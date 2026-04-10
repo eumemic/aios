@@ -67,6 +67,33 @@ class Settings(BaseSettings):
         description="Concurrent session loops per worker process.",
     )
 
+    # ── lease (Phase 2) ────────────────────────────────────────────────────
+    lease_duration_seconds: int = Field(
+        default=30,
+        ge=5,
+        description="How long a worker's lease on a session is valid.",
+    )
+    lease_refresh_seconds: int = Field(
+        default=10,
+        ge=1,
+        description="How often the lease refresh task extends the lease. "
+        "Should be comfortably less than lease_duration_seconds.",
+    )
+    lease_reschedule_delay_seconds: int = Field(
+        default=5,
+        ge=1,
+        description="When acquire_lease fails because another worker holds it, "
+        "delay before retrying via a deferred wake job.",
+    )
+
+    # ── database pool ──────────────────────────────────────────────────────
+    db_pool_max_size: int = Field(
+        default=16,
+        ge=1,
+        description="Maximum asyncpg pool size. Should comfortably exceed "
+        "worker_concurrency * ~3 connections per turn.",
+    )
+
     # ── api server ─────────────────────────────────────────────────────────
     api_host: str = Field(default="127.0.0.1")
     api_port: int = Field(default=8080, ge=1, le=65535)

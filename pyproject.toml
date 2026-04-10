@@ -19,8 +19,8 @@ dependencies = [
     "asyncpg>=0.30",
     "alembic>=1.13",
     "sqlalchemy>=2.0",          # required by alembic even when used without the ORM
-    "procrastinate>=2.10",
-    "psycopg[binary]>=3.2",     # required by procrastinate's eager import; we use asyncpg ourselves
+    "procrastinate==3.8.1",     # exact pin so the task/connector API stays stable
+    "psycopg[binary]>=3.2",     # required by procrastinate; aios uses asyncpg directly
     # Sandbox
     "aiodocker>=0.23",
     # Crypto + ids

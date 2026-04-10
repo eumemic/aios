@@ -17,6 +17,7 @@ from aios.config import get_settings
 from aios.crypto.vault import Vault
 from aios.db.pool import close_pool, create_pool
 from aios.errors import install_exception_handlers
+from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.logging import configure_logging, get_logger
 
 
@@ -28,14 +29,18 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("api.startup", db_url=_redact_dsn(settings.db_url))
-        pool = await create_pool(settings.db_url)
+        pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
         vault = Vault.from_base64(settings.vault_key.get_secret_value())
+        await procrastinate_app.open_async()
         app.state.pool = pool
         app.state.vault = vault
+        app.state.procrastinate = procrastinate_app
+        app.state.db_url = settings.db_url
         try:
             yield
         finally:
             log.info("api.shutdown")
+            await procrastinate_app.close_async()
             await pool.close()
             await close_pool()
 

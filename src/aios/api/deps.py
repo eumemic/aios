@@ -12,6 +12,7 @@ from typing import Annotated, cast
 
 import asyncpg
 from fastapi import Depends, Header, HTTPException, Request, status
+from procrastinate import App as ProcrastinateApp
 
 from aios.config import Settings, get_settings
 from aios.crypto.vault import Vault
@@ -25,6 +26,16 @@ def get_pool(request: Request) -> asyncpg.Pool:
 def get_vault(request: Request) -> Vault:
     vault: Vault = request.app.state.vault
     return vault
+
+
+def get_procrastinate(request: Request) -> ProcrastinateApp:
+    app: ProcrastinateApp = request.app.state.procrastinate
+    return app
+
+
+def get_db_url(request: Request) -> str:
+    db_url: str = request.app.state.db_url
+    return db_url
 
 
 def get_settings_dep() -> Settings:
@@ -59,4 +70,6 @@ def require_bearer_auth(
 # bare class. FastAPI's dependency injection ignores generic parameters.
 PoolDep = Annotated[asyncpg.Pool, Depends(get_pool)]
 VaultDep = Annotated[Vault, Depends(get_vault)]
+ProcrastinateDep = Annotated[ProcrastinateApp, Depends(get_procrastinate)]
+DbUrlDep = Annotated[str, Depends(get_db_url)]
 AuthDep = Annotated[None, Depends(require_bearer_auth)]

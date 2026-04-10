@@ -448,8 +448,13 @@ async def append_event(
         assert row is not None
 
     # NOTIFY happens outside the transaction so subscribers don't see it
-    # before the row is committed.
-    await conn.execute(f"NOTIFY events_{session_id}, '{new_id}'")
+    # before the row is committed. Use pg_notify (the function form) rather
+    # than the literal NOTIFY statement, because Postgres case-folds unquoted
+    # identifiers in NOTIFY <chan> — and our prefixed-ULID session ids
+    # contain uppercase letters. asyncpg's add_listener quotes the channel,
+    # preserving case, so the two would never match. pg_notify(text, text)
+    # treats the channel as a string literal and preserves it byte-for-byte.
+    await conn.execute("SELECT pg_notify($1, $2)", f"events_{session_id}", new_id)
     return _row_to_event(row)
 
 

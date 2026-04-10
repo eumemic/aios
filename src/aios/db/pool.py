@@ -38,7 +38,7 @@ async def get_pool() -> asyncpg.Pool[Any]:
     global _pool
     if _pool is None:
         settings = get_settings()
-        _pool = await create_pool(settings.db_url)
+        _pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
     return _pool
 
 
