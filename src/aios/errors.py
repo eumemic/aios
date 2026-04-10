@@ -1,0 +1,131 @@
+"""Aios error hierarchy and FastAPI exception handlers.
+
+Errors are returned to clients in the shape::
+
+    {"error": {"type": "<error_type>", "message": "<human readable>", "detail": {...}}}
+
+The ``type`` is a stable machine-readable string clients can branch on. The
+``detail`` is optional and can contain field-level info, ids, etc.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+
+class AiosError(Exception):
+    """Base class for all aios-specific errors.
+
+    Subclasses set a class-level ``error_type`` and ``status_code``; instances
+    carry a human-readable message and an optional structured detail dict.
+    """
+
+    error_type: str = "internal_error"
+    status_code: int = 500
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.detail = detail or {}
+
+    def to_body(self) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "error": {
+                "type": self.error_type,
+                "message": self.message,
+            }
+        }
+        if self.detail:
+            body["error"]["detail"] = self.detail
+        return body
+
+
+class NotFoundError(AiosError):
+    error_type = "not_found"
+    status_code = 404
+
+
+class ValidationError(AiosError):
+    error_type = "validation_error"
+    status_code = 422
+
+
+class ConflictError(AiosError):
+    error_type = "conflict"
+    status_code = 409
+
+
+class UnauthorizedError(AiosError):
+    error_type = "unauthorized"
+    status_code = 401
+
+
+class ForbiddenError(AiosError):
+    error_type = "forbidden"
+    status_code = 403
+
+
+class CredentialDecryptError(AiosError):
+    """Raised when the vault cannot decrypt a stored credential.
+
+    Almost always indicates the vault key has rotated without re-encrypting
+    existing rows, or the row is corrupt.
+    """
+
+    error_type = "credential_decrypt_error"
+    status_code = 500
+
+
+# ─── FastAPI integration ─────────────────────────────────────────────────────
+
+
+async def aios_error_handler(_request: Request, exc: Exception) -> JSONResponse:
+    """Render an :class:`AiosError` as a JSON response."""
+    assert isinstance(exc, AiosError)
+    return JSONResponse(status_code=exc.status_code, content=exc.to_body())
+
+
+async def http_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    """Render Starlette/FastAPI HTTPExceptions in our error envelope."""
+    assert isinstance(exc, StarletteHTTPException)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "type": "http_error",
+                "message": exc.detail if isinstance(exc.detail, str) else "http error",
+            }
+        },
+    )
+
+
+async def validation_error_handler(_request: Request, exc: Exception) -> JSONResponse:
+    """Render pydantic/FastAPI request validation errors."""
+    assert isinstance(exc, RequestValidationError)
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "type": "validation_error",
+                "message": "request body failed validation",
+                "detail": {"errors": exc.errors()},
+            }
+        },
+    )
+
+
+def install_exception_handlers(app: FastAPI) -> None:
+    """Wire all aios exception handlers into a FastAPI app."""
+    app.add_exception_handler(AiosError, aios_error_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+    app.add_exception_handler(RequestValidationError, validation_error_handler)

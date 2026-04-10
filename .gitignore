@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# uv
+.uv-cache/
+
+# Environment / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# aios runtime state
+/var/lib/aios/
+workspaces/
