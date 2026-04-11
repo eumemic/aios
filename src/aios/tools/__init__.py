@@ -6,9 +6,12 @@ The worker imports this module once at startup (via ``aios.harness.worker``),
 after which :func:`aios.tools.registry.to_openai_tools` can translate any
 agent's ``tools`` list into a LiteLLM ``tools`` parameter.
 
-Phase 3 shipped the bash tool. Phase 4 adds read, write, edit, and
-search on top of vendored hermes ``ShellFileOperations``. Each tool is
-a side-effect import below — keep the list short and well-ordered.
+Tools are deliberately minimal: ``bash`` is the workhorse, and ``read`` /
+``write`` / ``edit`` exist only to give the model capabilities bash can't
+cleanly offer (line-numbered structured reads, safe-arbitrary-content
+writes via base64 stdin, strict find-and-replace with in-process diff).
+No defensive guards, no heuristics, no model-specific shims — the model
+sees raw tool errors and retries through the session log.
 """
 
 from __future__ import annotations
@@ -19,5 +22,4 @@ from __future__ import annotations
 from aios.tools import bash as _bash  # noqa: F401
 from aios.tools import edit as _edit  # noqa: F401
 from aios.tools import read as _read  # noqa: F401
-from aios.tools import search as _search  # noqa: F401
 from aios.tools import write as _write  # noqa: F401

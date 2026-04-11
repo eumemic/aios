@@ -79,15 +79,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = [
     "B011",       # allow asserts in tests
-    "ASYNC240",   # pure os.path string ops in async handler tests are fine
 ]
-# File tool handlers use os.path.normpath / expanduser extensively for
-# pure path-string manipulation (no I/O). ASYNC240's heuristic flags
-# all os.path methods in async functions; suppress here rather than
-# per-line because the entire module is legitimately path-heavy.
-"src/aios/tools/read.py" = ["ASYNC240"]
-"src/aios/tools/write.py" = ["ASYNC240"]
-"src/aios/tools/edit.py" = ["ASYNC240"]
 
 [tool.ruff.format]
 quote-style = "double"

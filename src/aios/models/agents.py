@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # The set of built-in tool types aios v1 ships. Each entry on an agent's
 # `tools` list is an object with at minimum a `type` field; future phases can
 # extend the entry with per-tool configuration (e.g. timeouts, denylists).
-ToolType = Literal["bash", "read", "write", "edit", "search"]
+ToolType = Literal["bash", "read", "write", "edit"]
 
 
 class ToolSpec(BaseModel):

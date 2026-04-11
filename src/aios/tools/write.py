@@ -1,36 +1,41 @@
-"""The write tool -- write content to a file inside the session's sandbox.
+"""The write tool — write a file inside the session's sandbox.
 
-Thin handler over
-:class:`~aios.vendor.hermes_files.file_operations.ShellFileOperations`'s
-``write_file`` method. Applies the Phase 4 safety gates: sensitive-path
-check (hermes's ``/etc/``, ``/boot/``, ``/usr/lib/systemd/`` prefixes
-+ ``/var/run/docker.sock`` exact match), char-count limit, and
-staleness warning if the file was modified after the most recent read.
+A thin wrapper that base64-encodes the content on the host and pipes
+it into ``base64 -d > path`` inside the container via a here-string.
+Base64 output uses only ``[A-Za-z0-9+/=]``, so it's safe to embed
+inside a shell here-string with a single-quoted payload — no
+delimiter collision, no quoting surprises on NUL bytes or newlines.
 
-Error-shape convention:
+This is the one capability ``bash`` alone can't provide cleanly: for
+content beyond trivial size, heredocs break on delimiter-in-content
+and ``echo -n '...'`` breaks on single quotes inside the payload. The
+write tool gives the model a reliable channel for arbitrary text.
 
-- **Raise** for malformed arguments (``WriteArgumentError``).
-- **Return a dict with ``error: ...``** for deny-listed paths,
-  sensitive paths, oversize, and write failures. The model sees these
-  in the normal tool-result content.
+No deny list, no staleness warning, no char ceiling. The sandbox
+filesystem boundary IS the security boundary — writes inside the
+container are isolated from the host. If the model writes something
+harmful to ``/etc/passwd`` inside its own container, the only thing
+it hurts is its own container, which gets torn down at turn end
+anyway. Writes larger than the host's ``ARG_MAX`` fail naturally
+with a shell error surfaced back to the model.
+
+Return shape::
+
+    {"path": "/workspace/foo.py", "bytes_written": 42}
+
+On failure, returns ``{"error": "...", "path": path}``.
 """
 
 from __future__ import annotations
 
-import os
+import base64
+import shlex
 from typing import Any
 
 from aios.config import get_settings
 from aios.errors import AiosError
-from aios.tools import file_session
+from aios.harness import runtime
 from aios.tools.registry import registry
-from aios.vendor.hermes_files.file_operations import ShellFileOperations
-
-# Sensitive path prefixes and exact paths -- refuse to write even if the
-# primary deny list misses them. Above-and-beyond the
-# ``_is_write_denied`` check inside ShellFileOperations.
-_SENSITIVE_PATH_PREFIXES = ("/etc/", "/boot/", "/usr/lib/systemd/")
-_SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
 
 class WriteArgumentError(AiosError):
@@ -41,14 +46,12 @@ class WriteArgumentError(AiosError):
 
 
 WRITE_DESCRIPTION = (
-    "Write content to a file inside the session's sandbox, completely "
-    "replacing any existing content. Parent directories are created "
-    "automatically. Content is piped through stdin (no ARG_MAX limit "
-    "on file size). Writes to sensitive system paths (/etc, /boot, "
-    "~/.ssh, etc) are denied. Use this instead of heredocs or `echo >` "
-    "via the bash tool -- it's simpler and supports arbitrary binary-"
-    "safe content. For targeted changes to existing files, use the "
-    "edit tool instead to avoid overwriting the whole file."
+    "Write a text file inside the session's sandbox. Creates parent "
+    "directories as needed and overwrites any existing file at the "
+    "path. Paths may be absolute or relative to /workspace. Prefer "
+    "this over `echo > file` or heredoc tricks via the bash tool: "
+    "this tool handles arbitrary content safely (quotes, newlines, "
+    "NUL bytes, special characters) via base64 stdin piping."
 )
 
 WRITE_PARAMETERS_SCHEMA: dict[str, Any] = {
@@ -56,14 +59,11 @@ WRITE_PARAMETERS_SCHEMA: dict[str, Any] = {
     "properties": {
         "path": {
             "type": "string",
-            "description": (
-                "File path to write. Absolute, or relative to /workspace. "
-                "Parent directories are created automatically."
-            ),
+            "description": "Path to the file. Absolute or relative to /workspace.",
         },
         "content": {
             "type": "string",
-            "description": "Complete file content. Overwrites any existing file.",
+            "description": "Full file content to write. Overwrites any existing file.",
         },
     },
     "required": ["path", "content"],
@@ -71,49 +71,8 @@ WRITE_PARAMETERS_SCHEMA: dict[str, Any] = {
 }
 
 
-def _check_sensitive_path(path: str) -> str | None:
-    """Return an error message if the path targets a sensitive system location.
-
-    Checks BOTH the raw (expanded-but-not-resolved) path and the realpath
-    because macOS's ``/etc`` is a symlink to ``/private/etc`` — realpath
-    alone would convert ``/etc/passwd`` to ``/private/etc/passwd`` and
-    miss the ``/etc/`` prefix. The goal here is to catch model requests
-    for sensitive paths at a semantic level, not symlink-escape
-    attempts, so checking both is the correct behaviour.
-    """
-    expanded = os.path.expanduser(path)
-    try:
-        resolved = os.path.realpath(expanded)
-    except (OSError, ValueError):
-        resolved = expanded
-
-    msg = (
-        f"Refusing to write to sensitive system path: {path}. "
-        "Use the bash tool if you need to modify system files."
-    )
-
-    for candidate in (expanded, resolved):
-        for prefix in _SENSITIVE_PATH_PREFIXES:
-            if candidate.startswith(prefix):
-                return msg
-        if candidate in _SENSITIVE_EXACT_PATHS:
-            return msg
-    return None
-
-
-async def _get_mtime(file_ops: ShellFileOperations, path: str) -> float | None:
-    """Return mtime of ``path`` inside the sandbox, or None if stat fails."""
-    result = await file_ops._exec(f"stat -c %Y {file_ops._escape_shell_arg(path)} 2>/dev/null")
-    if result.exit_code != 0:
-        return None
-    try:
-        return float(result.stdout.strip())
-    except ValueError:
-        return None
-
-
 async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Handler for the write tool. See module docstring for error-shape rules."""
+    """Handler for the write tool. See module docstring for the return shape."""
     path = arguments.get("path")
     if not isinstance(path, str) or not path.strip():
         raise WriteArgumentError("write tool requires a non-empty 'path' string")
@@ -122,55 +81,32 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
     if not isinstance(content, str):
         raise WriteArgumentError("write tool requires a 'content' string")
 
-    # Sensitive-path check (pure).
-    sensitive_msg = _check_sensitive_path(path)
-    if sensitive_msg is not None:
-        return {"error": sensitive_msg}
-
-    # Char-count guard (pure).
     settings = get_settings()
-    if len(content) > settings.file_write_max_chars:
+    sandbox = runtime.require_sandbox_registry()
+    handle = await sandbox.get_or_provision(session_id)
+
+    content_bytes = content.encode("utf-8")
+    b64 = base64.b64encode(content_bytes).decode("ascii")
+
+    quoted_path = shlex.quote(path)
+    # Here-string ('<<<') feeds the single-quoted base64 payload to
+    # base64 -d's stdin. Safe because base64's alphabet excludes the
+    # single quote. `mkdir -p "$(dirname ...)"` creates parent dirs.
+    cmd = f"mkdir -p -- \"$(dirname -- {quoted_path})\" && base64 -d <<< '{b64}' > {quoted_path}"
+
+    result = await handle.run_command(
+        cmd,
+        timeout_seconds=settings.bash_default_timeout_seconds,
+        max_output_bytes=settings.bash_max_output_bytes,
+    )
+
+    if result.exit_code != 0:
         return {
-            "error": (
-                f"Write content is {len(content):,} characters which exceeds "
-                f"the safety limit ({settings.file_write_max_chars:,} chars). "
-                "Split the content across multiple files."
-            ),
+            "error": result.stderr.strip() or f"write failed with exit code {result.exit_code}",
             "path": path,
         }
 
-    sess = await file_session.get_or_create(session_id)
-
-    async with sess.lock:
-        # Staleness warning: if the model read this file earlier and
-        # the file has been modified externally since, warn on write
-        # (but still proceed -- this is advisory, not blocking).
-        staleness_warning: str | None = None
-        normpath = os.path.normpath(path)
-        previous_mtime = sess.read_timestamps.get(normpath)
-        if previous_mtime is not None:
-            current_mtime = await _get_mtime(sess.file_ops, path)
-            if current_mtime is not None and current_mtime != previous_mtime:
-                staleness_warning = (
-                    f"File {path} was modified externally since you last "
-                    f"read it. The write succeeded but you should re-read "
-                    "the file before making further edits."
-                )
-
-        # Perform the write.
-        result = await sess.file_ops.write_file(path, content)
-        result_dict = result.to_dict()
-
-        if staleness_warning is not None:
-            result_dict["_warning"] = staleness_warning
-
-        # Refresh read_timestamps so subsequent writes from this session
-        # don't re-warn about the same mtime.
-        new_mtime = await _get_mtime(sess.file_ops, path)
-        if new_mtime is not None:
-            sess.read_timestamps[normpath] = new_mtime
-
-        return result_dict
+    return {"path": path, "bytes_written": len(content_bytes)}
 
 
 def _register() -> None:

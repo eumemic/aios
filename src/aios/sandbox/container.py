@@ -15,10 +15,8 @@ instead of aiodocker's exec API? aiodocker wraps Docker's exec HTTP
 endpoint and requires manual demultiplexing of the stdout/stderr
 multiplexed stream. Shelling out to the ``docker`` CLI via
 ``asyncio.create_subprocess_exec`` (which passes argv directly to the OS,
-with NO shell interpretation) gives us clean stdout/stderr separation,
-simple stdin piping, and the timeout semantics we need. It's also the
-primitive hermes's ``ShellFileOperations`` adapts to in Phase 4, so the
-same interface serves both.
+with NO shell interpretation) gives us clean stdout/stderr separation
+and the timeout semantics we need.
 
 Security note: the command string the agent supplies is passed as a
 single argv element to ``bash -c`` inside the container. The ``docker

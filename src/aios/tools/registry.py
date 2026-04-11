@@ -16,12 +16,8 @@ The :func:`to_openai_tools` helper translates an agent's ``tools`` list
 (``[{type: 'bash'}, {type: 'read'}, ...]``) into the
 chat-completions/OpenAI ``tools`` parameter that LiteLLM expects.
 Translation is lookup + shape conversion — no per-tool customization yet.
-Phase 4 will add per-tool config (``{type: 'bash', timeout: 60}``) but the
-registry shape won't change.
-
-Why a singleton? Because Phase 4's file tools vendor hermes's
-``ShellFileOperations`` wholesale, which expects module-level registry
-semantics. Matching that makes the vendoring a near-copy-paste.
+Later phases may add per-tool config (``{type: 'bash', timeout: 60}``)
+but the registry shape won't change.
 """
 
 from __future__ import annotations

@@ -93,18 +93,11 @@ class SandboxRegistry:
 
         Called from the harness loop's finally block after the turn ends
         (lease released). No-op if the session never provisioned a
-        container (chat-only turn). Also drops any cached
-        :class:`aios.tools.file_session.FileToolSession` for this
-        session, since the session's ``ShellFileOperations`` held a
-        reference to the now-dead handle.
+        container (chat-only turn).
         """
         handle = self._handles.pop(session_id, None)
         if handle is None:
             return
-        # Lazy import to avoid the aios.tools -> aios.sandbox cycle.
-        from aios.tools import file_session
-
-        file_session.evict(session_id)
         await provisioner_release(handle)
 
     def evict(self, session_id: str) -> None:
@@ -114,15 +107,9 @@ class SandboxRegistry:
         container is already gone or unusable, so we just forget about
         it and let the next tool call provision a fresh one. Does NOT
         shell out to ``docker rm`` — the caller should not block on
-        that on the error path. Also drops the cached
-        :class:`aios.tools.file_session.FileToolSession` for the same
-        reason.
+        that on the error path.
         """
         if self._handles.pop(session_id, None) is not None:
-            # Lazy import to avoid the aios.tools -> aios.sandbox cycle.
-            from aios.tools import file_session
-
-            file_session.evict(session_id)
             log.info("sandbox.evicted", session_id=session_id)
 
     async def release_all(self) -> None:

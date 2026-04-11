@@ -76,32 +76,6 @@ class Settings(BaseSettings):
         "Output beyond this is truncated with a [truncated] marker.",
     )
 
-    # ── file tools (Phase 4) ───────────────────────────────────────────────
-    file_read_max_chars: int = Field(
-        default=100_000,
-        ge=1_000,
-        description="Maximum characters returned by a single read tool call. "
-        "Reads producing more content are rejected with a hint to use offset/limit. "
-        "100K chars ~= 25-35K tokens; tuned to keep large reads from blowing the "
-        "context window.",
-    )
-    file_write_max_chars: int = Field(
-        default=1_000_000,
-        ge=1_000,
-        description="Maximum characters accepted by a single write tool call. "
-        "Larger writes should be split across multiple files; the sandbox adapter "
-        "bypasses ARG_MAX via base64 stdin piping but very large writes still "
-        "strain the model's response budget.",
-    )
-    file_tool_max_output_bytes: int = Field(
-        default=200_000,
-        ge=10_000,
-        description="Maximum bytes of stdout+stderr returned from any single shell "
-        "command issued by the file tools. Distinct from bash_max_output_bytes "
-        "because file tools commonly read whole files and need a higher cap than "
-        "interactive bash commands.",
-    )
-
     # ── worker ─────────────────────────────────────────────────────────────
     worker_concurrency: int = Field(
         default=4,
