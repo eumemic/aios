@@ -170,13 +170,18 @@ async def run_session_turn_with_lease(session_id: str, *, cause: str = "message"
     # 1. Acquire the lease.
     last_seq = await acquire_lease(pool, session_id, worker_id)
     if last_seq is None:
-        # Another worker holds it. Reschedule and return.
+        # Another worker holds it. Defer a reschedule with a delay so we
+        # don't busy-loop while waiting for the held lease to expire. The
+        # delay is keyed off `lease_reschedule_delay_seconds` from settings.
         from aios.config import get_settings
         from aios.harness.procrastinate_app import app as procrastinate_app
 
         delay = get_settings().lease_reschedule_delay_seconds
         bound_log.info("lease.busy", reschedule_seconds=delay)
-        await procrastinate_app.configure_task("harness.wake_session").defer_async(
+        await procrastinate_app.configure_task(
+            "harness.wake_session",
+            schedule_in={"seconds": delay},
+        ).defer_async(
             session_id=session_id,
             cause="reschedule",
         )

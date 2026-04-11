@@ -27,13 +27,19 @@ Task parameters worth understanding:
   transitions from ``todo`` to ``doing``, so a follow-up message after the
   worker starts running the first job will produce a second queued job.
 
-* ``lock="{session_id}"``: forbids two concurrent executions of the same
-  session. Belt-and-suspenders with the DB lease — the lease is the source
-  of truth, but ``lock`` blocks at the procrastinate layer too.
+* **No ``lock`` parameter.** Originally the task carried ``lock={session_id}``
+  as belt-and-suspenders with the DB lease, but it broke crash recovery:
+  procrastinate's ``lock`` blocks any new job with the same key from
+  running while a prior one is in ``doing``, and procrastinate doesn't
+  auto-reclaim ``doing`` jobs whose workers have died. The DB lease is the
+  source of truth — two workers racing for the same session both call
+  ``acquire_lease``, and the SQL ``UPDATE`` is atomic. The lock layer was
+  preventing recovery, not aiding it.
 
 * ``retry=False``: failed tasks land in procrastinate's failed-jobs table
   for inspection. We handle the legitimate retry case (lease unavailable)
-  via an explicit reschedule inside ``run_session_turn_with_lease``.
+  via an explicit ``schedule_in`` reschedule inside
+  ``run_session_turn_with_lease``.
 
 * ``pass_context=False``: we don't need procrastinate's job context in
   Phase 2. Phase 5 may flip this for span attributes.
@@ -51,7 +57,6 @@ from aios.harness.procrastinate_app import app
     name="harness.wake_session",
     queue="sessions",
     queueing_lock="{session_id}",
-    lock="{session_id}",
     retry=False,
     pass_context=False,
 )
