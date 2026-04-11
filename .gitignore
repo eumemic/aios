@@ -30,6 +30,9 @@ venv/
 *.swp
 *.swo
 
+# Claude Code session state (not related to aios)
+.claude/
+
 # aios runtime state
 /var/lib/aios/
 workspaces/

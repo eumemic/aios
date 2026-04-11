@@ -1,0 +1,43 @@
+# aios sandbox base image.
+#
+# This is the image every aios v1 session runs inside. It's intentionally
+# minimal: a Python runtime for scripted tool calls, standard POSIX
+# utilities, curl for HTTP fetches, git, and ripgrep for the Phase 4
+# grep/glob tools. No languages beyond Python; no package manager state at
+# runtime (apt lists are cleaned).
+#
+# Build with:
+#   docker build -t aios-sandbox:latest -f docker/Dockerfile.sandbox docker/
+# or simply:
+#   uv run python -m aios build-image
+#
+# The image is labelled `aios.managed=true` at runtime (not build time) via
+# `docker run --label`, so the worker's orphan reaper can find containers
+# started by previous worker processes.
+#
+# Entry point is `tail -f /dev/null` — the container stays alive between
+# `docker exec` calls. Each bash/read/write/edit/glob/grep tool invocation
+# is a fresh `docker exec`, so shell state does not persist across calls
+# (one-shot exec model, see aios_v1_decisions.md).
+
+FROM python:3.13-slim-bookworm
+
+# Install standard tools. Keep this list small; aios is opinionated about
+# what lives in the sandbox.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        coreutils \
+        curl \
+        git \
+        ripgrep \
+ && rm -rf /var/lib/apt/lists/*
+
+# Workspace directory. The host mounts a per-session directory here at
+# container start via `-v <workspace_root>/<session_id>:/workspace`. The
+# directory is created empty on the host on first provision.
+WORKDIR /workspace
+
+# Keep the container alive until we remove it. Each tool call is a
+# `docker exec`, not a `docker run`.
+CMD ["tail", "-f", "/dev/null"]

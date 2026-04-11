@@ -394,6 +394,28 @@ async def set_session_status(
     )
 
 
+async def list_actively_leased_session_ids(conn: asyncpg.Connection[Any]) -> list[str]:
+    """Return ids of sessions with a currently-valid lease held by some worker.
+
+    Used by the sandbox orphan reaper at worker startup: any Docker
+    container labelled ``aios.managed=true`` whose ``aios.session_id``
+    label is NOT in this list is a corpse from a dead worker and gets
+    force-removed. Called AFTER :func:`recover_orphans`, so dead-worker
+    leases have already been cleared — anything still leased belongs to
+    a live peer worker.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT id
+          FROM sessions
+         WHERE lease_worker_id IS NOT NULL
+           AND lease_expires_at > now()
+           AND archived_at IS NULL
+        """
+    )
+    return [str(r["id"]) for r in rows]
+
+
 # ─── events ───────────────────────────────────────────────────────────────────
 
 

@@ -48,16 +48,32 @@ class Settings(BaseSettings):
     # ── sandbox ────────────────────────────────────────────────────────────
     docker_image: str = Field(
         default="aios-sandbox:latest",
-        description="Container image used for all v1 sessions.",
+        description="Container image used for all v1 sessions. Build via "
+        "`docker build -t aios-sandbox:latest -f docker/Dockerfile.sandbox docker/`.",
     )
     workspace_root: Path = Field(
         default=Path("/var/lib/aios/workspaces"),
-        description="Host directory containing per-session workspace subdirectories.",
+        description="Host directory containing per-session workspace subdirectories. "
+        "Each session gets <workspace_root>/<session_id> bind-mounted to /workspace "
+        "inside its sandbox container.",
     )
-    pool_size_max: int = Field(
-        default=16,
+    sandbox_network_mode: str = Field(
+        default="bridge",
+        description="Docker network mode for sandbox containers. 'bridge' (default) "
+        "gives full outbound internet access, which the HN demo needs. 'none' "
+        "disables networking entirely; 'host' shares the host network namespace.",
+    )
+    bash_default_timeout_seconds: int = Field(
+        default=120,
         ge=1,
-        description="Maximum concurrent Docker containers in the sandbox pool.",
+        description="Default timeout for a single bash tool call. The agent can "
+        "override per-call up to this maximum.",
+    )
+    bash_max_output_bytes: int = Field(
+        default=100_000,
+        ge=1_000,
+        description="Maximum bytes of stdout+stderr returned from a bash tool call. "
+        "Output beyond this is truncated with a [truncated] marker.",
     )
 
     # ── worker ─────────────────────────────────────────────────────────────
