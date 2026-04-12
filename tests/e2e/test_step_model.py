@@ -251,6 +251,261 @@ class TestCancelFlow:
         assert last_assistant_content(events) == "Cancelled and moving on."
 
 
+# ─── invariant tests ─────────────────────────────────────────────────────────
+
+
+@needs_docker
+class TestPendingResultSynthesis:
+    async def test_context_contains_pending_for_inflight_tools(self, harness: Harness) -> None:
+        """When model is called with an in-flight tool, the context should
+        contain a synthetic 'pending' result for that tool."""
+        tool_started = asyncio.Event()
+        tool_proceed = asyncio.Event()
+
+        async def slow_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            tool_started.set()
+            await tool_proceed.wait()
+            return {"output": "done"}
+
+        harness.register_tool("slow", slow_handler)
+        tc = tool_call("slow", {}, call_id="call_slow_1")
+        harness.script_model(
+            [
+                assistant(tool_calls=[tc]),
+                # Step 2: called because of user injection, tool still pending
+                assistant("Working on it, hang on."),
+                # Step 3: tool completed
+                assistant("All done."),
+            ]
+        )
+        session = await harness.start("do slow thing")
+
+        # Step 1: model calls slow tool
+        await harness.run_step(session.id)
+        await asyncio.wait_for(tool_started.wait(), timeout=5.0)
+
+        # Inject user message while tool is running
+        await harness.inject_message(session.id, "status?")
+
+        # Step 2: model sees user injection + pending tool
+        await harness.run_step(session.id)
+
+        # Inspect the context that was sent to the model in step 2
+        assert len(harness.model_calls) == 2
+        step2_messages = harness.model_calls[1]["messages"]
+        # Find the tool result for call_slow_1 in the context
+        tool_msg = next(
+            m
+            for m in step2_messages
+            if m.get("role") == "tool" and m.get("tool_call_id") == "call_slow_1"
+        )
+        assert "pending" in tool_msg["content"]
+
+        # Let tool complete, finish up
+        tool_proceed.set()
+        await harness.wait_for_tools(session.id)
+        await harness.run_step(session.id)
+
+    async def test_completed_tool_shows_real_result_not_pending(self, harness: Harness) -> None:
+        """After a tool completes, the context should show its real result,
+        not a pending placeholder."""
+
+        async def fast_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return {"value": 42}
+
+        harness.register_tool("fast", fast_handler)
+        harness.script_model(
+            [
+                assistant(tool_calls=[tool_call("fast", {}, call_id="call_f1")]),
+                assistant("Got 42."),
+            ]
+        )
+        session = await harness.start("do fast thing")
+        await harness.run_until_idle(session.id)
+
+        # Step 2 should have received the real result, not pending
+        assert len(harness.model_calls) == 2
+        step2_messages = harness.model_calls[1]["messages"]
+        tool_msg = next(
+            m
+            for m in step2_messages
+            if m.get("role") == "tool" and m.get("tool_call_id") == "call_f1"
+        )
+        assert "pending" not in tool_msg["content"]
+        assert "42" in tool_msg["content"]
+
+
+@needs_docker
+class TestContextOrdering:
+    async def test_tool_result_reordered_before_user_injection(self, harness: Harness) -> None:
+        """If a user message arrives before a tool result in the log (by seq),
+        the context builder should reorder so tool results appear right after
+        their requesting assistant message, before the user message."""
+        tool_started = asyncio.Event()
+        tool_proceed = asyncio.Event()
+
+        async def slow_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            tool_started.set()
+            await tool_proceed.wait()
+            return {"output": "result"}
+
+        harness.register_tool("slow", slow_handler)
+        harness.script_model(
+            [
+                assistant(tool_calls=[tool_call("slow", {}, call_id="call_s1")]),
+                assistant("Saw both."),
+            ]
+        )
+        session = await harness.start("do it")
+
+        await harness.run_step(session.id)
+        await asyncio.wait_for(tool_started.wait(), timeout=5.0)
+
+        # User message lands BEFORE tool result in the log
+        await harness.inject_message(session.id, "also do Y")
+
+        # Tool completes AFTER user message
+        tool_proceed.set()
+        await harness.wait_for_tools(session.id)
+
+        # Step 2: model should see: assistant+tool_calls, tool_result, user_msg
+        await harness.run_step(session.id)
+
+        step2_messages = harness.model_calls[1]["messages"]
+        # Find the positions
+        roles = [(m.get("role"), m.get("tool_call_id")) for m in step2_messages]
+        # After the assistant with tool_calls, the tool result should come
+        # BEFORE the user injection
+        asst_idx = next(i for i, (r, _) in enumerate(roles) if r == "assistant" and i > 0)
+        tool_idx = next(i for i, (r, tc) in enumerate(roles) if r == "tool" and tc == "call_s1")
+        user_inject_idx = next(i for i, (r, _) in enumerate(roles) if r == "user" and i > 1)
+        assert tool_idx == asst_idx + 1, (
+            "tool result should immediately follow its assistant message"
+        )
+        assert user_inject_idx > tool_idx, "user injection should come after tool result"
+
+
+@needs_docker
+class TestBatchGating:
+    async def test_partial_batch_does_not_trigger_model(self, harness: Harness) -> None:
+        """If 2 of 3 tools in a batch complete, should_call_model returns False."""
+        completed = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def instant_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return {"n": arguments.get("n")}
+
+        async def gated_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            completed.set()  # signal that we're waiting
+            await gate.wait()
+            return {"n": "gated"}
+
+        harness.register_tool("instant_b", instant_handler)
+        harness.register_tool("gated", gated_handler)
+
+        harness.script_model(
+            [
+                assistant(
+                    tool_calls=[
+                        tool_call("instant_b", {"n": 1}, call_id="call_i1"),
+                        tool_call("instant_b", {"n": 2}, call_id="call_i2"),
+                        tool_call("gated", {}, call_id="call_g1"),
+                    ]
+                ),
+                assistant("All three done."),
+            ]
+        )
+        session = await harness.start("three tools")
+
+        # Step 1: model calls 3 tools
+        await harness.run_step(session.id)
+
+        # Wait for gated tool to enter its handler (instant tools may have already finished)
+        await asyncio.wait_for(completed.wait(), timeout=5.0)
+
+        # At this point instant_b tools have completed but gated has not.
+        # Try to run a step — should be a no-op (partial batch).
+        initial_call_count = len(harness.model_calls)
+        await harness.run_step(session.id)
+        assert len(harness.model_calls) == initial_call_count, (
+            "model should NOT be called with partial batch results"
+        )
+
+        # Release the gated tool
+        gate.set()
+        await harness.wait_for_tools(session.id)
+
+        # Now all three are done — step should call model
+        await harness.run_step(session.id)
+        assert len(harness.model_calls) == initial_call_count + 1
+
+
+@needs_docker
+class TestSessionStatus:
+    async def test_status_transitions(self, harness: Harness) -> None:
+        """Session status should go idle → running → idle across a step."""
+        harness.script_model([assistant("Hi!")])
+        session = await harness.start("hello")
+
+        s = await harness.session(session.id)
+        assert s.status == "idle"
+
+        await harness.run_until_idle(session.id)
+
+        s = await harness.session(session.id)
+        assert s.status == "idle"
+        assert s.stop_reason == "end_turn"
+
+    async def test_stop_reason_end_turn(self, harness: Harness) -> None:
+        """When model returns no tool_calls, stop_reason is end_turn."""
+        harness.script_model([assistant("Done.")])
+        session = await harness.start("do it")
+        await harness.run_until_idle(session.id)
+        s = await harness.session(session.id)
+        assert s.stop_reason == "end_turn"
+
+
+@needs_docker
+class TestCancelContract:
+    async def test_cancelled_tool_result_has_is_error(self, harness: Harness) -> None:
+        """A cancelled tool's result should have is_error=True and contain 'cancelled'."""
+        tool_started = asyncio.Event()
+
+        async def blocking_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            tool_started.set()
+            await asyncio.sleep(3600)
+            return {}  # pragma: no cover
+
+        harness.register_tool("blocker", blocking_handler)
+        tc_block = tool_call("blocker", {}, call_id="call_block")
+        tc_cancel_it = cancel("call_block", call_id="call_do_cancel")
+
+        harness.script_model(
+            [
+                assistant(tool_calls=[tc_block]),
+                assistant(tool_calls=[tc_cancel_it]),
+                assistant("Cancelled."),
+            ]
+        )
+        session = await harness.start("block", tools=["cancel"])
+        await harness.run_step(session.id)
+        await asyncio.wait_for(tool_started.wait(), timeout=5.0)
+
+        await harness.inject_message(session.id, "cancel it")
+        await harness.run_step(session.id)
+        await harness.wait_for_tools(session.id)
+        await harness.run_step(session.id)
+
+        events = await harness.events(session.id)
+        blocked_result = next(
+            e.data
+            for e in events
+            if e.data.get("role") == "tool" and e.data.get("tool_call_id") == "call_block"
+        )
+        assert blocked_result.get("is_error") is True
+        assert "cancelled" in blocked_result["content"].lower()
+
+
 # ─── full tier (with Docker) ─────────────────────────────────────────────────
 
 

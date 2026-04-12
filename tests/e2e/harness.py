@@ -138,6 +138,7 @@ class Harness:
         self._responses: list[dict[str, Any]] = []
         self._response_idx = 0
         self._env_id: str | None = None
+        self.model_calls: list[dict[str, Any]] = []  # captured kwargs from each litellm call
 
     # ── scripting ────────────────────────────────────────────────────────
 
@@ -147,6 +148,7 @@ class Harness:
         _call_counter = 0
         self._responses = list(responses)
         self._response_idx = 0
+        self.model_calls = []
 
     def register_tool(
         self,
@@ -250,8 +252,13 @@ class Harness:
 
     # ── internal ─────────────────────────────────────────────────────────
 
-    def _pop_response(self) -> dict[str, Any]:
-        """Return the next scripted response wrapped in litellm envelope."""
+    def _pop_response(self, **kwargs: Any) -> dict[str, Any]:
+        """Return the next scripted response wrapped in litellm envelope.
+
+        Also records the kwargs (including ``messages``) on
+        ``self.model_calls`` for test assertions about context shape.
+        """
+        self.model_calls.append(kwargs)
         if self._response_idx >= len(self._responses):
             raise AssertionError(
                 f"model called {self._response_idx + 1} times but only "
