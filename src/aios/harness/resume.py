@@ -5,25 +5,17 @@ Finds sessions that meet ALL of:
 
 1. ``status = 'running'``
 2. ``archived_at IS NULL``
-3. The lease is unheld or expired (``lease_expires_at IS NULL OR < now()``)
-4. The most recent event is NOT a ``turn_ended`` lifecycle
+3. The most recent event is NOT a ``turn_ended`` lifecycle
 
-Condition 4 is the critical one. Without it, recovery would re-enqueue
-sessions that legitimately finished — the previous worker wrote the
-``turn_ended`` lifecycle event but its release SQL never ran (e.g., killed
-between event append and the release UPDATE). Those sessions are actually
-done; the next user message will wake them via the normal path. Recovery
-should leave them alone.
+Condition 3 prevents re-enqueuing sessions that legitimately finished
+but whose status update never ran (worker killed between event append
+and the status UPDATE). Those sessions are actually done; the next
+user message wakes them via the normal path.
 
-For each orphaned session, recovery clears the lease columns and defers a
-fresh ``wake_session(cause='resume')`` job. The defer is wrapped in a try/
-except for ``AlreadyEnqueued`` because two workers racing recovery may both
-try to enqueue the same session — the second defer fails harmlessly because
-procrastinate's queueing_lock holds.
-
-Recovery runs SEQUENTIALLY before ``app.run_worker_async`` to avoid the race
-where a freshly-cleared lease gets picked up by the worker poll loop while
-recovery is still iterating.
+For each orphan, recovery sets status to ``idle`` and defers a fresh
+``wake_session(cause='resume')`` job. The defer swallows
+``AlreadyEnqueued`` because two workers racing recovery may both try
+to enqueue the same session.
 """
 
 from __future__ import annotations
@@ -40,10 +32,7 @@ log = get_logger("aios.harness.resume")
 
 
 async def recover_orphans(pool: asyncpg.Pool[Any], app: App) -> int:
-    """Find orphaned sessions and re-enqueue wake jobs for each.
-
-    Returns the number of sessions recovered.
-    """
+    """Find orphaned sessions and re-enqueue wake jobs for each."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -51,7 +40,6 @@ async def recover_orphans(pool: asyncpg.Pool[Any], app: App) -> int:
               FROM sessions s
              WHERE s.status = 'running'
                AND s.archived_at IS NULL
-               AND (s.lease_expires_at IS NULL OR s.lease_expires_at < now())
                AND NOT EXISTS (
                    SELECT 1 FROM events e
                     WHERE e.session_id = s.id
@@ -69,17 +57,10 @@ async def recover_orphans(pool: asyncpg.Pool[Any], app: App) -> int:
     recovered = 0
     for row in rows:
         sid = row["id"]
+        # Reset status so the step function can set it to running.
         async with pool.acquire() as conn:
             await conn.execute(
-                """
-                UPDATE sessions
-                   SET lease_worker_id = NULL,
-                       lease_expires_at = NULL,
-                       container_id = NULL,
-                       updated_at = now()
-                 WHERE id = $1
-                   AND (lease_expires_at IS NULL OR lease_expires_at < now())
-                """,
+                "UPDATE sessions SET status = 'idle', updated_at = now() WHERE id = $1",
                 sid,
             )
         try:

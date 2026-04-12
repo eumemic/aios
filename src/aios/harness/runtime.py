@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from aios.crypto.vault import Vault
+    from aios.harness.task_registry import TaskRegistry
     from aios.sandbox.registry import SandboxRegistry
 
 
@@ -30,6 +31,7 @@ pool: asyncpg.Pool[Any] | None = None
 vault: Vault | None = None
 worker_id: str | None = None
 sandbox_registry: SandboxRegistry | None = None
+task_registry: TaskRegistry | None = None
 
 
 def require_pool() -> asyncpg.Pool[Any]:
@@ -66,3 +68,12 @@ def require_sandbox_registry() -> SandboxRegistry:
             "this code is running outside a worker_main context"
         )
     return sandbox_registry
+
+
+def require_task_registry() -> TaskRegistry:
+    if task_registry is None:
+        raise RuntimeError(
+            "aios.harness.runtime.task_registry is not initialized; "
+            "this code is running outside a worker_main context"
+        )
+    return task_registry

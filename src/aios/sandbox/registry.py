@@ -1,29 +1,25 @@
 """Per-worker in-memory registry of live session containers.
 
-The registry is the glue that makes container provisioning lazy. A tool
-handler asks the registry for a session's :class:`ContainerHandle`;
-the registry either returns the cached handle (second or later tool call
-in the same turn) or calls :func:`provision_for_session` to create a
-fresh one (first tool call in a session that doesn't have a container
-yet).
+The registry makes container provisioning lazy: a tool handler asks for
+a session's :class:`ContainerHandle`; the registry either returns the
+cached handle or calls :func:`provision_for_session` to create a fresh
+one.
 
 One registry instance per worker process, stashed on
-:mod:`aios.harness.runtime`. Workers do not share state across processes
-— two workers running the same session would both have their own
-container, but the DB lease ensures only one worker runs a given session
-at a time.
+:mod:`aios.harness.runtime`. The procrastinate ``lock`` parameter
+ensures only one step runs per session at a time.
 
-Thread-safety: all methods are ``async`` but the internal dict is
-manipulated from a single asyncio event loop. Two tool calls in the same
-session can't run concurrently (the harness loop dispatches them
-sequentially), but two different sessions running on the same worker
-can. The per-session lock prevents a provision race if both sessions'
-first tool call lands in the same tick.
+Container lifecycle is decoupled from step lifecycle via an idle-TTL
+reaper. Containers stay alive across consecutive steps for the same
+session and are released when idle for longer than
+``container_idle_timeout_seconds``. Worker shutdown calls
+:meth:`release_all` to clean up everything.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Iterable
 
 from aios.logging import get_logger
@@ -35,28 +31,13 @@ log = get_logger("aios.sandbox.registry")
 
 
 class SandboxRegistry:
-    """Maps session_id to a live :class:`ContainerHandle`.
-
-    Public API:
-
-    * :meth:`get_or_provision` — return the cached handle or create one
-    * :meth:`release` — tear down one session's container (turn ended)
-    * :meth:`release_all` — tear down every container (worker shutdown)
-    * :meth:`reap_orphans` — at startup, remove any leftover
-      ``aios.managed=true`` containers that don't match an active lease
-    * :meth:`evict` — drop the cache entry for a session without running
-      teardown, used after a container-death error when the registry
-      should forget the dead container and let the next tool call
-      provision a fresh one
-    """
+    """Maps session_id to a live :class:`ContainerHandle` with idle-TTL."""
 
     def __init__(self) -> None:
         self._handles: dict[str, ContainerHandle] = {}
-        # One lock per session_id to serialize provisioning. Entries are
-        # created on first touch and never removed (the worker's session
-        # count is bounded by worker_concurrency, so the leak is minor
-        # and simplifies the code).
+        self._last_used: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._reaper_task: asyncio.Task[None] | None = None
 
     def _lock_for(self, session_id: str) -> asyncio.Lock:
         lock = self._locks.get(session_id)
@@ -66,60 +47,41 @@ class SandboxRegistry:
         return lock
 
     async def get_or_provision(self, session_id: str) -> ContainerHandle:
-        """Return the cached handle for ``session_id``, or create one.
-
-        Serialized per session so concurrent tool calls don't race to
-        provision two containers. In practice the harness dispatches
-        tool calls sequentially within a turn, so contention is zero on
-        the hot path.
-        """
-        # Fast path: already cached.
+        """Return the cached handle, or provision a new container."""
         handle = self._handles.get(session_id)
         if handle is not None:
+            self._last_used[session_id] = time.monotonic()
             return handle
 
         async with self._lock_for(session_id):
-            # Re-check under the lock — another tool call might have
-            # provisioned while we were waiting.
             handle = self._handles.get(session_id)
             if handle is not None:
+                self._last_used[session_id] = time.monotonic()
                 return handle
             handle = await provision_for_session(session_id)
             self._handles[session_id] = handle
+            self._last_used[session_id] = time.monotonic()
             return handle
 
     async def release(self, session_id: str) -> None:
-        """Tear down the container for ``session_id`` if one exists.
-
-        Called from the harness loop's finally block after the turn ends
-        (lease released). No-op if the session never provisioned a
-        container (chat-only turn).
-        """
+        """Tear down one session's container. No-op if not cached."""
         handle = self._handles.pop(session_id, None)
+        self._last_used.pop(session_id, None)
         if handle is None:
             return
         await provisioner_release(handle)
 
     def evict(self, session_id: str) -> None:
-        """Drop the cache entry without running teardown.
-
-        Used by the tool dispatcher after a container-death error: the
-        container is already gone or unusable, so we just forget about
-        it and let the next tool call provision a fresh one. Does NOT
-        shell out to ``docker rm`` — the caller should not block on
-        that on the error path.
-        """
+        """Drop the cache entry without docker teardown (container is dead)."""
+        self._last_used.pop(session_id, None)
         if self._handles.pop(session_id, None) is not None:
             log.info("sandbox.evicted", session_id=session_id)
 
     async def release_all(self) -> None:
-        """Tear down every container in the registry.
-
-        Called at worker shutdown. Runs the teardowns concurrently —
-        all of them need to happen, none of them depend on each other.
-        """
+        """Tear down every container. Called at worker shutdown."""
         handles = list(self._handles.values())
         self._handles.clear()
+        self._last_used.clear()
         if not handles:
             return
         log.info("sandbox.release_all", count=len(handles))
@@ -136,17 +98,7 @@ class SandboxRegistry:
                 )
 
     async def reap_orphans(self, active_session_ids: Iterable[str]) -> int:
-        """Remove any leftover ``aios.managed=true`` containers.
-
-        At worker startup, list every container with the managed label
-        and compare against ``active_session_ids`` (sessions the DB says
-        have live leases). Force-remove anything else — those are
-        corpses from a previous worker that crashed.
-
-        Returns the number of containers removed. Logs but does not
-        raise on individual removal errors; the orphan reaper is
-        best-effort.
-        """
+        """At startup, remove containers not matching an active session."""
         try:
             managed = await list_managed_containers()
         except Exception as err:
@@ -175,3 +127,33 @@ class SandboxRegistry:
                     error=str(err),
                 )
         return removed
+
+    # ── idle-TTL reaper ──────────────────────────────────────────────────
+
+    async def _reap_idle_loop(self, idle_timeout: float, interval: float = 60.0) -> None:
+        """Background loop: release containers idle > idle_timeout seconds."""
+        while True:
+            await asyncio.sleep(interval)
+            now = time.monotonic()
+            to_release: list[str] = []
+            for sid, last in list(self._last_used.items()):
+                if now - last > idle_timeout:
+                    to_release.append(sid)
+            for sid in to_release:
+                log.info("sandbox.idle_release", session_id=sid)
+                await self.release(sid)
+
+    def start_reaper(self, idle_timeout: float = 300.0) -> None:
+        """Start the idle-TTL reaper background task."""
+        if self._reaper_task is not None:
+            return
+        self._reaper_task = asyncio.create_task(
+            self._reap_idle_loop(idle_timeout),
+            name="sandbox-idle-reaper",
+        )
+
+    def stop_reaper(self) -> None:
+        """Cancel the idle-TTL reaper."""
+        if self._reaper_task is not None:
+            self._reaper_task.cancel()
+            self._reaper_task = None

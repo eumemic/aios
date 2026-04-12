@@ -80,26 +80,15 @@ class Settings(BaseSettings):
     worker_concurrency: int = Field(
         default=4,
         ge=1,
-        description="Concurrent session loops per worker process.",
+        description="Concurrent session steps per worker process.",
     )
 
-    # ── lease (Phase 2) ────────────────────────────────────────────────────
-    lease_duration_seconds: int = Field(
-        default=30,
-        ge=5,
-        description="How long a worker's lease on a session is valid.",
-    )
-    lease_refresh_seconds: int = Field(
-        default=10,
-        ge=1,
-        description="How often the lease refresh task extends the lease. "
-        "Should be comfortably less than lease_duration_seconds.",
-    )
-    lease_reschedule_delay_seconds: int = Field(
-        default=5,
-        ge=1,
-        description="When acquire_lease fails because another worker holds it, "
-        "delay before retrying via a deferred wake job.",
+    # ── container lifecycle ────────────────────────────────────────────────
+    container_idle_timeout_seconds: int = Field(
+        default=300,
+        ge=30,
+        description="Seconds of inactivity before a session's sandbox container "
+        "is released. The idle reaper checks every 60s.",
     )
 
     # ── database pool ──────────────────────────────────────────────────────
