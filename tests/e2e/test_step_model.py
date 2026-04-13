@@ -905,7 +905,8 @@ class TestSessionVersionBinding:
 
     async def test_pinned_session_ignores_agent_update(self, harness: Harness) -> None:
         """Pinned session keeps using the old version after agent update."""
-        from aios.services import agents as agents_service, sessions as sessions_service
+        from aios.services import agents as agents_service
+        from aios.services import sessions as sessions_service
 
         harness.script_model(
             [
@@ -935,7 +936,8 @@ class TestSessionVersionBinding:
 
     async def test_session_update_changes_agent(self, harness: Harness) -> None:
         """Sessions can be updated to point at a different agent."""
-        from aios.services import agents as agents_service, sessions as sessions_service
+        from aios.services import agents as agents_service
+        from aios.services import sessions as sessions_service
 
         harness.script_model(
             [
@@ -948,7 +950,6 @@ class TestSessionVersionBinding:
 
         # Create a second agent
         from aios.ids import make_id
-        from aios.models.agents import ToolSpec
 
         agent2 = await agents_service.create_agent(
             harness._pool,
@@ -1015,7 +1016,8 @@ class TestCustomTools:
         )
 
         from aios.ids import make_id
-        from aios.services import environments as env_svc, sessions as sess_svc
+        from aios.services import environments as env_svc
+        from aios.services import sessions as sess_svc
 
         if harness._env_id is None:
             env = await env_svc.create_environment(
@@ -1078,7 +1080,8 @@ class TestCustomTools:
         )
 
         from aios.ids import make_id
-        from aios.services import environments as env_svc, sessions as sess_svc
+        from aios.services import environments as env_svc
+        from aios.services import sessions as sess_svc
 
         if harness._env_id is None:
             env = await env_svc.create_environment(
@@ -1160,7 +1163,8 @@ class TestCustomTools:
         )
 
         from aios.ids import make_id
-        from aios.services import environments as env_svc, sessions as sess_svc
+        from aios.services import environments as env_svc
+        from aios.services import sessions as sess_svc
 
         if harness._env_id is None:
             env = await env_svc.create_environment(
