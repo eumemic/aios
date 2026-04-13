@@ -12,7 +12,7 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
-from aios.models.agents import Agent, AgentVersion, ToolSpec
+from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
 from aios.models.skills import AgentSkillRef
 from aios.services import skills as skills_service
 
@@ -25,6 +25,7 @@ async def create_agent(
     system: str,
     tools: list[ToolSpec],
     skills: list[AgentSkillRef] | None = None,
+    mcp_servers: list[McpServerSpec] | None = None,
     description: str | None,
     metadata: dict[str, Any],
     window_min: int,
@@ -48,6 +49,7 @@ async def create_agent(
             system=system,
             tools=tools,
             skills_json=snapshot_json,
+            mcp_servers=mcp_servers or [],
             description=description,
             metadata=metadata,
             window_min=window_min,
@@ -82,6 +84,7 @@ async def update_agent(
     system: str | None = None,
     tools: list[ToolSpec] | None = None,
     skills: list[AgentSkillRef] | None = None,
+    mcp_servers: list[McpServerSpec] | None = None,
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
     window_min: int | None = None,
@@ -101,6 +104,7 @@ async def update_agent(
             system=system,
             tools=tools,
             skills_json=skills_json_str,
+            mcp_servers=mcp_servers,
             description=description,
             metadata=metadata,
             window_min=window_min,

@@ -10,8 +10,8 @@ Also adds a ``skills`` JSONB column to ``agents`` and ``agent_versions``
 to store skill reference bindings (``[{skill_id, version}]``), following
 the same pattern as the existing ``tools`` JSONB column.
 
-Revision ID: 0008
-Revises: 0007
+Revision ID: 0009
+Revises: 0008
 Create Date: 2026-04-13
 """
 
@@ -21,8 +21,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0008"
-down_revision: str = "0007"
+revision: str = "0009"
+down_revision: str = "0008"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

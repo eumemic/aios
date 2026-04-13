@@ -21,7 +21,7 @@ import asyncpg
 from aios.crypto.vault import EncryptedBlob
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import AGENT, ENVIRONMENT, EVENT, SESSION, SKILL, VAULT, VAULT_CREDENTIAL, make_id
-from aios.models.agents import Agent, AgentVersion, ToolSpec
+from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
 from aios.models.sessions import Session, SessionStatus, SessionUsage
@@ -147,6 +147,7 @@ def _parse_jsonb(raw: Any) -> Any:
 def _row_to_agent(row: asyncpg.Record) -> Agent:
     tools_data = _parse_jsonb(row["tools"])
     skills_data = _parse_jsonb(row["skills"])
+    mcp_data = _parse_jsonb(row.get("mcp_servers", []))
     metadata = _parse_jsonb(row["metadata"])
     return Agent(
         id=row["id"],
@@ -156,6 +157,7 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
         system=row["system"],
         tools=[ToolSpec.model_validate(t) for t in tools_data],
         skills=[AgentSkillRef.model_validate(s) for s in skills_data],
+        mcp_servers=[McpServerSpec.model_validate(s) for s in (mcp_data or [])],
         description=row["description"],
         metadata=metadata,
         window_min=row["window_min"],
@@ -169,6 +171,7 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
 def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
     tools_data = _parse_jsonb(row["tools"])
     skills_data = _parse_jsonb(row["skills"])
+    mcp_data = _parse_jsonb(row.get("mcp_servers", []))
     return AgentVersion(
         agent_id=row["agent_id"],
         version=row["version"],
@@ -176,6 +179,7 @@ def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
         system=row["system"],
         tools=[ToolSpec.model_validate(t) for t in tools_data],
         skills=[AgentSkillRef.model_validate(s) for s in skills_data],
+        mcp_servers=[McpServerSpec.model_validate(s) for s in (mcp_data or [])],
         window_min=row["window_min"],
         window_max=row["window_max"],
         created_at=row["created_at"],
@@ -190,31 +194,35 @@ async def insert_agent(
     system: str,
     tools: list[ToolSpec],
     skills_json: str = "[]",
+    mcp_servers: list[McpServerSpec],
     description: str | None,
     metadata: dict[str, Any],
     window_min: int,
     window_max: int,
 ) -> Agent:
     new_id = make_id(AGENT)
-    tools_json_str = json.dumps([t.model_dump() for t in tools])
+    tools_json = json.dumps([t.model_dump() for t in tools])
+    mcp_json = json.dumps([s.model_dump() for s in mcp_servers])
     metadata_json = json.dumps(metadata)
     try:
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
                 INSERT INTO agents (
-                    id, name, model, system, tools, skills,
+                    id, name, model, system, tools, skills, mcp_servers,
                     description, metadata, window_min, window_max, version
                 )
-                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8::jsonb, $9, $10, 1)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
+                        $8, $9::jsonb, $10, $11, 1)
                 RETURNING *
                 """,
                 new_id,
                 name,
                 model,
                 system,
-                tools_json_str,
+                tools_json,
                 skills_json,
+                mcp_json,
                 description,
                 metadata_json,
                 window_min,
@@ -225,16 +233,17 @@ async def insert_agent(
             await conn.execute(
                 """
                 INSERT INTO agent_versions (
-                    agent_id, version, model, system, tools, skills,
+                    agent_id, version, model, system, tools, skills, mcp_servers,
                     window_min, window_max
                 )
-                VALUES ($1, 1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
+                VALUES ($1, 1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8)
                 """,
                 new_id,
                 model,
                 system,
-                tools_json_str,
+                tools_json,
                 skills_json,
+                mcp_json,
                 window_min,
                 window_max,
             )
@@ -289,6 +298,7 @@ async def update_agent(
     system: str | None = None,
     tools: list[ToolSpec] | None = None,
     skills_json: str | None = None,
+    mcp_servers: list[McpServerSpec] | None = None,
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
     window_min: int | None = None,
@@ -319,16 +329,20 @@ async def update_agent(
     new_tools = tools if tools is not None else current.tools
     cur_skills_json = json.dumps([s.model_dump() for s in current.skills])
     new_skills_json = skills_json if skills_json is not None else cur_skills_json
+    new_mcp = mcp_servers if mcp_servers is not None else current.mcp_servers
     new_desc = description if description is not None else current.description
     new_meta = metadata if metadata is not None else current.metadata
     new_wmin = window_min if window_min is not None else current.window_min
     new_wmax = window_max if window_max is not None else current.window_max
+
+    # No-op detection.
     if (
         new_name == current.name
         and new_model == current.model
         and new_system == current.system
         and new_tools == current.tools
         and new_skills_json == cur_skills_json
+        and new_mcp == current.mcp_servers
         and new_desc == current.description
         and new_meta == current.metadata
         and new_wmin == current.window_min
@@ -337,7 +351,8 @@ async def update_agent(
         return current
 
     new_version = current.version + 1
-    tools_json_str = json.dumps([t.model_dump() for t in new_tools])
+    tools_json = json.dumps([t.model_dump() for t in new_tools])
+    mcp_json = json.dumps([s.model_dump() for s in new_mcp])
     meta_json = json.dumps(new_meta)
 
     async with conn.transaction():
@@ -345,8 +360,9 @@ async def update_agent(
             """
             UPDATE agents
                SET version = $2, name = $3, model = $4, system = $5,
-                   tools = $6::jsonb, skills = $7::jsonb, description = $8,
-                   metadata = $9::jsonb, window_min = $10, window_max = $11,
+                   tools = $6::jsonb, skills = $7::jsonb, mcp_servers = $8::jsonb,
+                   description = $9, metadata = $10::jsonb,
+                   window_min = $11, window_max = $12,
                    updated_at = now()
              WHERE id = $1
             RETURNING *
@@ -356,8 +372,9 @@ async def update_agent(
             new_name,
             new_model,
             new_system,
-            tools_json_str,
+            tools_json,
             new_skills_json,
+            mcp_json,
             new_desc,
             meta_json,
             new_wmin,
@@ -367,17 +384,18 @@ async def update_agent(
         await conn.execute(
             """
             INSERT INTO agent_versions (
-                agent_id, version, model, system, tools, skills,
+                agent_id, version, model, system, tools, skills, mcp_servers,
                 window_min, window_max
             )
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9)
             """,
             agent_id,
             new_version,
             new_model,
             new_system,
-            tools_json_str,
+            tools_json,
             new_skills_json,
+            mcp_json,
             new_wmin,
             new_wmax,
         )
@@ -1129,6 +1147,39 @@ async def batch_get_session_vault_ids(
     for r in rows:
         result[str(r["session_id"])].append(str(r["vault_id"]))
     return result
+
+
+# ─── MCP credential resolution ───────────────────────────────────────────────
+
+
+async def resolve_mcp_credential(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    mcp_server_url: str,
+) -> tuple[EncryptedBlob, str] | None:
+    """Find the first matching MCP credential across a session's bound vaults.
+
+    Joins ``session_vaults`` (rank-ordered) with ``vault_credentials``
+    filtered by ``mcp_server_url``. Returns ``(EncryptedBlob, auth_type)``
+    for the first match, or ``None`` if no credential exists.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT vc.ciphertext, vc.nonce, vc.auth_type
+          FROM session_vaults sv
+          JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
+         WHERE sv.session_id = $1
+           AND vc.mcp_server_url = $2
+           AND vc.archived_at IS NULL
+         ORDER BY sv.rank
+         LIMIT 1
+        """,
+        session_id,
+        mcp_server_url,
+    )
+    if row is None:
+        return None
+    return EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]), str(row["auth_type"])
 
 
 # ─── skills ──────────────────────────────────────────────────────────────────
