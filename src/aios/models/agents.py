@@ -17,7 +17,16 @@ from aios.models.skills import AgentSkillRef
 
 # Built-in tool types. Custom tools use type="custom" with extra fields.
 BuiltinToolType = Literal[
-    "bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "cancel"
+    "bash",
+    "read",
+    "write",
+    "edit",
+    "glob",
+    "grep",
+    "web_fetch",
+    "web_search",
+    "search_events",
+    "cancel",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled
