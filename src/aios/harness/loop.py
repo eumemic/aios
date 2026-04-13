@@ -47,7 +47,17 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     vault = runtime.require_vault()
 
     session = await sessions_service.get_session(pool, session_id)
-    agent = await agents_service.get_agent(pool, session.agent_id)
+
+    # Load agent config — pinned version or latest.
+    from aios.models.agents import Agent, AgentVersion
+
+    agent: Agent | AgentVersion
+    if session.agent_version is not None:
+        agent = await agents_service.get_agent_version(
+            pool, session.agent_id, session.agent_version
+        )
+    else:
+        agent = await agents_service.get_agent(pool, session.agent_id)
 
     # Read all message events for this session.
     events = await sessions_service.read_message_events(pool, session_id)

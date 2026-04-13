@@ -1,9 +1,9 @@
 """Agent resource: model + system prompt + tools + credential reference.
 
-Phase 1 stores agents as a single mutable row (no version table yet). Phase 4
-introduces immutable agent versions; the wire-level Read shape will gain a
-`version` field at that point. The `model` field is a free-form LiteLLM
-model string (e.g. ``anthropic/claude-opus-4-6``, ``ollama_chat/llama3.3``).
+Agents are versioned: every update creates a new immutable version. The
+``agents`` table holds the latest config; the ``agent_versions`` table stores
+the full history. The ``model`` field is a free-form LiteLLM model string
+(e.g. ``anthropic/claude-opus-4-6``, ``ollama_chat/llama3.3``).
 """
 
 from __future__ import annotations
@@ -54,15 +54,17 @@ class AgentCreate(BaseModel):
 
 
 class AgentUpdate(BaseModel):
-    """Request body for `PATCH /v1/agents/{id}`.
+    """Request body for ``PUT /v1/agents/{id}``.
 
-    All fields are optional; omitted fields are preserved. In Phase 4 this
-    will allocate a new immutable agent version; in Phase 1 it just mutates
-    the row in place.
+    All config fields are optional; omitted fields are preserved. The
+    ``version`` field is required for optimistic concurrency — it must match
+    the current version. If the update produces a change, a new version is
+    created; otherwise the existing version is returned unchanged.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    version: int = Field(description="Current version for optimistic concurrency.")
     name: str | None = Field(default=None, min_length=1, max_length=128)
     model: str | None = Field(default=None, min_length=1)
     system: str | None = None
@@ -75,9 +77,10 @@ class AgentUpdate(BaseModel):
 
 
 class Agent(BaseModel):
-    """Read view of an agent."""
+    """Read view of an agent (always the latest version)."""
 
     id: str
+    version: int
     name: str
     model: str
     system: str
@@ -90,3 +93,17 @@ class Agent(BaseModel):
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
+
+
+class AgentVersion(BaseModel):
+    """Read view of a specific agent version from the version history."""
+
+    agent_id: str
+    version: int
+    model: str
+    system: str
+    tools: list[ToolSpec]
+    credential_id: str | None
+    window_min: int
+    window_max: int
+    created_at: datetime

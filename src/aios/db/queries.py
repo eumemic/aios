@@ -21,7 +21,7 @@ import asyncpg
 from aios.crypto.vault import EncryptedBlob
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import AGENT, CREDENTIAL, ENVIRONMENT, EVENT, SESSION, make_id
-from aios.models.agents import Agent, ToolSpec
+from aios.models.agents import Agent, AgentVersion, ToolSpec
 from aios.models.credentials import Credential
 from aios.models.environments import Environment
 from aios.models.events import Event, EventKind
@@ -189,6 +189,7 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
     metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
     return Agent(
         id=row["id"],
+        version=row["version"],
         name=row["name"],
         model=row["model"],
         system=row["system"],
@@ -201,6 +202,22 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
+    )
+
+
+def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
+    raw_tools = row["tools"]
+    tools_data = json.loads(raw_tools) if isinstance(raw_tools, str) else raw_tools
+    return AgentVersion(
+        agent_id=row["agent_id"],
+        version=row["version"],
+        model=row["model"],
+        system=row["system"],
+        tools=[ToolSpec.model_validate(t) for t in tools_data],
+        credential_id=row["credential_id"],
+        window_min=row["window_min"],
+        window_max=row["window_max"],
+        created_at=row["created_at"],
     )
 
 
@@ -221,26 +238,45 @@ async def insert_agent(
     tools_json = json.dumps([t.model_dump() for t in tools])
     metadata_json = json.dumps(metadata)
     try:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO agents (
-                id, name, model, system, tools, credential_id,
-                description, metadata, window_min, window_max
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO agents (
+                    id, name, model, system, tools, credential_id,
+                    description, metadata, window_min, window_max, version
+                )
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9, $10, 1)
+                RETURNING *
+                """,
+                new_id,
+                name,
+                model,
+                system,
+                tools_json,
+                credential_id,
+                description,
+                metadata_json,
+                window_min,
+                window_max,
             )
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9, $10)
-            RETURNING *
-            """,
-            new_id,
-            name,
-            model,
-            system,
-            tools_json,
-            credential_id,
-            description,
-            metadata_json,
-            window_min,
-            window_max,
-        )
+            assert row is not None
+            # Snapshot version 1 into agent_versions.
+            await conn.execute(
+                """
+                INSERT INTO agent_versions (
+                    agent_id, version, model, system, tools,
+                    credential_id, window_min, window_max
+                )
+                VALUES ($1, 1, $2, $3, $4::jsonb, $5, $6, $7)
+                """,
+                new_id,
+                model,
+                system,
+                tools_json,
+                credential_id,
+                window_min,
+                window_max,
+            )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
             f"an agent named {name!r} already exists",
@@ -251,7 +287,6 @@ async def insert_agent(
             f"credential {credential_id} not found",
             detail={"credential_id": credential_id},
         ) from exc
-    assert row is not None
     return _row_to_agent(row)
 
 
@@ -288,6 +323,150 @@ async def archive_agent(conn: asyncpg.Connection[Any], agent_id: str) -> None:
         raise NotFoundError(f"agent {agent_id} not found or already archived")
 
 
+async def update_agent(
+    conn: asyncpg.Connection[Any],
+    agent_id: str,
+    *,
+    expected_version: int,
+    name: str | None = None,
+    model: str | None = None,
+    system: str | None = None,
+    tools: list[ToolSpec] | None = None,
+    credential_id: str | None = None,
+    description: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    window_min: int | None = None,
+    window_max: int | None = None,
+) -> Agent:
+    """Update an agent, creating a new version.
+
+    Requires ``expected_version`` to match the current version (optimistic
+    concurrency). Omitted fields are preserved. If nothing changed, the
+    existing version is returned without creating a new one (no-op).
+    """
+    current = await get_agent(conn, agent_id)
+    if current.version != expected_version:
+        raise ConflictError(
+            f"version mismatch: expected {expected_version}, current is {current.version}",
+            detail={"expected": expected_version, "current": current.version},
+        )
+    if current.archived_at is not None:
+        raise ConflictError(f"agent {agent_id} is archived", detail={"id": agent_id})
+
+    # Resolve final values (omitted = preserve current).
+    new_name = name if name is not None else current.name
+    new_model = model if model is not None else current.model
+    new_system = system if system is not None else current.system
+    new_tools = tools if tools is not None else current.tools
+    new_cred = credential_id if credential_id is not None else current.credential_id
+    new_desc = description if description is not None else current.description
+    new_meta = metadata if metadata is not None else current.metadata
+    new_wmin = window_min if window_min is not None else current.window_min
+    new_wmax = window_max if window_max is not None else current.window_max
+
+    # No-op detection.
+    if (
+        new_name == current.name
+        and new_model == current.model
+        and new_system == current.system
+        and new_tools == current.tools
+        and new_cred == current.credential_id
+        and new_desc == current.description
+        and new_meta == current.metadata
+        and new_wmin == current.window_min
+        and new_wmax == current.window_max
+    ):
+        return current
+
+    new_version = current.version + 1
+    tools_json = json.dumps([t.model_dump() for t in new_tools])
+    meta_json = json.dumps(new_meta)
+
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            """
+            UPDATE agents
+               SET version = $2, name = $3, model = $4, system = $5,
+                   tools = $6::jsonb, credential_id = $7, description = $8,
+                   metadata = $9::jsonb, window_min = $10, window_max = $11,
+                   updated_at = now()
+             WHERE id = $1
+            RETURNING *
+            """,
+            agent_id,
+            new_version,
+            new_name,
+            new_model,
+            new_system,
+            tools_json,
+            new_cred,
+            new_desc,
+            meta_json,
+            new_wmin,
+            new_wmax,
+        )
+        assert row is not None
+        await conn.execute(
+            """
+            INSERT INTO agent_versions (
+                agent_id, version, model, system, tools,
+                credential_id, window_min, window_max
+            )
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+            """,
+            agent_id,
+            new_version,
+            new_model,
+            new_system,
+            tools_json,
+            new_cred,
+            new_wmin,
+            new_wmax,
+        )
+    return _row_to_agent(row)
+
+
+async def get_agent_version(
+    conn: asyncpg.Connection[Any], agent_id: str, version: int
+) -> AgentVersion:
+    row = await conn.fetchrow(
+        "SELECT * FROM agent_versions WHERE agent_id = $1 AND version = $2",
+        agent_id,
+        version,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"agent {agent_id} version {version} not found",
+            detail={"agent_id": agent_id, "version": version},
+        )
+    return _row_to_agent_version(row)
+
+
+async def list_agent_versions(
+    conn: asyncpg.Connection[Any],
+    agent_id: str,
+    *,
+    limit: int = 50,
+    after: int | None = None,
+) -> list[AgentVersion]:
+    """List versions in descending order (newest first)."""
+    if after is None:
+        rows = await conn.fetch(
+            "SELECT * FROM agent_versions WHERE agent_id = $1 ORDER BY version DESC LIMIT $2",
+            agent_id,
+            limit,
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT * FROM agent_versions WHERE agent_id = $1 AND version < $2 "
+            "ORDER BY version DESC LIMIT $3",
+            agent_id,
+            after,
+            limit,
+        )
+    return [_row_to_agent_version(r) for r in rows]
+
+
 # ─── sessions ─────────────────────────────────────────────────────────────────
 
 
@@ -298,6 +477,7 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         id=row["id"],
         agent_id=row["agent_id"],
         environment_id=row["environment_id"],
+        agent_version=row["agent_version"],
         title=row["title"],
         metadata=metadata,
         status=row["status"],
@@ -314,6 +494,7 @@ async def insert_session(
     *,
     agent_id: str,
     environment_id: str,
+    agent_version: int | None,
     title: str | None,
     metadata: dict[str, Any],
     workspace_volume_path: str,
@@ -324,15 +505,16 @@ async def insert_session(
         row = await conn.fetchrow(
             """
             INSERT INTO sessions (
-                id, agent_id, environment_id, title, metadata,
+                id, agent_id, environment_id, agent_version, title, metadata,
                 status, workspace_volume_path
             )
-            VALUES ($1, $2, $3, $4, $5::jsonb, 'idle', $6)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7)
             RETURNING *
             """,
             new_id,
             agent_id,
             environment_id,
+            agent_version,
             title,
             metadata_json,
             workspace_volume_path,
@@ -411,6 +593,50 @@ async def list_running_session_ids(conn: asyncpg.Connection[Any]) -> list[str]:
         """
     )
     return [str(r["id"]) for r in rows]
+
+
+_UNSET: Any = object()
+
+
+async def update_session(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    agent_id: str | None = None,
+    agent_version: int | None = _UNSET,
+    title: str | None = _UNSET,
+    metadata: dict[str, Any] | None = None,
+) -> Session:
+    """Partial update of a session. Omitted fields are preserved.
+
+    ``agent_version`` and ``title`` use a sentinel to distinguish "not
+    provided" from "explicitly set to None".
+    """
+    sets: list[str] = []
+    args: list[Any] = [session_id]  # $1 = session_id
+
+    if agent_id is not None:
+        args.append(agent_id)
+        sets.append(f"agent_id = ${len(args)}")
+    if agent_version is not _UNSET:
+        args.append(agent_version)
+        sets.append(f"agent_version = ${len(args)}")
+    if title is not _UNSET:
+        args.append(title)
+        sets.append(f"title = ${len(args)}")
+    if metadata is not None:
+        args.append(json.dumps(metadata))
+        sets.append(f"metadata = ${len(args)}::jsonb")
+
+    if not sets:
+        return await get_session(conn, session_id)
+
+    sets.append("updated_at = now()")
+    sql = f"UPDATE sessions SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    row = await conn.fetchrow(sql, *args)
+    if row is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    return _row_to_session(row)
 
 
 # ─── events ───────────────────────────────────────────────────────────────────

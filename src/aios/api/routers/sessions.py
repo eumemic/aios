@@ -26,7 +26,7 @@ from aios.api.sse import sse_event_stream
 from aios.harness.wake import defer_wake
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
-from aios.models.sessions import Session, SessionCreate, SessionUserMessage
+from aios.models.sessions import Session, SessionCreate, SessionUpdate, SessionUserMessage
 from aios.services import sessions as service
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
@@ -43,6 +43,7 @@ async def create(
         pool,
         agent_id=body.agent_id,
         environment_id=body.environment_id,
+        agent_version=body.agent_version,
         title=body.title,
         metadata=body.metadata,
     )
@@ -78,6 +79,22 @@ async def list_(
 @router.get("/{session_id}")
 async def get(session_id: str, pool: PoolDep, _auth: AuthDep) -> Session:
     return await service.get_session(pool, session_id)
+
+
+@router.put("/{session_id}")
+async def update(session_id: str, body: SessionUpdate, pool: PoolDep, _auth: AuthDep) -> Session:
+    from aios.db.queries import _UNSET
+
+    # Use model_fields_set to distinguish "not provided" from "explicitly null".
+    # agent_version=null means "latest" (auto-updating); omitted means "keep current".
+    return await service.update_session(
+        pool,
+        session_id,
+        agent_id=body.agent_id,
+        agent_version=body.agent_version if "agent_version" in body.model_fields_set else _UNSET,
+        title=body.title if "title" in body.model_fields_set else _UNSET,
+        metadata=body.metadata,
+    )
 
 
 @router.post("/{session_id}/messages", status_code=status.HTTP_201_CREATED)

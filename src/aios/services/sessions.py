@@ -28,41 +28,37 @@ async def create_session(
     *,
     agent_id: str,
     environment_id: str,
+    agent_version: int | None = None,
     title: str | None,
     metadata: dict[str, Any],
 ) -> Session:
     """Create a session row and return it.
 
-    Note: Phase 1 doesn't actually mkdir the workspace path — that happens
-    in Phase 3 when the Docker pool is wired up. The path is stored on the
-    row so the directory creation is deterministic later.
+    ``agent_version=None`` means "latest" — the session will always use
+    whatever version of the agent is current at step time.
     """
     async with pool.acquire() as conn:
-        # We need the session id before we know the workspace path. Insert
-        # with a placeholder, then UPDATE — except we want everything in one
-        # statement, so we generate the id ahead of time.
         from aios.ids import SESSION, make_id
 
         new_id = make_id(SESSION)
         workspace_path = str(get_settings().workspace_root / new_id)
 
-        # We bypass queries.insert_session because we need to provide the id
-        # ourselves; replicate the SQL directly.
         import json
 
         try:
             row = await conn.fetchrow(
                 """
                 INSERT INTO sessions (
-                    id, agent_id, environment_id, title, metadata,
+                    id, agent_id, environment_id, agent_version, title, metadata,
                     status, workspace_volume_path
                 )
-                VALUES ($1, $2, $3, $4, $5::jsonb, 'idle', $6)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7)
                 RETURNING *
                 """,
                 new_id,
                 agent_id,
                 environment_id,
+                agent_version,
                 title,
                 json.dumps(metadata),
                 workspace_path,
@@ -146,3 +142,23 @@ async def set_session_status(
 ) -> None:
     async with pool.acquire() as conn:
         await queries.set_session_status(conn, session_id, status, stop_reason)
+
+
+async def update_session(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    agent_id: str | None = None,
+    agent_version: int | None = queries._UNSET,
+    title: str | None = queries._UNSET,
+    metadata: dict[str, Any] | None = None,
+) -> Session:
+    async with pool.acquire() as conn:
+        return await queries.update_session(
+            conn,
+            session_id,
+            agent_id=agent_id,
+            agent_version=agent_version,
+            title=title,
+            metadata=metadata,
+        )

@@ -734,6 +734,253 @@ class TestStreamingInference:
         assert "".join(deltas) == "Done."
 
 
+# ─── agent versioning + session mutability ──────────────────────────────────
+
+
+@needs_docker
+class TestAgentVersioning:
+    async def test_create_agent_starts_at_version_1(self, harness: Harness) -> None:
+        """Newly created agents are version 1."""
+        from aios.services import agents as agents_service
+
+        agent = await agents_service.create_agent(
+            harness._pool,
+            name=f"ver-test-{id(self)}",
+            model="fake/test",
+            system="v1 system",
+            tools=[],
+            credential_id=None,
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+        assert agent.version == 1
+
+    async def test_update_bumps_version(self, harness: Harness) -> None:
+        """Updating an agent creates a new version."""
+        from aios.services import agents as agents_service
+
+        agent = await agents_service.create_agent(
+            harness._pool,
+            name=f"ver-bump-{id(self)}",
+            model="fake/test",
+            system="original",
+            tools=[],
+            credential_id=None,
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+        updated = await agents_service.update_agent(
+            harness._pool, agent.id, expected_version=1, system="updated"
+        )
+        assert updated.version == 2
+        assert updated.system == "updated"
+
+    async def test_update_noop_keeps_version(self, harness: Harness) -> None:
+        """Updating with no changes doesn't bump the version."""
+        from aios.services import agents as agents_service
+
+        agent = await agents_service.create_agent(
+            harness._pool,
+            name=f"ver-noop-{id(self)}",
+            model="fake/test",
+            system="same",
+            tools=[],
+            credential_id=None,
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+        result = await agents_service.update_agent(harness._pool, agent.id, expected_version=1)
+        assert result.version == 1  # no bump
+
+    async def test_update_wrong_version_raises(self, harness: Harness) -> None:
+        """Optimistic concurrency: wrong version raises ConflictError."""
+        from aios.errors import ConflictError
+        from aios.services import agents as agents_service
+
+        agent = await agents_service.create_agent(
+            harness._pool,
+            name=f"ver-conflict-{id(self)}",
+            model="fake/test",
+            system="original",
+            tools=[],
+            credential_id=None,
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+        with pytest.raises(ConflictError, match="version mismatch"):
+            await agents_service.update_agent(
+                harness._pool, agent.id, expected_version=99, system="bad"
+            )
+
+    async def test_version_history(self, harness: Harness) -> None:
+        """Version history tracks all updates."""
+        from aios.services import agents as agents_service
+
+        agent = await agents_service.create_agent(
+            harness._pool,
+            name=f"ver-hist-{id(self)}",
+            model="fake/test",
+            system="v1",
+            tools=[],
+            credential_id=None,
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+        await agents_service.update_agent(harness._pool, agent.id, expected_version=1, system="v2")
+        await agents_service.update_agent(harness._pool, agent.id, expected_version=2, system="v3")
+        versions = await agents_service.list_agent_versions(harness._pool, agent.id)
+        assert len(versions) == 3
+        # Newest first
+        assert versions[0].version == 3
+        assert versions[0].system == "v3"
+        assert versions[2].version == 1
+        assert versions[2].system == "v1"
+
+    async def test_get_specific_version(self, harness: Harness) -> None:
+        """Can retrieve a specific historical version."""
+        from aios.services import agents as agents_service
+
+        agent = await agents_service.create_agent(
+            harness._pool,
+            name=f"ver-get-{id(self)}",
+            model="fake/test",
+            system="original",
+            tools=[],
+            credential_id=None,
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+        await agents_service.update_agent(
+            harness._pool, agent.id, expected_version=1, system="changed"
+        )
+        v1 = await agents_service.get_agent_version(harness._pool, agent.id, 1)
+        assert v1.system == "original"
+        v2 = await agents_service.get_agent_version(harness._pool, agent.id, 2)
+        assert v2.system == "changed"
+
+
+@needs_docker
+class TestSessionVersionBinding:
+    async def test_session_defaults_to_latest(self, harness: Harness) -> None:
+        """Sessions default to agent_version=None (latest)."""
+        harness.script_model([assistant("Hi")])
+        session = await harness.start("hello")
+        assert session.agent_version is None
+
+    async def test_session_uses_latest_after_agent_update(self, harness: Harness) -> None:
+        """Unpinned session uses updated agent config on next step."""
+        from aios.services import agents as agents_service
+
+        # Create agent + session with system="original"
+        harness.script_model(
+            [
+                assistant("Response 1"),
+                assistant("Response 2"),
+            ]
+        )
+        session = await harness.start("hello", system="original")
+        await harness.run_until_idle(session.id)
+
+        # Update the agent's system prompt
+        agent = await agents_service.get_agent(harness._pool, session.agent_id)
+        await agents_service.update_agent(
+            harness._pool, agent.id, expected_version=agent.version, system="updated"
+        )
+
+        # Send another message — step should use the updated system prompt
+        await harness.inject_message(session.id, "hello again")
+        await harness.run_step(session.id)
+
+        # The second model call should have the updated system prompt
+        assert len(harness.model_calls) == 2
+        step2_messages = harness.model_calls[1]["messages"]
+        system_msg = next(m for m in step2_messages if m["role"] == "system")
+        assert system_msg["content"] == "updated"
+
+    async def test_pinned_session_ignores_agent_update(self, harness: Harness) -> None:
+        """Pinned session keeps using the old version after agent update."""
+        from aios.services import agents as agents_service, sessions as sessions_service
+
+        harness.script_model(
+            [
+                assistant("Response 1"),
+                assistant("Response 2"),
+            ]
+        )
+        session = await harness.start("hello", system="original")
+        await harness.run_until_idle(session.id)
+
+        # Pin session to version 1
+        await sessions_service.update_session(harness._pool, session.id, agent_version=1)
+
+        # Update agent to version 2
+        agent = await agents_service.get_agent(harness._pool, session.agent_id)
+        await agents_service.update_agent(
+            harness._pool, agent.id, expected_version=agent.version, system="v2 system"
+        )
+
+        # Send another message — pinned session should still use v1 system prompt
+        await harness.inject_message(session.id, "hello again")
+        await harness.run_step(session.id)
+
+        step2_messages = harness.model_calls[1]["messages"]
+        system_msg = next(m for m in step2_messages if m["role"] == "system")
+        assert system_msg["content"] == "original"  # v1, not v2
+
+    async def test_session_update_changes_agent(self, harness: Harness) -> None:
+        """Sessions can be updated to point at a different agent."""
+        from aios.services import agents as agents_service, sessions as sessions_service
+
+        harness.script_model(
+            [
+                assistant("From agent 1"),
+                assistant("From agent 2"),
+            ]
+        )
+        session = await harness.start("hello", system="agent-one")
+        await harness.run_until_idle(session.id)
+
+        # Create a second agent
+        from aios.ids import make_id
+        from aios.models.agents import ToolSpec
+
+        agent2 = await agents_service.create_agent(
+            harness._pool,
+            name=f"agent-two-{make_id('agent')[-8:]}",
+            model="fake/test",
+            system="agent-two",
+            tools=[],
+            credential_id=None,
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+
+        # Switch session to agent 2
+        await sessions_service.update_session(harness._pool, session.id, agent_id=agent2.id)
+
+        # Next step should use agent 2's system prompt
+        await harness.inject_message(session.id, "hello from agent 2")
+        await harness.run_step(session.id)
+
+        step2_messages = harness.model_calls[1]["messages"]
+        system_msg = next(m for m in step2_messages if m["role"] == "system")
+        assert system_msg["content"] == "agent-two"
+
+
 # ─── full tier (with Docker) ─────────────────────────────────────────────────
 
 

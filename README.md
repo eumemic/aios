@@ -59,6 +59,15 @@ curl -N -H "Authorization: Bearer $AIOS_API_KEY" \
      http://localhost:8080/v1/sessions/sess_01.../stream
 ```
 
+## Divergences from Anthropic Managed Agents
+
+aios is inspired by [the Managed Agents architecture](https://www.anthropic.com/engineering/managed-agents) and shares its core primitives (session = append-only log, harness = stateless loop, sandbox = cattle-not-pets containers). It diverges in several ways to support long-lived assistant entities rather than task-scoped sessions:
+
+- **Mutable sessions.** Sessions can be updated after creation (`PUT /v1/sessions/:id`) to change the agent binding, version, title, or metadata. Anthropic sessions are immutable after creation.
+- **Auto-updating sessions.** By default (`agent_version: null`), sessions always use the latest agent config — updating an agent immediately affects all unpinned sessions on the next step. Sessions can optionally pin to a specific version for Anthropic-compatible behavior.
+- **Model-agnostic.** The `model` field is a LiteLLM URL (`ollama/...`, `openai/...`, `anthropic/...`, anything LiteLLM speaks), not limited to Claude.
+- **OpenAI wire format.** Events in the session log and streaming use OpenAI chat-completions message format (roles: system/user/assistant/tool, `tool_calls` array, etc.), not Anthropic's Messages API format. LiteLLM translates at the provider boundary.
+
 ## License
 
 MIT

@@ -1,7 +1,8 @@
-"""Business logic for agents. Phase 1: mutable single rows.
+"""Business logic for agents.
 
-Phase 4 will replace this module with versioning logic that allocates a new
-agent_versions row on every update.
+Agents are versioned: every update creates a new immutable version.
+The ``agents`` table holds the latest config; ``agent_versions`` stores
+the full history.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
-from aios.models.agents import Agent, ToolSpec
+from aios.models.agents import Agent, AgentVersion, ToolSpec
 
 
 async def create_agent(
@@ -64,3 +65,51 @@ async def list_agents(
 async def archive_agent(pool: asyncpg.Pool[Any], agent_id: str) -> None:
     async with pool.acquire() as conn:
         await queries.archive_agent(conn, agent_id)
+
+
+async def update_agent(
+    pool: asyncpg.Pool[Any],
+    agent_id: str,
+    *,
+    expected_version: int,
+    name: str | None = None,
+    model: str | None = None,
+    system: str | None = None,
+    tools: list[ToolSpec] | None = None,
+    credential_id: str | None = None,
+    description: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    window_min: int | None = None,
+    window_max: int | None = None,
+) -> Agent:
+    async with pool.acquire() as conn:
+        return await queries.update_agent(
+            conn,
+            agent_id,
+            expected_version=expected_version,
+            name=name,
+            model=model,
+            system=system,
+            tools=tools,
+            credential_id=credential_id,
+            description=description,
+            metadata=metadata,
+            window_min=window_min,
+            window_max=window_max,
+        )
+
+
+async def get_agent_version(pool: asyncpg.Pool[Any], agent_id: str, version: int) -> AgentVersion:
+    async with pool.acquire() as conn:
+        return await queries.get_agent_version(conn, agent_id, version)
+
+
+async def list_agent_versions(
+    pool: asyncpg.Pool[Any],
+    agent_id: str,
+    *,
+    limit: int = 50,
+    after: int | None = None,
+) -> list[AgentVersion]:
+    async with pool.acquire() as conn:
+        return await queries.list_agent_versions(conn, agent_id, limit=limit, after=after)
