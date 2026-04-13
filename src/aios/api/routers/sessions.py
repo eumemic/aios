@@ -32,6 +32,7 @@ from aios.models.sessions import (
     SessionInterruptRequest,
     SessionUpdate,
     SessionUserMessage,
+    ToolConfirmationRequest,
     ToolResultRequest,
 )
 from aios.services import sessions as service
@@ -163,6 +164,28 @@ async def submit_tool_result(
         data["is_error"] = True
     event = await service.append_event(pool, session_id, "message", data)
     await defer_wake(session_id, cause="custom_tool_result")
+    return event
+
+
+@router.post("/{session_id}/tool-confirmations", status_code=status.HTTP_201_CREATED)
+async def submit_tool_confirmation(
+    session_id: str,
+    body: ToolConfirmationRequest,
+    pool: PoolDep,
+    _auth: AuthDep,
+) -> Event:
+    """Confirm or deny an ``always_ask`` built-in tool call.
+
+    ``allow`` records a lifecycle event; the worker dispatches the tool on
+    its next step.  ``deny`` appends a tool-role error event; the model
+    sees the denial message and can adapt.
+    """
+    if body.result == "allow":
+        event = await service.confirm_tool_allow(pool, session_id, body.tool_call_id)
+    else:
+        deny_msg = body.deny_message or "Tool use denied by user."
+        event = await service.confirm_tool_deny(pool, session_id, body.tool_call_id, deny_msg)
+    await defer_wake(session_id, cause="tool_confirmation")
     return event
 
 

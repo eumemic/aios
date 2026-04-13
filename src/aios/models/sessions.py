@@ -100,3 +100,22 @@ class ToolResultRequest(BaseModel):
     tool_call_id: str = Field(description="The tool_call_id from the assistant's tool_calls.")
     content: str = Field(description="The result of executing the tool.")
     is_error: bool = Field(default=False, description="True if the tool execution failed.")
+
+
+class ToolConfirmationRequest(BaseModel):
+    """Request body for ``POST /v1/sessions/{id}/tool-confirmations``.
+
+    Used for built-in tools with ``permission: "always_ask"``. The client
+    inspects the pending tool call and either allows it (the worker will
+    execute it) or denies it (the model receives an error with the deny
+    message).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call_id: str = Field(description="The tool_call_id to confirm or deny.")
+    result: Literal["allow", "deny"]
+    deny_message: str | None = Field(
+        default=None,
+        description="When result='deny', an optional message explaining why. Shown to the model.",
+    )

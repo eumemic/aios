@@ -141,6 +141,8 @@ def to_openai_tools(agent_tools: list[AgentToolSpec]) -> list[dict[str, Any]]:
     """
     result: list[dict[str, Any]] = []
     for entry in agent_tools:
+        if not entry.enabled:
+            continue
         if entry.type == "custom":
             # Custom tools carry their own schema — not in the registry.
             result.append(

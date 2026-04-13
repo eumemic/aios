@@ -222,9 +222,15 @@ class Harness:
         message: str,
         *,
         tools: list[str] | None = None,
+        tool_specs: list[Any] | None = None,
         system: str = "You are a test assistant.",
     ) -> Session:
-        """Create an agent + session and append the initial user message."""
+        """Create an agent + session and append the initial user message.
+
+        Pass ``tools=["bash", "read"]`` for simple built-in lists, or
+        ``tool_specs=[ToolSpec(...)]`` for full control (e.g. permission
+        policies). Only one of the two should be provided.
+        """
         if self._env_id is None:
             from aios.ids import make_id
 
@@ -235,13 +241,16 @@ class Harness:
 
         from aios.models.agents import ToolSpec
 
-        tool_specs = [ToolSpec(type=t) for t in (tools or [])]
+        if tool_specs is not None:
+            final_specs = tool_specs
+        else:
+            final_specs = [ToolSpec(type=t) for t in (tools or [])]
         agent = await agents_service.create_agent(
             self._pool,
             name=f"test-agent-{make_id('agent')[-8:]}",
             model="fake/test",
             system=system,
-            tools=tool_specs,
+            tools=final_specs,
             credential_id=None,
             description=None,
             metadata={},
@@ -261,6 +270,21 @@ class Harness:
     async def inject_message(self, session_id: str, content: str) -> None:
         """Append a user message mid-turn."""
         await sessions_service.append_user_message(self._pool, session_id, content)
+
+    async def confirm_tool(
+        self,
+        session_id: str,
+        tool_call_id: str,
+        result: str = "allow",
+        deny_message: str | None = None,
+    ) -> None:
+        """Submit a tool confirmation (allow or deny) and wake the session."""
+        if result == "allow":
+            await sessions_service.confirm_tool_allow(self._pool, session_id, tool_call_id)
+        else:
+            await sessions_service.confirm_tool_deny(
+                self._pool, session_id, tool_call_id, deny_message or "Denied.",
+            )
 
     # ── step execution ───────────────────────────────────────────────────
 
