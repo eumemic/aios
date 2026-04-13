@@ -1,13 +1,13 @@
 """The glob tool — find files by pattern inside the session's sandbox.
 
-A thin wrapper over ``find -name -type f``. Returns a list of matching
-file paths, sorted and capped at 500 results.
+A thin wrapper over ``rg --files --glob``. Returns a list of matching
+file paths, capped at 500 results. Respects ``.gitignore`` automatically.
 
 Return shape::
 
     {"matches": ["/workspace/foo.py", "/workspace/bar.py"]}
 
-On failure (nonzero exit from ``find``), returns ``{"error": "..."}``.
+On failure (nonzero exit from ``rg``), returns ``{"error": "..."}``.
 """
 
 from __future__ import annotations
@@ -30,9 +30,9 @@ class GlobArgumentError(AiosError):
 
 GLOB_DESCRIPTION = (
     "Find files matching a glob pattern inside the session's sandbox. "
-    "Returns up to 500 matching file paths sorted alphabetically. "
+    "Returns up to 500 matching file paths. Respects .gitignore. "
     "`path` is the directory to search in (default /workspace). "
-    "`pattern` is a glob pattern like '*.py' or 'test_*'. "
+    "`pattern` is a glob pattern like '*.py' or '**/*.test.ts'. "
     "Prefer this over `find` via the bash tool for simple file searches."
 )
 
@@ -67,7 +67,7 @@ async def glob_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     sandbox = runtime.require_sandbox_registry()
     handle = await sandbox.get_or_provision(session_id)
 
-    cmd = f"find {shlex.quote(path)} -name {shlex.quote(pattern)} -type f 2>/dev/null | sort | head -500"
+    cmd = f"rg --files --glob {shlex.quote(pattern)} {shlex.quote(path)} 2>/dev/null | head -500"
 
     result = await handle.run_command(
         cmd,

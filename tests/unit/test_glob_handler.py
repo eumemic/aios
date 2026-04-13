@@ -81,7 +81,7 @@ class TestHappyPath:
         await glob_handler("sess_01TEST", {"pattern": "*.py"})
         cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
         assert "/workspace" in cmd
-        assert "find" in cmd
+        assert "rg --files" in cmd
         assert "*.py" in cmd
 
     async def test_custom_path(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:

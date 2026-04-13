@@ -86,13 +86,13 @@ class TestHappyPath:
     async def test_default_path(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello"})
         cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
-        assert "grep -rn" in cmd
+        assert cmd.startswith("rg")
         assert "/workspace" in cmd
 
     async def test_include_flag(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "include": "*.py"})
         cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
-        assert "--include=" in cmd
+        assert "--glob" in cmd
         assert "*.py" in cmd
 
     async def test_no_matches_returns_empty_string(
@@ -109,6 +109,68 @@ class TestHappyPath:
         )
         result = await grep_handler("sess_01TEST", {"pattern": "nonexistent"})
         assert result == {"matches": ""}
+
+
+class TestOutputModes:
+    async def test_files_with_matches_mode(
+        self, stub_registry: Any, stub_handle: ContainerHandle
+    ) -> None:
+        await grep_handler("sess_01TEST", {"pattern": "hello", "output_mode": "files_with_matches"})
+        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        assert " -l " in cmd
+
+    async def test_count_mode(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+        await grep_handler("sess_01TEST", {"pattern": "hello", "output_mode": "count"})
+        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        assert " -c " in cmd
+
+    async def test_content_mode_has_line_numbers(
+        self, stub_registry: Any, stub_handle: ContainerHandle
+    ) -> None:
+        await grep_handler("sess_01TEST", {"pattern": "hello", "output_mode": "content"})
+        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        assert " -n " in cmd
+
+
+class TestAdvancedFlags:
+    async def test_context_lines(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+        await grep_handler("sess_01TEST", {"pattern": "hello", "context": 3})
+        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        assert "-C 3" in cmd
+
+    async def test_case_insensitive(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+        await grep_handler("sess_01TEST", {"pattern": "hello", "case_insensitive": True})
+        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        assert " -i " in cmd
+
+    async def test_multiline(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+        await grep_handler("sess_01TEST", {"pattern": "hello", "multiline": True})
+        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        assert "-U" in cmd
+        assert "--multiline-dotall" in cmd
+
+    async def test_file_type_filter(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+        await grep_handler("sess_01TEST", {"pattern": "hello", "file_type": "py"})
+        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        assert "--type" in cmd
+        assert "py" in cmd
+
+    async def test_custom_limit(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+        await grep_handler("sess_01TEST", {"pattern": "hello", "limit": 100})
+        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        assert "head -100" in cmd
+
+    async def test_default_limit_250(
+        self, stub_registry: Any, stub_handle: ContainerHandle
+    ) -> None:
+        await grep_handler("sess_01TEST", {"pattern": "hello"})
+        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        assert "head -250" in cmd
+
+    async def test_max_columns_flag(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+        await grep_handler("sess_01TEST", {"pattern": "hello"})
+        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        assert "--max-columns=500" in cmd
 
 
 class TestErrorPath:
