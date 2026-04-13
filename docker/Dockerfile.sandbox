@@ -36,7 +36,6 @@ RUN apt-get update \
 # Workspace directory. The host mounts a per-session directory here at
 # container start via `-v <workspace_root>/<session_id>:/workspace`. The
 # directory is created empty on the host on first provision.
-ENV HOME=/workspace
 WORKDIR /workspace
 
 # Keep the container alive until we remove it. Each tool call is a
