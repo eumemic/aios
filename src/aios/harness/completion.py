@@ -6,9 +6,9 @@ Provides two variants:
 * :func:`stream_litellm` — streaming, delivers per-token deltas via
   ``pg_notify`` and returns the assembled message dict.
 
-The wrappers deliberately keep no state — credentials are passed in per call
-and never cached on the wrapper instance, so a single misconfigured request
-can't leak into a subsequent one.
+Model API keys are resolved by LiteLLM from standard environment variables
+(``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``, etc.) based on the model string
+prefix.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ async def call_litellm(
     model: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
-    api_key: str | None = None,
     api_base: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -43,8 +42,6 @@ async def call_litellm(
     }
     if tools:
         kwargs["tools"] = tools
-    if api_key is not None:
-        kwargs["api_key"] = api_key
     if api_base is not None:
         kwargs["api_base"] = api_base
     if extra:
@@ -66,7 +63,6 @@ async def stream_litellm(
     model: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
-    api_key: str | None = None,
     api_base: str | None = None,
     extra: dict[str, Any] | None = None,
     pool: asyncpg.Pool[Any],
@@ -88,8 +84,6 @@ async def stream_litellm(
     }
     if tools:
         kwargs["tools"] = tools
-    if api_key is not None:
-        kwargs["api_key"] = api_key
     if api_base is not None:
         kwargs["api_base"] = api_base
     if extra:

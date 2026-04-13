@@ -25,8 +25,12 @@ SESSION: Final = "sess"
 EVENT: Final = "evt"
 CREDENTIAL: Final = "cred"
 AGENT_VERSION: Final = "agver"  # reserved for phase 4
+VAULT: Final = "vlt"
+VAULT_CREDENTIAL: Final = "vcr"
 
-_PREFIXES: Final = frozenset({AGENT, ENVIRONMENT, SESSION, EVENT, CREDENTIAL, AGENT_VERSION})
+_PREFIXES: Final = frozenset(
+    {AGENT, ENVIRONMENT, SESSION, EVENT, CREDENTIAL, AGENT_VERSION, VAULT, VAULT_CREDENTIAL}
+)
 
 
 def make_id(prefix: str) -> str:

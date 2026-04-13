@@ -32,6 +32,7 @@ async def create_session(
     agent_version: int | None = None,
     title: str | None,
     metadata: dict[str, Any],
+    vault_ids: list[str] | None = None,
 ) -> Session:
     """Create a session row and return it.
 
@@ -72,12 +73,18 @@ async def create_session(
                 detail={"agent_id": agent_id, "environment_id": environment_id},
             ) from exc
         assert row is not None
-        return queries._row_to_session(row)
+        session = queries._row_to_session(row)
+        if vault_ids:
+            await queries.set_session_vaults(conn, session.id, vault_ids)
+            session = session.model_copy(update={"vault_ids": vault_ids})
+        return session
 
 
 async def get_session(pool: asyncpg.Pool[Any], session_id: str) -> Session:
     async with pool.acquire() as conn:
-        return await queries.get_session(conn, session_id)
+        session = await queries.get_session(conn, session_id)
+        vault_ids = await queries.get_session_vault_ids(conn, session_id)
+        return session.model_copy(update={"vault_ids": vault_ids})
 
 
 async def list_sessions(
@@ -89,9 +96,15 @@ async def list_sessions(
     after: str | None = None,
 ) -> list[Session]:
     async with pool.acquire() as conn:
-        return await queries.list_sessions(
+        sessions = await queries.list_sessions(
             conn, agent_id=agent_id, status=status, limit=limit, after=after
         )
+        if sessions:
+            vault_map = await queries.batch_get_session_vault_ids(conn, [s.id for s in sessions])
+            sessions = [
+                s.model_copy(update={"vault_ids": vault_map.get(s.id, [])}) for s in sessions
+            ]
+        return sessions
 
 
 async def append_user_message(pool: asyncpg.Pool[Any], session_id: str, content: str) -> Event:
@@ -163,9 +176,10 @@ async def update_session(
     agent_version: int | None = queries._UNSET,
     title: str | None = queries._UNSET,
     metadata: dict[str, Any] | None = None,
+    vault_ids: list[str] | None = None,
 ) -> Session:
     async with pool.acquire() as conn:
-        return await queries.update_session(
+        session = await queries.update_session(
             conn,
             session_id,
             agent_id=agent_id,
@@ -173,6 +187,10 @@ async def update_session(
             title=title,
             metadata=metadata,
         )
+        if vault_ids is not None:
+            await queries.set_session_vaults(conn, session_id, vault_ids)
+        vids = await queries.get_session_vault_ids(conn, session_id)
+        return session.model_copy(update={"vault_ids": vids})
 
 
 # ─── tool confirmations ────────────────────────────────────────────────────

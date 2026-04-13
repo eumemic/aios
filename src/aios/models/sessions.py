@@ -32,6 +32,10 @@ class SessionCreate(BaseModel):
     )
     title: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    vault_ids: list[str] = Field(
+        default_factory=list,
+        description="Vault ids to bind to this session for MCP credential resolution.",
+    )
     initial_message: str | None = Field(
         default=None,
         description=(
@@ -56,6 +60,7 @@ class SessionUpdate(BaseModel):
     agent_version: int | None = None
     title: str | None = None
     metadata: dict[str, Any] | None = None
+    vault_ids: list[str] | None = None
 
 
 class Session(BaseModel):
@@ -69,6 +74,7 @@ class Session(BaseModel):
     metadata: dict[str, Any]
     status: SessionStatus
     stop_reason: dict[str, Any] | None
+    vault_ids: list[str] = Field(default_factory=list)
     last_event_seq: int
     created_at: datetime
     updated_at: datetime

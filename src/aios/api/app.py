@@ -1,7 +1,7 @@
 """FastAPI app factory.
 
 Builds the app, wires in the routers, the exception handlers, and the
-lifespan that opens/closes the asyncpg pool and constructs the Vault.
+lifespan that opens/closes the asyncpg pool and constructs the CryptoBox.
 """
 
 from __future__ import annotations
@@ -12,9 +12,9 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from aios.api.routers import agents, credentials, environments, health, sessions
+from aios.api.routers import agents, environments, health, sessions, vaults
 from aios.config import get_settings
-from aios.crypto.vault import Vault
+from aios.crypto.vault import CryptoBox
 from aios.db.pool import close_pool, create_pool
 from aios.errors import install_exception_handlers
 from aios.harness.procrastinate_app import app as procrastinate_app
@@ -30,10 +30,10 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("api.startup", db_url=_redact_dsn(settings.db_url))
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
-        vault = Vault.from_base64(settings.vault_key.get_secret_value())
+        crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
         await procrastinate_app.open_async()
         app.state.pool = pool
-        app.state.vault = vault
+        app.state.crypto_box = crypto_box
         app.state.procrastinate = procrastinate_app
         app.state.db_url = settings.db_url
         try:
@@ -53,10 +53,10 @@ def create_app() -> FastAPI:
     )
     install_exception_handlers(app)
     app.include_router(health.router)
-    app.include_router(credentials.router)
     app.include_router(environments.router)
     app.include_router(agents.router)
     app.include_router(sessions.router)
+    app.include_router(vaults.router)
     return app
 
 
