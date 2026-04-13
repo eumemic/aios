@@ -20,11 +20,12 @@ import asyncpg
 
 from aios.crypto.vault import EncryptedBlob
 from aios.errors import ConflictError, NotFoundError
-from aios.ids import AGENT, ENVIRONMENT, EVENT, SESSION, VAULT, VAULT_CREDENTIAL, make_id
+from aios.ids import AGENT, ENVIRONMENT, EVENT, SESSION, SKILL, VAULT, VAULT_CREDENTIAL, make_id
 from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
 from aios.models.sessions import Session, SessionStatus, SessionUsage
+from aios.models.skills import AgentSkillRef, Skill, SkillVersion
 from aios.models.vaults import Vault, VaultCredential
 
 # ─── environments ─────────────────────────────────────────────────────────────
@@ -158,13 +159,15 @@ async def get_environment_config_for_session(
 # ─── agents ───────────────────────────────────────────────────────────────────
 
 
+def _parse_jsonb(raw: Any) -> Any:
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
 def _row_to_agent(row: asyncpg.Record) -> Agent:
-    raw_tools = row["tools"]
-    tools_data = json.loads(raw_tools) if isinstance(raw_tools, str) else raw_tools
-    raw_metadata = row["metadata"]
-    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
-    raw_mcp = row.get("mcp_servers", [])
-    mcp_data = json.loads(raw_mcp) if isinstance(raw_mcp, str) else (raw_mcp or [])
+    tools_data = _parse_jsonb(row["tools"])
+    skills_data = _parse_jsonb(row["skills"])
+    mcp_data = _parse_jsonb(row.get("mcp_servers", []))
+    metadata = _parse_jsonb(row["metadata"])
     return Agent(
         id=row["id"],
         version=row["version"],
@@ -172,7 +175,8 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
         model=row["model"],
         system=row["system"],
         tools=[ToolSpec.model_validate(t) for t in tools_data],
-        mcp_servers=[McpServerSpec.model_validate(s) for s in mcp_data],
+        skills=[AgentSkillRef.model_validate(s) for s in skills_data],
+        mcp_servers=[McpServerSpec.model_validate(s) for s in (mcp_data or [])],
         description=row["description"],
         metadata=metadata,
         window_min=row["window_min"],
@@ -184,17 +188,17 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
 
 
 def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
-    raw_tools = row["tools"]
-    tools_data = json.loads(raw_tools) if isinstance(raw_tools, str) else raw_tools
-    raw_mcp = row.get("mcp_servers", [])
-    mcp_data = json.loads(raw_mcp) if isinstance(raw_mcp, str) else (raw_mcp or [])
+    tools_data = _parse_jsonb(row["tools"])
+    skills_data = _parse_jsonb(row["skills"])
+    mcp_data = _parse_jsonb(row.get("mcp_servers", []))
     return AgentVersion(
         agent_id=row["agent_id"],
         version=row["version"],
         model=row["model"],
         system=row["system"],
         tools=[ToolSpec.model_validate(t) for t in tools_data],
-        mcp_servers=[McpServerSpec.model_validate(s) for s in mcp_data],
+        skills=[AgentSkillRef.model_validate(s) for s in skills_data],
+        mcp_servers=[McpServerSpec.model_validate(s) for s in (mcp_data or [])],
         window_min=row["window_min"],
         window_max=row["window_max"],
         created_at=row["created_at"],
@@ -208,6 +212,7 @@ async def insert_agent(
     model: str,
     system: str,
     tools: list[ToolSpec],
+    skills_json: str = "[]",
     mcp_servers: list[McpServerSpec],
     description: str | None,
     metadata: dict[str, Any],
@@ -223,10 +228,11 @@ async def insert_agent(
             row = await conn.fetchrow(
                 """
                 INSERT INTO agents (
-                    id, name, model, system, tools, mcp_servers,
+                    id, name, model, system, tools, skills, mcp_servers,
                     description, metadata, window_min, window_max, version
                 )
-                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8::jsonb, $9, $10, 1)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
+                        $8, $9::jsonb, $10, $11, 1)
                 RETURNING *
                 """,
                 new_id,
@@ -234,6 +240,7 @@ async def insert_agent(
                 model,
                 system,
                 tools_json,
+                skills_json,
                 mcp_json,
                 description,
                 metadata_json,
@@ -245,15 +252,16 @@ async def insert_agent(
             await conn.execute(
                 """
                 INSERT INTO agent_versions (
-                    agent_id, version, model, system, tools, mcp_servers,
+                    agent_id, version, model, system, tools, skills, mcp_servers,
                     window_min, window_max
                 )
-                VALUES ($1, 1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
+                VALUES ($1, 1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8)
                 """,
                 new_id,
                 model,
                 system,
                 tools_json,
+                skills_json,
                 mcp_json,
                 window_min,
                 window_max,
@@ -308,6 +316,7 @@ async def update_agent(
     model: str | None = None,
     system: str | None = None,
     tools: list[ToolSpec] | None = None,
+    skills_json: str | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
@@ -319,6 +328,9 @@ async def update_agent(
     Requires ``expected_version`` to match the current version (optimistic
     concurrency). Omitted fields are preserved. If nothing changed, the
     existing version is returned without creating a new one (no-op).
+
+    ``skills_json`` is a pre-serialized JSON string (resolved by the
+    service layer which snapshots concrete versions).
     """
     current = await get_agent(conn, agent_id)
     if current.version != expected_version:
@@ -334,6 +346,8 @@ async def update_agent(
     new_model = model if model is not None else current.model
     new_system = system if system is not None else current.system
     new_tools = tools if tools is not None else current.tools
+    cur_skills_json = json.dumps([s.model_dump() for s in current.skills])
+    new_skills_json = skills_json if skills_json is not None else cur_skills_json
     new_mcp = mcp_servers if mcp_servers is not None else current.mcp_servers
     new_desc = description if description is not None else current.description
     new_meta = metadata if metadata is not None else current.metadata
@@ -346,6 +360,7 @@ async def update_agent(
         and new_model == current.model
         and new_system == current.system
         and new_tools == current.tools
+        and new_skills_json == cur_skills_json
         and new_mcp == current.mcp_servers
         and new_desc == current.description
         and new_meta == current.metadata
@@ -364,8 +379,9 @@ async def update_agent(
             """
             UPDATE agents
                SET version = $2, name = $3, model = $4, system = $5,
-                   tools = $6::jsonb, mcp_servers = $7::jsonb, description = $8,
-                   metadata = $9::jsonb, window_min = $10, window_max = $11,
+                   tools = $6::jsonb, skills = $7::jsonb, mcp_servers = $8::jsonb,
+                   description = $9, metadata = $10::jsonb,
+                   window_min = $11, window_max = $12,
                    updated_at = now()
              WHERE id = $1
             RETURNING *
@@ -376,6 +392,7 @@ async def update_agent(
             new_model,
             new_system,
             tools_json,
+            new_skills_json,
             mcp_json,
             new_desc,
             meta_json,
@@ -386,16 +403,17 @@ async def update_agent(
         await conn.execute(
             """
             INSERT INTO agent_versions (
-                agent_id, version, model, system, tools, mcp_servers,
+                agent_id, version, model, system, tools, skills, mcp_servers,
                 window_min, window_max
             )
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9)
             """,
             agent_id,
             new_version,
             new_model,
             new_system,
             tools_json,
+            new_skills_json,
             mcp_json,
             new_wmin,
             new_wmax,
@@ -1181,3 +1199,226 @@ async def resolve_mcp_credential(
     if row is None:
         return None
     return EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]), str(row["auth_type"])
+
+
+# ─── skills ──────────────────────────────────────────────────────────────────
+
+
+def _row_to_skill(row: asyncpg.Record) -> Skill:
+    return Skill(
+        id=row["id"],
+        display_title=row["display_title"],
+        latest_version=row["latest_version"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        archived_at=row["archived_at"],
+    )
+
+
+def _row_to_skill_version(row: asyncpg.Record) -> SkillVersion:
+    files_data = _parse_jsonb(row["files"])
+    return SkillVersion(
+        skill_id=row["skill_id"],
+        version=row["version"],
+        directory=row["directory"],
+        name=row["name"],
+        description=row["description"],
+        files=files_data,
+        created_at=row["created_at"],
+    )
+
+
+async def insert_skill(
+    conn: asyncpg.Connection[Any],
+    *,
+    display_title: str,
+    directory: str,
+    name: str,
+    description: str,
+    files: dict[str, str],
+) -> tuple[Skill, SkillVersion]:
+    """Create a skill and its first version atomically.
+
+    Returns ``(skill, version_1)``.
+    """
+    new_id = make_id(SKILL)
+    files_json = json.dumps(files)
+    async with conn.transaction():
+        skill_row = await conn.fetchrow(
+            """
+            INSERT INTO skills (id, display_title, latest_version)
+            VALUES ($1, $2, 1)
+            RETURNING *
+            """,
+            new_id,
+            display_title,
+        )
+        assert skill_row is not None
+        ver_row = await conn.fetchrow(
+            """
+            INSERT INTO skill_versions (skill_id, version, directory, name, description, files)
+            VALUES ($1, 1, $2, $3, $4, $5::jsonb)
+            RETURNING *
+            """,
+            new_id,
+            directory,
+            name,
+            description,
+            files_json,
+        )
+        assert ver_row is not None
+    return _row_to_skill(skill_row), _row_to_skill_version(ver_row)
+
+
+async def get_skill(conn: asyncpg.Connection[Any], skill_id: str) -> Skill:
+    row = await conn.fetchrow("SELECT * FROM skills WHERE id = $1", skill_id)
+    if row is None:
+        raise NotFoundError(f"skill {skill_id} not found", detail={"id": skill_id})
+    return _row_to_skill(row)
+
+
+async def list_skills(
+    conn: asyncpg.Connection[Any], *, limit: int = 50, after: str | None = None
+) -> list[Skill]:
+    if after is None:
+        rows = await conn.fetch(
+            "SELECT * FROM skills WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            limit,
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT * FROM skills WHERE archived_at IS NULL AND id < $1 ORDER BY id DESC LIMIT $2",
+            after,
+            limit,
+        )
+    return [_row_to_skill(r) for r in rows]
+
+
+async def archive_skill(conn: asyncpg.Connection[Any], skill_id: str) -> None:
+    result = await conn.execute(
+        "UPDATE skills SET archived_at = now() WHERE id = $1 AND archived_at IS NULL",
+        skill_id,
+    )
+    if result == "UPDATE 0":
+        raise NotFoundError(f"skill {skill_id} not found or already archived")
+
+
+async def insert_skill_version(
+    conn: asyncpg.Connection[Any],
+    *,
+    skill_id: str,
+    directory: str,
+    name: str,
+    description: str,
+    files: dict[str, str],
+) -> SkillVersion:
+    """Create a new immutable version for an existing skill.
+
+    Locks the skills row, increments ``latest_version``, inserts the
+    version, and updates the head row's ``updated_at``.
+    """
+    files_json = json.dumps(files)
+    async with conn.transaction():
+        head = await conn.fetchrow(
+            "SELECT latest_version FROM skills WHERE id = $1 FOR UPDATE",
+            skill_id,
+        )
+        if head is None:
+            raise NotFoundError(f"skill {skill_id} not found", detail={"id": skill_id})
+        new_ver = head["latest_version"] + 1
+        ver_row = await conn.fetchrow(
+            """
+            INSERT INTO skill_versions (skill_id, version, directory, name, description, files)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            RETURNING *
+            """,
+            skill_id,
+            new_ver,
+            directory,
+            name,
+            description,
+            files_json,
+        )
+        assert ver_row is not None
+        await conn.execute(
+            "UPDATE skills SET latest_version = $2, updated_at = now() WHERE id = $1",
+            skill_id,
+            new_ver,
+        )
+    return _row_to_skill_version(ver_row)
+
+
+async def get_skill_version(
+    conn: asyncpg.Connection[Any], skill_id: str, version: int
+) -> SkillVersion:
+    row = await conn.fetchrow(
+        "SELECT * FROM skill_versions WHERE skill_id = $1 AND version = $2",
+        skill_id,
+        version,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"skill {skill_id} version {version} not found",
+            detail={"skill_id": skill_id, "version": version},
+        )
+    return _row_to_skill_version(row)
+
+
+async def get_latest_skill_version(conn: asyncpg.Connection[Any], skill_id: str) -> SkillVersion:
+    """Get the latest version of a skill by joining with the head row."""
+    row = await conn.fetchrow(
+        """
+        SELECT sv.* FROM skill_versions sv
+        JOIN skills s ON s.id = sv.skill_id AND sv.version = s.latest_version
+        WHERE sv.skill_id = $1
+        """,
+        skill_id,
+    )
+    if row is None:
+        raise NotFoundError(f"skill {skill_id} has no versions", detail={"skill_id": skill_id})
+    return _row_to_skill_version(row)
+
+
+async def list_skill_versions(
+    conn: asyncpg.Connection[Any],
+    skill_id: str,
+    *,
+    limit: int = 50,
+    after: int | None = None,
+) -> list[SkillVersion]:
+    """List versions in descending order (newest first)."""
+    if after is None:
+        rows = await conn.fetch(
+            "SELECT * FROM skill_versions WHERE skill_id = $1 ORDER BY version DESC LIMIT $2",
+            skill_id,
+            limit,
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT * FROM skill_versions WHERE skill_id = $1 AND version < $2 "
+            "ORDER BY version DESC LIMIT $3",
+            skill_id,
+            after,
+            limit,
+        )
+    return [_row_to_skill_version(r) for r in rows]
+
+
+async def resolve_skill_refs(
+    conn: asyncpg.Connection[Any],
+    refs: list[AgentSkillRef],
+) -> list[SkillVersion]:
+    """Resolve a list of skill references to concrete versions.
+
+    For each ref, if ``version`` is ``None``, resolves to the latest
+    version. Otherwise fetches the pinned version. Returns versions in
+    the same order as the input refs.
+    """
+    results: list[SkillVersion] = []
+    for ref in refs:
+        if ref.version is None:
+            sv = await get_latest_skill_version(conn, ref.skill_id)
+        else:
+            sv = await get_skill_version(conn, ref.skill_id, ref.version)
+        results.append(sv)
+    return results
