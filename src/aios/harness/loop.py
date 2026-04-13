@@ -79,11 +79,24 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         log.debug("step.early_out", session_id=session_id, cause=cause)
         return
 
+    # Resolve skills and augment system prompt.
+    from aios.harness.skills import augment_system_prompt, provision_skill_files
+    from aios.services import skills as skills_service
+
+    skill_versions = (
+        await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
+    )
+    system_prompt = augment_system_prompt(agent.system, skill_versions)
+
+    # Provision skill files to workspace (idempotent, host-side writes).
+    if skill_versions:
+        await provision_skill_files(session_id, skill_versions)
+
     # Build context with pending-result synthesis.
     tools = to_openai_tools(agent.tools)
     ctx = build_messages(
         events,
-        system_prompt=agent.system,
+        system_prompt=system_prompt,
         window_min=agent.window_min,
         window_max=agent.window_max,
         model=agent.model,

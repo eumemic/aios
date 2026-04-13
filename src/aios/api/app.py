@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from aios.api.routers import agents, environments, health, sessions, vaults
+from aios.api.routers import agents, environments, health, sessions, skills, vaults
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db.pool import close_pool, create_pool
@@ -56,6 +56,7 @@ def create_app() -> FastAPI:
     app.include_router(environments.router)
     app.include_router(agents.router)
     app.include_router(sessions.router)
+    app.include_router(skills.router)
     app.include_router(vaults.router)
     return app
 

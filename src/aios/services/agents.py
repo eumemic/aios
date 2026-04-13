@@ -13,6 +13,8 @@ import asyncpg
 
 from aios.db import queries
 from aios.models.agents import Agent, AgentVersion, ToolSpec
+from aios.models.skills import AgentSkillRef
+from aios.services import skills as skills_service
 
 
 async def create_agent(
@@ -22,6 +24,7 @@ async def create_agent(
     model: str,
     system: str,
     tools: list[ToolSpec],
+    skills: list[AgentSkillRef] | None = None,
     description: str | None,
     metadata: dict[str, Any],
     window_min: int,
@@ -34,6 +37,12 @@ async def create_agent(
             "window_min must be strictly less than window_max",
             detail={"window_min": window_min, "window_max": window_max},
         )
+    skill_refs = skills or []
+    if skill_refs:
+        await skills_service.validate_skill_refs(pool, skill_refs)
+    # Resolve versions for the snapshot (null → concrete latest).
+    resolved = await skills_service.resolve_skill_refs(pool, skill_refs) if skill_refs else []
+    snapshot_json = skills_service.serialize_skills_for_snapshot(skill_refs, resolved)
     async with pool.acquire() as conn:
         return await queries.insert_agent(
             conn,
@@ -41,6 +50,7 @@ async def create_agent(
             model=model,
             system=system,
             tools=tools,
+            skills_json=snapshot_json,
             description=description,
             metadata=metadata,
             window_min=window_min,
@@ -74,11 +84,17 @@ async def update_agent(
     model: str | None = None,
     system: str | None = None,
     tools: list[ToolSpec] | None = None,
+    skills: list[AgentSkillRef] | None = None,
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
     window_min: int | None = None,
     window_max: int | None = None,
 ) -> Agent:
+    skills_json_str: str | None = None
+    if skills is not None:
+        await skills_service.validate_skill_refs(pool, skills)
+        resolved = await skills_service.resolve_skill_refs(pool, skills) if skills else []
+        skills_json_str = skills_service.serialize_skills_for_snapshot(skills, resolved)
     async with pool.acquire() as conn:
         return await queries.update_agent(
             conn,
@@ -88,6 +104,7 @@ async def update_agent(
             model=model,
             system=system,
             tools=tools,
+            skills_json=skills_json_str,
             description=description,
             metadata=metadata,
             window_min=window_min,

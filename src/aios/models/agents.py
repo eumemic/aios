@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aios.models.skills import AgentSkillRef
+
 # Built-in tool types. Custom tools use type="custom" with extra fields.
 BuiltinToolType = Literal[
     "bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "cancel"
@@ -71,6 +73,7 @@ class AgentCreate(BaseModel):
     )
     system: str = Field(default="", description="System prompt; empty by default.")
     tools: list[ToolSpec] = Field(default_factory=list)
+    skills: list[AgentSkillRef] = Field(default_factory=list)
     description: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     window_min: int = Field(default=50_000, ge=1)
@@ -93,6 +96,7 @@ class AgentUpdate(BaseModel):
     model: str | None = Field(default=None, min_length=1)
     system: str | None = None
     tools: list[ToolSpec] | None = None
+    skills: list[AgentSkillRef] | None = None
     description: str | None = None
     metadata: dict[str, Any] | None = None
     window_min: int | None = Field(default=None, ge=1)
@@ -108,6 +112,7 @@ class Agent(BaseModel):
     model: str
     system: str
     tools: list[ToolSpec]
+    skills: list[AgentSkillRef] = Field(default_factory=list)
     description: str | None
     metadata: dict[str, Any]
     window_min: int
@@ -125,6 +130,7 @@ class AgentVersion(BaseModel):
     model: str
     system: str
     tools: list[ToolSpec]
+    skills: list[AgentSkillRef] = Field(default_factory=list)
     window_min: int
     window_max: int
     created_at: datetime
