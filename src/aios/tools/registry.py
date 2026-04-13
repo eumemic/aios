@@ -143,6 +143,8 @@ def to_openai_tools(agent_tools: list[AgentToolSpec]) -> list[dict[str, Any]]:
     for entry in agent_tools:
         if not entry.enabled:
             continue
+        if entry.type == "mcp_toolset":
+            continue  # MCP tools are added via discovery, not from registry.
         if entry.type == "custom":
             # Custom tools carry their own schema — not in the registry.
             result.append(
