@@ -217,7 +217,7 @@ def build_messages(
         )
         max_stimulus_seq = max(max_stimulus_seq, real_result_seqs[tcid])
 
-    # Windowing + system prompt.
+    # Windowing.
     if messages:
         messages = select_window(
             messages,
@@ -225,6 +225,12 @@ def build_messages(
             max_tokens=window_max,
             token_counter=lambda m: _approx_tokens(m, model),
         )
+
+    # Prune dangling messages at the start of the window. Windowing can
+    # cut in the middle of an assistant+tool_result group, leaving orphan
+    # tool results or an assistant with missing paired results.
+    messages = _prune_leading_orphans(messages)
+
     if system_prompt:
         messages.insert(0, {"role": "system", "content": system_prompt})
 
@@ -232,6 +238,49 @@ def build_messages(
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _prune_leading_orphans(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop messages from the front until we reach a clean conversation start.
+
+    Windowing can cut in the middle of an assistant + tool_result group,
+    leaving orphan tool results at the start (no preceding assistant with
+    matching tool_calls) or an assistant whose paired results were
+    partially dropped.
+
+    Walk forward and drop until we find a ``user`` message or an
+    ``assistant`` without ``tool_calls`` — both are valid starts. An
+    ``assistant`` with ``tool_calls`` is valid only if ALL its
+    tool_call_ids have matching tool results later in the list.
+    """
+    start = 0
+    while start < len(messages):
+        msg = messages[start]
+        role = msg.get("role")
+
+        if role == "user":
+            break  # clean start
+
+        if role == "assistant":
+            tc_ids = {tc["id"] for tc in (msg.get("tool_calls") or [])}
+            if not tc_ids:
+                break  # assistant with no tool_calls — clean start
+            # Check that all tool_calls have matching results in the rest.
+            remaining_result_ids = {
+                m.get("tool_call_id") for m in messages[start + 1 :] if m.get("role") == "tool"
+            }
+            if tc_ids <= remaining_result_ids:
+                break  # complete group — clean start
+            # Incomplete group — drop the assistant and its partial results.
+            start += 1
+            while start < len(messages) and messages[start].get("role") == "tool":
+                start += 1
+            continue
+
+        # tool or anything else at the front — orphan, drop.
+        start += 1
+
+    return messages[start:]
 
 
 def _find_assistant_for_tool_call(events: list[Event], tool_call_id: str) -> Event | None:

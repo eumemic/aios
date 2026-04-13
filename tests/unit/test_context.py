@@ -271,3 +271,66 @@ class TestBuildMessages:
         msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
         roles = [m["role"] for m in msgs]
         assert roles == ["user", "assistant", "tool", "assistant", "tool", "assistant"]
+
+    def test_window_prunes_orphan_tool_results_at_start(self) -> None:
+        """If windowing drops an assistant but keeps its tool results,
+        those orphan tool results should be pruned from the start."""
+        # Simulate a long conversation where windowing drops the first
+        # assistant+tool_calls but keeps the tool result.
+        # We force windowing by using a tiny token budget.
+        events = [
+            _evt(1, "user", content="x" * 400),  # big user message (~100 tokens)
+            _evt(2, "assistant", tool_calls=[_tc("a")]),
+            _evt(3, "tool", tool_call_id="a", content="result " * 50),  # ~50 tokens
+            _evt(4, "user", content="next question"),
+            _evt(5, "assistant", content="answer"),
+        ]
+        # With a very small window, the oldest messages get dropped.
+        # window_min=20, window_max=60 means the window holds ~60 tokens.
+        # The total is ~200+ tokens, so the front gets cut.
+        msgs = build_messages(
+            events, system_prompt=None, window_min=20, window_max=60
+        ).messages
+        # The window should NOT start with an orphan tool result.
+        # It should start with a user or assistant (no tool_calls) message.
+        if msgs:
+            first_role = msgs[0]["role"]
+            assert first_role in ("user", "assistant", "system"), (
+                f"window starts with orphan '{first_role}' message"
+            )
+            # If it starts with assistant, it should not have unmatched tool_calls
+            if first_role == "assistant" and msgs[0].get("tool_calls"):
+                tc_ids = {tc["id"] for tc in msgs[0]["tool_calls"]}
+                result_ids = {
+                    m["tool_call_id"] for m in msgs[1:] if m.get("role") == "tool"
+                }
+                assert tc_ids <= result_ids, "leading assistant has unmatched tool_calls"
+
+    def test_window_prunes_partial_assistant_tool_group(self) -> None:
+        """If windowing keeps an assistant with tool_calls but drops some
+        of its paired results, the whole group should be pruned."""
+        events = [
+            _evt(1, "assistant", tool_calls=[_tc("a"), _tc("b")]),
+            # a's result is big, b's is small
+            _evt(2, "tool", tool_call_id="a", content="big " * 200),  # ~200 tokens
+            _evt(3, "tool", tool_call_id="b", content="small"),
+            _evt(4, "user", content="next"),
+            _evt(5, "assistant", content="response"),
+        ]
+        events[0].data["reacting_to"] = 0
+        events[4].data["reacting_to"] = 3
+        # Tiny window forces the front to be dropped
+        msgs = build_messages(
+            events, system_prompt=None, window_min=10, window_max=30
+        ).messages
+        # Should not start with orphan tool results or incomplete assistant groups
+        for m in msgs:
+            if m.get("role") == "tool":
+                # Every tool result must have a preceding assistant with matching tool_call
+                tc_id = m.get("tool_call_id")
+                has_parent = any(
+                    tc_id in {tc["id"] for tc in prior.get("tool_calls") or []}
+                    for prior in msgs[:msgs.index(m)]
+                    if prior.get("role") == "assistant"
+                )
+                assert has_parent, f"orphan tool result for {tc_id}"
