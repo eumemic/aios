@@ -22,10 +22,9 @@ CLI.
 from __future__ import annotations
 
 import asyncio
-import json
-from typing import Any
 
 from aios.config import get_settings
+from aios.db import queries
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.sandbox.container import ContainerError, ContainerHandle
@@ -97,20 +96,7 @@ async def _load_environment_config(session_id: str) -> EnvironmentConfig | None:
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT e.config FROM environments e
-            JOIN sessions s ON s.environment_id = e.id
-            WHERE s.id = $1
-            """,
-            session_id,
-        )
-    if row is None:
-        return None
-
-    raw_config: Any = row["config"]
-    config_data = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
-    return EnvironmentConfig.model_validate(config_data)
+        return await queries.get_environment_config_for_session(conn, session_id)
 
 
 async def provision_for_session(session_id: str) -> ContainerHandle:
@@ -178,8 +164,7 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
     await _install_packages(handle, env_config, session_id)
 
     # Apply iptables lockdown after packages are installed.
-    if needs_lockdown:
-        assert isinstance(networking, LimitedNetworking)
+    if needs_lockdown and isinstance(networking, LimitedNetworking):
         await _apply_network_lockdown(handle, networking, session_id)
 
     log.info(

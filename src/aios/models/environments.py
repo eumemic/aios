@@ -25,7 +25,9 @@ from pydantic import (
 
 # Hostname: RFC 952 / RFC 1123 labels joined by dots.  Only characters that
 # are safe to embed in a shell script (no metacharacters, no slashes).
-_HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$")
+_HOSTNAME_RE = re.compile(
+    r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$"
+)
 
 
 class UnrestrictedNetworking(BaseModel):

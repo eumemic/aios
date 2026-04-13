@@ -224,20 +224,34 @@ class Harness:
         tools: list[str] | None = None,
         tool_specs: list[Any] | None = None,
         system: str = "You are a test assistant.",
+        environment_config: Any | None = None,
     ) -> Session:
         """Create an agent + session and append the initial user message.
 
         Pass ``tools=["bash", "read"]`` for simple built-in lists, or
         ``tool_specs=[ToolSpec(...)]`` for full control (e.g. permission
         policies). Only one of the two should be provided.
-        """
-        if self._env_id is None:
-            from aios.ids import make_id
 
+        Pass ``environment_config`` to create a fresh environment with
+        that config (e.g. for networking tests). When omitted, a shared
+        default environment is reused across calls.
+        """
+        from aios.ids import make_id
+
+        if environment_config is not None:
             env = await environments_service.create_environment(
-                self._pool, name=f"test-env-{make_id('env')[-8:]}"
+                self._pool,
+                name=f"test-env-{make_id('env')[-8:]}",
+                config=environment_config,
             )
-            self._env_id = env.id
+            env_id = env.id
+        else:
+            if self._env_id is None:
+                env = await environments_service.create_environment(
+                    self._pool, name=f"test-env-{make_id('env')[-8:]}"
+                )
+                self._env_id = env.id
+            env_id = self._env_id
 
         from aios.models.agents import ToolSpec
 
@@ -259,7 +273,7 @@ class Harness:
         session = await sessions_service.create_session(
             self._pool,
             agent_id=agent.id,
-            environment_id=self._env_id,
+            environment_id=env_id,
             title="e2e-test",
             metadata={},
         )
