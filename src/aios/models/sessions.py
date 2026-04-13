@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-SessionStatus = Literal["running", "idle", "terminated"]
+SessionStatus = Literal["running", "idle", "rescheduling", "terminated"]
 
 
 class SessionUsage(BaseModel):
