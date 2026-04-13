@@ -27,6 +27,8 @@ from aios.logging import get_logger
 
 log = get_logger("aios.mcp.client")
 
+MAX_TOOLS_PER_SERVER = 128
+
 
 async def _open_session(url: str, headers: dict[str, str], stack: AsyncExitStack) -> ClientSession:
     """Open a fully initialized MCP session, registering all contexts on *stack*."""
@@ -64,8 +66,11 @@ async def resolve_auth_headers(
 
     if auth_type == "static_bearer":
         token = payload.get("token", "")
-    else:  # mcp_oauth
+    elif auth_type == "mcp_oauth":
         token = payload.get("access_token", "")
+    else:
+        log.warning("mcp.unknown_auth_type", auth_type=auth_type)
+        return {}
 
     if not token:
         return {}
@@ -89,8 +94,16 @@ async def discover_mcp_tools(
             session = await _open_session(url, headers, stack)
             result = await session.list_tools()
 
+        if len(result.tools) > MAX_TOOLS_PER_SERVER:
+            log.warning(
+                "mcp.tools_truncated",
+                server_name=server_name,
+                total=len(result.tools),
+                limit=MAX_TOOLS_PER_SERVER,
+            )
+
         tools: list[dict[str, Any]] = []
-        for tool in result.tools:
+        for tool in result.tools[:MAX_TOOLS_PER_SERVER]:
             tools.append(
                 {
                     "type": "function",

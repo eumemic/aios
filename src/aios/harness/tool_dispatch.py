@@ -35,18 +35,20 @@ from aios.tools.registry import ToolNotFoundError, registry
 log = get_logger("aios.harness.tool_dispatch")
 
 
-def launch_tool_calls(
-    pool: asyncpg.Pool[Any],
+def _launch_tasks(
     session_id: str,
     tool_calls: list[dict[str, Any]],
+    coro_factory: Any,
+    *,
+    prefix: str,
 ) -> None:
-    """Launch each tool call as an asyncio task. Returns immediately."""
+    """Shared launcher: spawn one asyncio task per tool call, register in task registry."""
     task_reg = runtime.require_task_registry()
     for call in tool_calls:
         call_id = call.get("id") or "unknown"
         task = asyncio.create_task(
-            _execute_tool_async(pool, session_id, call),
-            name=f"tool:{session_id}:{call_id}",
+            coro_factory(call),
+            name=f"{prefix}:{session_id}:{call_id}",
         )
         task_reg.add(session_id, call_id, task)
 
@@ -54,6 +56,20 @@ def launch_tool_calls(
             task_reg.remove(s, c)
 
         task.add_done_callback(_on_done)
+
+
+def launch_tool_calls(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    tool_calls: list[dict[str, Any]],
+) -> None:
+    """Launch each tool call as an asyncio task. Returns immediately."""
+    _launch_tasks(
+        session_id,
+        tool_calls,
+        lambda call: _execute_tool_async(pool, session_id, call),
+        prefix="tool",
+    )
 
 
 async def _execute_tool_async(
@@ -167,30 +183,23 @@ def launch_mcp_tool_calls(
     tool_calls: list[dict[str, Any]],
     mcp_server_map: dict[str, str],
 ) -> None:
-    """Launch MCP tool calls as asyncio tasks. Returns immediately.
-
-    Same fire-and-forget pattern as :func:`launch_tool_calls`. Each task
-    connects to the MCP server, invokes the tool, appends a tool-role
-    event, and defers a wake.
-    """
-    task_reg = runtime.require_task_registry()
-    for call in tool_calls:
-        call_id = call.get("id") or "unknown"
-        task = asyncio.create_task(
-            _execute_mcp_tool_async(pool, session_id, call, mcp_server_map),
-            name=f"mcp_tool:{session_id}:{call_id}",
-        )
-        task_reg.add(session_id, call_id, task)
-
-        def _on_done(t: asyncio.Task[None], s: str = session_id, c: str = call_id) -> None:
-            task_reg.remove(s, c)
-
-        task.add_done_callback(_on_done)
+    """Launch MCP tool calls as asyncio tasks. Returns immediately."""
+    _launch_tasks(
+        session_id,
+        tool_calls,
+        lambda call: _execute_mcp_tool_async(pool, session_id, call, mcp_server_map),
+        prefix="mcp_tool",
+    )
 
 
 def _parse_mcp_tool_name(name: str) -> tuple[str, str]:
-    """Parse ``mcp__<server_name>__<tool_name>`` into ``(server_name, tool_name)``."""
+    """Parse ``mcp__<server_name>__<tool_name>`` into ``(server_name, tool_name)``.
+
+    Raises ``ValueError`` on malformed names.
+    """
     parts = name.split("__", 2)
+    if len(parts) < 3 or not parts[1] or not parts[2]:
+        raise ValueError(f"malformed MCP tool name: {name!r}")
     return parts[1], parts[2]
 
 

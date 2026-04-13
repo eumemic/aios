@@ -287,6 +287,9 @@ def _resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | Non
     server portion of the namespaced tool name, then returns the
     ``default_config.permission_policy.type`` or ``None`` (which callers
     treat as ``always_ask``).
+
+    Per-tool overrides via ``configs`` are stored in the model but not
+    enforced here yet — only ``default_config`` drives permission resolution.
     """
     server_name = name.split("__", 2)[1]
     for spec in agent_tools:
@@ -303,31 +306,33 @@ async def _discover_mcp_tools(
     session_id: str,
     agent: Any,
 ) -> list[dict[str, Any]]:
-    """Discover tools from all declared MCP servers.
+    """Discover tools from all declared MCP servers concurrently.
 
     For each server in ``agent.mcp_servers`` that has an enabled
     ``mcp_toolset`` entry, connects to the server, lists tools, and
     returns them in OpenAI format with namespaced names.
     """
+    import asyncio
+
     from aios.mcp.client import discover_mcp_tools, resolve_auth_headers
 
     crypto_box = runtime.require_crypto_box()
 
-    # Build set of enabled server names from the tools list.
     enabled_servers: set[str] = set()
     for spec in agent.tools:
         if spec.type == "mcp_toolset" and spec.enabled and spec.mcp_server_name:
             enabled_servers.add(spec.mcp_server_name)
 
-    all_tools: list[dict[str, Any]] = []
-    for server in agent.mcp_servers:
-        if server.name not in enabled_servers:
-            continue
-        headers = await resolve_auth_headers(pool, crypto_box, session_id, server.url)
-        tools = await discover_mcp_tools(server.url, server.name, headers)
-        all_tools.extend(tools)
+    async def _discover_one(url: str, name: str) -> list[dict[str, Any]]:
+        headers = await resolve_auth_headers(pool, crypto_box, session_id, url)
+        return await discover_mcp_tools(url, name, headers)
 
-    return all_tools
+    servers = [s for s in agent.mcp_servers if s.name in enabled_servers]
+    if not servers:
+        return []
+
+    results = await asyncio.gather(*[_discover_one(s.url, s.name) for s in servers])
+    return [tool for tools in results for tool in tools]
 
 
 async def _dispatch_confirmed_tools(
