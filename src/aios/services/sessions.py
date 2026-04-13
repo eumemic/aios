@@ -144,6 +144,16 @@ async def set_session_status(
         await queries.set_session_status(conn, session_id, status, stop_reason)
 
 
+async def archive_session(pool: asyncpg.Pool[Any], session_id: str) -> Session:
+    async with pool.acquire() as conn:
+        return await queries.archive_session(conn, session_id)
+
+
+async def delete_session(pool: asyncpg.Pool[Any], session_id: str) -> None:
+    async with pool.acquire() as conn:
+        await queries.delete_session(conn, session_id)
+
+
 async def update_session(
     pool: asyncpg.Pool[Any],
     session_id: str,

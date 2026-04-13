@@ -97,6 +97,16 @@ async def update(session_id: str, body: SessionUpdate, pool: PoolDep, _auth: Aut
     )
 
 
+@router.post("/{session_id}/archive")
+async def archive(session_id: str, pool: PoolDep, _auth: AuthDep) -> Session:
+    return await service.archive_session(pool, session_id)
+
+
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete(session_id: str, pool: PoolDep, _auth: AuthDep) -> None:
+    await service.delete_session(pool, session_id)
+
+
 @router.post("/{session_id}/messages", status_code=status.HTTP_201_CREATED)
 async def post_message(
     session_id: str,

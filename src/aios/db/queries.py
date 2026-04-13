@@ -639,6 +639,40 @@ async def update_session(
     return _row_to_session(row)
 
 
+async def archive_session(conn: asyncpg.Connection[Any], session_id: str) -> Session:
+    row = await conn.fetchrow(
+        "UPDATE sessions SET archived_at = now(), updated_at = now() "
+        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        session_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"session {session_id} not found or already archived",
+            detail={"id": session_id},
+        )
+    return _row_to_session(row)
+
+
+async def delete_session(conn: asyncpg.Connection[Any], session_id: str) -> None:
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            "SELECT status FROM sessions WHERE id = $1",
+            session_id,
+        )
+        if row is None:
+            raise NotFoundError(
+                f"session {session_id} not found",
+                detail={"id": session_id},
+            )
+        if row["status"] == "running":
+            raise ConflictError(
+                f"session {session_id} is running and cannot be deleted",
+                detail={"id": session_id},
+            )
+        await conn.execute("DELETE FROM events WHERE session_id = $1", session_id)
+        await conn.execute("DELETE FROM sessions WHERE id = $1", session_id)
+
+
 # ─── events ───────────────────────────────────────────────────────────────────
 
 
