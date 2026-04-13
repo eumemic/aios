@@ -29,7 +29,6 @@ from aios.harness.context import build_messages, should_call_model
 from aios.harness.tool_dispatch import launch_tool_calls
 from aios.logging import get_logger
 from aios.services import agents as agents_service
-from aios.services import credentials as credentials_service
 from aios.services import sessions as sessions_service
 from aios.tools.registry import to_openai_tools
 
@@ -44,7 +43,6 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     time.
     """
     pool = runtime.require_pool()
-    vault = runtime.require_vault()
 
     session = await sessions_service.get_session(pool, session_id)
 
@@ -67,11 +65,6 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         log.debug("step.early_out", session_id=session_id, cause=cause)
         return
 
-    # Decrypt credential. Plaintext lives only on this stack frame.
-    api_key: str | None = None
-    if agent.credential_id is not None:
-        api_key = await credentials_service.decrypt_credential(pool, vault, agent.credential_id)
-
     # Build context with pending-result synthesis.
     tools = to_openai_tools(agent.tools)
     ctx = build_messages(
@@ -91,7 +84,6 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
             model=agent.model,
             messages=ctx.messages,
             tools=tools if tools else None,
-            api_key=api_key,
             pool=pool,
             session_id=session_id,
         )

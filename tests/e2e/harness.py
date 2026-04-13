@@ -242,7 +242,6 @@ class Harness:
             model="fake/test",
             system=system,
             tools=tool_specs,
-            credential_id=None,
             description=None,
             metadata={},
             window_min=50_000,

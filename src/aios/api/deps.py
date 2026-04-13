@@ -1,7 +1,7 @@
-"""FastAPI dependencies: auth, DB pool, vault.
+"""FastAPI dependencies: auth, DB pool, crypto box.
 
 Each dependency is async and resolved per request via FastAPI's dep injection.
-The pool and vault are stored on ``request.app.state`` at startup, then
+The pool and crypto box are stored on ``request.app.state`` at startup, then
 exposed here as typed accessors.
 """
 
@@ -15,7 +15,7 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from procrastinate import App as ProcrastinateApp
 
 from aios.config import Settings, get_settings
-from aios.crypto.vault import Vault
+from aios.crypto.vault import CryptoBox
 from aios.errors import UnauthorizedError
 
 
@@ -23,9 +23,9 @@ def get_pool(request: Request) -> asyncpg.Pool:
     return cast("asyncpg.Pool", request.app.state.pool)
 
 
-def get_vault(request: Request) -> Vault:
-    vault: Vault = request.app.state.vault
-    return vault
+def get_crypto_box(request: Request) -> CryptoBox:
+    crypto_box: CryptoBox = request.app.state.crypto_box
+    return crypto_box
 
 
 def get_procrastinate(request: Request) -> ProcrastinateApp:
@@ -69,7 +69,7 @@ def require_bearer_auth(
 # Note: asyncpg.Pool isn't subscriptable at runtime, so we annotate with the
 # bare class. FastAPI's dependency injection ignores generic parameters.
 PoolDep = Annotated[asyncpg.Pool, Depends(get_pool)]
-VaultDep = Annotated[Vault, Depends(get_vault)]
+CryptoBoxDep = Annotated[CryptoBox, Depends(get_crypto_box)]
 ProcrastinateDep = Annotated[ProcrastinateApp, Depends(get_procrastinate)]
 DbUrlDep = Annotated[str, Depends(get_db_url)]
 AuthDep = Annotated[None, Depends(require_bearer_auth)]

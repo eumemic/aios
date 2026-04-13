@@ -53,6 +53,7 @@ async def create(
         agent_version=body.agent_version,
         title=body.title,
         metadata=body.metadata,
+        vault_ids=body.vault_ids or None,
     )
     if body.initial_message is not None:
         await service.append_user_message(pool, session.id, body.initial_message)
@@ -101,6 +102,7 @@ async def update(session_id: str, body: SessionUpdate, pool: PoolDep, _auth: Aut
         agent_version=body.agent_version if "agent_version" in body.model_fields_set else _UNSET,
         title=body.title if "title" in body.model_fields_set else _UNSET,
         metadata=body.metadata,
+        vault_ids=body.vault_ids,
     )
 
 
