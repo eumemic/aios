@@ -28,6 +28,7 @@ from aios.harness.completion import stream_litellm
 from aios.harness.context import build_messages, should_call_model
 from aios.harness.tool_dispatch import launch_tool_calls
 from aios.logging import get_logger
+from aios.models.agents import ToolSpec
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.tools.registry import to_openai_tools
@@ -59,6 +60,19 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
 
     # Read all message events for this session.
     events = await sessions_service.read_message_events(pool, session_id)
+
+    # Check for confirmed-but-undispatched tool calls (always_ask → allow).
+    # This must run before should_call_model because the confirmed tool has
+    # no result in the log yet — should_call_model would return False.
+    pending = await _dispatch_confirmed_tools(pool, session_id, events)
+    if pending:
+        launch_tool_calls(pool, session_id, pending)
+        log.info(
+            "step.confirmed_tools_dispatched",
+            session_id=session_id,
+            count=len(pending),
+        )
+        return
 
     # Early-out: nothing actionable for the model.
     if not should_call_model(events):
@@ -104,10 +118,10 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     # lock provides mutual exclusion).
     await sessions_service.append_event(pool, session_id, "message", assistant_msg)
 
-    # Check for tool calls — partition into built-in (harness-executed) and
-    # custom (client-executed). Built-in tools are dispatched as fire-and-forget
-    # asyncio tasks. Custom tools idle the session with requires_action so the
-    # client can execute them and send results back.
+    # Check for tool calls — partition into three buckets:
+    #   immediate       — built-in with always_allow (execute now)
+    #   needs_confirm   — built-in with always_ask (hold for client confirmation)
+    #   custom          — not in registry (hold for client execution)
     tool_calls: list[dict[str, Any]] = assistant_msg.get("tool_calls") or []
 
     if tool_calls:
@@ -117,33 +131,54 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
             name: str = (tc.get("function") or {}).get("name", "")
             return name
 
-        built_in = [tc for tc in tool_calls if tool_registry.has(_tc_name(tc))]
-        custom = [tc for tc in tool_calls if not tool_registry.has(_tc_name(tc))]
+        immediate: list[dict[str, Any]] = []
+        needs_confirm: list[dict[str, Any]] = []
+        custom: list[dict[str, Any]] = []
 
-        if built_in:
-            launch_tool_calls(pool, session_id, built_in)
+        for tc in tool_calls:
+            name = _tc_name(tc)
+            if not tool_registry.has(name):
+                custom.append(tc)
+            elif _resolve_permission(name, agent.tools) == "always_ask":
+                needs_confirm.append(tc)
+            else:
+                immediate.append(tc)
+
+        if immediate:
+            launch_tool_calls(pool, session_id, immediate)
             log.info(
                 "step.tools_launched",
                 session_id=session_id,
-                count=len(built_in),
-                tool_names=[_tc_name(tc) for tc in built_in],
+                count=len(immediate),
+                tool_names=[_tc_name(tc) for tc in immediate],
             )
 
-        if custom:
-            custom_call_ids = [tc.get("id") for tc in custom if tc.get("id")]
+        if needs_confirm or custom:
+            confirm_ids = [tc.get("id") for tc in needs_confirm if tc.get("id")]
+            custom_ids = [tc.get("id") for tc in custom if tc.get("id")]
+            all_pending_ids = confirm_ids + custom_ids
+
+            stop_reason: dict[str, Any] = {
+                "type": "requires_action",
+                "event_ids": all_pending_ids,
+            }
+            if confirm_ids:
+                stop_reason["confirmations"] = confirm_ids
+            if custom_ids:
+                stop_reason["custom_tools"] = custom_ids
+
             await sessions_service.set_session_status(
                 pool,
                 session_id,
                 "idle",
-                stop_reason={"type": "requires_action", "event_ids": custom_call_ids},
+                stop_reason=stop_reason,
             )
             await _append_lifecycle(pool, session_id, "turn_ended", "idle", "requires_action")
             log.info(
-                "step.custom_tools_pending",
+                "step.tools_pending",
                 session_id=session_id,
-                count=len(custom),
-                tool_names=[_tc_name(tc) for tc in custom],
-                call_ids=custom_call_ids,
+                confirmations=confirm_ids,
+                custom_tools=custom_ids,
             )
     else:
         # No tool calls — the model's turn is done.
@@ -152,6 +187,65 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         )
         await _append_lifecycle(pool, session_id, "turn_ended", "idle", "end_turn")
         log.info("step.turn_ended", session_id=session_id, cause=cause)
+
+
+def _resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
+    """Look up the permission policy for a tool by name."""
+    for spec in agent_tools:
+        tool_name = spec.name if spec.type == "custom" else spec.type
+        if tool_name == name:
+            return spec.permission
+    return None
+
+
+async def _dispatch_confirmed_tools(
+    pool: Any,
+    session_id: str,
+    message_events: list[Any],
+) -> list[dict[str, Any]]:
+    """Find tool calls that have been confirmed (allow) but not yet dispatched.
+
+    Returns the original tool call dicts ready for ``launch_tool_calls``,
+    or an empty list if nothing to dispatch.
+    """
+    # Find the latest assistant message with tool_calls.
+    asst_tool_calls: list[dict[str, Any]] = []
+    for e in reversed(message_events):
+        if e.kind == "message" and e.data.get("role") == "assistant":
+            tcs = e.data.get("tool_calls")
+            if tcs:
+                asst_tool_calls = tcs
+                break
+
+    if not asst_tool_calls:
+        return []
+
+    # Build set of tool_call_ids that already have a tool-role result.
+    completed: set[str] = set()
+    for e in message_events:
+        if e.kind == "message" and e.data.get("role") == "tool":
+            tcid = e.data.get("tool_call_id")
+            if tcid:
+                completed.add(tcid)
+
+    # Read lifecycle events to find tool_confirmed allow events.
+    lifecycle_events = await sessions_service.read_events(
+        pool,
+        session_id,
+        kind="lifecycle",
+    )
+    confirmed: set[str] = set()
+    for e in lifecycle_events:
+        if e.data.get("event") == "tool_confirmed" and e.data.get("result") == "allow":
+            tcid = e.data.get("tool_call_id")
+            if tcid:
+                confirmed.add(tcid)
+
+    # Return tool calls that are confirmed but have no result yet.
+    pending = [
+        tc for tc in asst_tool_calls if tc.get("id") in confirmed and tc.get("id") not in completed
+    ]
+    return pending
 
 
 async def _append_lifecycle(

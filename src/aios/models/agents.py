@@ -18,6 +18,10 @@ BuiltinToolType = Literal[
     "bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "cancel"
 ]
 
+# Permission policy for built-in tools. Custom tools are always client-controlled
+# and ignore this field.
+PermissionPolicy = Literal["always_allow", "always_ask"]
+
 
 class ToolSpec(BaseModel):
     """One entry in an agent's `tools` list.
@@ -25,6 +29,14 @@ class ToolSpec(BaseModel):
     For built-in tools, ``type`` is the tool name (``"bash"``, ``"read"``,
     etc.). For custom (client-executed) tools, ``type`` is ``"custom"`` and
     ``name``, ``description``, and ``input_schema`` are required.
+
+    ``enabled`` controls whether the tool is included in the schema sent to
+    the model. Disabled tools are invisible to the model.
+
+    ``permission`` controls execution policy for built-in tools:
+    ``None`` or ``"always_allow"`` executes immediately (current default);
+    ``"always_ask"`` idles the session with ``requires_action`` until the
+    client confirms or denies.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -33,6 +45,8 @@ class ToolSpec(BaseModel):
     name: str | None = None
     description: str | None = None
     input_schema: dict[str, Any] | None = None
+    enabled: bool = True
+    permission: PermissionPolicy | None = None
 
     @model_validator(mode="after")
     def _check_custom_fields(self) -> ToolSpec:
