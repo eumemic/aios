@@ -68,7 +68,7 @@ class Session(BaseModel):
     title: str | None
     metadata: dict[str, Any]
     status: SessionStatus
-    stop_reason: str | None
+    stop_reason: dict[str, Any] | None
     last_event_seq: int
     created_at: datetime
     updated_at: datetime
@@ -90,3 +90,13 @@ class SessionInterruptRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str | None = None
+
+
+class ToolResultRequest(BaseModel):
+    """Request body for ``POST /v1/sessions/{id}/tool-results``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call_id: str = Field(description="The tool_call_id from the assistant's tool_calls.")
+    content: str = Field(description="The result of executing the tool.")
+    is_error: bool = Field(default=False, description="True if the tool execution failed.")

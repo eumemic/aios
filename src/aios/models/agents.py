@@ -11,24 +11,36 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-# The set of built-in tool types aios v1 ships. Each entry on an agent's
-# `tools` list is an object with at minimum a `type` field; future phases can
-# extend the entry with per-tool configuration (e.g. timeouts, denylists).
-ToolType = Literal["bash", "read", "write", "edit", "glob", "grep", "cancel"]
+# Built-in tool types. Custom tools use type="custom" with extra fields.
+BuiltinToolType = Literal["bash", "read", "write", "edit", "glob", "grep", "cancel"]
 
 
 class ToolSpec(BaseModel):
     """One entry in an agent's `tools` list.
 
-    Currently just a `type` discriminator. Other fields are reserved for
-    future per-tool config and will be added without breaking the schema.
+    For built-in tools, ``type`` is the tool name (``"bash"``, ``"read"``,
+    etc.). For custom (client-executed) tools, ``type`` is ``"custom"`` and
+    ``name``, ``description``, and ``input_schema`` are required.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    type: ToolType
+    type: BuiltinToolType | Literal["custom"]
+    name: str | None = None
+    description: str | None = None
+    input_schema: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _check_custom_fields(self) -> ToolSpec:
+        if self.type == "custom":
+            missing = [
+                f for f in ("name", "description", "input_schema") if getattr(self, f) is None
+            ]
+            if missing:
+                raise ValueError(f"custom tools require: {', '.join(missing)}")
+        return self
 
 
 class AgentCreate(BaseModel):

@@ -141,15 +141,28 @@ def to_openai_tools(agent_tools: list[AgentToolSpec]) -> list[dict[str, Any]]:
     """
     result: list[dict[str, Any]] = []
     for entry in agent_tools:
-        tool = registry.get(entry.type)
-        result.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.parameters_schema,
-                },
-            }
-        )
+        if entry.type == "custom":
+            # Custom tools carry their own schema — not in the registry.
+            result.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": entry.name,
+                        "description": entry.description or "",
+                        "parameters": entry.input_schema or {},
+                    },
+                }
+            )
+        else:
+            tool = registry.get(entry.type)
+            result.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters_schema,
+                    },
+                }
+            )
     return result

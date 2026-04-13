@@ -97,7 +97,9 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         )
     except Exception:
         log.exception("step.litellm_failed", session_id=session_id)
-        await sessions_service.set_session_status(pool, session_id, "idle", stop_reason="error")
+        await sessions_service.set_session_status(
+            pool, session_id, "idle", stop_reason={"type": "error"}
+        )
         await _append_lifecycle(pool, session_id, "turn_ended", "idle", "error")
         raise
 
@@ -110,21 +112,52 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     # lock provides mutual exclusion).
     await sessions_service.append_event(pool, session_id, "message", assistant_msg)
 
-    # Check for tool calls.
+    # Check for tool calls — partition into built-in (harness-executed) and
+    # custom (client-executed). Built-in tools are dispatched as fire-and-forget
+    # asyncio tasks. Custom tools idle the session with requires_action so the
+    # client can execute them and send results back.
     tool_calls: list[dict[str, Any]] = assistant_msg.get("tool_calls") or []
 
     if tool_calls:
-        # Fire-and-forget: each task appends its result and defers a wake.
-        launch_tool_calls(pool, session_id, tool_calls)
-        log.info(
-            "step.tools_launched",
-            session_id=session_id,
-            count=len(tool_calls),
-            tool_names=[(tc.get("function") or {}).get("name", "?") for tc in tool_calls],
-        )
+        from aios.tools.registry import registry as tool_registry
+
+        def _tc_name(tc: dict[str, Any]) -> str:
+            name: str = (tc.get("function") or {}).get("name", "")
+            return name
+
+        built_in = [tc for tc in tool_calls if tool_registry.has(_tc_name(tc))]
+        custom = [tc for tc in tool_calls if not tool_registry.has(_tc_name(tc))]
+
+        if built_in:
+            launch_tool_calls(pool, session_id, built_in)
+            log.info(
+                "step.tools_launched",
+                session_id=session_id,
+                count=len(built_in),
+                tool_names=[_tc_name(tc) for tc in built_in],
+            )
+
+        if custom:
+            custom_call_ids = [tc.get("id") for tc in custom if tc.get("id")]
+            await sessions_service.set_session_status(
+                pool,
+                session_id,
+                "idle",
+                stop_reason={"type": "requires_action", "event_ids": custom_call_ids},
+            )
+            await _append_lifecycle(pool, session_id, "turn_ended", "idle", "requires_action")
+            log.info(
+                "step.custom_tools_pending",
+                session_id=session_id,
+                count=len(custom),
+                tool_names=[_tc_name(tc) for tc in custom],
+                call_ids=custom_call_ids,
+            )
     else:
         # No tool calls — the model's turn is done.
-        await sessions_service.set_session_status(pool, session_id, "idle", stop_reason="end_turn")
+        await sessions_service.set_session_status(
+            pool, session_id, "idle", stop_reason={"type": "end_turn"}
+        )
         await _append_lifecycle(pool, session_id, "turn_ended", "idle", "end_turn")
         log.info("step.turn_ended", session_id=session_id, cause=cause)
 

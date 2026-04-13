@@ -1,4 +1,4 @@
-"""Business logic for environments. v1 environments are name-only."""
+"""Business logic for environments."""
 
 from __future__ import annotations
 
@@ -7,12 +7,17 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
-from aios.models.environments import Environment
+from aios.models.environments import Environment, EnvironmentConfig
 
 
-async def create_environment(pool: asyncpg.Pool[Any], *, name: str) -> Environment:
+async def create_environment(
+    pool: asyncpg.Pool[Any],
+    *,
+    name: str,
+    config: EnvironmentConfig | None = None,
+) -> Environment:
     async with pool.acquire() as conn:
-        return await queries.insert_environment(conn, name=name)
+        return await queries.insert_environment(conn, name=name, config=config)
 
 
 async def get_environment(pool: asyncpg.Pool[Any], env_id: str) -> Environment:

@@ -138,7 +138,7 @@ async def set_session_status(
     pool: asyncpg.Pool[Any],
     session_id: str,
     status: SessionStatus,
-    stop_reason: str | None = None,
+    stop_reason: dict[str, Any] | None = None,
 ) -> None:
     async with pool.acquire() as conn:
         await queries.set_session_status(conn, session_id, status, stop_reason)

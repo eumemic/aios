@@ -103,6 +103,15 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
     if not container_id:
         raise ContainerError("docker run returned an empty container id")
 
+    handle = ContainerHandle(
+        session_id=session_id,
+        container_id=container_id,
+        workspace_path=workspace_path,
+    )
+
+    # Install packages from the session's environment config (if any).
+    await _install_packages(handle, session_id)
+
     log.info(
         "sandbox.provisioned",
         session_id=session_id,
@@ -110,11 +119,62 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         workspace_path=str(workspace_path),
     )
 
-    return ContainerHandle(
-        session_id=session_id,
-        container_id=container_id,
-        workspace_path=workspace_path,
-    )
+    return handle
+
+
+async def _install_packages(handle: ContainerHandle, session_id: str) -> None:
+    """Install packages from the session's environment config.
+
+    Looks up the session → environment → config.packages. If no packages
+    are configured, returns immediately. Failures are logged but don't
+    prevent container use — the model can retry or work around.
+    """
+    from aios.harness import runtime
+
+    pool = runtime.require_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT e.config FROM environments e
+            JOIN sessions s ON s.environment_id = e.id
+            WHERE s.id = $1
+            """,
+            session_id,
+        )
+    if row is None:
+        return
+
+    import json
+
+    raw_config = row["config"]
+    config = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+    packages = config.get("packages")
+    if not packages:
+        return
+
+    install_cmds = {
+        "apt": "apt-get update -qq && apt-get install -y -qq {}",
+        "pip": "pip install -q {}",
+        "npm": "npm install -g --silent {}",
+    }
+
+    for manager, cmd_template in install_cmds.items():
+        pkg_list = packages.get(manager)
+        if not pkg_list:
+            continue
+        cmd = cmd_template.format(" ".join(pkg_list))
+        settings = get_settings()
+        result = await handle.run_command(
+            cmd, timeout_seconds=120, max_output_bytes=settings.bash_max_output_bytes
+        )
+        if result.exit_code != 0:
+            log.warning(
+                "sandbox.package_install_failed",
+                session_id=session_id,
+                manager=manager,
+                exit_code=result.exit_code,
+                stderr=result.stderr[:500],
+            )
 
 
 async def release(handle: ContainerHandle) -> None:

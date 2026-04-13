@@ -11,7 +11,7 @@ Postgres ``LISTEN``/``NOTIFY``.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Query, status
 from sse_starlette import EventSourceResponse
@@ -32,6 +32,7 @@ from aios.models.sessions import (
     SessionInterruptRequest,
     SessionUpdate,
     SessionUserMessage,
+    ToolResultRequest,
 )
 from aios.services import sessions as service
 
@@ -135,7 +136,7 @@ async def interrupt(
 ) -> Session:
     """Interrupt a running session: cancel all in-flight work and idle it."""
     await service.append_event(pool, session_id, "interrupt", {"reason": body.reason})
-    await service.set_session_status(pool, session_id, "idle", stop_reason="interrupt")
+    await service.set_session_status(pool, session_id, "idle", stop_reason={"type": "interrupt"})
     await service.append_event(
         pool,
         session_id,
@@ -143,6 +144,26 @@ async def interrupt(
         {"event": "interrupted", "status": "idle", "stop_reason": "interrupt"},
     )
     return await service.get_session(pool, session_id)
+
+
+@router.post("/{session_id}/tool-results", status_code=status.HTTP_201_CREATED)
+async def submit_tool_result(
+    session_id: str,
+    body: ToolResultRequest,
+    pool: PoolDep,
+    _auth: AuthDep,
+) -> Event:
+    """Submit a custom tool result. Appends a tool-role message and wakes the session."""
+    data: dict[str, Any] = {
+        "role": "tool",
+        "tool_call_id": body.tool_call_id,
+        "content": body.content,
+    }
+    if body.is_error:
+        data["is_error"] = True
+    event = await service.append_event(pool, session_id, "message", data)
+    await defer_wake(session_id, cause="custom_tool_result")
+    return event
 
 
 @router.get("/{session_id}/events")

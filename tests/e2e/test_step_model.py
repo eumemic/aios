@@ -41,7 +41,7 @@ class TestBasicFlows:
 
         s = await harness.session(session.id)
         assert s.status == "idle"
-        assert s.stop_reason == "end_turn"
+        assert s.stop_reason == {"type": "end_turn"}
 
     async def test_single_tool_round_trip(self, harness: Harness) -> None:
         """Custom tool: model calls it, gets result, responds."""
@@ -454,7 +454,7 @@ class TestSessionStatus:
 
         s = await harness.session(session.id)
         assert s.status == "idle"
-        assert s.stop_reason == "end_turn"
+        assert s.stop_reason == {"type": "end_turn"}
 
     async def test_stop_reason_end_turn(self, harness: Harness) -> None:
         """When model returns no tool_calls, stop_reason is end_turn."""
@@ -462,7 +462,7 @@ class TestSessionStatus:
         session = await harness.start("do it")
         await harness.run_until_idle(session.id)
         s = await harness.session(session.id)
-        assert s.stop_reason == "end_turn"
+        assert s.stop_reason == {"type": "end_turn"}
 
 
 @needs_docker
@@ -625,7 +625,7 @@ class TestStreamingInference:
 
         s = await harness.session(session.id)
         assert s.status == "idle"
-        assert s.stop_reason == "end_turn"
+        assert s.stop_reason == {"type": "end_turn"}
 
         # Verify stream=True was passed to litellm
         assert harness.model_calls[0].get("stream") is True
@@ -979,6 +979,247 @@ class TestSessionVersionBinding:
         step2_messages = harness.model_calls[1]["messages"]
         system_msg = next(m for m in step2_messages if m["role"] == "system")
         assert system_msg["content"] == "agent-two"
+
+
+# ─── custom tools ───────────────────────────────────────────────────────────
+
+
+@needs_docker
+class TestCustomTools:
+    async def test_custom_tool_idles_with_requires_action(self, harness: Harness) -> None:
+        """When the model calls a custom tool, the session idles with requires_action."""
+        from aios.models.agents import ToolSpec
+        from aios.services import agents as agents_service
+
+        agent = await agents_service.create_agent(
+            harness._pool,
+            name=f"custom-tool-{id(self)}",
+            model="fake/test",
+            system="You are a test assistant.",
+            tools=[
+                ToolSpec(
+                    type="custom",
+                    name="get_weather",
+                    description="Get the weather",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                ),
+            ],
+            credential_id=None,
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+
+        # Script model to call the custom tool
+        harness.script_model(
+            [
+                assistant(tool_calls=[tool_call("get_weather", {"city": "SF"}, call_id="call_w1")]),
+            ]
+        )
+
+        from aios.ids import make_id
+        from aios.services import environments as env_svc, sessions as sess_svc
+
+        if harness._env_id is None:
+            env = await env_svc.create_environment(
+                harness._pool, name=f"test-env-{make_id('env')[-8:]}"
+            )
+            harness._env_id = env.id
+
+        session = await sess_svc.create_session(
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=harness._env_id,
+            title="custom-tool-test",
+            metadata={},
+        )
+        await sess_svc.append_user_message(harness._pool, session.id, "What's the weather in SF?")
+
+        # Run one step — model calls custom tool
+        await harness.run_step(session.id)
+
+        # Session should be idle with requires_action
+        s = await harness.session(session.id)
+        assert s.status == "idle"
+        assert s.stop_reason is not None
+        assert s.stop_reason["type"] == "requires_action"
+        assert "call_w1" in s.stop_reason["event_ids"]
+
+    async def test_custom_tool_result_resumes_session(self, harness: Harness) -> None:
+        """Submitting a custom tool result via the API resumes the session."""
+        from aios.models.agents import ToolSpec
+        from aios.services import agents as agents_service
+
+        agent = await agents_service.create_agent(
+            harness._pool,
+            name=f"custom-resume-{id(self)}",
+            model="fake/test",
+            system="You are a test assistant.",
+            tools=[
+                ToolSpec(
+                    type="custom",
+                    name="get_weather",
+                    description="Get the weather",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                ),
+            ],
+            credential_id=None,
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+
+        harness.script_model(
+            [
+                assistant(tool_calls=[tool_call("get_weather", {"city": "SF"}, call_id="call_w2")]),
+                assistant("The weather in SF is sunny, 72°F."),
+            ]
+        )
+
+        from aios.ids import make_id
+        from aios.services import environments as env_svc, sessions as sess_svc
+
+        if harness._env_id is None:
+            env = await env_svc.create_environment(
+                harness._pool, name=f"test-env-{make_id('env')[-8:]}"
+            )
+            harness._env_id = env.id
+
+        session = await sess_svc.create_session(
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=harness._env_id,
+            title="custom-resume-test",
+            metadata={},
+        )
+        await sess_svc.append_user_message(harness._pool, session.id, "Weather in SF?")
+
+        # Step 1: model calls custom tool → session idles
+        await harness.run_step(session.id)
+
+        # Simulate client sending tool result
+        await sess_svc.append_event(
+            harness._pool,
+            session.id,
+            "message",
+            {"role": "tool", "tool_call_id": "call_w2", "content": "Sunny, 72°F"},
+        )
+
+        # Step 2: model sees the tool result and responds
+        await harness.run_step(session.id)
+
+        events = await harness.events(session.id)
+        assert last_assistant_content(events) == "The weather in SF is sunny, 72°F."
+
+        s = await harness.session(session.id)
+        assert s.status == "idle"
+        assert s.stop_reason == {"type": "end_turn"}
+
+    async def test_mixed_builtin_and_custom_tools(self, harness: Harness) -> None:
+        """Model calls both a built-in tool and a custom tool in the same response."""
+
+        async def echo_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return {"output": arguments.get("text", "")}
+
+        harness.register_tool("echo", echo_handler)
+
+        from aios.models.agents import ToolSpec
+        from aios.services import agents as agents_service
+
+        agent = await agents_service.create_agent(
+            harness._pool,
+            name=f"mixed-tools-{id(self)}",
+            model="fake/test",
+            system="You are a test assistant.",
+            tools=[
+                ToolSpec(
+                    type="custom",
+                    name="lookup",
+                    description="Look up data",
+                    input_schema={"type": "object", "properties": {}, "additionalProperties": True},
+                ),
+            ],
+            credential_id=None,
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+
+        harness.script_model(
+            [
+                # Model calls both echo (built-in) and lookup (custom) at once
+                assistant(
+                    tool_calls=[
+                        tool_call("echo", {"text": "hi"}, call_id="call_echo"),
+                        tool_call("lookup", {"key": "foo"}, call_id="call_lookup"),
+                    ]
+                ),
+                assistant("Got both results."),
+            ]
+        )
+
+        from aios.ids import make_id
+        from aios.services import environments as env_svc, sessions as sess_svc
+
+        if harness._env_id is None:
+            env = await env_svc.create_environment(
+                harness._pool, name=f"test-env-{make_id('env')[-8:]}"
+            )
+            harness._env_id = env.id
+
+        session = await sess_svc.create_session(
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=harness._env_id,
+            title="mixed-tools-test",
+            metadata={},
+        )
+        await sess_svc.append_user_message(harness._pool, session.id, "Do both")
+
+        # Step 1: model calls both tools
+        await harness.run_step(session.id)
+        await harness.wait_for_tools(session.id)
+
+        # Session should be idle with requires_action for the custom tool
+        s = await harness.session(session.id)
+        assert s.status == "idle"
+        assert s.stop_reason is not None
+        assert s.stop_reason["type"] == "requires_action"
+
+        # The built-in tool (echo) should have already completed
+        events = await harness.events(session.id)
+        echo_result = next(
+            (
+                e.data
+                for e in events
+                if e.data.get("role") == "tool" and e.data.get("tool_call_id") == "call_echo"
+            ),
+            None,
+        )
+        assert echo_result is not None
+
+        # Submit custom tool result
+        await sess_svc.append_event(
+            harness._pool,
+            session.id,
+            "message",
+            {"role": "tool", "tool_call_id": "call_lookup", "content": '{"value": "bar"}'},
+        )
+
+        # Step 2: model sees both results
+        await harness.run_step(session.id)
+        assert last_assistant_content(await harness.events(session.id)) == "Got both results."
 
 
 # ─── full tier (with Docker) ─────────────────────────────────────────────────

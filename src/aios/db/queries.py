@@ -23,7 +23,7 @@ from aios.errors import ConflictError, NotFoundError
 from aios.ids import AGENT, CREDENTIAL, ENVIRONMENT, EVENT, SESSION, make_id
 from aios.models.agents import Agent, AgentVersion, ToolSpec
 from aios.models.credentials import Credential
-from aios.models.environments import Environment
+from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
 from aios.models.sessions import Session, SessionStatus
 
@@ -120,21 +120,31 @@ async def archive_credential(conn: asyncpg.Connection[Any], cred_id: str) -> Non
 
 
 def _row_to_environment(row: asyncpg.Record) -> Environment:
+    raw_config = row["config"]
+    config_data = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
     return Environment(
         id=row["id"],
         name=row["name"],
+        config=EnvironmentConfig.model_validate(config_data),
         created_at=row["created_at"],
         archived_at=row["archived_at"],
     )
 
 
-async def insert_environment(conn: asyncpg.Connection[Any], *, name: str) -> Environment:
+async def insert_environment(
+    conn: asyncpg.Connection[Any],
+    *,
+    name: str,
+    config: EnvironmentConfig | None = None,
+) -> Environment:
     new_id = make_id(ENVIRONMENT)
+    config_json = json.dumps((config or EnvironmentConfig()).model_dump(exclude_none=True))
     try:
         row = await conn.fetchrow(
-            "INSERT INTO environments (id, name) VALUES ($1, $2) RETURNING *",
+            "INSERT INTO environments (id, name, config) VALUES ($1, $2, $3::jsonb) RETURNING *",
             new_id,
             name,
+            config_json,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -473,6 +483,8 @@ async def list_agent_versions(
 def _row_to_session(row: asyncpg.Record) -> Session:
     raw_metadata = row["metadata"]
     metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    raw_stop = row["stop_reason"]
+    stop_reason = json.loads(raw_stop) if isinstance(raw_stop, str) else raw_stop
     return Session(
         id=row["id"],
         agent_id=row["agent_id"],
@@ -481,7 +493,7 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         title=row["title"],
         metadata=metadata,
         status=row["status"],
-        stop_reason=row["stop_reason"],
+        stop_reason=stop_reason,
         last_event_seq=row["last_event_seq"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -566,12 +578,13 @@ async def set_session_status(
     conn: asyncpg.Connection[Any],
     session_id: str,
     status: SessionStatus,
-    stop_reason: str | None = None,
+    stop_reason: dict[str, Any] | None = None,
 ) -> None:
+    stop_json = json.dumps(stop_reason) if stop_reason is not None else None
     await conn.execute(
-        "UPDATE sessions SET status = $1, stop_reason = $2, updated_at = now() WHERE id = $3",
+        "UPDATE sessions SET status = $1, stop_reason = $2::jsonb, updated_at = now() WHERE id = $3",
         status,
-        stop_reason,
+        stop_json,
         session_id,
     )
 

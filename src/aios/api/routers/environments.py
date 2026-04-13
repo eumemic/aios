@@ -14,7 +14,7 @@ router = APIRouter(prefix="/v1/environments", tags=["environments"])
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create(body: EnvironmentCreate, pool: PoolDep, _auth: AuthDep) -> Environment:
-    return await service.create_environment(pool, name=body.name)
+    return await service.create_environment(pool, name=body.name, config=body.config)
 
 
 @router.get("")
