@@ -130,9 +130,10 @@ class TestBuildMessages:
             _evt(1, "user", content="hello"),
             _evt(2, "assistant", content="hi there"),
         ]
-        msgs = build_messages(
+        ctx = build_messages(
             events, system_prompt="you are helpful", window_min=50_000, window_max=150_000
         )
+        msgs = ctx.messages
         assert msgs[0] == {"role": "system", "content": "you are helpful"}
         assert msgs[1]["role"] == "user"
         assert msgs[2]["role"] == "assistant"
@@ -144,7 +145,7 @@ class TestBuildMessages:
             _evt(3, "tool", tool_call_id="a", content="result a"),
             _evt(4, "tool", tool_call_id="b", content="result b"),
         ]
-        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000)
+        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
         # Order: user, assistant, tool_a, tool_b
         assert msgs[0]["role"] == "user"
         assert msgs[1]["role"] == "assistant"
@@ -160,7 +161,7 @@ class TestBuildMessages:
             _evt(3, "tool", tool_call_id="a", content="result a"),
             # b is still pending
         ]
-        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000)
+        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
         assert msgs[2]["tool_call_id"] == "a"
         assert "result a" in msgs[2]["content"]
         # b should be a synthetic pending result
@@ -176,7 +177,7 @@ class TestBuildMessages:
             _evt(3, "user", content="how goes?"),  # user injection before tool completes
             _evt(4, "tool", tool_call_id="x", content="X done"),
         ]
-        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000)
+        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
         # Should be: user, assistant+tool_calls, tool_result_x, user_injection
         assert msgs[0]["role"] == "user"
         assert msgs[0]["content"] == "do X"
@@ -188,7 +189,7 @@ class TestBuildMessages:
 
     def test_no_system_prompt_when_none(self) -> None:
         events = [_evt(1, "user", content="hi")]
-        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000)
+        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
         assert msgs[0]["role"] == "user"
 
     def test_multiple_tool_batches(self) -> None:
@@ -200,6 +201,6 @@ class TestBuildMessages:
             _evt(5, "tool", tool_call_id="b", content="done b"),
             _evt(6, "assistant", content="all done"),
         ]
-        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000)
+        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
         roles = [m["role"] for m in msgs]
         assert roles == ["user", "assistant", "tool", "assistant", "tool", "assistant"]

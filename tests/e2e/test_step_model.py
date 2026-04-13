@@ -506,6 +506,107 @@ class TestCancelContract:
         assert "cancelled" in blocked_result["content"].lower()
 
 
+# ─── reacting_to / stale-pending detection ───────────────────────────────────
+
+
+@needs_docker
+class TestReactingTo:
+    async def test_tool_completing_during_inference_triggers_followup(self, harness: Harness) -> None:
+        """When a tool result arrives DURING inference (after context was built
+        but before the model responds), the model's response is based on a stale
+        "pending" snapshot. A follow-up step must fire so the model sees the real
+        result.
+
+        Timeline: model calls slow tool → user injects → step 2 builds context
+        with pending tool → tool completes during Qwen thinking → model responds
+        "still working" → step 3 should fire and see the real result.
+        """
+        tool_started = asyncio.Event()
+        tool_proceed = asyncio.Event()
+
+        async def slow_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            tool_started.set()
+            await tool_proceed.wait()
+            return {"output": "finally done"}
+
+        harness.register_tool("slow", slow_handler)
+        harness.script_model(
+            [
+                # Step 1: model calls slow tool
+                assistant(tool_calls=[tool_call("slow", {}, call_id="call_s")]),
+                # Step 2: model sees user injection + pending tool → text response
+                assistant("Tool is still running, hang on."),
+                # Step 3: model sees real tool result → final response
+                assistant("Tool finished with: finally done"),
+            ]
+        )
+        session = await harness.start("do slow thing")
+
+        # Step 1: model calls slow tool
+        await harness.run_step(session.id)
+        await asyncio.wait_for(tool_started.wait(), timeout=5.0)
+
+        # Inject user message while tool is running
+        await harness.inject_message(session.id, "status?")
+
+        # Step 2: model sees user injection + pending tool result
+        await harness.run_step(session.id)
+
+        # Now let the tool complete (simulates tool finishing during/after inference)
+        tool_proceed.set()
+        await harness.wait_for_tools(session.id)
+
+        # Step 3: should_call_model should return True because the model's
+        # last response (step 2) has reacting_to < the tool result's seq.
+        # The tool result is "new" relative to what the model reacted to.
+        await harness.run_step(session.id)
+
+        events = await harness.events(session.id)
+        # Should have 3 assistant messages
+        assistants = [e for e in events if e.data.get("role") == "assistant"]
+        assert len(assistants) == 3
+        assert "finally done" in last_assistant_content(events)
+
+    async def test_reacting_to_field_present_on_assistant_messages(self, harness: Harness) -> None:
+        """Every assistant message should carry a reacting_to field."""
+        harness.script_model([assistant("Hi!")])
+        session = await harness.start("hello")
+        await harness.run_until_idle(session.id)
+
+        events = await harness.events(session.id)
+        asst = next(e for e in events if e.data.get("role") == "assistant")
+        assert "reacting_to" in asst.data
+        # reacting_to should point to the user message's seq
+        user_seq = next(e.seq for e in events if e.data.get("role") == "user")
+        assert asst.data["reacting_to"] == user_seq
+
+    async def test_no_followup_when_model_saw_real_result(self, harness: Harness) -> None:
+        """If the tool result was available when the context was built (not
+        pending), reacting_to includes it and no follow-up step fires."""
+
+        async def fast_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return {"value": 42}
+
+        harness.register_tool("fast", fast_handler)
+        harness.script_model(
+            [
+                assistant(tool_calls=[tool_call("fast", {}, call_id="call_f")]),
+                assistant("Got 42."),
+            ]
+        )
+        session = await harness.start("do it")
+        await harness.run_until_idle(session.id)
+
+        # Only 2 model calls — no unnecessary follow-up step
+        assert len(harness.model_calls) == 2
+
+        events = await harness.events(session.id)
+        last_asst = next(e for e in reversed(events) if e.data.get("role") == "assistant")
+        tool_result = next(e for e in events if e.data.get("role") == "tool")
+        # reacting_to should be >= the tool result's seq (model saw the real result)
+        assert last_asst.data["reacting_to"] >= tool_result.seq
+
+
 # ─── full tier (with Docker) ─────────────────────────────────────────────────
 
 

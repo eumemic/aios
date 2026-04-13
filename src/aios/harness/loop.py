@@ -64,7 +64,7 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
 
     # Build context with pending-result synthesis.
     tools = to_openai_tools(agent.tools)
-    messages = build_messages(
+    ctx = build_messages(
         events,
         system_prompt=agent.system,
         window_min=agent.window_min,
@@ -79,7 +79,7 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     try:
         assistant_msg = await call_litellm(
             model=agent.model,
-            messages=messages,
+            messages=ctx.messages,
             tools=tools if tools else None,
             api_key=api_key,
         )
@@ -88,6 +88,11 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         await sessions_service.set_session_status(pool, session_id, "idle", stop_reason="error")
         await _append_lifecycle(pool, session_id, "turn_ended", "idle", "error")
         raise
+
+    # Inject reacting_to so should_call_model knows what this response
+    # was based on. This is the seq of the latest user/tool event in the
+    # context — events after this seq are "new" on the next wake.
+    assistant_msg["reacting_to"] = ctx.reacting_to
 
     # Append assistant message to the session log (unfenced — procrastinate
     # lock provides mutual exclusion).
