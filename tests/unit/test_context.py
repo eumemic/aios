@@ -192,6 +192,73 @@ class TestBuildMessages:
         msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
         assert msgs[0]["role"] == "user"
 
+    def test_monotonic_blind_spot_shows_pending_then_injects_real(self) -> None:
+        """When a tool result arrives during inference (seq between reacting_to
+        and the assistant's own seq), the paired position shows PENDING (what the
+        assistant actually saw) and the real result is injected as a user message
+        at the end. This preserves prompt cache stability (monotonicity)."""
+        events = [
+            _evt(1, "user", content="run sleep 15"),
+            _evt(2, "assistant", tool_calls=[_tc("bash_1")], content=""),
+            # seq=3: user injection (before tool completes)
+            _evt(3, "user", content="status?"),
+            # seq=4: tool result (arrived DURING inference for assistant at seq=5)
+            _evt(4, "tool", tool_call_id="bash_1", content='{"stdout": "DONE"}'),
+            # seq=5: stale assistant response (reacting_to=3, saw pending)
+            _evt(5, "assistant", content="still running"),
+        ]
+        # Simulate reacting_to on the assistant messages
+        events[1].data["reacting_to"] = 1  # assistant at seq=2 reacted to user at seq=1
+        events[4].data["reacting_to"] = 3  # assistant at seq=5 reacted to user at seq=3
+        # (tool result at seq=4 has seq > reacting_to=3, so assistant saw pending)
+
+        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
+
+        # The paired position for bash_1 should show PENDING (not real)
+        # because the assistant at seq=5 saw it as pending
+        paired_tool = next(m for m in msgs if m.get("tool_call_id") == "bash_1" and m["role"] == "tool")
+        assert "pending" in paired_tool["content"], \
+            "paired position should show pending (what the assistant actually saw)"
+
+        # The stale assistant should appear coherently after the pending result
+        stale_asst = next(m for m in msgs if m.get("content") == "still running")
+        assert stale_asst is not None
+
+        # The real result should be injected at the END as a user message
+        last_msgs = msgs[-2:]  # last couple messages
+        injected = next(
+            (m for m in msgs if m["role"] == "user" and "DONE" in m.get("content", "")),
+            None,
+        )
+        assert injected is not None, \
+            "real tool result should be injected as a user message"
+        # The injected message should come AFTER the stale assistant
+        injected_idx = msgs.index(injected)
+        stale_idx = msgs.index(stale_asst)
+        assert injected_idx > stale_idx, \
+            "injected result should come after the stale assistant response"
+
+    def test_monotonic_no_rewrite_when_result_seen_as_real(self) -> None:
+        """When the assistant saw the real result (result.seq <= reacting_to),
+        the paired position shows the real result normally. No injection needed."""
+        events = [
+            _evt(1, "user", content="do it"),
+            _evt(2, "assistant", tool_calls=[_tc("a")], content=""),
+            _evt(3, "tool", tool_call_id="a", content="done"),
+            _evt(4, "assistant", content="got it"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 3  # saw tool result at seq=3
+
+        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
+        # Paired position should show REAL result (not pending)
+        paired_tool = next(m for m in msgs if m.get("tool_call_id") == "a")
+        assert "done" in paired_tool["content"]
+        assert "pending" not in paired_tool["content"]
+        # No injected user messages for the tool result
+        user_msgs = [m for m in msgs if m["role"] == "user"]
+        assert len(user_msgs) == 1  # only the original user message
+
     def test_multiple_tool_batches(self) -> None:
         events = [
             _evt(1, "user", content="start"),
