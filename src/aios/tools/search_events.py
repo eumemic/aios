@@ -25,7 +25,7 @@ from aios.harness import runtime
 from aios.logging import get_logger
 from aios.tools.registry import registry
 
-log = get_logger("aios.tools.search_events")
+log = get_logger(__name__)
 
 MAX_ROWS = 200
 QUERY_TIMEOUT_MS = 10_000
@@ -49,10 +49,11 @@ def _validate_sql(sql: str) -> str | None:
     return None
 
 
-def _format_results(rows: list[asyncpg.Record], columns: list[str], truncated: bool) -> str:
+def _format_results(rows: list[asyncpg.Record], truncated: bool) -> str:
     """Format query result rows as a readable text table."""
     if not rows:
         return "No results."
+    columns = list(rows[0].keys())
     header = " | ".join(columns)
     divider = "-" * len(header)
     data_lines = [
@@ -69,32 +70,23 @@ async def _execute_query(
     pool: asyncpg.Pool[Any],
     session_id: str,
     sql: str,
-) -> tuple[list[asyncpg.Record], list[str]]:
+) -> tuple[list[asyncpg.Record], bool]:
     """Execute a read-only SQL query scoped to session_id.
 
-    Acquires a connection from the pool, starts a READ ONLY transaction,
-    sets the session scope and statement timeout, wraps the user query
-    in a LIMIT to enforce the row cap, and returns the results.
+    Returns (rows, truncated). Rows are capped at MAX_ROWS; truncated
+    is True when the query produced more rows than the cap.
     """
-    async with pool.acquire() as conn:
-        await conn.execute("BEGIN READ ONLY")
-        try:
-            await conn.execute(f"SET LOCAL statement_timeout = '{QUERY_TIMEOUT_MS}ms'")
-            # Use set_config() instead of SET LOCAL so the session_id
-            # goes through as a parameter, not string interpolation.
-            await conn.execute("SELECT set_config('app.session_id', $1, true)", session_id)
+    async with pool.acquire() as conn, conn.transaction(readonly=True):
+        await conn.execute(f"SET LOCAL statement_timeout = '{QUERY_TIMEOUT_MS}ms'")
+        # set_config() accepts session_id as a parameter, avoiding interpolation.
+        await conn.execute("SELECT set_config('app.session_id', $1, true)", session_id)
+        wrapped = f"SELECT * FROM ({sql}) _q LIMIT {MAX_ROWS + 1}"
+        rows = await conn.fetch(wrapped)
 
-            # Wrap user query to enforce row limit (fetch MAX_ROWS+1 to detect
-            # truncation). Using text interpolation is safe here because `sql`
-            # has already been validated as a SELECT-only query without
-            # semicolons, and the LIMIT value is a constant integer.
-            wrapped = f"SELECT * FROM ({sql}) _q LIMIT {MAX_ROWS + 1}"
-            rows = await conn.fetch(wrapped)
-            columns = list(rows[0].keys()) if rows else []
-        finally:
-            await conn.execute("ROLLBACK")
-
-    return rows, columns
+    truncated = len(rows) > MAX_ROWS
+    if truncated:
+        rows = rows[:MAX_ROWS]
+    return rows, truncated
 
 
 SEARCH_EVENTS_DESCRIPTION = (
@@ -183,18 +175,14 @@ async def search_events_handler(session_id: str, arguments: dict[str, Any]) -> d
     pool = runtime.require_pool()
 
     try:
-        rows, columns = await _execute_query(pool, session_id, query)
+        rows, truncated = await _execute_query(pool, session_id, query)
     except asyncpg.exceptions.QueryCanceledError:
         return {"error": f"Query timed out after {QUERY_TIMEOUT_MS}ms"}
     except Exception as exc:
         log.warning("search_events.query_failed", error=str(exc))
         return {"error": f"Query failed: {exc}"}
 
-    truncated = len(rows) > MAX_ROWS
-    if truncated:
-        rows = rows[:MAX_ROWS]
-
-    text = _format_results(rows, columns, truncated)
+    text = _format_results(rows, truncated)
     return {"result": text}
 
 

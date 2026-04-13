@@ -112,13 +112,12 @@ class TestFormatResults:
     """Tests for _format_results pure function."""
 
     def test_empty_rows(self) -> None:
-        result = _format_results([], [], False)
+        result = _format_results([], False)
         assert result == "No results."
 
     def test_single_row(self) -> None:
         rows = [_FakeRecord({"id": "evt_01", "role": "assistant", "content_text": "Hello"})]
-        cols = ["id", "role", "content_text"]
-        result = _format_results(rows, cols, False)  # type: ignore[arg-type]
+        result = _format_results(rows, False)  # type: ignore[arg-type]
         assert "id" in result
         assert "role" in result
         assert "assistant" in result
@@ -129,34 +128,29 @@ class TestFormatResults:
             _FakeRecord({"seq": 1, "role": "user"}),
             _FakeRecord({"seq": 2, "role": "assistant"}),
         ]
-        cols = ["seq", "role"]
-        result = _format_results(rows, cols, False)  # type: ignore[arg-type]
+        result = _format_results(rows, False)  # type: ignore[arg-type]
         lines = result.strip().split("\n")
         assert len(lines) == 4  # header + divider + 2 data rows
 
     def test_truncated_notice(self) -> None:
         rows = [_FakeRecord({"id": "evt_01"})]
-        cols = ["id"]
-        result = _format_results(rows, cols, truncated=True)  # type: ignore[arg-type]
+        result = _format_results(rows, truncated=True)  # type: ignore[arg-type]
         assert "truncat" in result.lower()
         assert str(MAX_ROWS) in result
 
     def test_not_truncated_no_notice(self) -> None:
         rows = [_FakeRecord({"id": "evt_01"})]
-        cols = ["id"]
-        result = _format_results(rows, cols, truncated=False)  # type: ignore[arg-type]
+        result = _format_results(rows, truncated=False)  # type: ignore[arg-type]
         assert "truncat" not in result.lower()
 
     def test_null_values(self) -> None:
         rows = [_FakeRecord({"id": "evt_01", "role": None, "content_text": "text"})]
-        cols = ["id", "role", "content_text"]
-        result = _format_results(rows, cols, False)  # type: ignore[arg-type]
+        result = _format_results(rows, False)  # type: ignore[arg-type]
         assert "NULL" in result
 
     def test_header_divider_format(self) -> None:
         rows = [_FakeRecord({"a": 1, "b": 2})]
-        cols = ["a", "b"]
-        result = _format_results(rows, cols, False)  # type: ignore[arg-type]
+        result = _format_results(rows, False)  # type: ignore[arg-type]
         lines = result.split("\n")
         assert lines[0] == "a | b"
         assert lines[1] == "-" * len("a | b")
@@ -166,26 +160,20 @@ class TestFormatResults:
 
 
 def _mock_execute(
-    return_value: Any = ([], []),
+    return_value: Any = ([], False),
     side_effect: Any = None,
 ) -> Any:
     """Context manager that mocks both _execute_query and runtime.require_pool."""
-    from contextlib import contextmanager
+    return patch(
+        "aios.tools.search_events._execute_query",
+        new_callable=AsyncMock,
+        return_value=return_value,
+        side_effect=side_effect,
+    )
 
-    @contextmanager
-    def _ctx() -> Any:
-        with (
-            patch(
-                "aios.tools.search_events._execute_query",
-                new_callable=AsyncMock,
-                return_value=return_value,
-                side_effect=side_effect,
-            ) as mock_exec,
-            patch("aios.tools.search_events.runtime.require_pool"),
-        ):
-            yield mock_exec
 
-    return _ctx()
+def _mock_pool() -> Any:
+    return patch("aios.tools.search_events.runtime.require_pool")
 
 
 class TestSearchEventsHandler:
@@ -193,8 +181,7 @@ class TestSearchEventsHandler:
 
     async def test_success_returns_formatted_results(self) -> None:
         rows = [_FakeRecord({"role": "assistant", "content_text": "Hello"})]
-        columns = ["role", "content_text"]
-        with _mock_execute(return_value=(rows, columns)):
+        with _mock_execute(return_value=(rows, False)), _mock_pool():
             result = await search_events_handler(
                 "sess_01TEST", {"query": "SELECT * FROM events_search"}
             )
@@ -221,7 +208,7 @@ class TestSearchEventsHandler:
         assert "error" in result
 
     async def test_db_error_returns_error(self) -> None:
-        with _mock_execute(side_effect=Exception("connection refused")):
+        with _mock_execute(side_effect=Exception("connection refused")), _mock_pool():
             result = await search_events_handler(
                 "sess_01TEST", {"query": "SELECT * FROM events_search"}
             )
@@ -231,8 +218,9 @@ class TestSearchEventsHandler:
     async def test_timeout_returns_error(self) -> None:
         import asyncpg.exceptions
 
-        with _mock_execute(
-            side_effect=asyncpg.exceptions.QueryCanceledError(),
+        with (
+            _mock_execute(side_effect=asyncpg.exceptions.QueryCanceledError()),
+            _mock_pool(),
         ):
             result = await search_events_handler(
                 "sess_01TEST", {"query": "SELECT * FROM events_search"}
@@ -242,24 +230,22 @@ class TestSearchEventsHandler:
 
     async def test_row_limit_exact_max_no_truncation(self) -> None:
         rows = [_FakeRecord({"id": f"evt_{i}"}) for i in range(MAX_ROWS)]
-        columns = ["id"]
-        with _mock_execute(return_value=(rows, columns)):
+        with _mock_execute(return_value=(rows, False)), _mock_pool():
             result = await search_events_handler(
                 "sess_01TEST", {"query": "SELECT * FROM events_search"}
             )
         assert "truncat" not in result["result"].lower()
 
     async def test_row_limit_truncation(self) -> None:
-        rows = [_FakeRecord({"id": f"evt_{i}"}) for i in range(MAX_ROWS + 1)]
-        columns = ["id"]
-        with _mock_execute(return_value=(rows, columns)):
+        rows = [_FakeRecord({"id": f"evt_{i}"}) for i in range(MAX_ROWS)]
+        with _mock_execute(return_value=(rows, True)), _mock_pool():
             result = await search_events_handler(
                 "sess_01TEST", {"query": "SELECT * FROM events_search"}
             )
         assert "truncat" in result["result"].lower()
 
     async def test_no_results(self) -> None:
-        with _mock_execute(return_value=([], [])):
+        with _mock_execute(return_value=([], False)), _mock_pool():
             result = await search_events_handler(
                 "sess_01TEST", {"query": "SELECT * FROM events_search"}
             )
