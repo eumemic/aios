@@ -100,6 +100,42 @@ async def archive_environment(conn: asyncpg.Connection[Any], env_id: str) -> Non
         raise NotFoundError(f"environment {env_id} not found or already archived")
 
 
+async def update_environment(
+    conn: asyncpg.Connection[Any],
+    env_id: str,
+    *,
+    name: str | None = None,
+    config: EnvironmentConfig | None = None,
+) -> Environment:
+    """Update an environment. Omitted fields are preserved."""
+    current = await get_environment(conn, env_id)
+    if current.archived_at is not None:
+        raise ConflictError(f"environment {env_id} is archived", detail={"id": env_id})
+
+    new_name = name if name is not None else current.name
+    new_config = config if config is not None else current.config
+
+    # No-op detection.
+    if new_name == current.name and new_config == current.config:
+        return current
+
+    config_json = json.dumps(new_config.model_dump(exclude_none=True))
+    try:
+        row = await conn.fetchrow(
+            "UPDATE environments SET name = $2, config = $3::jsonb WHERE id = $1 RETURNING *",
+            env_id,
+            new_name,
+            config_json,
+        )
+    except asyncpg.UniqueViolationError as exc:
+        raise ConflictError(
+            f"an environment named {new_name!r} already exists",
+            detail={"name": new_name},
+        ) from exc
+    assert row is not None
+    return _row_to_environment(row)
+
+
 # ─── agents ───────────────────────────────────────────────────────────────────
 
 

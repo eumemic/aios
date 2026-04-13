@@ -137,11 +137,34 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
                 "model_usage": {},
             },
         )
-        await sessions_service.set_session_status(
-            pool, session_id, "idle", stop_reason={"type": "error"}
-        )
-        await _append_lifecycle(pool, session_id, "turn_ended", "idle", "error")
-        raise
+
+        # Count consecutive rescheduling lifecycle events to decide
+        # whether to retry or give up.
+        consecutive = await _count_consecutive_rescheduling(pool, session_id)
+        if consecutive < 2:
+            # Retry: set status to rescheduling and defer a delayed wake.
+            await sessions_service.set_session_status(
+                pool, session_id, "rescheduling", stop_reason={"type": "rescheduling"}
+            )
+            await _append_lifecycle(pool, session_id, "turn_ended", "rescheduling", "rescheduling")
+            from aios.harness.procrastinate_app import app as procrastinate_app
+
+            try:
+                await procrastinate_app.configure_task("harness.wake_session").defer_async(
+                    session_id=session_id,
+                    cause="reschedule",
+                    schedule_in={"seconds": 5},
+                )
+            except Exception:
+                log.exception("step.reschedule_defer_failed", session_id=session_id)
+            return
+        else:
+            # 3rd consecutive error — give up.
+            await sessions_service.set_session_status(
+                pool, session_id, "idle", stop_reason={"type": "error"}
+            )
+            await _append_lifecycle(pool, session_id, "turn_ended", "idle", "error")
+            raise
 
     # Emit span end with per-request token usage.
     await sessions_service.append_event(
@@ -383,6 +406,23 @@ async def _dispatch_confirmed_tools(
         tc for tc in asst_tool_calls if tc.get("id") in confirmed and tc.get("id") not in completed
     ]
     return pending
+
+
+async def _count_consecutive_rescheduling(pool: Any, session_id: str) -> int:
+    """Count consecutive rescheduling lifecycle events at the tail of the log.
+
+    Returns the number of consecutive ``turn_ended`` lifecycle events
+    with ``stop_reason == "rescheduling"`` at the end of the lifecycle
+    event sequence. A non-rescheduling event breaks the streak.
+    """
+    lifecycle_events = await sessions_service.read_events(pool, session_id, kind="lifecycle")
+    count = 0
+    for e in reversed(lifecycle_events):
+        if e.data.get("event") == "turn_ended" and e.data.get("stop_reason") == "rescheduling":
+            count += 1
+        else:
+            break
+    return count
 
 
 async def _append_lifecycle(

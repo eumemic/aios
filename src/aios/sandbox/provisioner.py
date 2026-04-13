@@ -156,6 +156,9 @@ async def _install_packages(handle: ContainerHandle, session_id: str) -> None:
         "apt": "apt-get update -qq && apt-get install -y -qq {}",
         "pip": "pip install -q {}",
         "npm": "npm install -g --silent {}",
+        "cargo": "cargo install {}",
+        "gem": "gem install {}",
+        "go": "go install {}",
     }
 
     for manager, cmd_template in install_cmds.items():
