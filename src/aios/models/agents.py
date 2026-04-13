@@ -1,4 +1,4 @@
-"""Agent resource: model + system prompt + tools.
+"""Agent resource: model + system prompt + tools + MCP servers.
 
 Agents are versioned: every update creates a new immutable version. The
 ``agents`` table holds the latest config; the ``agent_versions`` table stores
@@ -23,12 +23,65 @@ BuiltinToolType = Literal[
 PermissionPolicy = Literal["always_allow", "always_ask"]
 
 
+# ── MCP server declaration ────────────────────────────────────────────────────
+
+
+class McpServerSpec(BaseModel):
+    """One entry in an agent's ``mcp_servers`` list.
+
+    Declares a remote MCP server reachable via streamable HTTP transport.
+    The ``name`` is used to cross-reference from ``mcp_toolset`` tool entries
+    and to namespace discovered tools as ``mcp__<name>__<tool_name>``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["url"] = "url"
+    name: str = Field(min_length=1, max_length=64)
+    url: str = Field(min_length=1)
+
+
+# ── MCP toolset config (permission policies for discovered tools) ──────────
+
+
+class McpPermissionPolicy(BaseModel):
+    """Wrapper matching Anthropic's ``{type: "always_allow"}`` shape."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: PermissionPolicy
+
+
+class McpToolsetConfig(BaseModel):
+    """Default config for all tools discovered from an MCP server."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    permission_policy: McpPermissionPolicy | None = None
+
+
+class McpToolConfig(BaseModel):
+    """Per-tool override within an ``mcp_toolset`` entry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    enabled: bool = True
+    permission_policy: McpPermissionPolicy | None = None
+
+
+# ── Tool declaration ──────────────────────────────────────────────────────────
+
+
 class ToolSpec(BaseModel):
-    """One entry in an agent's `tools` list.
+    """One entry in an agent's ``tools`` list.
 
     For built-in tools, ``type`` is the tool name (``"bash"``, ``"read"``,
     etc.). For custom (client-executed) tools, ``type`` is ``"custom"`` and
-    ``name``, ``description``, and ``input_schema`` are required.
+    ``name``, ``description``, and ``input_schema`` are required. For MCP
+    toolsets, ``type`` is ``"mcp_toolset"`` and ``mcp_server_name`` is
+    required.
 
     ``enabled`` controls whether the tool is included in the schema sent to
     the model. Disabled tools are invisible to the model.
@@ -41,21 +94,29 @@ class ToolSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: BuiltinToolType | Literal["custom"]
+    type: BuiltinToolType | Literal["custom", "mcp_toolset"]
     name: str | None = None
     description: str | None = None
     input_schema: dict[str, Any] | None = None
     enabled: bool = True
     permission: PermissionPolicy | None = None
 
+    # mcp_toolset fields
+    mcp_server_name: str | None = None
+    default_config: McpToolsetConfig | None = None
+    configs: list[McpToolConfig] | None = None
+
     @model_validator(mode="after")
-    def _check_custom_fields(self) -> ToolSpec:
+    def _check_type_fields(self) -> ToolSpec:
         if self.type == "custom":
             missing = [
                 f for f in ("name", "description", "input_schema") if getattr(self, f) is None
             ]
             if missing:
                 raise ValueError(f"custom tools require: {', '.join(missing)}")
+        elif self.type == "mcp_toolset":
+            if self.mcp_server_name is None:
+                raise ValueError("mcp_toolset requires mcp_server_name")
         return self
 
 
@@ -71,6 +132,7 @@ class AgentCreate(BaseModel):
     )
     system: str = Field(default="", description="System prompt; empty by default.")
     tools: list[ToolSpec] = Field(default_factory=list)
+    mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     description: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     window_min: int = Field(default=50_000, ge=1)
@@ -93,6 +155,7 @@ class AgentUpdate(BaseModel):
     model: str | None = Field(default=None, min_length=1)
     system: str | None = None
     tools: list[ToolSpec] | None = None
+    mcp_servers: list[McpServerSpec] | None = None
     description: str | None = None
     metadata: dict[str, Any] | None = None
     window_min: int | None = Field(default=None, ge=1)
@@ -108,6 +171,7 @@ class Agent(BaseModel):
     model: str
     system: str
     tools: list[ToolSpec]
+    mcp_servers: list[McpServerSpec]
     description: str | None
     metadata: dict[str, Any]
     window_min: int
@@ -125,6 +189,7 @@ class AgentVersion(BaseModel):
     model: str
     system: str
     tools: list[ToolSpec]
+    mcp_servers: list[McpServerSpec]
     window_min: int
     window_max: int
     created_at: datetime

@@ -26,7 +26,7 @@ from typing import Any
 from aios.harness import runtime
 from aios.harness.completion import stream_litellm
 from aios.harness.context import build_messages, should_call_model
-from aios.harness.tool_dispatch import launch_tool_calls
+from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.logging import get_logger
 from aios.models.agents import ToolSpec
 from aios.services import agents as agents_service
@@ -58,6 +58,10 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     else:
         agent = await agents_service.get_agent(pool, session.agent_id)
 
+    # Build MCP server map from agent config (needed for confirmed-tool dispatch
+    # and for routing new tool calls after inference).
+    mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
+
     # Read all message events for this session.
     events = await sessions_service.read_message_events(pool, session_id)
 
@@ -66,7 +70,12 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     # no result in the log yet — should_call_model would return False.
     pending = await _dispatch_confirmed_tools(pool, session_id, events)
     if pending:
-        launch_tool_calls(pool, session_id, pending)
+        pending_builtin = [tc for tc in pending if not _is_mcp_tool(_tc_name(tc))]
+        pending_mcp = [tc for tc in pending if _is_mcp_tool(_tc_name(tc))]
+        if pending_builtin:
+            launch_tool_calls(pool, session_id, pending_builtin)
+        if pending_mcp:
+            launch_mcp_tool_calls(pool, session_id, pending_mcp, mcp_server_map)
         log.info(
             "step.confirmed_tools_dispatched",
             session_id=session_id,
@@ -81,6 +90,12 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
 
     # Build context with pending-result synthesis.
     tools = to_openai_tools(agent.tools)
+
+    # Discover MCP tools from declared servers.
+    if agent.mcp_servers:
+        mcp_tools = await _discover_mcp_tools(pool, session_id, agent)
+        tools.extend(mcp_tools)
+
     ctx = build_messages(
         events,
         system_prompt=agent.system,
@@ -183,26 +198,31 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     # lock provides mutual exclusion).
     await sessions_service.append_event(pool, session_id, "message", assistant_msg)
 
-    # Check for tool calls — partition into three buckets:
+    # Check for tool calls — partition into four buckets:
     #   immediate       — built-in with always_allow (execute now)
-    #   needs_confirm   — built-in with always_ask (hold for client confirmation)
-    #   custom          — not in registry (hold for client execution)
+    #   mcp_immediate   — MCP with always_allow (execute now via MCP client)
+    #   needs_confirm   — built-in or MCP with always_ask (hold for confirmation)
+    #   custom          — not in registry and not MCP (hold for client execution)
     tool_calls: list[dict[str, Any]] = assistant_msg.get("tool_calls") or []
 
     if tool_calls:
         from aios.tools.registry import registry as tool_registry
 
-        def _tc_name(tc: dict[str, Any]) -> str:
-            name: str = (tc.get("function") or {}).get("name", "")
-            return name
-
         immediate: list[dict[str, Any]] = []
+        mcp_immediate: list[dict[str, Any]] = []
         needs_confirm: list[dict[str, Any]] = []
         custom: list[dict[str, Any]] = []
 
         for tc in tool_calls:
             name = _tc_name(tc)
-            if not tool_registry.has(name):
+            if _is_mcp_tool(name):
+                # MCP tools default to always_ask (unlike built-in always_allow).
+                perm = _resolve_mcp_permission(name, agent.tools)
+                if perm == "always_allow":
+                    mcp_immediate.append(tc)
+                else:
+                    needs_confirm.append(tc)
+            elif not tool_registry.has(name):
                 custom.append(tc)
             elif _resolve_permission(name, agent.tools) == "always_ask":
                 needs_confirm.append(tc)
@@ -216,6 +236,15 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
                 session_id=session_id,
                 count=len(immediate),
                 tool_names=[_tc_name(tc) for tc in immediate],
+            )
+
+        if mcp_immediate:
+            launch_mcp_tool_calls(pool, session_id, mcp_immediate, mcp_server_map)
+            log.info(
+                "step.mcp_tools_launched",
+                session_id=session_id,
+                count=len(mcp_immediate),
+                tool_names=[_tc_name(tc) for tc in mcp_immediate],
             )
 
         if needs_confirm or custom:
@@ -254,13 +283,79 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         log.info("step.turn_ended", session_id=session_id, cause=cause)
 
 
+def _tc_name(tc: dict[str, Any]) -> str:
+    """Extract the function name from a tool_call dict."""
+    name: str = (tc.get("function") or {}).get("name", "")
+    return name
+
+
+def _is_mcp_tool(name: str) -> bool:
+    """Return True if the tool name is an MCP-namespaced tool."""
+    return name.startswith("mcp__")
+
+
 def _resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
-    """Look up the permission policy for a tool by name."""
+    """Look up the permission policy for a built-in or custom tool by name."""
     for spec in agent_tools:
         tool_name = spec.name if spec.type == "custom" else spec.type
         if tool_name == name:
             return spec.permission
     return None
+
+
+def _resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
+    """Look up the permission policy for an MCP tool.
+
+    Finds the ``mcp_toolset`` entry whose ``mcp_server_name`` matches the
+    server portion of the namespaced tool name, then returns the
+    ``default_config.permission_policy.type`` or ``None`` (which callers
+    treat as ``always_ask``).
+
+    Per-tool overrides via ``configs`` are stored in the model but not
+    enforced here yet — only ``default_config`` drives permission resolution.
+    """
+    server_name = name.split("__", 2)[1]
+    for spec in agent_tools:
+        if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
+            cfg = spec.default_config
+            if cfg and cfg.permission_policy:
+                return cfg.permission_policy.type
+            return spec.permission  # fallback to the flat permission field
+    return None
+
+
+async def _discover_mcp_tools(
+    pool: Any,
+    session_id: str,
+    agent: Any,
+) -> list[dict[str, Any]]:
+    """Discover tools from all declared MCP servers concurrently.
+
+    For each server in ``agent.mcp_servers`` that has an enabled
+    ``mcp_toolset`` entry, connects to the server, lists tools, and
+    returns them in OpenAI format with namespaced names.
+    """
+    import asyncio
+
+    from aios.mcp.client import discover_mcp_tools, resolve_auth_headers
+
+    crypto_box = runtime.require_crypto_box()
+
+    enabled_servers: set[str] = set()
+    for spec in agent.tools:
+        if spec.type == "mcp_toolset" and spec.enabled and spec.mcp_server_name:
+            enabled_servers.add(spec.mcp_server_name)
+
+    async def _discover_one(url: str, name: str) -> list[dict[str, Any]]:
+        headers = await resolve_auth_headers(pool, crypto_box, session_id, url)
+        return await discover_mcp_tools(url, name, headers)
+
+    servers = [s for s in agent.mcp_servers if s.name in enabled_servers]
+    if not servers:
+        return []
+
+    results = await asyncio.gather(*[_discover_one(s.url, s.name) for s in servers])
+    return [tool for tools in results for tool in tools]
 
 
 async def _dispatch_confirmed_tools(

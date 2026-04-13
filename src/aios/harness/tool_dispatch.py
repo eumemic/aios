@@ -35,18 +35,20 @@ from aios.tools.registry import ToolNotFoundError, registry
 log = get_logger("aios.harness.tool_dispatch")
 
 
-def launch_tool_calls(
-    pool: asyncpg.Pool[Any],
+def _launch_tasks(
     session_id: str,
     tool_calls: list[dict[str, Any]],
+    coro_factory: Any,
+    *,
+    prefix: str,
 ) -> None:
-    """Launch each tool call as an asyncio task. Returns immediately."""
+    """Shared launcher: spawn one asyncio task per tool call, register in task registry."""
     task_reg = runtime.require_task_registry()
     for call in tool_calls:
         call_id = call.get("id") or "unknown"
         task = asyncio.create_task(
-            _execute_tool_async(pool, session_id, call),
-            name=f"tool:{session_id}:{call_id}",
+            coro_factory(call),
+            name=f"{prefix}:{session_id}:{call_id}",
         )
         task_reg.add(session_id, call_id, task)
 
@@ -54,6 +56,20 @@ def launch_tool_calls(
             task_reg.remove(s, c)
 
         task.add_done_callback(_on_done)
+
+
+def launch_tool_calls(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    tool_calls: list[dict[str, Any]],
+) -> None:
+    """Launch each tool call as an asyncio task. Returns immediately."""
+    _launch_tasks(
+        session_id,
+        tool_calls,
+        lambda call: _execute_tool_async(pool, session_id, call),
+        prefix="tool",
+    )
 
 
 async def _execute_tool_async(
@@ -156,3 +172,101 @@ def _evict_session_container(session_id: str) -> None:
     if runtime.sandbox_registry is None:
         return
     runtime.sandbox_registry.evict(session_id)
+
+
+# ── MCP tool dispatch ─────────────────────────────────────────────────────────
+
+
+def launch_mcp_tool_calls(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    tool_calls: list[dict[str, Any]],
+    mcp_server_map: dict[str, str],
+) -> None:
+    """Launch MCP tool calls as asyncio tasks. Returns immediately."""
+    _launch_tasks(
+        session_id,
+        tool_calls,
+        lambda call: _execute_mcp_tool_async(pool, session_id, call, mcp_server_map),
+        prefix="mcp_tool",
+    )
+
+
+def _parse_mcp_tool_name(name: str) -> tuple[str, str]:
+    """Parse ``mcp__<server_name>__<tool_name>`` into ``(server_name, tool_name)``.
+
+    Raises ``ValueError`` on malformed names.
+    """
+    parts = name.split("__", 2)
+    if len(parts) < 3 or not parts[1] or not parts[2]:
+        raise ValueError(f"malformed MCP tool name: {name!r}")
+    return parts[1], parts[2]
+
+
+async def _execute_mcp_tool_async(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    call: dict[str, Any],
+    mcp_server_map: dict[str, str],
+) -> None:
+    """Execute one MCP tool call: connect, invoke, append result, defer wake."""
+    call_id = call.get("id") or "unknown"
+    function = call.get("function") or {}
+    name: str = function.get("name") or ""
+    raw_args = function.get("arguments", "{}")
+
+    bound_log = log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name)
+
+    try:
+        arguments = _parse_arguments(raw_args)
+        if arguments is None:
+            bound_log.warning("mcp_tool.bad_arguments")
+            await _append_tool_result(
+                pool, session_id, call_id, name, error="arguments were not valid JSON"
+            )
+            return
+
+        server_name, tool_name = _parse_mcp_tool_name(name)
+        url = mcp_server_map.get(server_name)
+        if url is None:
+            bound_log.warning("mcp_tool.server_not_found", server_name=server_name)
+            await _append_tool_result(
+                pool, session_id, call_id, name, error=f"MCP server {server_name!r} not found"
+            )
+            return
+
+        from aios.mcp.client import call_mcp_tool, resolve_auth_headers
+
+        crypto_box = runtime.require_crypto_box()
+        headers = await resolve_auth_headers(pool, crypto_box, session_id, url)
+        result = await call_mcp_tool(url, headers, tool_name, arguments)
+
+        content_str = json.dumps(result, ensure_ascii=False)
+        is_error = "error" in result
+        event_data: dict[str, Any] = {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "name": name,
+            "content": content_str,
+        }
+        if is_error:
+            event_data["is_error"] = True
+
+        bound_log.info("mcp_tool.completed", is_error=is_error)
+        await sessions_service.append_event(pool, session_id, "message", event_data)
+
+    except asyncio.CancelledError:
+        bound_log.info("mcp_tool.cancelled")
+        await _append_tool_result(pool, session_id, call_id, name, error="cancelled")
+
+    except Exception as err:
+        bound_log.exception("mcp_tool.handler_failed")
+        await _append_tool_result(
+            pool, session_id, call_id, name, error=f"{type(err).__name__}: {err}"
+        )
+
+    finally:
+        try:
+            await defer_wake(session_id, cause="mcp_tool_result")
+        except Exception:
+            bound_log.warning("mcp_tool.defer_wake_failed")

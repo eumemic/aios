@@ -1,0 +1,249 @@
+"""Unit tests for MCP client — discover, call, auth resolution.
+
+All MCP SDK interactions are mocked. No network calls.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from aios.crypto.vault import CryptoBox
+from aios.mcp.client import call_mcp_tool, discover_mcp_tools, resolve_auth_headers
+
+# ── resolve_auth_headers ──────────────────────────────────────────────────────
+
+
+class TestResolveAuthHeaders:
+    @pytest.fixture
+    def crypto_box(self) -> CryptoBox:
+        import os
+
+        return CryptoBox(os.urandom(32))
+
+    async def test_no_credential_returns_empty(self, crypto_box: CryptoBox) -> None:
+        pool = MagicMock()
+        with patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m:
+            m.return_value = None
+            result = await resolve_auth_headers(
+                pool, crypto_box, "sess_123", "https://mcp.example.com"
+            )
+        assert result == {}
+
+    async def test_static_bearer(self, crypto_box: CryptoBox) -> None:
+        payload = json.dumps({"token": "my-secret-token"})
+        blob = crypto_box.encrypt(payload)
+        pool = MagicMock()
+        with patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m:
+            m.return_value = (blob, "static_bearer")
+            result = await resolve_auth_headers(
+                pool, crypto_box, "sess_123", "https://mcp.example.com"
+            )
+        assert result == {"Authorization": "Bearer my-secret-token"}
+
+    async def test_mcp_oauth(self, crypto_box: CryptoBox) -> None:
+        payload = json.dumps({"access_token": "oauth-token-123"})
+        blob = crypto_box.encrypt(payload)
+        pool = MagicMock()
+        with patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m:
+            m.return_value = (blob, "mcp_oauth")
+            result = await resolve_auth_headers(
+                pool, crypto_box, "sess_123", "https://mcp.example.com"
+            )
+        assert result == {"Authorization": "Bearer oauth-token-123"}
+
+    async def test_empty_token_returns_empty(self, crypto_box: CryptoBox) -> None:
+        payload = json.dumps({"token": ""})
+        blob = crypto_box.encrypt(payload)
+        pool = MagicMock()
+        with patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m:
+            m.return_value = (blob, "static_bearer")
+            result = await resolve_auth_headers(
+                pool, crypto_box, "sess_123", "https://mcp.example.com"
+            )
+        assert result == {}
+
+
+# ── discover_mcp_tools ────────────────────────────────────────────────────────
+
+
+def _make_mock_tool(name: str, description: str, schema: dict[str, Any]) -> MagicMock:
+    tool = MagicMock()
+    tool.name = name
+    tool.description = description
+    tool.inputSchema = schema
+    return tool
+
+
+class TestDiscoverMcpTools:
+    async def test_discovery_returns_namespaced_tools(self) -> None:
+        mock_tool = _make_mock_tool("create_issue", "Create a GitHub issue", {"type": "object"})
+        mock_result = MagicMock()
+        mock_result.tools = [mock_tool]
+
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        mock_session.list_tools = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("aios.mcp.client.streamable_http_client") as mock_transport,
+            patch("aios.mcp.client.ClientSession") as mock_session_cls,
+        ):
+            mock_transport.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock(), MagicMock())
+            )
+            mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            tools = await discover_mcp_tools("https://mcp.github.com/", "github", {})
+
+        assert len(tools) == 1
+        assert tools[0]["type"] == "function"
+        assert tools[0]["function"]["name"] == "mcp__github__create_issue"
+        assert tools[0]["function"]["description"] == "Create a GitHub issue"
+        assert tools[0]["function"]["parameters"] == {"type": "object"}
+
+    async def test_discovery_multiple_tools(self) -> None:
+        tools_data = [
+            _make_mock_tool("tool_a", "Tool A", {"type": "object"}),
+            _make_mock_tool("tool_b", "Tool B", {"type": "object"}),
+        ]
+        mock_result = MagicMock()
+        mock_result.tools = tools_data
+
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        mock_session.list_tools = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("aios.mcp.client.streamable_http_client") as mock_transport,
+            patch("aios.mcp.client.ClientSession") as mock_session_cls,
+        ):
+            mock_transport.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock(), MagicMock())
+            )
+            mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            tools = await discover_mcp_tools("https://mcp.example.com/", "myserver", {})
+
+        assert len(tools) == 2
+        assert tools[0]["function"]["name"] == "mcp__myserver__tool_a"
+        assert tools[1]["function"]["name"] == "mcp__myserver__tool_b"
+
+    async def test_discovery_failure_returns_empty(self) -> None:
+        with patch("aios.mcp.client.streamable_http_client") as mock_transport:
+            mock_transport.return_value.__aenter__ = AsyncMock(side_effect=ConnectionError("down"))
+            mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            tools = await discover_mcp_tools("https://bad.example.com/", "bad", {})
+
+        assert tools == []
+
+
+# ── call_mcp_tool ─────────────────────────────────────────────────────────────
+
+
+class TestCallMcpTool:
+    async def test_successful_call(self) -> None:
+        mock_content = MagicMock()
+        mock_content.text = "Issue #42 created"
+        mock_content.type = "text"
+        mock_result = MagicMock()
+        mock_result.content = [mock_content]
+        mock_result.isError = False
+
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        mock_session.call_tool = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("aios.mcp.client.streamable_http_client") as mock_transport,
+            patch("aios.mcp.client.ClientSession") as mock_session_cls,
+        ):
+            mock_transport.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock(), MagicMock())
+            )
+            mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await call_mcp_tool(
+                "https://mcp.github.com/",
+                {"Authorization": "Bearer token"},
+                "create_issue",
+                {"title": "Test"},
+            )
+
+        assert result == {"content": "Issue #42 created"}
+
+    async def test_error_result(self) -> None:
+        mock_content = MagicMock()
+        mock_content.text = "Permission denied"
+        mock_content.type = "text"
+        mock_result = MagicMock()
+        mock_result.content = [mock_content]
+        mock_result.isError = True
+
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        mock_session.call_tool = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("aios.mcp.client.streamable_http_client") as mock_transport,
+            patch("aios.mcp.client.ClientSession") as mock_session_cls,
+        ):
+            mock_transport.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock(), MagicMock())
+            )
+            mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await call_mcp_tool("https://mcp.github.com/", {}, "create_issue", {})
+
+        assert result == {"error": "Permission denied"}
+
+    async def test_connection_failure(self) -> None:
+        with patch("aios.mcp.client.streamable_http_client") as mock_transport:
+            mock_transport.return_value.__aenter__ = AsyncMock(
+                side_effect=ConnectionError("server unreachable")
+            )
+            mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await call_mcp_tool("https://bad.example.com/", {}, "tool", {})
+
+        assert "error" in result
+        assert "MCP server error" in result["error"]
+
+    async def test_non_text_content_handled(self) -> None:
+        mock_img = MagicMock()
+        mock_img.type = "image"
+        del mock_img.text  # no text attribute
+        mock_result = MagicMock()
+        mock_result.content = [mock_img]
+        mock_result.isError = False
+
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        mock_session.call_tool = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("aios.mcp.client.streamable_http_client") as mock_transport,
+            patch("aios.mcp.client.ClientSession") as mock_session_cls,
+        ):
+            mock_transport.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock(), MagicMock())
+            )
+            mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await call_mcp_tool("https://example.com/", {}, "tool", {})
+
+        assert result == {"content": "[image content]"}
