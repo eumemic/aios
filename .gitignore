@@ -31,7 +31,11 @@ venv/
 *.swo
 
 # Claude Code session state (not related to aios)
-.claude/
+# Use /* so negation patterns work for tracked config
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/hooks/**
 
 # aios runtime state
 /var/lib/aios/
