@@ -1247,9 +1247,13 @@ class TestPermissionPolicies:
 
         self._override_tool("glob", fake_glob)
 
-        harness.script_model([
-            assistant(tool_calls=[tool_call("glob", {"pattern": "*.txt"}, call_id="call_ask1")]),
-        ])
+        harness.script_model(
+            [
+                assistant(
+                    tool_calls=[tool_call("glob", {"pattern": "*.txt"}, call_id="call_ask1")]
+                ),
+            ]
+        )
         session = await harness.start(
             "list files",
             tool_specs=[ToolSpec(type="glob", permission="always_ask")],
@@ -1272,10 +1276,14 @@ class TestPermissionPolicies:
 
         self._override_tool("glob", fake_glob)
 
-        harness.script_model([
-            assistant(tool_calls=[tool_call("glob", {"pattern": "*.txt"}, call_id="call_allow1")]),
-            assistant("Found found.txt"),
-        ])
+        harness.script_model(
+            [
+                assistant(
+                    tool_calls=[tool_call("glob", {"pattern": "*.txt"}, call_id="call_allow1")]
+                ),
+                assistant("Found found.txt"),
+            ]
+        )
         session = await harness.start(
             "list files",
             tool_specs=[ToolSpec(type="glob", permission="always_ask")],
@@ -1313,10 +1321,14 @@ class TestPermissionPolicies:
 
         self._override_tool("glob", fake_glob)
 
-        harness.script_model([
-            assistant(tool_calls=[tool_call("glob", {"pattern": "*.txt"}, call_id="call_deny1")]),
-            assistant("I understand, the tool was denied."),
-        ])
+        harness.script_model(
+            [
+                assistant(
+                    tool_calls=[tool_call("glob", {"pattern": "*.txt"}, call_id="call_deny1")]
+                ),
+                assistant("I understand, the tool was denied."),
+            ]
+        )
         session = await harness.start(
             "list files",
             tool_specs=[ToolSpec(type="glob", permission="always_ask")],
@@ -1326,9 +1338,7 @@ class TestPermissionPolicies:
         await harness.run_step(session.id)
 
         # Deny with message
-        await harness.confirm_tool(
-            session.id, "call_deny1", "deny", deny_message="Too dangerous."
-        )
+        await harness.confirm_tool(session.id, "call_deny1", "deny", deny_message="Too dangerous.")
 
         # Step 2: model sees the denial error and responds
         await harness.run_step(session.id)
@@ -1362,13 +1372,17 @@ class TestPermissionPolicies:
         self._override_tool("glob", fake_glob)
         self._override_tool("grep", fake_grep)
 
-        harness.script_model([
-            assistant(tool_calls=[
-                tool_call("glob", {"pattern": "*.txt"}, call_id="call_fast"),
-                tool_call("grep", {"pattern": "hello"}, call_id="call_slow"),
-            ]),
-            assistant("Both tools done."),
-        ])
+        harness.script_model(
+            [
+                assistant(
+                    tool_calls=[
+                        tool_call("glob", {"pattern": "*.txt"}, call_id="call_fast"),
+                        tool_call("grep", {"pattern": "hello"}, call_id="call_slow"),
+                    ]
+                ),
+                assistant("Both tools done."),
+            ]
+        )
         session = await harness.start(
             "search files",
             tool_specs=[
@@ -1436,15 +1450,18 @@ class TestPermissionPolicies:
 
     async def test_backward_compat_no_policy(self, harness: Harness) -> None:
         """Agent without permission fields → everything executes immediately."""
+
         async def echo_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
             return {"output": arguments.get("text", "")}
 
         harness.register_tool("echo", echo_handler)
 
-        harness.script_model([
-            assistant(tool_calls=[tool_call("echo", {"text": "hi"})]),
-            assistant("Echo said hi."),
-        ])
+        harness.script_model(
+            [
+                assistant(tool_calls=[tool_call("echo", {"text": "hi"})]),
+                assistant("Echo said hi."),
+            ]
+        )
         # Use simple tools= (no permission/enabled set)
         session = await harness.start("echo hi", tools=[])
         await harness.run_until_idle(session.id)

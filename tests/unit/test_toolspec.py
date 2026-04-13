@@ -36,7 +36,7 @@ class TestPermissionField:
         assert spec.permission == "always_ask"
 
     def test_invalid_policy_rejected(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             ToolSpec(type="bash", permission="always_deny")  # type: ignore[arg-type]
 
 
@@ -81,12 +81,14 @@ class TestBackwardCompat:
         assert spec.permission is None
 
     def test_old_custom_json(self) -> None:
-        old_json = json.dumps({
-            "type": "custom",
-            "name": "foo",
-            "description": "bar",
-            "input_schema": {"type": "object"},
-        })
+        old_json = json.dumps(
+            {
+                "type": "custom",
+                "name": "foo",
+                "description": "bar",
+                "input_schema": {"type": "object"},
+            }
+        )
         spec = ToolSpec.model_validate_json(old_json)
         assert spec.enabled is True
         assert spec.permission is None

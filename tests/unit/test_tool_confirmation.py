@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from aios.harness.loop import _resolve_permission
@@ -18,7 +18,7 @@ def _event(seq: int, data: dict[str, Any], kind: str = "message") -> Event:
         seq=seq,
         kind=kind,  # type: ignore[arg-type]
         data=data,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -26,14 +26,25 @@ class TestFindToolCall:
     def test_finds_existing_call(self) -> None:
         events = [
             _event(1, {"role": "user", "content": "hello"}),
-            _event(2, {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": '{"command": "echo hi"}'}},
-                    {"id": "call_2", "type": "function", "function": {"name": "read", "arguments": '{"file_path": "/tmp/x"}'}},
-                ],
-            }),
+            _event(
+                2,
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": '{"command": "echo hi"}'},
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "read", "arguments": '{"file_path": "/tmp/x"}'},
+                        },
+                    ],
+                },
+            ),
         ]
         tc = _find_tool_call(events, "call_2")
         assert tc is not None
@@ -50,15 +61,25 @@ class TestFindToolCall:
     def test_searches_in_reverse(self) -> None:
         """If the same call_id appears in multiple messages, the most recent wins."""
         events = [
-            _event(1, {
-                "role": "assistant",
-                "tool_calls": [{"id": "call_x", "function": {"name": "bash", "arguments": "{}"}}],
-            }),
+            _event(
+                1,
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "call_x", "function": {"name": "bash", "arguments": "{}"}}
+                    ],
+                },
+            ),
             _event(2, {"role": "tool", "tool_call_id": "call_x", "content": "done"}),
-            _event(3, {
-                "role": "assistant",
-                "tool_calls": [{"id": "call_x", "function": {"name": "read", "arguments": "{}"}}],
-            }),
+            _event(
+                3,
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "call_x", "function": {"name": "read", "arguments": "{}"}}
+                    ],
+                },
+            ),
         ]
         tc = _find_tool_call(events, "call_x")
         assert tc is not None

@@ -282,7 +282,10 @@ class Harness:
             await sessions_service.confirm_tool_allow(self._pool, session_id, tool_call_id)
         else:
             await sessions_service.confirm_tool_deny(
-                self._pool, session_id, tool_call_id, deny_message or "Denied.",
+                self._pool,
+                session_id,
+                tool_call_id,
+                deny_message or "Denied.",
             )
 
     # ── step execution ───────────────────────────────────────────────────
