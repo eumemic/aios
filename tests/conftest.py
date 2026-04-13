@@ -25,6 +25,29 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _unit_test_env() -> Iterator[None]:
+    """Provide dummy env vars so ``get_settings()`` doesn't crash in unit
+    tests that happen to import tool handlers or other code that reads
+    settings at module level. Without this, fresh checkouts (worktrees,
+    CI runners) fail because there's no ``.env`` file.
+
+    The ``aios_env`` fixture used by e2e/integration tests overrides these
+    with real (testcontainer-backed) values at function scope.
+    """
+    dummy = {
+        "AIOS_API_KEY": "test-key-for-unit-tests",
+        "AIOS_VAULT_KEY": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+        "AIOS_DB_URL": "postgresql://x:x@localhost:5432/x",
+    }
+    with mock.patch.dict(os.environ, dummy):
+        from aios.config import get_settings
+
+        get_settings.cache_clear()
+        yield
+        get_settings.cache_clear()
+
+
 def _docker_available() -> bool:
     try:
         result = subprocess.run(

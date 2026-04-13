@@ -2,9 +2,9 @@
 
 Provides two variants:
 
-* :func:`call_litellm` — non-streaming, returns the complete message dict.
+* :func:`call_litellm` — non-streaming, returns ``(message, usage)``.
 * :func:`stream_litellm` — streaming, delivers per-token deltas via
-  ``pg_notify`` and returns the assembled message dict.
+  ``pg_notify`` and returns ``(message, usage)``.
 
 The wrappers deliberately keep no state — credentials are passed in per call
 and never cached on the wrapper instance, so a single misconfigured request
@@ -22,6 +22,25 @@ if TYPE_CHECKING:
     import asyncpg
 
 
+def _normalize_usage(raw: dict[str, Any]) -> dict[str, int]:
+    """Map LiteLLM's usage field names to our canonical names.
+
+    LiteLLM uses OpenAI-style ``prompt_tokens`` / ``completion_tokens``.
+    Some providers (Anthropic via LiteLLM) also pass through
+    ``cache_creation_input_tokens`` and ``cache_read_input_tokens``
+    at the top level. OpenAI-compatible providers put cache reads in
+    ``prompt_tokens_details.cached_tokens``.
+    """
+    prompt_details = raw.get("prompt_tokens_details") or {}
+    cache_read = raw.get("cache_read_input_tokens") or prompt_details.get("cached_tokens") or 0
+    return {
+        "input_tokens": raw.get("prompt_tokens") or 0,
+        "output_tokens": raw.get("completion_tokens") or 0,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": raw.get("cache_creation_input_tokens") or 0,
+    }
+
+
 async def call_litellm(
     *,
     model: str,
@@ -30,12 +49,13 @@ async def call_litellm(
     api_key: str | None = None,
     api_base: str | None = None,
     extra: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Call ``litellm.acompletion`` and return the assistant message dict.
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Call ``litellm.acompletion`` and return ``(message, usage)``.
 
     Returns the message exactly as litellm produced it, including any
     provider-specific extensions like ``reasoning_content`` or
-    ``thinking_blocks``. The harness stores this dict opaquely.
+    ``thinking_blocks``. The harness stores the message dict opaquely.
+    Usage is normalized to our canonical field names.
     """
     kwargs: dict[str, Any] = {
         "model": model,
@@ -51,13 +71,14 @@ async def call_litellm(
         kwargs.update(extra)
 
     response = await litellm.acompletion(**kwargs)
+    usage = _normalize_usage(dict(response.get("usage") or {}))
     message = response["choices"][0]["message"]
     # litellm returns a Message object that supports model_dump()
     if hasattr(message, "model_dump"):
         result: dict[str, Any] = message.model_dump()
-        return result
+        return result, usage
     if isinstance(message, dict):
-        return message
+        return message, usage
     raise TypeError(f"unexpected message type from litellm.acompletion: {type(message).__name__}")
 
 
@@ -71,9 +92,8 @@ async def stream_litellm(
     extra: dict[str, Any] | None = None,
     pool: asyncpg.Pool[Any],
     session_id: str,
-) -> dict[str, Any]:
-    """Call ``litellm.acompletion`` with streaming, delivering per-token
-    deltas via ``pg_notify`` and returning the assembled assistant message.
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Call ``litellm.acompletion`` with streaming, returning ``(message, usage)``.
 
     Each content delta fires a transient ``pg_notify`` on the session's
     event channel. SSE clients receive these as ``event: delta`` — no DB
@@ -105,12 +125,13 @@ async def stream_litellm(
             await _notify_delta(pool, session_id, content)
 
     assembled: Any = litellm.stream_chunk_builder(chunks=chunks)
+    usage = _normalize_usage(dict(assembled.get("usage") or {}))
     message = assembled["choices"][0]["message"]
     if hasattr(message, "model_dump"):
         result: dict[str, Any] = message.model_dump()
-        return result
+        return result, usage
     if isinstance(message, dict):
-        return message
+        return message, usage
     raise TypeError(f"unexpected message type from stream_chunk_builder: {type(message).__name__}")
 
 

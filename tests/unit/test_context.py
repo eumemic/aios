@@ -145,7 +145,9 @@ class TestBuildMessages:
             _evt(3, "tool", tool_call_id="a", content="result a"),
             _evt(4, "tool", tool_call_id="b", content="result b"),
         ]
-        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
+        msgs = build_messages(
+            events, system_prompt=None, window_min=50_000, window_max=150_000
+        ).messages
         # Order: user, assistant, tool_a, tool_b
         assert msgs[0]["role"] == "user"
         assert msgs[1]["role"] == "assistant"
@@ -161,7 +163,9 @@ class TestBuildMessages:
             _evt(3, "tool", tool_call_id="a", content="result a"),
             # b is still pending
         ]
-        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
+        msgs = build_messages(
+            events, system_prompt=None, window_min=50_000, window_max=150_000
+        ).messages
         assert msgs[2]["tool_call_id"] == "a"
         assert "result a" in msgs[2]["content"]
         # b should be a synthetic pending result
@@ -177,7 +181,9 @@ class TestBuildMessages:
             _evt(3, "user", content="how goes?"),  # user injection before tool completes
             _evt(4, "tool", tool_call_id="x", content="X done"),
         ]
-        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
+        msgs = build_messages(
+            events, system_prompt=None, window_min=50_000, window_max=150_000
+        ).messages
         # Should be: user, assistant+tool_calls, tool_result_x, user_injection
         assert msgs[0]["role"] == "user"
         assert msgs[0]["content"] == "do X"
@@ -189,7 +195,9 @@ class TestBuildMessages:
 
     def test_no_system_prompt_when_none(self) -> None:
         events = [_evt(1, "user", content="hi")]
-        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
+        msgs = build_messages(
+            events, system_prompt=None, window_min=50_000, window_max=150_000
+        ).messages
         assert msgs[0]["role"] == "user"
 
     def test_monotonic_blind_spot_shows_pending_then_injects_real(self) -> None:
@@ -212,13 +220,18 @@ class TestBuildMessages:
         events[4].data["reacting_to"] = 3  # assistant at seq=5 reacted to user at seq=3
         # (tool result at seq=4 has seq > reacting_to=3, so assistant saw pending)
 
-        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
+        msgs = build_messages(
+            events, system_prompt=None, window_min=50_000, window_max=150_000
+        ).messages
 
         # The paired position for bash_1 should show PENDING (not real)
         # because the assistant at seq=5 saw it as pending
-        paired_tool = next(m for m in msgs if m.get("tool_call_id") == "bash_1" and m["role"] == "tool")
-        assert "pending" in paired_tool["content"], \
+        paired_tool = next(
+            m for m in msgs if m.get("tool_call_id") == "bash_1" and m["role"] == "tool"
+        )
+        assert "pending" in paired_tool["content"], (
             "paired position should show pending (what the assistant actually saw)"
+        )
 
         # The stale assistant should appear coherently after the pending result
         stale_asst = next(m for m in msgs if m.get("content") == "still running")
@@ -230,13 +243,13 @@ class TestBuildMessages:
             (m for m in msgs if m["role"] == "user" and "DONE" in m.get("content", "")),
             None,
         )
-        assert injected is not None, \
-            "real tool result should be injected as a user message"
+        assert injected is not None, "real tool result should be injected as a user message"
         # The injected message should come AFTER the stale assistant
         injected_idx = msgs.index(injected)
         stale_idx = msgs.index(stale_asst)
-        assert injected_idx > stale_idx, \
+        assert injected_idx > stale_idx, (
             "injected result should come after the stale assistant response"
+        )
 
     def test_monotonic_no_rewrite_when_result_seen_as_real(self) -> None:
         """When the assistant saw the real result (result.seq <= reacting_to),
@@ -250,7 +263,9 @@ class TestBuildMessages:
         events[1].data["reacting_to"] = 1
         events[3].data["reacting_to"] = 3  # saw tool result at seq=3
 
-        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
+        msgs = build_messages(
+            events, system_prompt=None, window_min=50_000, window_max=150_000
+        ).messages
         # Paired position should show REAL result (not pending)
         paired_tool = next(m for m in msgs if m.get("tool_call_id") == "a")
         assert "done" in paired_tool["content"]
@@ -268,7 +283,9 @@ class TestBuildMessages:
             _evt(5, "tool", tool_call_id="b", content="done b"),
             _evt(6, "assistant", content="all done"),
         ]
-        msgs = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000).messages
+        msgs = build_messages(
+            events, system_prompt=None, window_min=50_000, window_max=150_000
+        ).messages
         roles = [m["role"] for m in msgs]
         assert roles == ["user", "assistant", "tool", "assistant", "tool", "assistant"]
 
@@ -288,9 +305,7 @@ class TestBuildMessages:
         # With a very small window, the oldest messages get dropped.
         # window_min=20, window_max=60 means the window holds ~60 tokens.
         # The total is ~200+ tokens, so the front gets cut.
-        msgs = build_messages(
-            events, system_prompt=None, window_min=20, window_max=60
-        ).messages
+        msgs = build_messages(events, system_prompt=None, window_min=20, window_max=60).messages
         # The window should NOT start with an orphan tool result.
         # It should start with a user or assistant (no tool_calls) message.
         if msgs:
@@ -301,9 +316,7 @@ class TestBuildMessages:
             # If it starts with assistant, it should not have unmatched tool_calls
             if first_role == "assistant" and msgs[0].get("tool_calls"):
                 tc_ids = {tc["id"] for tc in msgs[0]["tool_calls"]}
-                result_ids = {
-                    m["tool_call_id"] for m in msgs[1:] if m.get("role") == "tool"
-                }
+                result_ids = {m["tool_call_id"] for m in msgs[1:] if m.get("role") == "tool"}
                 assert tc_ids <= result_ids, "leading assistant has unmatched tool_calls"
 
     def test_window_prunes_partial_assistant_tool_group(self) -> None:
@@ -320,9 +333,7 @@ class TestBuildMessages:
         events[0].data["reacting_to"] = 0
         events[4].data["reacting_to"] = 3
         # Tiny window forces the front to be dropped
-        msgs = build_messages(
-            events, system_prompt=None, window_min=10, window_max=30
-        ).messages
+        msgs = build_messages(events, system_prompt=None, window_min=10, window_max=30).messages
         # Should not start with orphan tool results or incomplete assistant groups
         for m in msgs:
             if m.get("role") == "tool":
@@ -330,7 +341,7 @@ class TestBuildMessages:
                 tc_id = m.get("tool_call_id")
                 has_parent = any(
                     tc_id in {tc["id"] for tc in prior.get("tool_calls") or []}
-                    for prior in msgs[:msgs.index(m)]
+                    for prior in msgs[: msgs.index(m)]
                     if prior.get("role") == "assistant"
                 )
                 assert has_parent, f"orphan tool result for {tc_id}"

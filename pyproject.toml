@@ -34,7 +34,7 @@ dependencies = [
     "structlog>=24.4",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

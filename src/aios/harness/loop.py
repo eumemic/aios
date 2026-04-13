@@ -85,9 +85,17 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     # Mark session as running.
     await sessions_service.set_session_status(pool, session_id, "running")
 
+    # Emit span start so consumers can measure inference latency.
+    start_event = await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {"event": "model_request_start"},
+    )
+
     # Call the model exactly once (streaming — deltas go to SSE via pg_notify).
     try:
-        assistant_msg = await stream_litellm(
+        assistant_msg, usage = await stream_litellm(
             model=agent.model,
             messages=ctx.messages,
             tools=tools if tools else None,
@@ -97,11 +105,45 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         )
     except Exception:
         log.exception("step.litellm_failed", session_id=session_id)
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {
+                "event": "model_request_end",
+                "model_request_start_id": start_event.id,
+                "is_error": True,
+                "model_usage": {},
+            },
+        )
         await sessions_service.set_session_status(
             pool, session_id, "idle", stop_reason={"type": "error"}
         )
         await _append_lifecycle(pool, session_id, "turn_ended", "idle", "error")
         raise
+
+    # Emit span end with per-request token usage.
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {
+            "event": "model_request_end",
+            "model_request_start_id": start_event.id,
+            "is_error": False,
+            "model_usage": usage,
+        },
+    )
+
+    # Increment cumulative session-level token counters.
+    await sessions_service.increment_usage(
+        pool,
+        session_id,
+        input_tokens=usage.get("input_tokens", 0),
+        output_tokens=usage.get("output_tokens", 0),
+        cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
+        cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+    )
 
     # Inject reacting_to so should_call_model knows what this response
     # was based on. This is the seq of the latest user/tool event in the
