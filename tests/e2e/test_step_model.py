@@ -511,7 +511,9 @@ class TestCancelContract:
 
 @needs_docker
 class TestReactingTo:
-    async def test_tool_completing_during_inference_triggers_followup(self, harness: Harness) -> None:
+    async def test_tool_completing_during_inference_triggers_followup(
+        self, harness: Harness
+    ) -> None:
         """When a tool result arrives DURING inference (after context was built
         but before the model responds), the model's response is based on a stale
         "pending" snapshot. A follow-up step must fire so the model sees the real
@@ -605,6 +607,131 @@ class TestReactingTo:
         tool_result = next(e for e in events if e.data.get("role") == "tool")
         # reacting_to should be >= the tool result's seq (model saw the real result)
         assert last_asst.data["reacting_to"] >= tool_result.seq
+
+
+# ─── streaming inference ────────────────────────────────────────────────────
+
+
+@needs_docker
+class TestStreamingInference:
+    async def test_streaming_basic_chat(self, harness: Harness) -> None:
+        """Streaming produces the same final result as non-streaming."""
+        harness.script_model([assistant("Hello, world!")])
+        session = await harness.start("Say hello")
+        await harness.run_until_idle(session.id)
+
+        events = await harness.events(session.id)
+        assert last_assistant_content(events) == "Hello, world!"
+
+        s = await harness.session(session.id)
+        assert s.status == "idle"
+        assert s.stop_reason == "end_turn"
+
+        # Verify stream=True was passed to litellm
+        assert harness.model_calls[0].get("stream") is True
+
+    async def test_streaming_tool_round_trip(self, harness: Harness) -> None:
+        """Streaming works correctly with tool calls."""
+
+        async def echo_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return {"output": arguments.get("text", "")}
+
+        harness.register_tool("echo", echo_handler)
+        harness.script_model(
+            [
+                assistant(tool_calls=[tool_call("echo", {"text": "streamed"})]),
+                assistant("Echo result: streamed"),
+            ]
+        )
+        session = await harness.start("echo streamed", tools=[])
+        await harness.run_until_idle(session.id)
+
+        events = await harness.events(session.id)
+        tr = first_tool_result(events)
+        assert '"streamed"' in tr["content"]
+        assert last_assistant_content(events) == "Echo result: streamed"
+
+        # Both calls should be streaming
+        assert all(c.get("stream") is True for c in harness.model_calls)
+
+    async def test_streaming_deltas_via_pg_notify(self, harness: Harness) -> None:
+        """Delta notifications are sent via pg_notify during streaming."""
+        import json
+
+        from aios.db.listen import listen_for_events
+
+        harness.script_model([assistant("ABCDEFGH")])
+        session = await harness.start("say abcdefgh")
+
+        # Open a listener BEFORE running the step so we catch deltas
+        from aios.config import get_settings
+
+        settings = get_settings()
+        async with listen_for_events(settings.db_url, session.id) as queue:
+            await harness.run_until_idle(session.id)
+
+            # Drain the queue — collect both deltas and event notifications
+            deltas: list[str] = []
+            event_ids: list[str] = []
+            while not queue.empty():
+                payload = queue.get_nowait()
+                if payload.startswith("{"):
+                    data = json.loads(payload)
+                    deltas.append(data["delta"])
+                else:
+                    event_ids.append(payload)
+
+        # Deltas should reconstruct the original content
+        assert "".join(deltas) == "ABCDEFGH"
+        # Event notifications should also have arrived (for persisted events)
+        assert len(event_ids) > 0
+
+    async def test_streaming_reacting_to_preserved(self, harness: Harness) -> None:
+        """reacting_to field is set correctly on streamed responses."""
+        harness.script_model([assistant("Streamed response")])
+        session = await harness.start("hello")
+        await harness.run_until_idle(session.id)
+
+        events = await harness.events(session.id)
+        asst = next(e for e in events if e.data.get("role") == "assistant")
+        assert "reacting_to" in asst.data
+        user_seq = next(e.seq for e in events if e.data.get("role") == "user")
+        assert asst.data["reacting_to"] == user_seq
+
+    async def test_streaming_empty_content_chunks_skipped(self, harness: Harness) -> None:
+        """Tool-only responses (no text content) don't produce deltas."""
+        import json
+
+        from aios.config import get_settings
+        from aios.db.listen import listen_for_events
+
+        async def noop_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return {"ok": True}
+
+        harness.register_tool("noop", noop_handler)
+        harness.script_model(
+            [
+                # First response: only tool calls, no text content
+                assistant(tool_calls=[tool_call("noop", {})]),
+                assistant("Done."),
+            ]
+        )
+        session = await harness.start("do noop", tools=[])
+
+        settings = get_settings()
+        async with listen_for_events(settings.db_url, session.id) as queue:
+            await harness.run_until_idle(session.id)
+
+            deltas: list[str] = []
+            while not queue.empty():
+                payload = queue.get_nowait()
+                if payload.startswith("{"):
+                    data = json.loads(payload)
+                    if "delta" in data:
+                        deltas.append(data["delta"])
+
+        # Only the second response ("Done.") should produce deltas
+        assert "".join(deltas) == "Done."
 
 
 # ─── full tier (with Docker) ─────────────────────────────────────────────────

@@ -98,6 +98,53 @@ class _FakeMessage:
         return dict(self._data)
 
 
+# ─── fake streaming response ────────────────────────────────────────────────
+
+
+class _FakeDelta:
+    """Mimics litellm's streaming Delta object."""
+
+    def __init__(
+        self,
+        content: str | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+class _FakeStreamChoice:
+    """Mimics a streaming chunk's choices[0]."""
+
+    def __init__(self, delta: _FakeDelta) -> None:
+        self.delta = delta
+
+
+class _FakeChunk:
+    """Mimics a single streaming chunk from litellm."""
+
+    def __init__(self, delta: _FakeDelta) -> None:
+        self.choices = [_FakeStreamChoice(delta)]
+
+
+class _FakeStream:
+    """Async iterator mimicking litellm's CustomStreamWrapper."""
+
+    def __init__(self, chunks: list[_FakeChunk]) -> None:
+        self._chunks = chunks
+        self._idx = 0
+
+    def __aiter__(self) -> _FakeStream:
+        return self
+
+    async def __anext__(self) -> _FakeChunk:
+        if self._idx >= len(self._chunks):
+            raise StopAsyncIteration
+        chunk = self._chunks[self._idx]
+        self._idx += 1
+        return chunk
+
+
 # ─── assertion helpers ───────────────────────────────────────────────────────
 
 
@@ -139,6 +186,7 @@ class Harness:
         self._response_idx = 0
         self._env_id: str | None = None
         self.model_calls: list[dict[str, Any]] = []  # captured kwargs from each litellm call
+        self._last_streaming_response: dict[str, Any] | None = None
 
     # ── scripting ────────────────────────────────────────────────────────
 
@@ -267,3 +315,46 @@ class Harness:
         resp = self._responses[self._response_idx]
         self._response_idx += 1
         return {"choices": [{"message": _FakeMessage(resp)}]}
+
+    def _pop_streaming_response(self, **kwargs: Any) -> _FakeStream:
+        """Return a fake async stream wrapping the next scripted response.
+
+        Splits text content into small chunks for realistic streaming
+        simulation. Stores the full response for ``_build_chunk_response``
+        to return when ``stream_chunk_builder`` is called.
+        """
+        self.model_calls.append(kwargs)
+        if self._response_idx >= len(self._responses):
+            raise AssertionError(
+                f"model called {self._response_idx + 1} times but only "
+                f"{len(self._responses)} responses were scripted"
+            )
+        resp = self._responses[self._response_idx]
+        self._response_idx += 1
+        self._last_streaming_response = resp
+
+        chunks: list[_FakeChunk] = []
+        content = resp.get("content", "")
+        if content:
+            # Split into 4-char chunks for realistic streaming
+            for i in range(0, len(content), 4):
+                chunks.append(_FakeChunk(_FakeDelta(content=content[i : i + 4])))
+
+        tool_calls = resp.get("tool_calls")
+        if tool_calls:
+            chunks.append(_FakeChunk(_FakeDelta(tool_calls=tool_calls)))
+
+        # Always emit at least one chunk (finish-reason chunk)
+        if not chunks:
+            chunks.append(_FakeChunk(_FakeDelta()))
+
+        return _FakeStream(chunks)
+
+    def _build_chunk_response(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Mock for ``litellm.stream_chunk_builder``.
+
+        Returns the full scripted response that was stored by the most
+        recent ``_pop_streaming_response`` call.
+        """
+        assert self._last_streaming_response is not None
+        return {"choices": [{"message": _FakeMessage(self._last_streaming_response)}]}

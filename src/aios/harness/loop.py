@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from aios.harness import runtime
-from aios.harness.completion import call_litellm
+from aios.harness.completion import stream_litellm
 from aios.harness.context import build_messages, should_call_model
 from aios.harness.tool_dispatch import launch_tool_calls
 from aios.logging import get_logger
@@ -75,13 +75,15 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     # Mark session as running.
     await sessions_service.set_session_status(pool, session_id, "running")
 
-    # Call the model exactly once.
+    # Call the model exactly once (streaming — deltas go to SSE via pg_notify).
     try:
-        assistant_msg = await call_litellm(
+        assistant_msg = await stream_litellm(
             model=agent.model,
             messages=ctx.messages,
             tools=tools if tools else None,
             api_key=api_key,
+            pool=pool,
+            session_id=session_id,
         )
     except Exception:
         log.exception("step.litellm_failed", session_id=session_id)

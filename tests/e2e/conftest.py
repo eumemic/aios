@@ -61,14 +61,20 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     h = Harness(pool, task_reg)
 
     # Install mocks at fixture scope so they cover fire-and-forget tool tasks
-    async def _fake_acompletion(**kwargs: Any) -> dict[str, Any]:
+    async def _fake_acompletion(**kwargs: Any) -> Any:
+        if kwargs.get("stream"):
+            return h._pop_streaming_response(**kwargs)
         return h._pop_response(**kwargs)
+
+    def _fake_chunk_builder(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return h._build_chunk_response(*args, **kwargs)
 
     async def _noop_defer_wake(session_id: str, *, cause: str = "message") -> None:
         pass
 
     with (
         mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),
+        mock.patch("aios.harness.completion.litellm.stream_chunk_builder", _fake_chunk_builder),
         mock.patch("aios.harness.tool_dispatch.defer_wake", _noop_defer_wake),
     ):
         yield h
@@ -120,14 +126,20 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     tool_snapshot = dict(registry._tools)
     h = Harness(pool, task_reg)
 
-    async def _fake_acompletion(**kwargs: Any) -> dict[str, Any]:
+    async def _fake_acompletion(**kwargs: Any) -> Any:
+        if kwargs.get("stream"):
+            return h._pop_streaming_response(**kwargs)
         return h._pop_response(**kwargs)
+
+    def _fake_chunk_builder(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return h._build_chunk_response(*args, **kwargs)
 
     async def _noop_defer_wake(session_id: str, *, cause: str = "message") -> None:
         pass
 
     with (
         mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),
+        mock.patch("aios.harness.completion.litellm.stream_chunk_builder", _fake_chunk_builder),
         mock.patch("aios.harness.tool_dispatch.defer_wake", _noop_defer_wake),
     ):
         yield h

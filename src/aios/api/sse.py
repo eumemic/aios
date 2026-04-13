@@ -102,19 +102,28 @@ async def sse_event_stream(
         # committed before the SELECT's snapshot) AND the queue (because
         # NOTIFY fired during the SELECT).
         while True:
-            event_id = await queue.get()
+            notification = await queue.get()
+
+            # Transient streaming deltas (no DB row). The payload is
+            # JSON like {"delta":"He"} — distinguishable from event IDs
+            # (which start with "evt_") by the leading "{".
+            if notification.startswith("{"):
+                yield ServerSentEvent(data=notification, event="delta")
+                continue
+
+            event_id = notification
             async with pool.acquire() as conn:
                 row = await conn.fetchrow("SELECT * FROM events WHERE id = $1", event_id)
             if row is None:
                 # Shouldn't happen — events are immutable. Log and skip.
                 log.warning("sse.event_not_found", event_id=event_id)
                 continue
-            payload = _serialize_event(row)
-            if payload["seq"] <= cursor:
+            event_data = _serialize_event(row)
+            if event_data["seq"] <= cursor:
                 continue
-            cursor = payload["seq"]
-            yield _event_to_sse(payload)
-            if _is_terminal(payload):
+            cursor = event_data["seq"]
+            yield _event_to_sse(event_data)
+            if _is_terminal(event_data):
                 yield ServerSentEvent(data="{}", event="done")
                 return
 
