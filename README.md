@@ -4,6 +4,16 @@ An open-source agent runtime inspired by [Anthropic's Managed Agents](https://ww
 
 **The model behind an agent is just a URL.** The agent's `model` field is a LiteLLM-compatible string — `anthropic/claude-opus-4-6`, `ollama/llama3.3`, `openrouter/moonshotai/kimi-k2.5`, anything LiteLLM speaks. The harness POSTs chat-completions requests; what's behind that URL is somebody else's problem.
 
+## Design philosophy
+
+aios is built for **long-lived assistant entities** — sessions that span months, not minutes. This drives three architectural choices that differ from Anthropic's Managed Agents:
+
+**Every tool is implicitly async.** The step function calls the model once, kicks off tool calls as fire-and-forget async tasks, and returns. The model stays responsive to user messages even while tools are running. No other agent harness does this — most block on tool execution.
+
+**No context compaction.** Most agent frameworks summarize old messages with an LLM when the context window fills up. This destroys information and costs tokens. aios uses deterministic chunked windowing that preserves prompt cache stability — the prefix stays constant within a chunk, so you get cache hits, not cache misses. When the agent needs old context, it queries its own event log via SQL (`search_events` tool) — exact keyword search, time ranges, aggregations. No information loss.
+
+**Sessions outlive their agents.** Sessions can be updated to point at a different agent, a different model, or a newer version — without losing conversation history. Upgrade the brain without losing the memory.
+
 ## Architecture
 
 ```
@@ -37,7 +47,7 @@ The harness is split into a stateless **API server** (`aios api`) and one or mor
 
 ## Features
 
-### Tools (8 built-in + custom + MCP)
+### Tools (9 built-in + custom + MCP)
 
 | Tool | Description |
 |---|---|
@@ -49,6 +59,7 @@ The harness is split into a stateless **API server** (`aios api`) and one or mor
 | `grep` | Content search with output modes, context, multiline regex (ripgrep) |
 | `web_fetch` | Fetch URLs and return markdown (Tavily) |
 | `web_search` | Search the web (Tavily) |
+| `search_events` | SQL search over the session's own event log (read-only, scoped) |
 | **Custom tools** | Client-executed tools with `requires_action` flow |
 | **MCP tools** | Connect remote MCP servers, auto-discover tools |
 
@@ -189,6 +200,8 @@ aios shares the core architecture from [the Managed Agents blog post](https://ww
 
 - **Mutable sessions.** Sessions can be updated after creation (`PUT /v1/sessions/:id`) to change the agent binding, version, title, metadata, or vault bindings. Anthropic sessions are immutable after creation.
 - **Auto-updating sessions.** By default (`agent_version: null`), sessions always use the latest agent config — updating an agent immediately affects all unpinned sessions on the next step. Anthropic always pins at creation time.
+- **No context compaction.** Anthropic uses LLM-based summarization to fit long conversations into the context window. aios uses deterministic chunked windowing — no information is destroyed, prompt cache stays stable. The `search_events` tool gives the agent SQL access to its full session history when it needs to look back.
+- **Async tool dispatch.** Tools run as fire-and-forget async tasks. The model can receive new user messages and respond while tools are still executing. Anthropic's harness blocks on tool completion.
 - **Model-agnostic.** The `model` field is any LiteLLM URL, not limited to Claude. Tested with Ollama (local), OpenRouter, Moonshot, and Anthropic models.
 - **OpenAI wire format.** Events in the session log and streaming use OpenAI chat-completions message format (roles: system/user/assistant/tool, `tool_calls` array), not Anthropic's Messages API format. LiteLLM translates at the provider boundary.
 
