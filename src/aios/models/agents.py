@@ -1,4 +1,4 @@
-"""Agent resource: model + system prompt + tools + credential reference.
+"""Agent resource: model + system prompt + tools.
 
 Agents are versioned: every update creates a new immutable version. The
 ``agents`` table holds the latest config; the ``agent_versions`` table stores
@@ -57,10 +57,6 @@ class AgentCreate(BaseModel):
     )
     system: str = Field(default="", description="System prompt; empty by default.")
     tools: list[ToolSpec] = Field(default_factory=list)
-    credential_id: str | None = Field(
-        default=None,
-        description="Optional credential id used when calling the model.",
-    )
     description: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     window_min: int = Field(default=50_000, ge=1)
@@ -83,7 +79,6 @@ class AgentUpdate(BaseModel):
     model: str | None = Field(default=None, min_length=1)
     system: str | None = None
     tools: list[ToolSpec] | None = None
-    credential_id: str | None = None
     description: str | None = None
     metadata: dict[str, Any] | None = None
     window_min: int | None = Field(default=None, ge=1)
@@ -99,7 +94,6 @@ class Agent(BaseModel):
     model: str
     system: str
     tools: list[ToolSpec]
-    credential_id: str | None
     description: str | None
     metadata: dict[str, Any]
     window_min: int
@@ -117,7 +111,6 @@ class AgentVersion(BaseModel):
     model: str
     system: str
     tools: list[ToolSpec]
-    credential_id: str | None
     window_min: int
     window_max: int
     created_at: datetime

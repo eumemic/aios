@@ -4,7 +4,7 @@
 
 1. Configures structlog
 2. Opens the asyncpg pool
-3. Constructs the libsodium vault
+3. Constructs the libsodium CryptoBox
 4. Creates the SandboxRegistry and TaskRegistry
 5. Stashes globals on :mod:`aios.harness.runtime`
 6. Opens the procrastinate connector
@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import aios.tools  # noqa: F401  — side-effect: register built-in tools
 from aios.config import get_settings
-from aios.crypto.vault import Vault
+from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.harness import runtime
@@ -45,12 +45,12 @@ async def worker_main() -> None:
     log = get_logger("aios.worker")
 
     pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
-    vault = Vault.from_base64(settings.vault_key.get_secret_value())
+    crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
     sandbox_registry = SandboxRegistry()
     task_registry = TaskRegistry()
 
     runtime.pool = pool
-    runtime.vault = vault
+    runtime.crypto_box = crypto_box
     runtime.worker_id = _make_worker_id()
     runtime.sandbox_registry = sandbox_registry
     runtime.task_registry = task_registry
