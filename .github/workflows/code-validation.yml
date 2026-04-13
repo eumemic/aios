@@ -51,5 +51,8 @@ jobs:
       - name: Unit tests
         run: uv run pytest tests/unit -q
 
+      - name: Build sandbox image
+        run: docker build -t aios-sandbox:latest -f docker/Dockerfile.sandbox docker/
+
       - name: E2E tests
         run: uv run pytest tests/e2e -q
