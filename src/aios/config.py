@@ -103,6 +103,12 @@ class Settings(BaseSettings):
     api_host: str = Field(default="127.0.0.1")
     api_port: int = Field(default=8080, ge=1, le=65535)
 
+    # ── web tools ──────────────────────────────────────────────────────────
+    tavily_api_key: str | None = Field(
+        default=None,
+        description="Tavily API key for web_fetch and web_search tools.",
+    )
+
     # ── observability ──────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")
 

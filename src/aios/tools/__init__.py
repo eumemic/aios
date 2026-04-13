@@ -25,4 +25,6 @@ from aios.tools import edit as _edit  # noqa: F401
 from aios.tools import glob as _glob  # noqa: F401
 from aios.tools import grep as _grep  # noqa: F401
 from aios.tools import read as _read  # noqa: F401
+from aios.tools import web_fetch as _web_fetch  # noqa: F401
+from aios.tools import web_search as _web_search  # noqa: F401
 from aios.tools import write as _write  # noqa: F401

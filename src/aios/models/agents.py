@@ -14,7 +14,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Built-in tool types. Custom tools use type="custom" with extra fields.
-BuiltinToolType = Literal["bash", "read", "write", "edit", "glob", "grep", "cancel"]
+BuiltinToolType = Literal[
+    "bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "cancel"
+]
 
 
 class ToolSpec(BaseModel):
