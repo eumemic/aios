@@ -158,6 +158,27 @@ async def set_session_status(
         await queries.set_session_status(conn, session_id, status, stop_reason)
 
 
+async def increment_usage(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+) -> None:
+    """Atomically add token counts to a session's cumulative usage."""
+    async with pool.acquire() as conn:
+        await queries.increment_session_usage(
+            conn,
+            session_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_input_tokens=cache_read_input_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+        )
+
+
 async def archive_session(pool: asyncpg.Pool[Any], session_id: str) -> Session:
     async with pool.acquire() as conn:
         return await queries.archive_session(conn, session_id)

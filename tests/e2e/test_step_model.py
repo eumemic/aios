@@ -1479,6 +1479,94 @@ class TestPermissionPolicies:
 
 @needs_docker
 @pytest.mark.e2e
+# ─── usage and span events ──────────────────────────────────────────────────
+
+
+@needs_docker
+class TestUsageTracking:
+    async def test_basic_chat_has_usage(self, harness: Harness) -> None:
+        """After one turn, session.usage has non-zero token counts."""
+        harness.script_model([assistant("Hello!")])
+        session = await harness.start("Hi")
+        await harness.run_until_idle(session.id)
+
+        s = await harness.session(session.id)
+        assert s.usage.input_tokens > 0
+        assert s.usage.output_tokens > 0
+
+    async def test_usage_accumulates_across_steps(self, harness: Harness) -> None:
+        """Two model calls should produce higher totals than one."""
+
+        async def noop_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return {"ok": True}
+
+        harness.register_tool("noop", noop_handler)
+        harness.script_model(
+            [
+                assistant(tool_calls=[tool_call("noop", {})]),
+                assistant("Done."),
+            ]
+        )
+        session = await harness.start("do something", tools=[])
+        await harness.run_until_idle(session.id)
+
+        s = await harness.session(session.id)
+        # Two model calls x 10 prompt_tokens each = 20
+        assert s.usage.input_tokens == 20
+        assert s.usage.output_tokens == 10
+
+    async def test_span_events_emitted(self, harness: Harness) -> None:
+        """A single model call emits paired span start + end events."""
+        harness.script_model([assistant("Hello!")])
+        session = await harness.start("Hi")
+        await harness.run_until_idle(session.id)
+
+        all_evts = await harness.all_events(session.id)
+        spans = [e for e in all_evts if e.kind == "span"]
+        assert len(spans) == 2
+
+        start = spans[0]
+        end = spans[1]
+        assert start.data["event"] == "model_request_start"
+        assert end.data["event"] == "model_request_end"
+        assert end.data["model_request_start_id"] == start.id
+        assert end.data["is_error"] is False
+        assert end.data["model_usage"]["input_tokens"] == 10
+        assert end.data["model_usage"]["output_tokens"] == 5
+
+    async def test_span_events_for_multi_step(self, harness: Harness) -> None:
+        """Two model calls produce two span pairs."""
+
+        async def noop_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return {"ok": True}
+
+        harness.register_tool("noop", noop_handler)
+        harness.script_model(
+            [
+                assistant(tool_calls=[tool_call("noop", {})]),
+                assistant("Done."),
+            ]
+        )
+        session = await harness.start("do something", tools=[])
+        await harness.run_until_idle(session.id)
+
+        all_evts = await harness.all_events(session.id)
+        spans = [e for e in all_evts if e.kind == "span"]
+        assert len(spans) == 4  # 2 start + 2 end
+
+        starts = [s for s in spans if s.data["event"] == "model_request_start"]
+        ends = [s for s in spans if s.data["event"] == "model_request_end"]
+        assert len(starts) == 2
+        assert len(ends) == 2
+
+        # Each end links to its own start
+        assert ends[0].data["model_request_start_id"] == starts[0].id
+        assert ends[1].data["model_request_start_id"] == starts[1].id
+
+
+# ─── full tier (needs Docker for containers + testcontainer) ────────────────
+
+
 class TestDockerIntegration:
     async def test_bash_real_container(self, docker_harness: Harness) -> None:
         """Real container, real docker exec."""

@@ -24,7 +24,7 @@ from aios.ids import AGENT, ENVIRONMENT, EVENT, SESSION, VAULT, VAULT_CREDENTIAL
 from aios.models.agents import Agent, AgentVersion, ToolSpec
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
-from aios.models.sessions import Session, SessionStatus
+from aios.models.sessions import Session, SessionStatus, SessionUsage
 from aios.models.vaults import Vault, VaultCredential
 
 # ─── environments ─────────────────────────────────────────────────────────────
@@ -391,6 +391,12 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         status=row["status"],
         stop_reason=stop_reason,
         last_event_seq=row["last_event_seq"],
+        usage=SessionUsage(
+            input_tokens=row["input_tokens"],
+            output_tokens=row["output_tokens"],
+            cache_read_input_tokens=row["cache_read_input_tokens"],
+            cache_creation_input_tokens=row["cache_creation_input_tokens"],
+        ),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -482,6 +488,31 @@ async def set_session_status(
         status,
         stop_json,
         session_id,
+    )
+
+
+async def increment_session_usage(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+) -> None:
+    """Atomically add token counts to a session's cumulative usage."""
+    await conn.execute(
+        "UPDATE sessions SET "
+        "input_tokens = input_tokens + $2, "
+        "output_tokens = output_tokens + $3, "
+        "cache_read_input_tokens = cache_read_input_tokens + $4, "
+        "cache_creation_input_tokens = cache_creation_input_tokens + $5 "
+        "WHERE id = $1",
+        session_id,
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
     )
 
 

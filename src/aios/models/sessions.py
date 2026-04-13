@@ -16,6 +16,15 @@ from pydantic import BaseModel, ConfigDict, Field
 SessionStatus = Literal["running", "idle", "terminated"]
 
 
+class SessionUsage(BaseModel):
+    """Cumulative token usage across all model calls in a session."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+
+
 class SessionCreate(BaseModel):
     """Request body for `POST /v1/sessions`."""
 
@@ -76,6 +85,7 @@ class Session(BaseModel):
     stop_reason: dict[str, Any] | None
     vault_ids: list[str] = Field(default_factory=list)
     last_event_seq: int
+    usage: SessionUsage = Field(default_factory=SessionUsage)
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

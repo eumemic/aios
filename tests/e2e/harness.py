@@ -320,6 +320,10 @@ class Harness:
         """Read all message events for the session."""
         return await sessions_service.read_message_events(self._pool, session_id)
 
+    async def all_events(self, session_id: str) -> list[Event]:
+        """Read all events (all kinds) for the session."""
+        return await sessions_service.read_events(self._pool, session_id, limit=500)
+
     async def session(self, session_id: str) -> Session:
         """Fetch the current session record."""
         return await sessions_service.get_session(self._pool, session_id)
@@ -340,7 +344,10 @@ class Harness:
             )
         resp = self._responses[self._response_idx]
         self._response_idx += 1
-        return {"choices": [{"message": _FakeMessage(resp)}]}
+        return {
+            "choices": [{"message": _FakeMessage(resp)}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
 
     def _pop_streaming_response(self, **kwargs: Any) -> _FakeStream:
         """Return a fake async stream wrapping the next scripted response.
@@ -383,4 +390,7 @@ class Harness:
         recent ``_pop_streaming_response`` call.
         """
         assert self._last_streaming_response is not None
-        return {"choices": [{"message": _FakeMessage(self._last_streaming_response)}]}
+        return {
+            "choices": [{"message": _FakeMessage(self._last_streaming_response)}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
