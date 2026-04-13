@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
 from typing import Any
 
 import asyncpg
@@ -140,9 +139,6 @@ class Harness:
         self._response_idx = 0
         self._env_id: str | None = None
         self.model_calls: list[dict[str, Any]] = []  # captured kwargs from each litellm call
-        self.inference_hook: Callable[..., Any] | None = (
-            None  # async callback(call_index) run during inference
-        )
 
     # ── scripting ────────────────────────────────────────────────────────
 
@@ -256,18 +252,13 @@ class Harness:
 
     # ── internal ─────────────────────────────────────────────────────────
 
-    async def _pop_response(self, **kwargs: Any) -> dict[str, Any]:
+    def _pop_response(self, **kwargs: Any) -> dict[str, Any]:
         """Return the next scripted response wrapped in litellm envelope.
 
-        Records kwargs on ``self.model_calls``. If ``self.inference_hook``
-        is set, calls it with the current call index BEFORE returning —
-        this lets tests simulate work happening "during inference" (e.g.,
-        a tool completing while the model is thinking).
+        Also records the kwargs (including ``messages``) on
+        ``self.model_calls`` for test assertions about context shape.
         """
-        call_index = self._response_idx
         self.model_calls.append(kwargs)
-        if self.inference_hook is not None:
-            await self.inference_hook(call_index)
         if self._response_idx >= len(self._responses):
             raise AssertionError(
                 f"model called {self._response_idx + 1} times but only "

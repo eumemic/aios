@@ -62,7 +62,7 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
 
     # Install mocks at fixture scope so they cover fire-and-forget tool tasks
     async def _fake_acompletion(**kwargs: Any) -> dict[str, Any]:
-        return await h._pop_response(**kwargs)
+        return h._pop_response(**kwargs)
 
     async def _noop_defer_wake(session_id: str, *, cause: str = "message") -> None:
         pass
@@ -121,7 +121,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     h = Harness(pool, task_reg)
 
     async def _fake_acompletion(**kwargs: Any) -> dict[str, Any]:
-        return await h._pop_response(**kwargs)
+        return h._pop_response(**kwargs)
 
     async def _noop_defer_wake(session_id: str, *, cause: str = "message") -> None:
         pass

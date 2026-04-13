@@ -61,14 +61,7 @@ async def _execute_tool_async(
     session_id: str,
     call: dict[str, Any],
 ) -> None:
-    """Execute one tool call: parse, invoke, wait for step, append result, defer wake.
-
-    The "wait for step" gate ensures that tool results are appended AFTER
-    the assistant message from the step that launched them. This preserves
-    perception order in the event log: if a tool completes during inference,
-    the model's response (based on a "pending" snapshot) appears first, and
-    the real tool result appears after — so the next step sees it as new.
-    """
+    """Execute one tool call: parse, invoke, append result, defer wake."""
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
     name = function.get("name") or ""
@@ -76,15 +69,14 @@ async def _execute_tool_async(
 
     bound_log = log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name)
 
-    # This will hold the event data to append after the gate opens.
-    result_data: dict[str, Any] | None = None
-
     try:
         # Parse arguments.
         arguments = _parse_arguments(raw_args)
         if arguments is None:
             bound_log.warning("tool.bad_arguments")
-            result_data = _error_data(call_id, name, "arguments were not valid JSON")
+            await _append_tool_result(
+                pool, session_id, call_id, name, error="arguments were not valid JSON"
+            )
             return
 
         # Look up tool handler.
@@ -92,44 +84,32 @@ async def _execute_tool_async(
             tool = registry.get(name)
         except ToolNotFoundError as err:
             bound_log.warning("tool.not_registered")
-            result_data = _error_data(call_id, name, err.message)
+            await _append_tool_result(pool, session_id, call_id, name, error=err.message)
             return
 
         # Invoke handler.
         result = await tool.handler(session_id, arguments)
         content_str = json.dumps(result, ensure_ascii=False)
         bound_log.info("tool.completed")
-        result_data = {
-            "role": "tool",
-            "tool_call_id": call_id,
-            "name": name,
-            "content": content_str,
-        }
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "message",
+            {"role": "tool", "tool_call_id": call_id, "name": name, "content": content_str},
+        )
 
     except asyncio.CancelledError:
         bound_log.info("tool.cancelled")
-        result_data = _error_data(call_id, name, "cancelled")
+        await _append_tool_result(pool, session_id, call_id, name, error="cancelled")
 
     except Exception as err:
         bound_log.exception("tool.handler_failed")
         _evict_session_container(session_id)
-        result_data = _error_data(call_id, name, f"{type(err).__name__}: {err}")
+        await _append_tool_result(
+            pool, session_id, call_id, name, error=f"{type(err).__name__}: {err}"
+        )
 
     finally:
-        # Wait for the step that launched us to finish appending its
-        # assistant message. If the step already finished, this returns
-        # immediately.
-        from aios.harness.loop import get_step_done_event
-
-        gate = get_step_done_event(session_id)
-        if gate is not None and not gate.is_set():
-            await gate.wait()
-
-        # Append the tool result.
-        if result_data is not None:
-            await sessions_service.append_event(pool, session_id, "message", result_data)
-
-        # Trigger the next step.
         try:
             await defer_wake(session_id, cause="tool_result")
         except Exception:
@@ -147,15 +127,28 @@ def _parse_arguments(raw_args: Any) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _error_data(call_id: str, name: str, error: str) -> dict[str, Any]:
-    """Build an error tool-result data dict (does not append — the finally block does)."""
-    return {
-        "role": "tool",
-        "tool_call_id": call_id,
-        "name": name,
-        "content": json.dumps({"error": error}, ensure_ascii=False),
-        "is_error": True,
-    }
+async def _append_tool_result(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    call_id: str,
+    name: str,
+    *,
+    error: str,
+) -> None:
+    """Append a tool-role error event."""
+    content = json.dumps({"error": error}, ensure_ascii=False)
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "message",
+        {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "name": name,
+            "content": content,
+            "is_error": True,
+        },
+    )
 
 
 def _evict_session_container(session_id: str) -> None:
