@@ -32,6 +32,17 @@ async def list_environments(
         return await queries.list_environments(conn, limit=limit, after=after)
 
 
+async def update_environment(
+    pool: asyncpg.Pool[Any],
+    env_id: str,
+    *,
+    name: str | None = None,
+    config: EnvironmentConfig | None = None,
+) -> Environment:
+    async with pool.acquire() as conn:
+        return await queries.update_environment(conn, env_id, name=name, config=config)
+
+
 async def archive_environment(pool: asyncpg.Pool[Any], env_id: str) -> None:
     async with pool.acquire() as conn:
         await queries.archive_environment(conn, env_id)

@@ -37,6 +37,18 @@ class EnvironmentCreate(BaseModel):
     config: EnvironmentConfig = Field(default_factory=EnvironmentConfig)
 
 
+class EnvironmentUpdate(BaseModel):
+    """Request body for ``PUT /v1/environments/{id}``.
+
+    All fields are optional; omitted fields are preserved.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    config: EnvironmentConfig | None = None
+
+
 class Environment(BaseModel):
     """Read view of an environment."""
 
