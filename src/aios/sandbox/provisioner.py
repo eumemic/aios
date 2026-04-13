@@ -22,9 +22,12 @@ CLI.
 from __future__ import annotations
 
 import asyncio
+import json
+from typing import Any
 
 from aios.config import get_settings
 from aios.logging import get_logger
+from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.sandbox.container import ContainerError, ContainerHandle
 from aios.sandbox.volumes import ensure_workspace_dir
 
@@ -36,6 +39,32 @@ log = get_logger("aios.sandbox.provisioner")
 MANAGED_LABEL_KEY = "aios.managed"
 MANAGED_LABEL_VALUE = "true"
 SESSION_LABEL_KEY = "aios.session_id"
+
+# Well-known hosts for public package registries.  Added to the iptables
+# allowlist when ``allow_package_managers`` is True in limited networking.
+PACKAGE_REGISTRY_HOSTS: frozenset[str] = frozenset(
+    {
+        # Python (pip)
+        "pypi.org",
+        "files.pythonhosted.org",
+        # Node (npm)
+        "registry.npmjs.org",
+        # Rust (cargo)
+        "crates.io",
+        "static.crates.io",
+        # Ruby (gem)
+        "rubygems.org",
+        # Go
+        "proxy.golang.org",
+        "sum.golang.org",
+        # Debian/Ubuntu (apt)
+        "deb.debian.org",
+        "security.debian.org",
+        # Common CDN used by package managers
+        "github.com",
+        "objects.githubusercontent.com",
+    }
+)
 
 
 async def _run_docker(argv: list[str]) -> tuple[int, bytes, bytes]:
@@ -58,6 +87,32 @@ async def _run_docker(argv: list[str]) -> tuple[int, bytes, bytes]:
     return proc.returncode or 0, stdout_bytes, stderr_bytes
 
 
+async def _load_environment_config(session_id: str) -> EnvironmentConfig | None:
+    """Load the environment config for a session from the DB.
+
+    Returns ``None`` if the session or environment doesn't exist (shouldn't
+    happen in normal flow, but callers handle it gracefully).
+    """
+    from aios.harness import runtime
+
+    pool = runtime.require_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT e.config FROM environments e
+            JOIN sessions s ON s.environment_id = e.id
+            WHERE s.id = $1
+            """,
+            session_id,
+        )
+    if row is None:
+        return None
+
+    raw_config: Any = row["config"]
+    config_data = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+    return EnvironmentConfig.model_validate(config_data)
+
+
 async def provision_for_session(session_id: str) -> ContainerHandle:
     """Create a fresh container for ``session_id`` and return a handle.
 
@@ -71,6 +126,11 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
     """
     settings = get_settings()
     workspace_path = ensure_workspace_dir(session_id)
+    env_config = await _load_environment_config(session_id)
+
+    # Determine if the environment uses limited networking.
+    networking = env_config.networking if env_config else None
+    needs_lockdown = isinstance(networking, LimitedNetworking)
 
     argv = [
         "docker",
@@ -89,8 +149,13 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         settings.sandbox_network_mode,
         # Keep stdin open so the container doesn't exit on empty stdin.
         "--interactive",
-        settings.docker_image,
     ]
+
+    # Limited networking needs NET_ADMIN to apply iptables rules.
+    if needs_lockdown:
+        argv.extend(["--cap-add", "NET_ADMIN"])
+
+    argv.append(settings.docker_image)
 
     rc, stdout_bytes, stderr_bytes = await _run_docker(argv)
     if rc != 0:
@@ -109,48 +174,39 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         workspace_path=workspace_path,
     )
 
-    # Install packages from the session's environment config (if any).
-    await _install_packages(handle, session_id)
+    # Install packages while the network is still open.
+    await _install_packages(handle, env_config, session_id)
+
+    # Apply iptables lockdown after packages are installed.
+    if needs_lockdown:
+        assert isinstance(networking, LimitedNetworking)
+        await _apply_network_lockdown(handle, networking, session_id)
 
     log.info(
         "sandbox.provisioned",
         session_id=session_id,
         container_id=container_id[:12],
         workspace_path=str(workspace_path),
+        networking=networking.type if networking else "unrestricted",
     )
 
     return handle
 
 
-async def _install_packages(handle: ContainerHandle, session_id: str) -> None:
-    """Install packages from the session's environment config.
+async def _install_packages(
+    handle: ContainerHandle,
+    env_config: EnvironmentConfig | None,
+    session_id: str,
+) -> None:
+    """Install packages from the environment config.
 
-    Looks up the session → environment → config.packages. If no packages
-    are configured, returns immediately. Failures are logged but don't
-    prevent container use — the model can retry or work around.
+    Failures are logged but don't prevent container use — the model can
+    retry or work around missing packages.
     """
-    from aios.harness import runtime
-
-    pool = runtime.require_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT e.config FROM environments e
-            JOIN sessions s ON s.environment_id = e.id
-            WHERE s.id = $1
-            """,
-            session_id,
-        )
-    if row is None:
+    if env_config is None or not env_config.packages:
         return
 
-    import json
-
-    raw_config = row["config"]
-    config = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
-    packages = config.get("packages")
-    if not packages:
-        return
+    packages = env_config.packages
 
     install_cmds = {
         "apt": "apt-get update -qq && apt-get install -y -qq {}",
@@ -161,12 +217,12 @@ async def _install_packages(handle: ContainerHandle, session_id: str) -> None:
         "go": "go install {}",
     }
 
+    settings = get_settings()
     for manager, cmd_template in install_cmds.items():
         pkg_list = packages.get(manager)
         if not pkg_list:
             continue
         cmd = cmd_template.format(" ".join(pkg_list))
-        settings = get_settings()
         result = await handle.run_command(
             cmd, timeout_seconds=120, max_output_bytes=settings.bash_max_output_bytes
         )
@@ -178,6 +234,90 @@ async def _install_packages(handle: ContainerHandle, session_id: str) -> None:
                 exit_code=result.exit_code,
                 stderr=result.stderr[:500],
             )
+
+
+# ── network lockdown ──────────────────────────────────────────────────────────
+
+
+def build_iptables_script(allowed_hosts: set[str]) -> str:
+    """Build a shell script that restricts outbound traffic via iptables.
+
+    The script allows: loopback, established connections, DNS (port 53),
+    and HTTP/HTTPS (ports 80/443) to the resolved IPs of each allowed
+    host. Everything else is dropped.
+
+    Hostnames are validated at the model layer (alphanumerics, dots, hyphens
+    only) so embedding them in the script is safe.
+    """
+    lines = [
+        "set -e",
+        "",
+        "# Flush existing OUTPUT rules",
+        "iptables -F OUTPUT",
+        "",
+        "# Allow loopback",
+        "iptables -A OUTPUT -o lo -j ACCEPT",
+        "",
+        "# Allow established/related connections",
+        "iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+        "",
+        "# Allow DNS (UDP and TCP port 53)",
+        "iptables -A OUTPUT -p udp --dport 53 -j ACCEPT",
+        "iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT",
+    ]
+
+    for host in sorted(allowed_hosts):
+        lines.append("")
+        lines.append(f"# Allow {host}")
+        lines.append(
+            f"for ip in $(getent ahosts {host} 2>/dev/null | awk '{{print $1}}' | sort -u); do"
+        )
+        lines.append('  iptables -A OUTPUT -d "$ip" -p tcp --dport 80 -j ACCEPT')
+        lines.append('  iptables -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT')
+        lines.append("done")
+
+    lines.append("")
+    lines.append("# Drop everything else")
+    lines.append("iptables -P OUTPUT DROP")
+
+    return "\n".join(lines)
+
+
+async def _apply_network_lockdown(
+    handle: ContainerHandle,
+    networking: LimitedNetworking,
+    session_id: str,
+) -> None:
+    """Apply iptables rules to restrict outbound traffic.
+
+    Called after package installation so that ``pip install`` etc. can
+    reach registries before the lockdown takes effect.  Failures are
+    logged as warnings — the container is still usable, but the model
+    will see connection errors if it tries to reach blocked hosts.
+    """
+    allowed: set[str] = set(networking.allowed_hosts)
+    if networking.allow_package_managers:
+        allowed |= PACKAGE_REGISTRY_HOSTS
+
+    script = build_iptables_script(allowed)
+    settings = get_settings()
+    result = await handle.run_command(
+        script, timeout_seconds=30, max_output_bytes=settings.bash_max_output_bytes
+    )
+
+    if result.exit_code != 0:
+        log.warning(
+            "sandbox.network_lockdown_failed",
+            session_id=session_id,
+            exit_code=result.exit_code,
+            stderr=result.stderr[:500],
+        )
+    else:
+        log.info(
+            "sandbox.network_lockdown_applied",
+            session_id=session_id,
+            allowed_host_count=len(allowed),
+        )
 
 
 async def release(handle: ContainerHandle) -> None:
