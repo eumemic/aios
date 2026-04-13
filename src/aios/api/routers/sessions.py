@@ -26,7 +26,13 @@ from aios.api.sse import sse_event_stream
 from aios.harness.wake import defer_wake
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
-from aios.models.sessions import Session, SessionCreate, SessionUpdate, SessionUserMessage
+from aios.models.sessions import (
+    Session,
+    SessionCreate,
+    SessionInterruptRequest,
+    SessionUpdate,
+    SessionUserMessage,
+)
 from aios.services import sessions as service
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
@@ -118,6 +124,25 @@ async def post_message(
     event = await service.append_user_message(pool, session_id, body.content)
     await defer_wake(session_id, cause="message")
     return event
+
+
+@router.post("/{session_id}/interrupt")
+async def interrupt(
+    session_id: str,
+    body: SessionInterruptRequest,
+    pool: PoolDep,
+    _auth: AuthDep,
+) -> Session:
+    """Interrupt a running session: cancel all in-flight work and idle it."""
+    await service.append_event(pool, session_id, "interrupt", {"reason": body.reason})
+    await service.set_session_status(pool, session_id, "idle", stop_reason="interrupt")
+    await service.append_event(
+        pool,
+        session_id,
+        "lifecycle",
+        {"event": "interrupted", "status": "idle", "stop_reason": "interrupt"},
+    )
+    return await service.get_session(pool, session_id)
 
 
 @router.get("/{session_id}/events")
