@@ -9,6 +9,7 @@ prefix.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -102,7 +103,6 @@ def _extract_skill_metadata(
     entry. Returns ``(directory, name, description, normalized_files)``
     where normalized_files has the directory prefix stripped from paths.
     """
-    # Find SKILL.md entries.
     skill_md_paths = [p for p in files if p.endswith("/SKILL.md") or p == "SKILL.md"]
     if len(skill_md_paths) == 0:
         raise ValidationError(
@@ -117,7 +117,6 @@ def _extract_skill_metadata(
 
     skill_md_path = skill_md_paths[0]
 
-    # Extract directory from path.
     if "/" in skill_md_path:
         directory = skill_md_path.rsplit("/", 1)[0].split("/")[0]
     else:
@@ -126,10 +125,8 @@ def _extract_skill_metadata(
             detail={"path": skill_md_path},
         )
 
-    # Parse frontmatter.
     name, description = parse_skill_md(files[skill_md_path])
 
-    # Normalize file paths: strip the top-level directory prefix.
     normalized: dict[str, str] = {}
     prefix = directory + "/"
     for path, content in files.items():
@@ -222,34 +219,23 @@ async def list_skill_versions(
 # ── agent skill resolution ────────────────────────────────────────────────
 
 
-async def validate_skill_refs(
+async def resolve_skill_refs(
     pool: asyncpg.Pool[Any],
     refs: list[AgentSkillRef],
-) -> None:
-    """Validate that all skill refs point to existing skills/versions.
+) -> list[SkillVersion]:
+    """Resolve skill refs to concrete SkillVersion objects.
 
-    Raises :class:`ValidationError` on the first invalid ref.
+    Also validates existence: raises ``NotFoundError`` if any skill or
+    pinned version doesn't exist. Raises ``ValidationError`` if the
+    count exceeds ``MAX_SKILLS_PER_AGENT``.
     """
+    if not refs:
+        return []
     if len(refs) > MAX_SKILLS_PER_AGENT:
         raise ValidationError(
             f"at most {MAX_SKILLS_PER_AGENT} skills per agent",
             detail={"count": len(refs)},
         )
-    async with pool.acquire() as conn:
-        for ref in refs:
-            if ref.version is not None:
-                await queries.get_skill_version(conn, ref.skill_id, ref.version)
-            else:
-                await queries.get_skill(conn, ref.skill_id)
-
-
-async def resolve_skill_refs(
-    pool: asyncpg.Pool[Any],
-    refs: list[AgentSkillRef],
-) -> list[SkillVersion]:
-    """Resolve skill refs to concrete SkillVersion objects."""
-    if not refs:
-        return []
     async with pool.acquire() as conn:
         return await queries.resolve_skill_refs(conn, refs)
 
@@ -263,8 +249,6 @@ def serialize_skills_for_snapshot(
     Replaces null versions with the resolved concrete version numbers
     so the snapshot is fully deterministic.
     """
-    import json
-
     snapshot: list[dict[str, Any]] = []
     for ref, sv in zip(refs, resolved, strict=True):
         snapshot.append({"skill_id": ref.skill_id, "version": sv.version})

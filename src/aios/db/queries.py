@@ -317,18 +317,12 @@ async def update_agent(
     new_model = model if model is not None else current.model
     new_system = system if system is not None else current.system
     new_tools = tools if tools is not None else current.tools
-    new_skills_json = (
-        skills_json
-        if skills_json is not None
-        else json.dumps([s.model_dump() for s in current.skills])
-    )
+    cur_skills_json = json.dumps([s.model_dump() for s in current.skills])
+    new_skills_json = skills_json if skills_json is not None else cur_skills_json
     new_desc = description if description is not None else current.description
     new_meta = metadata if metadata is not None else current.metadata
     new_wmin = window_min if window_min is not None else current.window_min
     new_wmax = window_max if window_max is not None else current.window_max
-
-    # No-op detection.
-    cur_skills_json = json.dumps([s.model_dump() for s in current.skills])
     if (
         new_name == current.name
         and new_model == current.model

@@ -38,10 +38,7 @@ async def create_agent(
             detail={"window_min": window_min, "window_max": window_max},
         )
     skill_refs = skills or []
-    if skill_refs:
-        await skills_service.validate_skill_refs(pool, skill_refs)
-    # Resolve versions for the snapshot (null → concrete latest).
-    resolved = await skills_service.resolve_skill_refs(pool, skill_refs) if skill_refs else []
+    resolved = await skills_service.resolve_skill_refs(pool, skill_refs)
     snapshot_json = skills_service.serialize_skills_for_snapshot(skill_refs, resolved)
     async with pool.acquire() as conn:
         return await queries.insert_agent(
@@ -92,8 +89,7 @@ async def update_agent(
 ) -> Agent:
     skills_json_str: str | None = None
     if skills is not None:
-        await skills_service.validate_skill_refs(pool, skills)
-        resolved = await skills_service.resolve_skill_refs(pool, skills) if skills else []
+        resolved = await skills_service.resolve_skill_refs(pool, skills)
         skills_json_str = skills_service.serialize_skills_for_snapshot(skills, resolved)
     async with pool.acquire() as conn:
         return await queries.update_agent(

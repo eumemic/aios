@@ -249,4 +249,4 @@ class TestAgentSkills:
             refs.append(AgentSkillRef(skill_id=s.id))
 
         with pytest.raises(ValidationError, match="20"):
-            await skills_svc.validate_skill_refs(pool, refs)
+            await skills_svc.resolve_skill_refs(pool, refs)
