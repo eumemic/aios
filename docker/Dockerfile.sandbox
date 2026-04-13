@@ -24,12 +24,16 @@ FROM python:3.13-slim-bookworm
 
 # Install standard tools. Keep this list small; aios is opinionated about
 # what lives in the sandbox.
+# iptables is required for environments with "limited" networking mode.
+# If you customize the sandbox image and only use unrestricted networking,
+# you can omit it.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
         coreutils \
         curl \
         git \
+        iptables \
         ripgrep \
  && rm -rf /var/lib/apt/lists/*
 

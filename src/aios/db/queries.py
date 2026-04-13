@@ -136,6 +136,25 @@ async def update_environment(
     return _row_to_environment(row)
 
 
+async def get_environment_config_for_session(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> EnvironmentConfig | None:
+    """Return the environment config for a session, or None if not found."""
+    row = await conn.fetchrow(
+        """
+        SELECT e.config FROM environments e
+        JOIN sessions s ON s.environment_id = e.id
+        WHERE s.id = $1
+        """,
+        session_id,
+    )
+    if row is None:
+        return None
+    raw_config = row["config"]
+    config_data = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+    return EnvironmentConfig.model_validate(config_data)
+
+
 # ─── agents ───────────────────────────────────────────────────────────────────
 
 
