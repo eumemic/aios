@@ -41,6 +41,10 @@ class SessionCreate(BaseModel):
     )
     title: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    vault_ids: list[str] = Field(
+        default_factory=list,
+        description="Vault ids to bind to this session for MCP credential resolution.",
+    )
     initial_message: str | None = Field(
         default=None,
         description=(
@@ -65,6 +69,7 @@ class SessionUpdate(BaseModel):
     agent_version: int | None = None
     title: str | None = None
     metadata: dict[str, Any] | None = None
+    vault_ids: list[str] | None = None
 
 
 class Session(BaseModel):
@@ -78,6 +83,7 @@ class Session(BaseModel):
     metadata: dict[str, Any]
     status: SessionStatus
     stop_reason: dict[str, Any] | None
+    vault_ids: list[str] = Field(default_factory=list)
     last_event_seq: int
     usage: SessionUsage = Field(default_factory=SessionUsage)
     created_at: datetime
@@ -110,3 +116,22 @@ class ToolResultRequest(BaseModel):
     tool_call_id: str = Field(description="The tool_call_id from the assistant's tool_calls.")
     content: str = Field(description="The result of executing the tool.")
     is_error: bool = Field(default=False, description="True if the tool execution failed.")
+
+
+class ToolConfirmationRequest(BaseModel):
+    """Request body for ``POST /v1/sessions/{id}/tool-confirmations``.
+
+    Used for built-in tools with ``permission: "always_ask"``. The client
+    inspects the pending tool call and either allows it (the worker will
+    execute it) or denies it (the model receives an error with the deny
+    message).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call_id: str = Field(description="The tool_call_id to confirm or deny.")
+    result: Literal["allow", "deny"]
+    deny_message: str | None = Field(
+        default=None,
+        description="When result='deny', an optional message explaining why. Shown to the model.",
+    )

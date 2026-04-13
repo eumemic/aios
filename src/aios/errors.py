@@ -75,14 +75,14 @@ class ForbiddenError(AiosError):
     status_code = 403
 
 
-class CredentialDecryptError(AiosError):
-    """Raised when the vault cannot decrypt a stored credential.
+class CryptoDecryptError(AiosError):
+    """Raised when the CryptoBox cannot decrypt a stored ciphertext.
 
-    Almost always indicates the vault key has rotated without re-encrypting
+    Almost always indicates the master key has rotated without re-encrypting
     existing rows, or the row is corrupt.
     """
 
-    error_type = "credential_decrypt_error"
+    error_type = "crypto_decrypt_error"
     status_code = 500
 
 

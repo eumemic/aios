@@ -8,8 +8,8 @@ without an aggregation query.
 Per-call token breakdowns live in ``span.model_request_end`` events in
 the event log.
 
-Revision ID: 0005
-Revises: 0004
+Revision ID: 0006
+Revises: 0005
 Create Date: 2026-04-13
 """
 
@@ -19,8 +19,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0005"
-down_revision: str = "0004"
+revision: str = "0006"
+down_revision: str = "0005"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -20,101 +20,12 @@ import asyncpg
 
 from aios.crypto.vault import EncryptedBlob
 from aios.errors import ConflictError, NotFoundError
-from aios.ids import AGENT, CREDENTIAL, ENVIRONMENT, EVENT, SESSION, make_id
+from aios.ids import AGENT, ENVIRONMENT, EVENT, SESSION, VAULT, VAULT_CREDENTIAL, make_id
 from aios.models.agents import Agent, AgentVersion, ToolSpec
-from aios.models.credentials import Credential
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
 from aios.models.sessions import Session, SessionStatus, SessionUsage
-
-# ─── credentials ──────────────────────────────────────────────────────────────
-
-
-def _row_to_credential(row: asyncpg.Record) -> Credential:
-    return Credential(
-        id=row["id"],
-        name=row["name"],
-        provider=row["provider"],
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-        archived_at=row["archived_at"],
-    )
-
-
-async def insert_credential(
-    conn: asyncpg.Connection[Any],
-    *,
-    name: str,
-    provider: str,
-    blob: EncryptedBlob,
-) -> Credential:
-    new_id = make_id(CREDENTIAL)
-    try:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO credentials (id, name, provider, ciphertext, nonce)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING *
-            """,
-            new_id,
-            name,
-            provider,
-            blob.ciphertext,
-            blob.nonce,
-        )
-    except asyncpg.UniqueViolationError as exc:
-        raise ConflictError(
-            f"a credential named {name!r} already exists",
-            detail={"name": name},
-        ) from exc
-    assert row is not None
-    return _row_to_credential(row)
-
-
-async def get_credential(conn: asyncpg.Connection[Any], cred_id: str) -> Credential:
-    row = await conn.fetchrow("SELECT * FROM credentials WHERE id = $1", cred_id)
-    if row is None:
-        raise NotFoundError(f"credential {cred_id} not found", detail={"id": cred_id})
-    return _row_to_credential(row)
-
-
-async def get_credential_blob(conn: asyncpg.Connection[Any], cred_id: str) -> EncryptedBlob:
-    """Fetch a credential's encrypted blob for decryption inside the harness."""
-    row = await conn.fetchrow(
-        "SELECT ciphertext, nonce FROM credentials WHERE id = $1 AND archived_at IS NULL",
-        cred_id,
-    )
-    if row is None:
-        raise NotFoundError(f"credential {cred_id} not found or archived")
-    return EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"]))
-
-
-async def list_credentials(
-    conn: asyncpg.Connection[Any], *, limit: int = 50, after: str | None = None
-) -> list[Credential]:
-    if after is None:
-        rows = await conn.fetch(
-            "SELECT * FROM credentials WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
-            limit,
-        )
-    else:
-        rows = await conn.fetch(
-            "SELECT * FROM credentials WHERE archived_at IS NULL AND id < $1 "
-            "ORDER BY id DESC LIMIT $2",
-            after,
-            limit,
-        )
-    return [_row_to_credential(r) for r in rows]
-
-
-async def archive_credential(conn: asyncpg.Connection[Any], cred_id: str) -> None:
-    result = await conn.execute(
-        "UPDATE credentials SET archived_at = now() WHERE id = $1 AND archived_at IS NULL",
-        cred_id,
-    )
-    if result == "UPDATE 0":
-        raise NotFoundError(f"credential {cred_id} not found or already archived")
-
+from aios.models.vaults import Vault, VaultCredential
 
 # ─── environments ─────────────────────────────────────────────────────────────
 
@@ -204,7 +115,6 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
         model=row["model"],
         system=row["system"],
         tools=[ToolSpec.model_validate(t) for t in tools_data],
-        credential_id=row["credential_id"],
         description=row["description"],
         metadata=metadata,
         window_min=row["window_min"],
@@ -224,7 +134,6 @@ def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
         model=row["model"],
         system=row["system"],
         tools=[ToolSpec.model_validate(t) for t in tools_data],
-        credential_id=row["credential_id"],
         window_min=row["window_min"],
         window_max=row["window_max"],
         created_at=row["created_at"],
@@ -238,7 +147,6 @@ async def insert_agent(
     model: str,
     system: str,
     tools: list[ToolSpec],
-    credential_id: str | None,
     description: str | None,
     metadata: dict[str, Any],
     window_min: int,
@@ -252,10 +160,10 @@ async def insert_agent(
             row = await conn.fetchrow(
                 """
                 INSERT INTO agents (
-                    id, name, model, system, tools, credential_id,
+                    id, name, model, system, tools,
                     description, metadata, window_min, window_max, version
                 )
-                VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9, $10, 1)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, 1)
                 RETURNING *
                 """,
                 new_id,
@@ -263,7 +171,6 @@ async def insert_agent(
                 model,
                 system,
                 tools_json,
-                credential_id,
                 description,
                 metadata_json,
                 window_min,
@@ -275,15 +182,14 @@ async def insert_agent(
                 """
                 INSERT INTO agent_versions (
                     agent_id, version, model, system, tools,
-                    credential_id, window_min, window_max
+                    window_min, window_max
                 )
-                VALUES ($1, 1, $2, $3, $4::jsonb, $5, $6, $7)
+                VALUES ($1, 1, $2, $3, $4::jsonb, $5, $6)
                 """,
                 new_id,
                 model,
                 system,
                 tools_json,
-                credential_id,
                 window_min,
                 window_max,
             )
@@ -291,11 +197,6 @@ async def insert_agent(
         raise ConflictError(
             f"an agent named {name!r} already exists",
             detail={"name": name},
-        ) from exc
-    except asyncpg.ForeignKeyViolationError as exc:
-        raise NotFoundError(
-            f"credential {credential_id} not found",
-            detail={"credential_id": credential_id},
         ) from exc
     return _row_to_agent(row)
 
@@ -342,7 +243,6 @@ async def update_agent(
     model: str | None = None,
     system: str | None = None,
     tools: list[ToolSpec] | None = None,
-    credential_id: str | None = None,
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
     window_min: int | None = None,
@@ -368,7 +268,6 @@ async def update_agent(
     new_model = model if model is not None else current.model
     new_system = system if system is not None else current.system
     new_tools = tools if tools is not None else current.tools
-    new_cred = credential_id if credential_id is not None else current.credential_id
     new_desc = description if description is not None else current.description
     new_meta = metadata if metadata is not None else current.metadata
     new_wmin = window_min if window_min is not None else current.window_min
@@ -380,7 +279,6 @@ async def update_agent(
         and new_model == current.model
         and new_system == current.system
         and new_tools == current.tools
-        and new_cred == current.credential_id
         and new_desc == current.description
         and new_meta == current.metadata
         and new_wmin == current.window_min
@@ -397,8 +295,8 @@ async def update_agent(
             """
             UPDATE agents
                SET version = $2, name = $3, model = $4, system = $5,
-                   tools = $6::jsonb, credential_id = $7, description = $8,
-                   metadata = $9::jsonb, window_min = $10, window_max = $11,
+                   tools = $6::jsonb, description = $7,
+                   metadata = $8::jsonb, window_min = $9, window_max = $10,
                    updated_at = now()
              WHERE id = $1
             RETURNING *
@@ -409,7 +307,6 @@ async def update_agent(
             new_model,
             new_system,
             tools_json,
-            new_cred,
             new_desc,
             meta_json,
             new_wmin,
@@ -420,16 +317,15 @@ async def update_agent(
             """
             INSERT INTO agent_versions (
                 agent_id, version, model, system, tools,
-                credential_id, window_min, window_max
+                window_min, window_max
             )
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
             """,
             agent_id,
             new_version,
             new_model,
             new_system,
             tools_json,
-            new_cred,
             new_wmin,
             new_wmax,
         )
@@ -713,6 +609,7 @@ async def delete_session(conn: asyncpg.Connection[Any], session_id: str) -> None
                 f"session {session_id} is running and cannot be deleted",
                 detail={"id": session_id},
             )
+        await conn.execute("DELETE FROM session_vaults WHERE session_id = $1", session_id)
         await conn.execute("DELETE FROM events WHERE session_id = $1", session_id)
         await conn.execute("DELETE FROM sessions WHERE id = $1", session_id)
 
@@ -819,3 +716,364 @@ async def read_message_events(conn: asyncpg.Connection[Any], session_id: str) ->
         session_id,
     )
     return [_row_to_event(r) for r in rows]
+
+
+# ─── vaults ─────────────────────────────────────────────────────────────────
+
+
+def _row_to_vault(row: asyncpg.Record) -> Vault:
+    raw_metadata = row["metadata"]
+    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    return Vault(
+        id=row["id"],
+        display_name=row["display_name"],
+        metadata=metadata,
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        archived_at=row["archived_at"],
+    )
+
+
+async def insert_vault(
+    conn: asyncpg.Connection[Any],
+    *,
+    display_name: str,
+    metadata: dict[str, Any],
+) -> Vault:
+    new_id = make_id(VAULT)
+    metadata_json = json.dumps(metadata)
+    row = await conn.fetchrow(
+        """
+        INSERT INTO vaults (id, display_name, metadata)
+        VALUES ($1, $2, $3::jsonb)
+        RETURNING *
+        """,
+        new_id,
+        display_name,
+        metadata_json,
+    )
+    assert row is not None
+    return _row_to_vault(row)
+
+
+async def get_vault(conn: asyncpg.Connection[Any], vault_id: str) -> Vault:
+    row = await conn.fetchrow("SELECT * FROM vaults WHERE id = $1", vault_id)
+    if row is None:
+        raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
+    return _row_to_vault(row)
+
+
+async def list_vaults(
+    conn: asyncpg.Connection[Any], *, limit: int = 50, after: str | None = None
+) -> list[Vault]:
+    if after is None:
+        rows = await conn.fetch(
+            "SELECT * FROM vaults WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            limit,
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT * FROM vaults WHERE archived_at IS NULL AND id < $1 ORDER BY id DESC LIMIT $2",
+            after,
+            limit,
+        )
+    return [_row_to_vault(r) for r in rows]
+
+
+async def update_vault(
+    conn: asyncpg.Connection[Any],
+    vault_id: str,
+    *,
+    display_name: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Vault:
+    sets: list[str] = []
+    args: list[Any] = [vault_id]
+    if display_name is not None:
+        args.append(display_name)
+        sets.append(f"display_name = ${len(args)}")
+    if metadata is not None:
+        args.append(json.dumps(metadata))
+        sets.append(f"metadata = ${len(args)}::jsonb")
+    if not sets:
+        return await get_vault(conn, vault_id)
+    sets.append("updated_at = now()")
+    sql = f"UPDATE vaults SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    row = await conn.fetchrow(sql, *args)
+    if row is None:
+        raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
+    return _row_to_vault(row)
+
+
+async def archive_vault(conn: asyncpg.Connection[Any], vault_id: str) -> Vault:
+    row = await conn.fetchrow(
+        "UPDATE vaults SET archived_at = now(), updated_at = now() "
+        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        vault_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"vault {vault_id} not found or already archived",
+            detail={"id": vault_id},
+        )
+    return _row_to_vault(row)
+
+
+async def delete_vault(conn: asyncpg.Connection[Any], vault_id: str) -> None:
+    async with conn.transaction():
+        await conn.execute("DELETE FROM vault_credentials WHERE vault_id = $1", vault_id)
+        result = await conn.execute("DELETE FROM vaults WHERE id = $1", vault_id)
+    if result == "DELETE 0":
+        raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
+
+
+# ─── vault credentials ──────────────────────────────────────────────────────
+
+
+def _row_to_vault_credential(row: asyncpg.Record) -> VaultCredential:
+    raw_metadata = row["metadata"]
+    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    return VaultCredential(
+        id=row["id"],
+        vault_id=row["vault_id"],
+        display_name=row["display_name"],
+        mcp_server_url=row["mcp_server_url"],
+        auth_type=row["auth_type"],
+        metadata=metadata,
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        archived_at=row["archived_at"],
+    )
+
+
+async def insert_vault_credential(
+    conn: asyncpg.Connection[Any],
+    *,
+    vault_id: str,
+    display_name: str | None,
+    mcp_server_url: str,
+    auth_type: str,
+    blob: EncryptedBlob,
+    metadata: dict[str, Any],
+) -> VaultCredential:
+    new_id = make_id(VAULT_CREDENTIAL)
+    metadata_json = json.dumps(metadata)
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO vault_credentials (
+                id, vault_id, display_name, mcp_server_url,
+                auth_type, ciphertext, nonce, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            RETURNING *
+            """,
+            new_id,
+            vault_id,
+            display_name,
+            mcp_server_url,
+            auth_type,
+            blob.ciphertext,
+            blob.nonce,
+            metadata_json,
+        )
+    except asyncpg.UniqueViolationError as exc:
+        raise ConflictError(
+            f"an active credential for {mcp_server_url!r} already exists in this vault",
+            detail={"mcp_server_url": mcp_server_url, "vault_id": vault_id},
+        ) from exc
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise NotFoundError(
+            f"vault {vault_id} not found",
+            detail={"vault_id": vault_id},
+        ) from exc
+    assert row is not None
+    return _row_to_vault_credential(row)
+
+
+async def get_vault_credential(
+    conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
+) -> VaultCredential:
+    row = await conn.fetchrow(
+        "SELECT * FROM vault_credentials WHERE id = $1 AND vault_id = $2",
+        credential_id,
+        vault_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"credential {credential_id} not found in vault {vault_id}",
+            detail={"id": credential_id, "vault_id": vault_id},
+        )
+    return _row_to_vault_credential(row)
+
+
+async def get_vault_credential_blob(
+    conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
+) -> EncryptedBlob:
+    row = await conn.fetchrow(
+        "SELECT ciphertext, nonce FROM vault_credentials "
+        "WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL",
+        credential_id,
+        vault_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"credential {credential_id} not found or archived",
+            detail={"id": credential_id, "vault_id": vault_id},
+        )
+    return EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"]))
+
+
+async def list_vault_credentials(
+    conn: asyncpg.Connection[Any],
+    vault_id: str,
+    *,
+    limit: int = 50,
+    after: str | None = None,
+) -> list[VaultCredential]:
+    if after is None:
+        rows = await conn.fetch(
+            "SELECT * FROM vault_credentials "
+            "WHERE vault_id = $1 AND archived_at IS NULL ORDER BY id DESC LIMIT $2",
+            vault_id,
+            limit,
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT * FROM vault_credentials "
+            "WHERE vault_id = $1 AND archived_at IS NULL AND id < $2 "
+            "ORDER BY id DESC LIMIT $3",
+            vault_id,
+            after,
+            limit,
+        )
+    return [_row_to_vault_credential(r) for r in rows]
+
+
+async def update_vault_credential(
+    conn: asyncpg.Connection[Any],
+    vault_id: str,
+    credential_id: str,
+    *,
+    display_name: str | None = _UNSET,
+    blob: EncryptedBlob | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> VaultCredential:
+    sets: list[str] = []
+    args: list[Any] = [credential_id, vault_id]
+    if display_name is not _UNSET:
+        args.append(display_name)
+        sets.append(f"display_name = ${len(args)}")
+    if blob is not None:
+        args.append(blob.ciphertext)
+        sets.append(f"ciphertext = ${len(args)}")
+        args.append(blob.nonce)
+        sets.append(f"nonce = ${len(args)}")
+    if metadata is not None:
+        args.append(json.dumps(metadata))
+        sets.append(f"metadata = ${len(args)}::jsonb")
+    if not sets:
+        return await get_vault_credential(conn, vault_id, credential_id)
+    sets.append("updated_at = now()")
+    sql = (
+        f"UPDATE vault_credentials SET {', '.join(sets)} "
+        f"WHERE id = $1 AND vault_id = $2 RETURNING *"
+    )
+    row = await conn.fetchrow(sql, *args)
+    if row is None:
+        raise NotFoundError(
+            f"credential {credential_id} not found in vault {vault_id}",
+            detail={"id": credential_id, "vault_id": vault_id},
+        )
+    return _row_to_vault_credential(row)
+
+
+async def archive_vault_credential(
+    conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
+) -> VaultCredential:
+    row = await conn.fetchrow(
+        "UPDATE vault_credentials SET archived_at = now(), updated_at = now() "
+        "WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL RETURNING *",
+        credential_id,
+        vault_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"credential {credential_id} not found or already archived",
+            detail={"id": credential_id, "vault_id": vault_id},
+        )
+    return _row_to_vault_credential(row)
+
+
+async def delete_vault_credential(
+    conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
+) -> None:
+    result = await conn.execute(
+        "DELETE FROM vault_credentials WHERE id = $1 AND vault_id = $2",
+        credential_id,
+        vault_id,
+    )
+    if result == "DELETE 0":
+        raise NotFoundError(
+            f"credential {credential_id} not found in vault {vault_id}",
+            detail={"id": credential_id, "vault_id": vault_id},
+        )
+
+
+async def count_active_vault_credentials(conn: asyncpg.Connection[Any], vault_id: str) -> int:
+    row = await conn.fetchrow(
+        "SELECT count(*) AS cnt FROM vault_credentials WHERE vault_id = $1 AND archived_at IS NULL",
+        vault_id,
+    )
+    assert row is not None
+    result: int = row["cnt"]
+    return result
+
+
+# ─── session-vault binding ──────────────────────────────────────────────────
+
+
+async def set_session_vaults(
+    conn: asyncpg.Connection[Any], session_id: str, vault_ids: list[str]
+) -> None:
+    """Replace the session's vault bindings. Order is preserved via rank."""
+    async with conn.transaction():
+        await conn.execute("DELETE FROM session_vaults WHERE session_id = $1", session_id)
+        for rank, vault_id in enumerate(vault_ids):
+            try:
+                await conn.execute(
+                    "INSERT INTO session_vaults (session_id, vault_id, rank) VALUES ($1, $2, $3)",
+                    session_id,
+                    vault_id,
+                    rank,
+                )
+            except asyncpg.ForeignKeyViolationError as exc:
+                raise NotFoundError(
+                    f"vault {vault_id} not found",
+                    detail={"vault_id": vault_id},
+                ) from exc
+
+
+async def get_session_vault_ids(conn: asyncpg.Connection[Any], session_id: str) -> list[str]:
+    rows = await conn.fetch(
+        "SELECT vault_id FROM session_vaults WHERE session_id = $1 ORDER BY rank",
+        session_id,
+    )
+    return [str(r["vault_id"]) for r in rows]
+
+
+async def batch_get_session_vault_ids(
+    conn: asyncpg.Connection[Any], session_ids: list[str]
+) -> dict[str, list[str]]:
+    """Batch-fetch vault_ids for multiple sessions. Returns a dict keyed by session_id."""
+    if not session_ids:
+        return {}
+    rows = await conn.fetch(
+        "SELECT session_id, vault_id FROM session_vaults "
+        "WHERE session_id = ANY($1) ORDER BY session_id, rank",
+        session_ids,
+    )
+    result: dict[str, list[str]] = {sid: [] for sid in session_ids}
+    for r in rows:
+        result[str(r["session_id"])].append(str(r["vault_id"]))
+    return result

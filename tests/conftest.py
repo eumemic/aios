@@ -111,12 +111,13 @@ def migrated_db_url(db_url: str) -> str:
 
 
 @pytest.fixture
-def aios_env(migrated_db_url: str) -> Iterator[dict[str, str]]:
+def aios_env(migrated_db_url: str, tmp_path: Path) -> Iterator[dict[str, str]]:
     """Set the env vars the FastAPI app needs."""
     env_vars = {
         "AIOS_API_KEY": secrets.token_urlsafe(32),
         "AIOS_VAULT_KEY": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
         "AIOS_DB_URL": migrated_db_url,
+        "AIOS_WORKSPACE_ROOT": str(tmp_path / "workspaces"),
     }
     with mock.patch.dict(os.environ, env_vars):
         # Reset the cached settings singleton

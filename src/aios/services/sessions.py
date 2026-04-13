@@ -8,6 +8,7 @@ it on the row so future workers can re-mount the same volume.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import asyncpg
@@ -31,6 +32,7 @@ async def create_session(
     agent_version: int | None = None,
     title: str | None,
     metadata: dict[str, Any],
+    vault_ids: list[str] | None = None,
 ) -> Session:
     """Create a session row and return it.
 
@@ -71,12 +73,18 @@ async def create_session(
                 detail={"agent_id": agent_id, "environment_id": environment_id},
             ) from exc
         assert row is not None
-        return queries._row_to_session(row)
+        session = queries._row_to_session(row)
+        if vault_ids:
+            await queries.set_session_vaults(conn, session.id, vault_ids)
+            session = session.model_copy(update={"vault_ids": vault_ids})
+        return session
 
 
 async def get_session(pool: asyncpg.Pool[Any], session_id: str) -> Session:
     async with pool.acquire() as conn:
-        return await queries.get_session(conn, session_id)
+        session = await queries.get_session(conn, session_id)
+        vault_ids = await queries.get_session_vault_ids(conn, session_id)
+        return session.model_copy(update={"vault_ids": vault_ids})
 
 
 async def list_sessions(
@@ -88,9 +96,15 @@ async def list_sessions(
     after: str | None = None,
 ) -> list[Session]:
     async with pool.acquire() as conn:
-        return await queries.list_sessions(
+        sessions = await queries.list_sessions(
             conn, agent_id=agent_id, status=status, limit=limit, after=after
         )
+        if sessions:
+            vault_map = await queries.batch_get_session_vault_ids(conn, [s.id for s in sessions])
+            sessions = [
+                s.model_copy(update={"vault_ids": vault_map.get(s.id, [])}) for s in sessions
+            ]
+        return sessions
 
 
 async def append_user_message(pool: asyncpg.Pool[Any], session_id: str, content: str) -> Event:
@@ -183,9 +197,10 @@ async def update_session(
     agent_version: int | None = queries._UNSET,
     title: str | None = queries._UNSET,
     metadata: dict[str, Any] | None = None,
+    vault_ids: list[str] | None = None,
 ) -> Session:
     async with pool.acquire() as conn:
-        return await queries.update_session(
+        session = await queries.update_session(
             conn,
             session_id,
             agent_id=agent_id,
@@ -193,3 +208,84 @@ async def update_session(
             title=title,
             metadata=metadata,
         )
+        if vault_ids is not None:
+            await queries.set_session_vaults(conn, session_id, vault_ids)
+        vids = await queries.get_session_vault_ids(conn, session_id)
+        return session.model_copy(update={"vault_ids": vids})
+
+
+# ─── tool confirmations ────────────────────────────────────────────────────
+
+
+def _find_tool_call(events: list[Event], tool_call_id: str) -> dict[str, Any] | None:
+    """Find a tool call dict by its id in the session's message events.
+
+    Scans assistant messages in reverse order and returns the raw tool_call
+    dict matching ``tool_call_id``, or ``None`` if not found.
+    """
+    for e in reversed(events):
+        if e.kind != "message" or e.data.get("role") != "assistant":
+            continue
+        for tc in e.data.get("tool_calls") or []:
+            if tc.get("id") == tool_call_id:
+                result: dict[str, Any] = tc
+                return result
+    return None
+
+
+async def confirm_tool_allow(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    tool_call_id: str,
+) -> Event:
+    """Record an allow confirmation for an ``always_ask`` tool call.
+
+    Appends a lifecycle event. The worker's step function will see this
+    and dispatch the tool call.
+    """
+    return await append_event(
+        pool,
+        session_id,
+        "lifecycle",
+        {"event": "tool_confirmed", "tool_call_id": tool_call_id, "result": "allow"},
+    )
+
+
+async def confirm_tool_deny(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    tool_call_id: str,
+    deny_message: str,
+) -> Event:
+    """Deny an ``always_ask`` tool call.
+
+    Appends a tool-role error event that the model will see in its next
+    context window. The deny message is formatted to match Anthropic's
+    ``"Permission to use <tool> has been rejected."`` pattern.
+    """
+    # Find the tool name from the event log for the error message.
+    events = await read_message_events(pool, session_id)
+    tc = _find_tool_call(events, tool_call_id)
+    tool_name = ((tc.get("function") or {}).get("name", "unknown")) if tc else "unknown"
+
+    content = json.dumps(
+        {
+            "error": (
+                f"Permission to use {tool_name} has been rejected. "
+                f"Rejection message: {deny_message}"
+            )
+        },
+        ensure_ascii=False,
+    )
+    return await append_event(
+        pool,
+        session_id,
+        "message",
+        {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
+            "content": content,
+            "is_error": True,
+        },
+    )

@@ -28,7 +28,7 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     """Function-scoped harness: real Postgres, scripted model, no Docker."""
     import aios.tools  # noqa: F401  — register built-in tools
     from aios.config import get_settings
-    from aios.crypto.vault import Vault
+    from aios.crypto.vault import CryptoBox
     from aios.db.pool import create_pool
     from aios.harness import runtime
     from aios.harness.task_registry import TaskRegistry
@@ -36,13 +36,13 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
 
     settings = get_settings()
     pool = await create_pool(settings.db_url, min_size=1, max_size=4)
-    vault = Vault.from_base64(settings.vault_key.get_secret_value())
+    crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
     task_reg = TaskRegistry()
 
     # Save runtime globals
     prev = (
         runtime.pool,
-        runtime.vault,
+        runtime.crypto_box,
         runtime.task_registry,
         runtime.sandbox_registry,
         runtime.worker_id,
@@ -50,7 +50,7 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
 
     # Install
     runtime.pool = pool
-    runtime.vault = vault
+    runtime.crypto_box = crypto_box
     runtime.task_registry = task_reg
     runtime.sandbox_registry = None  # no Docker in fast tier
     runtime.worker_id = "worker_test"
@@ -83,7 +83,7 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     registry._tools = tool_snapshot
     (
         runtime.pool,
-        runtime.vault,
+        runtime.crypto_box,
         runtime.task_registry,
         runtime.sandbox_registry,
         runtime.worker_id,
@@ -97,7 +97,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     """Like ``harness`` but with a real SandboxRegistry for Docker tests."""
     import aios.tools  # noqa: F401
     from aios.config import get_settings
-    from aios.crypto.vault import Vault
+    from aios.crypto.vault import CryptoBox
     from aios.db.pool import create_pool
     from aios.harness import runtime
     from aios.harness.task_registry import TaskRegistry
@@ -106,19 +106,19 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
 
     settings = get_settings()
     pool = await create_pool(settings.db_url, min_size=1, max_size=4)
-    vault = Vault.from_base64(settings.vault_key.get_secret_value())
+    crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
     task_reg = TaskRegistry()
     sandbox_reg = SandboxRegistry()
 
     prev = (
         runtime.pool,
-        runtime.vault,
+        runtime.crypto_box,
         runtime.task_registry,
         runtime.sandbox_registry,
         runtime.worker_id,
     )
     runtime.pool = pool
-    runtime.vault = vault
+    runtime.crypto_box = crypto_box
     runtime.task_registry = task_reg
     runtime.sandbox_registry = sandbox_reg
     runtime.worker_id = "worker_test"
@@ -147,7 +147,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     registry._tools = tool_snapshot
     (
         runtime.pool,
-        runtime.vault,
+        runtime.crypto_box,
         runtime.task_registry,
         runtime.sandbox_registry,
         runtime.worker_id,

@@ -132,3 +132,58 @@ class TestToOpenaiTools:
         )
         with pytest.raises(ToolNotFoundError):
             to_openai_tools([AgentToolSpec(type="bash")])
+
+    def test_disabled_tool_excluded(self) -> None:
+        """Tools with enabled=False are not included in the output."""
+        import aios.tools  # noqa: F401
+
+        result = to_openai_tools(
+            [
+                AgentToolSpec(type="bash"),
+                AgentToolSpec(type="bash", enabled=False),
+            ]
+        )
+        # Only 1 entry — the enabled one.
+        assert len(result) == 1
+        assert result[0]["function"]["name"] == "bash"
+
+    def test_all_disabled_returns_empty(self) -> None:
+        """If all tools are disabled, result is empty."""
+        import aios.tools  # noqa: F401
+
+        result = to_openai_tools(
+            [
+                AgentToolSpec(type="bash", enabled=False),
+            ]
+        )
+        assert result == []
+
+    def test_disabled_custom_tool_excluded(self) -> None:
+        """Custom tools with enabled=False are also excluded."""
+        result = to_openai_tools(
+            [
+                AgentToolSpec(
+                    type="custom",
+                    name="get_weather",
+                    description="Get weather",
+                    input_schema={"type": "object"},
+                    enabled=False,
+                ),
+            ]
+        )
+        assert result == []
+
+    def test_enabled_custom_tool_included(self) -> None:
+        """Custom tools with enabled=True (default) are included."""
+        result = to_openai_tools(
+            [
+                AgentToolSpec(
+                    type="custom",
+                    name="get_weather",
+                    description="Get weather",
+                    input_schema={"type": "object"},
+                ),
+            ]
+        )
+        assert len(result) == 1
+        assert result[0]["function"]["name"] == "get_weather"

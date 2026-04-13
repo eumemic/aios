@@ -22,13 +22,13 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import asyncpg
 
-    from aios.crypto.vault import Vault
+    from aios.crypto.vault import CryptoBox
     from aios.harness.task_registry import TaskRegistry
     from aios.sandbox.registry import SandboxRegistry
 
 
 pool: asyncpg.Pool[Any] | None = None
-vault: Vault | None = None
+crypto_box: CryptoBox | None = None
 worker_id: str | None = None
 sandbox_registry: SandboxRegistry | None = None
 task_registry: TaskRegistry | None = None
@@ -43,13 +43,13 @@ def require_pool() -> asyncpg.Pool[Any]:
     return pool
 
 
-def require_vault() -> Vault:
-    if vault is None:
+def require_crypto_box() -> CryptoBox:
+    if crypto_box is None:
         raise RuntimeError(
-            "aios.harness.runtime.vault is not initialized; "
+            "aios.harness.runtime.crypto_box is not initialized; "
             "this code is running outside a worker_main context"
         )
-    return vault
+    return crypto_box
 
 
 def require_worker_id() -> str:

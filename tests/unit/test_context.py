@@ -238,7 +238,6 @@ class TestBuildMessages:
         assert stale_asst is not None
 
         # The real result should be injected at the END as a user message
-        last_msgs = msgs[-2:]  # last couple messages
         injected = next(
             (m for m in msgs if m["role"] == "user" and "DONE" in m.get("content", "")),
             None,
