@@ -1,0 +1,33 @@
+#!/bin/bash
+# Git pre-commit hook for aios
+# Runs linting, type checking, and unit tests before allowing commits.
+#
+# Install: ln -sf ../../scripts/git-hooks/pre-commit .git/hooks/pre-commit
+
+set -uo pipefail
+
+echo "Running pre-commit checks..."
+echo ""
+
+GIT_ROOT="$(git rev-parse --show-toplevel)"
+
+# Only run if Python files are staged
+STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+
+if [[ -z "$STAGED_PY" ]]; then
+    echo "No Python files staged — skipping checks."
+    exit 0
+fi
+
+"$GIT_ROOT/scripts/run-checks.sh" --fail-on-autofix
+RESULT=$?
+
+# Re-add any files that ruff auto-formatted
+if [[ $RESULT -eq 0 ]]; then
+    modified=$(git diff --name-only | grep -E '\.py$' || true)
+    if [[ -n "$modified" ]]; then
+        git add $modified 2>/dev/null
+    fi
+fi
+
+exit $RESULT
