@@ -204,7 +204,8 @@ class TestBuildMessages:
         """When a tool result arrives during inference (seq between reacting_to
         and the assistant's own seq), the paired position shows PENDING (what the
         assistant actually saw) and the real result is injected as a user message
-        at the end. This preserves prompt cache stability (monotonicity)."""
+        after the horizon-setting assistant. This preserves prompt cache
+        stability (monotonicity)."""
         events = [
             _evt(1, "user", content="run sleep 15"),
             _evt(2, "assistant", tool_calls=[_tc("bash_1")], content=""),
@@ -237,7 +238,7 @@ class TestBuildMessages:
         stale_asst = next(m for m in msgs if m.get("content") == "still running")
         assert stale_asst is not None
 
-        # The real result should be injected at the END as a user message
+        # The real result should be injected as a user message after the stale assistant
         injected = next(
             (m for m in msgs if m["role"] == "user" and "DONE" in m.get("content", "")),
             None,
@@ -371,14 +372,14 @@ class TestMonotonicity:
             events, system_prompt=None, window_min=50_000, window_max=150_000
         ).messages
 
-    def test_tail_injection_stable_when_assistant_appended(self) -> None:
-        """A blind-spot tool result is injected as a user message at the
-        tail.  When the model responds (new assistant appended), the
-        injection must not shift — the new assistant should appear AFTER
-        the injection, preserving the prefix."""
+    def test_injection_stable_when_assistant_appended(self) -> None:
+        """A blind-spot tool result is injected as a user message after
+        the horizon-setter.  When the model responds (new assistant
+        appended), the injection must not shift — the new assistant
+        should appear AFTER the injection, preserving the prefix."""
         # L1: blind-spot result exists, model is about to be called.
         #   seq 4 (tool result) > reacting_to=3 of asst at seq 5
-        #   → paired position shows PENDING, real result injected at tail.
+        #   → paired position shows PENDING, real result injected inline.
         l1 = [
             _evt(1, "user", content="run sleep 15"),
             _evt(2, "assistant", tool_calls=[_tc("bash_1")]),

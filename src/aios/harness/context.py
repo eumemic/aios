@@ -203,12 +203,15 @@ def build_messages(
                         {"role": "tool", "tool_call_id": tcid, "content": _PENDING_CONTENT}
                     )
                     if tcid in real_results:
+                        # Safe: last assistant has horizon=INF so rseq<=INF
+                        # always takes the REAL branch above; only non-last
+                        # assistants reach here, and they all have entries.
                         setter_seq = horizon_setter_for[e.seq]
                         inject_after.setdefault(setter_seq, []).append((tcid, real_results[tcid]))
                 emitted_tcids.add(tcid)
 
-            # Emit inline injections: this assistant is the horizon-setter
-            # for an earlier assistant whose tool arrived in a blind spot.
+            # Inline blind-spot injections anchored to this assistant
+            # (preserves prefix monotonicity — see docstring).
             for inj_tcid, inj_data in inject_after.pop(e.seq, []):
                 name = inj_data.get("name", "tool")
                 messages.append(
