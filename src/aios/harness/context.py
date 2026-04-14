@@ -141,7 +141,9 @@ def build_messages(
     of the next assistant after it. A tool result with
     ``seq <= horizon`` was visible; one with ``seq > horizon`` arrived
     in the blind spot and is shown as pending in the paired position,
-    then injected as a user message at the tail.
+    then injected as a user message right after the horizon-setting
+    assistant. This placement preserves monotonicity — new events
+    append after the injection rather than before it.
     """
     # Index: tool_call_id → (data, seq).
     real_results: dict[str, dict[str, Any]] = {}
@@ -162,13 +164,18 @@ def build_messages(
         if e.kind == "message" and e.data.get("role") == "assistant"
     ]
     horizon_for: dict[int, int] = {}
+    horizon_setter_for: dict[int, int] = {}
     for i, (seq, _rt) in enumerate(asst_list):
-        horizon_for[seq] = asst_list[i + 1][1] if i + 1 < len(asst_list) else _INF
+        if i + 1 < len(asst_list):
+            horizon_for[seq] = asst_list[i + 1][1]
+            horizon_setter_for[seq] = asst_list[i + 1][0]
+        else:
+            horizon_for[seq] = _INF
 
     # Walk events in seq order.
     emitted_tcids: set[str] = set()
     messages: list[dict[str, Any]] = []
-    tail_injections: list[tuple[str, dict[str, Any]]] = []
+    inject_after: dict[int, list[tuple[str, dict[str, Any]]]] = {}
     max_stimulus_seq: int = 0
 
     for e in events:
@@ -196,8 +203,24 @@ def build_messages(
                         {"role": "tool", "tool_call_id": tcid, "content": _PENDING_CONTENT}
                     )
                     if tcid in real_results:
-                        tail_injections.append((tcid, real_results[tcid]))
+                        setter_seq = horizon_setter_for[e.seq]
+                        inject_after.setdefault(setter_seq, []).append((tcid, real_results[tcid]))
                 emitted_tcids.add(tcid)
+
+            # Emit inline injections: this assistant is the horizon-setter
+            # for an earlier assistant whose tool arrived in a blind spot.
+            for inj_tcid, inj_data in inject_after.pop(e.seq, []):
+                name = inj_data.get("name", "tool")
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[Tool result: {name} (call {inj_tcid}) completed]\n"
+                            f"{inj_data.get('content', '')}"
+                        ),
+                    }
+                )
+                max_stimulus_seq = max(max_stimulus_seq, real_result_seqs[inj_tcid])
 
         elif role == "tool":
             tcid = e.data.get("tool_call_id")
@@ -205,17 +228,6 @@ def build_messages(
                 messages.append(e.data)
                 emitted_tcids.add(tcid)
                 max_stimulus_seq = max(max_stimulus_seq, e.seq)
-
-    # Inject blind-spot results as user messages at the tail.
-    for tcid, data in tail_injections:
-        name = data.get("name", "tool")
-        messages.append(
-            {
-                "role": "user",
-                "content": f"[Tool result: {name} (call {tcid}) completed]\n{data.get('content', '')}",
-            }
-        )
-        max_stimulus_seq = max(max_stimulus_seq, real_result_seqs[tcid])
 
     # Windowing.
     if messages:
