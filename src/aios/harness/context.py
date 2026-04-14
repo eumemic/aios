@@ -28,7 +28,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from aios.harness.window import select_window
 from aios.models.events import Event
 
 # ─── should_call_model ──────────────────────────────────────────────────────
@@ -127,11 +126,13 @@ def build_messages(
     events: list[Event],
     *,
     system_prompt: str | None,
-    window_min: int,
-    window_max: int,
-    model: str = "",
 ) -> ContextResult:
-    """Assemble a chat-completions message list from the event log.
+    """Assemble a chat-completions message list from pre-windowed events.
+
+    Callers are expected to pass events that have already been windowed
+    (via :func:`~aios.db.queries.read_windowed_events`).  This function
+    handles message assembly, pending-result synthesis, blind-spot
+    injection, and leading-orphan pruning — but not windowing itself.
 
     **Monotonicity invariant:** the context is a monotonic function of
     the log — appending events only appends to the context, never
@@ -232,18 +233,10 @@ def build_messages(
                 emitted_tcids.add(tcid)
                 max_stimulus_seq = max(max_stimulus_seq, e.seq)
 
-    # Windowing.
-    if messages:
-        messages = select_window(
-            messages,
-            min_tokens=window_min,
-            max_tokens=window_max,
-            token_counter=lambda m: _approx_tokens(m, model),
-        )
-
-    # Prune dangling messages at the start of the window. Windowing can
-    # cut in the middle of an assistant+tool_result group, leaving orphan
-    # tool results or an assistant with missing paired results.
+    # Prune dangling messages at the start of the window.  DB-level
+    # windowing can cut in the middle of an assistant+tool_result group,
+    # leaving orphan tool results or an assistant with missing paired
+    # results.
     messages = _prune_leading_orphans(messages)
 
     if system_prompt:
@@ -307,14 +300,3 @@ def _find_assistant_for_tool_call(events: list[Event], tool_call_id: str) -> Eve
             if tc.get("id") == tool_call_id:
                 return e
     return None
-
-
-def _approx_tokens(message: dict[str, Any], model: str) -> int:
-    """Rough token count for a message dict."""
-    content = message.get("content") or ""
-    tool_calls = message.get("tool_calls") or []
-    total_chars = len(content)
-    for tc in tool_calls:
-        fn = tc.get("function") or {}
-        total_chars += len(fn.get("name") or "") + len(fn.get("arguments") or "")
-    return max(1, total_chars // 4)

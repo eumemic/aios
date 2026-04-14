@@ -131,7 +131,8 @@ class TestBuildMessages:
             _evt(2, "assistant", content="hi there"),
         ]
         ctx = build_messages(
-            events, system_prompt="you are helpful", window_min=50_000, window_max=150_000
+            events,
+            system_prompt="you are helpful",
         )
         msgs = ctx.messages
         assert msgs[0] == {"role": "system", "content": "you are helpful"}
@@ -146,7 +147,8 @@ class TestBuildMessages:
             _evt(4, "tool", tool_call_id="b", content="result b"),
         ]
         msgs = build_messages(
-            events, system_prompt=None, window_min=50_000, window_max=150_000
+            events,
+            system_prompt=None,
         ).messages
         # Order: user, assistant, tool_a, tool_b
         assert msgs[0]["role"] == "user"
@@ -164,7 +166,8 @@ class TestBuildMessages:
             # b is still pending
         ]
         msgs = build_messages(
-            events, system_prompt=None, window_min=50_000, window_max=150_000
+            events,
+            system_prompt=None,
         ).messages
         assert msgs[2]["tool_call_id"] == "a"
         assert "result a" in msgs[2]["content"]
@@ -182,7 +185,8 @@ class TestBuildMessages:
             _evt(4, "tool", tool_call_id="x", content="X done"),
         ]
         msgs = build_messages(
-            events, system_prompt=None, window_min=50_000, window_max=150_000
+            events,
+            system_prompt=None,
         ).messages
         # Should be: user, assistant+tool_calls, tool_result_x, user_injection
         assert msgs[0]["role"] == "user"
@@ -196,7 +200,8 @@ class TestBuildMessages:
     def test_no_system_prompt_when_none(self) -> None:
         events = [_evt(1, "user", content="hi")]
         msgs = build_messages(
-            events, system_prompt=None, window_min=50_000, window_max=150_000
+            events,
+            system_prompt=None,
         ).messages
         assert msgs[0]["role"] == "user"
 
@@ -222,7 +227,8 @@ class TestBuildMessages:
         # (tool result at seq=4 has seq > reacting_to=3, so assistant saw pending)
 
         msgs = build_messages(
-            events, system_prompt=None, window_min=50_000, window_max=150_000
+            events,
+            system_prompt=None,
         ).messages
 
         # The paired position for bash_1 should show PENDING (not real)
@@ -264,7 +270,8 @@ class TestBuildMessages:
         events[3].data["reacting_to"] = 3  # saw tool result at seq=3
 
         msgs = build_messages(
-            events, system_prompt=None, window_min=50_000, window_max=150_000
+            events,
+            system_prompt=None,
         ).messages
         # Paired position should show REAL result (not pending)
         paired_tool = next(m for m in msgs if m.get("tool_call_id") == "a")
@@ -284,60 +291,44 @@ class TestBuildMessages:
             _evt(6, "assistant", content="all done"),
         ]
         msgs = build_messages(
-            events, system_prompt=None, window_min=50_000, window_max=150_000
+            events,
+            system_prompt=None,
         ).messages
         roles = [m["role"] for m in msgs]
         assert roles == ["user", "assistant", "tool", "assistant", "tool", "assistant"]
 
-    def test_window_prunes_orphan_tool_results_at_start(self) -> None:
-        """If windowing drops an assistant but keeps its tool results,
+    def test_prune_orphan_tool_results_at_start(self) -> None:
+        """If DB windowing drops an assistant but keeps its tool results,
         those orphan tool results should be pruned from the start."""
-        # Simulate a long conversation where windowing drops the first
-        # assistant+tool_calls but keeps the tool result.
-        # We force windowing by using a tiny token budget.
+        # Simulate pre-windowed events where the assistant at seq=2 was
+        # dropped but its tool result at seq=3 was kept.
         events = [
-            _evt(1, "user", content="x" * 400),  # big user message (~100 tokens)
-            _evt(2, "assistant", tool_calls=[_tc("a")]),
-            _evt(3, "tool", tool_call_id="a", content="result " * 50),  # ~50 tokens
+            _evt(3, "tool", tool_call_id="a", content="result a"),
             _evt(4, "user", content="next question"),
             _evt(5, "assistant", content="answer"),
         ]
-        # With a very small window, the oldest messages get dropped.
-        # window_min=20, window_max=60 means the window holds ~60 tokens.
-        # The total is ~200+ tokens, so the front gets cut.
-        msgs = build_messages(events, system_prompt=None, window_min=20, window_max=60).messages
-        # The window should NOT start with an orphan tool result.
-        # It should start with a user or assistant (no tool_calls) message.
-        if msgs:
-            first_role = msgs[0]["role"]
-            assert first_role in ("user", "assistant", "system"), (
-                f"window starts with orphan '{first_role}' message"
-            )
-            # If it starts with assistant, it should not have unmatched tool_calls
-            if first_role == "assistant" and msgs[0].get("tool_calls"):
-                tc_ids = {tc["id"] for tc in msgs[0]["tool_calls"]}
-                result_ids = {m["tool_call_id"] for m in msgs[1:] if m.get("role") == "tool"}
-                assert tc_ids <= result_ids, "leading assistant has unmatched tool_calls"
+        msgs = build_messages(events, system_prompt=None).messages
+        assert msgs[0]["role"] == "user"
+        assert msgs[0]["content"] == "next question"
+        assert msgs[1]["role"] == "assistant"
 
-    def test_window_prunes_partial_assistant_tool_group(self) -> None:
-        """If windowing keeps an assistant with tool_calls but drops some
-        of its paired results, the whole group should be pruned."""
+    def test_prune_partial_assistant_tool_group(self) -> None:
+        """If DB windowing keeps an assistant with tool_calls but dropped
+        one of its paired results, the incomplete group should be pruned."""
+        # Simulate pre-windowed events where tool result "a" was dropped
+        # by the window boundary but "b" was kept.
         events = [
-            _evt(1, "assistant", tool_calls=[_tc("a"), _tc("b")]),
-            # a's result is big, b's is small
-            _evt(2, "tool", tool_call_id="a", content="big " * 200),  # ~200 tokens
-            _evt(3, "tool", tool_call_id="b", content="small"),
-            _evt(4, "user", content="next"),
-            _evt(5, "assistant", content="response"),
+            _evt(10, "assistant", tool_calls=[_tc("a"), _tc("b")]),
+            _evt(12, "tool", tool_call_id="b", content="small"),
+            _evt(13, "user", content="next"),
+            _evt(14, "assistant", content="response"),
         ]
         events[0].data["reacting_to"] = 0
-        events[4].data["reacting_to"] = 3
-        # Tiny window forces the front to be dropped
-        msgs = build_messages(events, system_prompt=None, window_min=10, window_max=30).messages
-        # Should not start with orphan tool results or incomplete assistant groups
+        events[3].data["reacting_to"] = 12
+        msgs = build_messages(events, system_prompt=None).messages
+        # The incomplete group (assistant + orphan tool "b") should be pruned.
         for m in msgs:
             if m.get("role") == "tool":
-                # Every tool result must have a preceding assistant with matching tool_call
                 tc_id = m.get("tool_call_id")
                 has_parent = any(
                     tc_id in {tc["id"] for tc in prior.get("tool_calls") or []}
@@ -369,7 +360,8 @@ class TestMonotonicity:
     @staticmethod
     def _build(events: list[Event]) -> list[dict]:
         return build_messages(
-            events, system_prompt=None, window_min=50_000, window_max=150_000
+            events,
+            system_prompt=None,
         ).messages
 
     def test_injection_stable_when_assistant_appended(self) -> None:
@@ -535,5 +527,5 @@ class TestMonotonicity:
         events[1].data["reacting_to"] = 1
         events[3].data["reacting_to"] = 1
 
-        ctx = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000)
+        ctx = build_messages(events, system_prompt=None)
         assert ctx.reacting_to >= 3

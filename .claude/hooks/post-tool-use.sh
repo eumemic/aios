@@ -40,9 +40,10 @@ if ! uv run mypy src --no-error-summary > "$MYPY_OUTPUT" 2>&1; then
     MYPY_FAILED=1
 fi
 
-# Pytest: re-run last-failed tests only (instant when nothing is broken).
+# Pytest: re-run last-failed unit tests only (instant when nothing is broken).
+# Scoped to tests/unit to avoid integration/e2e tests bleeding into edit-time checks.
 # Exit code 5 = "no tests collected" which is expected when nothing has failed.
-uv run pytest --lf --lfnf=none -x -q --tb=short --no-header > "$PYTEST_OUTPUT" 2>&1
+uv run pytest tests/unit --lf --lfnf=none -x -q --tb=short --no-header > "$PYTEST_OUTPUT" 2>&1
 PYTEST_RC=$?
 if [ $PYTEST_RC -ne 0 ] && [ $PYTEST_RC -ne 5 ]; then
     PYTEST_FAILED=1
