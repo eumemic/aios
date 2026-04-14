@@ -204,7 +204,8 @@ class TestBuildMessages:
         """When a tool result arrives during inference (seq between reacting_to
         and the assistant's own seq), the paired position shows PENDING (what the
         assistant actually saw) and the real result is injected as a user message
-        at the end. This preserves prompt cache stability (monotonicity)."""
+        after the horizon-setting assistant. This preserves prompt cache
+        stability (monotonicity)."""
         events = [
             _evt(1, "user", content="run sleep 15"),
             _evt(2, "assistant", tool_calls=[_tc("bash_1")], content=""),
@@ -237,7 +238,7 @@ class TestBuildMessages:
         stale_asst = next(m for m in msgs if m.get("content") == "still running")
         assert stale_asst is not None
 
-        # The real result should be injected at the END as a user message
+        # The real result should be injected as a user message after the stale assistant
         injected = next(
             (m for m in msgs if m["role"] == "user" and "DONE" in m.get("content", "")),
             None,
@@ -344,3 +345,195 @@ class TestBuildMessages:
                     if prior.get("role") == "assistant"
                 )
                 assert has_parent, f"orphan tool result for {tc_id}"
+
+
+# ─── monotonicity ──────────────────────────────────────────────────────────
+
+
+def _assert_prefix(short: list[dict], long: list[dict]) -> None:
+    """Assert that *short* is a message-for-message prefix of *long*."""
+    assert len(short) <= len(long), (
+        f"short ({len(short)} msgs) is longer than long ({len(long)} msgs)"
+    )
+    for i, (a, b) in enumerate(zip(short, long, strict=False)):
+        assert a == b, (
+            f"monotonicity violation at index {i}:\n  short[{i}] = {a!r}\n  long[{i}]  = {b!r}"
+        )
+
+
+class TestMonotonicity:
+    """build_messages(L1) must be a prefix of build_messages(L2) whenever L1
+    is a prefix of L2.  This is the property that keeps the prompt prefix
+    cache stable between successive inference calls."""
+
+    @staticmethod
+    def _build(events: list[Event]) -> list[dict]:
+        return build_messages(
+            events, system_prompt=None, window_min=50_000, window_max=150_000
+        ).messages
+
+    def test_injection_stable_when_assistant_appended(self) -> None:
+        """A blind-spot tool result is injected as a user message after
+        the horizon-setter.  When the model responds (new assistant
+        appended), the injection must not shift — the new assistant
+        should appear AFTER the injection, preserving the prefix."""
+        # L1: blind-spot result exists, model is about to be called.
+        #   seq 4 (tool result) > reacting_to=3 of asst at seq 5
+        #   → paired position shows PENDING, real result injected inline.
+        l1 = [
+            _evt(1, "user", content="run sleep 15"),
+            _evt(2, "assistant", tool_calls=[_tc("bash_1")]),
+            _evt(3, "user", content="status?"),
+            _evt(4, "tool", tool_call_id="bash_1", content="DONE"),
+            _evt(5, "assistant", content="still running"),
+        ]
+        l1[1].data["reacting_to"] = 1
+        l1[4].data["reacting_to"] = 3  # blind to tool at seq 4
+
+        # L2: model saw the injection and responded.
+        l2 = [*l1, _evt(6, "assistant", content="ah it finished")]
+        l2[5].data["reacting_to"] = 4
+
+        ctx1 = self._build(l1)
+        ctx2 = self._build(l2)
+
+        # ctx1 should be a prefix of ctx2.
+        _assert_prefix(ctx1, ctx2)
+
+    def test_inline_injection_position(self) -> None:
+        """Blind-spot injection appears right after the horizon-setter
+        assistant, not at the absolute tail of the message list."""
+        events = [
+            _evt(1, "user", content="run it"),
+            _evt(2, "assistant", tool_calls=[_tc("t1")]),
+            _evt(3, "tool", tool_call_id="t1", content="RESULT"),
+            # asst at seq=4 is the horizon-setter for seq=2.
+            # Its reacting_to=1, so tool at seq=3 > horizon=1 → blind spot.
+            _evt(4, "assistant", content="checking..."),
+            _evt(5, "user", content="anything else?"),
+            _evt(6, "assistant", content="nope"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 1  # didn't see tool at seq=3
+        events[5].data["reacting_to"] = 5
+
+        msgs = self._build(events)
+        roles = [m["role"] for m in msgs]
+        # Injection (user) sits between horizon-setter and the following user msg.
+        assert roles == ["user", "assistant", "tool", "assistant", "user", "user", "assistant"]
+        assert "RESULT" in msgs[4]["content"]
+
+    def test_horizon_setter_with_tool_calls_injection_after(self) -> None:
+        """When the horizon-setter itself has tool_calls, the blind-spot
+        injection goes after the horizon-setter's own tool results."""
+        events = [
+            _evt(1, "user", content="do A and B"),
+            _evt(2, "assistant", tool_calls=[_tc("a1")]),
+            _evt(3, "tool", tool_call_id="a1", content="A done"),
+            # Asst at seq=4: horizon-setter for seq=2, with its own tool_calls.
+            _evt(4, "assistant", tool_calls=[_tc("b1")]),
+            _evt(5, "tool", tool_call_id="b1", content="B done"),
+            _evt(6, "assistant", content="all done"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 1  # blind to a1 at seq=3
+        events[5].data["reacting_to"] = 5
+
+        msgs = self._build(events)
+        roles = [m["role"] for m in msgs]
+        assert roles == ["user", "assistant", "tool", "assistant", "tool", "user", "assistant"]
+        assert "pending" in msgs[2]["content"]
+        assert msgs[4]["tool_call_id"] == "b1"
+        assert "B done" in msgs[4]["content"]
+        assert "A done" in msgs[5]["content"]
+
+    def test_multiple_blind_spot_tools_same_assistant(self) -> None:
+        """Multiple blind-spot tools from the same assistant are all injected
+        inline after the same horizon-setter."""
+        events = [
+            _evt(1, "user", content="run two"),
+            _evt(2, "assistant", tool_calls=[_tc("x"), _tc("y")]),
+            _evt(3, "tool", tool_call_id="x", content="X done"),
+            _evt(4, "tool", tool_call_id="y", content="Y done"),
+            _evt(5, "assistant", content="both pending..."),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[4].data["reacting_to"] = 1  # blind to both tools
+
+        msgs = self._build(events)
+        roles = [m["role"] for m in msgs]
+        assert roles == ["user", "assistant", "tool", "tool", "assistant", "user", "user"]
+        assert "pending" in msgs[2]["content"]
+        assert "pending" in msgs[3]["content"]
+        assert "X done" in msgs[5]["content"]
+        assert "Y done" in msgs[6]["content"]
+
+    def test_multiple_assistants_with_blind_spots(self) -> None:
+        """Two different assistants each with blind-spot tools inject after
+        their respective horizon-setters."""
+        events = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[_tc("a")]),
+            _evt(3, "tool", tool_call_id="a", content="A done"),
+            # asst at seq=4 is horizon-setter for seq=2, and itself has tool_calls.
+            _evt(4, "assistant", tool_calls=[_tc("b")]),
+            _evt(5, "tool", tool_call_id="b", content="B done"),
+            # asst at seq=6 is horizon-setter for seq=4.
+            _evt(6, "assistant", content="wrapping up"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 1  # blind to a (seq=3 > horizon=1)
+        events[5].data["reacting_to"] = 3  # blind to b (seq=5 > horizon=3)
+
+        msgs = self._build(events)
+        roles = [m["role"] for m in msgs]
+        assert roles == [
+            "user",
+            "assistant",
+            "tool",
+            "assistant",
+            "tool",
+            "user",
+            "assistant",
+            "user",
+        ]
+        assert "pending" in msgs[2]["content"]
+        assert "pending" in msgs[4]["content"]
+        assert "A done" in msgs[5]["content"]
+        assert "B done" in msgs[7]["content"]
+
+    def test_monotonicity_across_three_successive_appends(self) -> None:
+        """L1 ⊂ L2 ⊂ L3: prefix preserved at each step."""
+        base = [
+            _evt(1, "user", content="run sleep 15"),
+            _evt(2, "assistant", tool_calls=[_tc("bash_1")]),
+            _evt(3, "user", content="status?"),
+            _evt(4, "tool", tool_call_id="bash_1", content="DONE"),
+            _evt(5, "assistant", content="still running"),
+        ]
+        base[1].data["reacting_to"] = 1
+        base[4].data["reacting_to"] = 3
+
+        l1 = list(base)
+        l2 = [*l1, _evt(6, "assistant", content="ah it finished")]
+        l2[5].data["reacting_to"] = 4
+        l3 = [*l2, _evt(7, "user", content="great, now do Y")]
+
+        ctx1, ctx2, ctx3 = self._build(l1), self._build(l2), self._build(l3)
+        _assert_prefix(ctx1, ctx2)
+        _assert_prefix(ctx2, ctx3)
+
+    def test_reacting_to_includes_inline_injection_seq(self) -> None:
+        """ContextResult.reacting_to must account for the seq of blind-spot
+        tool results that are injected inline."""
+        events = [
+            _evt(1, "user", content="run it"),
+            _evt(2, "assistant", tool_calls=[_tc("t1")]),
+            _evt(3, "tool", tool_call_id="t1", content="RESULT"),
+            _evt(4, "assistant", content="checking..."),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 1
+
+        ctx = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000)
+        assert ctx.reacting_to >= 3
