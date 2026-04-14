@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from aios.harness.loop import _resolve_permission
+from aios.harness.loop import resolve_permission
 from aios.models.agents import ToolSpec
 from aios.models.events import Event
 from aios.services.sessions import _find_tool_call
@@ -101,11 +101,11 @@ class TestResolvePermission:
             ToolSpec(type="bash", permission="always_ask"),
             ToolSpec(type="read"),
         ]
-        assert _resolve_permission("bash", tools) == "always_ask"
+        assert resolve_permission("bash", tools) == "always_ask"
 
     def test_builtin_without_permission(self) -> None:
         tools = [ToolSpec(type="bash")]
-        assert _resolve_permission("bash", tools) is None
+        assert resolve_permission("bash", tools) is None
 
     def test_custom_tool(self) -> None:
         tools = [
@@ -117,11 +117,11 @@ class TestResolvePermission:
                 permission="always_ask",
             ),
         ]
-        assert _resolve_permission("get_weather", tools) == "always_ask"
+        assert resolve_permission("get_weather", tools) == "always_ask"
 
     def test_unknown_tool_returns_none(self) -> None:
         tools = [ToolSpec(type="bash")]
-        assert _resolve_permission("nonexistent", tools) is None
+        assert resolve_permission("nonexistent", tools) is None
 
     def test_empty_tools(self) -> None:
-        assert _resolve_permission("bash", []) is None
+        assert resolve_permission("bash", []) is None

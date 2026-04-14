@@ -75,7 +75,7 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     with (
         mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),
         mock.patch("aios.harness.completion.litellm.stream_chunk_builder", _fake_chunk_builder),
-        mock.patch("aios.harness.tool_dispatch.defer_wake", _noop_defer_wake),
+        mock.patch("aios.harness.wake.defer_wake", _noop_defer_wake),
     ):
         yield h
 
@@ -140,7 +140,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     with (
         mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),
         mock.patch("aios.harness.completion.litellm.stream_chunk_builder", _fake_chunk_builder),
-        mock.patch("aios.harness.tool_dispatch.defer_wake", _noop_defer_wake),
+        mock.patch("aios.harness.wake.defer_wake", _noop_defer_wake),
     ):
         yield h
 

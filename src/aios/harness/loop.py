@@ -25,7 +25,8 @@ from typing import Any
 
 from aios.harness import runtime
 from aios.harness.completion import stream_litellm
-from aios.harness.context import build_messages, should_call_model
+from aios.harness.context import build_messages
+from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.logging import get_logger
 from aios.models.agents import ToolSpec
@@ -44,6 +45,14 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     time.
     """
     pool = runtime.require_pool()
+    task_registry = runtime.require_task_registry()
+
+    # Sweep-based guard: does this session actually need work?
+    # Prevents wasted DB/model calls from stale or duplicate wakes.
+    needs = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
+    if session_id not in needs:
+        log.debug("step.early_out", session_id=session_id, cause=cause)
+        return
 
     session = await sessions_service.get_session(pool, session_id)
 
@@ -66,8 +75,7 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     events = await sessions_service.read_message_events(pool, session_id)
 
     # Check for confirmed-but-undispatched tool calls (always_ask → allow).
-    # This must run before should_call_model because the confirmed tool has
-    # no result in the log yet — should_call_model would return False.
+    # The sweep's case (c) ensures we passed the guard above.
     pending = await _dispatch_confirmed_tools(pool, session_id, events)
     if pending:
         pending_builtin = [tc for tc in pending if not _is_mcp_tool(_tc_name(tc))]
@@ -81,11 +89,6 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
             session_id=session_id,
             count=len(pending),
         )
-        return
-
-    # Early-out: nothing actionable for the model.
-    if not should_call_model(events):
-        log.debug("step.early_out", session_id=session_id, cause=cause)
         return
 
     # Resolve skills and augment system prompt.
@@ -230,14 +233,14 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
             name = _tc_name(tc)
             if _is_mcp_tool(name):
                 # MCP tools default to always_ask (unlike built-in always_allow).
-                perm = _resolve_mcp_permission(name, agent.tools)
+                perm = resolve_mcp_permission(name, agent.tools)
                 if perm == "always_allow":
                     mcp_immediate.append(tc)
                 else:
                     needs_confirm.append(tc)
             elif not tool_registry.has(name):
                 custom.append(tc)
-            elif _resolve_permission(name, agent.tools) == "always_ask":
+            elif resolve_permission(name, agent.tools) == "always_ask":
                 needs_confirm.append(tc)
             else:
                 immediate.append(tc)
@@ -307,7 +310,7 @@ def _is_mcp_tool(name: str) -> bool:
     return name.startswith("mcp__")
 
 
-def _resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
+def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
     """Look up the permission policy for a built-in or custom tool by name."""
     for spec in agent_tools:
         tool_name = spec.name if spec.type == "custom" else spec.type
@@ -316,16 +319,13 @@ def _resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
     return None
 
 
-def _resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
+def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
     """Look up the permission policy for an MCP tool.
 
     Finds the ``mcp_toolset`` entry whose ``mcp_server_name`` matches the
     server portion of the namespaced tool name, then returns the
     ``default_config.permission_policy.type`` or ``None`` (which callers
     treat as ``always_ask``).
-
-    Per-tool overrides via ``configs`` are stored in the model but not
-    enforced here yet — only ``default_config`` drives permission resolution.
     """
     server_name = name.split("__", 2)[1]
     for spec in agent_tools:
@@ -333,7 +333,7 @@ def _resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | Non
             cfg = spec.default_config
             if cfg and cfg.permission_policy:
                 return cfg.permission_policy.type
-            return spec.permission  # fallback to the flat permission field
+            return spec.permission
     return None
 
 

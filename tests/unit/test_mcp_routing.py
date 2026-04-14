@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from aios.harness.loop import (
     _is_mcp_tool,
-    _resolve_mcp_permission,
     _tc_name,
+    resolve_mcp_permission,
 )
 from aios.models.agents import (
     McpPermissionPolicy,
@@ -45,7 +45,7 @@ class TestResolveMcpPermission:
     def test_default_returns_none(self) -> None:
         """No mcp_toolset entry → None (callers treat as always_ask)."""
         tools = [ToolSpec(type="bash")]
-        assert _resolve_mcp_permission("mcp__github__create_issue", tools) is None
+        assert resolve_mcp_permission("mcp__github__create_issue", tools) is None
 
     def test_always_allow_from_default_config(self) -> None:
         tools = [
@@ -57,7 +57,7 @@ class TestResolveMcpPermission:
                 ),
             ),
         ]
-        assert _resolve_mcp_permission("mcp__github__create_issue", tools) == "always_allow"
+        assert resolve_mcp_permission("mcp__github__create_issue", tools) == "always_allow"
 
     def test_always_ask_from_default_config(self) -> None:
         tools = [
@@ -69,7 +69,7 @@ class TestResolveMcpPermission:
                 ),
             ),
         ]
-        assert _resolve_mcp_permission("mcp__github__create_issue", tools) == "always_ask"
+        assert resolve_mcp_permission("mcp__github__create_issue", tools) == "always_ask"
 
     def test_no_default_config_returns_flat_permission(self) -> None:
         """Falls back to ToolSpec.permission when no default_config."""
@@ -80,14 +80,14 @@ class TestResolveMcpPermission:
                 permission="always_allow",
             ),
         ]
-        assert _resolve_mcp_permission("mcp__github__create_issue", tools) == "always_allow"
+        assert resolve_mcp_permission("mcp__github__create_issue", tools) == "always_allow"
 
     def test_no_config_no_permission_returns_none(self) -> None:
         """No default_config, no flat permission → None (always_ask)."""
         tools = [
             ToolSpec(type="mcp_toolset", mcp_server_name="github"),
         ]
-        assert _resolve_mcp_permission("mcp__github__create_issue", tools) is None
+        assert resolve_mcp_permission("mcp__github__create_issue", tools) is None
 
     def test_wrong_server_not_matched(self) -> None:
         tools = [
@@ -99,7 +99,7 @@ class TestResolveMcpPermission:
                 ),
             ),
         ]
-        assert _resolve_mcp_permission("mcp__github__create_issue", tools) is None
+        assert resolve_mcp_permission("mcp__github__create_issue", tools) is None
 
 
 class TestToOpenaiToolsSkipsMcpToolset:
