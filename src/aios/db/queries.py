@@ -842,8 +842,9 @@ async def read_windowed_events(
     snap boundary (same math as :func:`~aios.harness.window.select_window`)
     and loads only the events past that boundary.
 
-    Falls back to :func:`read_message_events` when cumulative data is
-    not available (pre-backfill sessions or rolling deploys).
+    Falls back to :func:`read_message_events` (loading all events) when
+    cumulative data is not available (pre-backfill sessions or rolling
+    deploys) or when the entire session fits within ``window_max``.
     """
     # Index seek: total cumulative tokens from the latest message event.
     total = await conn.fetchval(
@@ -858,15 +859,11 @@ async def read_windowed_events(
     if total is None:
         return await read_message_events(conn, session_id)
 
-    # Everything fits in the window — no need to drop.
-    if total <= window_max:
-        return await read_message_events(conn, session_id)
+    from aios.harness.tokens import tokens_to_drop
 
-    # Snap math (mirrors window.py:select_window lines 92-95).
-    overshoot = total - window_max
-    chunk = window_max - window_min
-    snaps = (overshoot + chunk - 1) // chunk  # ceil division
-    tokens_to_drop = snaps * chunk
+    drop = tokens_to_drop(total, window_min=window_min, window_max=window_max)
+    if drop == 0:
+        return await read_message_events(conn, session_id)
 
     # Bounded range scan: only events past the boundary.
     rows = await conn.fetch(
@@ -875,7 +872,7 @@ async def read_windowed_events(
         "AND cumulative_tokens > $2 "
         "ORDER BY seq ASC",
         session_id,
-        tokens_to_drop,
+        drop,
     )
     return [_row_to_event(r) for r in rows]
 

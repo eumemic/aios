@@ -23,15 +23,17 @@ Concretely, given a per-agent ``min_tokens`` / ``max_tokens`` (defaults
   to a stable prefix, so prompt prefix caching keeps hitting until the next
   snap.
 
-The safety case: if a single event is so large that even a windowed sequence
-still exceeds ``max_tokens * 1.5``, the harness will emit a context_overflow
-lifecycle event and idle the session. That check is intentionally outside this
-function — ``select_window`` is pure: same input, same output, no side effects.
+Note: a ``context_overflow`` safety check (idle the session when
+windowed content still exceeds ``max_tokens * 1.5``) is planned but
+not yet implemented.  ``select_window`` is pure: same input, same
+output, no side effects.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+
+from aios.harness.tokens import tokens_to_drop as _tokens_to_drop
 
 
 def select_window[T](
@@ -80,21 +82,10 @@ def select_window[T](
         cumulative.append((evt, running))
 
     total = running
-
-    # Cheap path: everything fits.
-    if total <= max_tokens:
+    drop = _tokens_to_drop(total, window_min=min_tokens, window_max=max_tokens)
+    if drop == 0:
         return list(events)
-
-    # Snap math. We want the cutoff (`tokens_to_drop`) to be a step function
-    # of `total`, advancing in chunks of (max - min). After the first snap
-    # (overshoot in (0, max-min]), tokens_to_drop = (max - min). After the
-    # second snap (overshoot in (max-min, 2*(max-min)]), it's 2*(max - min).
-    overshoot = total - max_tokens
-    chunk = max_tokens - min_tokens
-    snaps = (overshoot + chunk - 1) // chunk  # ceil(overshoot / chunk)
-    tokens_to_drop = snaps * chunk
-
-    return [evt for evt, cum in cumulative if cum > tokens_to_drop]
+    return [evt for evt, cum in cumulative if cum > drop]
 
 
 def cumulative_tokens[T](

@@ -360,7 +360,8 @@ class TestMonotonicity:
     @staticmethod
     def _build(events: list[Event]) -> list[dict]:
         return build_messages(
-            events, system_prompt=None, window_min=50_000, window_max=150_000
+            events,
+            system_prompt=None,
         ).messages
 
     def test_injection_stable_when_assistant_appended(self) -> None:
@@ -526,5 +527,5 @@ class TestMonotonicity:
         events[1].data["reacting_to"] = 1
         events[3].data["reacting_to"] = 1
 
-        ctx = build_messages(events, system_prompt=None, window_min=50_000, window_max=150_000)
+        ctx = build_messages(events, system_prompt=None)
         assert ctx.reacting_to >= 3

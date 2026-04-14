@@ -17,17 +17,15 @@ import json
 import os
 import sys
 
-import asyncpg
-
 # Ensure the project root is importable.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from aios.db.pool import create_pool
 from aios.harness.tokens import approx_tokens
 
 
 async def backfill(db_url: str) -> None:
-    pool = await asyncpg.create_pool(db_url, min_size=1, max_size=4)
-    assert pool is not None
+    pool = await create_pool(db_url, min_size=1, max_size=4)
 
     async with pool.acquire() as conn:
         session_rows = await conn.fetch(

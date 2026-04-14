@@ -47,6 +47,26 @@ def approx_tokens(message: dict[str, Any]) -> int:
     return max(1, total_chars // 4)
 
 
+# ─── snap boundary math ───────────────────────────────────────────────────
+
+
+def tokens_to_drop(total: int, *, window_min: int, window_max: int) -> int:
+    """Compute how many tokens to drop from the front of a context window.
+
+    Uses the chunked snap policy from :mod:`aios.harness.window`:
+    drop in ``(max - min)``-sized chunks so the cutoff advances
+    monotonically and prefix caching stays stable within a chunk.
+
+    Returns 0 when the total fits within ``window_max``.
+    """
+    if total <= window_max:
+        return 0
+    overshoot = total - window_max
+    chunk = window_max - window_min
+    snaps = (overshoot + chunk - 1) // chunk  # ceil division
+    return snaps * chunk
+
+
 # ─── precise litellm counter ───────────────────────────────────────────────
 
 
