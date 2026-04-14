@@ -49,17 +49,39 @@ def _unit_test_env() -> Iterator[None]:
 
 
 def _docker_available() -> bool:
-    try:
-        result = subprocess.run(
-            ["docker", "info"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+    """Check if Docker is available, ensuring ``DOCKER_HOST`` is set.
+
+    The Docker CLI auto-discovers Docker Desktop's socket, but the
+    Python ``docker`` library and ``testcontainers`` require
+    ``DOCKER_HOST`` in the environment. This function sets it
+    whenever Docker is available but ``DOCKER_HOST`` is missing.
+    """
+    # If DOCKER_HOST is already set, just verify Docker is reachable.
+    if "DOCKER_HOST" in os.environ:
+        try:
+            result = subprocess.run(["docker", "info"], capture_output=True, check=False, timeout=5)
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+    # DOCKER_HOST is not set. Try known socket paths.
+    for sock in [
+        Path("/var/run/docker.sock"),
+        Path.home() / ".docker" / "run" / "docker.sock",
+    ]:
+        if sock.exists():
+            os.environ["DOCKER_HOST"] = f"unix://{sock}"
+            try:
+                result = subprocess.run(
+                    ["docker", "info"], capture_output=True, check=False, timeout=5
+                )
+                if result.returncode == 0:
+                    return True
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+            del os.environ["DOCKER_HOST"]
+
+    return False
 
 
 needs_docker = pytest.mark.skipif(
