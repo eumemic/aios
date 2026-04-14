@@ -720,6 +720,18 @@ def _row_to_event(row: asyncpg.Record) -> Event:
     )
 
 
+async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: str) -> int | None:
+    """Fetch the cumulative_tokens value of the most recent message event."""
+    val: int | None = await conn.fetchval(
+        "SELECT cumulative_tokens FROM events "
+        "WHERE session_id = $1 AND kind = 'message' "
+        "AND cumulative_tokens IS NOT NULL "
+        "ORDER BY seq DESC LIMIT 1",
+        session_id,
+    )
+    return val
+
+
 async def append_event(
     conn: asyncpg.Connection[Any],
     *,
@@ -757,13 +769,7 @@ async def append_event(
         # Compute cumulative_tokens for message events.
         cum_tokens: int | None = None
         if kind == "message":
-            prev = await conn.fetchval(
-                "SELECT cumulative_tokens FROM events "
-                "WHERE session_id = $1 AND kind = 'message' "
-                "AND cumulative_tokens IS NOT NULL "
-                "ORDER BY seq DESC LIMIT 1",
-                session_id,
-            )
+            prev = await _latest_cumulative_tokens(conn, session_id)
             cum_tokens = (prev or 0) + approx_tokens(data)
 
         row = await conn.fetchrow(
@@ -847,13 +853,7 @@ async def read_windowed_events(
     deploys) or when the entire session fits within ``window_max``.
     """
     # Index seek: total cumulative tokens from the latest message event.
-    total = await conn.fetchval(
-        "SELECT cumulative_tokens FROM events "
-        "WHERE session_id = $1 AND kind = 'message' "
-        "AND cumulative_tokens IS NOT NULL "
-        "ORDER BY seq DESC LIMIT 1",
-        session_id,
-    )
+    total = await _latest_cumulative_tokens(conn, session_id)
 
     # Fallback: no cumulative data yet — load everything.
     if total is None:
