@@ -6,11 +6,12 @@ per tool call. Each task:
 
 1. Parses the arguments, looks up the handler, and invokes it.
 2. Appends a tool-role event to the session log (success or error).
-3. Defers a ``wake_session`` job so the next step picks up the result.
+3. Triggers the sweep so the next step picks up the result.
 
 The contract: **every task MUST append exactly one tool-role event and
-defer a wake in its finally block.** This is enforced by the
-try/except/finally structure. Only a worker SIGKILL can break it.
+trigger the sweep in its finally block.** This is enforced by the
+try/except/finally structure. Only a worker SIGKILL can break it —
+and the periodic sweep recovers from that.
 
 Tool tasks run on the worker's event loop and outlive the procrastinate
 job handler that spawned them. They're tracked in the per-worker
@@ -27,7 +28,6 @@ from typing import Any
 import asyncpg
 
 from aios.harness import runtime
-from aios.harness.wake import defer_wake
 from aios.logging import get_logger
 from aios.services import sessions as sessions_service
 from aios.tools.registry import ToolNotFoundError, registry
@@ -127,9 +127,13 @@ async def _execute_tool_async(
 
     finally:
         try:
-            await defer_wake(session_id, cause="tool_result")
+            from aios.harness.sweep import wake_sessions_needing_inference
+
+            await wake_sessions_needing_inference(
+                pool, runtime.require_task_registry(), session_id=session_id
+            )
         except Exception:
-            bound_log.warning("tool.defer_wake_failed")
+            bound_log.warning("tool.sweep_failed")
 
 
 def _parse_arguments(raw_args: Any) -> dict[str, Any] | None:
@@ -267,6 +271,10 @@ async def _execute_mcp_tool_async(
 
     finally:
         try:
-            await defer_wake(session_id, cause="mcp_tool_result")
+            from aios.harness.sweep import wake_sessions_needing_inference
+
+            await wake_sessions_needing_inference(
+                pool, runtime.require_task_registry(), session_id=session_id
+            )
         except Exception:
-            bound_log.warning("mcp_tool.defer_wake_failed")
+            bound_log.warning("mcp_tool.sweep_failed")

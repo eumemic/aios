@@ -25,7 +25,8 @@ from typing import Any
 
 from aios.harness import runtime
 from aios.harness.completion import stream_litellm
-from aios.harness.context import build_messages, should_call_model
+from aios.harness.context import build_messages
+from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.logging import get_logger
 from aios.models.agents import ToolSpec
@@ -83,8 +84,10 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         )
         return
 
-    # Early-out: nothing actionable for the model.
-    if not should_call_model(events):
+    # Early-out: sweep-based guard against stale wakes.
+    task_registry = runtime.require_task_registry()
+    needs = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
+    if session_id not in needs:
         log.debug("step.early_out", session_id=session_id, cause=cause)
         return
 

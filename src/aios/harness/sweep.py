@@ -1,0 +1,456 @@
+"""Unified session wake/recovery sweep.
+
+Replaces the per-session ``defer_wake`` + ``should_call_model`` +
+``recover_orphans`` triad with a single function that:
+
+1. **Repairs ghosts** — tool calls that were dispatched but never
+   completed (SIGKILL, crash before launch, etc.).
+2. **Finds sessions needing inference** — unreacted user messages,
+   completed tool batches, or ghost repairs.
+3. **Defers procrastinate wakes** for those sessions.
+
+Called from three sites:
+
+- **Recurring sweep** — starts at worker boot (immediate), then periodic.
+- **Tool result appended** — scoped to the completing session.
+- **API endpoints** — user messages and tool confirmations continue to
+  use the existing ``defer_wake`` hot path.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import asyncpg
+
+from aios.harness.task_registry import TaskRegistry
+from aios.logging import get_logger
+
+log = get_logger("aios.harness.sweep")
+
+
+# ─── ghost repair ────────────────────────────────────────────────────────────
+
+
+async def find_and_repair_ghosts(
+    pool: asyncpg.Pool[Any],
+    task_registry: TaskRegistry,
+    *,
+    session_id: str | None = None,
+) -> list[tuple[str, str]]:
+    """Find ghost tool calls and append synthetic error results.
+
+    A ghost is a tool_call_id from an assistant message where:
+
+    - No tool-role result event exists in the log.
+    - No asyncio task is in-flight (TaskRegistry).
+    - The harness would have dispatched the tool (i.e. it's not a
+      custom tool or an unconfirmed ``always_ask`` tool still waiting
+      for client action).
+
+    Returns a list of ``(session_id, tool_call_id)`` pairs that were
+    repaired.
+    """
+    in_flight = task_registry.all_in_flight_tool_call_ids()
+
+    scope_clause = "AND e.session_id = $1" if session_id else ""
+    scope_params: list[Any] = [session_id] if session_id else []
+
+    async with pool.acquire() as conn:
+        # 1. All assistant messages with tool_calls.
+        asst_rows = await conn.fetch(
+            f"""
+            SELECT e.session_id, e.data
+              FROM events e
+              JOIN sessions s ON s.id = e.session_id
+             WHERE s.archived_at IS NULL
+               AND e.kind = 'message'
+               AND e.data->>'role' = 'assistant'
+               AND jsonb_array_length(COALESCE(e.data->'tool_calls', '[]'::jsonb)) > 0
+               {scope_clause}
+            """,
+            *scope_params,
+        )
+
+        if not asst_rows:
+            return []
+
+        session_ids = list({r["session_id"] for r in asst_rows})
+
+        # 2. All existing tool results for those sessions.
+        result_rows = await conn.fetch(
+            """
+            SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
+              FROM events e
+             WHERE e.session_id = ANY($1::text[])
+               AND e.kind = 'message'
+               AND e.data->>'role' = 'tool'
+            """,
+            session_ids,
+        )
+        results_by_session: dict[str, set[str]] = {}
+        for r in result_rows:
+            results_by_session.setdefault(r["session_id"], set()).add(r["tool_call_id"])
+
+        # 3. Confirmed-allow lifecycle events.
+        lifecycle_rows = await conn.fetch(
+            """
+            SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
+              FROM events e
+             WHERE e.session_id = ANY($1::text[])
+               AND e.kind = 'lifecycle'
+               AND e.data->>'event' = 'tool_confirmed'
+               AND e.data->>'result' = 'allow'
+            """,
+            session_ids,
+        )
+        confirmed_by_session: dict[str, set[str]] = {}
+        for r in lifecycle_rows:
+            confirmed_by_session.setdefault(r["session_id"], set()).add(r["tool_call_id"])
+
+        # 4. Agent tool configs per session (respecting version pinning).
+        agent_rows = await conn.fetch(
+            """
+            SELECT s.id AS session_id,
+                   COALESCE(av.tools, a.tools) AS tools
+              FROM sessions s
+              JOIN agents a ON a.id = s.agent_id
+              LEFT JOIN agent_versions av
+                ON av.agent_id = s.agent_id AND av.version = s.agent_version
+             WHERE s.id = ANY($1::text[])
+            """,
+            session_ids,
+        )
+        agent_tools_by_session: dict[str, Any] = {}
+        for r in agent_rows:
+            raw = r["tools"]
+            agent_tools_by_session[r["session_id"]] = (
+                json.loads(raw) if isinstance(raw, str) else raw
+            )
+
+    # 5. Correlate: find ghosts.
+    ghosts: list[tuple[str, str, str]] = []  # (session_id, tool_call_id, tool_name)
+
+    for row in asst_rows:
+        sid = row["session_id"]
+        data = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+        tool_calls: list[dict[str, Any]] = data.get("tool_calls") or []
+        existing_results = results_by_session.get(sid, set())
+        session_in_flight = in_flight.get(sid, set())
+        confirmed = confirmed_by_session.get(sid, set())
+        agent_tools = agent_tools_by_session.get(sid, [])
+
+        for tc in tool_calls:
+            tcid = tc.get("id")
+            if not tcid:
+                continue
+            if tcid in existing_results:
+                continue  # already has a result
+            if tcid in session_in_flight:
+                continue  # task is still running
+
+            name = (tc.get("function") or {}).get("name", "")
+            if _was_dispatched(name, tcid, confirmed, agent_tools):
+                ghosts.append((sid, tcid, name))
+
+    # 6. Append synthetic error results for ghosts.
+    if ghosts:
+        from aios.services import sessions as sessions_service
+
+        for sid, tcid, name in ghosts:
+            content = json.dumps(
+                {"error": "No result was received for this tool call."},
+                ensure_ascii=False,
+            )
+            await sessions_service.append_event(
+                pool,
+                sid,
+                "message",
+                {
+                    "role": "tool",
+                    "tool_call_id": tcid,
+                    "name": name,
+                    "content": content,
+                    "is_error": True,
+                },
+            )
+            log.info("sweep.ghost_repaired", session_id=sid, tool_call_id=tcid, tool_name=name)
+
+    return [(sid, tcid) for sid, tcid, _ in ghosts]
+
+
+def _was_dispatched(
+    name: str,
+    tool_call_id: str,
+    confirmed_ids: set[str],
+    agent_tools: list[dict[str, Any]],
+) -> bool:
+    """Determine whether a tool call was dispatched by the harness.
+
+    A dispatched tool that has no result and no in-flight task is a
+    ghost. A tool that was never dispatched (custom, or unconfirmed
+    ``always_ask``) is legitimately waiting for the client.
+    """
+    from aios.tools.registry import registry
+
+    if name.startswith("mcp__"):
+        server_name = name.split("__", 2)[1]
+        for spec in agent_tools:
+            if spec.get("type") == "mcp_toolset" and spec.get("mcp_server_name") == server_name:
+                dc = spec.get("default_config") or {}
+                pp = dc.get("permission_policy") or {}
+                perm = pp.get("type") or spec.get("permission")
+                if perm == "always_allow":
+                    return True
+                return tool_call_id in confirmed_ids
+        # MCP tool with no matching config defaults to always_ask.
+        return tool_call_id in confirmed_ids
+
+    if not registry.has(name):
+        # Custom tool — client-executed, never dispatched by the harness.
+        return False
+
+    # Built-in tool — check permission policy.
+    for spec in agent_tools:
+        tool_name = spec.get("name") if spec.get("type") == "custom" else spec.get("type")
+        if tool_name == name:
+            if spec.get("permission") == "always_ask":
+                return tool_call_id in confirmed_ids
+            return True  # always_allow or no policy (default)
+
+    # Built-in tool with no explicit spec → always_allow by default.
+    return True
+
+
+# ─── sessions needing inference ──────────────────────────────────────────────
+
+
+async def find_sessions_needing_inference(
+    pool: asyncpg.Pool[Any],
+    task_registry: TaskRegistry,
+    *,
+    session_id: str | None = None,
+) -> set[str]:
+    """Return session IDs that need an inference step.
+
+    A session needs inference when:
+
+    (a) It has message events but no assistant message (first turn).
+    (b) It has non-assistant message events with ``seq`` greater than
+        the last assistant message's ``reacting_to`` — these are events
+        the model hasn't reacted to yet.
+    (c) It has a ``tool_confirmed allow`` lifecycle event for a
+        ``tool_call_id`` that has no result and no in-flight task
+        (needs dispatch via ``_dispatch_confirmed_tools``).
+
+    Sessions are then filtered: if the only unreacted events are tool
+    results from a batch that still has in-flight tasks, the session is
+    not yet ready (batch incomplete).
+    """
+    scope_clause = "AND s.id = $1" if session_id else ""
+    scope_params: list[Any] = [session_id] if session_id else []
+
+    async with pool.acquire() as conn:
+        # Primary query: sessions with unreacted message events.
+        candidate_rows = await conn.fetch(
+            f"""
+            SELECT DISTINCT e.session_id
+              FROM events e
+              JOIN sessions s ON s.id = e.session_id
+             WHERE s.archived_at IS NULL
+               AND e.kind = 'message'
+               AND e.data->>'role' != 'assistant'
+               AND (
+                   -- No assistant message at all (first turn)
+                   NOT EXISTS (
+                       SELECT 1 FROM events a
+                        WHERE a.session_id = e.session_id
+                          AND a.kind = 'message'
+                          AND a.data->>'role' = 'assistant'
+                   )
+                   OR
+                   -- Event seq > last assistant's reacting_to
+                   e.seq > COALESCE(
+                       (SELECT MAX(COALESCE((a.data->>'reacting_to')::bigint, a.seq))
+                          FROM events a
+                         WHERE a.session_id = e.session_id
+                           AND a.kind = 'message'
+                           AND a.data->>'role' = 'assistant'),
+                       0
+                   )
+               )
+               {scope_clause}
+            """,
+            *scope_params,
+        )
+
+        candidates = {r["session_id"] for r in candidate_rows}
+
+        # Case (c): sessions with confirmed-but-unresulted tool calls.
+        confirmed_rows = await conn.fetch(
+            f"""
+            SELECT DISTINCT lc.session_id
+              FROM events lc
+              JOIN sessions s ON s.id = lc.session_id
+             WHERE s.archived_at IS NULL
+               AND lc.kind = 'lifecycle'
+               AND lc.data->>'event' = 'tool_confirmed'
+               AND lc.data->>'result' = 'allow'
+               AND NOT EXISTS (
+                   SELECT 1 FROM events tr
+                    WHERE tr.session_id = lc.session_id
+                      AND tr.kind = 'message'
+                      AND tr.data->>'role' = 'tool'
+                      AND tr.data->>'tool_call_id' = lc.data->>'tool_call_id'
+               )
+               {scope_clause}
+            """,
+            *scope_params,
+        )
+        for r in confirmed_rows:
+            candidates.add(r["session_id"])
+
+    # Batch-completion filter: for candidates, check if unreacted events
+    # are solely tool results from batches with in-flight tasks.
+    if not candidates:
+        return set()
+
+    return await _filter_incomplete_batches(pool, task_registry, candidates)
+
+
+async def _filter_incomplete_batches(
+    pool: asyncpg.Pool[Any],
+    task_registry: TaskRegistry,
+    candidates: set[str],
+) -> set[str]:
+    """Remove sessions whose only unreacted events are tool results from
+    in-progress batches (where sibling tools are still in-flight).
+    """
+    result: set[str] = set()
+
+    async with pool.acquire() as conn:
+        for sid in candidates:
+            in_flight = task_registry.in_flight_tool_call_ids(sid)
+
+            # Fetch unreacted events for this session.
+            rows = await conn.fetch(
+                """
+                SELECT e.data
+                  FROM events e
+                 WHERE e.session_id = $1
+                   AND e.kind = 'message'
+                   AND e.data->>'role' != 'assistant'
+                   AND e.seq > COALESCE(
+                       (SELECT MAX(COALESCE((a.data->>'reacting_to')::bigint, a.seq))
+                          FROM events a
+                         WHERE a.session_id = $1
+                           AND a.kind = 'message'
+                           AND a.data->>'role' = 'assistant'),
+                       0
+                   )
+                """,
+                sid,
+            )
+
+            if not rows:
+                # No unreacted events — could be here from case (c) only.
+                # Check confirmed-but-undispatched.
+                if not in_flight:
+                    result.add(sid)
+                continue
+
+            # If any unreacted event is a user message → always needs inference.
+            unreacted = [
+                json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows
+            ]
+            if any(e.get("role") == "user" for e in unreacted):
+                result.add(sid)
+                continue
+
+            # All unreacted events are tool results. Check batch completion.
+            # A tool result is "ready" if its parent assistant message's
+            # tool_calls batch is complete (all siblings have results) and
+            # no sibling is in-flight.
+            unreacted_tcids = {e.get("tool_call_id") for e in unreacted if e.get("tool_call_id")}
+
+            # If any unreacted tool_call_id is NOT in-flight, the session
+            # has completed work the model needs to see.
+            if unreacted_tcids - in_flight:
+                # At least one unreacted result is from a completed tool.
+                # Check if all siblings in that batch are also done.
+                all_results = await conn.fetch(
+                    """
+                    SELECT e.data->>'tool_call_id' AS tool_call_id
+                      FROM events e
+                     WHERE e.session_id = $1
+                       AND e.kind = 'message'
+                       AND e.data->>'role' = 'tool'
+                    """,
+                    sid,
+                )
+                all_result_ids = {r["tool_call_id"] for r in all_results}
+
+                # Find parent assistant messages for unreacted tool results.
+                asst_rows = await conn.fetch(
+                    """
+                    SELECT e.data
+                      FROM events e
+                     WHERE e.session_id = $1
+                       AND e.kind = 'message'
+                       AND e.data->>'role' = 'assistant'
+                       AND jsonb_array_length(COALESCE(e.data->'tool_calls', '[]'::jsonb)) > 0
+                    """,
+                    sid,
+                )
+
+                for ar in asst_rows:
+                    adata = json.loads(ar["data"]) if isinstance(ar["data"], str) else ar["data"]
+                    batch_ids = {tc["id"] for tc in (adata.get("tool_calls") or []) if tc.get("id")}
+                    if not (batch_ids & unreacted_tcids):
+                        continue  # this batch doesn't contain any unreacted results
+                    # Check if the batch is complete: all IDs have results or are in-flight.
+                    if batch_ids <= all_result_ids:
+                        result.add(sid)
+                        break
+
+    return result
+
+
+# ─── main entry point ────────────────────────────────────────────────────────
+
+
+async def wake_sessions_needing_inference(
+    pool: asyncpg.Pool[Any],
+    task_registry: TaskRegistry,
+    *,
+    session_id: str | None = None,
+) -> set[str]:
+    """The main sweep function.
+
+    1. Repairs ghosts (appends synthetic error results).
+    2. Finds sessions needing inference.
+    3. Defers procrastinate wakes for those sessions.
+
+    Returns the set of session IDs that were woken.
+    """
+    await find_and_repair_ghosts(pool, task_registry, session_id=session_id)
+    session_ids = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
+    for sid in session_ids:
+        await _defer_wake(sid)
+    return session_ids
+
+
+async def _defer_wake(session_id: str) -> None:
+    """Enqueue a ``wake_session`` job, swallowing ``AlreadyEnqueued``."""
+    import contextlib
+
+    from procrastinate import exceptions as procrastinate_exceptions
+
+    from aios.harness.procrastinate_app import app
+
+    with contextlib.suppress(procrastinate_exceptions.AlreadyEnqueued):
+        await app.configure_task("harness.wake_session").defer_async(
+            session_id=session_id,
+            cause="sweep",
+        )

@@ -328,6 +328,47 @@ class Harness:
             await self.run_step(session_id)
         raise RuntimeError(f"run_until_idle: hit max_steps={max_steps}")
 
+    async def simulate_sigkill(self, session_id: str) -> None:
+        """Simulate SIGKILL: cancel all in-flight tasks for a session
+        without letting their CancelledError handlers append results.
+
+        Mocks ``append_event`` to suppress writes during cancellation
+        cleanup, then restores it. After this call, the tasks are gone
+        and no tool results were appended.
+        """
+        from unittest import mock
+
+        session_tasks = self._task_registry._tasks.get(session_id, {})
+        raw_tasks = list(session_tasks.values())
+        # Remove from registry first so shutdown won't find them.
+        self._task_registry._tasks.pop(session_id, None)
+        if raw_tasks:
+            # Suppress DB writes during cancellation cleanup.
+            with mock.patch("aios.services.sessions.append_event"):
+                for t in raw_tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*raw_tasks, return_exceptions=True)
+
+    # ── sweep ────────────────────────────────────────────────────────────
+
+    async def run_ghost_repair(self, session_id: str | None = None) -> list[tuple[str, str]]:
+        """Run ghost detection and repair.
+
+        Returns ``(session_id, tool_call_id)`` pairs for each ghost repaired.
+        """
+        from aios.harness.sweep import find_and_repair_ghosts
+
+        return await find_and_repair_ghosts(self._pool, self._task_registry, session_id=session_id)
+
+    async def sessions_needing_inference(self, session_id: str | None = None) -> set[str]:
+        """Return session IDs that the sweep considers ready for inference."""
+        from aios.harness.sweep import find_sessions_needing_inference
+
+        return await find_sessions_needing_inference(
+            self._pool, self._task_registry, session_id=session_id
+        )
+
     # ── inspection ───────────────────────────────────────────────────────
 
     async def events(self, session_id: str) -> list[Event]:

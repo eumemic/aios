@@ -66,6 +66,22 @@ class TaskRegistry:
             return 0
         return sum(1 for t in session_tasks.values() if not t.done())
 
+    def in_flight_tool_call_ids(self, session_id: str) -> set[str]:
+        """Return tool_call_ids with in-flight tasks for a session."""
+        session_tasks = self._tasks.get(session_id)
+        if not session_tasks:
+            return set()
+        return {tcid for tcid, task in session_tasks.items() if not task.done()}
+
+    def all_in_flight_tool_call_ids(self) -> dict[str, set[str]]:
+        """Return ``{session_id: {tool_call_ids}}`` for all sessions with in-flight tasks."""
+        result: dict[str, set[str]] = {}
+        for sid, tasks in self._tasks.items():
+            active = {tcid for tcid, t in tasks.items() if not t.done()}
+            if active:
+                result[sid] = active
+        return result
+
     async def shutdown(self) -> None:
         """Cancel all tasks and await them for cleanup (finally blocks)."""
         all_tasks: list[asyncio.Task[None]] = []

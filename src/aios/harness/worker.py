@@ -20,14 +20,21 @@ releases all containers, and closes connections.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+from typing import TYPE_CHECKING, Any
+
 import aios.tools  # noqa: F401  — side-effect: register built-in tools
+
+if TYPE_CHECKING:
+    import asyncpg
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.harness import runtime
 from aios.harness.procrastinate_app import app as procrastinate_app
-from aios.harness.resume import recover_orphans
+from aios.harness.sweep import wake_sessions_needing_inference
 from aios.harness.task_registry import TaskRegistry
 from aios.logging import configure_logging, get_logger
 from aios.sandbox.registry import SandboxRegistry
@@ -63,11 +70,13 @@ async def worker_main() -> None:
         concurrency=settings.worker_concurrency,
     )
 
+    sweep_task: asyncio.Task[None] | None = None
+
     try:
-        # Recover orphaned sessions (status=running with no turn_ended).
-        recovered = await recover_orphans(pool, procrastinate_app)
-        if recovered:
-            log.info("worker.recovered_orphans", count=recovered)
+        # Startup sweep: repair ghosts and wake sessions needing inference.
+        woken = await wake_sessions_needing_inference(pool, task_registry)
+        if woken:
+            log.info("worker.startup_sweep", woken=len(woken))
 
         # Reap orphaned sandbox containers.
         async with pool.acquire() as conn:
@@ -79,6 +88,12 @@ async def worker_main() -> None:
         # Start container idle-TTL reaper.
         sandbox_registry.start_reaper(idle_timeout=settings.container_idle_timeout_seconds)
 
+        # Start periodic sweep (every 30s).
+        sweep_task = asyncio.create_task(
+            _periodic_sweep(pool, task_registry, interval=30),
+            name="periodic_sweep",
+        )
+
         await procrastinate_app.run_worker_async(
             queues=["sessions"],
             concurrency=settings.worker_concurrency,
@@ -87,8 +102,30 @@ async def worker_main() -> None:
         )
     finally:
         log.info("worker.shutdown")
+        if sweep_task is not None:
+            sweep_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweep_task
         sandbox_registry.stop_reaper()
         await task_registry.shutdown()
         await sandbox_registry.release_all()
         await procrastinate_app.close_async()
         await pool.close()
+
+
+async def _periodic_sweep(
+    pool: asyncpg.Pool[Any],
+    task_registry: TaskRegistry,
+    *,
+    interval: int = 30,
+) -> None:
+    """Background task: run the sweep periodically."""
+    log = get_logger("aios.worker.sweep")
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            woken = await wake_sessions_needing_inference(pool, task_registry)
+            if woken:
+                log.info("periodic_sweep.woken", count=len(woken))
+        except Exception:
+            log.exception("periodic_sweep.failed")

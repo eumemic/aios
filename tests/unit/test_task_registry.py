@@ -64,6 +64,48 @@ class TestCancellation:
         assert reg.cancel_session("sess_nope") == 0
 
 
+class TestInFlightQueries:
+    def test_in_flight_tool_call_ids_empty(self) -> None:
+        reg = TaskRegistry()
+        assert reg.in_flight_tool_call_ids("sess_nope") == set()
+
+    def test_in_flight_tool_call_ids(self) -> None:
+        reg = TaskRegistry()
+        f1 = asyncio.get_event_loop().create_future()
+        f2 = asyncio.get_event_loop().create_future()
+        reg.add("sess_1", "call_a", f1)  # type: ignore[arg-type]
+        reg.add("sess_1", "call_b", f2)  # type: ignore[arg-type]
+        assert reg.in_flight_tool_call_ids("sess_1") == {"call_a", "call_b"}
+
+    def test_in_flight_tool_call_ids_excludes_done(self) -> None:
+        reg = TaskRegistry()
+        f1 = asyncio.get_event_loop().create_future()
+        f2 = asyncio.get_event_loop().create_future()
+        f2.set_result(None)  # mark as done
+        reg.add("sess_1", "call_a", f1)  # type: ignore[arg-type]
+        reg.add("sess_1", "call_b", f2)  # type: ignore[arg-type]
+        assert reg.in_flight_tool_call_ids("sess_1") == {"call_a"}
+
+    def test_all_in_flight_tool_call_ids(self) -> None:
+        reg = TaskRegistry()
+        f1 = asyncio.get_event_loop().create_future()
+        f2 = asyncio.get_event_loop().create_future()
+        f3 = asyncio.get_event_loop().create_future()
+        f3.set_result(None)  # done — should be excluded
+        reg.add("sess_1", "call_a", f1)  # type: ignore[arg-type]
+        reg.add("sess_2", "call_b", f2)  # type: ignore[arg-type]
+        reg.add("sess_2", "call_c", f3)  # type: ignore[arg-type]
+        result = reg.all_in_flight_tool_call_ids()
+        assert result == {"sess_1": {"call_a"}, "sess_2": {"call_b"}}
+
+    def test_all_in_flight_excludes_sessions_with_no_active(self) -> None:
+        reg = TaskRegistry()
+        f1 = asyncio.get_event_loop().create_future()
+        f1.set_result(None)  # done
+        reg.add("sess_1", "call_a", f1)  # type: ignore[arg-type]
+        assert reg.all_in_flight_tool_call_ids() == {}
+
+
 class TestShutdown:
     async def test_shutdown_cancels_all(self) -> None:
         reg = TaskRegistry()
