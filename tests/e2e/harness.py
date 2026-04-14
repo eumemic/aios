@@ -27,7 +27,6 @@ from typing import Any
 
 import asyncpg
 
-from aios.harness.context import should_call_model
 from aios.harness.loop import run_session_step
 from aios.harness.task_registry import TaskRegistry
 from aios.models.events import Event
@@ -319,11 +318,12 @@ class Harness:
         raise RuntimeError("wait_for_tools: tasks never completed")
 
     async def run_until_idle(self, session_id: str, *, max_steps: int = 20) -> None:
-        """Run steps until should_call_model returns False."""
+        """Run steps until the sweep says no inference is needed."""
         for _ in range(max_steps):
             await self.wait_for_tools(session_id)
-            events = await sessions_service.read_message_events(self._pool, session_id)
-            if not should_call_model(events):
+            await self.run_ghost_repair(session_id)
+            needs = await self.sessions_needing_inference(session_id)
+            if session_id not in needs:
                 return
             await self.run_step(session_id)
         raise RuntimeError(f"run_until_idle: hit max_steps={max_steps}")

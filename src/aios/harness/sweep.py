@@ -288,6 +288,7 @@ async def find_sessions_needing_inference(
         candidates = {r["session_id"] for r in candidate_rows}
 
         # Case (c): sessions with confirmed-but-unresulted tool calls.
+        # These bypass the batch filter — they need dispatch, not inference.
         confirmed_rows = await conn.fetch(
             f"""
             SELECT DISTINCT lc.session_id
@@ -308,15 +309,18 @@ async def find_sessions_needing_inference(
             """,
             *scope_params,
         )
-        for r in confirmed_rows:
-            candidates.add(r["session_id"])
+        confirmed_sessions = {r["session_id"] for r in confirmed_rows}
 
-    # Batch-completion filter: for candidates, check if unreacted events
-    # are solely tool results from batches with in-flight tasks.
-    if not candidates:
-        return set()
+    # Batch-completion filter: for unreacted-event candidates, check if
+    # the only unreacted events are tool results from incomplete batches.
+    # Case (c) sessions bypass this — they need dispatch regardless.
+    filtered = (
+        await _filter_incomplete_batches(pool, task_registry, candidates - confirmed_sessions)
+        if (candidates - confirmed_sessions)
+        else set()
+    )
 
-    return await _filter_incomplete_batches(pool, task_registry, candidates)
+    return filtered | confirmed_sessions
 
 
 async def _filter_incomplete_batches(
@@ -326,95 +330,100 @@ async def _filter_incomplete_batches(
 ) -> set[str]:
     """Remove sessions whose only unreacted events are tool results from
     in-progress batches (where sibling tools are still in-flight).
+
+    Uses three batched queries across all candidates (no N+1).
     """
-    result: set[str] = set()
+    session_list = list(candidates)
 
     async with pool.acquire() as conn:
-        for sid in candidates:
-            in_flight = task_registry.in_flight_tool_call_ids(sid)
+        unreacted_rows = await conn.fetch(
+            """
+            SELECT e.session_id, e.data
+              FROM events e
+             WHERE e.session_id = ANY($1::text[])
+               AND e.kind = 'message'
+               AND e.data->>'role' != 'assistant'
+               AND e.seq > COALESCE(
+                   (SELECT MAX(COALESCE((a.data->>'reacting_to')::bigint, a.seq))
+                      FROM events a
+                     WHERE a.session_id = e.session_id
+                       AND a.kind = 'message'
+                       AND a.data->>'role' = 'assistant'),
+                   0)
+            """,
+            session_list,
+        )
 
-            # Fetch unreacted events for this session.
-            rows = await conn.fetch(
-                """
-                SELECT e.data
-                  FROM events e
-                 WHERE e.session_id = $1
-                   AND e.kind = 'message'
-                   AND e.data->>'role' != 'assistant'
-                   AND e.seq > COALESCE(
-                       (SELECT MAX(COALESCE((a.data->>'reacting_to')::bigint, a.seq))
-                          FROM events a
-                         WHERE a.session_id = $1
-                           AND a.kind = 'message'
-                           AND a.data->>'role' = 'assistant'),
-                       0
-                   )
-                """,
-                sid,
-            )
+        all_result_rows = await conn.fetch(
+            """
+            SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
+              FROM events e
+             WHERE e.session_id = ANY($1::text[])
+               AND e.kind = 'message'
+               AND e.data->>'role' = 'tool'
+            """,
+            session_list,
+        )
 
-            if not rows:
-                # No unreacted events — could be here from case (c) only.
-                # Check confirmed-but-undispatched.
-                if not in_flight:
-                    result.add(sid)
-                continue
+        all_asst_rows = await conn.fetch(
+            """
+            SELECT e.session_id, e.data
+              FROM events e
+             WHERE e.session_id = ANY($1::text[])
+               AND e.kind = 'message'
+               AND e.data->>'role' = 'assistant'
+               AND jsonb_array_length(COALESCE(e.data->'tool_calls', '[]'::jsonb)) > 0
+            """,
+            session_list,
+        )
 
-            # If any unreacted event is a user message → always needs inference.
-            unreacted = [
-                json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows
-            ]
-            if any(e.get("role") == "user" for e in unreacted):
+    unreacted_by_sid = _group_event_data(unreacted_rows)
+    results_by_sid = _group_tool_call_ids(all_result_rows)
+    asst_by_sid = _group_event_data(all_asst_rows)
+
+    result: set[str] = set()
+    for sid in candidates:
+        in_flight = task_registry.in_flight_tool_call_ids(sid)
+        unreacted = unreacted_by_sid.get(sid, [])
+
+        if not unreacted:
+            if not in_flight:
                 result.add(sid)
+            continue
+
+        if any(evt.get("role") == "user" for evt in unreacted):
+            result.add(sid)
+            continue
+
+        unreacted_tcids = {evt.get("tool_call_id") for evt in unreacted if evt.get("tool_call_id")}
+        all_result_ids = results_by_sid.get(sid, set())
+
+        for asst_data in asst_by_sid.get(sid, []):
+            batch_ids = {tc["id"] for tc in (asst_data.get("tool_calls") or []) if tc.get("id")}
+            if not (batch_ids & unreacted_tcids):
                 continue
-
-            # All unreacted events are tool results. Check batch completion.
-            # A tool result is "ready" if its parent assistant message's
-            # tool_calls batch is complete (all siblings have results) and
-            # no sibling is in-flight.
-            unreacted_tcids = {e.get("tool_call_id") for e in unreacted if e.get("tool_call_id")}
-
-            # If any unreacted tool_call_id is NOT in-flight, the session
-            # has completed work the model needs to see.
-            if unreacted_tcids - in_flight:
-                # At least one unreacted result is from a completed tool.
-                # Check if all siblings in that batch are also done.
-                all_results = await conn.fetch(
-                    """
-                    SELECT e.data->>'tool_call_id' AS tool_call_id
-                      FROM events e
-                     WHERE e.session_id = $1
-                       AND e.kind = 'message'
-                       AND e.data->>'role' = 'tool'
-                    """,
-                    sid,
-                )
-                all_result_ids = {r["tool_call_id"] for r in all_results}
-
-                # Find parent assistant messages for unreacted tool results.
-                asst_rows = await conn.fetch(
-                    """
-                    SELECT e.data
-                      FROM events e
-                     WHERE e.session_id = $1
-                       AND e.kind = 'message'
-                       AND e.data->>'role' = 'assistant'
-                       AND jsonb_array_length(COALESCE(e.data->'tool_calls', '[]'::jsonb)) > 0
-                    """,
-                    sid,
-                )
-
-                for ar in asst_rows:
-                    adata = json.loads(ar["data"]) if isinstance(ar["data"], str) else ar["data"]
-                    batch_ids = {tc["id"] for tc in (adata.get("tool_calls") or []) if tc.get("id")}
-                    if not (batch_ids & unreacted_tcids):
-                        continue  # this batch doesn't contain any unreacted results
-                    # Check if the batch is complete: all IDs have results or are in-flight.
-                    if batch_ids <= all_result_ids:
-                        result.add(sid)
-                        break
+            if batch_ids <= all_result_ids:
+                result.add(sid)
+                break
 
     return result
+
+
+def _group_event_data(rows: list[Any]) -> dict[str, list[dict[str, Any]]]:
+    """Group rows by session_id, parsing data JSONB into dicts."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        data = json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]
+        grouped.setdefault(r["session_id"], []).append(data)
+    return grouped
+
+
+def _group_tool_call_ids(rows: list[Any]) -> dict[str, set[str]]:
+    """Group tool_call_ids by session_id into sets."""
+    grouped: dict[str, set[str]] = {}
+    for r in rows:
+        grouped.setdefault(r["session_id"], set()).add(r["tool_call_id"])
+    return grouped
 
 
 # ─── main entry point ────────────────────────────────────────────────────────

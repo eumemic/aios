@@ -45,6 +45,14 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     time.
     """
     pool = runtime.require_pool()
+    task_registry = runtime.require_task_registry()
+
+    # Sweep-based guard: does this session actually need work?
+    # Prevents wasted DB/model calls from stale or duplicate wakes.
+    needs = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
+    if session_id not in needs:
+        log.debug("step.early_out", session_id=session_id, cause=cause)
+        return
 
     session = await sessions_service.get_session(pool, session_id)
 
@@ -67,8 +75,7 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     events = await sessions_service.read_message_events(pool, session_id)
 
     # Check for confirmed-but-undispatched tool calls (always_ask → allow).
-    # This must run before should_call_model because the confirmed tool has
-    # no result in the log yet — should_call_model would return False.
+    # The sweep's case (c) ensures we passed the guard above.
     pending = await _dispatch_confirmed_tools(pool, session_id, events)
     if pending:
         pending_builtin = [tc for tc in pending if not _is_mcp_tool(_tc_name(tc))]
@@ -82,13 +89,6 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
             session_id=session_id,
             count=len(pending),
         )
-        return
-
-    # Early-out: sweep-based guard against stale wakes.
-    task_registry = runtime.require_task_registry()
-    needs = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
-    if session_id not in needs:
-        log.debug("step.early_out", session_id=session_id, cause=cause)
         return
 
     # Resolve skills and augment system prompt.
