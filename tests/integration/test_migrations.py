@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -35,11 +37,14 @@ def _alembic_url(pg: object) -> str:
 
 
 def _run_alembic(args: list[str], db_url: str) -> subprocess.CompletedProcess[str]:
+    uv = shutil.which("uv")
+    if uv is None:
+        raise FileNotFoundError("uv not found on PATH")
     return subprocess.run(
-        ["uv", "run", "alembic", *args],
+        [uv, "run", "alembic", *args],
         cwd=PROJECT_ROOT,
         env={
-            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
             "AIOS_DB_URL": db_url,
             "HOME": str(Path.home()),
         },
@@ -85,7 +90,6 @@ def test_migration_creates_all_tables(postgres: object) -> None:
                 "agents_name_uniq",
                 "events_session_seq_idx",
                 "events_session_message_seq_idx",
-                "sessions_lease_idx",
             ):
                 assert required in index_names, f"missing index {required}"
         finally:

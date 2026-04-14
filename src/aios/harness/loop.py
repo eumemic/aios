@@ -71,8 +71,10 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     # and for routing new tool calls after inference).
     mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
 
-    # Read all message events for this session.
-    events = await sessions_service.read_message_events(pool, session_id)
+    # Read windowed message events for this session.
+    events = await sessions_service.read_windowed_events(
+        pool, session_id, window_min=agent.window_min, window_max=agent.window_max
+    )
 
     # Check for confirmed-but-undispatched tool calls (always_ask → allow).
     # The sweep's case (c) ensures we passed the guard above.
@@ -115,9 +117,6 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     ctx = build_messages(
         events,
         system_prompt=system_prompt,
-        window_min=agent.window_min,
-        window_max=agent.window_max,
-        model=agent.model,
     )
 
     # Mark session as running.

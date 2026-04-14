@@ -1,21 +1,53 @@
-"""Token counting helper.
+"""Token counting helpers.
 
-Wraps :func:`litellm.token_counter` with a process-local LRU cache keyed by
-event id. Events are immutable, so the cache entries are permanent for the
-lifetime of the process. The harness re-counts only events it hasn't seen
-before, so the per-turn cost stays O(new events since last turn) instead of
-O(full session history).
+Two estimators live here:
+
+* :func:`approx_tokens` — fast, dependency-free ``len // 4`` estimate
+  used by the cumulative-tokens column and context windowing.  Suitable
+  for boundary decisions where ±10 % accuracy is fine.
+
+* :func:`token_count_for_event` — precise LiteLLM-backed counter with
+  a process-local LRU cache keyed by event id.
+
+Both are importable from any layer (no internal aios dependencies
+beyond the ``Event`` model type hint).
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import litellm
 
 if TYPE_CHECKING:
     from aios.models.events import Event
+
+
+# ─── cheap estimator (no external deps) ────────────────────────────────────
+
+
+def approx_tokens(message: dict[str, Any]) -> int:
+    """Rough token count for a chat-completions message dict.
+
+    Counts characters in ``content`` plus ``tool_calls[].function.{name,
+    arguments}`` and divides by 4.  Returns at least 1.
+
+    This is the single source of truth for the ``cumulative_tokens``
+    column on the events table and for the chunked-window boundary
+    computation.  If the formula changes, run the backfill script to
+    recompute stored values.
+    """
+    content = message.get("content") or ""
+    tool_calls = message.get("tool_calls") or []
+    total_chars = len(content)
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        total_chars += len(fn.get("name") or "") + len(fn.get("arguments") or "")
+    return max(1, total_chars // 4)
+
+
+# ─── precise litellm counter ───────────────────────────────────────────────
 
 
 @lru_cache(maxsize=10_000)

@@ -34,4 +34,5 @@ class Event(BaseModel):
     seq: int
     kind: EventKind
     data: dict[str, Any]
+    cumulative_tokens: int | None = None
     created_at: datetime

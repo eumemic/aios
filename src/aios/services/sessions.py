@@ -148,6 +148,19 @@ async def read_message_events(pool: asyncpg.Pool[Any], session_id: str) -> list[
         return await queries.read_message_events(conn, session_id)
 
 
+async def read_windowed_events(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    window_min: int,
+    window_max: int,
+) -> list[Event]:
+    async with pool.acquire() as conn:
+        return await queries.read_windowed_events(
+            conn, session_id, window_min=window_min, window_max=window_max
+        )
+
+
 async def set_session_status(
     pool: asyncpg.Pool[Any],
     session_id: str,

@@ -715,6 +715,7 @@ def _row_to_event(row: asyncpg.Record) -> Event:
         seq=row["seq"],
         kind=row["kind"],
         data=data,
+        cumulative_tokens=row["cumulative_tokens"],
         created_at=row["created_at"],
     )
 
@@ -732,7 +733,14 @@ async def append_event(
     the parent session, so concurrent appenders (the API server adding a
     user message while the harness is mid-turn) serialize correctly. Issues
     ``pg_notify`` after the insert so SSE subscribers receive the new event.
+
+    For message events, computes and stores ``cumulative_tokens`` — the
+    running total of approximate token counts through this event.  The
+    previous cumulative value is fetched inside the same transaction (under
+    the session row lock), so there is no race with concurrent appenders.
     """
+    from aios.harness.tokens import approx_tokens
+
     new_id = make_id(EVENT)
     data_json = json.dumps(data)
 
@@ -745,14 +753,28 @@ async def append_event(
         if seq_row is None:
             raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
         seq = seq_row["last_event_seq"]
+
+        # Compute cumulative_tokens for message events.
+        cum_tokens: int | None = None
+        if kind == "message":
+            prev = await conn.fetchval(
+                "SELECT cumulative_tokens FROM events "
+                "WHERE session_id = $1 AND kind = 'message' "
+                "AND cumulative_tokens IS NOT NULL "
+                "ORDER BY seq DESC LIMIT 1",
+                session_id,
+            )
+            cum_tokens = (prev or 0) + approx_tokens(data)
+
         row = await conn.fetchrow(
-            "INSERT INTO events (id, session_id, seq, kind, data) "
-            "VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING *",
+            "INSERT INTO events (id, session_id, seq, kind, data, cumulative_tokens) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb, $6) RETURNING *",
             new_id,
             session_id,
             seq,
             kind,
             data_json,
+            cum_tokens,
         )
         assert row is not None
 
@@ -797,12 +819,63 @@ async def read_events(
 async def read_message_events(conn: asyncpg.Connection[Any], session_id: str) -> list[Event]:
     """Read every message-kind event for a session in chronological order.
 
-    Used by the harness to reconstruct the conversation history before
-    applying the windowing function.
+    Used by callers that need the full unwindowed log (e.g.
+    ``confirm_tool_deny`` searching for a tool_call_id).
     """
     rows = await conn.fetch(
         "SELECT * FROM events WHERE session_id = $1 AND kind = 'message' ORDER BY seq ASC",
         session_id,
+    )
+    return [_row_to_event(r) for r in rows]
+
+
+async def read_windowed_events(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    window_min: int,
+    window_max: int,
+) -> list[Event]:
+    """Read message events for the session's trailing context window.
+
+    Uses the ``cumulative_tokens`` column to compute the chunked-window
+    snap boundary (same math as :func:`~aios.harness.window.select_window`)
+    and loads only the events past that boundary.
+
+    Falls back to :func:`read_message_events` when cumulative data is
+    not available (pre-backfill sessions or rolling deploys).
+    """
+    # Index seek: total cumulative tokens from the latest message event.
+    total = await conn.fetchval(
+        "SELECT cumulative_tokens FROM events "
+        "WHERE session_id = $1 AND kind = 'message' "
+        "AND cumulative_tokens IS NOT NULL "
+        "ORDER BY seq DESC LIMIT 1",
+        session_id,
+    )
+
+    # Fallback: no cumulative data yet — load everything.
+    if total is None:
+        return await read_message_events(conn, session_id)
+
+    # Everything fits in the window — no need to drop.
+    if total <= window_max:
+        return await read_message_events(conn, session_id)
+
+    # Snap math (mirrors window.py:select_window lines 92-95).
+    overshoot = total - window_max
+    chunk = window_max - window_min
+    snaps = (overshoot + chunk - 1) // chunk  # ceil division
+    tokens_to_drop = snaps * chunk
+
+    # Bounded range scan: only events past the boundary.
+    rows = await conn.fetch(
+        "SELECT * FROM events "
+        "WHERE session_id = $1 AND kind = 'message' "
+        "AND cumulative_tokens > $2 "
+        "ORDER BY seq ASC",
+        session_id,
+        tokens_to_drop,
     )
     return [_row_to_event(r) for r in rows]
 
