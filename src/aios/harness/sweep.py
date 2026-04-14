@@ -20,9 +20,12 @@ Called from three sites:
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
+
+if TYPE_CHECKING:
+    from aios.models.agents import ToolSpec
 
 from aios.harness.task_registry import TaskRegistry
 from aios.harness.wake import defer_wake
@@ -145,10 +148,15 @@ async def find_and_repair_ghosts(
             """,
             candidate_sids,
         )
-    agent_tools_by_session: dict[str, Any] = {}
+    from aios.models.agents import ToolSpec
+
+    agent_tools_by_session: dict[str, list[ToolSpec]] = {}
     for r in agent_rows:
         raw = r["tools"]
-        agent_tools_by_session[r["session_id"]] = json.loads(raw) if isinstance(raw, str) else raw
+        tools_list = json.loads(raw) if isinstance(raw, str) else raw
+        agent_tools_by_session[r["session_id"]] = [
+            ToolSpec.model_validate(t) for t in (tools_list or [])
+        ]
 
     ghosts: list[tuple[str, str, str]] = []
     for sid, tcid, name in candidates:
@@ -183,38 +191,32 @@ def _was_dispatched(
     name: str,
     tool_call_id: str,
     confirmed_ids: set[str],
-    agent_tools: list[dict[str, Any]],
+    agent_tools: list[ToolSpec],
 ) -> bool:
     """Determine whether a tool call was dispatched by the harness.
 
     A dispatched tool that has no result and no in-flight task is a
     ghost. A tool that was never dispatched (custom, or unconfirmed
     ``always_ask``) is legitimately waiting for the client.
+
+    Uses the same permission resolution as the step function
+    (``resolve_permission`` / ``resolve_mcp_permission`` from loop.py).
     """
+    from aios.harness.loop import resolve_mcp_permission, resolve_permission
     from aios.tools.registry import registry
 
     if name.startswith("mcp__"):
-        server_name = name.split("__", 2)[1]
-        for spec in agent_tools:
-            if spec.get("type") == "mcp_toolset" and spec.get("mcp_server_name") == server_name:
-                dc = spec.get("default_config") or {}
-                pp = dc.get("permission_policy") or {}
-                perm = pp.get("type") or spec.get("permission")
-                if perm == "always_allow":
-                    return True
-                return tool_call_id in confirmed_ids
+        perm = resolve_mcp_permission(name, agent_tools)
+        if perm == "always_allow":
+            return True
         return tool_call_id in confirmed_ids
 
     if not registry.has(name):
         return False
 
-    for spec in agent_tools:
-        tool_name = spec.get("name") if spec.get("type") == "custom" else spec.get("type")
-        if tool_name == name:
-            if spec.get("permission") == "always_ask":
-                return tool_call_id in confirmed_ids
-            return True
-
+    perm = resolve_permission(name, agent_tools)
+    if perm == "always_ask":
+        return tool_call_id in confirmed_ids
     return True
 
 

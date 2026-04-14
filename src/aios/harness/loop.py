@@ -233,14 +233,14 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
             name = _tc_name(tc)
             if _is_mcp_tool(name):
                 # MCP tools default to always_ask (unlike built-in always_allow).
-                perm = _resolve_mcp_permission(name, agent.tools)
+                perm = resolve_mcp_permission(name, agent.tools)
                 if perm == "always_allow":
                     mcp_immediate.append(tc)
                 else:
                     needs_confirm.append(tc)
             elif not tool_registry.has(name):
                 custom.append(tc)
-            elif _resolve_permission(name, agent.tools) == "always_ask":
+            elif resolve_permission(name, agent.tools) == "always_ask":
                 needs_confirm.append(tc)
             else:
                 immediate.append(tc)
@@ -310,7 +310,7 @@ def _is_mcp_tool(name: str) -> bool:
     return name.startswith("mcp__")
 
 
-def _resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
+def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
     """Look up the permission policy for a built-in or custom tool by name."""
     for spec in agent_tools:
         tool_name = spec.name if spec.type == "custom" else spec.type
@@ -319,16 +319,13 @@ def _resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
     return None
 
 
-def _resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
+def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
     """Look up the permission policy for an MCP tool.
 
     Finds the ``mcp_toolset`` entry whose ``mcp_server_name`` matches the
     server portion of the namespaced tool name, then returns the
     ``default_config.permission_policy.type`` or ``None`` (which callers
     treat as ``always_ask``).
-
-    Per-tool overrides via ``configs`` are stored in the model but not
-    enforced here yet — only ``default_config`` drives permission resolution.
     """
     server_name = name.split("__", 2)[1]
     for spec in agent_tools:
@@ -336,7 +333,7 @@ def _resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | Non
             cfg = spec.default_config
             if cfg and cfg.permission_policy:
                 return cfg.permission_policy.type
-            return spec.permission  # fallback to the flat permission field
+            return spec.permission
     return None
 
 
