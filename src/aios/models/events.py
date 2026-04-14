@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 EventKind = Literal["message", "lifecycle", "span", "interrupt"]
 
@@ -34,5 +34,5 @@ class Event(BaseModel):
     seq: int
     kind: EventKind
     data: dict[str, Any]
-    cumulative_tokens: int | None = None
+    cumulative_tokens: int | None = Field(default=None, exclude=True)
     created_at: datetime
