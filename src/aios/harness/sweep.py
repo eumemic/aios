@@ -25,7 +25,9 @@ from typing import Any
 import asyncpg
 
 from aios.harness.task_registry import TaskRegistry
+from aios.harness.wake import defer_wake
 from aios.logging import get_logger
+from aios.services import sessions as sessions_service
 
 log = get_logger("aios.harness.sweep")
 
@@ -58,7 +60,6 @@ async def find_and_repair_ghosts(
     scope_params: list[Any] = [session_id] if session_id else []
 
     async with pool.acquire() as conn:
-        # 1. All assistant messages with tool_calls.
         asst_rows = await conn.fetch(
             f"""
             SELECT e.session_id, e.data
@@ -78,7 +79,6 @@ async def find_and_repair_ghosts(
 
         session_ids = list({r["session_id"] for r in asst_rows})
 
-        # 2. All existing tool results for those sessions.
         result_rows = await conn.fetch(
             """
             SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
@@ -93,7 +93,6 @@ async def find_and_repair_ghosts(
         for r in result_rows:
             results_by_session.setdefault(r["session_id"], set()).add(r["tool_call_id"])
 
-        # 3. Confirmed-allow lifecycle events.
         lifecycle_rows = await conn.fetch(
             """
             SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
@@ -109,7 +108,31 @@ async def find_and_repair_ghosts(
         for r in lifecycle_rows:
             confirmed_by_session.setdefault(r["session_id"], set()).add(r["tool_call_id"])
 
-        # 4. Agent tool configs per session (respecting version pinning).
+    # First pass: find candidate ghosts (no result, no in-flight task).
+    # We don't yet know their dispatch status — that requires agent config.
+    candidates: list[tuple[str, str, str]] = []  # (session_id, tool_call_id, tool_name)
+
+    for row in asst_rows:
+        sid = row["session_id"]
+        data = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+        existing_results = results_by_session.get(sid, set())
+        session_in_flight = in_flight.get(sid, set())
+
+        for tc in data.get("tool_calls") or []:
+            tcid = tc.get("id")
+            if not tcid or tcid in existing_results or tcid in session_in_flight:
+                continue
+            name = (tc.get("function") or {}).get("name", "")
+            candidates.append((sid, tcid, name))
+
+    if not candidates:
+        return []
+
+    # Second pass: load agent config only for sessions with candidates,
+    # then filter to actually-dispatched tools.
+    candidate_sids = list({sid for sid, _, _ in candidates})
+    async with pool.acquire() as conn:
+        # LEFT JOIN agent_versions to respect version pinning.
         agent_rows = await conn.fetch(
             """
             SELECT s.id AS session_id,
@@ -120,62 +143,38 @@ async def find_and_repair_ghosts(
                 ON av.agent_id = s.agent_id AND av.version = s.agent_version
              WHERE s.id = ANY($1::text[])
             """,
-            session_ids,
+            candidate_sids,
         )
-        agent_tools_by_session: dict[str, Any] = {}
-        for r in agent_rows:
-            raw = r["tools"]
-            agent_tools_by_session[r["session_id"]] = (
-                json.loads(raw) if isinstance(raw, str) else raw
-            )
+    agent_tools_by_session: dict[str, Any] = {}
+    for r in agent_rows:
+        raw = r["tools"]
+        agent_tools_by_session[r["session_id"]] = json.loads(raw) if isinstance(raw, str) else raw
 
-    # 5. Correlate: find ghosts.
-    ghosts: list[tuple[str, str, str]] = []  # (session_id, tool_call_id, tool_name)
-
-    for row in asst_rows:
-        sid = row["session_id"]
-        data = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
-        tool_calls: list[dict[str, Any]] = data.get("tool_calls") or []
-        existing_results = results_by_session.get(sid, set())
-        session_in_flight = in_flight.get(sid, set())
+    ghosts: list[tuple[str, str, str]] = []
+    for sid, tcid, name in candidates:
         confirmed = confirmed_by_session.get(sid, set())
         agent_tools = agent_tools_by_session.get(sid, [])
+        if _was_dispatched(name, tcid, confirmed, agent_tools):
+            ghosts.append((sid, tcid, name))
 
-        for tc in tool_calls:
-            tcid = tc.get("id")
-            if not tcid:
-                continue
-            if tcid in existing_results:
-                continue  # already has a result
-            if tcid in session_in_flight:
-                continue  # task is still running
-
-            name = (tc.get("function") or {}).get("name", "")
-            if _was_dispatched(name, tcid, confirmed, agent_tools):
-                ghosts.append((sid, tcid, name))
-
-    # 6. Append synthetic error results for ghosts.
-    if ghosts:
-        from aios.services import sessions as sessions_service
-
-        for sid, tcid, name in ghosts:
-            content = json.dumps(
-                {"error": "No result was received for this tool call."},
-                ensure_ascii=False,
-            )
-            await sessions_service.append_event(
-                pool,
-                sid,
-                "message",
-                {
-                    "role": "tool",
-                    "tool_call_id": tcid,
-                    "name": name,
-                    "content": content,
-                    "is_error": True,
-                },
-            )
-            log.info("sweep.ghost_repaired", session_id=sid, tool_call_id=tcid, tool_name=name)
+    for sid, tcid, name in ghosts:
+        content = json.dumps(
+            {"error": "No result was received for this tool call."},
+            ensure_ascii=False,
+        )
+        await sessions_service.append_event(
+            pool,
+            sid,
+            "message",
+            {
+                "role": "tool",
+                "tool_call_id": tcid,
+                "name": name,
+                "content": content,
+                "is_error": True,
+            },
+        )
+        log.info("sweep.ghost_repaired", session_id=sid, tool_call_id=tcid, tool_name=name)
 
     return [(sid, tcid) for sid, tcid, _ in ghosts]
 
@@ -204,22 +203,18 @@ def _was_dispatched(
                 if perm == "always_allow":
                     return True
                 return tool_call_id in confirmed_ids
-        # MCP tool with no matching config defaults to always_ask.
         return tool_call_id in confirmed_ids
 
     if not registry.has(name):
-        # Custom tool — client-executed, never dispatched by the harness.
         return False
 
-    # Built-in tool — check permission policy.
     for spec in agent_tools:
         tool_name = spec.get("name") if spec.get("type") == "custom" else spec.get("type")
         if tool_name == name:
             if spec.get("permission") == "always_ask":
                 return tool_call_id in confirmed_ids
-            return True  # always_allow or no policy (default)
+            return True
 
-    # Built-in tool with no explicit spec → always_allow by default.
     return True
 
 
@@ -244,15 +239,14 @@ async def find_sessions_needing_inference(
         ``tool_call_id`` that has no result and no in-flight task
         (needs dispatch via ``_dispatch_confirmed_tools``).
 
-    Sessions are then filtered: if the only unreacted events are tool
-    results from a batch that still has in-flight tasks, the session is
-    not yet ready (batch incomplete).
+    Sessions from (a)/(b) are filtered: if the only unreacted events are
+    tool results from a batch with in-flight tasks, the session is not
+    yet ready. Case (c) sessions bypass this filter.
     """
     scope_clause = "AND s.id = $1" if session_id else ""
     scope_params: list[Any] = [session_id] if session_id else []
 
     async with pool.acquire() as conn:
-        # Primary query: sessions with unreacted message events.
         candidate_rows = await conn.fetch(
             f"""
             SELECT DISTINCT e.session_id
@@ -262,7 +256,6 @@ async def find_sessions_needing_inference(
                AND e.kind = 'message'
                AND e.data->>'role' != 'assistant'
                AND (
-                   -- No assistant message at all (first turn)
                    NOT EXISTS (
                        SELECT 1 FROM events a
                         WHERE a.session_id = e.session_id
@@ -270,7 +263,6 @@ async def find_sessions_needing_inference(
                           AND a.data->>'role' = 'assistant'
                    )
                    OR
-                   -- Event seq > last assistant's reacting_to
                    e.seq > COALESCE(
                        (SELECT MAX(COALESCE((a.data->>'reacting_to')::bigint, a.seq))
                           FROM events a
@@ -287,8 +279,7 @@ async def find_sessions_needing_inference(
 
         candidates = {r["session_id"] for r in candidate_rows}
 
-        # Case (c): sessions with confirmed-but-unresulted tool calls.
-        # These bypass the batch filter — they need dispatch, not inference.
+        # Case (c) bypasses the batch filter — confirmed tools need dispatch.
         confirmed_rows = await conn.fetch(
             f"""
             SELECT DISTINCT lc.session_id
@@ -311,15 +302,10 @@ async def find_sessions_needing_inference(
         )
         confirmed_sessions = {r["session_id"] for r in confirmed_rows}
 
-    # Batch-completion filter: for unreacted-event candidates, check if
-    # the only unreacted events are tool results from incomplete batches.
-    # Case (c) sessions bypass this — they need dispatch regardless.
+    to_filter = candidates - confirmed_sessions
     filtered = (
-        await _filter_incomplete_batches(pool, task_registry, candidates - confirmed_sessions)
-        if (candidates - confirmed_sessions)
-        else set()
+        await _filter_incomplete_batches(pool, task_registry, to_filter) if to_filter else set()
     )
-
     return filtered | confirmed_sessions
 
 
@@ -410,7 +396,6 @@ async def _filter_incomplete_batches(
 
 
 def _group_event_data(rows: list[Any]) -> dict[str, list[dict[str, Any]]]:
-    """Group rows by session_id, parsing data JSONB into dicts."""
     grouped: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
         data = json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]
@@ -419,7 +404,6 @@ def _group_event_data(rows: list[Any]) -> dict[str, list[dict[str, Any]]]:
 
 
 def _group_tool_call_ids(rows: list[Any]) -> dict[str, set[str]]:
-    """Group tool_call_ids by session_id into sets."""
     grouped: dict[str, set[str]] = {}
     for r in rows:
         grouped.setdefault(r["session_id"], set()).add(r["tool_call_id"])
@@ -446,20 +430,5 @@ async def wake_sessions_needing_inference(
     await find_and_repair_ghosts(pool, task_registry, session_id=session_id)
     session_ids = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
     for sid in session_ids:
-        await _defer_wake(sid)
+        await defer_wake(sid, cause="sweep")
     return session_ids
-
-
-async def _defer_wake(session_id: str) -> None:
-    """Enqueue a ``wake_session`` job, swallowing ``AlreadyEnqueued``."""
-    import contextlib
-
-    from procrastinate import exceptions as procrastinate_exceptions
-
-    from aios.harness.procrastinate_app import app
-
-    with contextlib.suppress(procrastinate_exceptions.AlreadyEnqueued):
-        await app.configure_task("harness.wake_session").defer_async(
-            session_id=session_id,
-            cause="sweep",
-        )

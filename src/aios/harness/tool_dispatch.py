@@ -126,14 +126,7 @@ async def _execute_tool_async(
         )
 
     finally:
-        try:
-            from aios.harness.sweep import wake_sessions_needing_inference
-
-            await wake_sessions_needing_inference(
-                pool, runtime.require_task_registry(), session_id=session_id
-            )
-        except Exception:
-            bound_log.warning("tool.sweep_failed")
+        await _trigger_sweep(pool, session_id, bound_log)
 
 
 def _parse_arguments(raw_args: Any) -> dict[str, Any] | None:
@@ -176,6 +169,24 @@ def _evict_session_container(session_id: str) -> None:
     if runtime.sandbox_registry is None:
         return
     runtime.sandbox_registry.evict(session_id)
+
+
+async def _trigger_sweep(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    bound_log: Any,
+) -> None:
+    """Run the sweep for this session. Called from the finally block of
+    every tool task — both built-in and MCP.
+    """
+    try:
+        from aios.harness.sweep import wake_sessions_needing_inference
+
+        await wake_sessions_needing_inference(
+            pool, runtime.require_task_registry(), session_id=session_id
+        )
+    except Exception:
+        bound_log.warning("tool.sweep_failed")
 
 
 # ── MCP tool dispatch ─────────────────────────────────────────────────────────
@@ -270,11 +281,4 @@ async def _execute_mcp_tool_async(
         )
 
     finally:
-        try:
-            from aios.harness.sweep import wake_sessions_needing_inference
-
-            await wake_sessions_needing_inference(
-                pool, runtime.require_task_registry(), session_id=session_id
-            )
-        except Exception:
-            bound_log.warning("mcp_tool.sweep_failed")
+        await _trigger_sweep(pool, session_id, bound_log)
