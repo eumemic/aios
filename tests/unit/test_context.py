@@ -312,6 +312,14 @@ class TestBuildMessages:
         assert msgs[0]["content"] == "next question"
         assert msgs[1]["role"] == "assistant"
 
+    def test_user_metadata_excluded_from_messages(self) -> None:
+        """Metadata on user message events must not leak into the
+        chat-completions message list sent to the model."""
+        e = _evt(1, "user", content="hello")
+        e.data["metadata"] = {"run_id": "abc123"}
+        msgs = build_messages([e], system_prompt=None).messages
+        assert msgs[0] == {"role": "user", "content": "hello"}
+
     def test_prune_partial_assistant_tool_group(self) -> None:
         """If DB windowing keeps an assistant with tool_calls but dropped
         one of its paired results, the incomplete group should be pruned."""

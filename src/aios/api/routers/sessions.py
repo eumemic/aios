@@ -55,6 +55,8 @@ async def create(
         title=body.title,
         metadata=body.metadata,
         vault_ids=body.vault_ids or None,
+        workspace_path=body.workspace_path,
+        env=body.env or None,
     )
     if body.initial_message is not None:
         await service.append_user_message(pool, session.id, body.initial_message)
@@ -125,7 +127,9 @@ async def post_message(
     procrastinate: ProcrastinateDep,
     _auth: AuthDep,
 ) -> Event:
-    event = await service.append_user_message(pool, session_id, body.content)
+    event = await service.append_user_message(
+        pool, session_id, body.content, metadata=body.metadata or None
+    )
     await defer_wake(session_id, cause="message")
     return event
 

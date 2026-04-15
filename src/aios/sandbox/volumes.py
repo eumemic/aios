@@ -42,3 +42,10 @@ def ensure_workspace_dir(session_id: str) -> Path:
     path = workspace_dir_for(session_id)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def ensure_workspace_path(raw_path: str) -> Path:
+    """Resolve ``raw_path`` to an absolute ``Path``, creating it if needed."""
+    path = Path(raw_path).resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path

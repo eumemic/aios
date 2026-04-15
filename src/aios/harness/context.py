@@ -185,7 +185,8 @@ def build_messages(
         role = e.data.get("role")
 
         if role == "user":
-            messages.append(e.data)
+            msg = {k: v for k, v in e.data.items() if k != "metadata"}
+            messages.append(msg)
             max_stimulus_seq = max(max_stimulus_seq, e.seq)
 
         elif role == "assistant":

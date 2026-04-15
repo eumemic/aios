@@ -1,9 +1,9 @@
 """Business logic for sessions and their event log.
 
-Phase 1 sessions own a workspace directory on the host but no Docker
-container yet — Phase 3 wires the sandbox in. The session creation flow
-allocates the workspace path under ``settings.workspace_root`` and persists
-it on the row so future workers can re-mount the same volume.
+Session creation persists the workspace volume path (caller-supplied or
+defaulting to ``settings.workspace_root / session_id``) and optional
+per-session env vars on the row so workers can mount the correct volume
+and inject environment variables at container provisioning time.
 """
 
 from __future__ import annotations
@@ -19,11 +19,6 @@ from aios.models.events import Event, EventKind
 from aios.models.sessions import Session, SessionStatus
 
 
-def _workspace_path_for(session_id: str) -> str:
-    """Compute the host-side workspace directory for ``session_id``."""
-    return str(get_settings().workspace_root / session_id)
-
-
 async def create_session(
     pool: asyncpg.Pool[Any],
     *,
@@ -33,6 +28,8 @@ async def create_session(
     title: str | None,
     metadata: dict[str, Any],
     vault_ids: list[str] | None = None,
+    workspace_path: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> Session:
     """Create a session row and return it.
 
@@ -43,18 +40,16 @@ async def create_session(
         from aios.ids import SESSION, make_id
 
         new_id = make_id(SESSION)
-        workspace_path = str(get_settings().workspace_root / new_id)
-
-        import json
+        workspace_path = workspace_path or str(get_settings().workspace_root / new_id)
 
         try:
             row = await conn.fetchrow(
                 """
                 INSERT INTO sessions (
                     id, agent_id, environment_id, agent_version, title, metadata,
-                    status, workspace_volume_path
+                    status, workspace_volume_path, env
                 )
-                VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb)
                 RETURNING *
                 """,
                 new_id,
@@ -64,6 +59,7 @@ async def create_session(
                 title,
                 json.dumps(metadata),
                 workspace_path,
+                json.dumps(env or {}),
             )
         except asyncpg.ForeignKeyViolationError as exc:
             from aios.errors import NotFoundError
@@ -107,14 +103,22 @@ async def list_sessions(
         return sessions
 
 
-async def append_user_message(pool: asyncpg.Pool[Any], session_id: str, content: str) -> Event:
+async def append_user_message(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    content: str,
+    metadata: dict[str, Any] | None = None,
+) -> Event:
     """Append a `role: user` message event to the session log."""
+    data: dict[str, Any] = {"role": "user", "content": content}
+    if metadata:
+        data["metadata"] = metadata
     async with pool.acquire() as conn:
         return await queries.append_event(
             conn,
             session_id=session_id,
             kind="message",
-            data={"role": "user", "content": content},
+            data=data,
         )
 
 

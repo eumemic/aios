@@ -20,7 +20,7 @@ import asyncpg
 
 from aios.crypto.vault import EncryptedBlob
 from aios.errors import ConflictError, NotFoundError
-from aios.ids import AGENT, ENVIRONMENT, EVENT, SESSION, SKILL, VAULT, VAULT_CREDENTIAL, make_id
+from aios.ids import AGENT, ENVIRONMENT, EVENT, SKILL, VAULT, VAULT_CREDENTIAL, make_id
 from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
@@ -492,50 +492,35 @@ def _row_to_session(row: asyncpg.Record) -> Session:
     )
 
 
-async def insert_session(
-    conn: asyncpg.Connection[Any],
-    *,
-    agent_id: str,
-    environment_id: str,
-    agent_version: int | None,
-    title: str | None,
-    metadata: dict[str, Any],
-    workspace_volume_path: str,
-) -> Session:
-    new_id = make_id(SESSION)
-    metadata_json = json.dumps(metadata)
-    try:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO sessions (
-                id, agent_id, environment_id, agent_version, title, metadata,
-                status, workspace_volume_path
-            )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7)
-            RETURNING *
-            """,
-            new_id,
-            agent_id,
-            environment_id,
-            agent_version,
-            title,
-            metadata_json,
-            workspace_volume_path,
-        )
-    except asyncpg.ForeignKeyViolationError as exc:
-        raise NotFoundError(
-            "agent or environment not found",
-            detail={"agent_id": agent_id, "environment_id": environment_id},
-        ) from exc
-    assert row is not None
-    return _row_to_session(row)
-
-
 async def get_session(conn: asyncpg.Connection[Any], session_id: str) -> Session:
     row = await conn.fetchrow("SELECT * FROM sessions WHERE id = $1", session_id)
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
     return _row_to_session(row)
+
+
+async def get_session_workspace_path(conn: asyncpg.Connection[Any], session_id: str) -> str:
+    """Return the host-side workspace path stored on the session row."""
+    val: str | None = await conn.fetchval(
+        "SELECT workspace_volume_path FROM sessions WHERE id = $1", session_id
+    )
+    if val is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    return val
+
+
+async def get_session_provisioning(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> tuple[str, dict[str, str]]:
+    """Return ``(workspace_volume_path, env)`` for provisioning a session's container."""
+    row = await conn.fetchrow(
+        "SELECT workspace_volume_path, env FROM sessions WHERE id = $1", session_id
+    )
+    if row is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    raw_env = row["env"]
+    env: dict[str, str] = json.loads(raw_env) if isinstance(raw_env, str) else raw_env
+    return row["workspace_volume_path"], env
 
 
 async def list_sessions(

@@ -101,6 +101,13 @@ class EnvironmentConfig(BaseModel):
             'access; {"type": "limited", "allowed_hosts": [...]} to restrict.'
         ),
     )
+    env: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Environment variables injected into every session container "
+            "using this environment.  Per-session env overrides these."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
