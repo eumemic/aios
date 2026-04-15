@@ -58,7 +58,7 @@ class TestSearchEvents:
                 "query": (
                     "SELECT role, count(*) AS n "
                     "FROM events_search "
-                    "WHERE kind = 'message' AND role IS NOT NULL "
+                    "WHERE role IS NOT NULL "
                     "GROUP BY role "
                     "ORDER BY role"
                 ),
@@ -108,17 +108,17 @@ class TestSearchEvents:
         result = await search_events_handler(
             session_id,
             {
-                "query": (
-                    "SELECT * FROM events_search WHERE kind = 'message' ORDER BY seq LIMIT 1"
-                ),
+                "query": ("SELECT * FROM events_search ORDER BY seq LIMIT 1"),
             },
         )
 
         text = result["result"]
         # Header line should contain all view columns
         header = text.split("\n")[0]
-        for col in ("id", "seq", "kind", "role", "created_at", "content_text"):
+        for col in ("id", "seq", "role", "created_at", "content_text"):
             assert col in header
+        # kind column should NOT be present (view is messages-only now)
+        assert "kind" not in header
 
     async def test_sql_validation_rejects_insert(self, harness: Harness) -> None:
         """DML queries are rejected before hitting the database."""
@@ -175,3 +175,31 @@ class TestSearchEvents:
         )
 
         assert result["result"] == "No results."
+
+    async def test_view_excludes_non_message_events(self, harness: Harness) -> None:
+        """The events_search view must only expose message events.
+
+        Lifecycle, span, and interrupt events are harness internals — they
+        should not leak into the agent's search results.  After migration
+        0013 the view filters to ``kind = 'message'`` and drops the ``kind``
+        column entirely.
+        """
+        session_id = await self._setup_session(harness)
+
+        # A normal step produces lifecycle + span events alongside messages.
+        # Verify the raw event log has non-message events…
+        all_events = await harness.all_events(session_id)
+        non_message_kinds = {e.kind for e in all_events if e.kind != "message"}
+        assert non_message_kinds, "test setup: expected lifecycle/span events in the log"
+
+        # …but the search view must not expose them.  Count total rows in the
+        # view vs message events in the raw log — they must match.
+        msg_count = sum(1 for e in all_events if e.kind == "message")
+
+        result = await search_events_handler(
+            session_id,
+            {"query": "SELECT count(*) AS n FROM events_search"},
+        )
+
+        text = result["result"]
+        assert str(msg_count) in text, f"expected {msg_count} rows in view, got: {text}"

@@ -90,16 +90,15 @@ async def _execute_query(
 
 
 SEARCH_EVENTS_DESCRIPTION = (
-    "Query this session's event log using SQL. Use this tool to search past "
-    "conversation history — especially useful when earlier messages have fallen "
+    "Query this session's conversation history using SQL. Use this tool to "
+    "search past messages — especially useful when earlier messages have fallen "
     "out of the context window.\n\n"
     "Schema — events_search view columns:\n"
     "- id (text): unique event ID\n"
     "- seq (integer): sequence number (chronological order within the session)\n"
-    "- kind (text): 'message', 'lifecycle', 'span', or 'interrupt'\n"
-    "- role (text): 'user', 'assistant', or 'tool' (NULL for non-message events)\n"
-    "- created_at (timestamptz): when the event was created\n"
-    "- content_text (text): the message content (or full JSON for non-message events)\n\n"
+    "- role (text): 'user', 'assistant', or 'tool'\n"
+    "- created_at (timestamptz): when the message was created\n"
+    "- content_text (text): the message content\n\n"
     "Limits: results capped at 200 rows. Only SELECT queries allowed.\n\n"
     "Common patterns:\n\n"
     "Keyword search (case-insensitive):\n"
@@ -119,12 +118,10 @@ SEARCH_EVENTS_DESCRIPTION = (
     "Count messages by role:\n"
     "  SELECT role, count(*) AS n\n"
     "  FROM events_search\n"
-    "  WHERE kind = 'message'\n"
     "  GROUP BY role\n\n"
     "Most recent messages:\n"
     "  SELECT seq, role, created_at, substr(content_text, 1, 100) AS preview\n"
     "  FROM events_search\n"
-    "  WHERE kind = 'message'\n"
     "  ORDER BY seq DESC LIMIT 10\n\n"
     "Exact date range:\n"
     "  SELECT * FROM events_search\n"
@@ -136,7 +133,6 @@ SEARCH_EVENTS_DESCRIPTION = (
     "- Use LIMIT to control result size (hard cap is 200 rows)\n"
     "- Use substr(content_text, 1, N) for content previews to keep output compact\n"
     "- ILIKE '%term%' is case-insensitive; use multiple ILIKE clauses for OR searches\n"
-    "- Filter by kind = 'message' to exclude lifecycle/span events\n"
     "- Filter by role = 'user'/'assistant'/'tool' to narrow to specific speakers"
 )
 
@@ -147,11 +143,11 @@ SEARCH_EVENTS_PARAMETERS_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": (
                 "SQL SELECT query against the events_search view.\n"
-                "Available columns: id (text), seq (integer), kind (text), "
+                "Available columns: id (text), seq (integer), "
                 "role (text), created_at (timestamptz), content_text (text).\n\n"
                 "Examples:\n"
                 "  SELECT * FROM events_search WHERE content_text ILIKE '%keyword%' LIMIT 20\n"
-                "  SELECT role, count(*) FROM events_search WHERE kind = 'message' GROUP BY role\n"
+                "  SELECT role, count(*) FROM events_search GROUP BY role\n"
                 "  SELECT * FROM events_search "
                 "WHERE created_at > now() - interval '7 days' ORDER BY seq"
             ),
