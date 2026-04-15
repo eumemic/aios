@@ -45,12 +45,7 @@ def ensure_workspace_dir(session_id: str) -> Path:
 
 
 def ensure_workspace_path(raw_path: str) -> Path:
-    """Resolve ``raw_path`` to an absolute ``Path``, creating it if needed.
-
-    Used by the provisioner when the workspace path is loaded from the
-    session row (which may be a custom path or the default auto-generated
-    one).  ``mkdir`` with ``exist_ok=True`` is safe for both cases.
-    """
+    """Resolve ``raw_path`` to an absolute ``Path``, creating it if needed."""
     path = Path(raw_path).resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path

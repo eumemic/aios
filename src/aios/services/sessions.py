@@ -19,11 +19,6 @@ from aios.models.events import Event, EventKind
 from aios.models.sessions import Session, SessionStatus
 
 
-def _workspace_path_for(session_id: str) -> str:
-    """Compute the host-side workspace directory for ``session_id``."""
-    return str(get_settings().workspace_root / session_id)
-
-
 async def create_session(
     pool: asyncpg.Pool[Any],
     *,
@@ -46,8 +41,6 @@ async def create_session(
 
         new_id = make_id(SESSION)
         workspace_path = workspace_path or str(get_settings().workspace_root / new_id)
-
-        import json
 
         try:
             row = await conn.fetchrow(

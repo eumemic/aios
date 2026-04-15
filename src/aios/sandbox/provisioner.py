@@ -98,22 +98,13 @@ async def _load_environment_config(session_id: str) -> EnvironmentConfig | None:
         return await queries.get_environment_config_for_session(conn, session_id)
 
 
-async def _load_workspace_path(session_id: str) -> str:
-    """Load the workspace volume path for a session from the DB."""
+async def _load_session_provisioning(session_id: str) -> tuple[str, dict[str, str]]:
+    """Load workspace path and env from the session row in one query."""
     from aios.harness import runtime
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
-        return await queries.get_session_workspace_path(conn, session_id)
-
-
-async def _load_session_env(session_id: str) -> dict[str, str]:
-    """Load per-session environment variables from the DB."""
-    from aios.harness import runtime
-
-    pool = runtime.require_pool()
-    async with pool.acquire() as conn:
-        return await queries.get_session_env(conn, session_id)
+        return await queries.get_session_provisioning(conn, session_id)
 
 
 async def provision_for_session(session_id: str) -> ContainerHandle:
@@ -130,10 +121,9 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
     from aios.sandbox.volumes import ensure_workspace_path
 
     settings = get_settings()
-    raw_path = await _load_workspace_path(session_id)
+    raw_path, session_env = await _load_session_provisioning(session_id)
     workspace_path = ensure_workspace_path(raw_path)
     env_config = await _load_environment_config(session_id)
-    session_env = await _load_session_env(session_id)
 
     # Merge environment-level and session-level env vars (session wins).
     merged_env: dict[str, str] = {
@@ -164,7 +154,6 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         "--interactive",
     ]
 
-    # Inject merged environment variables into the container.
     for key, value in merged_env.items():
         argv.extend(["--env", f"{key}={value}"])
 

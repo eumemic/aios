@@ -190,10 +190,10 @@ class TestProvisionerDockerArgs:
             ),
             patch("aios.sandbox.provisioner._run_docker", fake_run_docker),
             patch(
-                "aios.sandbox.provisioner._load_workspace_path", AsyncMock(return_value="/tmp/ws")
+                "aios.sandbox.provisioner._load_session_provisioning",
+                AsyncMock(return_value=("/tmp/ws", {})),
             ),
             patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
-            patch("aios.sandbox.provisioner._load_session_env", AsyncMock(return_value={})),
             patch(
                 "aios.sandbox.provisioner._install_packages",
                 AsyncMock(),
@@ -233,10 +233,10 @@ class TestProvisionerDockerArgs:
             ),
             patch("aios.sandbox.provisioner._run_docker", fake_run_docker),
             patch(
-                "aios.sandbox.provisioner._load_workspace_path", AsyncMock(return_value="/tmp/ws")
+                "aios.sandbox.provisioner._load_session_provisioning",
+                AsyncMock(return_value=("/tmp/ws", {})),
             ),
             patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
-            patch("aios.sandbox.provisioner._load_session_env", AsyncMock(return_value={})),
             patch("aios.sandbox.provisioner._install_packages", AsyncMock()),
             patch(
                 "aios.sandbox.provisioner._apply_network_lockdown",
@@ -267,10 +267,10 @@ class TestProvisionerDockerArgs:
             ),
             patch("aios.sandbox.provisioner._run_docker", fake_run_docker),
             patch(
-                "aios.sandbox.provisioner._load_workspace_path", AsyncMock(return_value="/tmp/ws")
+                "aios.sandbox.provisioner._load_session_provisioning",
+                AsyncMock(return_value=("/tmp/ws", {})),
             ),
             patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
-            patch("aios.sandbox.provisioner._load_session_env", AsyncMock(return_value={})),
             patch("aios.sandbox.provisioner._install_packages", AsyncMock()),
             patch(
                 "aios.sandbox.provisioner._apply_network_lockdown",

@@ -548,14 +548,18 @@ async def get_session_workspace_path(conn: asyncpg.Connection[Any], session_id: 
     return val
 
 
-async def get_session_env(conn: asyncpg.Connection[Any], session_id: str) -> dict[str, str]:
-    """Return per-session environment variables from the session row."""
-    val = await conn.fetchval("SELECT env FROM sessions WHERE id = $1", session_id)
-    if val is None:
+async def get_session_provisioning(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> tuple[str, dict[str, str]]:
+    """Return ``(workspace_volume_path, env)`` for provisioning a session's container."""
+    row = await conn.fetchrow(
+        "SELECT workspace_volume_path, env FROM sessions WHERE id = $1", session_id
+    )
+    if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
-    raw = json.loads(val) if isinstance(val, str) else val
-    result: dict[str, str] = raw
-    return result
+    raw_env = row["env"]
+    env: dict[str, str] = json.loads(raw_env) if isinstance(raw_env, str) else raw_env
+    return row["workspace_volume_path"], env
 
 
 async def list_sessions(
