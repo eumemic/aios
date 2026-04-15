@@ -41,10 +41,44 @@ _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
 }
 
 
+def _sanitize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize tool_calls inner structure for cross-model replay.
+
+    Some models produce malformed tool_calls (control characters in
+    arguments, missing fields, extra provider keys) that break strict
+    downstream providers.  Returns a cleaned copy with only spec fields
+    and valid JSON arguments.
+    """
+    sanitized = []
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        raw_args = fn.get("arguments", "{}")
+        if isinstance(raw_args, dict):
+            raw_args = json.dumps(raw_args)
+        elif isinstance(raw_args, str):
+            try:
+                json.loads(raw_args)
+            except (json.JSONDecodeError, ValueError):
+                raw_args = "{}"
+        else:
+            raw_args = "{}"
+        sanitized.append(
+            {
+                "id": tc.get("id") or "",
+                "type": "function",
+                "function": {"name": fn.get("name") or "", "arguments": raw_args},
+            }
+        )
+    return sanitized
+
+
 def _strip_to_spec(msg: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of *msg* with only chat-completions spec fields."""
     allowed = _ALLOWED_FIELDS.get(msg.get("role", ""), frozenset())
-    return {k: v for k, v in msg.items() if k in allowed}
+    out = {k: v for k, v in msg.items() if k in allowed}
+    if out.get("tool_calls"):
+        out["tool_calls"] = _sanitize_tool_calls(out["tool_calls"])
+    return out
 
 
 # ─── should_call_model ──────────────────────────────────────────────────────

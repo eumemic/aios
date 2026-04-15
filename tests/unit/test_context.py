@@ -5,6 +5,7 @@ Uses lightweight FakeEvent objects to avoid touching the DB.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -624,3 +625,122 @@ class TestFieldStripping:
         events[1].data["reasoning_content"] = "thoughts"
         build_messages(events, system_prompt=None)
         assert "reasoning_content" in events[1].data
+
+
+class TestToolCallSanitization:
+    """_strip_to_spec sanitizes the inner structure of tool_calls so
+    malformed entries from one model don't break cross-model replay."""
+
+    def test_valid_tool_calls_unchanged(self) -> None:
+        """Well-formed tool_calls pass through identical."""
+        events = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[_tc("a", "bash")]),
+            _evt(3, "tool", tool_call_id="a", content="done"),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        assert msgs[1]["tool_calls"] == [_tc("a", "bash")]
+
+    def test_malformed_arguments_replaced(self) -> None:
+        """Control characters in function.arguments get replaced with '{}'."""
+        bad_tc = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"cmd": "echo\nhello"}'},
+        }
+        events = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[bad_tc]),
+            _evt(3, "tool", tool_call_id="call_1", content="done"),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        tc = msgs[1]["tool_calls"][0]
+        assert tc["function"]["arguments"] == "{}"
+        assert tc["function"]["name"] == "bash"
+        assert tc["id"] == "call_1"
+
+    def test_missing_function_name_defaults_empty(self) -> None:
+        """Missing function.name defaults to empty string."""
+        bad_tc = {"id": "call_1", "type": "function", "function": {"arguments": "{}"}}
+        events = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[bad_tc]),
+            _evt(3, "tool", tool_call_id="call_1", content="done"),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        assert msgs[1]["tool_calls"][0]["function"]["name"] == ""
+
+    def test_missing_id_defaults_empty(self) -> None:
+        """Missing tool_call id defaults to empty string."""
+        bad_tc = {"type": "function", "function": {"name": "bash", "arguments": "{}"}}
+        events = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[bad_tc]),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        assert msgs[1]["tool_calls"][0]["id"] == ""
+
+    def test_extra_fields_stripped_from_tool_call(self) -> None:
+        """Provider-specific fields inside tool_call dicts are excluded."""
+        tc_with_extras = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": "{}"},
+            "index": 0,
+            "provider_id": "xyz",
+        }
+        events = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[tc_with_extras]),
+            _evt(3, "tool", tool_call_id="call_1", content="done"),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        tc = msgs[1]["tool_calls"][0]
+        assert set(tc.keys()) == {"id", "type", "function"}
+        assert set(tc["function"].keys()) == {"name", "arguments"}
+
+    def test_dict_arguments_serialized(self) -> None:
+        """Arguments as a dict (from some providers) are serialized to JSON string."""
+        bad_tc = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": {"command": "ls"}},
+        }
+        events = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[bad_tc]),
+            _evt(3, "tool", tool_call_id="call_1", content="done"),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        args = msgs[1]["tool_calls"][0]["function"]["arguments"]
+        assert isinstance(args, str)
+        assert json.loads(args) == {"command": "ls"}
+
+    def test_missing_function_dict(self) -> None:
+        """tool_call with no function dict at all gets safe defaults."""
+        bad_tc = {"id": "call_1", "type": "function"}
+        events = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[bad_tc]),
+            _evt(3, "tool", tool_call_id="call_1", content="done"),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        tc = msgs[1]["tool_calls"][0]
+        assert tc["function"]["name"] == ""
+        assert tc["function"]["arguments"] == "{}"
+
+    def test_sanitization_does_not_mutate_event_data(self) -> None:
+        """Sanitization produces new dicts; original event data is unchanged."""
+        bad_args = '{"cmd": "echo\nhello"}'
+        bad_tc = {
+            "id": "c1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": bad_args},
+        }
+        events = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[bad_tc]),
+            _evt(3, "tool", tool_call_id="c1", content="done"),
+        ]
+        build_messages(events, system_prompt=None)
+        assert events[1].data["tool_calls"][0]["function"]["arguments"] == bad_args
