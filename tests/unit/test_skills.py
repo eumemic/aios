@@ -10,7 +10,7 @@ import json
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pydantic
 import pytest
@@ -266,7 +266,13 @@ class TestProvisionSkillFiles:
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "sess_01TEST"
-            with patch("aios.harness.skills.ensure_workspace_dir", return_value=workspace):
+            with (
+                patch(
+                    "aios.harness.skills._load_workspace_path",
+                    AsyncMock(return_value=str(workspace)),
+                ),
+                patch("aios.harness.skills.ensure_workspace_path", return_value=workspace),
+            ):
                 await provision_skill_files("sess_01TEST", [sv])
 
             skill_md = workspace / "skills" / "my-skill" / "SKILL.md"
@@ -284,7 +290,13 @@ class TestProvisionSkillFiles:
             workspace = Path(tmpdir) / "sess_01TEST"
             skills_dir = workspace / "skills"
             skills_dir.mkdir(parents=True)
-            with patch("aios.harness.skills.ensure_workspace_dir", return_value=workspace):
+            with (
+                patch(
+                    "aios.harness.skills._load_workspace_path",
+                    AsyncMock(return_value=str(workspace)),
+                ),
+                patch("aios.harness.skills.ensure_workspace_path", return_value=workspace),
+            ):
                 await provision_skill_files("sess_01TEST", [sv])
 
             assert not (skills_dir / "code-review").exists()

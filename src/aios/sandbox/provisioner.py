@@ -28,7 +28,6 @@ from aios.db import queries
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.sandbox.container import ContainerError, ContainerHandle
-from aios.sandbox.volumes import ensure_workspace_dir
 
 log = get_logger("aios.sandbox.provisioner")
 
@@ -99,6 +98,24 @@ async def _load_environment_config(session_id: str) -> EnvironmentConfig | None:
         return await queries.get_environment_config_for_session(conn, session_id)
 
 
+async def _load_workspace_path(session_id: str) -> str:
+    """Load the workspace volume path for a session from the DB."""
+    from aios.harness import runtime
+
+    pool = runtime.require_pool()
+    async with pool.acquire() as conn:
+        return await queries.get_session_workspace_path(conn, session_id)
+
+
+async def _load_session_env(session_id: str) -> dict[str, str]:
+    """Load per-session environment variables from the DB."""
+    from aios.harness import runtime
+
+    pool = runtime.require_pool()
+    async with pool.acquire() as conn:
+        return await queries.get_session_env(conn, session_id)
+
+
 async def provision_for_session(session_id: str) -> ContainerHandle:
     """Create a fresh container for ``session_id`` and return a handle.
 
@@ -110,9 +127,19 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
     Raises :class:`ContainerError` if ``docker run`` fails for any reason
     (image missing, daemon unreachable, resource limits, ...).
     """
+    from aios.sandbox.volumes import ensure_workspace_path
+
     settings = get_settings()
-    workspace_path = ensure_workspace_dir(session_id)
+    raw_path = await _load_workspace_path(session_id)
+    workspace_path = ensure_workspace_path(raw_path)
     env_config = await _load_environment_config(session_id)
+    session_env = await _load_session_env(session_id)
+
+    # Merge environment-level and session-level env vars (session wins).
+    merged_env: dict[str, str] = {
+        **(env_config.env if env_config and env_config.env else {}),
+        **session_env,
+    }
 
     # Determine if the environment uses limited networking.
     networking = env_config.networking if env_config else None
@@ -136,6 +163,10 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         # Keep stdin open so the container doesn't exit on empty stdin.
         "--interactive",
     ]
+
+    # Inject merged environment variables into the container.
+    for key, value in merged_env.items():
+        argv.extend(["--env", f"{key}={value}"])
 
     # Limited networking needs NET_ADMIN to apply iptables rules.
     if needs_lockdown:

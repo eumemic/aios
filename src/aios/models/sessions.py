@@ -9,9 +9,10 @@ internal — they live in the DB row but are not exposed on the wire shape.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SessionStatus = Literal["running", "idle", "rescheduling", "terminated"]
 
@@ -45,6 +46,19 @@ class SessionCreate(BaseModel):
         default_factory=list,
         description="Vault ids to bind to this session for MCP credential resolution.",
     )
+
+    workspace_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute host path to use as the session workspace. "
+            "If omitted, defaults to workspace_root/<session_id>. "
+            "The directory must exist; aios will not create it."
+        ),
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables injected into the sandbox container.",
+    )
     initial_message: str | None = Field(
         default=None,
         description=(
@@ -53,6 +67,18 @@ class SessionCreate(BaseModel):
             "enqueues a wake job. Equivalent to a follow-up POST /messages."
         ),
     )
+
+    @field_validator("workspace_path")
+    @classmethod
+    def _validate_workspace_path(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        p = Path(v)
+        if not p.is_absolute():
+            raise ValueError("workspace_path must be an absolute path")
+        if not p.is_dir():
+            raise ValueError(f"workspace_path directory does not exist: {v}")
+        return v
 
 
 class SessionUpdate(BaseModel):
