@@ -46,3 +46,32 @@ class TestNormalizeMessage:
         result = _normalize_message(msg)
         assert result == {"role": "assistant", "content": "just text"}
         assert "tool_calls" not in result
+
+    def test_content_null_becomes_empty_string(self) -> None:
+        """content: None (from providers like GPT-5.4-mini) becomes ""."""
+        msg: dict[str, object] = {"role": "assistant", "content": None}
+        result = _normalize_message(msg)
+        assert result["content"] == ""
+
+    def test_content_absent_becomes_empty_string(self) -> None:
+        """Message missing content key entirely gets content: ""."""
+        msg: dict[str, object] = {"role": "assistant"}
+        result = _normalize_message(msg)
+        assert result["content"] == ""
+
+    def test_content_nonempty_preserved(self) -> None:
+        """Non-null content passes through unchanged."""
+        msg: dict[str, object] = {"role": "assistant", "content": "hello"}
+        result = _normalize_message(msg)
+        assert result["content"] == "hello"
+
+    def test_content_null_with_tool_calls_null_both_fixed(self) -> None:
+        """Both null content and null tool_calls are normalized together."""
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": None,
+        }
+        result = _normalize_message(msg)
+        assert result["content"] == ""
+        assert "tool_calls" not in result

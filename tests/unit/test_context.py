@@ -529,3 +529,90 @@ class TestMonotonicity:
 
         ctx = build_messages(events, system_prompt=None)
         assert ctx.reacting_to >= 3
+
+
+# ─── field stripping ────────────────────────────────────────────────────────
+
+
+class TestFieldStripping:
+    """build_messages strips provider-specific fields from the output,
+    keeping only chat-completions spec fields per role."""
+
+    def test_assistant_reasoning_content_stripped(self) -> None:
+        """Provider-specific reasoning_content is excluded from context."""
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "assistant", content="hi"),
+        ]
+        events[1].data["reasoning_content"] = "I think the user wants..."
+        msgs = build_messages(events, system_prompt=None).messages
+        assert msgs[1]["content"] == "hi"
+        assert "reasoning_content" not in msgs[1]
+
+    def test_assistant_reacting_to_stripped(self) -> None:
+        """Internal reacting_to field is excluded from context output."""
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "assistant", content="hi"),
+        ]
+        events[1].data["reacting_to"] = 1
+        msgs = build_messages(events, system_prompt=None).messages
+        assert "reacting_to" not in msgs[1]
+
+    def test_assistant_tool_calls_preserved(self) -> None:
+        """tool_calls is a spec field and must survive stripping."""
+        events = [
+            _evt(1, "user", content="do it"),
+            _evt(2, "assistant", tool_calls=[_tc("a")]),
+            _evt(3, "tool", tool_call_id="a", content="done"),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        assert msgs[1]["tool_calls"] == [_tc("a")]
+
+    def test_tool_message_extra_fields_stripped(self) -> None:
+        """Unknown fields on tool messages are excluded."""
+        events = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[_tc("a")]),
+            _evt(3, "tool", tool_call_id="a", content="done"),
+        ]
+        events[2].data["provider_metadata"] = {"some": "thing"}
+        msgs = build_messages(events, system_prompt=None).messages
+        tool_msg = next(m for m in msgs if m.get("role") == "tool")
+        assert "provider_metadata" not in tool_msg
+        assert tool_msg["tool_call_id"] == "a"
+        assert tool_msg["content"] == "done"
+
+    def test_multiple_provider_fields_all_stripped(self) -> None:
+        """All provider-specific fields are excluded, only spec fields remain."""
+        events = [
+            _evt(1, "user", content="think hard"),
+            _evt(2, "assistant", content="here's my answer"),
+        ]
+        events[1].data.update(
+            {
+                "reasoning_content": "deep thoughts...",
+                "reasoning": "step by step...",
+                "reasoning_details": [{"type": "thinking", "content": "hmm"}],
+                "reacting_to": 1,
+                "provider_specific_id": "abc123",
+            }
+        )
+        msgs = build_messages(events, system_prompt=None).messages
+        assert set(msgs[1].keys()) == {"role", "content"}
+
+    def test_system_prompt_clean(self) -> None:
+        """System prompt message contains only spec fields."""
+        events = [_evt(1, "user", content="hi")]
+        msgs = build_messages(events, system_prompt="You are helpful.").messages
+        assert msgs[0] == {"role": "system", "content": "You are helpful."}
+
+    def test_stripping_does_not_mutate_event_data(self) -> None:
+        """Stripping produces new dicts; original event data is unchanged."""
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "assistant", content="hi"),
+        ]
+        events[1].data["reasoning_content"] = "thoughts"
+        build_messages(events, system_prompt=None)
+        assert "reasoning_content" in events[1].data
