@@ -86,13 +86,7 @@ class TestNormalizeUsage:
         }
 
     def test_model_dump_flattened_prompt_tokens_details(self) -> None:
-        """model_dump() flattens Pydantic objects; verify dict form still works.
-
-        Regression test: LiteLLM can return a PromptTokensDetailsWrapper
-        Pydantic object for prompt_tokens_details.  After model_dump() at the
-        call site, it arrives here as a dict with extra keys (audio_tokens,
-        etc.).  Verify we still extract cached_tokens correctly.
-        """
+        """Regression: model_dump() flattens Pydantic objects to dicts with extra keys."""
         raw = {
             "prompt_tokens": 400,
             "completion_tokens": 120,
