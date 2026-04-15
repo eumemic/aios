@@ -68,7 +68,8 @@ async def call_litellm(
         kwargs.update(extra)
 
     response = await litellm.acompletion(**kwargs)
-    usage = _normalize_usage(dict(response.get("usage") or {}))
+    usage_obj = response.get("usage")
+    usage = _normalize_usage(usage_obj.model_dump() if usage_obj else {})
     message = response["choices"][0]["message"]
     # litellm returns a Message object that supports model_dump()
     if hasattr(message, "model_dump"):
@@ -119,7 +120,8 @@ async def stream_litellm(
             await _notify_delta(pool, session_id, content)
 
     assembled: Any = litellm.stream_chunk_builder(chunks=chunks)
-    usage = _normalize_usage(dict(assembled.get("usage") or {}))
+    usage_obj = assembled.get("usage")
+    usage = _normalize_usage(usage_obj.model_dump() if usage_obj else {})
     message = assembled["choices"][0]["message"]
     if hasattr(message, "model_dump"):
         result: dict[str, Any] = message.model_dump()
