@@ -37,6 +37,20 @@ def _normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
 _CACHE_CONTROL = {"type": "ephemeral"}
 
 
+def _set_content_block_cache(msg: dict[str, Any]) -> None:
+    """Place ``cache_control`` on the last content block of a message.
+
+    Anthropic requires ``cache_control`` on content blocks, not on the
+    message dict itself.  If ``content`` is a plain string, it is converted
+    to content-block format so the marker has somewhere to live.
+    """
+    content = msg.get("content")
+    if isinstance(content, str):
+        msg["content"] = [{"type": "text", "text": content, "cache_control": _CACHE_CONTROL}]
+    elif isinstance(content, list) and content:
+        content[-1]["cache_control"] = _CACHE_CONTROL
+
+
 def inject_cache_breakpoints(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
@@ -44,8 +58,9 @@ def inject_cache_breakpoints(
     """Annotate messages and tools with ``cache_control`` breakpoints.
 
     Anthropic's prompt caching requires explicit ``cache_control`` markers
-    to create cache entries.  LiteLLM strips them for providers that don't
-    support them (e.g. OpenAI), so this is safe to apply unconditionally.
+    on **content blocks** (not on message dicts) to create cache entries.
+    LiteLLM strips them for providers that don't support them (e.g. OpenAI),
+    so this is safe to apply unconditionally.
 
     Places breakpoints on the system message, last tool definition, and
     last conversation message (3 of Anthropic's max 4).
@@ -54,14 +69,14 @@ def inject_cache_breakpoints(
         return
 
     if messages[0].get("role") == "system":
-        messages[0]["cache_control"] = _CACHE_CONTROL
+        _set_content_block_cache(messages[0])
 
     if tools:
         tools[-1]["cache_control"] = _CACHE_CONTROL
 
     last = messages[-1]
     if last.get("role") != "system":
-        last["cache_control"] = _CACHE_CONTROL
+        _set_content_block_cache(last)
 
 
 def _normalize_usage(raw: dict[str, Any]) -> dict[str, int]:
