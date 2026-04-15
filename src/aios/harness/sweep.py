@@ -71,7 +71,7 @@ async def find_and_repair_ghosts(
              WHERE s.archived_at IS NULL
                AND e.kind = 'message'
                AND e.data->>'role' = 'assistant'
-               AND jsonb_array_length(COALESCE(e.data->'tool_calls', '[]'::jsonb)) > 0
+               AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
                {scope_clause}
             """,
             *scope_params,
@@ -360,7 +360,7 @@ async def _filter_incomplete_batches(
              WHERE e.session_id = ANY($1::text[])
                AND e.kind = 'message'
                AND e.data->>'role' = 'assistant'
-               AND jsonb_array_length(COALESCE(e.data->'tool_calls', '[]'::jsonb)) > 0
+               AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
             """,
             session_list,
         )

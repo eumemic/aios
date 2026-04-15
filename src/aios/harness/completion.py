@@ -22,6 +22,18 @@ if TYPE_CHECKING:
     import asyncpg
 
 
+def _normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
+    """Strip null-valued fields that break downstream JSONB queries.
+
+    Some LiteLLM providers (e.g. openrouter/moonshotai/kimi-k2.5) return
+    ``tool_calls: null`` instead of omitting the key.  Stored verbatim,
+    this becomes JSONB ``null`` which ``jsonb_array_length`` rejects.
+    """
+    if "tool_calls" in msg and msg["tool_calls"] is None:
+        del msg["tool_calls"]
+    return msg
+
+
 def _normalize_usage(raw: dict[str, Any]) -> dict[str, int]:
     """Map LiteLLM's usage field names to our canonical names.
 
@@ -73,9 +85,9 @@ async def call_litellm(
     # litellm returns a Message object that supports model_dump()
     if hasattr(message, "model_dump"):
         result: dict[str, Any] = message.model_dump()
-        return result, usage
+        return _normalize_message(result), usage
     if isinstance(message, dict):
-        return message, usage
+        return _normalize_message(message), usage
     raise TypeError(f"unexpected message type from litellm.acompletion: {type(message).__name__}")
 
 
@@ -123,9 +135,9 @@ async def stream_litellm(
     message = assembled["choices"][0]["message"]
     if hasattr(message, "model_dump"):
         result: dict[str, Any] = message.model_dump()
-        return result, usage
+        return _normalize_message(result), usage
     if isinstance(message, dict):
-        return message, usage
+        return _normalize_message(message), usage
     raise TypeError(f"unexpected message type from stream_chunk_builder: {type(message).__name__}")
 
 

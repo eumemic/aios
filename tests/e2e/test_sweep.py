@@ -320,6 +320,41 @@ class TestGhostExclusions:
         repaired = await harness.run_ghost_repair(session.id)
         assert len(repaired) == 0
 
+    async def test_tool_calls_null_not_ghost(self, harness: Harness) -> None:
+        """Assistant message with tool_calls: null (JSON null) doesn't crash sweep.
+
+        Some LiteLLM providers return tool_calls: null instead of omitting
+        the key. Stored as JSONB null, this used to crash the ghost sweep's
+        jsonb_array_length query. The message has no tool calls, so ghost
+        repair should return nothing and the inference query should not crash.
+        """
+        harness.script_model([])
+        session = await harness.start("hi", tools=[])
+
+        # Manually append an assistant message with tool_calls: null.
+        # This simulates what reaches the DB from providers like kimi-k2.5
+        # (the ingestion fix strips it, but existing rows may have it).
+        await sessions_service.append_event(
+            harness._pool,
+            session.id,
+            "message",
+            {
+                "role": "assistant",
+                "content": "I have no tools to call.",
+                "tool_calls": None,
+                "reacting_to": 1,
+            },
+        )
+
+        # Ghost repair must not crash and must find no ghosts.
+        repaired = await harness.run_ghost_repair(session.id)
+        assert len(repaired) == 0
+
+        # Inference detection must not crash either (exercises
+        # _filter_incomplete_batches which has the same query pattern).
+        needs = await harness.sessions_needing_inference(session.id)
+        assert session.id not in needs
+
     async def test_custom_tool_not_ghost(self, harness: Harness) -> None:
         """Custom (client-executed) tool waiting for result is NOT a ghost."""
         harness.script_model(
