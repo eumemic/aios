@@ -21,6 +21,7 @@ from tests.e2e.harness import (
     cancel,
     first_tool_result,
     last_assistant_content,
+    msg_text,
     tool_call,
     tool_results,
 )
@@ -299,7 +300,7 @@ class TestPendingResultSynthesis:
             for m in step2_messages
             if m.get("role") == "tool" and m.get("tool_call_id") == "call_slow_1"
         )
-        assert "pending" in tool_msg["content"]
+        assert "pending" in msg_text(tool_msg)
 
         # Let tool complete, finish up
         tool_proceed.set()
@@ -331,8 +332,9 @@ class TestPendingResultSynthesis:
             for m in step2_messages
             if m.get("role") == "tool" and m.get("tool_call_id") == "call_f1"
         )
-        assert "pending" not in tool_msg["content"]
-        assert "42" in tool_msg["content"]
+        tool_text = msg_text(tool_msg)
+        assert "pending" not in tool_text
+        assert "42" in tool_text
 
 
 @needs_docker
@@ -901,7 +903,7 @@ class TestSessionVersionBinding:
         assert len(harness.model_calls) == 2
         step2_messages = harness.model_calls[1]["messages"]
         system_msg = next(m for m in step2_messages if m["role"] == "system")
-        assert system_msg["content"] == "updated"
+        assert msg_text(system_msg) == "updated"
 
     async def test_pinned_session_ignores_agent_update(self, harness: Harness) -> None:
         """Pinned session keeps using the old version after agent update."""
@@ -932,7 +934,7 @@ class TestSessionVersionBinding:
 
         step2_messages = harness.model_calls[1]["messages"]
         system_msg = next(m for m in step2_messages if m["role"] == "system")
-        assert system_msg["content"] == "original"  # v1, not v2
+        assert msg_text(system_msg) == "original"  # v1, not v2
 
     async def test_session_update_changes_agent(self, harness: Harness) -> None:
         """Sessions can be updated to point at a different agent."""
@@ -972,7 +974,7 @@ class TestSessionVersionBinding:
 
         step2_messages = harness.model_calls[1]["messages"]
         system_msg = next(m for m in step2_messages if m["role"] == "system")
-        assert system_msg["content"] == "agent-two"
+        assert msg_text(system_msg) == "agent-two"
 
 
 # ─── custom tools ───────────────────────────────────────────────────────────

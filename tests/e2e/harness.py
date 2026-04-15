@@ -168,6 +168,16 @@ def last_assistant_content(events: list[Event]) -> str:
     raise AssertionError("no assistant message found in events")
 
 
+def msg_text(msg: dict[str, Any]) -> str:
+    """Extract plain text from a message's content (string or content blocks)."""
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return str(content)
+
+
 # ─── the harness ─────────────────────────────────────────────────────────────
 
 
