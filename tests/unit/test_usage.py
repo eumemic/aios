@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from aios.harness.completion import _normalize_usage, inject_cache_breakpoints
+from aios.harness.completion import (
+    _CACHE_CONTROL,
+    _normalize_usage,
+    inject_cache_breakpoints,
+)
 
 
 class TestNormalizeUsage:
@@ -121,9 +125,6 @@ class TestNormalizeUsage:
 # ─── inject_cache_breakpoints ─────────────────────────────────────────────
 
 
-_CC = {"type": "ephemeral"}
-
-
 def _msg(role: str, content: str = "") -> dict[str, Any]:
     """Build a minimal message dict."""
     return {"role": role, "content": content}
@@ -141,32 +142,32 @@ class TestInjectCacheBreakpoints:
     def test_system_message_annotated(self) -> None:
         msgs = [_msg("system", "you are helpful"), _msg("user", "hi")]
         inject_cache_breakpoints(msgs, None)
-        assert msgs[0]["cache_control"] == _CC
+        assert msgs[0]["cache_control"] == _CACHE_CONTROL
 
     def test_last_tool_annotated(self) -> None:
         msgs = [_msg("system", "sys"), _msg("user", "hi")]
         tools = [_tool_def("bash"), _tool_def("read")]
         inject_cache_breakpoints(msgs, tools)
         assert "cache_control" not in tools[0]
-        assert tools[1]["cache_control"] == _CC
+        assert tools[1]["cache_control"] == _CACHE_CONTROL
 
     def test_last_conversation_message_annotated(self) -> None:
         msgs = [_msg("system", "sys"), _msg("user", "hi")]
         inject_cache_breakpoints(msgs, None)
-        assert msgs[1]["cache_control"] == _CC
+        assert msgs[1]["cache_control"] == _CACHE_CONTROL
 
     def test_no_system_message(self) -> None:
         msgs = [_msg("user", "hi"), _msg("assistant", "hello")]
         inject_cache_breakpoints(msgs, None)
         assert "cache_control" not in msgs[0]
-        assert msgs[1]["cache_control"] == _CC
+        assert msgs[1]["cache_control"] == _CACHE_CONTROL
 
     def test_no_tools(self) -> None:
         msgs = [_msg("system", "sys"), _msg("user", "hi")]
         inject_cache_breakpoints(msgs, None)
         # No crash; system and last message still annotated.
-        assert msgs[0]["cache_control"] == _CC
-        assert msgs[1]["cache_control"] == _CC
+        assert msgs[0]["cache_control"] == _CACHE_CONTROL
+        assert msgs[1]["cache_control"] == _CACHE_CONTROL
 
     def test_empty_messages(self) -> None:
         inject_cache_breakpoints([], None)  # no crash
@@ -177,7 +178,7 @@ class TestInjectCacheBreakpoints:
         skips it to avoid redundancy."""
         msgs = [_msg("system", "sys")]
         inject_cache_breakpoints(msgs, None)
-        assert msgs[0]["cache_control"] == _CC
+        assert msgs[0]["cache_control"] == _CACHE_CONTROL
 
     def test_tool_result_as_last_message(self) -> None:
         msgs = [
@@ -187,12 +188,12 @@ class TestInjectCacheBreakpoints:
             {"role": "tool", "tool_call_id": "a", "content": "done"},
         ]
         inject_cache_breakpoints(msgs, None)
-        assert msgs[3]["cache_control"] == _CC
+        assert msgs[3]["cache_control"] == _CACHE_CONTROL
 
     def test_all_three_breakpoints(self) -> None:
         msgs = [_msg("system", "sys"), _msg("user", "hi")]
         tools = [_tool_def("bash")]
         inject_cache_breakpoints(msgs, tools)
-        assert msgs[0]["cache_control"] == _CC
-        assert tools[0]["cache_control"] == _CC
-        assert msgs[1]["cache_control"] == _CC
+        assert msgs[0]["cache_control"] == _CACHE_CONTROL
+        assert tools[0]["cache_control"] == _CACHE_CONTROL
+        assert msgs[1]["cache_control"] == _CACHE_CONTROL
