@@ -20,7 +20,7 @@ import asyncpg
 
 from aios.crypto.vault import EncryptedBlob
 from aios.errors import ConflictError, NotFoundError
-from aios.ids import AGENT, ENVIRONMENT, EVENT, SESSION, SKILL, VAULT, VAULT_CREDENTIAL, make_id
+from aios.ids import AGENT, ENVIRONMENT, EVENT, SKILL, VAULT, VAULT_CREDENTIAL, make_id
 from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
@@ -490,45 +490,6 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
     )
-
-
-async def insert_session(
-    conn: asyncpg.Connection[Any],
-    *,
-    agent_id: str,
-    environment_id: str,
-    agent_version: int | None,
-    title: str | None,
-    metadata: dict[str, Any],
-    workspace_volume_path: str,
-) -> Session:
-    new_id = make_id(SESSION)
-    metadata_json = json.dumps(metadata)
-    try:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO sessions (
-                id, agent_id, environment_id, agent_version, title, metadata,
-                status, workspace_volume_path
-            )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7)
-            RETURNING *
-            """,
-            new_id,
-            agent_id,
-            environment_id,
-            agent_version,
-            title,
-            metadata_json,
-            workspace_volume_path,
-        )
-    except asyncpg.ForeignKeyViolationError as exc:
-        raise NotFoundError(
-            "agent or environment not found",
-            detail={"agent_id": agent_id, "environment_id": environment_id},
-        ) from exc
-    assert row is not None
-    return _row_to_session(row)
 
 
 async def get_session(conn: asyncpg.Connection[Any], session_id: str) -> Session:

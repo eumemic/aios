@@ -1,9 +1,9 @@
 """Business logic for sessions and their event log.
 
-Phase 1 sessions own a workspace directory on the host but no Docker
-container yet — Phase 3 wires the sandbox in. The session creation flow
-allocates the workspace path under ``settings.workspace_root`` and persists
-it on the row so future workers can re-mount the same volume.
+Session creation persists the workspace volume path (caller-supplied or
+defaulting to ``settings.workspace_root / session_id``) and optional
+per-session env vars on the row so workers can mount the correct volume
+and inject environment variables at container provisioning time.
 """
 
 from __future__ import annotations
