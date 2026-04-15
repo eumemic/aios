@@ -23,14 +23,17 @@ if TYPE_CHECKING:
 
 
 def _normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
-    """Strip null-valued fields that break downstream JSONB queries.
+    """Normalize provider quirks that break downstream consumers.
 
-    Some LiteLLM providers (e.g. openrouter/moonshotai/kimi-k2.5) return
-    ``tool_calls: null`` instead of omitting the key.  Stored verbatim,
-    this becomes JSONB ``null`` which ``jsonb_array_length`` rejects.
+    Some LiteLLM providers return ``tool_calls: null`` instead of omitting
+    the key (breaks ``jsonb_array_length``), and ``content: null`` instead
+    of ``content: ""`` (breaks providers like MiniMax and Gemma when the
+    message is replayed in a cross-model session).
     """
     if "tool_calls" in msg and msg["tool_calls"] is None:
         del msg["tool_calls"]
+    if msg.get("content") is None:
+        msg["content"] = ""
     return msg
 
 

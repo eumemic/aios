@@ -30,6 +30,23 @@ from typing import Any
 
 from aios.models.events import Event
 
+# Chat-completions spec fields per role.  Only these are emitted in the
+# context; provider-specific extensions (reasoning_content, etc.) stay
+# in the event log but are excluded from the message list.
+_ALLOWED_FIELDS: dict[str, frozenset[str]] = {
+    "assistant": frozenset({"role", "content", "tool_calls"}),
+    "tool": frozenset({"role", "tool_call_id", "content", "name"}),
+    "user": frozenset({"role", "content", "name"}),
+    "system": frozenset({"role", "content", "name"}),
+}
+
+
+def _strip_to_spec(msg: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of *msg* with only chat-completions spec fields."""
+    allowed = _ALLOWED_FIELDS.get(msg.get("role", ""), frozenset())
+    return {k: v for k, v in msg.items() if k in allowed}
+
+
 # ─── should_call_model ──────────────────────────────────────────────────────
 
 
@@ -243,7 +260,10 @@ def build_messages(
     if system_prompt:
         messages.insert(0, {"role": "system", "content": system_prompt})
 
-    return ContextResult(messages=messages, reacting_to=max_stimulus_seq)
+    return ContextResult(
+        messages=[_strip_to_spec(m) for m in messages],
+        reacting_to=max_stimulus_seq,
+    )
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
