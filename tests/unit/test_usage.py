@@ -85,6 +85,21 @@ class TestNormalizeUsage:
             "cache_creation_input_tokens": 0,
         }
 
+    def test_model_dump_flattened_prompt_tokens_details(self) -> None:
+        """Regression: model_dump() flattens Pydantic objects to dicts with extra keys."""
+        raw = {
+            "prompt_tokens": 400,
+            "completion_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 200, "audio_tokens": None},
+        }
+        result = _normalize_usage(raw)
+        assert result == {
+            "input_tokens": 400,
+            "output_tokens": 120,
+            "cache_read_input_tokens": 200,
+            "cache_creation_input_tokens": 0,
+        }
+
     def test_zero_values_preserved(self) -> None:
         raw = {
             "prompt_tokens": 0,
