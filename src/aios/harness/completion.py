@@ -34,6 +34,36 @@ def _normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     return msg
 
 
+_CACHE_CONTROL = {"type": "ephemeral"}
+
+
+def inject_cache_breakpoints(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+) -> None:
+    """Annotate messages and tools with ``cache_control`` breakpoints.
+
+    Anthropic's prompt caching requires explicit ``cache_control`` markers
+    to create cache entries.  LiteLLM strips them for providers that don't
+    support them (e.g. OpenAI), so this is safe to apply unconditionally.
+
+    Places breakpoints on the system message, last tool definition, and
+    last conversation message (3 of Anthropic's max 4).
+    """
+    if not messages:
+        return
+
+    if messages[0].get("role") == "system":
+        messages[0]["cache_control"] = _CACHE_CONTROL
+
+    if tools:
+        tools[-1]["cache_control"] = _CACHE_CONTROL
+
+    last = messages[-1]
+    if last.get("role") != "system":
+        last["cache_control"] = _CACHE_CONTROL
+
+
 def _normalize_usage(raw: dict[str, Any]) -> dict[str, int]:
     """Map LiteLLM's usage field names to our canonical names.
 
@@ -68,6 +98,8 @@ async def call_litellm(
     ``thinking_blocks``. The harness stores the message dict opaquely.
     Usage is normalized to our canonical field names.
     """
+    inject_cache_breakpoints(messages, tools)
+
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -112,6 +144,8 @@ async def stream_litellm(
     assembled via ``litellm.stream_chunk_builder`` and returned for
     storage as a normal event.
     """
+    inject_cache_breakpoints(messages, tools)
+
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
