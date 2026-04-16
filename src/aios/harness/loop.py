@@ -224,6 +224,15 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
     )
 
+    # INTERNAL_MONOLOGUE prefix, gated on the session having bindings.
+    # The prefix is persisted in the event log and shown to the model on
+    # every subsequent step's context build — that IS the teaching
+    # mechanism.  Do not strip on replay.
+    if bindings:
+        from aios.harness.channels import apply_monologue_prefix
+
+        assistant_msg = apply_monologue_prefix(assistant_msg)
+
     # Inject reacting_to so should_call_model knows what this response
     # was based on. This is the seq of the latest user/tool event in the
     # context — events after this seq are "new" on the next wake.
