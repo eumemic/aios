@@ -951,23 +951,38 @@ async def update_vault(
 
 
 async def archive_vault(conn: asyncpg.Connection[Any], vault_id: str) -> Vault:
-    row = await conn.fetchrow(
-        "UPDATE vaults SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
-        vault_id,
-    )
-    if row is None:
-        raise NotFoundError(
-            f"vault {vault_id} not found or already archived",
-            detail={"id": vault_id},
+    """Archive a vault and purge the encrypted blobs of its active credentials.
+
+    Archive is an UPDATE, so ``ON DELETE CASCADE`` on the FK does not fire
+    here — child credentials must be archived and zeroed explicitly. Both
+    operations run in one transaction.
+    """
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            "UPDATE vaults SET archived_at = now(), updated_at = now() "
+            "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+            vault_id,
+        )
+        if row is None:
+            raise NotFoundError(
+                f"vault {vault_id} not found or already archived",
+                detail={"id": vault_id},
+            )
+        # Purge every active child credential's secret payload at the same
+        # moment we archive the parent vault.
+        await conn.execute(
+            "UPDATE vault_credentials "
+            "SET ciphertext = ''::bytea, nonce = ''::bytea, "
+            "    archived_at = now(), updated_at = now() "
+            "WHERE vault_id = $1 AND archived_at IS NULL",
+            vault_id,
         )
     return _row_to_vault(row)
 
 
 async def delete_vault(conn: asyncpg.Connection[Any], vault_id: str) -> None:
-    async with conn.transaction():
-        await conn.execute("DELETE FROM vault_credentials WHERE vault_id = $1", vault_id)
-        result = await conn.execute("DELETE FROM vaults WHERE id = $1", vault_id)
+    # Child credentials are removed by ``ON DELETE CASCADE`` (migration 0015).
+    result = await conn.execute("DELETE FROM vaults WHERE id = $1", vault_id)
     if result == "DELETE 0":
         raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
 
@@ -1142,8 +1157,16 @@ async def update_vault_credential(
 async def archive_vault_credential(
     conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
 ) -> VaultCredential:
+    """Archive a credential and zero out its encrypted secret payload.
+
+    The bytes are scrubbed at archive time so a future DB dump or query
+    cannot leak the secret, even though ``WHERE archived_at IS NULL``
+    filters in the read path already prevent resolution.
+    """
     row = await conn.fetchrow(
-        "UPDATE vault_credentials SET archived_at = now(), updated_at = now() "
+        "UPDATE vault_credentials "
+        "SET ciphertext = ''::bytea, nonce = ''::bytea, "
+        "    archived_at = now(), updated_at = now() "
         "WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL RETURNING *",
         credential_id,
         vault_id,

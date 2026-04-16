@@ -271,6 +271,83 @@ class TestVaultCredentialCRUD:
             assert "maximum" in str(f)
 
 
+class TestArchiveAndCascade:
+    """Archive must zero the encrypted blob; delete must cascade via the FK."""
+
+    async def test_archive_credential_zeros_blob(self, pool: Any, crypto_box: Any) -> None:
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="zero-cred", metadata={})
+        body = VaultCredentialCreate(
+            mcp_server_url="https://zero-cred.example.com",
+            auth_type="static_bearer",
+            token=SecretStr("doomed"),
+        )
+        cred = await svc.create_vault_credential(pool, crypto_box, vault_id=vault.id, body=body)
+        await svc.archive_vault_credential(pool, vault.id, cred.id)
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT ciphertext, nonce FROM vault_credentials WHERE id = $1",
+                cred.id,
+            )
+        assert row is not None
+        assert bytes(row["ciphertext"]) == b""
+        assert bytes(row["nonce"]) == b""
+
+    async def test_archive_vault_zeros_active_credentials(self, pool: Any, crypto_box: Any) -> None:
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="zero-vault", metadata={})
+        # Two active credentials.
+        for i in range(2):
+            await svc.create_vault_credential(
+                pool,
+                crypto_box,
+                vault_id=vault.id,
+                body=VaultCredentialCreate(
+                    mcp_server_url=f"https://zero-vault-{i}.example.com",
+                    auth_type="static_bearer",
+                    token=SecretStr(f"t-{i}"),
+                ),
+            )
+
+        await svc.archive_vault(pool, vault.id)
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT ciphertext, nonce, archived_at FROM vault_credentials WHERE vault_id = $1",
+                vault.id,
+            )
+        assert len(rows) == 2
+        for row in rows:
+            assert bytes(row["ciphertext"]) == b""
+            assert bytes(row["nonce"]) == b""
+            assert row["archived_at"] is not None
+
+    async def test_delete_vault_cascades_to_credentials(self, pool: Any, crypto_box: Any) -> None:
+        """``ON DELETE CASCADE`` (migration 0015) wipes child rows automatically."""
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="cascade-test", metadata={})
+        cred = await svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=vault.id,
+            body=VaultCredentialCreate(
+                mcp_server_url="https://cascade.example.com",
+                auth_type="static_bearer",
+                token=SecretStr("doomed"),
+            ),
+        )
+
+        await svc.delete_vault(pool, vault.id)
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT 1 FROM vault_credentials WHERE id = $1", cred.id)
+        assert row is None  # cascade-deleted
+
+
 class TestQueries:
     """Direct tests for query-layer functions used internally by services."""
 
