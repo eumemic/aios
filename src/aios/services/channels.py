@@ -228,6 +228,13 @@ async def resolve_channel(pool: asyncpg.Pool[Any], address: str) -> ResolveResul
     ``sessions.id`` is satisfied atomically.
     """
     async with pool.acquire() as conn, conn.transaction():
+        # Serialize concurrent first-time resolves of the same address.
+        # Without this, two simultaneous misses both insert sessions and
+        # the second insert_binding fails on the unique index — a spurious
+        # 409 from the connector's perspective.  Advisory lock is per-
+        # address (not global) and releases automatically on commit.
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", address)
+
         existing = await queries.get_binding_by_address(conn, address)
         if existing is not None:
             return ResolveResult(

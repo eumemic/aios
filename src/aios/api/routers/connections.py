@@ -4,6 +4,12 @@ Inbound flow: a connector posts a message for some ``path`` (chat id);
 we build the channel ``address`` from ``connector/account/path``, run
 the resolver, append a user-message event with ``metadata.channel``
 stamped, and defer a wake job.
+
+``DELETE /{id}`` soft-archives by design.  No hard-delete endpoint:
+connections are cheap to retain archived for audit, and dropping the
+``connections`` row would orphan any historical ``metadata.channel``
+references in the event log.  (Vaults expose both because vault
+credentials carry encrypted secrets that may need to be purged.)
 """
 
 from __future__ import annotations
@@ -88,9 +94,13 @@ async def post_message(
     pool: PoolDep,
     _auth: AuthDep,
 ) -> InboundMessageResponse:
-    if not body.path or body.path.startswith("/") or body.path.endswith("/"):
+    # Path is split on '/' to form trailing address segments.  Reject
+    # empty leading/trailing/interior segments and '..' to keep the
+    # full address (and thus prefix-rule matching) unambiguous.
+    segments = body.path.split("/")
+    if not segments or any(seg == "" or seg == ".." for seg in segments):
         raise ValidationError(
-            "path must be non-empty and have no leading or trailing slashes",
+            "path must be non-empty with no empty segments or '..'",
             detail={"path": body.path},
         )
 

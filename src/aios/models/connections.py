@@ -15,11 +15,17 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ConnectionCreate(BaseModel):
-    """Request body for ``POST /v1/connections``."""
+    """Request body for ``POST /v1/connections``.
+
+    ``connector`` and ``account`` may not contain ``/`` — they form the
+    leading two segments of channel addresses (``{connector}/{account}/{path}``)
+    and a ``/`` would create ambiguous segment boundaries that confuse
+    routing-rule prefix matching.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -28,6 +34,13 @@ class ConnectionCreate(BaseModel):
     mcp_url: str = Field(min_length=1)
     vault_id: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("connector", "account")
+    @classmethod
+    def _no_slash(cls, v: str) -> str:
+        if "/" in v:
+            raise ValueError("must not contain '/'")
+        return v
 
 
 class ConnectionUpdate(BaseModel):

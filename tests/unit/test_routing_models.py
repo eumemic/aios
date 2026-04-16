@@ -54,6 +54,24 @@ class TestConnectionCreate:
                 vault_id="vlt_abc",
             )
 
+    def test_rejects_slash_in_connector(self) -> None:
+        with pytest.raises(ValidationError, match="must not contain '/'"):
+            ConnectionCreate(
+                connector="signal/x",
+                account="alice",
+                mcp_url="https://m",
+                vault_id="vlt_abc",
+            )
+
+    def test_rejects_slash_in_account(self) -> None:
+        with pytest.raises(ValidationError, match="must not contain '/'"):
+            ConnectionCreate(
+                connector="signal",
+                account="alice/bob",
+                mcp_url="https://m",
+                vault_id="vlt_abc",
+            )
+
 
 class TestConnectionUpdate:
     def test_all_optional(self) -> None:
