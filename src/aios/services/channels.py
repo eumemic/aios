@@ -241,7 +241,9 @@ async def resolve_channel(pool: asyncpg.Pool[Any], address: str) -> ResolveResul
         # resolves of the same address don't both reach insert_binding and
         # spuriously 409.  Re-check the binding after acquiring it: another
         # transaction may have inserted one while we were waiting.
-        await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", address)
+        # ``hashtextextended`` gives a 64-bit key (vs ``hashtext``'s 32-bit)
+        # so unrelated addresses don't collide on the lock space.
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", address)
         existing = await queries.get_binding_by_address(conn, address)
         if existing is not None:
             return ResolveResult(

@@ -90,8 +90,7 @@ async def post_message(
     _auth: AuthDep,
 ) -> InboundMessageResponse:
     # Empty/`..` segments would break segment-aware prefix-rule matching.
-    segments = body.path.split("/")
-    if not segments or any(seg in ("", "..") for seg in segments):
+    if any(seg in ("", "..") for seg in body.path.split("/")):
         raise ValidationError(
             "path must be non-empty with no empty segments or '..'",
             detail={"path": body.path},
