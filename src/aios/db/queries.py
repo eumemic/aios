@@ -14,6 +14,7 @@ seqs even when the API and the harness are appending concurrently.
 from __future__ import annotations
 
 import json
+from types import EllipsisType
 from typing import Any
 
 import asyncpg
@@ -1099,13 +1100,13 @@ async def update_vault_credential(
     vault_id: str,
     credential_id: str,
     *,
-    display_name: str | None = _UNSET,
     blob: EncryptedBlob | None = None,
-    metadata: dict[str, Any] | None = None,
+    display_name: str | None | EllipsisType = ...,
+    metadata: dict[str, Any] | None | EllipsisType = ...,
 ) -> VaultCredential:
     sets: list[str] = []
     args: list[Any] = [credential_id, vault_id]
-    if display_name is not _UNSET:
+    if display_name is not ...:
         args.append(display_name)
         sets.append(f"display_name = ${len(args)}")
     if blob is not None:
@@ -1113,7 +1114,7 @@ async def update_vault_credential(
         sets.append(f"ciphertext = ${len(args)}")
         args.append(blob.nonce)
         sets.append(f"nonce = ${len(args)}")
-    if metadata is not None:
+    if metadata is not ...:
         args.append(json.dumps(metadata))
         sets.append(f"metadata = ${len(args)}::jsonb")
     if not sets:

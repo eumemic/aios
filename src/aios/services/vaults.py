@@ -234,11 +234,9 @@ async def update_vault_credential(
             conn,
             vault_id,
             credential_id,
-            display_name=body.display_name
-            if "display_name" in body.model_fields_set
-            else queries._UNSET,
             blob=new_blob,
-            metadata=body.metadata,
+            display_name=(body.display_name if "display_name" in body.model_fields_set else ...),
+            metadata=body.metadata if "metadata" in body.model_fields_set else ...,
         )
 
 
