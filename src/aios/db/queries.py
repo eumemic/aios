@@ -1909,14 +1909,23 @@ async def archive_routing_rule(conn: asyncpg.Connection[Any], rule_id: str) -> R
 async def find_matching_rule(conn: asyncpg.Connection[Any], address: str) -> RoutingRule | None:
     """Longest-matching segment-aware prefix lookup.
 
-    ``signal`` matches ``signal/abc/x`` but not ``signalfoo``: the
-    ``$1 LIKE prefix || '/%'`` clause requires a segment boundary.
+    ``signal`` matches ``signal/abc/x`` but not ``signalfoo``: the second
+    clause requires a literal ``prefix + "/"`` boundary.  Substring
+    equality (rather than ``LIKE``) is used so meta-characters in the
+    prefix (``_``, ``%``) are matched literally — a prefix of
+    ``foo_bar`` must not match ``fooXbar/baz``.
     """
     row = await conn.fetchrow(
         """
         SELECT * FROM routing_rules
         WHERE archived_at IS NULL
-          AND ($1 = prefix OR $1 LIKE prefix || '/%')
+          AND (
+              $1 = prefix
+              OR (
+                  length($1) > length(prefix)
+                  AND substring($1, 1, length(prefix) + 1) = prefix || '/'
+              )
+          )
         ORDER BY length(prefix) DESC
         LIMIT 1
         """,

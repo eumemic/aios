@@ -421,6 +421,50 @@ class TestFindMatchingRule:
         assert r is not None
         assert r.prefix == f"l-{suffix}/b/c"
 
+    async def test_underscore_in_prefix_treated_literally(
+        self, pool: Any, agent_id: str, env_id: str
+    ) -> None:
+        """LIKE meta-characters (``_``, ``%``) in prefix must NOT act as
+        wildcards.  Without proper handling, prefix ``foo_bar`` would
+        wrongly match address ``fooXbar/baz`` (LIKE's ``_`` matches any
+        single char).
+        """
+        from aios.db import queries
+        from aios.services import channels as svc
+
+        suffix = _uniq()
+        await svc.create_routing_rule(
+            pool,
+            prefix=f"fo_bar-{suffix}",
+            target=f"agent:{agent_id}",
+            session_params=SessionParams(environment_id=env_id),
+        )
+        async with pool.acquire() as conn:
+            wrong = await queries.find_matching_rule(conn, f"fooXbar-{suffix}/x")
+            right = await queries.find_matching_rule(conn, f"fo_bar-{suffix}/x")
+        assert wrong is None
+        assert right is not None
+
+    async def test_percent_in_prefix_treated_literally(
+        self, pool: Any, agent_id: str, env_id: str
+    ) -> None:
+        """LIKE's ``%`` (any-string) must not wildcard either."""
+        from aios.db import queries
+        from aios.services import channels as svc
+
+        suffix = _uniq()
+        await svc.create_routing_rule(
+            pool,
+            prefix=f"fo%bar-{suffix}",
+            target=f"agent:{agent_id}",
+            session_params=SessionParams(environment_id=env_id),
+        )
+        async with pool.acquire() as conn:
+            wrong = await queries.find_matching_rule(conn, f"fooXXXbar-{suffix}/x")
+            right = await queries.find_matching_rule(conn, f"fo%bar-{suffix}/x")
+        assert wrong is None
+        assert right is not None
+
 
 # ─── resolve_channel ────────────────────────────────────────────────────────
 
@@ -633,6 +677,34 @@ class TestResolveChannel:
             session_params=SessionParams(),
         )
         with pytest.raises(NotFoundError):
+            await svc.resolve_channel(pool, f"{prefix}/x")
+
+    async def test_session_target_with_archived_session_raises(
+        self, pool: Any, agent_id: str, env_id: str
+    ) -> None:
+        """A rule pointing at an archived session must fail loudly rather
+        than silently re-binding to it.
+        """
+        from aios.services import channels as svc
+        from aios.services import sessions as sess_svc
+
+        s = await sess_svc.create_session(
+            pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title=None,
+            metadata={},
+        )
+        await sess_svc.archive_session(pool, s.id)
+
+        prefix = f"st-arch-{_uniq()}"
+        await svc.create_routing_rule(
+            pool,
+            prefix=prefix,
+            target=f"session:{s.id}",
+            session_params=SessionParams(),
+        )
+        with pytest.raises(NotFoundError, match="archived"):
             await svc.resolve_channel(pool, f"{prefix}/x")
 
     async def test_invalid_vault_id_in_session_params_rolls_back(

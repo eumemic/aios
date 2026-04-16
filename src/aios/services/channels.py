@@ -27,7 +27,7 @@ from typing import Any, Literal
 import asyncpg
 
 from aios.db import queries
-from aios.errors import NoRouteError, ValidationError
+from aios.errors import NoRouteError, NotFoundError, ValidationError
 from aios.models.channel_bindings import ChannelBinding
 from aios.models.routing_rules import RoutingRule, SessionParams
 
@@ -262,8 +262,14 @@ async def resolve_channel(pool: asyncpg.Pool[Any], address: str) -> ResolveResul
         target = parse_target(rule.target)
 
         if isinstance(target, SessionTarget):
-            # Verify the session exists (raises NotFoundError otherwise).
+            # Verify the session exists and is not archived — binding to
+            # an archived session would silently resurrect activity on it.
             session = await queries.get_session(conn, target.session_id)
+            if session.archived_at is not None:
+                raise NotFoundError(
+                    f"session {target.session_id} is archived",
+                    detail={"id": target.session_id},
+                )
             session_id = session.id
             created = False
         else:
