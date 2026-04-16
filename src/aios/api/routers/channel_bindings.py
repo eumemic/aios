@@ -1,12 +1,7 @@
 """Channel binding endpoints — explicit address → session mappings.
 
 No PUT: bindings are immutable.  To re-route an address, archive the
-existing binding and create a new one.
-
-``DELETE /{id}`` soft-archives by design.  No hard-delete endpoint:
-the partial unique index on ``address`` already lets archived rows
-coexist with a fresh active binding for the same address, and the row
-itself ``ON DELETE CASCADE``s away with its session.
+existing binding and create a new one.  ``DELETE`` soft-archives.
 """
 
 from __future__ import annotations

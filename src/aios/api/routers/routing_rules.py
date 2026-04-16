@@ -1,10 +1,6 @@
 """Routing rule endpoints — fallback prefix-match for unbound addresses.
 
-``DELETE /{id}`` soft-archives by design.  No hard-delete endpoint:
-the partial unique index on ``prefix`` already lets archived rules
-coexist with a fresh active rule on the same prefix, and retaining
-archived rules is useful for tracing how historical sessions were
-created.
+``DELETE`` soft-archives; archived rules are retained for audit.
 """
 
 from __future__ import annotations

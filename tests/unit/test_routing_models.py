@@ -54,23 +54,20 @@ class TestConnectionCreate:
                 vault_id="vlt_abc",
             )
 
-    def test_rejects_slash_in_connector(self) -> None:
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("connector", "signal/x"), ("account", "alice/bob")],
+    )
+    def test_rejects_slash(self, field: str, value: str) -> None:
+        kwargs: dict[str, str] = {
+            "connector": "signal",
+            "account": "alice",
+            "mcp_url": "https://m",
+            "vault_id": "vlt_abc",
+        }
+        kwargs[field] = value
         with pytest.raises(ValidationError, match="must not contain '/'"):
-            ConnectionCreate(
-                connector="signal/x",
-                account="alice",
-                mcp_url="https://m",
-                vault_id="vlt_abc",
-            )
-
-    def test_rejects_slash_in_account(self) -> None:
-        with pytest.raises(ValidationError, match="must not contain '/'"):
-            ConnectionCreate(
-                connector="signal",
-                account="alice/bob",
-                mcp_url="https://m",
-                vault_id="vlt_abc",
-            )
+            ConnectionCreate(**kwargs)  # type: ignore[arg-type]
 
 
 class TestConnectionUpdate:
