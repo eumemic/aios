@@ -1,0 +1,11 @@
+{
+  "source": "+15550000000",
+  "sourceUuid": "99999999-8888-7777-6666-555555555555",
+  "sourceName": "Bot",
+  "sourceDevice": 1,
+  "timestamp": 1700000007000,
+  "dataMessage": {
+    "timestamp": 1700000007000,
+    "message": "sent from the bot itself"
+  }
+}

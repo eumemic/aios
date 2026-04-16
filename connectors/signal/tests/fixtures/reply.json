@@ -1,0 +1,17 @@
+{
+  "source": "+15551234567",
+  "sourceUuid": "11111111-2222-3333-4444-555555555555",
+  "sourceName": "Alice",
+  "sourceDevice": 1,
+  "timestamp": 1700000003000,
+  "dataMessage": {
+    "timestamp": 1700000003000,
+    "message": "agreed!",
+    "quote": {
+      "id": 1699999000000,
+      "author": "+15550000000",
+      "authorUuid": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      "text": "Original message"
+    }
+  }
+}
