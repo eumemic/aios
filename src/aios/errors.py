@@ -75,6 +75,17 @@ class ForbiddenError(AiosError):
     status_code = 403
 
 
+class NoRouteError(AiosError):
+    """Raised when a channel address has no matching binding or routing rule.
+
+    Translates to 404 with envelope ``type="no_route"`` so callers (the
+    inbound-message endpoint, connectors) can branch on the type.
+    """
+
+    error_type = "no_route"
+    status_code = 404
+
+
 class CryptoDecryptError(AiosError):
     """Raised when the CryptoBox cannot decrypt a stored ciphertext.
 

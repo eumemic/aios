@@ -13,7 +13,6 @@ from typing import Any
 
 import asyncpg
 
-from aios.config import get_settings
 from aios.db import queries
 from aios.models.events import Event, EventKind
 from aios.models.sessions import Session, SessionStatus
@@ -37,39 +36,16 @@ async def create_session(
     whatever version of the agent is current at step time.
     """
     async with pool.acquire() as conn:
-        from aios.ids import SESSION, make_id
-
-        new_id = make_id(SESSION)
-        workspace_path = workspace_path or str(get_settings().workspace_root / new_id)
-
-        try:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO sessions (
-                    id, agent_id, environment_id, agent_version, title, metadata,
-                    status, workspace_volume_path, env
-                )
-                VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb)
-                RETURNING *
-                """,
-                new_id,
-                agent_id,
-                environment_id,
-                agent_version,
-                title,
-                json.dumps(metadata),
-                workspace_path,
-                json.dumps(env or {}),
-            )
-        except asyncpg.ForeignKeyViolationError as exc:
-            from aios.errors import NotFoundError
-
-            raise NotFoundError(
-                "agent or environment not found",
-                detail={"agent_id": agent_id, "environment_id": environment_id},
-            ) from exc
-        assert row is not None
-        session = queries._row_to_session(row)
+        session = await queries.insert_session(
+            conn,
+            agent_id=agent_id,
+            environment_id=environment_id,
+            agent_version=agent_version,
+            title=title,
+            metadata=metadata,
+            workspace_path=workspace_path,
+            env=env,
+        )
         if vault_ids:
             await queries.set_session_vaults(conn, session.id, vault_ids)
             session = session.model_copy(update={"vault_ids": vault_ids})
