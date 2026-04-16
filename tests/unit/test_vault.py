@@ -12,7 +12,7 @@ import pytest
 from pydantic import SecretStr
 
 from aios.crypto.vault import KEY_BYTES, NONCE_BYTES, CryptoBox, EncryptedBlob
-from aios.errors import CryptoDecryptError
+from aios.errors import CryptoDecryptError, OAuthRefreshError
 from aios.models.vaults import (
     TokenEndpointAuthBasic,
     TokenEndpointAuthNone,
@@ -22,7 +22,13 @@ from aios.models.vaults import (
     VaultCredentialUpdate,
 )
 from aios.services import vaults as vaults_service
-from aios.services.vaults import _extract_auth_payload, _merge_auth_payload
+from aios.services.vaults import (
+    REFRESH_SKEW_SECONDS,
+    _extract_auth_payload,
+    _is_expiring,
+    _merge_auth_payload,
+    refresh_credential,
+)
 
 
 @pytest.fixture
@@ -324,3 +330,410 @@ class TestUpdateVaultCredentialCallSite:
 
         kwargs = upd.await_args.kwargs
         assert kwargs["display_name"] is None  # not Ellipsis — explicitly passed
+
+
+# ── OAuth refresh ────────────────────────────────────────────────────────────
+
+
+def _conn_with_transaction() -> MagicMock:
+    """Return a MagicMock conn whose ``conn.transaction()`` is a working async CM."""
+    conn = MagicMock()
+    txn_cm = MagicMock()
+    txn_cm.__aenter__ = AsyncMock(return_value=None)
+    txn_cm.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction.return_value = txn_cm
+    conn.execute = AsyncMock()
+    return conn
+
+
+def _http_response(*, status: int = 200, body: dict[str, Any] | None = None) -> MagicMock:
+    """Build a fake httpx.Response with ``json()`` and ``raise_for_status()``."""
+    import httpx as _httpx
+
+    resp = MagicMock()
+    resp.status_code = status
+    resp.json = MagicMock(return_value=body or {})
+    if status >= 400:
+
+        def _raise() -> None:
+            raise _httpx.HTTPStatusError(
+                f"server returned {status}", request=MagicMock(), response=resp
+            )
+
+        resp.raise_for_status = MagicMock(side_effect=_raise)
+    else:
+        resp.raise_for_status = MagicMock()
+    return resp
+
+
+def _async_client_returning(resp: Any) -> MagicMock:
+    """Build a MagicMock standing in for ``httpx.AsyncClient(...)``."""
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.post = AsyncMock(return_value=resp)
+    return client
+
+
+def _expiring_oauth_payload(**overrides: Any) -> dict[str, Any]:
+    from datetime import UTC, datetime, timedelta
+
+    base = {
+        "access_token": "old-at",
+        "refresh_token": "rt-1",
+        "client_id": "cid",
+        "token_endpoint": "https://issuer.example/token",
+        "expires_at": (datetime.now(UTC) + timedelta(seconds=5)).isoformat(),
+        "token_endpoint_auth": {"method": "none"},
+    }
+    base.update(overrides)
+    return base
+
+
+class TestIsExpiring:
+    def test_far_future_is_not_expiring(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        payload = {"expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()}
+        assert _is_expiring(payload) is False
+
+    def test_within_skew_is_expiring(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        # Inside the skew window (5 s < 30 s default).
+        payload = {"expires_at": (datetime.now(UTC) + timedelta(seconds=5)).isoformat()}
+        assert _is_expiring(payload) is True
+
+    def test_already_expired_is_expiring(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        payload = {"expires_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat()}
+        assert _is_expiring(payload) is True
+
+    def test_missing_expires_at_is_not_expiring(self) -> None:
+        # Treat absence as "never expires" — refresh path stays out of the way.
+        assert _is_expiring({}) is False
+
+    def test_naive_datetime_assumed_utc(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        # Some providers return naive ISO strings; treat as UTC.
+        future_naive = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=5)
+        assert _is_expiring({"expires_at": future_naive.isoformat()}) is True
+
+
+class TestRefreshCredential:
+    """Mocked-httpx unit tests for the locked refresh helper.
+
+    The conn is a MagicMock; the lock query is patched to return a real
+    decryptable blob so the function exercises decrypt → POST → re-encrypt
+    → UPDATE end-to-end against fake I/O.
+    """
+
+    @pytest.mark.asyncio
+    async def test_skips_when_token_not_expiring(self, crypto_box: CryptoBox) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        payload = _expiring_oauth_payload(
+            expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        blob = crypto_box.encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(_http_response(body={"access_token": "new"}))
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                mcp_server_url="https://mcp.example.com",
+            )
+
+        client.post.assert_not_awaited()
+        conn.execute.assert_not_awaited()  # row not updated
+
+    @pytest.mark.asyncio
+    async def test_basic_method_uses_basic_auth(self, crypto_box: CryptoBox) -> None:
+        import httpx as _httpx
+
+        payload = _expiring_oauth_payload(
+            token_endpoint_auth={"method": "client_secret_basic", "client_secret": "shh"},
+        )
+        blob = crypto_box.encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(_http_response(body={"access_token": "new"}))
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                mcp_server_url="https://mcp.example.com",
+            )
+
+        kwargs = client.post.await_args.kwargs
+        assert isinstance(kwargs["auth"], _httpx.BasicAuth)
+        # client_secret never leaks into the form body.
+        assert "client_secret" not in kwargs["data"]
+        assert kwargs["data"]["grant_type"] == "refresh_token"
+        assert kwargs["data"]["refresh_token"] == "rt-1"
+
+    @pytest.mark.asyncio
+    async def test_post_method_includes_secret_in_body(self, crypto_box: CryptoBox) -> None:
+        payload = _expiring_oauth_payload(
+            token_endpoint_auth={"method": "client_secret_post", "client_secret": "shh"},
+        )
+        blob = crypto_box.encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(_http_response(body={"access_token": "new"}))
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                mcp_server_url="https://mcp.example.com",
+            )
+
+        kwargs = client.post.await_args.kwargs
+        assert "auth" not in kwargs
+        assert kwargs["data"]["client_secret"] == "shh"
+        assert kwargs["data"]["client_id"] == "cid"
+
+    @pytest.mark.asyncio
+    async def test_none_method_includes_only_client_id(self, crypto_box: CryptoBox) -> None:
+        payload = _expiring_oauth_payload(
+            token_endpoint_auth={"method": "none"},
+        )
+        blob = crypto_box.encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(_http_response(body={"access_token": "new"}))
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                mcp_server_url="https://mcp.example.com",
+            )
+
+        kwargs = client.post.await_args.kwargs
+        assert "auth" not in kwargs
+        assert "client_secret" not in kwargs["data"]
+        assert kwargs["data"]["client_id"] == "cid"
+
+    @pytest.mark.asyncio
+    async def test_persists_new_access_token_and_expires_at(self, crypto_box: CryptoBox) -> None:
+        payload = _expiring_oauth_payload()
+        blob = crypto_box.encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(
+            _http_response(body={"access_token": "fresh-at", "expires_in": 3600})
+        )
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                mcp_server_url="https://mcp.example.com",
+            )
+
+        # The UPDATE call carried fresh ciphertext+nonce. Decrypt them and
+        # confirm the new token is in the payload.
+        conn.execute.assert_awaited_once()
+        args = conn.execute.await_args.args
+        new_blob = EncryptedBlob(ciphertext=args[1], nonce=args[2])
+        new_payload = json.loads(crypto_box.decrypt(new_blob))
+        assert new_payload["access_token"] == "fresh-at"
+        # expires_at is updated to ~1 hour out.
+        assert "expires_at" in new_payload
+
+    @pytest.mark.asyncio
+    async def test_rotates_refresh_token_when_returned(self, crypto_box: CryptoBox) -> None:
+        payload = _expiring_oauth_payload()
+        blob = crypto_box.encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(
+            _http_response(body={"access_token": "fresh", "refresh_token": "rt-2"})
+        )
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                mcp_server_url="https://mcp.example.com",
+            )
+
+        args = conn.execute.await_args.args
+        new_blob = EncryptedBlob(ciphertext=args[1], nonce=args[2])
+        assert json.loads(crypto_box.decrypt(new_blob))["refresh_token"] == "rt-2"
+
+    @pytest.mark.asyncio
+    async def test_keeps_refresh_token_when_omitted(self, crypto_box: CryptoBox) -> None:
+        payload = _expiring_oauth_payload()
+        blob = crypto_box.encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        # Response omits refresh_token.
+        client = _async_client_returning(_http_response(body={"access_token": "fresh"}))
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                mcp_server_url="https://mcp.example.com",
+            )
+
+        args = conn.execute.await_args.args
+        new_blob = EncryptedBlob(ciphertext=args[1], nonce=args[2])
+        assert json.loads(crypto_box.decrypt(new_blob))["refresh_token"] == "rt-1"  # preserved
+
+    @pytest.mark.asyncio
+    async def test_http_error_raises_oauth_refresh_error(self, crypto_box: CryptoBox) -> None:
+        payload = _expiring_oauth_payload()
+        blob = crypto_box.encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(_http_response(status=401))
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+            pytest.raises(OAuthRefreshError),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                mcp_server_url="https://mcp.example.com",
+            )
+
+        # Row not updated when refresh fails.
+        conn.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_malformed_response_raises(self, crypto_box: CryptoBox) -> None:
+        payload = _expiring_oauth_payload()
+        blob = crypto_box.encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        # 200 OK but missing access_token in body.
+        client = _async_client_returning(_http_response(body={"expires_in": 3600}))
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+            pytest.raises(OAuthRefreshError, match="access_token"),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                mcp_server_url="https://mcp.example.com",
+            )
+
+    @pytest.mark.asyncio
+    async def test_no_credential_found_raises(self, crypto_box: CryptoBox) -> None:
+        conn = _conn_with_transaction()
+        with (
+            patch.object(
+                vaults_service.queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=None),
+            ),
+            pytest.raises(OAuthRefreshError, match="no active credential"),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                mcp_server_url="https://mcp.example.com",
+            )
+
+    @pytest.mark.asyncio
+    async def test_missing_refresh_fields_raises(self, crypto_box: CryptoBox) -> None:
+        # Stored credential is expiring but lacks refresh_token / token_endpoint.
+        payload = {
+            "access_token": "old",
+            "expires_at": _expiring_oauth_payload()["expires_at"],
+            "client_id": "cid",
+        }
+        blob = crypto_box.encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            pytest.raises(OAuthRefreshError, match="missing required refresh fields"),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                mcp_server_url="https://mcp.example.com",
+            )
+
+
+def test_refresh_skew_seconds_is_positive() -> None:
+    """Sanity check the constant — 0 would cause infinite refresh churn."""
+    assert REFRESH_SKEW_SECONDS > 0

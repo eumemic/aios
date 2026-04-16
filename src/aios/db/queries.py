@@ -1067,6 +1067,28 @@ async def get_vault_credential(
     return _row_to_vault_credential(row)
 
 
+async def lock_oauth_credential_for_refresh(
+    conn: asyncpg.Connection[Any], vault_id: str, mcp_server_url: str
+) -> tuple[str, EncryptedBlob] | None:
+    """``SELECT FOR UPDATE`` the active credential for ``(vault_id, url)``.
+
+    Used by the OAuth refresh path to serialize concurrent refreshes of the
+    same credential. Returns ``(credential_id, EncryptedBlob)`` or ``None``
+    if no active credential exists. Caller owns the surrounding transaction.
+    """
+    row = await conn.fetchrow(
+        "SELECT id, ciphertext, nonce FROM vault_credentials "
+        "WHERE vault_id = $1 AND mcp_server_url = $2 AND archived_at IS NULL "
+        "FOR UPDATE",
+        vault_id,
+        mcp_server_url,
+    )
+    if row is None:
+        return None
+    blob = EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"]))
+    return str(row["id"]), blob
+
+
 async def get_vault_credential_with_blob(
     conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
 ) -> tuple[VaultCredential, EncryptedBlob]:
