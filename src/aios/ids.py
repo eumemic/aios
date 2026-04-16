@@ -28,9 +28,25 @@ AGENT_VERSION: Final = "agver"  # reserved for phase 4
 VAULT: Final = "vlt"
 VAULT_CREDENTIAL: Final = "vcr"
 SKILL: Final = "skl"
+CONNECTION: Final = "conn"
+CHANNEL_BINDING: Final = "cbnd"
+ROUTING_RULE: Final = "rrul"
 
 _PREFIXES: Final = frozenset(
-    {AGENT, ENVIRONMENT, SESSION, EVENT, CREDENTIAL, AGENT_VERSION, VAULT, VAULT_CREDENTIAL, SKILL}
+    {
+        AGENT,
+        ENVIRONMENT,
+        SESSION,
+        EVENT,
+        CREDENTIAL,
+        AGENT_VERSION,
+        VAULT,
+        VAULT_CREDENTIAL,
+        SKILL,
+        CONNECTION,
+        CHANNEL_BINDING,
+        ROUTING_RULE,
+    }
 )
 
 
