@@ -43,25 +43,17 @@ async def _open_session(url: str, headers: dict[str, str], stack: AsyncExitStack
     return session
 
 
-async def resolve_auth_headers(
-    pool: asyncpg.Pool[Any],
+def _headers_from_credential(
     crypto_box: CryptoBox,
-    session_id: str,
-    mcp_server_url: str,
+    blob: Any,
+    auth_type: str,
 ) -> dict[str, str]:
-    """Look up vault credentials for an MCP server and return auth headers.
+    """Decrypt a credential blob and build the auth header dict.
 
-    Searches the session's bound vaults (rank-ordered) for the first
-    credential matching ``mcp_server_url``. Returns an ``Authorization``
-    header dict, or an empty dict if no credential is found.
+    Returns ``{"Authorization": "Bearer <token>"}`` for recognised auth
+    types, or ``{}`` when the credential is missing a token or the auth
+    type is unknown.
     """
-    async with pool.acquire() as conn:
-        result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
-
-    if result is None:
-        return {}
-
-    blob, auth_type = result
     payload = json.loads(crypto_box.decrypt(blob))
 
     if auth_type == "static_bearer":
@@ -76,6 +68,26 @@ async def resolve_auth_headers(
         return {}
 
     return {"Authorization": f"Bearer {token}"}
+
+
+async def resolve_auth_headers(
+    pool: asyncpg.Pool[Any],
+    crypto_box: CryptoBox,
+    session_id: str,
+    mcp_server_url: str,
+) -> dict[str, str]:
+    """Look up vault credentials for an MCP server and return auth headers.
+
+    Searches the session's bound vaults (rank-ordered) for the first
+    credential matching ``mcp_server_url``. Returns an ``Authorization``
+    header dict, or an empty dict if no credential is found.
+    """
+    async with pool.acquire() as conn:
+        result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
+    if result is None:
+        return {}
+    blob, auth_type = result
+    return _headers_from_credential(crypto_box, blob, auth_type)
 
 
 async def discover_mcp_tools(
