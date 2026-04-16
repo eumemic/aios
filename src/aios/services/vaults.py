@@ -63,7 +63,7 @@ def _serialize_token_endpoint_auth(v: TokenEndpointAuth) -> dict[str, str]:
     return {"method": v.method, "client_secret": v.client_secret.get_secret_value()}
 
 
-def _is_expiring(payload: dict[str, Any], skew: int = REFRESH_SKEW_SECONDS) -> bool:
+def is_expiring(payload: dict[str, Any], skew: int = REFRESH_SKEW_SECONDS) -> bool:
     """Return True if the token's ``expires_at`` is within ``skew`` seconds of now.
 
     Missing ``expires_at`` is treated as "never expires" (False) so that
@@ -116,7 +116,7 @@ async def refresh_credential(
             ) from exc
 
         # Double-check after lock — another worker may have refreshed already.
-        if not _is_expiring(payload):
+        if not is_expiring(payload):
             return
 
         token_endpoint = payload.get("token_endpoint")
@@ -193,11 +193,17 @@ async def refresh_credential(
         rotated = token_data.get("refresh_token")
         if rotated:
             payload["refresh_token"] = rotated
-        # Update expires_at if the provider declared an expires_in.
-        expires_in = token_data.get("expires_in")
-        if isinstance(expires_in, (int, float)) and expires_in > 0:
-            new_expiry = datetime.now(UTC) + timedelta(seconds=int(expires_in))
-            payload["expires_at"] = new_expiry.isoformat()
+        # Update expires_at if the provider declared an expires_in. Accept
+        # numeric strings as well as int/float — RFC 6749 says SHOULD be a
+        # number, but real providers (Slack, others) sometimes return strings.
+        # Without this, the new access_token would be stored without an
+        # ``expires_at`` and ``is_expiring`` would treat it as never-expiring.
+        try:
+            seconds = int(token_data.get("expires_in", 0))
+        except (TypeError, ValueError):
+            seconds = 0
+        if seconds > 0:
+            payload["expires_at"] = (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
 
         new_blob = crypto_box.encrypt(json.dumps(payload))
         await conn.execute(

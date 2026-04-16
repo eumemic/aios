@@ -1,9 +1,12 @@
 """Symmetric encryption box using libsodium SecretBox (XChaCha20-Poly1305 + Poly1305 MAC).
 
 The aios server holds a single 32-byte master key in the ``AIOS_VAULT_KEY`` env
-var (base64-encoded). Every encrypted row stores a randomly-generated nonce
-alongside its ciphertext; encryption is authenticated, so any tampering or key
-mismatch produces a clean error rather than silent corruption.
+var (base64-encoded). Every *active* encrypted row stores a randomly-generated
+nonce alongside its ciphertext; encryption is authenticated, so any tampering
+or key mismatch produces a clean error rather than silent corruption. Archived
+rows have their ciphertext and nonce zeroed out so that a future DB dump or
+query cannot leak the secret — read paths filter ``WHERE archived_at IS NULL``
+to avoid attempting to decrypt the scrubbed bytes.
 """
 
 from __future__ import annotations

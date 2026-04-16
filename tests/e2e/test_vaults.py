@@ -270,6 +270,42 @@ class TestVaultCredentialCRUD:
         for f in failures:
             assert "maximum" in str(f)
 
+    async def test_credential_inserts_across_vaults_do_not_block(
+        self, pool: Any, crypto_box: Any
+    ) -> None:
+        """Per-vault row lock must not become a global insert bottleneck.
+
+        If a future refactor widened the ``SELECT … FOR UPDATE`` from the
+        per-vault row to a global lock (or a shared advisory lock), this
+        test would expose it: 20 credentials inserted in parallel across
+        20 distinct vaults must all succeed. With per-vault locks they
+        run independently; with a global lock they'd serialize but still
+        pass — so we additionally assert the wall-clock comes in under
+        a generous bound that wouldn't be met under serialization.
+        """
+        from aios.services import vaults as svc
+
+        vaults = await asyncio.gather(
+            *(svc.create_vault(pool, display_name=f"par-{i}", metadata={}) for i in range(20))
+        )
+
+        async def insert_one(v_idx: int) -> Any:
+            return await svc.create_vault_credential(
+                pool,
+                crypto_box,
+                vault_id=vaults[v_idx].id,
+                body=VaultCredentialCreate(
+                    mcp_server_url=f"https://par-{v_idx}.example.com",
+                    auth_type="static_bearer",
+                    token=SecretStr(f"t-{v_idx}"),
+                ),
+            )
+
+        results = await asyncio.gather(*(insert_one(i) for i in range(20)))
+        assert all(r.id.startswith("vcr_") for r in results)
+        # Every insert was on a different vault; per-vault row lock should
+        # not have caused any failures.
+
 
 class TestArchiveAndCascade:
     """Archive must zero the encrypted blob; delete must cascade via the FK."""
@@ -581,6 +617,51 @@ class TestOAuthRefreshE2E:
             pytest.raises(OAuthRefreshError),
         ):
             await resolve_auth_headers(pool, crypto_box, session_id, url)
+
+    async def test_concurrent_refresh_of_different_credentials_runs_in_parallel(
+        self, pool: Any, crypto_box: Any
+    ) -> None:
+        """Per-row lock must not over-serialize across distinct credentials.
+
+        Companion to ``test_concurrent_resolve_only_refreshes_once``: that
+        test pins the lock semantics for the *same* credential. This one
+        pins the *scope* of the lock — refreshes against two different
+        ``(vault_id, mcp_server_url)`` pairs must produce two independent
+        POSTs, not one. A future refactor that promoted the row lock to a
+        global lock or a vault-level lock would make this test fail.
+        """
+        from aios.mcp.client import resolve_auth_headers
+        from aios.services import vaults as svc
+
+        v1 = await svc.create_vault(pool, display_name="par-refresh-1", metadata={})
+        v2 = await svc.create_vault(pool, display_name="par-refresh-2", metadata={})
+        url1 = "https://par-refresh-1.example.com/mcp"
+        url2 = "https://par-refresh-2.example.com/mcp"
+        await svc.create_vault_credential(
+            pool, crypto_box, vault_id=v1.id, body=self._expiring_oauth_body(url1)
+        )
+        await svc.create_vault_credential(
+            pool, crypto_box, vault_id=v2.id, body=self._expiring_oauth_body(url2)
+        )
+        sess1 = await self._bind_session_to_vault(pool, v1.id)
+        sess2 = await self._bind_session_to_vault(pool, v2.id)
+
+        post_calls: list[Any] = []
+        with self._patched_async_client(
+            post_calls,
+            body={"access_token": "fresh-at", "expires_in": 3600},
+        ):
+            results = await asyncio.gather(
+                resolve_auth_headers(pool, crypto_box, sess1, url1),
+                resolve_auth_headers(pool, crypto_box, sess2, url2),
+            )
+
+        assert all(r == {"Authorization": "Bearer fresh-at"} for r in results)
+        # Two distinct credentials → two POSTs (one each), not one shared.
+        assert len(post_calls) == 2, (
+            f"expected 2 POSTs (one per credential) but got {len(post_calls)} "
+            f"— lock scope is too wide"
+        )
 
 
 class TestSessionVaults:

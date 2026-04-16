@@ -24,7 +24,7 @@ from mcp.client.streamable_http import streamable_http_client
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.logging import get_logger
-from aios.services.vaults import _is_expiring, refresh_credential
+from aios.services.vaults import is_expiring, refresh_credential
 
 log = get_logger("aios.mcp.client")
 
@@ -70,7 +70,7 @@ async def resolve_auth_headers(
 
         if auth_type == "mcp_oauth":
             payload = json.loads(crypto_box.decrypt(blob))
-            if _is_expiring(payload):
+            if is_expiring(payload):
                 # Lazy refresh: another coroutine may race us here, but
                 # ``refresh_credential`` re-checks expiry under a row lock.
                 await refresh_credential(

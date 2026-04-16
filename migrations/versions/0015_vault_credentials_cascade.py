@@ -7,7 +7,7 @@ Postgres handle the child row cleanup, so ``delete_vault`` collapses
 to a single statement.
 
 Note: this only affects ``DELETE`` paths. ``archive_vault`` is an
-``UPDATE`` and does not trigger the cascade — the service-layer code
+``UPDATE`` and does not trigger the cascade — ``queries.archive_vault``
 explicitly zeros child credentials' encrypted blobs in the same
 transaction.
 

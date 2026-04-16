@@ -26,8 +26,8 @@ from aios.services import vaults as vaults_service
 from aios.services.vaults import (
     REFRESH_SKEW_SECONDS,
     _extract_auth_payload,
-    _is_expiring,
     _merge_auth_payload,
+    is_expiring,
     refresh_credential,
 )
 from tests.unit.conftest import fake_pool_yielding_conn
@@ -384,28 +384,28 @@ class TestIsExpiring:
     def test_far_future_is_not_expiring(self) -> None:
 
         payload = {"expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()}
-        assert _is_expiring(payload) is False
+        assert is_expiring(payload) is False
 
     def test_within_skew_is_expiring(self) -> None:
 
         # Inside the skew window (5 s < 30 s default).
         payload = {"expires_at": (datetime.now(UTC) + timedelta(seconds=5)).isoformat()}
-        assert _is_expiring(payload) is True
+        assert is_expiring(payload) is True
 
     def test_already_expired_is_expiring(self) -> None:
 
         payload = {"expires_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat()}
-        assert _is_expiring(payload) is True
+        assert is_expiring(payload) is True
 
     def test_missing_expires_at_is_not_expiring(self) -> None:
         # Treat absence as "never expires" — refresh path stays out of the way.
-        assert _is_expiring({}) is False
+        assert is_expiring({}) is False
 
     def test_naive_datetime_assumed_utc(self) -> None:
 
         # Some providers return naive ISO strings; treat as UTC.
         future_naive = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=5)
-        assert _is_expiring({"expires_at": future_naive.isoformat()}) is True
+        assert is_expiring({"expires_at": future_naive.isoformat()}) is True
 
 
 class TestRefreshCredential:
@@ -534,6 +534,43 @@ class TestRefreshCredential:
         assert "auth" not in kwargs
         assert "client_secret" not in kwargs["data"]
         assert kwargs["data"]["client_id"] == "cid"
+
+    @pytest.mark.asyncio
+    async def test_string_expires_in_is_accepted(self, crypto_box: CryptoBox) -> None:
+        """Some OAuth providers return ``expires_in`` as a JSON string ("3600").
+
+        Without ``int()`` conversion the new token would be stored without an
+        ``expires_at``, ``is_expiring`` would treat it as never-expiring, and
+        the token would never refresh again — silent correctness failure.
+        """
+        payload = _expiring_oauth_payload()
+        blob = crypto_box.encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(
+            _http_response(body={"access_token": "fresh", "expires_in": "3600"}),
+        )
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                mcp_server_url="https://mcp.example.com",
+            )
+
+        args = conn.execute.await_args.args
+        new_blob = EncryptedBlob(ciphertext=args[1], nonce=args[2])
+        new_payload = json.loads(crypto_box.decrypt(new_blob))
+        assert "expires_at" in new_payload
+        # is_expiring on the new payload should be False (token is fresh).
+        assert is_expiring(new_payload) is False
 
     @pytest.mark.asyncio
     async def test_persists_new_access_token_and_expires_at(self, crypto_box: CryptoBox) -> None:
