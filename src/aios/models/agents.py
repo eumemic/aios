@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aios.models.skills import AgentSkillRef
 
@@ -43,6 +43,11 @@ class McpServerSpec(BaseModel):
     Declares a remote MCP server reachable via streamable HTTP transport.
     The ``name`` is used to cross-reference from ``mcp_toolset`` tool entries
     and to namespace discovered tools as ``mcp__<name>__<tool_name>``.
+
+    The ``conn_`` prefix on ``name`` is reserved — it's used by the
+    Phase-2 (#31) connector/channel mechanism for connection-derived
+    servers (``conn_<connection_id>``).  Reserving the namespace at the
+    model boundary keeps future scheme changes safe.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -50,6 +55,13 @@ class McpServerSpec(BaseModel):
     type: Literal["url"] = "url"
     name: str = Field(min_length=1, max_length=64)
     url: str = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def _reject_conn_prefix(cls, v: str) -> str:
+        if v.startswith("conn_"):
+            raise ValueError("mcp_server name prefix 'conn_' is reserved for connections")
+        return v
 
 
 # ── MCP toolset config (permission policies for discovered tools) ──────────

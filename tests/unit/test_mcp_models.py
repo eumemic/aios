@@ -51,6 +51,36 @@ class TestMcpServerSpec:
         restored = McpServerSpec.model_validate_json(j)
         assert restored.name == "slack"
 
+    def test_conn_prefix_reserved(self) -> None:
+        """The ``conn_`` prefix is reserved for connection-derived MCP server
+        names (Phase 2, #31).  Even though conn_{c.id} is collision-free by
+        construction with the current scheme, we reserve the namespace so
+        future changes remain safe.
+        """
+        with pytest.raises(ValueError, match="conn_"):
+            McpServerSpec(name="conn_github", url="https://mcp.github.com/")
+
+    def test_conn_prefix_reserved_in_agent_create(self) -> None:
+        """Same rejection at the AgentCreate boundary (the HTTP router
+        path — JSON body → ``model_validate`` runs the field validator
+        on every nested mcp_servers entry).
+        """
+        with pytest.raises(ValueError, match="conn_"):
+            AgentCreate.model_validate(
+                {
+                    "name": "bad",
+                    "model": "openai/gpt-4o-mini",
+                    "system": "",
+                    "mcp_servers": [{"type": "url", "name": "conn_foo", "url": "https://m"}],
+                }
+            )
+
+    def test_names_without_conn_prefix_accepted(self) -> None:
+        """Names containing ``conn`` but not starting with ``conn_`` are fine."""
+        assert McpServerSpec(name="connector", url="https://m").name == "connector"
+        assert McpServerSpec(name="my_conn", url="https://m").name == "my_conn"
+        assert McpServerSpec(name="conn", url="https://m").name == "conn"
+
 
 class TestMcpToolsetConfig:
     def test_defaults(self) -> None:
