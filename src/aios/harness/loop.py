@@ -349,7 +349,7 @@ async def _discover_mcp_tools(
     """
     import asyncio
 
-    from aios.mcp.client import discover_mcp_tools, resolve_auth_headers
+    from aios.mcp.client import discover_mcp_tools, resolve_auth_for_url
 
     crypto_box = runtime.require_crypto_box()
 
@@ -359,7 +359,7 @@ async def _discover_mcp_tools(
             enabled_servers.add(spec.mcp_server_name)
 
     async def _discover_one(url: str, name: str) -> list[dict[str, Any]]:
-        headers = await resolve_auth_headers(pool, crypto_box, session_id, url)
+        headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
         return await discover_mcp_tools(url, name, headers)
 
     servers = [s for s in agent.mcp_servers if s.name in enabled_servers]

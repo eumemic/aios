@@ -70,20 +70,34 @@ def _headers_from_credential(
     return {"Authorization": f"Bearer {token}"}
 
 
-async def resolve_auth_headers(
+async def resolve_auth_for_url(
     pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
     session_id: str,
     mcp_server_url: str,
 ) -> dict[str, str]:
-    """Look up vault credentials for an MCP server and return auth headers.
+    """Resolve MCP auth for ``mcp_server_url`` in the context of a session.
 
-    Searches the session's bound vaults (rank-ordered) for the first
-    credential matching ``mcp_server_url``. Returns an ``Authorization``
-    header dict, or an empty dict if no credential is found.
+    Connection-declared auth takes precedence.  If this URL belongs to a
+    registered connection, the credential in the connection's vault is
+    used — connections own their auth and it's fixed per-account.
+    Otherwise we fall back to the session's bound vaults
+    (``session_vaults``), the existing mechanism for agent-declared MCP.
+
+    Returns an ``Authorization`` header dict, or ``{}`` if no credential
+    is found.  The fallback is NOT consulted when a connection claims
+    the URL but its vault has no matching credential — connection
+    ownership decides the source, end of discussion.
     """
     async with pool.acquire() as conn:
-        result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
+        owner = await queries.get_connection_vault_for_url(conn, mcp_server_url)
+        if owner is not None:
+            _connection_id, vault_id = owner
+            result = await queries.resolve_vault_credential(
+                conn, vault_id=vault_id, mcp_server_url=mcp_server_url
+            )
+        else:
+            result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
     if result is None:
         return {}
     blob, auth_type = result

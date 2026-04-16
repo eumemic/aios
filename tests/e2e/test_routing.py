@@ -1093,6 +1093,121 @@ class TestGetConnectionsByPairs:
         assert rows == []
 
 
+class TestResolveVaultCredential:
+    """Direct (vault_id, URL) → (blob, auth_type) lookup — no session_vaults
+    join.  The connection-first half of resolve_auth_for_url uses this.
+    """
+
+    async def test_match_returns_blob(self, pool: Any, vault_id: str) -> None:
+        from pydantic import SecretStr
+
+        from aios.config import get_settings
+        from aios.crypto.vault import CryptoBox
+        from aios.db import queries
+        from aios.models.vaults import VaultCredentialCreate
+        from aios.services import vaults as vault_svc
+
+        crypto_box = CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
+        url = f"https://rvc-{_uniq()}.example"
+        await vault_svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=vault_id,
+            body=VaultCredentialCreate(
+                display_name="t",
+                mcp_server_url=url,
+                auth_type="static_bearer",
+                token=SecretStr("hello"),
+            ),
+        )
+        async with pool.acquire() as conn:
+            hit = await queries.resolve_vault_credential(
+                conn, vault_id=vault_id, mcp_server_url=url
+            )
+        assert hit is not None
+        blob, auth_type = hit
+        assert auth_type == "static_bearer"
+        import json as _json
+
+        assert _json.loads(crypto_box.decrypt(blob))["token"] == "hello"
+
+    async def test_no_match_returns_none(self, pool: Any, vault_id: str) -> None:
+        from aios.db import queries
+
+        async with pool.acquire() as conn:
+            hit = await queries.resolve_vault_credential(
+                conn,
+                vault_id=vault_id,
+                mcp_server_url=f"https://rvc-miss-{_uniq()}.example",
+            )
+        assert hit is None
+
+    async def test_excludes_archived_credential(self, pool: Any, vault_id: str) -> None:
+        from pydantic import SecretStr
+
+        from aios.config import get_settings
+        from aios.crypto.vault import CryptoBox
+        from aios.db import queries
+        from aios.models.vaults import VaultCredentialCreate
+        from aios.services import vaults as vault_svc
+
+        crypto_box = CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
+        url = f"https://rvc-arc-{_uniq()}.example"
+        cred = await vault_svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=vault_id,
+            body=VaultCredentialCreate(
+                display_name="t",
+                mcp_server_url=url,
+                auth_type="static_bearer",
+                token=SecretStr("hello"),
+            ),
+        )
+        await vault_svc.archive_vault_credential(pool, vault_id, cred.id)
+
+        async with pool.acquire() as conn:
+            hit = await queries.resolve_vault_credential(
+                conn, vault_id=vault_id, mcp_server_url=url
+            )
+        assert hit is None
+
+    async def test_scoped_to_vault_id(self, pool: Any) -> None:
+        """A credential in vault A must not surface when looking up in vault B."""
+        from pydantic import SecretStr
+
+        from aios.config import get_settings
+        from aios.crypto.vault import CryptoBox
+        from aios.db import queries
+        from aios.models.vaults import VaultCredentialCreate
+        from aios.services import vaults as vault_svc
+
+        crypto_box = CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
+        v_a = await vault_svc.create_vault(pool, display_name="rvc-a", metadata={})
+        v_b = await vault_svc.create_vault(pool, display_name="rvc-b", metadata={})
+        url = f"https://rvc-scope-{_uniq()}.example"
+        await vault_svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=v_a.id,
+            body=VaultCredentialCreate(
+                display_name="t",
+                mcp_server_url=url,
+                auth_type="static_bearer",
+                token=SecretStr("A"),
+            ),
+        )
+        async with pool.acquire() as conn:
+            hit_a = await queries.resolve_vault_credential(
+                conn, vault_id=v_a.id, mcp_server_url=url
+            )
+            hit_b = await queries.resolve_vault_credential(
+                conn, vault_id=v_b.id, mcp_server_url=url
+            )
+        assert hit_a is not None
+        assert hit_b is None
+
+
 class TestGetConnectionVaultForUrl:
     """URL → (connection_id, vault_id) lookup used by resolve_auth_for_url
     to decide whether a URL belongs to a registered connection.

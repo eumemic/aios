@@ -1292,6 +1292,35 @@ async def batch_get_session_vault_ids(
 # ─── MCP credential resolution ───────────────────────────────────────────────
 
 
+async def resolve_vault_credential(
+    conn: asyncpg.Connection[Any],
+    *,
+    vault_id: str,
+    mcp_server_url: str,
+) -> tuple[EncryptedBlob, str] | None:
+    """Look up an MCP credential in a specific vault by URL.
+
+    Targets a single vault directly — no ``session_vaults`` join.  Used by
+    :func:`aios.mcp.client.resolve_auth_for_url` when a URL is owned by a
+    registered connection (whose vault is fixed per-account).
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT ciphertext, nonce, auth_type
+          FROM vault_credentials
+         WHERE vault_id = $1
+           AND mcp_server_url = $2
+           AND archived_at IS NULL
+         LIMIT 1
+        """,
+        vault_id,
+        mcp_server_url,
+    )
+    if row is None:
+        return None
+    return EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]), str(row["auth_type"])
+
+
 async def resolve_mcp_credential(
     conn: asyncpg.Connection[Any],
     session_id: str,
