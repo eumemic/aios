@@ -399,6 +399,190 @@ class TestQueries:
                 await queries.get_vault_credential_with_blob(conn, vault.id, cred.id)
 
 
+class TestOAuthRefreshE2E:
+    """End-to-end refresh: real testcontainer Postgres + mocked OAuth endpoint.
+
+    The mocked httpx layer lets these tests assert that exactly one POST
+    happens under concurrency — proving the SELECT … FOR UPDATE row lock
+    works, not just trust the unit test that mocks the lock query.
+    """
+
+    @staticmethod
+    async def _bind_session_to_vault(pool: Any, vault_id: str) -> str:
+        """Create the minimum scaffolding (env + agent + session) to bind a vault."""
+        from aios.services import agents as agents_svc
+        from aios.services import environments as env_svc
+        from aios.services import sessions as sess_svc
+
+        suffix = vault_id[-8:]
+        env = await env_svc.create_environment(pool, name=f"oauth-e2e-env-{suffix}")
+        agent = await agents_svc.create_agent(
+            pool,
+            name=f"oauth-e2e-agent-{suffix}",
+            model="fake/test",
+            system="test",
+            tools=[],
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+        session = await sess_svc.create_session(
+            pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title="oauth-refresh-test",
+            metadata={},
+            vault_ids=[vault_id],
+        )
+        return str(session.id)
+
+    @staticmethod
+    def _expiring_oauth_body(url: str) -> VaultCredentialCreate:
+        from datetime import UTC, datetime, timedelta
+
+        return VaultCredentialCreate(
+            mcp_server_url=url,
+            auth_type="mcp_oauth",
+            access_token=SecretStr("stale-at"),
+            refresh_token=SecretStr("rt-1"),
+            client_id="cid",
+            token_endpoint="https://issuer.example/token",
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),  # already expired
+        )
+
+    @staticmethod
+    def _patched_async_client(post_calls: list[Any], body: dict[str, Any]):
+        """Build a ``patch`` context for ``services.vaults.httpx.AsyncClient``.
+
+        Each ``client.post`` invocation is recorded into ``post_calls`` and
+        returns a mocked 200 response with ``body``.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        resp = MagicMock()
+        resp.json = MagicMock(return_value=body)
+        resp.raise_for_status = MagicMock()
+
+        async def _post(url: str, **kwargs: Any) -> Any:
+            post_calls.append((url, kwargs))
+            return resp
+
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.post = AsyncMock(side_effect=_post)
+        return patch("aios.services.vaults.httpx.AsyncClient", MagicMock(return_value=client))
+
+    async def test_refresh_persists_to_db(self, pool: Any, crypto_box: Any) -> None:
+        """A real Postgres round-trip: insert expiring oauth cred, resolve, assert
+        the token endpoint was POSTed and the new ciphertext is in the DB."""
+        import json as _json
+
+        from aios.mcp.client import resolve_auth_headers
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="oauth-e2e", metadata={})
+        url = "https://oauth-e2e.example.com/mcp"
+        cred = await svc.create_vault_credential(
+            pool, crypto_box, vault_id=vault.id, body=self._expiring_oauth_body(url)
+        )
+        session_id = await self._bind_session_to_vault(pool, vault.id)
+
+        post_calls: list[Any] = []
+        with self._patched_async_client(
+            post_calls,
+            body={"access_token": "fresh-at", "expires_in": 3600},
+        ):
+            headers = await resolve_auth_headers(pool, crypto_box, session_id, url)
+
+        assert len(post_calls) == 1, "expected exactly one POST to the token endpoint"
+        assert post_calls[0][0] == "https://issuer.example/token"
+        assert headers == {"Authorization": "Bearer fresh-at"}
+
+        # Verify the new ciphertext is in the DB.
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT ciphertext, nonce FROM vault_credentials WHERE id = $1",
+                cred.id,
+            )
+        from aios.crypto.vault import EncryptedBlob
+
+        new_blob = EncryptedBlob(
+            ciphertext=bytes(row["ciphertext"]),
+            nonce=bytes(row["nonce"]),
+        )
+        new_payload = _json.loads(crypto_box.decrypt(new_blob))
+        assert new_payload["access_token"] == "fresh-at"
+
+    async def test_concurrent_resolve_only_refreshes_once(self, pool: Any, crypto_box: Any) -> None:
+        """Five parallel resolutions on an expiring credential issue exactly one POST.
+
+        Without the SELECT … FOR UPDATE row lock + double-check, every
+        coroutine would race to the token endpoint. The lock serializes
+        them; the second-to-last waiter sees the now-fresh expires_at
+        after acquiring the lock and exits without POSTing.
+        """
+        from aios.mcp.client import resolve_auth_headers
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="oauth-race", metadata={})
+        url = "https://oauth-race.example.com/mcp"
+        await svc.create_vault_credential(
+            pool, crypto_box, vault_id=vault.id, body=self._expiring_oauth_body(url)
+        )
+        session_id = await self._bind_session_to_vault(pool, vault.id)
+
+        post_calls: list[Any] = []
+        with self._patched_async_client(
+            post_calls,
+            body={"access_token": "fresh-at", "expires_in": 3600},
+        ):
+            results = await asyncio.gather(
+                *(resolve_auth_headers(pool, crypto_box, session_id, url) for _ in range(5))
+            )
+
+        assert all(r == {"Authorization": "Bearer fresh-at"} for r in results)
+        assert len(post_calls) == 1, (
+            f"expected 1 POST but got {len(post_calls)} — row lock or double-check is broken"
+        )
+
+    async def test_refresh_failure_bubbles(self, pool: Any, crypto_box: Any) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from aios.errors import OAuthRefreshError
+        from aios.mcp.client import resolve_auth_headers
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="oauth-fail", metadata={})
+        url = "https://oauth-fail.example.com/mcp"
+        await svc.create_vault_credential(
+            pool, crypto_box, vault_id=vault.id, body=self._expiring_oauth_body(url)
+        )
+        session_id = await self._bind_session_to_vault(pool, vault.id)
+
+        # Token endpoint returns 401.
+        import httpx as _httpx
+
+        resp = MagicMock()
+        resp.status_code = 401
+
+        def _raise() -> None:
+            raise _httpx.HTTPStatusError("401", request=MagicMock(), response=resp)
+
+        resp.raise_for_status = MagicMock(side_effect=_raise)
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.post = AsyncMock(return_value=resp)
+
+        with (
+            patch("aios.services.vaults.httpx.AsyncClient", MagicMock(return_value=client)),
+            pytest.raises(OAuthRefreshError),
+        ):
+            await resolve_auth_headers(pool, crypto_box, session_id, url)
+
+
 class TestSessionVaults:
     async def test_session_with_vault_ids(self, pool: Any) -> None:
         from aios.services import agents as agents_svc
