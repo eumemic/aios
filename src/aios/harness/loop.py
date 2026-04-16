@@ -109,6 +109,7 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         return
 
     # Resolve skills and augment system prompt.
+    from aios.harness.channels import augment_with_channels
     from aios.harness.skills import augment_system_prompt, provision_skill_files
     from aios.services import skills as skills_service
 
@@ -116,6 +117,9 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
     )
     system_prompt = augment_system_prompt(agent.system, skill_versions)
+    # Appended after the skills block; no-op when the session has no bindings
+    # (preserves the "no bindings ⇒ identical behaviour" Phase-2 invariant).
+    system_prompt = augment_with_channels(system_prompt, bindings)
 
     # Provision skill files to workspace (idempotent, host-side writes).
     if skill_versions:
