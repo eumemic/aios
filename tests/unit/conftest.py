@@ -11,7 +11,9 @@ import base64
 import os
 import secrets
 from collections.abc import Iterator
+from typing import Any
 from unittest import mock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -30,3 +32,13 @@ def _unit_env() -> Iterator[None]:
         get_settings.cache_clear()
         yield
         get_settings.cache_clear()
+
+
+def fake_pool_yielding_conn(conn: Any) -> Any:
+    """Stand-in for ``asyncpg.Pool`` whose ``async with pool.acquire()`` yields *conn*."""
+    pool = MagicMock()
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=conn)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    pool.acquire.return_value = cm
+    return pool

@@ -13,17 +13,7 @@ import pytest
 
 from aios.crypto.vault import CryptoBox
 from aios.mcp.client import call_mcp_tool, discover_mcp_tools, resolve_auth_headers
-
-
-def _fake_pool_yielding_conn(conn: Any) -> Any:
-    """Stand-in for asyncpg.Pool whose ``async with pool.acquire()`` yields *conn*."""
-    pool = MagicMock()
-    cm = MagicMock()
-    cm.__aenter__ = AsyncMock(return_value=conn)
-    cm.__aexit__ = AsyncMock(return_value=None)
-    pool.acquire.return_value = cm
-    return pool
-
+from tests.unit.conftest import fake_pool_yielding_conn
 
 # ── resolve_auth_headers ──────────────────────────────────────────────────────
 
@@ -36,7 +26,7 @@ class TestResolveAuthHeaders:
         return CryptoBox(os.urandom(32))
 
     async def test_no_credential_returns_empty(self, crypto_box: CryptoBox) -> None:
-        pool = _fake_pool_yielding_conn(MagicMock())
+        pool = fake_pool_yielding_conn(MagicMock())
         with patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m:
             m.return_value = None
             result = await resolve_auth_headers(
@@ -47,7 +37,7 @@ class TestResolveAuthHeaders:
     async def test_static_bearer(self, crypto_box: CryptoBox) -> None:
         payload = json.dumps({"token": "my-secret-token"})
         blob = crypto_box.encrypt(payload)
-        pool = _fake_pool_yielding_conn(MagicMock())
+        pool = fake_pool_yielding_conn(MagicMock())
         with patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m:
             m.return_value = (blob, "static_bearer", "vlt_1")
             result = await resolve_auth_headers(
@@ -59,7 +49,7 @@ class TestResolveAuthHeaders:
         # No expires_at → treated as non-expiring; refresh is not called.
         payload = json.dumps({"access_token": "oauth-token-123"})
         blob = crypto_box.encrypt(payload)
-        pool = _fake_pool_yielding_conn(MagicMock())
+        pool = fake_pool_yielding_conn(MagicMock())
         with patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m:
             m.return_value = (blob, "mcp_oauth", "vlt_1")
             result = await resolve_auth_headers(
@@ -79,7 +69,7 @@ class TestResolveAuthHeaders:
         fresh = json.dumps({"access_token": "fresh"})
         stale_blob = crypto_box.encrypt(expiring)
         fresh_blob = crypto_box.encrypt(fresh)
-        pool = _fake_pool_yielding_conn(MagicMock())
+        pool = fake_pool_yielding_conn(MagicMock())
 
         # First resolve returns stale; second returns fresh (post-refresh).
         resolve_mock = AsyncMock(
@@ -92,7 +82,7 @@ class TestResolveAuthHeaders:
 
         with (
             patch("aios.mcp.client.queries.resolve_mcp_credential", resolve_mock),
-            patch("aios.services.vaults.refresh_credential", refresh_mock),
+            patch("aios.mcp.client.refresh_credential", refresh_mock),
         ):
             result = await resolve_auth_headers(
                 pool, crypto_box, "sess_123", "https://mcp.example.com"
@@ -114,12 +104,12 @@ class TestResolveAuthHeaders:
             }
         )
         blob = crypto_box.encrypt(far_future)
-        pool = _fake_pool_yielding_conn(MagicMock())
+        pool = fake_pool_yielding_conn(MagicMock())
         refresh_mock = AsyncMock()
 
         with (
             patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m,
-            patch("aios.services.vaults.refresh_credential", refresh_mock),
+            patch("aios.mcp.client.refresh_credential", refresh_mock),
         ):
             m.return_value = (blob, "mcp_oauth", "vlt_1")
             result = await resolve_auth_headers(
@@ -141,12 +131,12 @@ class TestResolveAuthHeaders:
             }
         )
         blob = crypto_box.encrypt(expiring)
-        pool = _fake_pool_yielding_conn(MagicMock())
+        pool = fake_pool_yielding_conn(MagicMock())
 
         with (
             patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m,
             patch(
-                "aios.services.vaults.refresh_credential",
+                "aios.mcp.client.refresh_credential",
                 AsyncMock(side_effect=OAuthRefreshError("bad", detail={})),
             ),
             pytest.raises(OAuthRefreshError),
@@ -157,7 +147,7 @@ class TestResolveAuthHeaders:
     async def test_empty_token_returns_empty(self, crypto_box: CryptoBox) -> None:
         payload = json.dumps({"token": ""})
         blob = crypto_box.encrypt(payload)
-        pool = _fake_pool_yielding_conn(MagicMock())
+        pool = fake_pool_yielding_conn(MagicMock())
         with patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m:
             m.return_value = (blob, "static_bearer", "vlt_1")
             result = await resolve_auth_headers(

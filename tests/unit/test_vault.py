@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,6 +30,7 @@ from aios.services.vaults import (
     _merge_auth_payload,
     refresh_credential,
 )
+from tests.unit.conftest import fake_pool_yielding_conn
 
 
 @pytest.fixture
@@ -236,18 +238,7 @@ class TestMergeAuthPayload:
 # ── update_vault_credential: no _UNSET sentinel leaks into queries ───────────
 
 
-def _fake_pool_yielding_conn(conn: Any) -> Any:
-    """Build a stand-in for asyncpg.Pool where ``async with pool.acquire()`` yields *conn*."""
-    pool = MagicMock()
-    acquire_cm = MagicMock()
-    acquire_cm.__aenter__ = AsyncMock(return_value=conn)
-    acquire_cm.__aexit__ = AsyncMock(return_value=None)
-    pool.acquire.return_value = acquire_cm
-    return pool
-
-
 def _existing_credential() -> VaultCredential:
-    from datetime import UTC, datetime
 
     return VaultCredential(
         id="vc_1",
@@ -271,7 +262,7 @@ class TestUpdateVaultCredentialCallSite:
         existing = _existing_credential()
         existing_blob = crypto_box.encrypt(json.dumps({"access_token": "at"}))
         conn = MagicMock()
-        pool = _fake_pool_yielding_conn(conn)
+        pool = fake_pool_yielding_conn(conn)
 
         with (
             patch.object(
@@ -305,7 +296,7 @@ class TestUpdateVaultCredentialCallSite:
         existing = _existing_credential()
         existing_blob = crypto_box.encrypt(json.dumps({"access_token": "at"}))
         conn = MagicMock()
-        pool = _fake_pool_yielding_conn(conn)
+        pool = fake_pool_yielding_conn(conn)
 
         with (
             patch.object(
@@ -376,7 +367,6 @@ def _async_client_returning(resp: Any) -> MagicMock:
 
 
 def _expiring_oauth_payload(**overrides: Any) -> dict[str, Any]:
-    from datetime import UTC, datetime, timedelta
 
     base = {
         "access_token": "old-at",
@@ -392,20 +382,17 @@ def _expiring_oauth_payload(**overrides: Any) -> dict[str, Any]:
 
 class TestIsExpiring:
     def test_far_future_is_not_expiring(self) -> None:
-        from datetime import UTC, datetime, timedelta
 
         payload = {"expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()}
         assert _is_expiring(payload) is False
 
     def test_within_skew_is_expiring(self) -> None:
-        from datetime import UTC, datetime, timedelta
 
         # Inside the skew window (5 s < 30 s default).
         payload = {"expires_at": (datetime.now(UTC) + timedelta(seconds=5)).isoformat()}
         assert _is_expiring(payload) is True
 
     def test_already_expired_is_expiring(self) -> None:
-        from datetime import UTC, datetime, timedelta
 
         payload = {"expires_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat()}
         assert _is_expiring(payload) is True
@@ -415,7 +402,6 @@ class TestIsExpiring:
         assert _is_expiring({}) is False
 
     def test_naive_datetime_assumed_utc(self) -> None:
-        from datetime import UTC, datetime, timedelta
 
         # Some providers return naive ISO strings; treat as UTC.
         future_naive = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=5)
@@ -432,7 +418,6 @@ class TestRefreshCredential:
 
     @pytest.mark.asyncio
     async def test_skips_when_token_not_expiring(self, crypto_box: CryptoBox) -> None:
-        from datetime import UTC, datetime, timedelta
 
         payload = _expiring_oauth_payload(
             expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),

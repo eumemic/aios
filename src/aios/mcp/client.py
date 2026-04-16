@@ -24,6 +24,7 @@ from mcp.client.streamable_http import streamable_http_client
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.logging import get_logger
+from aios.services.vaults import _is_expiring, refresh_credential
 
 log = get_logger("aios.mcp.client")
 
@@ -60,8 +61,6 @@ async def resolve_auth_headers(
     OAuth refresh failures bubble up as :class:`OAuthRefreshError`; there is
     no silent fallback to the stale token.
     """
-    from aios.services.vaults import _is_expiring, refresh_credential
-
     async with pool.acquire() as conn:
         result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
         if result is None:
