@@ -14,7 +14,7 @@ import asyncpg
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.errors import ValidationError
+from aios.errors import NotFoundError, ValidationError
 from aios.models.vaults import (
     TokenEndpointAuth,
     TokenEndpointAuthNone,
@@ -178,7 +178,19 @@ async def create_vault_credential(
 ) -> VaultCredential:
     payload = _extract_auth_payload(body)
     blob = crypto_box.encrypt(json.dumps(payload))
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        # Lock the parent vault row to serialize concurrent credential inserts
+        # within this vault. Without it, two parallel inserts can both observe
+        # ``count == MAX-1`` and overflow the cap.
+        locked = await conn.fetchrow(
+            "SELECT 1 FROM vaults WHERE id = $1 FOR UPDATE",
+            vault_id,
+        )
+        if locked is None:
+            raise NotFoundError(
+                f"vault {vault_id} not found",
+                detail={"vault_id": vault_id},
+            )
         count = await queries.count_active_vault_credentials(conn, vault_id)
         if count >= MAX_CREDENTIALS_PER_VAULT:
             raise ValidationError(

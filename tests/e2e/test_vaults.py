@@ -5,6 +5,7 @@ Tests run against a real testcontainer Postgres with migrations applied.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -233,6 +234,41 @@ class TestVaultCredentialCRUD:
         )
         with pytest.raises(ValidationError, match="maximum"):
             await svc.create_vault_credential(pool, crypto_box, vault_id=vault.id, body=body21)
+
+    async def test_credential_limit_under_concurrency(self, pool: Any, crypto_box: Any) -> None:
+        """The 20-cred limit holds under concurrent inserts.
+
+        Without ``SELECT … FOR UPDATE`` on the vault row, two parallel
+        inserts can both observe ``count == 19`` and both succeed,
+        overflowing the cap. With the row lock, exactly 20 succeed and the
+        rest get ``ValidationError``.
+        """
+        from aios.errors import ValidationError
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="race-test", metadata={})
+
+        async def attempt(i: int) -> Any:
+            body = VaultCredentialCreate(
+                mcp_server_url=f"https://race-{i}.example.com",
+                auth_type="static_bearer",
+                token=SecretStr(f"t-{i}"),
+            )
+            try:
+                return await svc.create_vault_credential(
+                    pool, crypto_box, vault_id=vault.id, body=body
+                )
+            except ValidationError as e:
+                return e
+
+        results = await asyncio.gather(*(attempt(i) for i in range(25)))
+        successes = [r for r in results if not isinstance(r, ValidationError)]
+        failures = [r for r in results if isinstance(r, ValidationError)]
+
+        assert len(successes) == 20
+        assert len(failures) == 5
+        for f in failures:
+            assert "maximum" in str(f)
 
 
 class TestSessionVaults:
