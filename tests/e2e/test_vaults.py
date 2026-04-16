@@ -271,6 +271,57 @@ class TestVaultCredentialCRUD:
             assert "maximum" in str(f)
 
 
+class TestQueries:
+    """Direct tests for query-layer functions used internally by services."""
+
+    async def test_get_credential_with_blob_returns_both(self, pool: Any, crypto_box: Any) -> None:
+        from aios.db import queries
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="combo-test", metadata={})
+        body = VaultCredentialCreate(
+            mcp_server_url="https://combo.example.com",
+            auth_type="static_bearer",
+            token=SecretStr("combo-token"),
+        )
+        cred = await svc.create_vault_credential(pool, crypto_box, vault_id=vault.id, body=body)
+
+        async with pool.acquire() as conn:
+            fetched_cred, blob = await queries.get_vault_credential_with_blob(
+                conn, vault.id, cred.id
+            )
+
+        assert fetched_cred.id == cred.id
+        assert fetched_cred.auth_type == "static_bearer"
+        assert blob.ciphertext  # non-empty
+        assert blob.nonce  # non-empty
+        # Verify the blob actually decrypts to the original payload.
+        import json as _json
+
+        payload = _json.loads(crypto_box.decrypt(blob))
+        assert payload == {"token": "combo-token"}
+
+    async def test_get_credential_with_blob_excludes_archived(
+        self, pool: Any, crypto_box: Any
+    ) -> None:
+        from aios.db import queries
+        from aios.errors import NotFoundError
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="combo-arch", metadata={})
+        body = VaultCredentialCreate(
+            mcp_server_url="https://combo-arch.example.com",
+            auth_type="static_bearer",
+            token=SecretStr("doomed"),
+        )
+        cred = await svc.create_vault_credential(pool, crypto_box, vault_id=vault.id, body=body)
+        await svc.archive_vault_credential(pool, vault.id, cred.id)
+
+        async with pool.acquire() as conn:
+            with pytest.raises(NotFoundError, match="archived"):
+                await queries.get_vault_credential_with_blob(conn, vault.id, cred.id)
+
+
 class TestSessionVaults:
     async def test_session_with_vault_ids(self, pool: Any) -> None:
         from aios.services import agents as agents_svc

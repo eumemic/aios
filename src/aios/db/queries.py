@@ -1052,12 +1052,16 @@ async def get_vault_credential(
     return _row_to_vault_credential(row)
 
 
-async def get_vault_credential_blob(
+async def get_vault_credential_with_blob(
     conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
-) -> EncryptedBlob:
+) -> tuple[VaultCredential, EncryptedBlob]:
+    """Fetch the credential metadata and decrypted-blob inputs in one round-trip.
+
+    Excludes archived credentials — the blob is meaningless once archived
+    (and gets zeroed out at archive time).
+    """
     row = await conn.fetchrow(
-        "SELECT ciphertext, nonce FROM vault_credentials "
-        "WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL",
+        "SELECT * FROM vault_credentials WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL",
         credential_id,
         vault_id,
     )
@@ -1066,7 +1070,9 @@ async def get_vault_credential_blob(
             f"credential {credential_id} not found or archived",
             detail={"id": credential_id, "vault_id": vault_id},
         )
-    return EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"]))
+    cred = _row_to_vault_credential(row)
+    blob = EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"]))
+    return cred, blob
 
 
 async def list_vault_credentials(

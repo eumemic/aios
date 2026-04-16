@@ -236,8 +236,9 @@ async def update_vault_credential(
 ) -> VaultCredential:
     async with pool.acquire() as conn:
         # Decrypt existing payload, merge provided fields, re-encrypt.
-        cred = await queries.get_vault_credential(conn, vault_id, credential_id)
-        existing_blob = await queries.get_vault_credential_blob(conn, vault_id, credential_id)
+        cred, existing_blob = await queries.get_vault_credential_with_blob(
+            conn, vault_id, credential_id
+        )
         existing_payload = json.loads(crypto_box.decrypt(existing_blob))
         merged = _merge_auth_payload(existing_payload, body, cred.auth_type)
         new_blob = crypto_box.encrypt(json.dumps(merged))

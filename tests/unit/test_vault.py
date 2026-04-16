@@ -263,21 +263,15 @@ class TestUpdateVaultCredentialCallSite:
     @pytest.mark.asyncio
     async def test_omits_display_name_when_not_in_fields_set(self, crypto_box: CryptoBox) -> None:
         existing = _existing_credential()
-        existing_payload = {"access_token": "at"}
-        existing_blob = crypto_box.encrypt(json.dumps(existing_payload))
+        existing_blob = crypto_box.encrypt(json.dumps({"access_token": "at"}))
         conn = MagicMock()
         pool = _fake_pool_yielding_conn(conn)
 
         with (
             patch.object(
                 vaults_service.queries,
-                "get_vault_credential",
-                AsyncMock(return_value=existing),
-            ),
-            patch.object(
-                vaults_service.queries,
-                "get_vault_credential_blob",
-                AsyncMock(return_value=existing_blob),
+                "get_vault_credential_with_blob",
+                AsyncMock(return_value=(existing, existing_blob)),
             ),
             patch.object(
                 vaults_service.queries,
@@ -310,13 +304,8 @@ class TestUpdateVaultCredentialCallSite:
         with (
             patch.object(
                 vaults_service.queries,
-                "get_vault_credential",
-                AsyncMock(return_value=existing),
-            ),
-            patch.object(
-                vaults_service.queries,
-                "get_vault_credential_blob",
-                AsyncMock(return_value=existing_blob),
+                "get_vault_credential_with_blob",
+                AsyncMock(return_value=(existing, existing_blob)),
             ),
             patch.object(
                 vaults_service.queries,
