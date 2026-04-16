@@ -16,6 +16,8 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.errors import ValidationError
 from aios.models.vaults import (
+    TokenEndpointAuth,
+    TokenEndpointAuthNone,
     Vault,
     VaultCredential,
     VaultCredentialCreate,
@@ -24,12 +26,14 @@ from aios.models.vaults import (
 
 MAX_CREDENTIALS_PER_VAULT = 20
 
-# Fields that go into the encrypted payload for each auth type.
+# Fields that go into the encrypted payload for each auth type. The
+# ``token_endpoint_auth`` field is a discriminated Pydantic union and gets
+# special-cased in the (de)serializers below; ``client_secret`` lives inside
+# its variants.
 _OAUTH_FIELDS = (
     "access_token",
     "expires_at",
     "client_id",
-    "client_secret",
     "refresh_token",
     "token_endpoint",
     "token_endpoint_auth",
@@ -37,6 +41,13 @@ _OAUTH_FIELDS = (
     "resource",
 )
 _BEARER_FIELDS = ("token",)
+
+
+def _serialize_token_endpoint_auth(v: TokenEndpointAuth) -> dict[str, str]:
+    """Flatten the typed union into a JSON-serializable dict with the secret unwrapped."""
+    if isinstance(v, TokenEndpointAuthNone):
+        return {"method": "none"}
+    return {"method": v.method, "client_secret": v.client_secret.get_secret_value()}
 
 
 # ── vault CRUD ──────────────────────────────────────────────────────────────
@@ -117,13 +128,16 @@ def _extract_auth_payload(body: VaultCredentialCreate) -> dict[str, Any]:
         payload = {}
         for field in _OAUTH_FIELDS:
             val = getattr(body, field)
-            if val is not None:
-                if hasattr(val, "get_secret_value"):
-                    payload[field] = val.get_secret_value()
-                elif hasattr(val, "isoformat"):
-                    payload[field] = val.isoformat()
-                else:
-                    payload[field] = val
+            if val is None:
+                continue
+            if field == "token_endpoint_auth":
+                payload[field] = _serialize_token_endpoint_auth(val)
+            elif hasattr(val, "get_secret_value"):
+                payload[field] = val.get_secret_value()
+            elif hasattr(val, "isoformat"):
+                payload[field] = val.isoformat()
+            else:
+                payload[field] = val
         return payload
 
 
@@ -139,16 +153,19 @@ def _merge_auth_payload(
     fields = _OAUTH_FIELDS if auth_type == "mcp_oauth" else _BEARER_FIELDS
     merged = dict(existing)
     for field in fields:
-        if field in body.model_fields_set:
-            val = getattr(body, field)
-            if val is None:
-                merged.pop(field, None)
-            elif hasattr(val, "get_secret_value"):
-                merged[field] = val.get_secret_value()
-            elif hasattr(val, "isoformat"):
-                merged[field] = val.isoformat()
-            else:
-                merged[field] = val
+        if field not in body.model_fields_set:
+            continue
+        val = getattr(body, field)
+        if val is None:
+            merged.pop(field, None)
+        elif field == "token_endpoint_auth":
+            merged[field] = _serialize_token_endpoint_auth(val)
+        elif hasattr(val, "get_secret_value"):
+            merged[field] = val.get_secret_value()
+        elif hasattr(val, "isoformat"):
+            merged[field] = val.isoformat()
+        else:
+            merged[field] = val
     return merged
 
 
