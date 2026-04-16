@@ -48,12 +48,6 @@ def _headers_from_credential(
     blob: Any,
     auth_type: str,
 ) -> dict[str, str]:
-    """Decrypt a credential blob and build the auth header dict.
-
-    Returns ``{"Authorization": "Bearer <token>"}`` for recognised auth
-    types, or ``{}`` when the credential is missing a token or the auth
-    type is unknown.
-    """
     payload = json.loads(crypto_box.decrypt(blob))
 
     if auth_type == "static_bearer":
@@ -76,25 +70,20 @@ async def resolve_auth_for_url(
     session_id: str,
     mcp_server_url: str,
 ) -> dict[str, str]:
-    """Resolve MCP auth for ``mcp_server_url`` in the context of a session.
+    """Resolve MCP auth headers for ``mcp_server_url``.
 
-    Connection-declared auth takes precedence.  If this URL belongs to a
-    registered connection, the credential in the connection's vault is
-    used — connections own their auth and it's fixed per-account.
-    Otherwise we fall back to the session's bound vaults
-    (``session_vaults``), the existing mechanism for agent-declared MCP.
-
-    Returns an ``Authorization`` header dict, or ``{}`` if no credential
-    is found.  The fallback is NOT consulted when a connection claims
-    the URL but its vault has no matching credential — connection
-    ownership decides the source, end of discussion.
+    Connection-owned URLs resolve through the connection's vault;
+    other URLs fall back to the session's bound vaults.  A connection
+    that owns the URL but has no matching credential returns ``{}``
+    rather than falling back — ownership decides the source, not
+    whether the lookup hits (prevents a misconfigured connection from
+    silently leaking a tenant-level credential).
     """
     async with pool.acquire() as conn:
-        owner = await queries.get_connection_vault_for_url(conn, mcp_server_url)
-        if owner is not None:
-            _connection_id, vault_id = owner
+        connection_vault_id = await queries.get_connection_vault_for_url(conn, mcp_server_url)
+        if connection_vault_id is not None:
             result = await queries.resolve_vault_credential(
-                conn, vault_id=vault_id, mcp_server_url=mcp_server_url
+                conn, vault_id=connection_vault_id, mcp_server_url=mcp_server_url
             )
         else:
             result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)

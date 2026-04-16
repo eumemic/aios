@@ -53,9 +53,7 @@ class TestMcpServerSpec:
 
     def test_conn_prefix_reserved(self) -> None:
         """The ``conn_`` prefix is reserved for connection-derived MCP server
-        names (Phase 2, #31).  Even though conn_{c.id} is collision-free by
-        construction with the current scheme, we reserve the namespace so
-        future changes remain safe.
+        names — agent-declared names must not collide.
         """
         with pytest.raises(ValueError, match="conn_"):
             McpServerSpec(name="conn_github", url="https://mcp.github.com/")

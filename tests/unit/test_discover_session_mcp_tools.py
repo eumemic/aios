@@ -1,5 +1,4 @@
-"""Unit tests for discover_session_mcp_tools — the Phase 2 (#31)
-unified MCP discovery.
+"""Unit tests for discover_session_mcp_tools.
 
 Covers the collect-URLs-then-discover shape: agent-declared MCP
 (filtered by enabled mcp_toolset entries) unioned with

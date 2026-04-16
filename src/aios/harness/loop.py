@@ -67,21 +67,10 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     else:
         agent = await agents_service.get_agent(pool, session.agent_id)
 
-    # Load this session's bindings once.  Passed through to everything that
-    # needs it (MCP discovery, prompt augmentation, monologue prefix gate) —
-    # do NOT re-query inside helpers.
-    from aios.db import queries as _queries
-    from aios.harness.channels import connection_server_name, connections_for_bindings
+    from aios.harness.channels import connection_server_name, list_bindings_and_connections
 
-    async with pool.acquire() as _conn:
-        bindings = await _queries.list_session_bindings(_conn, session_id)
-    connections = await connections_for_bindings(pool, bindings)
+    bindings, connections = await list_bindings_and_connections(pool, session_id)
 
-    # Build MCP server map — agent-declared PLUS connection-provided.
-    # Needed for both confirmed-tool dispatch (below) and post-inference
-    # tool-call routing.  Connection-derived names (conn_<id>) cannot
-    # collide with agent-declared names (reserved prefix, enforced in
-    # the agent model).
     mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
     for c in connections:
         mcp_server_map[connection_server_name(c)] = c.mcp_url
@@ -117,8 +106,6 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
     )
     system_prompt = augment_system_prompt(agent.system, skill_versions)
-    # Appended after the skills block; no-op when the session has no bindings
-    # (preserves the "no bindings ⇒ identical behaviour" Phase-2 invariant).
     system_prompt = augment_with_channels(system_prompt, bindings)
 
     # Provision skill files to workspace (idempotent, host-side writes).
@@ -128,8 +115,6 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     # Build context with pending-result synthesis.
     tools = to_openai_tools(agent.tools)
 
-    # Discover MCP tools from every source this session sees — agent-declared
-    # plus connection-provided (derived from bindings loaded above).
     if agent.mcp_servers or connections:
         mcp_tools = await discover_session_mcp_tools(pool, session_id, agent, connections)
         tools.extend(mcp_tools)
@@ -224,10 +209,6 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
     )
 
-    # INTERNAL_MONOLOGUE prefix, gated on the session having bindings.
-    # The prefix is persisted in the event log and shown to the model on
-    # every subsequent step's context build — that IS the teaching
-    # mechanism.  Do not strip on replay.
     if bindings:
         from aios.harness.channels import apply_monologue_prefix
 
@@ -371,32 +352,14 @@ async def discover_session_mcp_tools(
     agent: Any,
     connections: list[Any],
 ) -> list[dict[str, Any]]:
-    """Discover MCP tools from every source this session sees.
-
-    Two sources:
-
-    * **Agent-declared MCP**: entries in ``agent.mcp_servers`` whose
-      ``name`` matches an enabled ``mcp_toolset`` in ``agent.tools``.
-      Unchanged from the pre-Phase-2 behaviour.
-
-    * **Connection-provided MCP**: every :class:`Connection` whose
-      channel is bound to this session, passed in by the caller
-      (derived from ``list_session_bindings`` + ``connections_for_bindings``).
-      The server name uses :func:`aios.harness.channels.connection_server_name`
-      (``conn_<connection_id>``) so collisions with agent-declared names
-      are impossible by construction.
-
-    Auth for each URL is resolved via
-    :func:`aios.mcp.client.resolve_auth_for_url`, which checks the
-    connection-owned vault first and falls back to ``session_vaults``.
-    All discoveries run concurrently.
+    """Discover MCP tools from agent-declared servers (filtered by enabled
+    ``mcp_toolset`` entries) unioned with connection-provided servers.
     """
     import asyncio
 
     from aios.harness.channels import connection_server_name
     from aios.mcp.client import discover_mcp_tools, resolve_auth_for_url
 
-    # Collect (server_name, url) pairs from both sources.
     servers: list[tuple[str, str]] = []
 
     enabled_server_names: set[str] = set()

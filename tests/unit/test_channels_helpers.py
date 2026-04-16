@@ -1,4 +1,4 @@
-"""Unit tests for harness/channels.py — the Phase 2 (#31) helper module.
+"""Unit tests for harness/channels.py.
 
 Pure-function coverage.  The connection-lookup helper (async, hits the
 DB) is covered in tests/e2e.

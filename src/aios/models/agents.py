@@ -43,11 +43,6 @@ class McpServerSpec(BaseModel):
     Declares a remote MCP server reachable via streamable HTTP transport.
     The ``name`` is used to cross-reference from ``mcp_toolset`` tool entries
     and to namespace discovered tools as ``mcp__<name>__<tool_name>``.
-
-    The ``conn_`` prefix on ``name`` is reserved — it's used by the
-    Phase-2 (#31) connector/channel mechanism for connection-derived
-    servers (``conn_<connection_id>``).  Reserving the namespace at the
-    model boundary keeps future scheme changes safe.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -58,9 +53,13 @@ class McpServerSpec(BaseModel):
 
     @field_validator("name")
     @classmethod
-    def _reject_conn_prefix(cls, v: str) -> str:
-        if v.startswith("conn_"):
-            raise ValueError("mcp_server name prefix 'conn_' is reserved for connections")
+    def _reject_reserved_prefix(cls, v: str) -> str:
+        from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
+
+        if v.startswith(CONNECTION_SERVER_NAME_PREFIX):
+            raise ValueError(
+                f"mcp_server name prefix {CONNECTION_SERVER_NAME_PREFIX!r} is reserved"
+            )
         return v
 
 

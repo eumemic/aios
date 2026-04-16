@@ -959,12 +959,12 @@ class TestInboundEndpoint:
         assert r.json()["error"]["type"] == "validation_error"
 
 
-# ─── Phase 2 queries (#31) ──────────────────────────────────────────────────
+# ─── step-function queries ──────────────────────────────────────────────────
 
 
 class TestListSessionBindings:
     """Unpaginated "all active bindings for this session" lookup used by
-    the Phase-2 step to derive connection-provided MCP URLs.
+    the step function to derive connection-provided MCP URLs.
     """
 
     async def test_empty_when_no_bindings(self, pool: Any, agent_id: str, env_id: str) -> None:
@@ -1039,7 +1039,7 @@ class TestListSessionBindings:
 
 class TestGetConnectionsByPairs:
     """Batch lookup of active connections by (connector, account) pairs,
-    used by the Phase-2 discovery step after collecting bindings.
+    used by discovery after collecting bindings.
     """
 
     async def test_empty_input_returns_empty(self, pool: Any) -> None:
@@ -1094,13 +1094,8 @@ class TestGetConnectionsByPairs:
 
 
 class TestResolveAuthForUrlPrecedence:
-    """Phase 2 (#31) acceptance: connection-declared auth takes precedence
-    over session_vaults when both sources have a credential for the same URL.
-
-    This is the load-bearing invariant of the connection/channel design —
-    a connection 'owns' its MCP URL's auth; session_vaults is the right
-    place for agent-declared MCP credentials but cannot express per-account
-    auth for connections.
+    """Connection-declared auth takes precedence over session_vaults
+    when both sources have a credential for the same URL.
     """
 
     async def test_connection_credential_beats_session_vault(
@@ -1170,8 +1165,7 @@ class TestResolveAuthForUrlPrecedence:
     async def test_session_vault_used_for_non_connection_url(
         self, pool: Any, agent_id: str, env_id: str
     ) -> None:
-        """When the URL isn't owned by any connection, fall back to
-        session_vaults (the pre-Phase-2 behaviour)."""
+        """When the URL isn't owned by any connection, fall back to session_vaults."""
         from pydantic import SecretStr
 
         from aios.config import get_settings
@@ -1384,16 +1378,16 @@ class TestResolveVaultCredential:
 
 
 class TestGetConnectionVaultForUrl:
-    """URL → (connection_id, vault_id) lookup used by resolve_auth_for_url
-    to decide whether a URL belongs to a registered connection.
+    """URL → vault_id lookup used by resolve_auth_for_url to decide
+    whether a URL belongs to a registered connection.
     """
 
-    async def test_match_returns_connection_and_vault(self, pool: Any, vault_id: str) -> None:
+    async def test_match_returns_vault_id(self, pool: Any, vault_id: str) -> None:
         from aios.db import queries
         from aios.services import connections as conn_svc
 
         url = f"https://mcp-match-{_uniq()}.example"
-        c = await conn_svc.create_connection(
+        await conn_svc.create_connection(
             pool,
             connector="signal",
             account=f"gcvfu-{_uniq()}",
@@ -1403,8 +1397,7 @@ class TestGetConnectionVaultForUrl:
         )
         async with pool.acquire() as conn:
             hit = await queries.get_connection_vault_for_url(conn, url)
-        assert hit is not None
-        assert hit == (c.id, vault_id)
+        assert hit == vault_id
 
     async def test_no_match_returns_none(self, pool: Any) -> None:
         from aios.db import queries
