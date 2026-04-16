@@ -957,3 +957,188 @@ class TestInboundEndpoint:
         )
         assert r.status_code == 422, (bad_path, r.text)
         assert r.json()["error"]["type"] == "validation_error"
+
+
+# ─── Phase 2 queries (#31) ──────────────────────────────────────────────────
+
+
+class TestListSessionBindings:
+    """Unpaginated "all active bindings for this session" lookup used by
+    the Phase-2 step to derive connection-provided MCP URLs.
+    """
+
+    async def test_empty_when_no_bindings(self, pool: Any, agent_id: str, env_id: str) -> None:
+        from aios.db import queries
+        from aios.services import sessions as sess_svc
+
+        s = await sess_svc.create_session(
+            pool, agent_id=agent_id, environment_id=env_id, title=None, metadata={}
+        )
+        async with pool.acquire() as conn:
+            bindings = await queries.list_session_bindings(conn, s.id)
+        assert bindings == []
+
+    async def test_returns_all_active_bindings_for_session(
+        self, pool: Any, agent_id: str, env_id: str
+    ) -> None:
+        from aios.db import queries
+        from aios.services import channels as ch_svc
+        from aios.services import sessions as sess_svc
+
+        s = await sess_svc.create_session(
+            pool, agent_id=agent_id, environment_id=env_id, title=None, metadata={}
+        )
+        suffix = _uniq()
+        a1 = await ch_svc.create_binding(pool, address=f"signal/x-{suffix}/1", session_id=s.id)
+        a2 = await ch_svc.create_binding(pool, address=f"signal/x-{suffix}/2", session_id=s.id)
+
+        async with pool.acquire() as conn:
+            bindings = await queries.list_session_bindings(conn, s.id)
+        ids = {b.id for b in bindings}
+        assert ids == {a1.id, a2.id}
+
+    async def test_excludes_archived_bindings(self, pool: Any, agent_id: str, env_id: str) -> None:
+        from aios.db import queries
+        from aios.services import channels as ch_svc
+        from aios.services import sessions as sess_svc
+
+        s = await sess_svc.create_session(
+            pool, agent_id=agent_id, environment_id=env_id, title=None, metadata={}
+        )
+        active = await ch_svc.create_binding(
+            pool, address=f"signal/arc-{_uniq()}/a", session_id=s.id
+        )
+        dead = await ch_svc.create_binding(pool, address=f"signal/arc-{_uniq()}/b", session_id=s.id)
+        await ch_svc.archive_binding(pool, dead.id)
+
+        async with pool.acquire() as conn:
+            bindings = await queries.list_session_bindings(conn, s.id)
+        ids = {b.id for b in bindings}
+        assert ids == {active.id}
+
+    async def test_scoped_to_session(self, pool: Any, agent_id: str, env_id: str) -> None:
+        from aios.db import queries
+        from aios.services import channels as ch_svc
+        from aios.services import sessions as sess_svc
+
+        s1 = await sess_svc.create_session(
+            pool, agent_id=agent_id, environment_id=env_id, title=None, metadata={}
+        )
+        s2 = await sess_svc.create_session(
+            pool, agent_id=agent_id, environment_id=env_id, title=None, metadata={}
+        )
+        await ch_svc.create_binding(pool, address=f"signal/sc-{_uniq()}/s1", session_id=s1.id)
+        await ch_svc.create_binding(pool, address=f"signal/sc-{_uniq()}/s2", session_id=s2.id)
+
+        async with pool.acquire() as conn:
+            s1_bindings = await queries.list_session_bindings(conn, s1.id)
+            s2_bindings = await queries.list_session_bindings(conn, s2.id)
+        assert len(s1_bindings) == 1 and s1_bindings[0].session_id == s1.id
+        assert len(s2_bindings) == 1 and s2_bindings[0].session_id == s2.id
+
+
+class TestGetConnectionsByPairs:
+    """Batch lookup of active connections by (connector, account) pairs,
+    used by the Phase-2 discovery step after collecting bindings.
+    """
+
+    async def test_empty_input_returns_empty(self, pool: Any) -> None:
+        from aios.db import queries
+
+        async with pool.acquire() as conn:
+            rows = await queries.get_connections_by_pairs(conn, [])
+        assert rows == []
+
+    async def test_returns_matching_connections(self, pool: Any, vault_id: str) -> None:
+        from aios.db import queries
+        from aios.services import connections as conn_svc
+
+        a = f"gcp-a-{_uniq()}"
+        b = f"gcp-b-{_uniq()}"
+        c_a = await conn_svc.create_connection(
+            pool,
+            connector="signal",
+            account=a,
+            mcp_url="https://m1",
+            vault_id=vault_id,
+            metadata={},
+        )
+        c_b = await conn_svc.create_connection(
+            pool, connector="slack", account=b, mcp_url="https://m2", vault_id=vault_id, metadata={}
+        )
+
+        async with pool.acquire() as conn:
+            rows = await queries.get_connections_by_pairs(
+                conn, [("signal", a), ("slack", b), ("discord", "nope")]
+            )
+        ids = {c.id for c in rows}
+        assert ids == {c_a.id, c_b.id}
+
+    async def test_excludes_archived(self, pool: Any, vault_id: str) -> None:
+        from aios.db import queries
+        from aios.services import connections as conn_svc
+
+        acct = f"gcp-arc-{_uniq()}"
+        c = await conn_svc.create_connection(
+            pool,
+            connector="signal",
+            account=acct,
+            mcp_url="https://m",
+            vault_id=vault_id,
+            metadata={},
+        )
+        await conn_svc.archive_connection(pool, c.id)
+        async with pool.acquire() as conn:
+            rows = await queries.get_connections_by_pairs(conn, [("signal", acct)])
+        assert rows == []
+
+
+class TestGetConnectionVaultForUrl:
+    """URL → (connection_id, vault_id) lookup used by resolve_auth_for_url
+    to decide whether a URL belongs to a registered connection.
+    """
+
+    async def test_match_returns_connection_and_vault(self, pool: Any, vault_id: str) -> None:
+        from aios.db import queries
+        from aios.services import connections as conn_svc
+
+        url = f"https://mcp-match-{_uniq()}.example"
+        c = await conn_svc.create_connection(
+            pool,
+            connector="signal",
+            account=f"gcvfu-{_uniq()}",
+            mcp_url=url,
+            vault_id=vault_id,
+            metadata={},
+        )
+        async with pool.acquire() as conn:
+            hit = await queries.get_connection_vault_for_url(conn, url)
+        assert hit is not None
+        assert hit == (c.id, vault_id)
+
+    async def test_no_match_returns_none(self, pool: Any) -> None:
+        from aios.db import queries
+
+        async with pool.acquire() as conn:
+            hit = await queries.get_connection_vault_for_url(
+                conn, f"https://unknown-{_uniq()}.example"
+            )
+        assert hit is None
+
+    async def test_excludes_archived(self, pool: Any, vault_id: str) -> None:
+        from aios.db import queries
+        from aios.services import connections as conn_svc
+
+        url = f"https://mcp-arc-{_uniq()}.example"
+        c = await conn_svc.create_connection(
+            pool,
+            connector="signal",
+            account=f"gcvfu-arc-{_uniq()}",
+            mcp_url=url,
+            vault_id=vault_id,
+            metadata={},
+        )
+        await conn_svc.archive_connection(pool, c.id)
+        async with pool.acquire() as conn:
+            hit = await queries.get_connection_vault_for_url(conn, url)
+        assert hit is None

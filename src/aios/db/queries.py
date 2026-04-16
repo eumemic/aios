@@ -1669,6 +1669,54 @@ async def update_connection(
     return _row_to_connection(row)
 
 
+async def get_connections_by_pairs(
+    conn: asyncpg.Connection[Any],
+    pairs: list[tuple[str, str]],
+) -> list[Connection]:
+    """Batch-look-up active connections by ``(connector, account)`` pairs.
+
+    Returns connections where ``(connector, account)`` is in ``pairs`` and
+    ``archived_at IS NULL``. Empty ``pairs`` → empty list (no roundtrip).
+    Used by the step function to turn a session's bindings into the set
+    of connection-provided MCP URLs that belong to it.
+    """
+    if not pairs:
+        return []
+    connectors = [p[0] for p in pairs]
+    accounts = [p[1] for p in pairs]
+    rows = await conn.fetch(
+        """
+        SELECT c.*
+          FROM connections c
+          JOIN unnest($1::text[], $2::text[]) AS p(connector, account)
+            ON c.connector = p.connector AND c.account = p.account
+         WHERE c.archived_at IS NULL
+        """,
+        connectors,
+        accounts,
+    )
+    return [_row_to_connection(r) for r in rows]
+
+
+async def get_connection_vault_for_url(
+    conn: asyncpg.Connection[Any], mcp_server_url: str
+) -> tuple[str, str] | None:
+    """Return ``(connection_id, vault_id)`` if ``mcp_server_url`` is owned
+    by an active connection, else ``None``.
+
+    Used by :func:`aios.mcp.client.resolve_auth_for_url` to give connection
+    auth precedence: a URL registered on a connection resolves through
+    that connection's vault rather than through ``session_vaults``.
+    """
+    row = await conn.fetchrow(
+        "SELECT id, vault_id FROM connections WHERE mcp_url = $1 AND archived_at IS NULL LIMIT 1",
+        mcp_server_url,
+    )
+    if row is None:
+        return None
+    return row["id"], row["vault_id"]
+
+
 async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
     row = await conn.fetchrow(
         "UPDATE connections SET archived_at = now(), updated_at = now() "
@@ -1772,6 +1820,23 @@ async def list_bindings(
         f"ORDER BY id DESC LIMIT ${len(args)}"
     )
     rows = await conn.fetch(sql, *args)
+    return [_row_to_channel_binding(r) for r in rows]
+
+
+async def list_session_bindings(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> list[ChannelBinding]:
+    """Return every active binding for ``session_id``, unpaginated.
+
+    Used by the step function (Phase 2, #31) to derive connection-provided
+    MCP URLs and to build the bound-channels block in the system prompt.
+    Distinct from :func:`list_bindings` which is paginated-by-id for CRUD
+    list endpoints — the step function wants them all in one shot.
+    """
+    rows = await conn.fetch(
+        "SELECT * FROM channel_bindings WHERE session_id = $1 AND archived_at IS NULL ORDER BY id",
+        session_id,
+    )
     return [_row_to_channel_binding(r) for r in rows]
 
 
