@@ -1282,16 +1282,18 @@ async def resolve_mcp_credential(
     conn: asyncpg.Connection[Any],
     session_id: str,
     mcp_server_url: str,
-) -> tuple[EncryptedBlob, str] | None:
+) -> tuple[EncryptedBlob, str, str] | None:
     """Find the first matching MCP credential across a session's bound vaults.
 
     Joins ``session_vaults`` (rank-ordered) with ``vault_credentials``
-    filtered by ``mcp_server_url``. Returns ``(EncryptedBlob, auth_type)``
-    for the first match, or ``None`` if no credential exists.
+    filtered by ``mcp_server_url``. Returns
+    ``(EncryptedBlob, auth_type, vault_id)`` for the first match, or
+    ``None`` if no credential exists. The ``vault_id`` is needed by the
+    OAuth refresh path to scope ``SELECT … FOR UPDATE`` to a specific row.
     """
     row = await conn.fetchrow(
         """
-        SELECT vc.ciphertext, vc.nonce, vc.auth_type
+        SELECT vc.ciphertext, vc.nonce, vc.auth_type, vc.vault_id
           FROM session_vaults sv
           JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
          WHERE sv.session_id = $1
@@ -1305,7 +1307,11 @@ async def resolve_mcp_credential(
     )
     if row is None:
         return None
-    return EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]), str(row["auth_type"])
+    return (
+        EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]),
+        str(row["auth_type"]),
+        str(row["vault_id"]),
+    )
 
 
 # ─── skills ──────────────────────────────────────────────────────────────────

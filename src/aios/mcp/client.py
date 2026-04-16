@@ -52,25 +52,47 @@ async def resolve_auth_headers(
     """Look up vault credentials for an MCP server and return auth headers.
 
     Searches the session's bound vaults (rank-ordered) for the first
-    credential matching ``mcp_server_url``. Returns an ``Authorization``
+    credential matching ``mcp_server_url``. For ``mcp_oauth`` credentials
+    whose ``expires_at`` falls within the refresh skew window, transparently
+    refreshes the access token before returning. Returns an ``Authorization``
     header dict, or an empty dict if no credential is found.
+
+    OAuth refresh failures bubble up as :class:`OAuthRefreshError`; there is
+    no silent fallback to the stale token.
     """
+    from aios.services.vaults import _is_expiring, refresh_credential
+
     async with pool.acquire() as conn:
         result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
+        if result is None:
+            return {}
 
-    if result is None:
-        return {}
+        blob, auth_type, vault_id = result
 
-    blob, auth_type = result
-    payload = json.loads(crypto_box.decrypt(blob))
-
-    if auth_type == "static_bearer":
-        token = payload.get("token", "")
-    elif auth_type == "mcp_oauth":
-        token = payload.get("access_token", "")
-    else:
-        log.warning("mcp.unknown_auth_type", auth_type=auth_type)
-        return {}
+        if auth_type == "mcp_oauth":
+            payload = json.loads(crypto_box.decrypt(blob))
+            if _is_expiring(payload):
+                # Lazy refresh: another coroutine may race us here, but
+                # ``refresh_credential`` re-checks expiry under a row lock.
+                await refresh_credential(
+                    crypto_box,
+                    conn,
+                    vault_id=vault_id,
+                    mcp_server_url=mcp_server_url,
+                )
+                # Re-resolve to read the post-commit ciphertext.
+                refreshed = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
+                if refreshed is None:
+                    return {}
+                blob, _, _ = refreshed
+                payload = json.loads(crypto_box.decrypt(blob))
+            token = payload.get("access_token", "")
+        elif auth_type == "static_bearer":
+            payload = json.loads(crypto_box.decrypt(blob))
+            token = payload.get("token", "")
+        else:
+            log.warning("mcp.unknown_auth_type", auth_type=auth_type)
+            return {}
 
     if not token:
         return {}
