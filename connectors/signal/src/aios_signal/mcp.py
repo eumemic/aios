@@ -46,7 +46,7 @@ log = structlog.get_logger(__name__)
 _FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
 
 
-def _focal_chat_id_from_meta(meta: RequestParams.Meta | None) -> str:
+def focal_chat_id_from_meta(meta: RequestParams.Meta | None) -> str:
     """Extract the Signal ``chat_id`` from an MCP request's ``_meta``.
 
     aios injects ``aios.focal_channel_path`` for connection-provided
@@ -69,7 +69,7 @@ def _focal_chat_id_from_meta(meta: RequestParams.Meta | None) -> str:
     return path
 
 
-def _build_send_params(chat_id: str, text: str) -> dict[str, Any]:
+def build_send_params(chat_id: str, text: str) -> dict[str, Any]:
     """Translate ``(chat_id, text)`` into signal-cli ``send`` params.
 
     Pure function: decodes the URL-safe chat_id, applies Signal's
@@ -88,7 +88,7 @@ def _build_send_params(chat_id: str, text: str) -> dict[str, Any]:
     return params
 
 
-def _build_react_params(
+def build_react_params(
     chat_id: str,
     target_author_uuid: str,
     target_timestamp_ms: int,
@@ -152,8 +152,8 @@ def build_mcp_server(*, rpc: RpcClient) -> FastMCP:
         Args:
             text: Message body. Markdown is converted to Signal text styles.
         """
-        chat_id = _focal_chat_id_from_meta(ctx.request_context.meta)
-        params = _build_send_params(chat_id, text)
+        chat_id = focal_chat_id_from_meta(ctx.request_context.meta)
+        params = build_send_params(chat_id, text)
         result = await rpc.call("send", params)
         return {"sent_at_ms": _extract_timestamp(result)}
 
@@ -174,8 +174,8 @@ def build_mcp_server(*, rpc: RpcClient) -> FastMCP:
             target_timestamp_ms: Timestamp of the target message (from inbound metadata).
             emoji: The reaction emoji.
         """
-        chat_id = _focal_chat_id_from_meta(ctx.request_context.meta)
-        params = _build_react_params(chat_id, target_author_uuid, target_timestamp_ms, emoji)
+        chat_id = focal_chat_id_from_meta(ctx.request_context.meta)
+        params = build_react_params(chat_id, target_author_uuid, target_timestamp_ms, emoji)
         await rpc.call("sendReaction", params)
         return {"status": "ok"}
 

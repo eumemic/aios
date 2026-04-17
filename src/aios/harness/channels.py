@@ -17,10 +17,9 @@ from aios.models.events import Event
 MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE: "
 
 # Key under a switch_channel tool_result's ``data["metadata"]`` that
-# records the target and outcome.  Set by the switch_channel handler
-# (slice 5), consumed by :func:`derive_last_seen` /
-# :func:`derive_unread_counts` here.  Its value is a dict with
-# ``{"target": str | None, "success": bool}`` shape.
+# records the target and outcome — ``{"target": str | None, "success": bool}``.
+# :func:`derive_last_seen` / :func:`derive_unread_counts` anchor the
+# per-channel ``last_seen`` watermark off successful switches.
 SWITCH_CHANNEL_METADATA_KEY = "switch_channel"
 
 # Top-level key inside the ``_meta`` field sent on JSON-RPC tool-call
@@ -305,21 +304,30 @@ def derive_unread_counts(events: Iterable[Event], channels: Iterable[str]) -> di
     ``unread_in_channel = count of events where orig_channel == channel
     AND seq > last_seen_in_channel``.
 
-    Implementation walks the events once: first pass builds per-channel
-    last_seen via the same rules as :func:`derive_last_seen`, second
-    pass counts qualifying user events against those watermarks.  The
-    input is fully materialised into a list so both passes see the
-    same data even if the caller passes a one-shot iterator.
+    Single pass: build every channel's ``last_seen`` watermark and
+    collect candidate events in one walk, then count candidates whose
+    seq exceeds their channel's watermark.  O(N + C) where N is events
+    and C is candidates — versus the naïve per-channel derivation
+    which is O(K*N).
     """
-    channel_list = list(channels)
-    events_list = list(events)
-    last_seen = {ch: derive_last_seen(events_list, ch) for ch in channel_list}
-    counts = dict.fromkeys(channel_list, 0)
-    for e in events_list:
+    channel_set = set(channels)
+    last_seen = dict.fromkeys(channel_set, 0)
+    candidates: list[tuple[str, int]] = []
+    for e in events:
+        focal = e.focal_channel_at_arrival
+        if focal in last_seen and e.seq > last_seen[focal]:
+            last_seen[focal] = e.seq
+        marker = _switch_marker(e)
+        if marker is not None and marker["success"]:
+            target = marker["target"]
+            if target in last_seen and e.seq > last_seen[target]:
+                last_seen[target] = e.seq
         orig = e.orig_channel
-        if orig is None or orig not in counts:
-            continue
-        if e.seq > last_seen[orig]:
+        if isinstance(orig, str) and orig in last_seen:
+            candidates.append((orig, e.seq))
+    counts = dict.fromkeys(channel_set, 0)
+    for orig, seq in candidates:
+        if seq > last_seen[orig]:
             counts[orig] += 1
     return counts
 

@@ -152,11 +152,10 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         system_prompt=system_prompt,
     )
 
-    # Append the ephemeral channels tail block (slice 7).  Rebuilt from
-    # the monotonic event log each step so unread counts refresh
-    # without busting the prefix cache.  Lives at the tail of the
-    # user-visible context; the paradigm prose explaining the symbols
-    # is in the cache-stable system prompt above.
+    # The tail block lives *after* build_messages so its per-step
+    # mutations (unread counts, previews) don't bust the prefix cache.
+    # Paradigm prose (symbol meanings, switch_channel semantics) stays
+    # in the cache-stable system prompt above.
     tail = build_channels_tail_block(bindings, events, session.focal_channel)
     if tail is not None:
         ctx.messages.append(tail)
@@ -375,19 +374,19 @@ def _switch_channel_tool_spec() -> dict[str, Any]:
 def _hide_conn_tools_when_phone_down(
     mcp_tools: list[dict[str, Any]], focal_channel: str | None
 ) -> list[dict[str, Any]]:
-    """Filter ``mcp__conn_*`` tools out of the list when focal is NULL.
+    """Filter connection-provided MCP tools out when focal is NULL.
 
-    The agent should not see connection-provided tools in the "phone
-    down" state — those tools require a focal channel to resolve their
-    ``chat_id`` (injected into ``_meta`` at dispatch time), and the
-    model shouldn't be asked to choose which channel to send to.
-    Agent-declared MCP tools are untouched.
+    Those tools resolve their ``chat_id`` from focal (injected into
+    ``_meta`` at dispatch time); a "phone down" state has no focal to
+    inject, so the model shouldn't be offered them.  Agent-declared
+    MCP tools are untouched.
     """
+    from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
+
     if focal_channel is not None:
         return mcp_tools
-    return [
-        t for t in mcp_tools if not t.get("function", {}).get("name", "").startswith("mcp__conn_")
-    ]
+    prefix = f"mcp__{CONNECTION_SERVER_NAME_PREFIX}"
+    return [t for t in mcp_tools if not t.get("function", {}).get("name", "").startswith(prefix)]
 
 
 def _tc_name(tc: dict[str, Any]) -> str:

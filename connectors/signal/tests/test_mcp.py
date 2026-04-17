@@ -16,12 +16,12 @@ from starlette.routing import Route
 
 from aios_signal.mcp import (
     BearerAuthMiddleware,
-    _build_react_params,
-    _build_send_params,
     _extract_timestamp,
-    _focal_chat_id_from_meta,
     build_mcp_app,
     build_mcp_server,
+    build_react_params,
+    build_send_params,
+    focal_chat_id_from_meta,
     parse_bind,
 )
 
@@ -86,45 +86,45 @@ async def _call_tool(
 class TestFocalChatIdFromMeta:
     def test_returns_path_when_present(self) -> None:
         meta = RequestParams.Meta.model_validate({"aios.focal_channel_path": "chat-abc"})
-        assert _focal_chat_id_from_meta(meta) == "chat-abc"
+        assert focal_chat_id_from_meta(meta) == "chat-abc"
 
     def test_none_meta_raises(self) -> None:
         with pytest.raises(ValueError, match="focal channel"):
-            _focal_chat_id_from_meta(None)
+            focal_chat_id_from_meta(None)
 
     def test_missing_key_raises(self) -> None:
         meta = RequestParams.Meta.model_validate({"other_key": "x"})
         with pytest.raises(ValueError, match="focal channel"):
-            _focal_chat_id_from_meta(meta)
+            focal_chat_id_from_meta(meta)
 
     def test_empty_string_raises(self) -> None:
         meta = RequestParams.Meta.model_validate({"aios.focal_channel_path": ""})
         with pytest.raises(ValueError, match="focal channel"):
-            _focal_chat_id_from_meta(meta)
+            focal_chat_id_from_meta(meta)
 
 
 class TestBuildSendParams:
     def test_dm_uuid(self) -> None:
-        params = _build_send_params("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "hi")
+        params = build_send_params("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "hi")
         assert params == {
             "message": "hi",
             "recipient": ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
         }
 
     def test_group_urlsafe_base64_decoded(self) -> None:
-        params = _build_send_params("abc-def_xyz==", "hi")
+        params = build_send_params("abc-def_xyz==", "hi")
         assert params["groupId"] == "abc+def/xyz=="
         assert "recipient" not in params
 
     def test_markdown_produces_text_styles(self) -> None:
-        params = _build_send_params("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "**bold** now")
+        params = build_send_params("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "**bold** now")
         assert params["message"] == "bold now"
         assert any("BOLD" in s for s in params["textStyles"])
 
 
 class TestBuildReactParams:
     def test_dm_shape(self) -> None:
-        params = _build_react_params(
+        params = build_react_params(
             "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             "cccccccc-dddd-eeee-ffff-000000000000",
             987654,
@@ -138,7 +138,7 @@ class TestBuildReactParams:
         }
 
     def test_group_shape(self) -> None:
-        params = _build_react_params(
+        params = build_react_params(
             "abc-def_xyz==",
             "cccccccc-dddd-eeee-ffff-000000000000",
             987654,

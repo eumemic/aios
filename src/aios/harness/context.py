@@ -51,10 +51,6 @@ _NOTIFICATION_PREVIEW_CHARS = 80
 def _format_channel_header(metadata: dict[str, Any]) -> str:
     """Render a one-line header describing the origin of an inbound message.
 
-    Lifted from PR #46 — folded into slice 4 so the focal-channel
-    rendering owns the single source of truth for inbound-event
-    presentation.
-
     When a user message carries channel metadata, the raw fields are
     whitelisted out of the chat-completions message before the model
     ever sees them (see ``_ALLOWED_FIELDS``).  That leaves the model
@@ -165,21 +161,19 @@ def render_user_event(
 ) -> dict[str, Any]:
     """Render a user event into its chat-completions message form.
 
-    Slice 4 of the focal-channel redesign (issue #29): rendering is a
-    deterministic function of the event's stamped ``orig_channel`` and
-    ``focal_channel_at_arrival``.  Callers (``build_messages`` and the
-    append-time token counter in ``queries.append_event``) share this
-    helper so the context and the ``cumulative_tokens`` column stay in
-    lock-step.
+    Rendering is a deterministic function of the event's stamped
+    ``orig_channel`` and ``focal_channel_at_arrival``.  ``build_messages``
+    and the append-time token counter in ``queries.append_event`` share
+    this helper so the context and the ``cumulative_tokens`` column
+    stay in lock-step.
 
     Branches:
 
-    * ``orig_channel`` is ``None`` → legacy / non-connector event,
-      rendered as Phase 2 did (metadata stripped, no header, no
-      notification).  Covers direct ``POST /sessions/{id}/messages``
-      traffic and pre-migration rows.
-    * ``orig == focal_at_arrival`` (non-NULL) → full content with the
-      #46 metadata header inlined.
+    * ``orig_channel`` is ``None`` → legacy / non-connector event;
+      metadata stripped, no header, no notification.  Covers direct
+      ``POST /sessions/{id}/messages`` traffic and pre-migration rows.
+    * ``orig == focal_at_arrival`` (non-NULL) → full content with a
+      metadata header inlined.
     * Otherwise (focal is NULL, or focal differs from orig) →
       notification marker: a short, emoji-prefixed one-liner surfacing
       the origin channel, sender, and a truncated content preview.
