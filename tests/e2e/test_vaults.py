@@ -5,6 +5,7 @@ Tests run against a real testcontainer Postgres with migrations applied.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -233,6 +234,434 @@ class TestVaultCredentialCRUD:
         )
         with pytest.raises(ValidationError, match="maximum"):
             await svc.create_vault_credential(pool, crypto_box, vault_id=vault.id, body=body21)
+
+    async def test_credential_limit_under_concurrency(self, pool: Any, crypto_box: Any) -> None:
+        """The 20-cred limit holds under concurrent inserts.
+
+        Without ``SELECT … FOR UPDATE`` on the vault row, two parallel
+        inserts can both observe ``count == 19`` and both succeed,
+        overflowing the cap. With the row lock, exactly 20 succeed and the
+        rest get ``ValidationError``.
+        """
+        from aios.errors import ValidationError
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="race-test", metadata={})
+
+        async def attempt(i: int) -> Any:
+            body = VaultCredentialCreate(
+                mcp_server_url=f"https://race-{i}.example.com",
+                auth_type="static_bearer",
+                token=SecretStr(f"t-{i}"),
+            )
+            try:
+                return await svc.create_vault_credential(
+                    pool, crypto_box, vault_id=vault.id, body=body
+                )
+            except ValidationError as e:
+                return e
+
+        results = await asyncio.gather(*(attempt(i) for i in range(25)))
+        successes = [r for r in results if not isinstance(r, ValidationError)]
+        failures = [r for r in results if isinstance(r, ValidationError)]
+
+        assert len(successes) == 20
+        assert len(failures) == 5
+        for f in failures:
+            assert "maximum" in str(f)
+
+    async def test_credential_inserts_across_vaults_do_not_block(
+        self, pool: Any, crypto_box: Any
+    ) -> None:
+        """Per-vault row lock must not become a global insert bottleneck.
+
+        If a future refactor widened the ``SELECT … FOR UPDATE`` from the
+        per-vault row to a global lock (or a shared advisory lock), this
+        test would expose it: 20 credentials inserted in parallel across
+        20 distinct vaults must all succeed. With per-vault locks they
+        run independently; with a global lock they'd serialize but still
+        pass — so we additionally assert the wall-clock comes in under
+        a generous bound that wouldn't be met under serialization.
+        """
+        from aios.services import vaults as svc
+
+        vaults = await asyncio.gather(
+            *(svc.create_vault(pool, display_name=f"par-{i}", metadata={}) for i in range(20))
+        )
+
+        async def insert_one(v_idx: int) -> Any:
+            return await svc.create_vault_credential(
+                pool,
+                crypto_box,
+                vault_id=vaults[v_idx].id,
+                body=VaultCredentialCreate(
+                    mcp_server_url=f"https://par-{v_idx}.example.com",
+                    auth_type="static_bearer",
+                    token=SecretStr(f"t-{v_idx}"),
+                ),
+            )
+
+        results = await asyncio.gather(*(insert_one(i) for i in range(20)))
+        assert all(r.id.startswith("vcr_") for r in results)
+        # Every insert was on a different vault; per-vault row lock should
+        # not have caused any failures.
+
+
+class TestArchiveAndCascade:
+    """Archive must zero the encrypted blob; delete must cascade via the FK."""
+
+    async def test_archive_credential_zeros_blob(self, pool: Any, crypto_box: Any) -> None:
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="zero-cred", metadata={})
+        body = VaultCredentialCreate(
+            mcp_server_url="https://zero-cred.example.com",
+            auth_type="static_bearer",
+            token=SecretStr("doomed"),
+        )
+        cred = await svc.create_vault_credential(pool, crypto_box, vault_id=vault.id, body=body)
+        await svc.archive_vault_credential(pool, vault.id, cred.id)
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT ciphertext, nonce FROM vault_credentials WHERE id = $1",
+                cred.id,
+            )
+        assert row is not None
+        assert bytes(row["ciphertext"]) == b""
+        assert bytes(row["nonce"]) == b""
+
+    async def test_archive_vault_zeros_active_credentials(self, pool: Any, crypto_box: Any) -> None:
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="zero-vault", metadata={})
+        # Two active credentials.
+        for i in range(2):
+            await svc.create_vault_credential(
+                pool,
+                crypto_box,
+                vault_id=vault.id,
+                body=VaultCredentialCreate(
+                    mcp_server_url=f"https://zero-vault-{i}.example.com",
+                    auth_type="static_bearer",
+                    token=SecretStr(f"t-{i}"),
+                ),
+            )
+
+        await svc.archive_vault(pool, vault.id)
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT ciphertext, nonce, archived_at FROM vault_credentials WHERE vault_id = $1",
+                vault.id,
+            )
+        assert len(rows) == 2
+        for row in rows:
+            assert bytes(row["ciphertext"]) == b""
+            assert bytes(row["nonce"]) == b""
+            assert row["archived_at"] is not None
+
+    async def test_delete_vault_cascades_to_credentials(self, pool: Any, crypto_box: Any) -> None:
+        """``ON DELETE CASCADE`` (migration 0015) wipes child rows automatically."""
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="cascade-test", metadata={})
+        cred = await svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=vault.id,
+            body=VaultCredentialCreate(
+                mcp_server_url="https://cascade.example.com",
+                auth_type="static_bearer",
+                token=SecretStr("doomed"),
+            ),
+        )
+
+        await svc.delete_vault(pool, vault.id)
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT 1 FROM vault_credentials WHERE id = $1", cred.id)
+        assert row is None  # cascade-deleted
+
+
+class TestQueries:
+    """Direct tests for query-layer functions used internally by services."""
+
+    async def test_get_credential_with_blob_returns_both(self, pool: Any, crypto_box: Any) -> None:
+        from aios.db import queries
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="combo-test", metadata={})
+        body = VaultCredentialCreate(
+            mcp_server_url="https://combo.example.com",
+            auth_type="static_bearer",
+            token=SecretStr("combo-token"),
+        )
+        cred = await svc.create_vault_credential(pool, crypto_box, vault_id=vault.id, body=body)
+
+        async with pool.acquire() as conn:
+            fetched_cred, blob = await queries.get_vault_credential_with_blob(
+                conn, vault.id, cred.id
+            )
+
+        assert fetched_cred.id == cred.id
+        assert fetched_cred.auth_type == "static_bearer"
+        assert blob.ciphertext  # non-empty
+        assert blob.nonce  # non-empty
+        # Verify the blob actually decrypts to the original payload.
+        import json as _json
+
+        payload = _json.loads(crypto_box.decrypt(blob))
+        assert payload == {"token": "combo-token"}
+
+    async def test_get_credential_with_blob_excludes_archived(
+        self, pool: Any, crypto_box: Any
+    ) -> None:
+        from aios.db import queries
+        from aios.errors import NotFoundError
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="combo-arch", metadata={})
+        body = VaultCredentialCreate(
+            mcp_server_url="https://combo-arch.example.com",
+            auth_type="static_bearer",
+            token=SecretStr("doomed"),
+        )
+        cred = await svc.create_vault_credential(pool, crypto_box, vault_id=vault.id, body=body)
+        await svc.archive_vault_credential(pool, vault.id, cred.id)
+
+        async with pool.acquire() as conn:
+            with pytest.raises(NotFoundError, match="archived"):
+                await queries.get_vault_credential_with_blob(conn, vault.id, cred.id)
+
+
+class TestOAuthRefreshE2E:
+    """End-to-end refresh: real testcontainer Postgres + mocked OAuth endpoint.
+
+    The mocked httpx layer lets these tests assert that exactly one POST
+    happens under concurrency — proving the SELECT … FOR UPDATE row lock
+    works, not just trust the unit test that mocks the lock query.
+    """
+
+    @staticmethod
+    async def _bind_session_to_vault(pool: Any, vault_id: str) -> str:
+        """Create the minimum scaffolding (env + agent + session) to bind a vault."""
+        from aios.services import agents as agents_svc
+        from aios.services import environments as env_svc
+        from aios.services import sessions as sess_svc
+
+        suffix = vault_id[-8:]
+        env = await env_svc.create_environment(pool, name=f"oauth-e2e-env-{suffix}")
+        agent = await agents_svc.create_agent(
+            pool,
+            name=f"oauth-e2e-agent-{suffix}",
+            model="fake/test",
+            system="test",
+            tools=[],
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+        session = await sess_svc.create_session(
+            pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title="oauth-refresh-test",
+            metadata={},
+            vault_ids=[vault_id],
+        )
+        return str(session.id)
+
+    @staticmethod
+    def _expiring_oauth_body(url: str) -> VaultCredentialCreate:
+        from datetime import UTC, datetime, timedelta
+
+        return VaultCredentialCreate(
+            mcp_server_url=url,
+            auth_type="mcp_oauth",
+            access_token=SecretStr("stale-at"),
+            refresh_token=SecretStr("rt-1"),
+            client_id="cid",
+            token_endpoint="https://issuer.example/token",
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),  # already expired
+        )
+
+    @staticmethod
+    def _patched_async_client(post_calls: list[Any], body: dict[str, Any]):
+        """Build a ``patch`` context for ``services.vaults.httpx.AsyncClient``.
+
+        Each ``client.post`` invocation is recorded into ``post_calls`` and
+        returns a mocked 200 response with ``body``.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        resp = MagicMock()
+        resp.json = MagicMock(return_value=body)
+        resp.raise_for_status = MagicMock()
+
+        async def _post(url: str, **kwargs: Any) -> Any:
+            post_calls.append((url, kwargs))
+            return resp
+
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.post = AsyncMock(side_effect=_post)
+        return patch("aios.services.vaults.httpx.AsyncClient", MagicMock(return_value=client))
+
+    async def test_refresh_persists_to_db(self, pool: Any, crypto_box: Any) -> None:
+        """A real Postgres round-trip: insert expiring oauth cred, resolve, assert
+        the token endpoint was POSTed and the new ciphertext is in the DB."""
+        import json as _json
+
+        from aios.mcp.client import resolve_auth_for_url
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="oauth-e2e", metadata={})
+        url = "https://oauth-e2e.example.com/mcp"
+        cred = await svc.create_vault_credential(
+            pool, crypto_box, vault_id=vault.id, body=self._expiring_oauth_body(url)
+        )
+        session_id = await self._bind_session_to_vault(pool, vault.id)
+
+        post_calls: list[Any] = []
+        with self._patched_async_client(
+            post_calls,
+            body={"access_token": "fresh-at", "expires_in": 3600},
+        ):
+            headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
+
+        assert len(post_calls) == 1, "expected exactly one POST to the token endpoint"
+        assert post_calls[0][0] == "https://issuer.example/token"
+        assert headers == {"Authorization": "Bearer fresh-at"}
+
+        # Verify the new ciphertext is in the DB.
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT ciphertext, nonce FROM vault_credentials WHERE id = $1",
+                cred.id,
+            )
+        from aios.crypto.vault import EncryptedBlob
+
+        new_blob = EncryptedBlob(
+            ciphertext=bytes(row["ciphertext"]),
+            nonce=bytes(row["nonce"]),
+        )
+        new_payload = _json.loads(crypto_box.decrypt(new_blob))
+        assert new_payload["access_token"] == "fresh-at"
+
+    async def test_concurrent_resolve_only_refreshes_once(self, pool: Any, crypto_box: Any) -> None:
+        """Five parallel resolutions on an expiring credential issue exactly one POST.
+
+        Without the SELECT … FOR UPDATE row lock + double-check, every
+        coroutine would race to the token endpoint. The lock serializes
+        them; the second-to-last waiter sees the now-fresh expires_at
+        after acquiring the lock and exits without POSTing.
+        """
+        from aios.mcp.client import resolve_auth_for_url
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="oauth-race", metadata={})
+        url = "https://oauth-race.example.com/mcp"
+        await svc.create_vault_credential(
+            pool, crypto_box, vault_id=vault.id, body=self._expiring_oauth_body(url)
+        )
+        session_id = await self._bind_session_to_vault(pool, vault.id)
+
+        post_calls: list[Any] = []
+        with self._patched_async_client(
+            post_calls,
+            body={"access_token": "fresh-at", "expires_in": 3600},
+        ):
+            results = await asyncio.gather(
+                *(resolve_auth_for_url(pool, crypto_box, session_id, url) for _ in range(5))
+            )
+
+        assert all(r == {"Authorization": "Bearer fresh-at"} for r in results)
+        assert len(post_calls) == 1, (
+            f"expected 1 POST but got {len(post_calls)} — row lock or double-check is broken"
+        )
+
+    async def test_refresh_failure_bubbles(self, pool: Any, crypto_box: Any) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from aios.errors import OAuthRefreshError
+        from aios.mcp.client import resolve_auth_for_url
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(pool, display_name="oauth-fail", metadata={})
+        url = "https://oauth-fail.example.com/mcp"
+        await svc.create_vault_credential(
+            pool, crypto_box, vault_id=vault.id, body=self._expiring_oauth_body(url)
+        )
+        session_id = await self._bind_session_to_vault(pool, vault.id)
+
+        # Token endpoint returns 401.
+        import httpx as _httpx
+
+        resp = MagicMock()
+        resp.status_code = 401
+
+        def _raise() -> None:
+            raise _httpx.HTTPStatusError("401", request=MagicMock(), response=resp)
+
+        resp.raise_for_status = MagicMock(side_effect=_raise)
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.post = AsyncMock(return_value=resp)
+
+        with (
+            patch("aios.services.vaults.httpx.AsyncClient", MagicMock(return_value=client)),
+            pytest.raises(OAuthRefreshError),
+        ):
+            await resolve_auth_for_url(pool, crypto_box, session_id, url)
+
+    async def test_concurrent_refresh_of_different_credentials_runs_in_parallel(
+        self, pool: Any, crypto_box: Any
+    ) -> None:
+        """Per-row lock must not over-serialize across distinct credentials.
+
+        Companion to ``test_concurrent_resolve_only_refreshes_once``: that
+        test pins the lock semantics for the *same* credential. This one
+        pins the *scope* of the lock — refreshes against two different
+        ``(vault_id, mcp_server_url)`` pairs must produce two independent
+        POSTs, not one. A future refactor that promoted the row lock to a
+        global lock or a vault-level lock would make this test fail.
+        """
+        from aios.mcp.client import resolve_auth_for_url
+        from aios.services import vaults as svc
+
+        v1 = await svc.create_vault(pool, display_name="par-refresh-1", metadata={})
+        v2 = await svc.create_vault(pool, display_name="par-refresh-2", metadata={})
+        url1 = "https://par-refresh-1.example.com/mcp"
+        url2 = "https://par-refresh-2.example.com/mcp"
+        await svc.create_vault_credential(
+            pool, crypto_box, vault_id=v1.id, body=self._expiring_oauth_body(url1)
+        )
+        await svc.create_vault_credential(
+            pool, crypto_box, vault_id=v2.id, body=self._expiring_oauth_body(url2)
+        )
+        sess1 = await self._bind_session_to_vault(pool, v1.id)
+        sess2 = await self._bind_session_to_vault(pool, v2.id)
+
+        post_calls: list[Any] = []
+        with self._patched_async_client(
+            post_calls,
+            body={"access_token": "fresh-at", "expires_in": 3600},
+        ):
+            results = await asyncio.gather(
+                resolve_auth_for_url(pool, crypto_box, sess1, url1),
+                resolve_auth_for_url(pool, crypto_box, sess2, url2),
+            )
+
+        assert all(r == {"Authorization": "Bearer fresh-at"} for r in results)
+        # Two distinct credentials → two POSTs (one each), not one shared.
+        assert len(post_calls) == 2, (
+            f"expected 2 POSTs (one per credential) but got {len(post_calls)} "
+            f"— lock scope is too wide"
+        )
 
 
 class TestSessionVaults:

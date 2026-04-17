@@ -14,6 +14,7 @@ seqs even when the API and the harness are appending concurrently.
 from __future__ import annotations
 
 import json
+from types import EllipsisType
 from typing import Any
 
 import asyncpg
@@ -1016,23 +1017,38 @@ async def update_vault(
 
 
 async def archive_vault(conn: asyncpg.Connection[Any], vault_id: str) -> Vault:
-    row = await conn.fetchrow(
-        "UPDATE vaults SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
-        vault_id,
-    )
-    if row is None:
-        raise NotFoundError(
-            f"vault {vault_id} not found or already archived",
-            detail={"id": vault_id},
+    """Archive a vault and purge the encrypted blobs of its active credentials.
+
+    Archive is an UPDATE, so ``ON DELETE CASCADE`` on the FK does not fire
+    here — child credentials must be archived and zeroed explicitly. Both
+    operations run in one transaction.
+    """
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            "UPDATE vaults SET archived_at = now(), updated_at = now() "
+            "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+            vault_id,
+        )
+        if row is None:
+            raise NotFoundError(
+                f"vault {vault_id} not found or already archived",
+                detail={"id": vault_id},
+            )
+        # Purge every active child credential's secret payload at the same
+        # moment we archive the parent vault.
+        await conn.execute(
+            "UPDATE vault_credentials "
+            "SET ciphertext = ''::bytea, nonce = ''::bytea, "
+            "    archived_at = now(), updated_at = now() "
+            "WHERE vault_id = $1 AND archived_at IS NULL",
+            vault_id,
         )
     return _row_to_vault(row)
 
 
 async def delete_vault(conn: asyncpg.Connection[Any], vault_id: str) -> None:
-    async with conn.transaction():
-        await conn.execute("DELETE FROM vault_credentials WHERE vault_id = $1", vault_id)
-        result = await conn.execute("DELETE FROM vaults WHERE id = $1", vault_id)
+    # Child credentials are removed by ``ON DELETE CASCADE`` (migration 0015).
+    result = await conn.execute("DELETE FROM vaults WHERE id = $1", vault_id)
     if result == "DELETE 0":
         raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
 
@@ -1117,12 +1133,38 @@ async def get_vault_credential(
     return _row_to_vault_credential(row)
 
 
-async def get_vault_credential_blob(
-    conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
-) -> EncryptedBlob:
+async def lock_oauth_credential_for_refresh(
+    conn: asyncpg.Connection[Any], vault_id: str, mcp_server_url: str
+) -> tuple[str, EncryptedBlob] | None:
+    """``SELECT FOR UPDATE`` the active credential for ``(vault_id, url)``.
+
+    Used by the OAuth refresh path to serialize concurrent refreshes of the
+    same credential. Returns ``(credential_id, EncryptedBlob)`` or ``None``
+    if no active credential exists. Caller owns the surrounding transaction.
+    """
     row = await conn.fetchrow(
-        "SELECT ciphertext, nonce FROM vault_credentials "
-        "WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL",
+        "SELECT id, ciphertext, nonce FROM vault_credentials "
+        "WHERE vault_id = $1 AND mcp_server_url = $2 AND archived_at IS NULL "
+        "FOR UPDATE",
+        vault_id,
+        mcp_server_url,
+    )
+    if row is None:
+        return None
+    blob = EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"]))
+    return str(row["id"]), blob
+
+
+async def get_vault_credential_with_blob(
+    conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
+) -> tuple[VaultCredential, EncryptedBlob]:
+    """Fetch the credential metadata and decrypted-blob inputs in one round-trip.
+
+    Excludes archived credentials — the blob is meaningless once archived
+    (and gets zeroed out at archive time).
+    """
+    row = await conn.fetchrow(
+        "SELECT * FROM vault_credentials WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL",
         credential_id,
         vault_id,
     )
@@ -1131,7 +1173,9 @@ async def get_vault_credential_blob(
             f"credential {credential_id} not found or archived",
             detail={"id": credential_id, "vault_id": vault_id},
         )
-    return EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"]))
+    cred = _row_to_vault_credential(row)
+    blob = EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"]))
+    return cred, blob
 
 
 async def list_vault_credentials(
@@ -1165,13 +1209,13 @@ async def update_vault_credential(
     vault_id: str,
     credential_id: str,
     *,
-    display_name: str | None = _UNSET,
     blob: EncryptedBlob | None = None,
-    metadata: dict[str, Any] | None = None,
+    display_name: str | None | EllipsisType = ...,
+    metadata: dict[str, Any] | None | EllipsisType = ...,
 ) -> VaultCredential:
     sets: list[str] = []
     args: list[Any] = [credential_id, vault_id]
-    if display_name is not _UNSET:
+    if display_name is not ...:
         args.append(display_name)
         sets.append(f"display_name = ${len(args)}")
     if blob is not None:
@@ -1179,7 +1223,7 @@ async def update_vault_credential(
         sets.append(f"ciphertext = ${len(args)}")
         args.append(blob.nonce)
         sets.append(f"nonce = ${len(args)}")
-    if metadata is not None:
+    if metadata is not ...:
         args.append(json.dumps(metadata))
         sets.append(f"metadata = ${len(args)}::jsonb")
     if not sets:
@@ -1201,8 +1245,16 @@ async def update_vault_credential(
 async def archive_vault_credential(
     conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
 ) -> VaultCredential:
+    """Archive a credential and zero out its encrypted secret payload.
+
+    The bytes are scrubbed at archive time so a future DB dump or query
+    cannot leak the secret, even though ``WHERE archived_at IS NULL``
+    filters in the read path already prevent resolution.
+    """
     row = await conn.fetchrow(
-        "UPDATE vault_credentials SET archived_at = now(), updated_at = now() "
+        "UPDATE vault_credentials "
+        "SET ciphertext = ''::bytea, nonce = ''::bytea, "
+        "    archived_at = now(), updated_at = now() "
         "WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL RETURNING *",
         credential_id,
         vault_id,
@@ -1321,16 +1373,18 @@ async def resolve_mcp_credential(
     conn: asyncpg.Connection[Any],
     session_id: str,
     mcp_server_url: str,
-) -> tuple[EncryptedBlob, str] | None:
+) -> tuple[EncryptedBlob, str, str] | None:
     """Find the first matching MCP credential across a session's bound vaults.
 
     Joins ``session_vaults`` (rank-ordered) with ``vault_credentials``
-    filtered by ``mcp_server_url``. Returns ``(EncryptedBlob, auth_type)``
-    for the first match, or ``None`` if no credential exists.
+    filtered by ``mcp_server_url``. Returns
+    ``(EncryptedBlob, auth_type, vault_id)`` for the first match, or
+    ``None`` if no credential exists. The ``vault_id`` is needed by the
+    OAuth refresh path to scope ``SELECT … FOR UPDATE`` to a specific row.
     """
     row = await conn.fetchrow(
         """
-        SELECT vc.ciphertext, vc.nonce, vc.auth_type
+        SELECT vc.ciphertext, vc.nonce, vc.auth_type, vc.vault_id
           FROM session_vaults sv
           JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
          WHERE sv.session_id = $1
@@ -1344,7 +1398,11 @@ async def resolve_mcp_credential(
     )
     if row is None:
         return None
-    return EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]), str(row["auth_type"])
+    return (
+        EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]),
+        str(row["auth_type"]),
+        str(row["vault_id"]),
+    )
 
 
 # ─── skills ──────────────────────────────────────────────────────────────────

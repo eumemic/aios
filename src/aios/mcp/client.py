@@ -24,6 +24,7 @@ from mcp.client.streamable_http import streamable_http_client
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.logging import get_logger
+from aios.services.vaults import is_expiring, refresh_credential
 
 log = get_logger("aios.mcp.client")
 
@@ -43,25 +44,13 @@ async def _open_session(url: str, headers: dict[str, str], stack: AsyncExitStack
     return session
 
 
-def _headers_from_credential(
-    crypto_box: CryptoBox,
-    blob: Any,
-    auth_type: str,
-) -> dict[str, str]:
-    payload = json.loads(crypto_box.decrypt(blob))
-
+def _token_from_payload(payload: dict[str, Any], auth_type: str) -> str:
     if auth_type == "static_bearer":
-        token = payload.get("token", "")
-    elif auth_type == "mcp_oauth":
-        token = payload.get("access_token", "")
-    else:
-        log.warning("mcp.unknown_auth_type", auth_type=auth_type)
-        return {}
-
-    if not token:
-        return {}
-
-    return {"Authorization": f"Bearer {token}"}
+        return str(payload.get("token", ""))
+    if auth_type == "mcp_oauth":
+        return str(payload.get("access_token", ""))
+    log.warning("mcp.unknown_auth_type", auth_type=auth_type)
+    return ""
 
 
 async def resolve_auth_for_url(
@@ -72,25 +61,57 @@ async def resolve_auth_for_url(
 ) -> dict[str, str]:
     """Resolve MCP auth headers for ``mcp_server_url``.
 
-    Connection-owned URLs resolve through the connection's vault;
-    other URLs fall back to the session's bound vaults.  A connection
-    that owns the URL but has no matching credential returns ``{}``
-    rather than falling back — ownership decides the source, not
-    whether the lookup hits (prevents a misconfigured connection from
-    silently leaking a tenant-level credential).
+    Connection-owned URLs resolve through the connection's vault; other
+    URLs fall back to the session's bound vaults (``session_vaults``).
+    A connection that owns the URL but has no matching credential
+    returns ``{}`` rather than falling back — ownership decides the
+    source, not whether the lookup hits (prevents a misconfigured
+    connection from silently leaking a tenant-level credential).
+
+    For ``mcp_oauth`` credentials whose ``expires_at`` falls within the
+    refresh skew window, the access token is transparently refreshed
+    (row-locked via ``refresh_credential`` to serialize concurrent
+    refreshes of the same row) before returning.  OAuth refresh failures
+    bubble up as :class:`OAuthRefreshError`; there is no silent fallback
+    to the stale token.
     """
     async with pool.acquire() as conn:
         connection_vault_id = await queries.get_connection_vault_for_url(conn, mcp_server_url)
         if connection_vault_id is not None:
-            result = await queries.resolve_vault_credential(
+            vault_result = await queries.resolve_vault_credential(
                 conn, vault_id=connection_vault_id, mcp_server_url=mcp_server_url
             )
+            if vault_result is None:
+                return {}
+            blob, auth_type = vault_result
+            vault_id = connection_vault_id
         else:
-            result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
-    if result is None:
+            session_result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
+            if session_result is None:
+                return {}
+            blob, auth_type, vault_id = session_result
+
+        if auth_type == "mcp_oauth":
+            payload = json.loads(crypto_box.decrypt(blob))
+            if is_expiring(payload):
+                await refresh_credential(
+                    crypto_box, conn, vault_id=vault_id, mcp_server_url=mcp_server_url
+                )
+                refreshed = await queries.resolve_vault_credential(
+                    conn, vault_id=vault_id, mcp_server_url=mcp_server_url
+                )
+                if refreshed is None:
+                    return {}
+                blob = refreshed[0]
+                payload = json.loads(crypto_box.decrypt(blob))
+            token = str(payload.get("access_token", ""))
+        else:
+            payload = json.loads(crypto_box.decrypt(blob))
+            token = _token_from_payload(payload, auth_type)
+
+    if not token:
         return {}
-    blob, auth_type = result
-    return _headers_from_credential(crypto_box, blob, auth_type)
+    return {"Authorization": f"Bearer {token}"}
 
 
 async def discover_mcp_tools(

@@ -9,11 +9,46 @@ in API responses.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 AuthType = Literal["mcp_oauth", "static_bearer"]
+
+
+# ── Token endpoint auth (for OAuth refresh) ─────────────────────────────────
+
+
+class TokenEndpointAuthNone(BaseModel):
+    """Public OAuth client — no credentials sent on the refresh call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["none"]
+
+
+class TokenEndpointAuthBasic(BaseModel):
+    """OAuth client_secret_basic — HTTP Basic header on the refresh call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["client_secret_basic"]
+    client_secret: SecretStr
+
+
+class TokenEndpointAuthPost(BaseModel):
+    """OAuth client_secret_post — client_secret in the form body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["client_secret_post"]
+    client_secret: SecretStr
+
+
+TokenEndpointAuth = Annotated[
+    TokenEndpointAuthNone | TokenEndpointAuthBasic | TokenEndpointAuthPost,
+    Field(discriminator="method"),
+]
 
 
 # ── Vault ────────────────────────────────────────────────────────────────────
@@ -70,10 +105,9 @@ class VaultCredentialCreate(BaseModel):
     access_token: SecretStr | None = None
     expires_at: datetime | None = None
     client_id: str | None = None
-    client_secret: SecretStr | None = None
     refresh_token: SecretStr | None = None
     token_endpoint: str | None = None
-    token_endpoint_auth: str | None = None
+    token_endpoint_auth: TokenEndpointAuth | None = None
     scope: str | None = None
     resource: str | None = None
 
@@ -97,10 +131,9 @@ class VaultCredentialUpdate(BaseModel):
     access_token: SecretStr | None = None
     expires_at: datetime | None = None
     client_id: str | None = None
-    client_secret: SecretStr | None = None
     refresh_token: SecretStr | None = None
     token_endpoint: str | None = None
-    token_endpoint_auth: str | None = None
+    token_endpoint_auth: TokenEndpointAuth | None = None
     scope: str | None = None
     resource: str | None = None
 

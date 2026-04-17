@@ -8,14 +8,19 @@ layer validates auth-type-specific fields and enforces limits.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import asyncpg
+import httpx
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.errors import ValidationError
+from aios.errors import NotFoundError, OAuthRefreshError, ValidationError
+from aios.logging import get_logger
 from aios.models.vaults import (
+    TokenEndpointAuth,
+    TokenEndpointAuthNone,
     Vault,
     VaultCredential,
     VaultCredentialCreate,
@@ -24,12 +29,24 @@ from aios.models.vaults import (
 
 MAX_CREDENTIALS_PER_VAULT = 20
 
-# Fields that go into the encrypted payload for each auth type.
+# Refresh an OAuth token if it expires within this window — gives the
+# in-flight MCP request enough headroom to complete on the new token.
+REFRESH_SKEW_SECONDS = 30
+
+# Timeout for the OAuth token-endpoint POST. Generous because OAuth providers
+# vary widely; tighter values cause spurious refresh failures.
+_REFRESH_HTTP_TIMEOUT_SECONDS = 30
+
+log = get_logger("aios.services.vaults")
+
+# Fields that go into the encrypted payload for each auth type. The
+# ``token_endpoint_auth`` field is a discriminated Pydantic union and gets
+# special-cased in the (de)serializers below; ``client_secret`` lives inside
+# its variants.
 _OAUTH_FIELDS = (
     "access_token",
     "expires_at",
     "client_id",
-    "client_secret",
     "refresh_token",
     "token_endpoint",
     "token_endpoint_auth",
@@ -37,6 +54,166 @@ _OAUTH_FIELDS = (
     "resource",
 )
 _BEARER_FIELDS = ("token",)
+
+
+def _serialize_token_endpoint_auth(v: TokenEndpointAuth) -> dict[str, str]:
+    """Flatten the typed union into a JSON-serializable dict with the secret unwrapped."""
+    if isinstance(v, TokenEndpointAuthNone):
+        return {"method": "none"}
+    return {"method": v.method, "client_secret": v.client_secret.get_secret_value()}
+
+
+def is_expiring(payload: dict[str, Any], skew: int = REFRESH_SKEW_SECONDS) -> bool:
+    """Return True if the token's ``expires_at`` is within ``skew`` seconds of now.
+
+    Missing ``expires_at`` is treated as "never expires" (False) so that
+    legacy / non-expiring tokens behave like ``static_bearer``.
+    """
+    raw = payload.get("expires_at")
+    if not raw:
+        return False
+    try:
+        expires_at = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at <= datetime.now(UTC) + timedelta(seconds=skew)
+
+
+async def refresh_credential(
+    crypto_box: CryptoBox,
+    conn: asyncpg.Connection[Any],
+    *,
+    vault_id: str,
+    mcp_server_url: str,
+) -> None:
+    """Refresh the OAuth access token for ``(vault_id, mcp_server_url)``.
+
+    Concurrency-safe: opens a transaction, locks the credential row with
+    ``SELECT … FOR UPDATE``, then re-checks ``expires_at`` against the skew
+    window. If a parallel coroutine already refreshed during the wait on
+    the lock, this call returns without POSTing.
+
+    Raises :class:`OAuthRefreshError` on any HTTP failure, malformed
+    response, or missing fields. The transaction rolls back on raise so the
+    stale token stays in place for the next attempt.
+    """
+    async with conn.transaction():
+        locked = await queries.lock_oauth_credential_for_refresh(conn, vault_id, mcp_server_url)
+        if locked is None:
+            raise OAuthRefreshError(
+                f"no active credential for {mcp_server_url!r} in vault {vault_id}",
+                detail={"vault_id": vault_id, "mcp_server_url": mcp_server_url},
+            )
+        credential_id, blob = locked
+        try:
+            payload: dict[str, Any] = json.loads(crypto_box.decrypt(blob))
+        except Exception as exc:
+            raise OAuthRefreshError(
+                "failed to decrypt stored credential",
+                detail={"credential_id": credential_id, "reason": str(exc)},
+            ) from exc
+
+        # Double-check after lock — another worker may have refreshed already.
+        if not is_expiring(payload):
+            return
+
+        token_endpoint = payload.get("token_endpoint")
+        refresh_token = payload.get("refresh_token")
+        client_id = payload.get("client_id")
+        if not token_endpoint or not refresh_token or not client_id:
+            raise OAuthRefreshError(
+                "credential is missing required refresh fields",
+                detail={
+                    "credential_id": credential_id,
+                    "missing": [
+                        name
+                        for name, val in (
+                            ("token_endpoint", token_endpoint),
+                            ("refresh_token", refresh_token),
+                            ("client_id", client_id),
+                        )
+                        if not val
+                    ],
+                },
+            )
+
+        # Build the POST per the configured token_endpoint_auth method.
+        endpoint_auth = payload.get("token_endpoint_auth") or {"method": "none"}
+        method = endpoint_auth.get("method", "none")
+        body: dict[str, str] = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+        }
+        post_kwargs: dict[str, Any] = {"data": body}
+        if method == "client_secret_basic":
+            post_kwargs["auth"] = httpx.BasicAuth(client_id, endpoint_auth.get("client_secret", ""))
+        elif method == "client_secret_post":
+            body["client_secret"] = endpoint_auth.get("client_secret", "")
+        # method == "none" → nothing extra; client_id alone identifies the public client.
+
+        scope = payload.get("scope")
+        if scope:
+            body["scope"] = scope
+
+        try:
+            async with httpx.AsyncClient(timeout=_REFRESH_HTTP_TIMEOUT_SECONDS) as client:
+                resp = await client.post(token_endpoint, **post_kwargs)
+                resp.raise_for_status()
+                token_data = resp.json()
+        except httpx.HTTPError as exc:
+            log.warning(
+                "vault.oauth_refresh_http_error",
+                credential_id=credential_id,
+                token_endpoint=token_endpoint,
+                exc_info=True,
+            )
+            raise OAuthRefreshError(
+                f"OAuth token endpoint request failed: {exc}",
+                detail={
+                    "credential_id": credential_id,
+                    "token_endpoint": token_endpoint,
+                },
+            ) from exc
+
+        new_access_token = token_data.get("access_token")
+        if not new_access_token:
+            raise OAuthRefreshError(
+                "OAuth response missing 'access_token'",
+                detail={
+                    "credential_id": credential_id,
+                    "token_endpoint": token_endpoint,
+                },
+            )
+
+        payload["access_token"] = new_access_token
+        # Rotate refresh_token if the provider returned a new one; otherwise keep.
+        rotated = token_data.get("refresh_token")
+        if rotated:
+            payload["refresh_token"] = rotated
+        # Update expires_at if the provider declared an expires_in. Accept
+        # numeric strings as well as int/float — RFC 6749 says SHOULD be a
+        # number, but real providers (Slack, others) sometimes return strings.
+        # Without this, the new access_token would be stored without an
+        # ``expires_at`` and ``is_expiring`` would treat it as never-expiring.
+        try:
+            seconds = int(token_data.get("expires_in", 0))
+        except (TypeError, ValueError):
+            seconds = 0
+        if seconds > 0:
+            payload["expires_at"] = (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
+
+        new_blob = crypto_box.encrypt(json.dumps(payload))
+        await conn.execute(
+            "UPDATE vault_credentials "
+            "SET ciphertext = $1, nonce = $2, updated_at = now() "
+            "WHERE id = $3",
+            new_blob.ciphertext,
+            new_blob.nonce,
+            credential_id,
+        )
 
 
 # ── vault CRUD ──────────────────────────────────────────────────────────────
@@ -117,13 +294,16 @@ def _extract_auth_payload(body: VaultCredentialCreate) -> dict[str, Any]:
         payload = {}
         for field in _OAUTH_FIELDS:
             val = getattr(body, field)
-            if val is not None:
-                if hasattr(val, "get_secret_value"):
-                    payload[field] = val.get_secret_value()
-                elif hasattr(val, "isoformat"):
-                    payload[field] = val.isoformat()
-                else:
-                    payload[field] = val
+            if val is None:
+                continue
+            if field == "token_endpoint_auth":
+                payload[field] = _serialize_token_endpoint_auth(val)
+            elif hasattr(val, "get_secret_value"):
+                payload[field] = val.get_secret_value()
+            elif hasattr(val, "isoformat"):
+                payload[field] = val.isoformat()
+            else:
+                payload[field] = val
         return payload
 
 
@@ -139,16 +319,19 @@ def _merge_auth_payload(
     fields = _OAUTH_FIELDS if auth_type == "mcp_oauth" else _BEARER_FIELDS
     merged = dict(existing)
     for field in fields:
-        if field in body.model_fields_set:
-            val = getattr(body, field)
-            if val is None:
-                merged.pop(field, None)
-            elif hasattr(val, "get_secret_value"):
-                merged[field] = val.get_secret_value()
-            elif hasattr(val, "isoformat"):
-                merged[field] = val.isoformat()
-            else:
-                merged[field] = val
+        if field not in body.model_fields_set:
+            continue
+        val = getattr(body, field)
+        if val is None:
+            merged.pop(field, None)
+        elif field == "token_endpoint_auth":
+            merged[field] = _serialize_token_endpoint_auth(val)
+        elif hasattr(val, "get_secret_value"):
+            merged[field] = val.get_secret_value()
+        elif hasattr(val, "isoformat"):
+            merged[field] = val.isoformat()
+        else:
+            merged[field] = val
     return merged
 
 
@@ -161,7 +344,19 @@ async def create_vault_credential(
 ) -> VaultCredential:
     payload = _extract_auth_payload(body)
     blob = crypto_box.encrypt(json.dumps(payload))
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        # Lock the parent vault row to serialize concurrent credential inserts
+        # within this vault. Without it, two parallel inserts can both observe
+        # ``count == MAX-1`` and overflow the cap.
+        locked = await conn.fetchrow(
+            "SELECT 1 FROM vaults WHERE id = $1 FOR UPDATE",
+            vault_id,
+        )
+        if locked is None:
+            raise NotFoundError(
+                f"vault {vault_id} not found",
+                detail={"vault_id": vault_id},
+            )
         count = await queries.count_active_vault_credentials(conn, vault_id)
         if count >= MAX_CREDENTIALS_PER_VAULT:
             raise ValidationError(
@@ -207,8 +402,9 @@ async def update_vault_credential(
 ) -> VaultCredential:
     async with pool.acquire() as conn:
         # Decrypt existing payload, merge provided fields, re-encrypt.
-        cred = await queries.get_vault_credential(conn, vault_id, credential_id)
-        existing_blob = await queries.get_vault_credential_blob(conn, vault_id, credential_id)
+        cred, existing_blob = await queries.get_vault_credential_with_blob(
+            conn, vault_id, credential_id
+        )
         existing_payload = json.loads(crypto_box.decrypt(existing_blob))
         merged = _merge_auth_payload(existing_payload, body, cred.auth_type)
         new_blob = crypto_box.encrypt(json.dumps(merged))
@@ -217,11 +413,9 @@ async def update_vault_credential(
             conn,
             vault_id,
             credential_id,
-            display_name=body.display_name
-            if "display_name" in body.model_fields_set
-            else queries._UNSET,
             blob=new_blob,
-            metadata=body.metadata,
+            display_name=(body.display_name if "display_name" in body.model_fields_set else ...),
+            metadata=body.metadata if "metadata" in body.model_fields_set else ...,
         )
 
 
