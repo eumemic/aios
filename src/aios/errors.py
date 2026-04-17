@@ -97,6 +97,25 @@ class CryptoDecryptError(AiosError):
     status_code = 500
 
 
+class OAuthRefreshError(AiosError):
+    """Raised when refreshing an MCP OAuth access token fails.
+
+    Causes include: the token endpoint returned a non-2xx response, the
+    response was missing ``access_token``, the network call timed out, or
+    the stored credential is missing required fields (``refresh_token``,
+    ``token_endpoint``, ``client_id``).
+
+    The error bubbles up from ``resolve_auth_headers`` so the model sees
+    the resulting MCP failure in its next tool result envelope and can
+    react. There is deliberately no silent fallback to the stale
+    ``access_token`` — that would mask a recoverable failure as a
+    permanent 401.
+    """
+
+    error_type = "oauth_refresh_error"
+    status_code = 502
+
+
 # ─── FastAPI integration ─────────────────────────────────────────────────────
 
 
