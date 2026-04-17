@@ -206,3 +206,20 @@ def test_build_mcp_app_returns_starlette() -> None:
     mcp = build_mcp_server(rpc=rpc)  # type: ignore[arg-type]
     app = build_mcp_app(mcp, token="t")
     assert isinstance(app, Starlette)
+
+
+def test_build_mcp_server_passes_signal_instructions() -> None:
+    """The MCP server's ``instructions`` field is the transport for
+    Signal's per-connector affordance prose; aios reads it from the
+    ``InitializeResult`` returned by ``session.initialize()`` and
+    composes it into the agent's system prompt.
+    """
+    from aios_signal.prompts import SIGNAL_SERVER_INSTRUCTIONS
+
+    rpc = FakeRpc()
+    mcp = build_mcp_server(rpc=rpc)  # type: ignore[arg-type]
+    assert mcp.instructions == SIGNAL_SERVER_INSTRUCTIONS
+    # Sanity-check the prose covers the v1 toolset.
+    assert "signal_send" in mcp.instructions
+    assert "signal_react" in mcp.instructions
+    assert "signal_read_receipt" in mcp.instructions

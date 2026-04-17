@@ -1758,7 +1758,10 @@ async def get_connections_by_pairs(
 ) -> list[Connection]:
     """Active connections where ``(connector, account)`` is in ``pairs``.
 
-    Empty input → no roundtrip.
+    Empty input → no roundtrip.  Results are ordered by ``c.id`` so the
+    caller can feed them into the system prompt in a stable order — a
+    prerequisite for prompt-cache stability across steps, since the
+    caller-side ``pairs`` are typically built from a set.
     """
     if not pairs:
         return []
@@ -1771,6 +1774,7 @@ async def get_connections_by_pairs(
           JOIN unnest($1::text[], $2::text[]) AS p(connector, account)
             ON c.connector = p.connector AND c.account = p.account
          WHERE c.archived_at IS NULL
+         ORDER BY c.id
         """,
         connectors,
         accounts,

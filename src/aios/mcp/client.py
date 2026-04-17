@@ -20,6 +20,7 @@ import asyncpg
 import httpx
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.types import InitializeResult
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
@@ -31,8 +32,14 @@ log = get_logger("aios.mcp.client")
 MAX_TOOLS_PER_SERVER = 128
 
 
-async def _open_session(url: str, headers: dict[str, str], stack: AsyncExitStack) -> ClientSession:
-    """Open a fully initialized MCP session, registering all contexts on *stack*."""
+async def _open_session(
+    url: str, headers: dict[str, str], stack: AsyncExitStack
+) -> tuple[ClientSession, InitializeResult]:
+    """Open a fully initialized MCP session, registering all contexts on *stack*.
+
+    Returns the session along with the ``InitializeResult`` so callers can
+    read server-supplied metadata (notably ``instructions``).
+    """
     http_client = await stack.enter_async_context(httpx.AsyncClient(headers=headers))
     read_stream, write_stream, _ = await stack.enter_async_context(
         streamable_http_client(url, http_client=http_client)
@@ -40,8 +47,8 @@ async def _open_session(url: str, headers: dict[str, str], stack: AsyncExitStack
     session: ClientSession = await stack.enter_async_context(
         ClientSession(read_stream, write_stream)
     )
-    await session.initialize()
-    return session
+    init_result = await session.initialize()
+    return session, init_result
 
 
 def _token_from_payload(payload: dict[str, Any], auth_type: str) -> str:
@@ -118,16 +125,24 @@ async def discover_mcp_tools(
     url: str,
     server_name: str,
     headers: dict[str, str],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str | None]:
     """Connect to an MCP server and discover available tools.
 
-    Returns a list of OpenAI-format tool dicts with namespaced names
-    (``mcp__<server_name>__<tool_name>``). On any error, logs a warning
-    and returns an empty list — the model simply doesn't see those tools.
+    Returns a ``(tools, instructions)`` pair:
+
+    * ``tools`` — OpenAI-format tool dicts with namespaced names
+      (``mcp__<server_name>__<tool_name>``).
+    * ``instructions`` — the server's ``InitializeResult.instructions``
+      string (per the MCP spec), or ``None`` if the server didn't supply
+      any. Used by the harness to compose per-connector affordance prose
+      into the system prompt.
+
+    On any error, logs a warning and returns ``([], None)`` — the model
+    simply doesn't see those tools (or that connector's instructions).
     """
     try:
         async with AsyncExitStack() as stack:
-            session = await _open_session(url, headers, stack)
+            session, init_result = await _open_session(url, headers, stack)
             result = await session.list_tools()
 
         if len(result.tools) > MAX_TOOLS_PER_SERVER:
@@ -150,7 +165,7 @@ async def discover_mcp_tools(
                     },
                 }
             )
-        return tools
+        return tools, init_result.instructions
 
     except Exception:
         log.warning(
@@ -159,7 +174,7 @@ async def discover_mcp_tools(
             url=url,
             exc_info=True,
         )
-        return []
+        return [], None
 
 
 async def call_mcp_tool(
@@ -176,7 +191,7 @@ async def call_mcp_tool(
     """
     try:
         async with AsyncExitStack() as stack:
-            session = await _open_session(url, headers, stack)
+            session, _ = await _open_session(url, headers, stack)
             result = await session.call_tool(tool_name, arguments)
 
         # Concatenate text content from the result.

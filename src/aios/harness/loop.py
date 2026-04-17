@@ -97,8 +97,18 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         )
         return
 
+    # Discovery runs before prompt assembly because each MCP server's
+    # instructions feed the per-connector affordance block.
+    tools = to_openai_tools(agent.tools)
+    mcp_instructions: dict[str, str] = {}
+    if agent.mcp_servers or connections:
+        mcp_tools, mcp_instructions = await discover_session_mcp_tools(
+            pool, session_id, agent, connections
+        )
+        tools.extend(mcp_tools)
+
     # Resolve skills and augment system prompt.
-    from aios.harness.channels import augment_with_channels
+    from aios.harness.channels import augment_with_channels, augment_with_connector_instructions
     from aios.harness.skills import augment_system_prompt, provision_skill_files
     from aios.services import skills as skills_service
 
@@ -107,17 +117,13 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     )
     system_prompt = augment_system_prompt(agent.system, skill_versions)
     system_prompt = augment_with_channels(system_prompt, bindings)
+    system_prompt = augment_with_connector_instructions(
+        system_prompt, mcp_instructions, connections
+    )
 
     # Provision skill files to workspace (idempotent, host-side writes).
     if skill_versions:
         await provision_skill_files(session_id, skill_versions)
-
-    # Build context with pending-result synthesis.
-    tools = to_openai_tools(agent.tools)
-
-    if agent.mcp_servers or connections:
-        mcp_tools = await discover_session_mcp_tools(pool, session_id, agent, connections)
-        tools.extend(mcp_tools)
 
     ctx = build_messages(
         events,
@@ -360,9 +366,15 @@ async def discover_session_mcp_tools(
     session_id: str,
     agent: Any,
     connections: list[Any],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Discover MCP tools from agent-declared servers (filtered by enabled
     ``mcp_toolset`` entries) unioned with connection-provided servers.
+
+    Returns ``(tools, instructions_by_server)`` where the second element
+    maps ``server_name`` → the server's ``InitializeResult.instructions``
+    string.  Servers that supplied no instructions (or ``""``) are
+    omitted from the dict — the harness uses presence in the dict as
+    the trigger for rendering a per-connector affordance block.
     """
     import asyncio
 
@@ -383,16 +395,24 @@ async def discover_session_mcp_tools(
         servers.append((connection_server_name(c), c.mcp_url))
 
     if not servers:
-        return []
+        return [], {}
 
     crypto_box = runtime.require_crypto_box()
 
-    async def _discover_one(name: str, url: str) -> list[dict[str, Any]]:
+    async def _discover_one(name: str, url: str) -> tuple[list[dict[str, Any]], str | None]:
         headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
         return await discover_mcp_tools(url, name, headers)
 
     results = await asyncio.gather(*[_discover_one(n, u) for n, u in servers])
-    return [tool for tools in results for tool in tools]
+    tools: list[dict[str, Any]] = [
+        tool for (tool_list, _instructions) in results for tool in tool_list
+    ]
+    instructions_by_server: dict[str, str] = {
+        name: instructions
+        for (name, _url), (_tools, instructions) in zip(servers, results, strict=True)
+        if instructions
+    }
+    return tools, instructions_by_server
 
 
 async def _dispatch_confirmed_tools(

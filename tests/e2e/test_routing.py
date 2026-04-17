@@ -1073,6 +1073,12 @@ class TestGetConnectionsByPairs:
             )
         ids = {c.id for c in rows}
         assert ids == {c_a.id, c_b.id}
+        # Results must be id-ordered so callers can pass them into the
+        # system prompt in a stable order (prompt-cache stability
+        # invariant).  Caller-side inputs are typically set-derived and
+        # therefore have non-deterministic order across processes.
+        returned_ids = [c.id for c in rows]
+        assert returned_ids == sorted(returned_ids)
 
     async def test_excludes_archived(self, pool: Any, vault_id: str) -> None:
         from aios.db import queries
