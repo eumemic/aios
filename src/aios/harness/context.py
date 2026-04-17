@@ -26,9 +26,77 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from aios.models.events import Event
+
+
+def _format_channel_header(metadata: dict[str, Any]) -> str:
+    """Render a one-line header describing the origin of an inbound message.
+
+    When a user message carries channel metadata, the raw fields are
+    whitelisted out of the chat-completions message before the model ever
+    sees them (see ``_ALLOWED_FIELDS``).  That leaves the model with no way
+    to know the sender or timestamp — values the connector tools need as
+    arguments.  Inline the salient fields into the visible ``content`` so
+    the model can read them natively.
+    """
+    if not isinstance(metadata, dict) or "channel" not in metadata:
+        return ""
+    parts: list[str] = [f"channel={metadata['channel']}"]
+    chat_type = metadata.get("chat_type")
+    if isinstance(chat_type, str) and chat_type:
+        parts.append(f"chat_type={chat_type}")
+    chat_name = metadata.get("chat_name")
+    if isinstance(chat_name, str) and chat_name:
+        parts.append(f"chat_name={chat_name!r}")
+    sender_name = metadata.get("sender_name")
+    if isinstance(sender_name, str) and sender_name:
+        parts.append(f"from={sender_name}")
+    sender_uuid = metadata.get("sender_uuid")
+    if isinstance(sender_uuid, str) and sender_uuid:
+        parts.append(f"sender_uuid={sender_uuid}")
+    timestamp_ms = metadata.get("timestamp_ms")
+    if isinstance(timestamp_ms, int):
+        iso = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat(timespec="milliseconds")
+        parts.append(f"timestamp_ms={timestamp_ms} ({iso})")
+    header = "[" + " · ".join(parts) + "]"
+    # Surface platform-native reactions (emoji tap-backs) that come through
+    # as message events with empty content. Without this line the agent sees
+    # the user event as a blank message.
+    reaction = metadata.get("reaction")
+    if isinstance(reaction, dict):
+        emoji = reaction.get("emoji") or "?"
+        r_parts: list[str] = [f"reaction={emoji!r}"]
+        target_author = reaction.get("target_author_uuid")
+        if isinstance(target_author, str) and target_author:
+            r_parts.append(f"target_author_uuid={target_author}")
+        target_ts = reaction.get("target_timestamp_ms")
+        if isinstance(target_ts, int):
+            r_parts.append(f"target_timestamp_ms={target_ts}")
+        header += "\n[" + " · ".join(r_parts) + "]"
+    # Surface a quoted-reply summary when present so the model can see
+    # which message the user is responding to via the platform's native
+    # reply feature.
+    reply_to = metadata.get("reply_to")
+    if isinstance(reply_to, dict):
+        quoted = (reply_to.get("text") or "").replace("\n", " ").strip()
+        quote_parts: list[str] = []
+        author = reply_to.get("author_uuid")
+        if isinstance(author, str) and author:
+            quote_parts.append(f"author_uuid={author}")
+        ts = reply_to.get("timestamp_ms")
+        if isinstance(ts, int):
+            quote_parts.append(f"timestamp_ms={ts}")
+        quote_meta = " · ".join(quote_parts) if quote_parts else "?"
+        if quoted:
+            snippet = quoted if len(quoted) <= 200 else quoted[:200] + "…"
+            header += f"\n[reply_to: {quote_meta}] > {snippet}"
+        else:
+            header += f"\n[reply_to: {quote_meta}]"
+    return header
+
 
 # Chat-completions spec fields per role.  Only these are emitted in the
 # context; provider-specific extensions (reasoning_content, etc.) stay
@@ -237,6 +305,12 @@ def build_messages(
 
         if role == "user":
             msg = {k: v for k, v in e.data.items() if k != "metadata"}
+            metadata = e.data.get("metadata")
+            if isinstance(metadata, dict):
+                header = _format_channel_header(metadata)
+                if header:
+                    existing = msg.get("content") or ""
+                    msg["content"] = f"{header}\n{existing}" if existing else header
             messages.append(msg)
             max_stimulus_seq = max(max_stimulus_seq, e.seq)
 

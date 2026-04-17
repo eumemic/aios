@@ -20,6 +20,7 @@ def _evt(
     tool_calls: list[dict[str, Any]] | None = None,
     tool_call_id: str | None = None,
     content: str = "",
+    metadata: dict[str, Any] | None = None,
 ) -> Event:
     """Build a minimal message Event for testing."""
     data: dict[str, Any] = {"role": role, "content": content}
@@ -27,6 +28,8 @@ def _evt(
         data["tool_calls"] = tool_calls
     if tool_call_id is not None:
         data["tool_call_id"] = tool_call_id
+    if metadata is not None:
+        data["metadata"] = metadata
     return Event(
         id=f"evt_{seq}",
         session_id="sess_01TEST",
@@ -744,3 +747,115 @@ class TestToolCallSanitization:
         ]
         build_messages(events, system_prompt=None)
         assert events[1].data["tool_calls"][0]["function"]["arguments"] == bad_args
+
+
+# ─── channel header inlining ────────────────────────────────────────────────
+
+
+class TestChannelHeader:
+    """Inbound messages stamped with connector metadata get a header line
+    inlined into their ``content`` so the model can natively read the
+    channel, sender, timestamp, reply-to, and reaction fields.
+
+    Metadata is whitelisted out of the chat-completions message by
+    :func:`_strip_to_spec`; the header is the agent-visible projection.
+    """
+
+    def test_no_metadata_leaves_content_untouched(self) -> None:
+        events = [_evt(1, "user", content="hello")]
+        msgs = build_messages(events, system_prompt=None).messages
+        assert msgs[0]["content"] == "hello"
+
+    def test_non_dict_metadata_leaves_content_untouched(self) -> None:
+        # metadata field exists but isn't a dict — defensive: no crash, no header.
+        events = [_evt(1, "user", content="hello", metadata={})]
+        msgs = build_messages(events, system_prompt=None).messages
+        # empty dict has no "channel" key → no header
+        assert msgs[0]["content"] == "hello"
+
+    def test_basic_channel_header(self) -> None:
+        md = {
+            "channel": "signal/bot-uuid/peer-uuid",
+            "sender_uuid": "peer-uuid",
+            "timestamp_ms": 1776401210703,
+        }
+        events = [_evt(1, "user", content="hi", metadata=md)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert content.startswith("[channel=signal/bot-uuid/peer-uuid")
+        assert "sender_uuid=peer-uuid" in content
+        assert "timestamp_ms=1776401210703" in content
+        assert content.endswith("\nhi")
+
+    def test_header_includes_chat_type_and_name(self) -> None:
+        md = {
+            "channel": "signal/bot/group-id",
+            "chat_type": "group",
+            "chat_name": "QA",
+            "sender_uuid": "u1",
+            "sender_name": "Tom",
+            "timestamp_ms": 1776401210703,
+        }
+        events = [_evt(1, "user", content="yo", metadata=md)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "chat_type=group" in content
+        assert "chat_name='QA'" in content
+        assert "from=Tom" in content
+
+    def test_header_surfaces_reply_to(self) -> None:
+        md = {
+            "channel": "signal/bot/peer",
+            "reply_to": {
+                "author_uuid": "bot",
+                "timestamp_ms": 1776400000000,
+                "text": "what I said before",
+            },
+        }
+        events = [_evt(1, "user", content="reacting to that", metadata=md)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        # Second line is the reply block with quoted text preview.
+        assert "\n[reply_to: author_uuid=bot · timestamp_ms=1776400000000]" in content
+        assert "> what I said before" in content
+        assert content.endswith("\nreacting to that")
+
+    def test_header_surfaces_reaction(self) -> None:
+        """Reactions arrive as user events with empty content; the header
+        makes the agent see them as a reaction rather than a blank message.
+        """
+        md = {
+            "channel": "signal/bot/peer",
+            "reaction": {
+                "emoji": "👍",
+                "target_author_uuid": "bot",
+                "target_timestamp_ms": 1776400000000,
+            },
+        }
+        events = [_evt(1, "user", content="", metadata=md)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "[reaction='👍'" in content
+        assert "target_author_uuid=bot" in content
+        assert "target_timestamp_ms=1776400000000" in content
+
+    def test_metadata_stripped_from_wire_message(self) -> None:
+        """The chat-completions message only has spec fields (role, content,
+        name). ``metadata`` must never appear.
+        """
+        md = {"channel": "signal/bot/peer", "sender_uuid": "u1"}
+        events = [_evt(1, "user", content="hi", metadata=md)]
+        msg = build_messages(events, system_prompt=None).messages[0]
+        assert "metadata" not in msg
+        assert set(msg.keys()) <= {"role", "content", "name"}
+
+    def test_timestamp_ms_gets_iso_alongside_raw(self) -> None:
+        """Model sees both the raw ms integer (for tool args) and a
+        human-readable ISO form (for reading).
+        """
+        md = {
+            "channel": "signal/bot/peer",
+            "timestamp_ms": 1776401210703,
+        }
+        events = [_evt(1, "user", content="hi", metadata=md)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        # Raw integer appears for tool args.
+        assert "timestamp_ms=1776401210703" in content
+        # ISO rendering (UTC, millisecond precision) appears parenthesized.
+        assert "(2026-04-17T" in content
