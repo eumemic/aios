@@ -1807,6 +1807,26 @@ async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) 
     return _row_to_connection(row)
 
 
+async def count_active_bindings_for_connection(
+    conn: asyncpg.Connection[Any], *, connector: str, account: str
+) -> int:
+    """Count active channel bindings whose address is scoped to this
+    (connector, account). Used to block connection archival while sessions
+    are still reachable via those bindings — archiving the connection would
+    silently drop the connection-provided MCP tools from any live session.
+
+    Uses ``starts_with`` (literal prefix match) rather than ``LIKE`` so
+    accounts containing ``%`` or ``_`` don't expand into wildcard matches.
+    """
+    prefix = f"{connector}/{account}/"
+    val: int = await conn.fetchval(
+        "SELECT COUNT(*) FROM channel_bindings "
+        "WHERE starts_with(address, $1) AND archived_at IS NULL",
+        prefix,
+    )
+    return val
+
+
 # ─── channel bindings ───────────────────────────────────────────────────────
 
 

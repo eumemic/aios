@@ -1,9 +1,10 @@
 """Business logic for connection resources.
 
-Thin wrapper over :mod:`aios.db.queries` — connections themselves carry
-no business rules at this phase. The actual routing logic lives in
-:mod:`aios.services.channels`; the inbound-message endpoint composes
-this service with that one.
+Thin wrapper over :mod:`aios.db.queries`. The only business rule lives
+in :func:`archive_connection`, which refuses to archive a connection
+while channel bindings under its ``(connector, account)`` prefix are
+still active — archiving would silently drop the connection-provided
+MCP tools from any live session bound to those channels.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
+from aios.errors import ConflictError
 from aios.models.connections import Connection
 
 
@@ -68,4 +70,24 @@ async def update_connection(
 
 async def archive_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Connection:
     async with pool.acquire() as conn:
+        connection = await queries.get_connection(conn, connection_id)
+        if connection.archived_at is not None:
+            # Let the query raise its canonical "already archived" error.
+            return await queries.archive_connection(conn, connection_id)
+        active = await queries.count_active_bindings_for_connection(
+            conn, connector=connection.connector, account=connection.account
+        )
+        if active > 0:
+            raise ConflictError(
+                f"connection {connection_id} has {active} active channel binding"
+                f"{'s' if active != 1 else ''} under {connection.connector}/"
+                f"{connection.account}; archive the bindings first to avoid "
+                f"silently dropping MCP tools from live sessions",
+                detail={
+                    "id": connection_id,
+                    "active_bindings": active,
+                    "connector": connection.connector,
+                    "account": connection.account,
+                },
+            )
         return await queries.archive_connection(conn, connection_id)

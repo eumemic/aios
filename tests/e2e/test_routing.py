@@ -158,6 +158,95 @@ class TestConnectionCRUD:
             metadata={},
         )
 
+    async def test_archive_blocked_by_active_bindings(
+        self, pool: Any, agent_id: str, env_id: str, vault_id: str
+    ) -> None:
+        """A connection with an active binding can't be archived silently —
+        doing so would drop MCP tools from any live session bound to
+        channels under that ``(connector, account)`` prefix.
+        """
+        from aios.services import channels as ch_svc
+        from aios.services import connections as svc
+        from aios.services import sessions as sess_svc
+
+        account = f"archblock-{_uniq()}"
+        c = await svc.create_connection(
+            pool,
+            connector="signal",
+            account=account,
+            mcp_url="https://m",
+            vault_id=vault_id,
+            metadata={},
+        )
+        session = await sess_svc.create_session(
+            pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title=None,
+            metadata={},
+        )
+        binding = await ch_svc.create_binding(
+            pool,
+            address=f"signal/{account}/chat-1",
+            session_id=session.id,
+        )
+
+        with pytest.raises(ConflictError) as exc:
+            await svc.archive_connection(pool, c.id)
+        assert "active channel binding" in str(exc.value)
+        assert exc.value.detail["active_bindings"] == 1
+        assert exc.value.detail["connector"] == "signal"
+        assert exc.value.detail["account"] == account
+
+        # After archiving the binding, connection archival succeeds.
+        await ch_svc.archive_binding(pool, binding.id)
+        archived = await svc.archive_connection(pool, c.id)
+        assert archived.archived_at is not None
+
+    async def test_archive_ignores_bindings_on_other_accounts(
+        self, pool: Any, agent_id: str, env_id: str, vault_id: str
+    ) -> None:
+        """A binding scoped to a different ``(connector, account)`` doesn't
+        block archival — the prefix match is literal, not wildcard.
+        """
+        from aios.services import channels as ch_svc
+        from aios.services import connections as svc
+        from aios.services import sessions as sess_svc
+
+        account_a = f"archigna-{_uniq()}"
+        account_b = f"archignb-{_uniq()}"
+        c_a = await svc.create_connection(
+            pool,
+            connector="signal",
+            account=account_a,
+            mcp_url="https://a",
+            vault_id=vault_id,
+            metadata={},
+        )
+        await svc.create_connection(
+            pool,
+            connector="signal",
+            account=account_b,
+            mcp_url="https://b",
+            vault_id=vault_id,
+            metadata={},
+        )
+        session = await sess_svc.create_session(
+            pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title=None,
+            metadata={},
+        )
+        # Binding lives under account_b; account_a should archive cleanly.
+        await ch_svc.create_binding(
+            pool,
+            address=f"signal/{account_b}/chat-1",
+            session_id=session.id,
+        )
+        archived = await svc.archive_connection(pool, c_a.id)
+        assert archived.archived_at is not None
+
     async def test_unknown_vault(self, pool: Any) -> None:
         from aios.services import connections as svc
 
