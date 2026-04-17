@@ -1344,6 +1344,31 @@ async def batch_get_session_vault_ids(
 # ─── MCP credential resolution ───────────────────────────────────────────────
 
 
+async def resolve_vault_credential(
+    conn: asyncpg.Connection[Any],
+    *,
+    vault_id: str,
+    mcp_server_url: str,
+) -> tuple[EncryptedBlob, str] | None:
+    """Look up an MCP credential in a specific vault by URL — no
+    ``session_vaults`` join."""
+    row = await conn.fetchrow(
+        """
+        SELECT ciphertext, nonce, auth_type
+          FROM vault_credentials
+         WHERE vault_id = $1
+           AND mcp_server_url = $2
+           AND archived_at IS NULL
+         LIMIT 1
+        """,
+        vault_id,
+        mcp_server_url,
+    )
+    if row is None:
+        return None
+    return EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]), str(row["auth_type"])
+
+
 async def resolve_mcp_credential(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -1727,6 +1752,43 @@ async def update_connection(
     return _row_to_connection(row)
 
 
+async def get_connections_by_pairs(
+    conn: asyncpg.Connection[Any],
+    pairs: list[tuple[str, str]],
+) -> list[Connection]:
+    """Active connections where ``(connector, account)`` is in ``pairs``.
+
+    Empty input → no roundtrip.
+    """
+    if not pairs:
+        return []
+    connectors = [p[0] for p in pairs]
+    accounts = [p[1] for p in pairs]
+    rows = await conn.fetch(
+        """
+        SELECT c.*
+          FROM connections c
+          JOIN unnest($1::text[], $2::text[]) AS p(connector, account)
+            ON c.connector = p.connector AND c.account = p.account
+         WHERE c.archived_at IS NULL
+        """,
+        connectors,
+        accounts,
+    )
+    return [_row_to_connection(r) for r in rows]
+
+
+async def get_connection_vault_for_url(
+    conn: asyncpg.Connection[Any], mcp_server_url: str
+) -> str | None:
+    """Vault id of the active connection owning ``mcp_server_url``, else ``None``."""
+    val: str | None = await conn.fetchval(
+        "SELECT vault_id FROM connections WHERE mcp_url = $1 AND archived_at IS NULL LIMIT 1",
+        mcp_server_url,
+    )
+    return val
+
+
 async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
     row = await conn.fetchrow(
         "UPDATE connections SET archived_at = now(), updated_at = now() "
@@ -1830,6 +1892,21 @@ async def list_bindings(
         f"ORDER BY id DESC LIMIT ${len(args)}"
     )
     rows = await conn.fetch(sql, *args)
+    return [_row_to_channel_binding(r) for r in rows]
+
+
+async def list_session_bindings(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> list[ChannelBinding]:
+    """Every active binding for ``session_id``, unpaginated.
+
+    Distinct from the paginated :func:`list_bindings` used by the CRUD
+    list endpoint — the step function wants them all in one shot.
+    """
+    rows = await conn.fetch(
+        "SELECT * FROM channel_bindings WHERE session_id = $1 AND archived_at IS NULL ORDER BY id",
+        session_id,
+    )
     return [_row_to_channel_binding(r) for r in rows]
 
 

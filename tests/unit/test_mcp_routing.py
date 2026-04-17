@@ -101,6 +101,36 @@ class TestResolveMcpPermission:
         ]
         assert resolve_mcp_permission("mcp__github__create_issue", tools) is None
 
+    def test_connection_provided_defaults_to_always_allow(self) -> None:
+        """Tools from connection-provided MCP servers (names with the
+        reserved ``conn_`` prefix) don't require per-call confirmation:
+        the session's channel binding is the explicit routing consent.
+        """
+        # No agent-declared mcp_toolset entry references the connection —
+        # the reserved-prefix validator forbids it — so normally we'd
+        # fall through to None (= always_ask).  Connection servers are
+        # the exception.
+        assert (
+            resolve_mcp_permission("mcp__conn_01HQR2K7VXBZ9MNPL3WYCT8F__send", []) == "always_allow"
+        )
+
+    def test_connection_provided_ignores_agent_overrides(self) -> None:
+        """Even if someone (somehow) had a matching mcp_toolset entry, the
+        connection branch wins — agent-declared tools can't target
+        connection-derived servers by name."""
+        # The validator prevents this from being constructible via API, but
+        # test behaviour directly in case of bypass (e.g., legacy DB rows).
+        tools = [
+            ToolSpec(
+                type="mcp_toolset",
+                mcp_server_name="conn_foo",
+                default_config=McpToolsetConfig(
+                    permission_policy=McpPermissionPolicy(type="always_ask"),
+                ),
+            ),
+        ]
+        assert resolve_mcp_permission("mcp__conn_foo__send", tools) == "always_allow"
+
 
 class TestToOpenaiToolsSkipsMcpToolset:
     def test_mcp_toolset_skipped(self) -> None:

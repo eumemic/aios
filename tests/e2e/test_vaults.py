@@ -515,7 +515,7 @@ class TestOAuthRefreshE2E:
         the token endpoint was POSTed and the new ciphertext is in the DB."""
         import json as _json
 
-        from aios.mcp.client import resolve_auth_headers
+        from aios.mcp.client import resolve_auth_for_url
         from aios.services import vaults as svc
 
         vault = await svc.create_vault(pool, display_name="oauth-e2e", metadata={})
@@ -530,7 +530,7 @@ class TestOAuthRefreshE2E:
             post_calls,
             body={"access_token": "fresh-at", "expires_in": 3600},
         ):
-            headers = await resolve_auth_headers(pool, crypto_box, session_id, url)
+            headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
 
         assert len(post_calls) == 1, "expected exactly one POST to the token endpoint"
         assert post_calls[0][0] == "https://issuer.example/token"
@@ -559,7 +559,7 @@ class TestOAuthRefreshE2E:
         them; the second-to-last waiter sees the now-fresh expires_at
         after acquiring the lock and exits without POSTing.
         """
-        from aios.mcp.client import resolve_auth_headers
+        from aios.mcp.client import resolve_auth_for_url
         from aios.services import vaults as svc
 
         vault = await svc.create_vault(pool, display_name="oauth-race", metadata={})
@@ -575,7 +575,7 @@ class TestOAuthRefreshE2E:
             body={"access_token": "fresh-at", "expires_in": 3600},
         ):
             results = await asyncio.gather(
-                *(resolve_auth_headers(pool, crypto_box, session_id, url) for _ in range(5))
+                *(resolve_auth_for_url(pool, crypto_box, session_id, url) for _ in range(5))
             )
 
         assert all(r == {"Authorization": "Bearer fresh-at"} for r in results)
@@ -587,7 +587,7 @@ class TestOAuthRefreshE2E:
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from aios.errors import OAuthRefreshError
-        from aios.mcp.client import resolve_auth_headers
+        from aios.mcp.client import resolve_auth_for_url
         from aios.services import vaults as svc
 
         vault = await svc.create_vault(pool, display_name="oauth-fail", metadata={})
@@ -616,7 +616,7 @@ class TestOAuthRefreshE2E:
             patch("aios.services.vaults.httpx.AsyncClient", MagicMock(return_value=client)),
             pytest.raises(OAuthRefreshError),
         ):
-            await resolve_auth_headers(pool, crypto_box, session_id, url)
+            await resolve_auth_for_url(pool, crypto_box, session_id, url)
 
     async def test_concurrent_refresh_of_different_credentials_runs_in_parallel(
         self, pool: Any, crypto_box: Any
@@ -630,7 +630,7 @@ class TestOAuthRefreshE2E:
         POSTs, not one. A future refactor that promoted the row lock to a
         global lock or a vault-level lock would make this test fail.
         """
-        from aios.mcp.client import resolve_auth_headers
+        from aios.mcp.client import resolve_auth_for_url
         from aios.services import vaults as svc
 
         v1 = await svc.create_vault(pool, display_name="par-refresh-1", metadata={})
@@ -652,8 +652,8 @@ class TestOAuthRefreshE2E:
             body={"access_token": "fresh-at", "expires_in": 3600},
         ):
             results = await asyncio.gather(
-                resolve_auth_headers(pool, crypto_box, sess1, url1),
-                resolve_auth_headers(pool, crypto_box, sess2, url2),
+                resolve_auth_for_url(pool, crypto_box, sess1, url1),
+                resolve_auth_for_url(pool, crypto_box, sess2, url2),
             )
 
         assert all(r == {"Authorization": "Bearer fresh-at"} for r in results)

@@ -12,52 +12,177 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aios.crypto.vault import CryptoBox
-from aios.mcp.client import call_mcp_tool, discover_mcp_tools, resolve_auth_headers
+from aios.mcp.client import call_mcp_tool, discover_mcp_tools, resolve_auth_for_url
 from tests.unit.conftest import fake_pool_yielding_conn
 
-# ── resolve_auth_headers ──────────────────────────────────────────────────────
+# ── resolve_auth_for_url ──────────────────────────────────────────────────────
 
 
-class TestResolveAuthHeaders:
+class TestResolveAuthForUrl:
+    """Connection-declared credentials take precedence over session_vaults,
+    and mcp_oauth credentials are transparently refreshed when expiring.
+    """
+
     @pytest.fixture
     def crypto_box(self) -> CryptoBox:
         import os
 
         return CryptoBox(os.urandom(32))
 
-    async def test_no_credential_returns_empty(self, crypto_box: CryptoBox) -> None:
+    # ── precedence: connection-owned URLs ─────────────────────────────────
+
+    async def test_connection_url_uses_connection_vault(self, crypto_box: CryptoBox) -> None:
+        payload = json.dumps({"token": "connection-token"})
+        blob = crypto_box.encrypt(payload)
         pool = fake_pool_yielding_conn(MagicMock())
-        with patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m:
-            m.return_value = None
-            result = await resolve_auth_headers(
+        with (
+            patch(
+                "aios.mcp.client.queries.get_connection_vault_for_url",
+                new_callable=AsyncMock,
+            ) as g,
+            patch(
+                "aios.mcp.client.queries.resolve_vault_credential",
+                new_callable=AsyncMock,
+            ) as v,
+            patch(
+                "aios.mcp.client.queries.resolve_mcp_credential",
+                new_callable=AsyncMock,
+            ) as s,
+        ):
+            g.return_value = "vlt_v2"
+            v.return_value = (blob, "static_bearer")
+            result = await resolve_auth_for_url(
+                pool, crypto_box, "sess_123", "https://mcp.example.com"
+            )
+        assert result == {"Authorization": "Bearer connection-token"}
+        # Connection precedence: session_vaults lookup MUST NOT be consulted.
+        s.assert_not_awaited()
+        v.assert_awaited_once()
+
+    async def test_connection_url_missing_credential_returns_empty(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        pool = fake_pool_yielding_conn(MagicMock())
+        with (
+            patch(
+                "aios.mcp.client.queries.get_connection_vault_for_url",
+                new_callable=AsyncMock,
+            ) as g,
+            patch(
+                "aios.mcp.client.queries.resolve_vault_credential",
+                new_callable=AsyncMock,
+            ) as v,
+            patch(
+                "aios.mcp.client.queries.resolve_mcp_credential",
+                new_callable=AsyncMock,
+            ) as s,
+        ):
+            g.return_value = "vlt_v2"
+            v.return_value = None
+            result = await resolve_auth_for_url(
+                pool, crypto_box, "sess_123", "https://mcp.example.com"
+            )
+        assert result == {}
+        # Still doesn't fall back — connection ownership decided the source.
+        s.assert_not_awaited()
+
+    async def test_mcp_oauth_from_connection(self, crypto_box: CryptoBox) -> None:
+        payload = json.dumps({"access_token": "oauth-conn-token"})
+        blob = crypto_box.encrypt(payload)
+        pool = fake_pool_yielding_conn(MagicMock())
+        with (
+            patch(
+                "aios.mcp.client.queries.get_connection_vault_for_url",
+                new_callable=AsyncMock,
+            ) as g,
+            patch(
+                "aios.mcp.client.queries.resolve_vault_credential",
+                new_callable=AsyncMock,
+            ) as v,
+        ):
+            g.return_value = "vlt_v2"
+            v.return_value = (blob, "mcp_oauth")
+            result = await resolve_auth_for_url(
+                pool, crypto_box, "sess_123", "https://mcp.example.com"
+            )
+        assert result == {"Authorization": "Bearer oauth-conn-token"}
+
+    # ── fallback: session_vaults ──────────────────────────────────────────
+
+    async def test_non_connection_url_falls_back_to_session_vaults(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        payload = json.dumps({"token": "session-token"})
+        blob = crypto_box.encrypt(payload)
+        pool = fake_pool_yielding_conn(MagicMock())
+        with (
+            patch(
+                "aios.mcp.client.queries.get_connection_vault_for_url",
+                new_callable=AsyncMock,
+            ) as g,
+            patch(
+                "aios.mcp.client.queries.resolve_vault_credential",
+                new_callable=AsyncMock,
+            ) as v,
+            patch(
+                "aios.mcp.client.queries.resolve_mcp_credential",
+                new_callable=AsyncMock,
+            ) as s,
+        ):
+            g.return_value = None
+            s.return_value = (blob, "static_bearer", "vlt_s1")
+            result = await resolve_auth_for_url(
+                pool, crypto_box, "sess_123", "https://mcp.example.com"
+            )
+        assert result == {"Authorization": "Bearer session-token"}
+        v.assert_not_awaited()
+        s.assert_awaited_once()
+
+    async def test_neither_source_returns_empty(self, crypto_box: CryptoBox) -> None:
+        pool = fake_pool_yielding_conn(MagicMock())
+        with (
+            patch(
+                "aios.mcp.client.queries.get_connection_vault_for_url",
+                new_callable=AsyncMock,
+            ) as g,
+            patch(
+                "aios.mcp.client.queries.resolve_mcp_credential",
+                new_callable=AsyncMock,
+            ) as s,
+        ):
+            g.return_value = None
+            s.return_value = None
+            result = await resolve_auth_for_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com"
             )
         assert result == {}
 
-    async def test_static_bearer(self, crypto_box: CryptoBox) -> None:
-        payload = json.dumps({"token": "my-secret-token"})
+    async def test_empty_token_returns_empty(self, crypto_box: CryptoBox) -> None:
+        payload = json.dumps({"token": ""})
         blob = crypto_box.encrypt(payload)
         pool = fake_pool_yielding_conn(MagicMock())
-        with patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m:
-            m.return_value = (blob, "static_bearer", "vlt_1")
-            result = await resolve_auth_headers(
+        with (
+            patch(
+                "aios.mcp.client.queries.get_connection_vault_for_url",
+                new_callable=AsyncMock,
+            ) as g,
+            patch(
+                "aios.mcp.client.queries.resolve_mcp_credential",
+                new_callable=AsyncMock,
+            ) as s,
+        ):
+            g.return_value = None
+            s.return_value = (blob, "static_bearer", "vlt_s1")
+            result = await resolve_auth_for_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com"
             )
-        assert result == {"Authorization": "Bearer my-secret-token"}
+        assert result == {}
 
-    async def test_mcp_oauth(self, crypto_box: CryptoBox) -> None:
-        # No expires_at → treated as non-expiring; refresh is not called.
-        payload = json.dumps({"access_token": "oauth-token-123"})
-        blob = crypto_box.encrypt(payload)
-        pool = fake_pool_yielding_conn(MagicMock())
-        with patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m:
-            m.return_value = (blob, "mcp_oauth", "vlt_1")
-            result = await resolve_auth_headers(
-                pool, crypto_box, "sess_123", "https://mcp.example.com"
-            )
-        assert result == {"Authorization": "Bearer oauth-token-123"}
+    # ── OAuth refresh (applies to both paths) ─────────────────────────────
 
     async def test_oauth_refresh_triggered_when_expiring(self, crypto_box: CryptoBox) -> None:
+        """Session-vaults path: stale mcp_oauth token triggers refresh, then
+        the re-read returns the fresh token."""
         from datetime import UTC, datetime, timedelta
 
         expiring = json.dumps(
@@ -71,28 +196,74 @@ class TestResolveAuthHeaders:
         fresh_blob = crypto_box.encrypt(fresh)
         pool = fake_pool_yielding_conn(MagicMock())
 
-        # First resolve returns stale; second returns fresh (post-refresh).
-        resolve_mock = AsyncMock(
-            side_effect=[
-                (stale_blob, "mcp_oauth", "vlt_1"),
-                (fresh_blob, "mcp_oauth", "vlt_1"),
-            ]
-        )
         refresh_mock = AsyncMock()
-
         with (
-            patch("aios.mcp.client.queries.resolve_mcp_credential", resolve_mock),
+            patch(
+                "aios.mcp.client.queries.get_connection_vault_for_url",
+                new_callable=AsyncMock,
+            ) as g,
+            patch(
+                "aios.mcp.client.queries.resolve_mcp_credential",
+                new_callable=AsyncMock,
+            ) as s,
+            patch(
+                "aios.mcp.client.queries.resolve_vault_credential",
+                new_callable=AsyncMock,
+            ) as v,
             patch("aios.mcp.client.refresh_credential", refresh_mock),
         ):
-            result = await resolve_auth_headers(
+            g.return_value = None
+            s.return_value = (stale_blob, "mcp_oauth", "vlt_s1")
+            v.return_value = (fresh_blob, "mcp_oauth")
+            result = await resolve_auth_for_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com"
             )
 
         refresh_mock.assert_awaited_once()
         kwargs = refresh_mock.await_args.kwargs
-        assert kwargs["vault_id"] == "vlt_1"
+        assert kwargs["vault_id"] == "vlt_s1"
         assert kwargs["mcp_server_url"] == "https://mcp.example.com"
         assert result == {"Authorization": "Bearer fresh"}
+
+    async def test_oauth_refresh_triggered_on_connection_path(self, crypto_box: CryptoBox) -> None:
+        """Connection-owned path: refresh ALSO triggers here — the refresh
+        flow is source-agnostic, it just needs a vault_id + url pair.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        expiring = json.dumps(
+            {
+                "access_token": "stale-conn",
+                "expires_at": (datetime.now(UTC) + timedelta(seconds=5)).isoformat(),
+            }
+        )
+        fresh = json.dumps({"access_token": "fresh-conn"})
+        stale_blob = crypto_box.encrypt(expiring)
+        fresh_blob = crypto_box.encrypt(fresh)
+        pool = fake_pool_yielding_conn(MagicMock())
+
+        refresh_mock = AsyncMock()
+        with (
+            patch(
+                "aios.mcp.client.queries.get_connection_vault_for_url",
+                new_callable=AsyncMock,
+            ) as g,
+            patch(
+                "aios.mcp.client.queries.resolve_vault_credential",
+                new_callable=AsyncMock,
+            ) as v,
+            patch("aios.mcp.client.refresh_credential", refresh_mock),
+        ):
+            g.return_value = "vlt_conn"
+            # Two reads: initial (stale) and post-refresh (fresh).
+            v.side_effect = [(stale_blob, "mcp_oauth"), (fresh_blob, "mcp_oauth")]
+            result = await resolve_auth_for_url(
+                pool, crypto_box, "sess_123", "https://mcp.example.com"
+            )
+
+        refresh_mock.assert_awaited_once()
+        assert refresh_mock.await_args.kwargs["vault_id"] == "vlt_conn"
+        assert result == {"Authorization": "Bearer fresh-conn"}
 
     async def test_oauth_refresh_not_triggered_when_fresh(self, crypto_box: CryptoBox) -> None:
         from datetime import UTC, datetime, timedelta
@@ -108,11 +279,19 @@ class TestResolveAuthHeaders:
         refresh_mock = AsyncMock()
 
         with (
-            patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m,
+            patch(
+                "aios.mcp.client.queries.get_connection_vault_for_url",
+                new_callable=AsyncMock,
+            ) as g,
+            patch(
+                "aios.mcp.client.queries.resolve_mcp_credential",
+                new_callable=AsyncMock,
+            ) as s,
             patch("aios.mcp.client.refresh_credential", refresh_mock),
         ):
-            m.return_value = (blob, "mcp_oauth", "vlt_1")
-            result = await resolve_auth_headers(
+            g.return_value = None
+            s.return_value = (blob, "mcp_oauth", "vlt_s1")
+            result = await resolve_auth_for_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com"
             )
 
@@ -134,26 +313,23 @@ class TestResolveAuthHeaders:
         pool = fake_pool_yielding_conn(MagicMock())
 
         with (
-            patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m,
+            patch(
+                "aios.mcp.client.queries.get_connection_vault_for_url",
+                new_callable=AsyncMock,
+            ) as g,
+            patch(
+                "aios.mcp.client.queries.resolve_mcp_credential",
+                new_callable=AsyncMock,
+            ) as s,
             patch(
                 "aios.mcp.client.refresh_credential",
                 AsyncMock(side_effect=OAuthRefreshError("bad", detail={})),
             ),
             pytest.raises(OAuthRefreshError),
         ):
-            m.return_value = (blob, "mcp_oauth", "vlt_1")
-            await resolve_auth_headers(pool, crypto_box, "sess_123", "https://mcp.example.com")
-
-    async def test_empty_token_returns_empty(self, crypto_box: CryptoBox) -> None:
-        payload = json.dumps({"token": ""})
-        blob = crypto_box.encrypt(payload)
-        pool = fake_pool_yielding_conn(MagicMock())
-        with patch("aios.mcp.client.queries.resolve_mcp_credential", new_callable=AsyncMock) as m:
-            m.return_value = (blob, "static_bearer", "vlt_1")
-            result = await resolve_auth_headers(
-                pool, crypto_box, "sess_123", "https://mcp.example.com"
-            )
-        assert result == {}
+            g.return_value = None
+            s.return_value = (blob, "mcp_oauth", "vlt_s1")
+            await resolve_auth_for_url(pool, crypto_box, "sess_123", "https://mcp.example.com")
 
 
 # ── discover_mcp_tools ────────────────────────────────────────────────────────

@@ -17,6 +17,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# Reserved prefix for MCP server names derived from a connection.  Keeps
+# connection-provided servers disjoint from agent-declared ones in the
+# shared mcp_server_map.
+CONNECTION_SERVER_NAME_PREFIX = "conn_"
+
 
 class ConnectionCreate(BaseModel):
     """Request body for ``POST /v1/connections``.

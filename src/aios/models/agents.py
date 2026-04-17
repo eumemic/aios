@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aios.models.skills import AgentSkillRef
 
@@ -50,6 +50,17 @@ class McpServerSpec(BaseModel):
     type: Literal["url"] = "url"
     name: str = Field(min_length=1, max_length=64)
     url: str = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def _reject_reserved_prefix(cls, v: str) -> str:
+        from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
+
+        if v.startswith(CONNECTION_SERVER_NAME_PREFIX):
+            raise ValueError(
+                f"mcp_server name prefix {CONNECTION_SERVER_NAME_PREFIX!r} is reserved"
+            )
+        return v
 
 
 # ── MCP toolset config (permission policies for discovered tools) ──────────

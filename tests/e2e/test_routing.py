@@ -957,3 +957,471 @@ class TestInboundEndpoint:
         )
         assert r.status_code == 422, (bad_path, r.text)
         assert r.json()["error"]["type"] == "validation_error"
+
+
+# ─── step-function queries ──────────────────────────────────────────────────
+
+
+class TestListSessionBindings:
+    """Unpaginated "all active bindings for this session" lookup used by
+    the step function to derive connection-provided MCP URLs.
+    """
+
+    async def test_empty_when_no_bindings(self, pool: Any, agent_id: str, env_id: str) -> None:
+        from aios.db import queries
+        from aios.services import sessions as sess_svc
+
+        s = await sess_svc.create_session(
+            pool, agent_id=agent_id, environment_id=env_id, title=None, metadata={}
+        )
+        async with pool.acquire() as conn:
+            bindings = await queries.list_session_bindings(conn, s.id)
+        assert bindings == []
+
+    async def test_returns_all_active_bindings_for_session(
+        self, pool: Any, agent_id: str, env_id: str
+    ) -> None:
+        from aios.db import queries
+        from aios.services import channels as ch_svc
+        from aios.services import sessions as sess_svc
+
+        s = await sess_svc.create_session(
+            pool, agent_id=agent_id, environment_id=env_id, title=None, metadata={}
+        )
+        suffix = _uniq()
+        a1 = await ch_svc.create_binding(pool, address=f"signal/x-{suffix}/1", session_id=s.id)
+        a2 = await ch_svc.create_binding(pool, address=f"signal/x-{suffix}/2", session_id=s.id)
+
+        async with pool.acquire() as conn:
+            bindings = await queries.list_session_bindings(conn, s.id)
+        ids = {b.id for b in bindings}
+        assert ids == {a1.id, a2.id}
+
+    async def test_excludes_archived_bindings(self, pool: Any, agent_id: str, env_id: str) -> None:
+        from aios.db import queries
+        from aios.services import channels as ch_svc
+        from aios.services import sessions as sess_svc
+
+        s = await sess_svc.create_session(
+            pool, agent_id=agent_id, environment_id=env_id, title=None, metadata={}
+        )
+        active = await ch_svc.create_binding(
+            pool, address=f"signal/arc-{_uniq()}/a", session_id=s.id
+        )
+        dead = await ch_svc.create_binding(pool, address=f"signal/arc-{_uniq()}/b", session_id=s.id)
+        await ch_svc.archive_binding(pool, dead.id)
+
+        async with pool.acquire() as conn:
+            bindings = await queries.list_session_bindings(conn, s.id)
+        ids = {b.id for b in bindings}
+        assert ids == {active.id}
+
+    async def test_scoped_to_session(self, pool: Any, agent_id: str, env_id: str) -> None:
+        from aios.db import queries
+        from aios.services import channels as ch_svc
+        from aios.services import sessions as sess_svc
+
+        s1 = await sess_svc.create_session(
+            pool, agent_id=agent_id, environment_id=env_id, title=None, metadata={}
+        )
+        s2 = await sess_svc.create_session(
+            pool, agent_id=agent_id, environment_id=env_id, title=None, metadata={}
+        )
+        await ch_svc.create_binding(pool, address=f"signal/sc-{_uniq()}/s1", session_id=s1.id)
+        await ch_svc.create_binding(pool, address=f"signal/sc-{_uniq()}/s2", session_id=s2.id)
+
+        async with pool.acquire() as conn:
+            s1_bindings = await queries.list_session_bindings(conn, s1.id)
+            s2_bindings = await queries.list_session_bindings(conn, s2.id)
+        assert len(s1_bindings) == 1 and s1_bindings[0].session_id == s1.id
+        assert len(s2_bindings) == 1 and s2_bindings[0].session_id == s2.id
+
+
+class TestGetConnectionsByPairs:
+    """Batch lookup of active connections by (connector, account) pairs,
+    used by discovery after collecting bindings.
+    """
+
+    async def test_empty_input_returns_empty(self, pool: Any) -> None:
+        from aios.db import queries
+
+        async with pool.acquire() as conn:
+            rows = await queries.get_connections_by_pairs(conn, [])
+        assert rows == []
+
+    async def test_returns_matching_connections(self, pool: Any, vault_id: str) -> None:
+        from aios.db import queries
+        from aios.services import connections as conn_svc
+
+        a = f"gcp-a-{_uniq()}"
+        b = f"gcp-b-{_uniq()}"
+        c_a = await conn_svc.create_connection(
+            pool,
+            connector="signal",
+            account=a,
+            mcp_url="https://m1",
+            vault_id=vault_id,
+            metadata={},
+        )
+        c_b = await conn_svc.create_connection(
+            pool, connector="slack", account=b, mcp_url="https://m2", vault_id=vault_id, metadata={}
+        )
+
+        async with pool.acquire() as conn:
+            rows = await queries.get_connections_by_pairs(
+                conn, [("signal", a), ("slack", b), ("discord", "nope")]
+            )
+        ids = {c.id for c in rows}
+        assert ids == {c_a.id, c_b.id}
+
+    async def test_excludes_archived(self, pool: Any, vault_id: str) -> None:
+        from aios.db import queries
+        from aios.services import connections as conn_svc
+
+        acct = f"gcp-arc-{_uniq()}"
+        c = await conn_svc.create_connection(
+            pool,
+            connector="signal",
+            account=acct,
+            mcp_url="https://m",
+            vault_id=vault_id,
+            metadata={},
+        )
+        await conn_svc.archive_connection(pool, c.id)
+        async with pool.acquire() as conn:
+            rows = await queries.get_connections_by_pairs(conn, [("signal", acct)])
+        assert rows == []
+
+
+class TestResolveAuthForUrlPrecedence:
+    """Connection-declared auth takes precedence over session_vaults
+    when both sources have a credential for the same URL.
+    """
+
+    async def test_connection_credential_beats_session_vault(
+        self, pool: Any, agent_id: str, env_id: str
+    ) -> None:
+        from pydantic import SecretStr
+
+        from aios.config import get_settings
+        from aios.crypto.vault import CryptoBox
+        from aios.mcp.client import resolve_auth_for_url
+        from aios.models.vaults import VaultCredentialCreate
+        from aios.services import connections as conn_svc
+        from aios.services import sessions as sess_svc
+        from aios.services import vaults as vault_svc
+
+        crypto_box = CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
+        shared_url = f"https://shared-mcp-{_uniq()}.example"
+
+        v1 = await vault_svc.create_vault(pool, display_name="session-vault", metadata={})
+        await vault_svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=v1.id,
+            body=VaultCredentialCreate(
+                display_name="session",
+                mcp_server_url=shared_url,
+                auth_type="static_bearer",
+                token=SecretStr("SESSION_TOKEN_V1"),
+            ),
+        )
+
+        v2 = await vault_svc.create_vault(pool, display_name="connection-vault", metadata={})
+        await vault_svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=v2.id,
+            body=VaultCredentialCreate(
+                display_name="connection",
+                mcp_server_url=shared_url,
+                auth_type="static_bearer",
+                token=SecretStr("CONNECTION_TOKEN_V2"),
+            ),
+        )
+
+        await conn_svc.create_connection(
+            pool,
+            connector="signal",
+            account=f"precedence-{_uniq()}",
+            mcp_url=shared_url,
+            vault_id=v2.id,
+            metadata={},
+        )
+
+        session = await sess_svc.create_session(
+            pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title=None,
+            metadata={},
+            vault_ids=[v1.id],
+        )
+
+        headers = await resolve_auth_for_url(pool, crypto_box, session.id, shared_url)
+        # Connection wins even though session_vaults ALSO has a credential.
+        assert headers == {"Authorization": "Bearer CONNECTION_TOKEN_V2"}
+
+    async def test_session_vault_used_for_non_connection_url(
+        self, pool: Any, agent_id: str, env_id: str
+    ) -> None:
+        """When the URL isn't owned by any connection, fall back to session_vaults."""
+        from pydantic import SecretStr
+
+        from aios.config import get_settings
+        from aios.crypto.vault import CryptoBox
+        from aios.mcp.client import resolve_auth_for_url
+        from aios.models.vaults import VaultCredentialCreate
+        from aios.services import sessions as sess_svc
+        from aios.services import vaults as vault_svc
+
+        crypto_box = CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
+        url = f"https://agent-mcp-{_uniq()}.example"
+
+        v = await vault_svc.create_vault(pool, display_name="agent-vault", metadata={})
+        await vault_svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=v.id,
+            body=VaultCredentialCreate(
+                display_name="agent",
+                mcp_server_url=url,
+                auth_type="static_bearer",
+                token=SecretStr("AGENT_TOKEN"),
+            ),
+        )
+
+        session = await sess_svc.create_session(
+            pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title=None,
+            metadata={},
+            vault_ids=[v.id],
+        )
+
+        headers = await resolve_auth_for_url(pool, crypto_box, session.id, url)
+        assert headers == {"Authorization": "Bearer AGENT_TOKEN"}
+
+    async def test_connection_with_no_matching_credential_returns_empty(
+        self, pool: Any, agent_id: str, env_id: str
+    ) -> None:
+        """Connection ownership decides the source, regardless of hit.  If
+        the connection's vault has no credential for the URL we MUST NOT
+        silently fall back to session_vaults — a misconfigured connection
+        must surface as missing auth, not as a leaked tenant credential.
+        """
+        from pydantic import SecretStr
+
+        from aios.config import get_settings
+        from aios.crypto.vault import CryptoBox
+        from aios.mcp.client import resolve_auth_for_url
+        from aios.models.vaults import VaultCredentialCreate
+        from aios.services import connections as conn_svc
+        from aios.services import sessions as sess_svc
+        from aios.services import vaults as vault_svc
+
+        crypto_box = CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
+        url = f"https://broken-conn-{_uniq()}.example"
+
+        # session_vaults has the credential...
+        v_session = await vault_svc.create_vault(pool, display_name="s", metadata={})
+        await vault_svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=v_session.id,
+            body=VaultCredentialCreate(
+                display_name="s",
+                mcp_server_url=url,
+                auth_type="static_bearer",
+                token=SecretStr("LEAKED"),
+            ),
+        )
+        # ...but the connection's vault is empty.
+        v_empty = await vault_svc.create_vault(pool, display_name="empty", metadata={})
+        await conn_svc.create_connection(
+            pool,
+            connector="signal",
+            account=f"broken-{_uniq()}",
+            mcp_url=url,
+            vault_id=v_empty.id,
+            metadata={},
+        )
+
+        session = await sess_svc.create_session(
+            pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title=None,
+            metadata={},
+            vault_ids=[v_session.id],
+        )
+
+        headers = await resolve_auth_for_url(pool, crypto_box, session.id, url)
+        # Must NOT be "Bearer LEAKED".
+        assert headers == {}
+
+
+class TestResolveVaultCredential:
+    """Direct (vault_id, URL) → (blob, auth_type) lookup — no session_vaults
+    join.  The connection-first half of resolve_auth_for_url uses this.
+    """
+
+    async def test_match_returns_blob(self, pool: Any, vault_id: str) -> None:
+        from pydantic import SecretStr
+
+        from aios.config import get_settings
+        from aios.crypto.vault import CryptoBox
+        from aios.db import queries
+        from aios.models.vaults import VaultCredentialCreate
+        from aios.services import vaults as vault_svc
+
+        crypto_box = CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
+        url = f"https://rvc-{_uniq()}.example"
+        await vault_svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=vault_id,
+            body=VaultCredentialCreate(
+                display_name="t",
+                mcp_server_url=url,
+                auth_type="static_bearer",
+                token=SecretStr("hello"),
+            ),
+        )
+        async with pool.acquire() as conn:
+            hit = await queries.resolve_vault_credential(
+                conn, vault_id=vault_id, mcp_server_url=url
+            )
+        assert hit is not None
+        blob, auth_type = hit
+        assert auth_type == "static_bearer"
+        import json as _json
+
+        assert _json.loads(crypto_box.decrypt(blob))["token"] == "hello"
+
+    async def test_no_match_returns_none(self, pool: Any, vault_id: str) -> None:
+        from aios.db import queries
+
+        async with pool.acquire() as conn:
+            hit = await queries.resolve_vault_credential(
+                conn,
+                vault_id=vault_id,
+                mcp_server_url=f"https://rvc-miss-{_uniq()}.example",
+            )
+        assert hit is None
+
+    async def test_excludes_archived_credential(self, pool: Any, vault_id: str) -> None:
+        from pydantic import SecretStr
+
+        from aios.config import get_settings
+        from aios.crypto.vault import CryptoBox
+        from aios.db import queries
+        from aios.models.vaults import VaultCredentialCreate
+        from aios.services import vaults as vault_svc
+
+        crypto_box = CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
+        url = f"https://rvc-arc-{_uniq()}.example"
+        cred = await vault_svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=vault_id,
+            body=VaultCredentialCreate(
+                display_name="t",
+                mcp_server_url=url,
+                auth_type="static_bearer",
+                token=SecretStr("hello"),
+            ),
+        )
+        await vault_svc.archive_vault_credential(pool, vault_id, cred.id)
+
+        async with pool.acquire() as conn:
+            hit = await queries.resolve_vault_credential(
+                conn, vault_id=vault_id, mcp_server_url=url
+            )
+        assert hit is None
+
+    async def test_scoped_to_vault_id(self, pool: Any) -> None:
+        """A credential in vault A must not surface when looking up in vault B."""
+        from pydantic import SecretStr
+
+        from aios.config import get_settings
+        from aios.crypto.vault import CryptoBox
+        from aios.db import queries
+        from aios.models.vaults import VaultCredentialCreate
+        from aios.services import vaults as vault_svc
+
+        crypto_box = CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
+        v_a = await vault_svc.create_vault(pool, display_name="rvc-a", metadata={})
+        v_b = await vault_svc.create_vault(pool, display_name="rvc-b", metadata={})
+        url = f"https://rvc-scope-{_uniq()}.example"
+        await vault_svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=v_a.id,
+            body=VaultCredentialCreate(
+                display_name="t",
+                mcp_server_url=url,
+                auth_type="static_bearer",
+                token=SecretStr("A"),
+            ),
+        )
+        async with pool.acquire() as conn:
+            hit_a = await queries.resolve_vault_credential(
+                conn, vault_id=v_a.id, mcp_server_url=url
+            )
+            hit_b = await queries.resolve_vault_credential(
+                conn, vault_id=v_b.id, mcp_server_url=url
+            )
+        assert hit_a is not None
+        assert hit_b is None
+
+
+class TestGetConnectionVaultForUrl:
+    """URL → vault_id lookup used by resolve_auth_for_url to decide
+    whether a URL belongs to a registered connection.
+    """
+
+    async def test_match_returns_vault_id(self, pool: Any, vault_id: str) -> None:
+        from aios.db import queries
+        from aios.services import connections as conn_svc
+
+        url = f"https://mcp-match-{_uniq()}.example"
+        await conn_svc.create_connection(
+            pool,
+            connector="signal",
+            account=f"gcvfu-{_uniq()}",
+            mcp_url=url,
+            vault_id=vault_id,
+            metadata={},
+        )
+        async with pool.acquire() as conn:
+            hit = await queries.get_connection_vault_for_url(conn, url)
+        assert hit == vault_id
+
+    async def test_no_match_returns_none(self, pool: Any) -> None:
+        from aios.db import queries
+
+        async with pool.acquire() as conn:
+            hit = await queries.get_connection_vault_for_url(
+                conn, f"https://unknown-{_uniq()}.example"
+            )
+        assert hit is None
+
+    async def test_excludes_archived(self, pool: Any, vault_id: str) -> None:
+        from aios.db import queries
+        from aios.services import connections as conn_svc
+
+        url = f"https://mcp-arc-{_uniq()}.example"
+        c = await conn_svc.create_connection(
+            pool,
+            connector="signal",
+            account=f"gcvfu-arc-{_uniq()}",
+            mcp_url=url,
+            vault_id=vault_id,
+            metadata={},
+        )
+        await conn_svc.archive_connection(pool, c.id)
+        async with pool.acquire() as conn:
+            hit = await queries.get_connection_vault_for_url(conn, url)
+        assert hit is None

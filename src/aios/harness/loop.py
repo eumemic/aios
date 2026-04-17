@@ -67,9 +67,13 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     else:
         agent = await agents_service.get_agent(pool, session.agent_id)
 
-    # Build MCP server map from agent config (needed for confirmed-tool dispatch
-    # and for routing new tool calls after inference).
+    from aios.harness.channels import connection_server_name, list_bindings_and_connections
+
+    bindings, connections = await list_bindings_and_connections(pool, session_id)
+
     mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
+    for c in connections:
+        mcp_server_map[connection_server_name(c)] = c.mcp_url
 
     # Read windowed message events for this session.
     events = await sessions_service.read_windowed_events(
@@ -94,6 +98,7 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         return
 
     # Resolve skills and augment system prompt.
+    from aios.harness.channels import augment_with_channels
     from aios.harness.skills import augment_system_prompt, provision_skill_files
     from aios.services import skills as skills_service
 
@@ -101,6 +106,7 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
     )
     system_prompt = augment_system_prompt(agent.system, skill_versions)
+    system_prompt = augment_with_channels(system_prompt, bindings)
 
     # Provision skill files to workspace (idempotent, host-side writes).
     if skill_versions:
@@ -109,9 +115,8 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     # Build context with pending-result synthesis.
     tools = to_openai_tools(agent.tools)
 
-    # Discover MCP tools from declared servers.
-    if agent.mcp_servers:
-        mcp_tools = await _discover_mcp_tools(pool, session_id, agent)
+    if agent.mcp_servers or connections:
+        mcp_tools = await discover_session_mcp_tools(pool, session_id, agent, connections)
         tools.extend(mcp_tools)
 
     ctx = build_messages(
@@ -203,6 +208,11 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
         cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
     )
+
+    if bindings:
+        from aios.harness.channels import apply_monologue_prefix
+
+        assistant_msg = apply_monologue_prefix(assistant_msg)
 
     # Inject reacting_to so should_call_model knows what this response
     # was based on. This is the seq of the latest user/tool event in the
@@ -321,12 +331,21 @@ def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
 def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
     """Look up the permission policy for an MCP tool.
 
-    Finds the ``mcp_toolset`` entry whose ``mcp_server_name`` matches the
-    server portion of the namespaced tool name, then returns the
-    ``default_config.permission_policy.type`` or ``None`` (which callers
-    treat as ``always_ask``).
+    Connection-provided tools (server name in the reserved ``conn_``
+    namespace) default to ``always_allow`` — the session's channel
+    binding is already explicit routing consent; gating every reply on
+    a confirmation prompt would defeat the connector autonomy story.
+
+    For agent-declared servers, finds the ``mcp_toolset`` entry whose
+    ``mcp_server_name`` matches the server portion of the namespaced
+    tool name, then returns the ``default_config.permission_policy.type``
+    or ``None`` (which callers treat as ``always_ask``).
     """
+    from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
+
     server_name = name.split("__", 2)[1]
+    if server_name.startswith(CONNECTION_SERVER_NAME_PREFIX):
+        return "always_allow"
     for spec in agent_tools:
         if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
             cfg = spec.default_config
@@ -336,37 +355,43 @@ def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None
     return None
 
 
-async def _discover_mcp_tools(
+async def discover_session_mcp_tools(
     pool: Any,
     session_id: str,
     agent: Any,
+    connections: list[Any],
 ) -> list[dict[str, Any]]:
-    """Discover tools from all declared MCP servers concurrently.
-
-    For each server in ``agent.mcp_servers`` that has an enabled
-    ``mcp_toolset`` entry, connects to the server, lists tools, and
-    returns them in OpenAI format with namespaced names.
+    """Discover MCP tools from agent-declared servers (filtered by enabled
+    ``mcp_toolset`` entries) unioned with connection-provided servers.
     """
     import asyncio
 
-    from aios.mcp.client import discover_mcp_tools, resolve_auth_headers
+    from aios.harness.channels import connection_server_name
+    from aios.mcp.client import discover_mcp_tools, resolve_auth_for_url
 
-    crypto_box = runtime.require_crypto_box()
+    servers: list[tuple[str, str]] = []
 
-    enabled_servers: set[str] = set()
+    enabled_server_names: set[str] = set()
     for spec in agent.tools:
         if spec.type == "mcp_toolset" and spec.enabled and spec.mcp_server_name:
-            enabled_servers.add(spec.mcp_server_name)
+            enabled_server_names.add(spec.mcp_server_name)
+    for s in agent.mcp_servers:
+        if s.name in enabled_server_names:
+            servers.append((s.name, s.url))
 
-    async def _discover_one(url: str, name: str) -> list[dict[str, Any]]:
-        headers = await resolve_auth_headers(pool, crypto_box, session_id, url)
-        return await discover_mcp_tools(url, name, headers)
+    for c in connections:
+        servers.append((connection_server_name(c), c.mcp_url))
 
-    servers = [s for s in agent.mcp_servers if s.name in enabled_servers]
     if not servers:
         return []
 
-    results = await asyncio.gather(*[_discover_one(s.url, s.name) for s in servers])
+    crypto_box = runtime.require_crypto_box()
+
+    async def _discover_one(name: str, url: str) -> list[dict[str, Any]]:
+        headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
+        return await discover_mcp_tools(url, name, headers)
+
+    results = await asyncio.gather(*[_discover_one(n, u) for n, u in servers])
     return [tool for tools in results for tool in tools]
 
 
