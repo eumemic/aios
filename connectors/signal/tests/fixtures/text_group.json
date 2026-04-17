@@ -1,0 +1,28 @@
+{
+  "source": "+15551234567",
+  "sourceNumber": "+15551234567",
+  "sourceUuid": "11111111-2222-3333-4444-555555555555",
+  "sourceName": "Alice",
+  "sourceDevice": 1,
+  "timestamp": 1700000001000,
+  "dataMessage": {
+    "timestamp": 1700000001000,
+    "message": "hey \ufffc thanks!",
+    "expiresInSeconds": 0,
+    "viewOnce": false,
+    "mentions": [
+      {
+        "name": "Bob",
+        "number": "+15557654321",
+        "uuid": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+        "start": 4,
+        "length": 1
+      }
+    ],
+    "groupInfo": {
+      "groupId": "abc+def/xyz==",
+      "groupName": "Friends",
+      "type": "DELIVER"
+    }
+  }
+}

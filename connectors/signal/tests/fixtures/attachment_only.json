@@ -1,0 +1,19 @@
+{
+  "source": "+15551234567",
+  "sourceUuid": "11111111-2222-3333-4444-555555555555",
+  "sourceName": "Alice",
+  "sourceDevice": 1,
+  "timestamp": 1700000004000,
+  "dataMessage": {
+    "timestamp": 1700000004000,
+    "attachments": [
+      {
+        "contentType": "image/jpeg",
+        "filename": "photo.jpg",
+        "id": "abc-def-123",
+        "size": 102400,
+        "file": "/tmp/signal-cli/attachments/abc-def-123"
+      }
+    ]
+  }
+}

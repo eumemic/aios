@@ -1,0 +1,14 @@
+{
+  "source": "+15551234567",
+  "sourceNumber": "+15551234567",
+  "sourceUuid": "11111111-2222-3333-4444-555555555555",
+  "sourceName": "Alice",
+  "sourceDevice": 1,
+  "timestamp": 1700000000000,
+  "dataMessage": {
+    "timestamp": 1700000000000,
+    "message": "Hello there",
+    "expiresInSeconds": 0,
+    "viewOnce": false
+  }
+}
