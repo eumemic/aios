@@ -17,6 +17,7 @@ from unittest import mock
 import pytest
 
 from aios.models.routing_rules import SessionParams
+from tests.e2e.harness import msg_text
 
 
 def _uniq() -> str:
@@ -771,28 +772,6 @@ class TestOraSmokeTestRegression:
         assert await _get_session_focal(runtime_pool, session_id) == dm_address
 
 
-def _msg_text(msg: dict[str, Any]) -> str:
-    """Extract plain text from a chat-completions message.
-
-    Messages can carry ``content`` as a plain string or a list of
-    content blocks (Anthropic-style) — LiteLLM's cache-breakpoint
-    injection turns the system-prompt string into a list-of-blocks
-    shape.  Collapse both to plain text for substring assertions.
-    """
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for b in content:
-            if isinstance(b, dict):
-                t = b.get("text")
-                if isinstance(t, str):
-                    parts.append(t)
-        return "\n".join(parts)
-    return ""
-
-
 class TestTailBlockInStep:
     """Slice 7: the ephemeral channels tail block appears as the last
     user-role message on the chat-completions list, and its unread
@@ -854,7 +833,7 @@ class TestTailBlockInStep:
         messages = calls[-1]["messages"]
         # Tail block is the last user message in the payload.
         assert messages[-1]["role"] == "user"
-        content = _msg_text(messages[-1])
+        content = msg_text(messages[-1])
         assert "━━━ Channels ━━━" in content
         # NULL focal at this point → no ▸ marker, the one binding appears as ○.
         assert f"○ {address}" in content
@@ -925,7 +904,7 @@ class TestTailBlockInStep:
         await harness.run_step(session_id)
         messages = harness.model_calls[-1]["messages"]
         assert messages[-1]["role"] == "user"
-        content_step1 = _msg_text(messages[-1])
+        content_step1 = msg_text(messages[-1])
         assert f"▸ {address_a} (focal)" in content_step1
         assert f"○ {address_b} — 2 unread" in content_step1
         assert "msg-b2" in content_step1  # preview of latest unread
@@ -940,7 +919,7 @@ class TestTailBlockInStep:
         )
         harness.script_model([assistant("noted")])
         await harness.run_step(session_id)
-        content_step2 = _msg_text(harness.model_calls[-1]["messages"][-1])
+        content_step2 = msg_text(harness.model_calls[-1]["messages"][-1])
         assert f"▸ {address_b} (focal)" in content_step2
         # A is now non-focal; no unread for A yet since we never switched
         # away after its last focal-stamp, but the listing should show it.
