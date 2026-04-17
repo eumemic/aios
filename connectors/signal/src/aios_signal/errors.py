@@ -1,8 +1,4 @@
-"""Exception hierarchy for aios-signal.
-
-One shared base so operators can catch connector-specific failures without
-grabbing unrelated stdlib exceptions.
-"""
+"""Exception hierarchy for aios-signal."""
 
 from __future__ import annotations
 
@@ -12,20 +8,20 @@ class SignalConnectorError(Exception):
 
 
 class RpcError(SignalConnectorError):
-    """signal-cli JSON-RPC returned an error or the transport failed."""
+    pass
 
 
 class RpcTimeoutError(RpcError):
-    """An RPC call exceeded its timeout."""
+    pass
 
 
 class ListenerClosedError(RpcError):
-    """The persistent listener connection to signal-cli closed unexpectedly."""
+    pass
 
 
 class DaemonCrashError(SignalConnectorError):
-    """The signal-cli subprocess exited unexpectedly."""
+    pass
 
 
 class BotAccountNotFoundError(SignalConnectorError):
-    """signal-cli has no registered account matching the configured phone."""
+    pass

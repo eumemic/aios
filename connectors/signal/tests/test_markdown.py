@@ -77,6 +77,15 @@ def test_utf16_offsets_with_emoji() -> None:
     assert "3:4:BOLD" in styles
 
 
+def test_utf16_offsets_with_emoji_inside_styled_span() -> None:
+    # Surrogate-pair emoji INSIDE the styled content — length must count
+    # the emoji as 2 UTF-16 code units, not 1 Python code point.
+    stripped, styles = convert_markdown_to_signal_styles("before **a🔥b** after")
+    assert stripped == "before a🔥b after"
+    # "before " = 7 UTF-16 code units; "a🔥b" = 1 + 2 + 1 = 4 code units.
+    assert "7:4:BOLD" in styles
+
+
 def test_snake_case_underscores_not_italic() -> None:
     # Ensure `snake_case_identifier` doesn't get parsed as italic.
     stripped, styles = convert_markdown_to_signal_styles("snake_case_identifier works")

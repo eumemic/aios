@@ -102,7 +102,7 @@ def test_build_content_text_with_text_and_attachment(bot_uuid: str) -> None:
         chat_name=None,
         timestamp_ms=1,
         text="Check this out",
-        attachments=(Attachment(content_type="image/png", filename="x.png", signal_file=None),),
+        attachments=(Attachment(content_type="image/png", filename="x.png"),),
         reply=None,
         reaction=None,
     )

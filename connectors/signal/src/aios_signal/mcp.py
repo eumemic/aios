@@ -2,20 +2,14 @@
 
 Tools (invoked by the aios worker over streamable HTTP):
 
-- ``signal_send(chat_id, text)`` → signal-cli ``send`` RPC
-- ``signal_react(chat_id, target_author_uuid, target_timestamp_ms, emoji)`` →
-  signal-cli ``sendReaction`` RPC
-- ``signal_read_receipt(sender_uuid, timestamp_ms_list)`` → signal-cli
-  ``sendReceipt`` RPC with ``type="read"``
+- ``signal_send`` → signal-cli ``send`` RPC
+- ``signal_react`` → signal-cli ``sendReaction`` RPC
+- ``signal_read_receipt`` → signal-cli ``sendReceipt`` with ``type="read"``
 
-Authentication is a single static bearer token, presented as
-``Authorization: Bearer <token>``. This matches the ``static_bearer`` vault
-credential shape aios already understands.
-
-We don't use FastMCP's built-in auth because it requires AuthSettings with an
-issuer URL (OAuth resource-server shape) that doesn't fit a static-token
-deployment. A thin Starlette middleware wrapping the ASGI app is simpler and
-keeps the contract uniform across loopback and remote deployments.
+We don't use FastMCP's built-in auth because it requires AuthSettings with
+an OAuth-shaped ``issuer_url`` that doesn't fit a static-token deployment.
+A thin Starlette middleware wrapping the ASGI app gives us a uniform
+``Authorization: Bearer`` contract across loopback and remote deployments.
 """
 
 from __future__ import annotations
@@ -23,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import urllib.parse
 from typing import Any
 
 import structlog
@@ -40,8 +35,6 @@ log = structlog.get_logger(__name__)
 
 
 class BearerAuthMiddleware:
-    """Starlette-style ASGI middleware enforcing ``Authorization: Bearer``."""
-
     def __init__(self, app: ASGIApp, *, expected_token: str) -> None:
         self._app = app
         self._expected = expected_token.encode("utf-8")
@@ -67,13 +60,7 @@ class BearerAuthMiddleware:
         await self._app(scope, receive, send)
 
 
-def build_mcp_server(
-    *,
-    rpc: RpcClient,
-    bot_account_uuid: str,  # accepted for future use (self-reference in metadata, logs)
-) -> FastMCP:
-    """Build the FastMCP instance with the three Signal tools registered."""
-    _ = bot_account_uuid  # kept for future use
+def build_mcp_server(*, rpc: RpcClient) -> FastMCP:
     mcp = FastMCP("aios-signal", stateless_http=True)
 
     @mcp.tool()
@@ -82,10 +69,7 @@ def build_mcp_server(
 
         Args:
             chat_id: URL-safe chat ID (DM UUID or URL-safe-base64 group ID).
-            text: Message body. Markdown formatting is converted to Signal text styles.
-
-        Returns:
-            ``{"sent_at_ms": <signal-cli timestamp>}``.
+            text: Message body. Markdown is converted to Signal text styles.
         """
         chat_type, raw_id = decode_chat_id(chat_id)
         stripped, styles = convert_markdown_to_signal_styles(text)
@@ -97,7 +81,7 @@ def build_mcp_server(
         else:
             params["recipient"] = [raw_id]
         result = await rpc.call("send", params)
-        return {"sent_at_ms": int(_extract_timestamp(result))}
+        return {"sent_at_ms": _extract_timestamp(result)}
 
     @mcp.tool()
     async def signal_react(
@@ -111,8 +95,8 @@ def build_mcp_server(
         Args:
             chat_id: URL-safe chat ID where the target message lives.
             target_author_uuid: ACI UUID of the message's author.
-            target_timestamp_ms: Timestamp of the target message (from its inbound metadata).
-            emoji: The reaction emoji. Pass ``""`` is invalid; use signal-cli remove semantics.
+            target_timestamp_ms: Timestamp of the target message (from inbound metadata).
+            emoji: The reaction emoji.
         """
         chat_type, raw_id = decode_chat_id(chat_id)
         params: dict[str, Any] = {
@@ -136,10 +120,12 @@ def build_mcp_server(
 
         Args:
             sender_uuid: ACI UUID of the original sender.
-            timestamp_ms_list: List of message timestamps (from inbound metadata) to ack.
+            timestamp_ms_list: Message timestamps (from inbound metadata) to ack.
         """
+        # Wrap in list for consistency with send/sendReaction and to match
+        # signal-cli's accepted shape on recent versions.
         params: dict[str, Any] = {
-            "recipient": sender_uuid,
+            "recipient": [sender_uuid],
             "type": "read",
             "targetTimestamp": list(timestamp_ms_list),
         }
@@ -150,37 +136,24 @@ def build_mcp_server(
 
 
 def build_mcp_app(mcp: FastMCP, *, token: str) -> Starlette:
-    """Wrap the FastMCP streamable-http app with bearer auth."""
     inner = mcp.streamable_http_app()
-    app = Starlette(
-        routes=inner.routes,
-        lifespan=inner.router.lifespan_context,
-    )
+    app = Starlette(routes=inner.routes, lifespan=inner.router.lifespan_context)
     app.add_middleware(BearerAuthMiddleware, expected_token=token)
     return app
 
 
 def _extract_timestamp(rpc_result: Any) -> int:
-    """Pull a timestamp out of signal-cli's ``send`` response.
-
-    signal-cli's ``send`` returns ``{"timestamp": <ms>, "results": [...]}``.
-    We keep the parse defensive: the RPC shape has varied across versions.
-    """
-    if isinstance(rpc_result, dict):
-        ts = rpc_result.get("timestamp")
-        if isinstance(ts, int):
-            return ts
-        if isinstance(ts, str) and ts.isdigit():
-            return int(ts)
-    raise ValueError(f"signal-cli send returned unexpected shape: {rpc_result!r}")
+    if not isinstance(rpc_result, dict):
+        raise ValueError(f"signal-cli send returned unexpected shape: {rpc_result!r}")
+    ts = rpc_result.get("timestamp")
+    if not isinstance(ts, int):
+        raise ValueError(f"signal-cli send timestamp not an int: {ts!r}")
+    return ts
 
 
 async def serve_mcp(app: Starlette, *, host: str, port: int) -> None:
-    """Run the MCP server on uvicorn, exiting cleanly on task cancellation.
-
-    Uvicorn's ``Server.serve`` does not react to :exc:`asyncio.CancelledError`
-    on its own — we have to flip ``should_exit`` and await shutdown ourselves.
-    """
+    # Uvicorn's Server.serve doesn't react to CancelledError; we flip
+    # should_exit and await shutdown ourselves.
     config = uvicorn.Config(app, host=host, port=port, log_config=None, lifespan="on")
     server = uvicorn.Server(config)
     log.info("signal.mcp.serving", host=host, port=port)
@@ -194,8 +167,8 @@ async def serve_mcp(app: Starlette, *, host: str, port: int) -> None:
 
 
 def parse_bind(bind: str) -> tuple[str, int]:
-    """Split ``host:port`` into (host, port) with type-checked port."""
-    host, _, port_str = bind.rpartition(":")
-    if not host or not port_str:
+    # urlsplit handles both "host:port" and "[::1]:port" (IPv6) correctly.
+    parts = urllib.parse.urlsplit(f"//{bind}")
+    if not parts.hostname or parts.port is None:
         raise ValueError(f"invalid bind {bind!r} — expected host:port")
-    return host, int(port_str)
+    return parts.hostname, parts.port

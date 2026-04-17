@@ -114,7 +114,7 @@ def test_build_metadata_full() -> None:
         chat_name="Friends",
         timestamp_ms=100,
         text="hi",
-        attachments=(Attachment(content_type="image/png", filename="x.png", signal_file=None),),
+        attachments=(Attachment(content_type="image/png", filename="x.png"),),
         reply=Reply(author_uuid="b", timestamp_ms=99, text="prev"),
         reaction=Reaction(emoji="👍", target_author_uuid="c", target_timestamp_ms=98),
     )

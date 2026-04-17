@@ -1,17 +1,15 @@
 """aios ingest client + InboundPump.
 
-POSTs inbound Signal messages at
-``POST /v1/connections/{connection_id}/messages`` with the metadata envelope
-specified in the issue (channel, sender, reply/reaction structures).
-
-Retries transient failures (network, 5xx) with exponential backoff. On
-persistent failure, logs and drops — Signal's own redelivery on reconnect is
-the recovery mechanism (for messages the daemon hasn't already acked).
+POSTs inbound Signal messages to ``/v1/connections/{id}/messages``. Retries
+transient failures (network, 5xx) with exponential backoff; 4xx and
+retry-exhaustion both log and drop, and we let Signal's own redelivery on
+reconnect recover anything not acked by the daemon.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Self
 
@@ -19,7 +17,7 @@ import httpx
 import structlog
 
 from .addressing import encode_chat_id
-from .parse import InboundMessage, build_content_text
+from .parse import InboundMessage, build_content_text, parse_envelope
 
 log = structlog.get_logger(__name__)
 
@@ -53,12 +51,6 @@ class IngestClient:
         content: str,
         metadata: dict[str, Any],
     ) -> None:
-        """POST an inbound message to aios, retrying on transient failures.
-
-        Non-2xx 4xx responses are logged and dropped (the request was malformed
-        and retrying won't help). 5xx and network errors retry with exponential
-        backoff; on exhaustion we log and drop.
-        """
         if self._client is None:
             raise RuntimeError("IngestClient must be used as an async context manager")
         url = f"/v1/connections/{self.connection_id}/messages"
@@ -76,6 +68,7 @@ class IngestClient:
             if response.is_success:
                 return
             if 400 <= response.status_code < 500:
+                # 4xx is our bug — retrying won't help.
                 log.error(
                     "ingest.client_error",
                     status=response.status_code,
@@ -83,7 +76,6 @@ class IngestClient:
                     path=path,
                 )
                 return
-            # 5xx: retry.
             log.warning(
                 "ingest.server_error",
                 attempt=attempt,
@@ -100,12 +92,8 @@ def build_metadata(
     chat_id: str,
     bot_uuid: str,
 ) -> dict[str, Any]:
-    """Build the ``metadata`` envelope for an inbound Signal message.
-
-    Mirrors the shape specified in issue #33. ``channel`` is redundant with
-    what aios stamps server-side, but we include it so the event is
-    self-describing.
-    """
+    # `channel` is redundant with what aios stamps server-side, but we
+    # include it so events are self-describing when read outside aios.
     metadata: dict[str, Any] = {
         "channel": f"signal/{bot_uuid}/{chat_id}",
         "sender_uuid": msg.sender_uuid,
@@ -133,15 +121,11 @@ def build_metadata(
 
 @dataclass(slots=True)
 class InboundPump:
-    """Drain the signal-cli listener, parse envelopes, post to aios."""
-
     bot_uuid: str
     ingest: IngestClient
-    messages: Any  # AsyncIterator[dict[str, Any]] — avoid Protocol churn here
+    messages: AsyncIterator[dict[str, Any]]
 
     async def run(self) -> None:
-        from .parse import parse_envelope  # local import to keep parse self-contained
-
         async for envelope in self.messages:
             msg = parse_envelope(envelope, bot_account_uuid=self.bot_uuid)
             if msg is None:

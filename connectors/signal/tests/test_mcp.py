@@ -32,7 +32,7 @@ class FakeRpc:
 
 
 async def _call_tool(rpc: FakeRpc, name: str, args: dict[str, Any]) -> dict[str, Any]:
-    mcp = build_mcp_server(rpc=rpc, bot_account_uuid="bot-uuid")  # type: ignore[arg-type]
+    mcp = build_mcp_server(rpc=rpc)  # type: ignore[arg-type]
     result = await mcp.call_tool(name, args)
     # call_tool returns (content_blocks, structured_result) when the tool
     # has an output_schema (ours do — typed dict returns).
@@ -122,7 +122,7 @@ async def test_signal_read_receipt() -> None:
     method, params = rpc.calls[0]
     assert method == "sendReceipt"
     assert params == {
-        "recipient": "eeeeeeee-ffff-0000-1111-222222222222",
+        "recipient": ["eeeeeeee-ffff-0000-1111-222222222222"],
         "type": "read",
         "targetTimestamp": [100, 200, 300],
     }
@@ -130,12 +130,13 @@ async def test_signal_read_receipt() -> None:
 
 def test_extract_timestamp_happy_path() -> None:
     assert _extract_timestamp({"timestamp": 42}) == 42
-    assert _extract_timestamp({"timestamp": "42"}) == 42
 
 
 def test_extract_timestamp_rejects_junk() -> None:
     with pytest.raises(ValueError):
         _extract_timestamp({"no_timestamp": True})
+    with pytest.raises(ValueError):
+        _extract_timestamp({"timestamp": "42"})  # strings rejected — int-only
     with pytest.raises(ValueError):
         _extract_timestamp("not-a-dict")
 
@@ -143,6 +144,10 @@ def test_extract_timestamp_rejects_junk() -> None:
 def test_parse_bind() -> None:
     assert parse_bind("127.0.0.1:9100") == ("127.0.0.1", 9100)
     assert parse_bind("0.0.0.0:80") == ("0.0.0.0", 80)
+
+
+def test_parse_bind_ipv6() -> None:
+    assert parse_bind("[::1]:9100") == ("::1", 9100)
 
 
 def test_parse_bind_rejects_malformed() -> None:
@@ -198,6 +203,6 @@ async def test_bearer_auth_rejects_non_bearer_scheme() -> None:
 
 def test_build_mcp_app_returns_starlette() -> None:
     rpc = FakeRpc()
-    mcp = build_mcp_server(rpc=rpc, bot_account_uuid="bot")  # type: ignore[arg-type]
+    mcp = build_mcp_server(rpc=rpc)  # type: ignore[arg-type]
     app = build_mcp_app(mcp, token="t")
     assert isinstance(app, Starlette)

@@ -1,17 +1,9 @@
 """Top-level orchestration.
 
-``run(cfg)`` wires the three moving parts of the connector into one
-``asyncio.TaskGroup``:
-
-1. :class:`SignalDaemon` owns the signal-cli subprocess (enter: spawn, wait
-   for TCP, discover the bot's ACI UUID).
-2. :class:`InboundPump` drains the listener, parses envelopes, and POSTs them
-   to aios.
-3. The FastMCP server (``signal_send``, ``signal_react``,
-   ``signal_read_receipt``) is served on uvicorn.
-
-Crash-is-fatal: any task failure propagates through the TaskGroup, tearing
-the process down with a non-zero exit. Operator systemd/Docker restarts.
+``run(cfg)`` supervises three tasks under one ``asyncio.TaskGroup``: the
+signal-cli subprocess, the inbound pump (listener → parse → POST aios), and
+the MCP server. Any task failure propagates through the group and exits the
+process non-zero — operator systemd/Docker restarts.
 """
 
 from __future__ import annotations
@@ -30,7 +22,6 @@ log = structlog.get_logger(__name__)
 
 
 async def run(cfg: Settings) -> None:
-    """Blocking run loop — returns only on graceful shutdown or fatal crash."""
     async with SignalDaemon(
         phone=cfg.phone,
         config_dir=cfg.config_dir,
@@ -51,8 +42,7 @@ async def run(cfg: Settings) -> None:
                 ingest=ingest,
                 messages=daemon.listener.messages(),
             )
-            mcp = build_mcp_server(rpc=daemon.rpc, bot_account_uuid=bot_uuid)
-            mcp_app = build_mcp_app(mcp, token=cfg.mcp_token)
+            mcp_app = build_mcp_app(build_mcp_server(rpc=daemon.rpc), token=cfg.mcp_token)
             host, port = parse_bind(cfg.mcp_bind)
 
             try:
@@ -61,12 +51,11 @@ async def run(cfg: Settings) -> None:
                     tg.create_task(serve_mcp(mcp_app, host=host, port=port), name="signal-mcp")
                     tg.create_task(_await_crash(daemon), name="signal-crash-watch")
             except* Exception as eg:
-                # Surface the first real exception so the caller sees a
-                # conventional traceback rather than ExceptionGroup repr.
+                # Surface the first real exception so operators see a conventional
+                # traceback rather than ExceptionGroup noise.
                 raise eg.exceptions[0] from None
 
 
 async def _await_crash(daemon: SignalDaemon) -> None:
-    """Feed the daemon's crash future into the TaskGroup as a regular task."""
     with contextlib.suppress(asyncio.CancelledError):
         await daemon.crashed()

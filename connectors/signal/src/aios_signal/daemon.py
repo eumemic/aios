@@ -1,10 +1,9 @@
 """signal-cli subprocess lifecycle.
 
-Owns spawning signal-cli in daemon mode, pumping its stdout/stderr into
-structlog, and waiting for TCP readiness via ``listAccounts``. Crash-is-fatal:
-an unexpected subprocess exit raises :class:`DaemonCrashError` through the
-``crashed()`` awaitable, which app.py propagates into the TaskGroup to tear
-the whole process down.
+Spawns ``signal-cli daemon``, drains its stdio, waits for TCP readiness via
+``listAccounts``, and exposes ``discover_bot_uuid``. Crash-is-fatal: an
+unexpected subprocess exit raises :class:`DaemonCrashError` through
+``crashed()``, which app.py feeds into its TaskGroup.
 """
 
 from __future__ import annotations
@@ -22,34 +21,14 @@ from .rpc import RpcClient, RpcListener
 
 log = structlog.get_logger(__name__)
 
-# 150 attempts @ 200ms = 30s total.
-READY_POLL_ATTEMPTS = 150
+READY_POLL_ATTEMPTS = 150  # 150 attempts @ 200ms = 30s total
 READY_POLL_INTERVAL_S = 0.2
 READY_POLL_TIMEOUT_S = 2.0
-
-BOT_UUID_ATTEMPTS = 3
-BOT_UUID_RETRY_INTERVAL_S = 2.0
 
 SHUTDOWN_GRACE_S = 5.0
 
 
 class SignalDaemon:
-    """Async context manager owning a ``signal-cli --daemon`` subprocess.
-
-    Usage::
-
-        async with SignalDaemon(
-            phone="+15551234567",
-            config_dir=Path("~/.config/signal-cli"),
-            cli_bin="signal-cli",
-            host="127.0.0.1",
-            port=7583,
-        ) as daemon:
-            bot_uuid = await daemon.discover_bot_uuid()
-            async for envelope in daemon.listener.messages():
-                ...
-    """
-
     def __init__(
         self,
         *,
@@ -69,6 +48,7 @@ class SignalDaemon:
         self._drain_tasks: list[asyncio.Task[None]] = []
         self._watch_task: asyncio.Task[None] | None = None
         self._crash_future: asyncio.Future[None] | None = None
+        self._accounts: list[dict[str, Any]] | None = None
 
         self.rpc = RpcClient(host, port)
         self.listener = RpcListener(host, port)
@@ -151,21 +131,17 @@ class SignalDaemon:
             self._crash_future.set_exception(DaemonCrashError(f"signal-cli exited with code {rc}"))
 
     def crashed(self) -> asyncio.Future[None]:
-        """Return a future that completes with :class:`DaemonCrashError` on crash.
-
-        app.py awaits this as a supervision primitive inside its TaskGroup so
-        that a daemon crash causes the whole process to exit non-zero.
-        """
         assert self._crash_future is not None, "daemon not started"
         return self._crash_future
 
     async def _wait_for_tcp(self) -> None:
-        """Poll ``listAccounts`` until it returns, or fail after 30s."""
+        # Readiness probe doubles as the account lookup — caching the result
+        # lets discover_bot_uuid skip a second RPC round-trip.
         last_error: Exception | None = None
         for _ in range(READY_POLL_ATTEMPTS):
             try:
                 probe = RpcClient(self.host, self.port, timeout=READY_POLL_TIMEOUT_S)
-                await probe.call("listAccounts")
+                self._accounts = await probe.call("listAccounts")
                 await self.listener.connect()
                 log.info("signal.daemon.ready", host=self.host, port=self.port)
                 return
@@ -177,34 +153,20 @@ class SignalDaemon:
         )
 
     async def discover_bot_uuid(self) -> str:
-        """Return the ACI UUID of the account whose number matches ``self.phone``.
-
-        Retries transient RPC failures a few times; missing-account is fatal.
-        """
-        last_error: Exception | None = None
-        for attempt in range(BOT_UUID_ATTEMPTS):
-            if attempt > 0:
-                await asyncio.sleep(BOT_UUID_RETRY_INTERVAL_S)
-            try:
-                accounts = await self.rpc.call("listAccounts")
-            except Exception as e:
-                last_error = e
-                log.warning("signal.bot_uuid.rpc_error", attempt=attempt, error=str(e))
-                continue
-            uuid = _find_account_uuid(accounts, self.phone)
-            if uuid is not None:
+        assert self._accounts is not None, "daemon not ready"
+        target = self.phone.strip()
+        for entry in self._accounts:
+            if entry.get("number", "").strip() == target and entry.get("uuid"):
+                uuid: str = entry["uuid"]
                 return uuid
-            raise BotAccountNotFoundError(
-                f"signal-cli has no account for {self.phone}. "
-                f"Run `signal-cli -a {self.phone} register` first."
-            )
         raise BotAccountNotFoundError(
-            f"listAccounts failed after {BOT_UUID_ATTEMPTS} attempts: {last_error!r}"
+            f"signal-cli has no account for {self.phone}. "
+            f"Run `signal-cli -a {self.phone} register` first."
         )
 
 
 async def _spawn_subprocess(args: list[str]) -> asyncio.subprocess.Process:
-    """Thin wrapper over ``asyncio.create_subprocess_exec`` for mocking in tests."""
+    """Thin wrapper for test-time monkeypatching."""
     spawn = asyncio.create_subprocess_exec
     return await spawn(
         *args,
@@ -213,28 +175,7 @@ async def _spawn_subprocess(args: list[str]) -> asyncio.subprocess.Process:
     )
 
 
-def _normalize_phone(phone: str) -> str:
-    return phone.strip()
-
-
-def _find_account_uuid(accounts: Any, phone: str) -> str | None:
-    """Scan the ``listAccounts`` result for the entry matching ``phone``."""
-    if not isinstance(accounts, list):
-        return None
-    target = _normalize_phone(phone)
-    for entry in accounts:
-        if not isinstance(entry, dict):
-            continue
-        number = entry.get("number")
-        if isinstance(number, str) and _normalize_phone(number) == target:
-            uuid = entry.get("uuid")
-            if isinstance(uuid, str) and uuid:
-                return uuid
-    return None
-
-
 async def _drain(reader: asyncio.StreamReader, log_event: str) -> None:
-    """Read lines from a subprocess pipe and log them through structlog."""
     try:
         while True:
             line = await reader.readline()

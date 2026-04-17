@@ -21,12 +21,11 @@ from typing import NamedTuple
 
 
 def _utf16_len(text: str) -> int:
-    """Return the number of UTF-16 code units needed to encode text."""
-    return sum(2 if ord(c) > 0xFFFF else 1 for c in text)
+    # Each UTF-16 code unit is 2 bytes; divide by 2 to get code-unit count.
+    return len(text.encode("utf-16-le")) // 2
 
 
 def _codepoint_to_utf16_offset(text: str, cp_offset: int) -> int:
-    """Convert a Python string index (code point offset) to UTF-16 code units."""
     return _utf16_len(text[:cp_offset])
 
 
@@ -40,14 +39,26 @@ class _StyleSpan(NamedTuple):
 
 
 def _overlaps_protected(start: int, end: int, protected: list[tuple[int, int]]) -> bool:
-    """Return True if [start, end) is blocked by a protected range.
+    """Return True if [start, end) overlaps a protected range without fully containing it.
 
-    A span is blocked if it overlaps a protected range without fully containing it.
-    This allows outer formatting (e.g. bold wrapping code) while preventing inner
-    formatting (e.g. bold inside code blocks).
+    Allows outer formatting to wrap code (bold around backticks) but prevents
+    inner formatting inside code (bold inside a backtick span).
     """
-    # Overlap that doesn't fully contain the protected range is blocked.
     return any(start < pe and end > ps and not (start <= ps and end >= pe) for ps, pe in protected)
+
+
+# Compiled once at import; matchers are on the per-outbound-message hot path.
+_FENCED_RE = re.compile(r"```([a-zA-Z]*)\n?(.*?)\n?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+_HEADER_RE = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+)?$", re.MULTILINE)
+_BOLD_STAR_RE = re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*", re.DOTALL)
+_BOLD_UNDER_RE = re.compile(r"__(?!\s)(.+?)(?<!\s)__", re.DOTALL)
+# *text* — not ** on either side
+_ITALIC_STAR_RE = re.compile(r"(?<!\*)\*(?!\*)(?!\s)(.+?)(?<!\s)(?<!\*)\*(?!\*)", re.DOTALL)
+# _text_ — not preceded/followed by word chars (avoids snake_case)
+_ITALIC_UNDER_RE = re.compile(r"(?<!\w)_(?!_)(?!\s)(.+?)(?<!\s)(?<!_)_(?!\w)", re.DOTALL)
+_STRIKE_RE = re.compile(r"~~(.+?)~~", re.DOTALL)
+_SPOILER_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
 
 
 def convert_markdown_to_signal_styles(
@@ -83,8 +94,7 @@ def convert_markdown_to_signal_styles(
     # -------------------------------------------------------------------------
     # Phase 1: Find fenced code blocks first (highest priority, protect content)
     # -------------------------------------------------------------------------
-    fenced_pattern = re.compile(r"```([a-zA-Z]*)\n?(.*?)\n?```", re.DOTALL)
-    for m in fenced_pattern.finditer(text):
+    for m in _FENCED_RE.finditer(text):
         lang = m.group(1)
         content = m.group(2)
         # Calculate where the content starts in original text
@@ -119,8 +129,7 @@ def convert_markdown_to_signal_styles(
     # -------------------------------------------------------------------------
     # Phase 2: Inline code (backtick spans) - protect content
     # -------------------------------------------------------------------------
-    inline_code_pattern = re.compile(r"`([^`]+)`")
-    for m in inline_code_pattern.finditer(text):
+    for m in _INLINE_CODE_RE.finditer(text):
         if _overlaps_protected(m.start(), m.end(), protected):
             continue
         content_start = m.start() + 1
@@ -142,8 +151,7 @@ def convert_markdown_to_signal_styles(
     # -------------------------------------------------------------------------
     # Phase 3: Headers (# text) -> BOLD (strip # prefix, render content bold)
     # -------------------------------------------------------------------------
-    header_pattern = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+)?$", re.MULTILINE)
-    for m in header_pattern.finditer(text):
+    for m in _HEADER_RE.finditer(text):
         if _overlaps_protected(m.start(), m.end(), protected):
             continue
         content_start = m.start(2)  # start of header text
@@ -174,11 +182,7 @@ def convert_markdown_to_signal_styles(
     # -------------------------------------------------------------------------
     # Phase 4: Bold (**text** or __text__)
     # -------------------------------------------------------------------------
-    bold_patterns = [
-        re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*", re.DOTALL),
-        re.compile(r"__(?!\s)(.+?)(?<!\s)__", re.DOTALL),
-    ]
-    for pat in bold_patterns:
+    for pat in (_BOLD_STAR_RE, _BOLD_UNDER_RE):
         for m in pat.finditer(text):
             if _overlaps_protected(m.start(), m.end(), protected):
                 continue
@@ -202,14 +206,7 @@ def convert_markdown_to_signal_styles(
     # -------------------------------------------------------------------------
     # Phase 5: Italic (*text* or _text_)
     # -------------------------------------------------------------------------
-    italic_patterns = [
-        # *text* - not ** on either side
-        re.compile(r"(?<!\*)\*(?!\*)(?!\s)(.+?)(?<!\s)(?<!\*)\*(?!\*)", re.DOTALL),
-        # _text_ - not preceded/followed by word chars (avoids snake_case)
-        # (?!_) and (?<!_) prevent __ bold delimiters from matching as italic
-        re.compile(r"(?<!\w)_(?!_)(?!\s)(.+?)(?<!\s)(?<!_)_(?!\w)", re.DOTALL),
-    ]
-    for pat in italic_patterns:
+    for pat in (_ITALIC_STAR_RE, _ITALIC_UNDER_RE):
         for m in pat.finditer(text):
             if _overlaps_protected(m.start(), m.end(), protected):
                 continue
@@ -233,8 +230,7 @@ def convert_markdown_to_signal_styles(
     # -------------------------------------------------------------------------
     # Phase 6: Strikethrough (~~text~~)
     # -------------------------------------------------------------------------
-    strikethrough_pattern = re.compile(r"~~(.+?)~~", re.DOTALL)
-    for m in strikethrough_pattern.finditer(text):
+    for m in _STRIKE_RE.finditer(text):
         if _overlaps_protected(m.start(), m.end(), protected):
             continue
         content_start = m.start() + 2
@@ -257,8 +253,7 @@ def convert_markdown_to_signal_styles(
     # -------------------------------------------------------------------------
     # Phase 7: Spoiler (||text||)
     # -------------------------------------------------------------------------
-    spoiler_pattern = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
-    for m in spoiler_pattern.finditer(text):
+    for m in _SPOILER_RE.finditer(text):
         if _overlaps_protected(m.start(), m.end(), protected):
             continue
         content_start = m.start() + 2
