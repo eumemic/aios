@@ -59,12 +59,11 @@ def build_channels_system_block(bindings: list[ChannelBinding]) -> str:
     lines.append("")
     lines.append(
         "To respond to a channel you must call the connector's response "
-        "tool — for Signal that is `signal_send`; other connectors "
-        "expose their own response tools, described in the per-connector "
-        "sections below. Bare assistant text is NOT delivered to any "
-        f"channel; it is internal thinking and will be prefixed with "
-        f"{MONOLOGUE_PREFIX.strip()!r} in your conversation history as "
-        "a reminder that no human will see it."
+        "tool; each connector describes its own tools in the "
+        "per-connector sections below. Bare assistant text is NOT "
+        "delivered to any channel; it is internal thinking and will be "
+        f"prefixed with {MONOLOGUE_PREFIX.strip()!r} in your "
+        "conversation history as a reminder that no human will see it."
     )
     lines.append("")
     lines.append(
