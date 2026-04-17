@@ -160,6 +160,11 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     if tail is not None:
         ctx.messages.append(tail)
 
+    # Dump the exact chat-completions payload we're about to send to LiteLLM
+    # when AIOS_DUMP_CONTEXT is set — useful for debugging prompt construction
+    # (header inlining, system-prompt augmentation, tool list shape).
+    await _dump_context_if_enabled(session_id, agent.model, ctx.messages, tools)
+
     # Mark session as running.
     await sessions_service.set_session_status(pool, session_id, "running")
 
@@ -387,6 +392,45 @@ def _hide_conn_tools_when_phone_down(
         return mcp_tools
     prefix = f"mcp__{CONNECTION_SERVER_NAME_PREFIX}"
     return [t for t in mcp_tools if not t.get("function", {}).get("name", "").startswith(prefix)]
+
+
+async def _dump_context_if_enabled(
+    session_id: str,
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+) -> None:
+    """Write the chat-completions payload to disk when ``AIOS_DUMP_CONTEXT`` is set.
+
+    Debug aid: inspect exactly what reaches LiteLLM (post header-inlining,
+    post system-prompt augmentation, with the full tool list).
+    """
+    import os as _os
+
+    if not _os.environ.get("AIOS_DUMP_CONTEXT"):
+        return
+    import asyncio as _asyncio
+    import json as _json
+    import time as _time
+    from pathlib import Path as _Path
+
+    dump_dir = _Path(_os.environ.get("AIOS_DUMP_CONTEXT_DIR", "/tmp/aios-context-dumps"))
+    ts = int(_time.time() * 1000)
+    path = dump_dir / f"{ts}_{session_id}.json"
+    payload = {
+        "session_id": session_id,
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+    }
+
+    def _write() -> None:
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            _json.dump(payload, f, indent=2)
+
+    await _asyncio.to_thread(_write)
+    log.info("step.context_dumped", path=str(path))
 
 
 def _tc_name(tc: dict[str, Any]) -> str:
