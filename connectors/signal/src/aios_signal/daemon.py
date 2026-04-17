@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import signal
 from pathlib import Path
-from typing import Any, Self
+from typing import Self
 
 import structlog
 
@@ -48,7 +48,6 @@ class SignalDaemon:
         self._drain_tasks: list[asyncio.Task[None]] = []
         self._watch_task: asyncio.Task[None] | None = None
         self._crash_future: asyncio.Future[None] | None = None
-        self._accounts: list[dict[str, Any]] | None = None
 
         self.rpc = RpcClient(host, port)
         self.listener = RpcListener(host, port)
@@ -135,13 +134,14 @@ class SignalDaemon:
         return self._crash_future
 
     async def _wait_for_tcp(self) -> None:
-        # Readiness probe doubles as the account lookup — caching the result
-        # lets discover_bot_uuid skip a second RPC round-trip.
+        # ``listAccounts`` is rejected when the daemon is started with ``-a``
+        # (account-scoped mode), so probe with ``version`` — always
+        # implemented, side-effect-free.
         last_error: Exception | None = None
         for _ in range(READY_POLL_ATTEMPTS):
             try:
                 probe = RpcClient(self.host, self.port, timeout=READY_POLL_TIMEOUT_S)
-                self._accounts = await probe.call("listAccounts")
+                await probe.call("version")
                 await self.listener.connect()
                 log.info("signal.daemon.ready", host=self.host, port=self.port)
                 return
@@ -153,16 +153,66 @@ class SignalDaemon:
         )
 
     async def discover_bot_uuid(self) -> str:
-        assert self._accounts is not None, "daemon not ready"
+        # Read signal-cli's on-disk account index rather than RPCing —
+        # ``listAccounts`` is the only method that returns this info and it's
+        # unavailable in account-scoped daemon mode.
+        import json as _json
+
+        accounts_json = self.config_dir / "data" / "accounts.json"
+        try:
+            raw = accounts_json.read_text()
+        except OSError as e:
+            raise BotAccountNotFoundError(
+                f"cannot read signal-cli accounts file at {accounts_json}: {e}"
+            ) from e
+        try:
+            data = _json.loads(raw)
+        except _json.JSONDecodeError as e:
+            raise BotAccountNotFoundError(
+                f"malformed signal-cli accounts file at {accounts_json}: {e}"
+            ) from e
         target = self.phone.strip()
-        for entry in self._accounts:
-            if entry.get("number", "").strip() == target and entry.get("uuid"):
+        for entry in data.get("accounts", []):
+            if str(entry.get("number", "")).strip() == target and entry.get("uuid"):
                 uuid: str = entry["uuid"]
                 return uuid
         raise BotAccountNotFoundError(
-            f"signal-cli has no account for {self.phone}. "
+            f"signal-cli has no account for {self.phone} in {accounts_json}. "
             f"Run `signal-cli -a {self.phone} register` first."
         )
+
+    async def list_contacts(self) -> dict[str, str]:
+        """Return a ``{uuid: display_name}`` map from signal-cli's contact store.
+
+        signal-cli's inbound ``sourceName`` is sometimes empty (e.g. for peers
+        not in the bot's local contacts but whose profile name Signal's UI
+        resolves elsewhere). ``listContacts`` pulls the richer view so the
+        connector can stamp a ``sender_name`` even when the envelope omits it.
+        Returns an empty dict on RPC failure — name resolution is best-effort.
+        """
+        try:
+            result = await self.rpc.call("listContacts", {"allRecipients": True})
+        except Exception:
+            log.warning("signal.list_contacts.failed", exc_info=True)
+            return {}
+        if not isinstance(result, list):
+            return {}
+        mapping: dict[str, str] = {}
+        for contact in result:
+            if not isinstance(contact, dict):
+                continue
+            uuid = contact.get("uuid")
+            if not isinstance(uuid, str) or not uuid:
+                continue
+            profile = contact.get("profile") or {}
+            name = (
+                contact.get("name")
+                or (profile.get("givenName") if isinstance(profile, dict) else None)
+                or (profile.get("familyName") if isinstance(profile, dict) else None)
+            )
+            if isinstance(name, str) and name.strip():
+                mapping[uuid] = name.strip()
+        return mapping
 
 
 async def _spawn_subprocess(args: list[str]) -> asyncio.subprocess.Process:

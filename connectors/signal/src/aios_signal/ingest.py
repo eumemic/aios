@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any, Self
 
 import httpx
@@ -124,12 +124,20 @@ class InboundPump:
     bot_uuid: str
     ingest: IngestClient
     messages: AsyncIterator[dict[str, Any]]
+    contact_names: dict[str, str] = field(default_factory=dict)
 
     async def run(self) -> None:
         async for envelope in self.messages:
             msg = parse_envelope(envelope, bot_account_uuid=self.bot_uuid)
             if msg is None:
                 continue
+            # Fall back to signal-cli's contact store when the envelope's
+            # ``sourceName`` is empty — Signal's UI resolves names via
+            # profiles the envelope doesn't carry.
+            if msg.sender_name is None:
+                resolved = self.contact_names.get(msg.sender_uuid)
+                if resolved:
+                    msg = replace(msg, sender_name=resolved)
             chat_id = encode_chat_id(msg.raw_chat_id, msg.chat_type)
             content = build_content_text(msg)
             metadata = build_metadata(msg, chat_id, self.bot_uuid)

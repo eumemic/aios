@@ -30,7 +30,13 @@ async def run(cfg: Settings) -> None:
         port=cfg.daemon_port,
     ) as daemon:
         bot_uuid = await daemon.discover_bot_uuid()
-        log.info("signal.ready", bot_uuid=bot_uuid, phone=cfg.phone)
+        contact_names = await daemon.list_contacts()
+        log.info(
+            "signal.ready",
+            bot_uuid=bot_uuid,
+            phone=cfg.phone,
+            contacts=len(contact_names),
+        )
 
         async with IngestClient(
             base_url=cfg.aios_url,
@@ -41,6 +47,7 @@ async def run(cfg: Settings) -> None:
                 bot_uuid=bot_uuid,
                 ingest=ingest,
                 messages=daemon.listener.messages(),
+                contact_names=contact_names,
             )
             mcp_app = build_mcp_app(build_mcp_server(rpc=daemon.rpc), token=cfg.mcp_token)
             host, port = parse_bind(cfg.mcp_bind)

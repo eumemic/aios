@@ -4,7 +4,12 @@ Tools (invoked by the aios worker over streamable HTTP):
 
 - ``signal_send`` → signal-cli ``send`` RPC
 - ``signal_react`` → signal-cli ``sendReaction`` RPC
-- ``signal_read_receipt`` → signal-cli ``sendReceipt`` with ``type="read"``
+
+Read receipts are NOT an agent-facing tool. The semantically-correct
+moment to mark a message as read is when the agent's ``reacting_to``
+watermark advances past it — the model chose to reason about it — not
+when the model happens to call a tool. That's a connector-side
+automation, not a tool. Punted to a follow-up (see SMOKE_TEST_NOTES.md).
 
 We don't use FastMCP's built-in auth because it requires AuthSettings with
 an OAuth-shaped ``issuer_url`` that doesn't fit a static-token deployment.
@@ -155,7 +160,8 @@ def build_mcp_server(*, rpc: RpcClient) -> FastMCP:
         chat_id = focal_chat_id_from_meta(ctx.request_context.meta)
         params = build_send_params(chat_id, text)
         result = await rpc.call("send", params)
-        return {"sent_at_ms": _extract_timestamp(result)}
+        ts = _extract_timestamp(result)
+        return {"sent_at_ms": ts} if ts is not None else {"status": "ok"}
 
     @mcp.tool()
     async def signal_react(
@@ -169,35 +175,22 @@ def build_mcp_server(*, rpc: RpcClient) -> FastMCP:
         The chat id is taken implicitly from your focal channel —
         aios injects it via the JSON-RPC ``_meta`` field on each call.
 
+        The target message is identified by ``(target_author_uuid, target_timestamp_ms)``.
+        Every inbound Signal message in your conversation starts with a header line like
+        ``[channel=... · from=... · sender_uuid=<uuid> · timestamp_ms=<ms> (<iso>)]``.
+        Copy ``sender_uuid`` and the raw ``timestamp_ms`` integer from that header; do
+        not construct them yourself.
+
         Args:
-            target_author_uuid: ACI UUID of the message's author.
-            target_timestamp_ms: Timestamp of the target message (from inbound metadata).
+            target_author_uuid: The ``sender_uuid`` from the header of the message
+                you're reacting to.
+            target_timestamp_ms: The ``timestamp_ms`` integer from the header of the
+                message you're reacting to.
             emoji: The reaction emoji.
         """
         chat_id = focal_chat_id_from_meta(ctx.request_context.meta)
         params = build_react_params(chat_id, target_author_uuid, target_timestamp_ms, emoji)
         await rpc.call("sendReaction", params)
-        return {"status": "ok"}
-
-    @mcp.tool()
-    async def signal_read_receipt(
-        sender_uuid: str,
-        timestamp_ms_list: list[int],
-    ) -> dict[str, Any]:
-        """Mark one or more messages from ``sender_uuid`` as read.
-
-        Args:
-            sender_uuid: ACI UUID of the original sender.
-            timestamp_ms_list: Message timestamps (from inbound metadata) to ack.
-        """
-        # Wrap in list for consistency with send/sendReaction and to match
-        # signal-cli's accepted shape on recent versions.
-        params: dict[str, Any] = {
-            "recipient": [sender_uuid],
-            "type": "read",
-            "targetTimestamp": list(timestamp_ms_list),
-        }
-        await rpc.call("sendReceipt", params)
         return {"status": "ok"}
 
     return mcp
@@ -210,13 +203,20 @@ def build_mcp_app(mcp: FastMCP, *, token: str) -> Starlette:
     return app
 
 
-def _extract_timestamp(rpc_result: Any) -> int:
+def _extract_timestamp(rpc_result: Any) -> int | None:
+    """Pull the send timestamp from signal-cli's ``send`` result, or ``None``.
+
+    signal-cli delivers DM sends with ``{"timestamp": <ms>, ...}``, but group
+    sends in 0.14.x return a bare ``null`` even on success — the RPC doesn't
+    carry a timestamp. RPC-level delivery failures raise ``RpcError`` in the
+    transport layer, so if we reach this function the send *did* happen; a
+    missing timestamp just means we don't have an ID to hand back. Return
+    ``None`` and let the caller convey "sent, no ID" to the model.
+    """
     if not isinstance(rpc_result, dict):
-        raise ValueError(f"signal-cli send returned unexpected shape: {rpc_result!r}")
+        return None
     ts = rpc_result.get("timestamp")
-    if not isinstance(ts, int):
-        raise ValueError(f"signal-cli send timestamp not an int: {ts!r}")
-    return ts
+    return ts if isinstance(ts, int) else None
 
 
 async def serve_mcp(app: Starlette, *, host: str, port: int) -> None:
