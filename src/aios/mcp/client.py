@@ -1,9 +1,11 @@
 """MCP client — tool discovery, invocation, and credential resolution.
 
-Each function opens a fresh connection to the MCP server via streamable
-HTTP transport. There is no connection caching or pooling — this matches
-the per-step model where each ``wake_session`` job is a single
-procrastinate invocation.
+In worker context the module uses the worker-scoped
+:class:`~aios.mcp.pool.McpSessionPool` (stashed on
+:mod:`aios.harness.runtime`) to reuse persistent ``ClientSession``
+instances across calls. Outside a worker context (tests, API process)
+the pool is ``None`` and a fresh connection is opened per call — the
+original behaviour.
 
 Tool names are namespaced as ``mcp__<server_name>__<tool_name>`` to
 avoid collisions with built-in and custom tools. The model sees these
@@ -141,9 +143,24 @@ async def discover_mcp_tools(
     simply doesn't see those tools (or that connector's instructions).
     """
     try:
-        async with AsyncExitStack() as stack:
-            session, init_result = await _open_session(url, headers, stack)
-            result = await session.list_tools()
+        from aios.harness import runtime
+
+        _pool = runtime.mcp_session_pool
+
+        if _pool is not None:
+            # Pool path: reuse cached session; on failure evict + retry once.
+            try:
+                session, init_result = await _pool.get_or_connect(url, headers)
+                result = await session.list_tools()
+            except Exception:
+                _pool.evict(url, headers)
+                session, init_result = await _pool.get_or_connect(url, headers)
+                result = await session.list_tools()
+        else:
+            # Fallback: fresh connection per call (API process, tests).
+            async with AsyncExitStack() as stack:
+                session, init_result = await _open_session(url, headers, stack)
+                result = await session.list_tools()
 
         if len(result.tools) > MAX_TOOLS_PER_SERVER:
             log.warning(
@@ -190,9 +207,22 @@ async def call_mcp_tool(
     (failure).
     """
     try:
-        async with AsyncExitStack() as stack:
-            session, _ = await _open_session(url, headers, stack)
-            result = await session.call_tool(tool_name, arguments)
+        from aios.harness import runtime
+
+        _pool = runtime.mcp_session_pool
+
+        if _pool is not None:
+            try:
+                session, _ = await _pool.get_or_connect(url, headers)
+                result = await session.call_tool(tool_name, arguments)
+            except Exception:
+                _pool.evict(url, headers)
+                session, _ = await _pool.get_or_connect(url, headers)
+                result = await session.call_tool(tool_name, arguments)
+        else:
+            async with AsyncExitStack() as stack:
+                session, _ = await _open_session(url, headers, stack)
+                result = await session.call_tool(tool_name, arguments)
 
         # Concatenate text content from the result.
         parts: list[str] = []

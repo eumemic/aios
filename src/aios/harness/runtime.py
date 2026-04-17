@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
     from aios.crypto.vault import CryptoBox
     from aios.harness.task_registry import TaskRegistry
+    from aios.mcp.pool import McpSessionPool
     from aios.sandbox.registry import SandboxRegistry
 
 
@@ -32,6 +33,7 @@ crypto_box: CryptoBox | None = None
 worker_id: str | None = None
 sandbox_registry: SandboxRegistry | None = None
 task_registry: TaskRegistry | None = None
+mcp_session_pool: McpSessionPool | None = None
 
 
 def require_pool() -> asyncpg.Pool[Any]:
@@ -77,3 +79,12 @@ def require_task_registry() -> TaskRegistry:
             "this code is running outside a worker_main context"
         )
     return task_registry
+
+
+def require_mcp_session_pool() -> McpSessionPool:
+    if mcp_session_pool is None:
+        raise RuntimeError(
+            "aios.harness.runtime.mcp_session_pool is not initialized; "
+            "this code is running outside a worker_main context"
+        )
+    return mcp_session_pool
