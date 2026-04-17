@@ -331,12 +331,21 @@ def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
 def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
     """Look up the permission policy for an MCP tool.
 
-    Finds the ``mcp_toolset`` entry whose ``mcp_server_name`` matches the
-    server portion of the namespaced tool name, then returns the
-    ``default_config.permission_policy.type`` or ``None`` (which callers
-    treat as ``always_ask``).
+    Connection-provided tools (server name in the reserved ``conn_``
+    namespace) default to ``always_allow`` — the session's channel
+    binding is already explicit routing consent; gating every reply on
+    a confirmation prompt would defeat the connector autonomy story.
+
+    For agent-declared servers, finds the ``mcp_toolset`` entry whose
+    ``mcp_server_name`` matches the server portion of the namespaced
+    tool name, then returns the ``default_config.permission_policy.type``
+    or ``None`` (which callers treat as ``always_ask``).
     """
+    from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
+
     server_name = name.split("__", 2)[1]
+    if server_name.startswith(CONNECTION_SERVER_NAME_PREFIX):
+        return "always_allow"
     for spec in agent_tools:
         if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
             cfg = spec.default_config

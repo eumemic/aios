@@ -48,19 +48,18 @@ def _connection(cid: str, connector: str = "signal", account: str = "acct") -> C
 
 
 class TestConnectionServerName:
-    """Use the connection id directly — unambiguous by construction,
-    no sanitization, no collisions.  Readability cost is acceptable
-    because tool names are for the model, not humans.
+    """The connection id already starts with the reserved ``conn_``
+    prefix (via ``ids.CONNECTION``), so it doubles as the server name
+    directly — no stutter, still unambiguous by construction.
     """
 
     def test_uses_id_directly(self) -> None:
         c = _connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F")
-        assert connection_server_name(c) == "conn_conn_01HQR2K7VXBZ9MNPL3WYCT8F"
+        assert connection_server_name(c) == "conn_01HQR2K7VXBZ9MNPL3WYCT8F"
 
     def test_distinct_connections_produce_distinct_names(self) -> None:
-        """Distinct ids → distinct names, regardless of connector/account."""
-        c1 = _connection("conn_a", connector="signal", account="abc_def")
-        c2 = _connection("conn_b", connector="signal_abc", account="def")
+        c1 = _connection("conn_aaa", connector="signal", account="abc_def")
+        c2 = _connection("conn_bbb", connector="signal_abc", account="def")
         assert connection_server_name(c1) != connection_server_name(c2)
 
     def test_is_stable_for_same_connection(self) -> None:

@@ -16,7 +16,10 @@ MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE: "
 
 
 def connection_server_name(c: Connection) -> str:
-    return f"{CONNECTION_SERVER_NAME_PREFIX}{c.id}"
+    # c.id is "conn_<ULID>" — the ids.CONNECTION prefix is already the
+    # reserved namespace marker, so use it directly instead of stuttering.
+    assert c.id.startswith(CONNECTION_SERVER_NAME_PREFIX)
+    return c.id
 
 
 async def list_bindings_and_connections(

@@ -127,8 +127,8 @@ class TestDiscoverSessionMcpTools:
         assert urls == {"https://m1", "https://m2"}
         names = {t["name"] for t in tools}
         assert names == {
-            "mcp__conn_conn_01HQR2K7VXBZ9MNPL3WYCT8F__t",
-            "mcp__conn_conn_01HQR2K7VXBZ9MNPL3WYCT8G__t",
+            "mcp__conn_01HQR2K7VXBZ9MNPL3WYCT8F__t",
+            "mcp__conn_01HQR2K7VXBZ9MNPL3WYCT8G__t",
         }
 
     async def test_agent_and_connections_combined(self) -> None:
