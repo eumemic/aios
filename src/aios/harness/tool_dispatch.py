@@ -30,7 +30,7 @@ import asyncpg
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.services import sessions as sessions_service
-from aios.tools.registry import ToolNotFoundError, registry
+from aios.tools.registry import ToolNotFoundError, ToolResult, registry
 
 log = get_logger("aios.harness.tool_dispatch")
 
@@ -103,15 +103,32 @@ async def _execute_tool_async(
             await _append_tool_result(pool, session_id, call_id, name, error=err.message)
             return
 
-        # Invoke handler.
+        # Invoke handler.  Handlers return either a plain dict (JSON-
+        # encoded into the tool message's content) or a ToolResult
+        # (carries per-event metadata and/or a plain-string content).
         result = await tool.handler(session_id, arguments)
-        content_str = json.dumps(result, ensure_ascii=False)
+        event_data: dict[str, Any] = {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "name": name,
+        }
+        if isinstance(result, ToolResult):
+            if isinstance(result.content, str):
+                event_data["content"] = result.content
+            else:
+                event_data["content"] = json.dumps(result.content, ensure_ascii=False)
+            if result.metadata:
+                event_data["metadata"] = result.metadata
+            if result.is_error:
+                event_data["is_error"] = True
+        else:
+            event_data["content"] = json.dumps(result, ensure_ascii=False)
         bound_log.info("tool.completed")
         await sessions_service.append_event(
             pool,
             session_id,
             "message",
-            {"role": "tool", "tool_call_id": call_id, "name": name, "content": content_str},
+            event_data,
         )
 
     except asyncio.CancelledError:
@@ -197,12 +214,23 @@ def launch_mcp_tool_calls(
     session_id: str,
     tool_calls: list[dict[str, Any]],
     mcp_server_map: dict[str, str],
+    *,
+    focal_channel: str | None = None,
 ) -> None:
-    """Launch MCP tool calls as asyncio tasks. Returns immediately."""
+    """Launch MCP tool calls as asyncio tasks. Returns immediately.
+
+    ``focal_channel`` is the session's focal at the moment these calls
+    were emitted (captured at step top in ``run_session_step`` so a
+    concurrent ``switch_channel`` in the same batch cannot race the
+    ``chat_id`` injection).  Passed through to each task so
+    connection-provided tools can stamp ``_meta`` with the suffix.
+    """
     _launch_tasks(
         session_id,
         tool_calls,
-        lambda call: _execute_mcp_tool_async(pool, session_id, call, mcp_server_map),
+        lambda call: _execute_mcp_tool_async(
+            pool, session_id, call, mcp_server_map, focal_channel=focal_channel
+        ),
         prefix="mcp_tool",
     )
 
@@ -223,8 +251,21 @@ async def _execute_mcp_tool_async(
     session_id: str,
     call: dict[str, Any],
     mcp_server_map: dict[str, str],
+    *,
+    focal_channel: str | None = None,
 ) -> None:
-    """Execute one MCP tool call: connect, invoke, append result, defer wake."""
+    """Execute one MCP tool call: connect, invoke, append result, defer wake.
+
+    For connection-provided servers (name in the reserved ``conn_``
+    namespace), the focal-channel suffix is stamped into the JSON-RPC
+    request's ``_meta`` so the connector can resolve its
+    connector-specific chat identifiers without the model having to
+    pass them explicitly.  The ``focal_channel`` snapshot is emission-
+    time — a concurrent ``switch_channel`` in the same assistant batch
+    does not race this injection.
+    """
+    from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
+
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
     name: str = function.get("name") or ""
@@ -250,11 +291,33 @@ async def _execute_mcp_tool_async(
             )
             return
 
+        from aios.harness.channels import FOCAL_CHANNEL_META_KEY, focal_channel_path
         from aios.mcp.client import call_mcp_tool, resolve_auth_for_url
+
+        meta: dict[str, Any] | None = None
+        if server_name.startswith(CONNECTION_SERVER_NAME_PREFIX):
+            suffix = focal_channel_path(focal_channel)
+            if suffix is None:
+                # The model shouldn't be able to call a conn_* tool while
+                # focal is NULL — loop.py filters them out of the tool
+                # list in that state — but defend in depth if it slips
+                # through (stale tool_calls, etc.).
+                await _append_tool_result(
+                    pool,
+                    session_id,
+                    call_id,
+                    name,
+                    error=(
+                        "connection-provided tools require a focal channel; "
+                        "call switch_channel first"
+                    ),
+                )
+                return
+            meta = {FOCAL_CHANNEL_META_KEY: suffix}
 
         crypto_box = runtime.require_crypto_box()
         headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
-        result = await call_mcp_tool(url, headers, tool_name, arguments)
+        result = await call_mcp_tool(url, headers, tool_name, arguments, meta=meta)
 
         content_str = json.dumps(result, ensure_ascii=False)
         is_error = "error" in result

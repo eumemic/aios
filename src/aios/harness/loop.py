@@ -89,7 +89,13 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         if pending_builtin:
             launch_tool_calls(pool, session_id, pending_builtin)
         if pending_mcp:
-            launch_mcp_tool_calls(pool, session_id, pending_mcp, mcp_server_map)
+            launch_mcp_tool_calls(
+                pool,
+                session_id,
+                pending_mcp,
+                mcp_server_map,
+                focal_channel=session.focal_channel,
+            )
         log.info(
             "step.confirmed_tools_dispatched",
             session_id=session_id,
@@ -100,15 +106,31 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     # Discovery runs before prompt assembly because each MCP server's
     # instructions feed the per-connector affordance block.
     tools = to_openai_tools(agent.tools)
+    # Inject the built-in switch_channel tool when the session has any
+    # active bindings — it's the only way the agent can mutate its
+    # focal attention, so expose it whenever focal-aware rendering is
+    # relevant.  Agents don't need to opt in via ``agent.tools``; the
+    # focal machinery is session-state-level, not agent-level.
+    if bindings:
+        tools.append(_switch_channel_tool_spec())
     mcp_instructions: dict[str, str] = {}
     if agent.mcp_servers or connections:
         mcp_tools, mcp_instructions = await discover_session_mcp_tools(
             pool, session_id, agent, connections
         )
+        # Hide connection-provided MCP tools when the agent is in the
+        # "phone down" state (focal_channel is NULL).  You can't type in
+        # a chat app unless you're in a chat — the agent must call
+        # switch_channel first if it wants to send.
+        mcp_tools = _hide_conn_tools_when_phone_down(mcp_tools, session.focal_channel)
         tools.extend(mcp_tools)
 
     # Resolve skills and augment system prompt.
-    from aios.harness.channels import augment_with_channels, augment_with_connector_instructions
+    from aios.harness.channels import (
+        augment_with_connector_instructions,
+        augment_with_focal_paradigm,
+        build_channels_tail_block,
+    )
     from aios.harness.skills import augment_system_prompt, provision_skill_files
     from aios.services import skills as skills_service
 
@@ -116,7 +138,7 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
     )
     system_prompt = augment_system_prompt(agent.system, skill_versions)
-    system_prompt = augment_with_channels(system_prompt, bindings)
+    system_prompt = augment_with_focal_paradigm(system_prompt, bindings)
     system_prompt = augment_with_connector_instructions(
         system_prompt, mcp_instructions, connections
     )
@@ -129,6 +151,14 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         events,
         system_prompt=system_prompt,
     )
+
+    # The tail block lives *after* build_messages so its per-step
+    # mutations (unread counts, previews) don't bust the prefix cache.
+    # Paradigm prose (symbol meanings, switch_channel semantics) stays
+    # in the cache-stable system prompt above.
+    tail = build_channels_tail_block(bindings, events, session.focal_channel)
+    if tail is not None:
+        ctx.messages.append(tail)
 
     # Mark session as running.
     await sessions_service.set_session_status(pool, session_id, "running")
@@ -270,7 +300,13 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
             )
 
         if mcp_immediate:
-            launch_mcp_tool_calls(pool, session_id, mcp_immediate, mcp_server_map)
+            launch_mcp_tool_calls(
+                pool,
+                session_id,
+                mcp_immediate,
+                mcp_server_map,
+                focal_channel=session.focal_channel,
+            )
             log.info(
                 "step.mcp_tools_launched",
                 session_id=session_id,
@@ -312,6 +348,45 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         )
         await _append_lifecycle(pool, session_id, "turn_ended", "idle", "end_turn")
         log.info("step.turn_ended", session_id=session_id, cause=cause)
+
+
+def _switch_channel_tool_spec() -> dict[str, Any]:
+    """Build the chat-completions tool entry for the ``switch_channel`` built-in.
+
+    Injected unconditionally into the tool list when the session has
+    any active bindings (see ``run_session_step``).  Agents don't need
+    to list it in their ``tools`` declaration — it's focal-machinery
+    scope, not agent scope.
+    """
+    from aios.tools.registry import registry as tool_registry
+
+    tool = tool_registry.get("switch_channel")
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters_schema,
+        },
+    }
+
+
+def _hide_conn_tools_when_phone_down(
+    mcp_tools: list[dict[str, Any]], focal_channel: str | None
+) -> list[dict[str, Any]]:
+    """Filter connection-provided MCP tools out when focal is NULL.
+
+    Those tools resolve their ``chat_id`` from focal (injected into
+    ``_meta`` at dispatch time); a "phone down" state has no focal to
+    inject, so the model shouldn't be offered them.  Agent-declared
+    MCP tools are untouched.
+    """
+    from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
+
+    if focal_channel is not None:
+        return mcp_tools
+    prefix = f"mcp__{CONNECTION_SERVER_NAME_PREFIX}"
+    return [t for t in mcp_tools if not t.get("function", {}).get("name", "").startswith(prefix)]
 
 
 def _tc_name(tc: dict[str, Any]) -> str:

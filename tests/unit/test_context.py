@@ -20,13 +20,29 @@ def _evt(
     tool_calls: list[dict[str, Any]] | None = None,
     tool_call_id: str | None = None,
     content: str = "",
+    metadata: dict[str, Any] | None = None,
+    orig_channel: str | None = None,
+    focal_channel_at_arrival: str | None = None,
 ) -> Event:
-    """Build a minimal message Event for testing."""
+    """Build a minimal message Event for testing.
+
+    When a user event is constructed with ``metadata["channel"]`` but
+    no explicit ``orig_channel``, the helper auto-stamps it the same
+    way :func:`aios.services.sessions.append_user_message` does at the
+    real append site, so focal-aware rendering kicks in for these
+    events just as it would in production.
+    """
     data: dict[str, Any] = {"role": role, "content": content}
     if tool_calls is not None:
         data["tool_calls"] = tool_calls
     if tool_call_id is not None:
         data["tool_call_id"] = tool_call_id
+    if metadata is not None:
+        data["metadata"] = metadata
+    if orig_channel is None and role == "user" and isinstance(metadata, dict):
+        ch = metadata.get("channel")
+        if isinstance(ch, str):
+            orig_channel = ch
     return Event(
         id=f"evt_{seq}",
         session_id="sess_01TEST",
@@ -34,6 +50,8 @@ def _evt(
         kind="message",
         data=data,
         created_at=datetime.now(tz=UTC),
+        orig_channel=orig_channel,
+        focal_channel_at_arrival=focal_channel_at_arrival,
     )
 
 
@@ -744,3 +762,184 @@ class TestToolCallSanitization:
         ]
         build_messages(events, system_prompt=None)
         assert events[1].data["tool_calls"][0]["function"]["arguments"] == bad_args
+
+
+# ─── focal-channel rendering ────────────────────────────────────────────────
+
+
+class TestFocalRendering:
+    """Slice 4 of the focal-channel redesign (issue #29).
+
+    User events are rendered differently based on ``orig_channel`` vs
+    ``focal_channel_at_arrival``.  Three branches:
+
+    * both NULL (legacy / direct non-connector message) → Phase 2
+      rendering unchanged.
+    * ``orig == focal_at_arrival`` → full content with the #46 metadata
+      header inlined.
+    * ``orig != focal_at_arrival`` OR focal NULL → short notification
+      marker.
+    """
+
+    _CHAN_A = "signal/bot/alice"
+    _CHAN_B = "signal/bot/bob"
+
+    def test_legacy_null_event_phase2_rendering(self) -> None:
+        """orig_channel=None: no header, no marker — same as Phase 2."""
+        events = [_evt(1, "user", content="hi")]
+        msg = build_messages(events, system_prompt=None).messages[0]
+        assert msg["content"] == "hi"
+        assert "metadata" not in msg
+        assert "🔔" not in msg["content"]
+
+    def test_focal_match_renders_full_content_with_header(self) -> None:
+        md = {
+            "channel": self._CHAN_A,
+            "sender_uuid": "peer-uuid",
+            "timestamp_ms": 1776401210703,
+        }
+        events = [_evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        msg = build_messages(events, system_prompt=None).messages[0]
+        assert msg["content"].startswith(f"[channel={self._CHAN_A}")
+        assert "sender_uuid=peer-uuid" in msg["content"]
+        assert msg["content"].endswith("\nhi")
+        assert "metadata" not in msg
+
+    def test_focal_match_header_includes_chat_type_name_and_sender(self) -> None:
+        md = {
+            "channel": self._CHAN_A,
+            "chat_type": "group",
+            "chat_name": "QA",
+            "sender_uuid": "u1",
+            "sender_name": "Tom",
+            "timestamp_ms": 1776401210703,
+        }
+        events = [_evt(1, "user", content="yo", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "chat_type=group" in content
+        assert "chat_name='QA'" in content
+        assert "from=Tom" in content
+
+    def test_focal_match_reply_to_surfaced(self) -> None:
+        md = {
+            "channel": self._CHAN_A,
+            "reply_to": {
+                "author_uuid": "bot",
+                "timestamp_ms": 1776400000000,
+                "text": "what I said before",
+            },
+        }
+        events = [
+            _evt(1, "user", content="reacting", metadata=md, focal_channel_at_arrival=self._CHAN_A)
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "\n[reply_to: author_uuid=bot · timestamp_ms=1776400000000]" in content
+        assert "> what I said before" in content
+
+    def test_focal_match_reaction_surfaced(self) -> None:
+        md = {
+            "channel": self._CHAN_A,
+            "reaction": {
+                "emoji": "👍",
+                "target_author_uuid": "bot",
+                "target_timestamp_ms": 1776400000000,
+            },
+        }
+        events = [_evt(1, "user", content="", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "[reaction='👍'" in content
+        assert "target_author_uuid=bot" in content
+
+    def test_focal_match_iso_timestamp(self) -> None:
+        md = {"channel": self._CHAN_A, "timestamp_ms": 1776401210703}
+        events = [_evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "timestamp_ms=1776401210703" in content
+        assert "(2026-04-17T" in content
+
+    def test_focal_match_metadata_stripped_from_wire_message(self) -> None:
+        md = {"channel": self._CHAN_A, "sender_uuid": "u1"}
+        events = [_evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        msg = build_messages(events, system_prompt=None).messages[0]
+        assert "metadata" not in msg
+        assert set(msg.keys()) <= {"role", "content", "name"}
+
+    def test_notification_when_orig_differs_from_focal(self) -> None:
+        md = {"channel": self._CHAN_B, "sender_name": "Bob"}
+        events = [
+            _evt(
+                1,
+                "user",
+                content="hey there",
+                metadata=md,
+                focal_channel_at_arrival=self._CHAN_A,
+            )
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert content.startswith(f"🔔 {self._CHAN_B}")
+        assert "from=Bob" in content
+        assert "hey there" in content
+
+    def test_notification_when_focal_null(self) -> None:
+        """Phone-down state: all inbound renders as notifications."""
+        md = {"channel": self._CHAN_B, "sender_name": "Bob"}
+        events = [_evt(1, "user", content="hey", metadata=md, focal_channel_at_arrival=None)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert content.startswith(f"🔔 {self._CHAN_B}")
+
+    def test_notification_omits_sender_when_absent(self) -> None:
+        """No sender_name → no ``from=`` clause, just channel + preview."""
+        md = {"channel": self._CHAN_B}
+        events = [
+            _evt(1, "user", content="hey", metadata=md, focal_channel_at_arrival=self._CHAN_A)
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "from=" not in content
+        assert content == f"🔔 {self._CHAN_B} · hey"
+
+    def test_notification_truncation_at_80_chars(self) -> None:
+        long = "x" * 200
+        md = {"channel": self._CHAN_B, "sender_name": "Bob"}
+        events = [_evt(1, "user", content=long, metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        # Exactly 80 x's followed by an ellipsis.
+        assert "x" * 80 + "…" in content
+        assert "x" * 81 not in content  # never more than 80 raw chars
+
+    def test_notification_reaction_fallback_when_content_empty(self) -> None:
+        md = {
+            "channel": self._CHAN_B,
+            "sender_name": "Bob",
+            "reaction": {"emoji": "👍"},
+        }
+        events = [_evt(1, "user", content="", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "reacted 👍" in content
+
+    def test_notification_metadata_stripped_from_wire_message(self) -> None:
+        md = {"channel": self._CHAN_B, "sender_name": "Bob"}
+        events = [_evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        msg = build_messages(events, system_prompt=None).messages[0]
+        assert "metadata" not in msg
+        assert set(msg.keys()) <= {"role", "content", "name"}
+
+    def test_switch_channel_does_not_rewrite_past_events(self) -> None:
+        """Monotonicity invariant: past events' rendering is pinned by
+        their own stamped fields, regardless of subsequent focal changes.
+        """
+        md_b = {"channel": self._CHAN_B, "sender_name": "Bob"}
+        # Event arrives on B while focal=A → notification at append time.
+        ev_early = _evt(
+            1, "user", content="early", metadata=md_b, focal_channel_at_arrival=self._CHAN_A
+        )
+        # Later event on A while focal=A (post-switch simulation) → full.
+        ev_late = _evt(
+            2,
+            "user",
+            content="later",
+            metadata={"channel": self._CHAN_A, "sender_name": "Alice"},
+            focal_channel_at_arrival=self._CHAN_A,
+        )
+        msgs = build_messages([ev_early, ev_late], system_prompt=None).messages
+        assert msgs[0]["content"].startswith(f"🔔 {self._CHAN_B}")
+        assert msgs[1]["content"].startswith(f"[channel={self._CHAN_A}")
