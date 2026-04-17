@@ -38,6 +38,13 @@ async def list_bindings_and_connections(
 
 
 def build_channels_system_block(bindings: list[ChannelBinding]) -> str:
+    """Generic, connector-agnostic prose introducing the channels paradigm.
+
+    Per-platform specifics (Signal markdown subset, mention syntax,
+    response idioms) live in each connector and travel through the MCP
+    ``InitializeResult.instructions`` field — see
+    :func:`build_connector_instructions_block`.
+    """
     if not bindings:
         return ""
     lines = ["You are bound to the following channels:"]
@@ -45,16 +52,72 @@ def build_channels_system_block(bindings: list[ChannelBinding]) -> str:
         lines.append(f"  - {b.address}")
     lines.append("")
     lines.append(
-        "Use the appropriate connector tool to respond to each channel. "
-        "Bare assistant text is not sent to any channel — it is internal "
-        f"thinking and will be prefixed with {MONOLOGUE_PREFIX.strip()!r} in your "
-        "conversation history as a reminder that it is not visible to users."
+        "A channel is a conversation reachable through a connector "
+        "(Signal, Slack, etc.). Each address is path-shaped: "
+        "connector/account/chat-id."
+    )
+    lines.append("")
+    lines.append(
+        "To respond to a channel you must call the connector's response "
+        "tool — for Signal that is `signal_send`; other connectors "
+        "expose their own response tools, described in the per-connector "
+        "sections below. Bare assistant text is NOT delivered to any "
+        f"channel; it is internal thinking and will be prefixed with "
+        f"{MONOLOGUE_PREFIX.strip()!r} in your conversation history as "
+        "a reminder that no human will see it."
+    )
+    lines.append("")
+    lines.append(
+        "You may take any number of tool calls before responding (web "
+        "fetches, file edits, sandbox commands). Tools run "
+        "asynchronously — new user messages can arrive while a tool is "
+        "in flight, and you will see them on your next step. There is "
+        "no obligation to respond on every step; silence is the right "
+        "choice when there is nothing new requiring a reply."
     )
     return "\n".join(lines)
 
 
 def augment_with_channels(base_system: str, bindings: list[ChannelBinding]) -> str:
     block = build_channels_system_block(bindings)
+    if not block:
+        return base_system
+    if base_system:
+        return base_system + "\n\n" + block
+    return block
+
+
+def build_connector_instructions_block(
+    instructions_by_server: dict[str, str],
+    connections: list[Connection],
+) -> str:
+    """Render per-connector affordance prose grouped by connection.
+
+    ``instructions_by_server`` maps server_name (which for connection-
+    provided MCP servers equals ``connection_server_name(c)``) to the
+    server's ``InitializeResult.instructions`` string.  Connections are
+    iterated in the caller-supplied order so the prompt is stable
+    across steps (cache friendly).
+
+    Connections without an entry in the dict are skipped — a connector
+    that supplies no instructions contributes no block.
+    """
+    sections: list[str] = []
+    for c in connections:
+        name = connection_server_name(c)
+        text = instructions_by_server.get(name)
+        if not text:
+            continue
+        sections.append(f"## Connector: {c.connector}/{c.account}\n\n{text}")
+    return "\n\n".join(sections)
+
+
+def augment_with_connector_instructions(
+    base_system: str,
+    instructions_by_server: dict[str, str],
+    connections: list[Connection],
+) -> str:
+    block = build_connector_instructions_block(instructions_by_server, connections)
     if not block:
         return base_system
     if base_system:

@@ -343,6 +343,18 @@ def _make_mock_tool(name: str, description: str, schema: dict[str, Any]) -> Magi
     return tool
 
 
+def _mock_init_result(instructions: str | None = None) -> MagicMock:
+    """Build an ``InitializeResult``-shaped mock.
+
+    ``MagicMock`` would happily synthesise a sub-mock for ``.instructions``
+    (truthy by default), so tests must set the attribute explicitly to
+    cover the ``None`` path.
+    """
+    result = MagicMock()
+    result.instructions = instructions
+    return result
+
+
 class TestDiscoverMcpTools:
     async def test_discovery_returns_namespaced_tools(self) -> None:
         mock_tool = _make_mock_tool("create_issue", "Create a GitHub issue", {"type": "object"})
@@ -350,7 +362,7 @@ class TestDiscoverMcpTools:
         mock_result.tools = [mock_tool]
 
         mock_session = AsyncMock()
-        mock_session.initialize = AsyncMock()
+        mock_session.initialize = AsyncMock(return_value=_mock_init_result())
         mock_session.list_tools = AsyncMock(return_value=mock_result)
 
         with (
@@ -364,13 +376,14 @@ class TestDiscoverMcpTools:
             mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            tools = await discover_mcp_tools("https://mcp.github.com/", "github", {})
+            tools, instructions = await discover_mcp_tools("https://mcp.github.com/", "github", {})
 
         assert len(tools) == 1
         assert tools[0]["type"] == "function"
         assert tools[0]["function"]["name"] == "mcp__github__create_issue"
         assert tools[0]["function"]["description"] == "Create a GitHub issue"
         assert tools[0]["function"]["parameters"] == {"type": "object"}
+        assert instructions is None
 
     async def test_discovery_multiple_tools(self) -> None:
         tools_data = [
@@ -381,7 +394,7 @@ class TestDiscoverMcpTools:
         mock_result.tools = tools_data
 
         mock_session = AsyncMock()
-        mock_session.initialize = AsyncMock()
+        mock_session.initialize = AsyncMock(return_value=_mock_init_result())
         mock_session.list_tools = AsyncMock(return_value=mock_result)
 
         with (
@@ -395,7 +408,9 @@ class TestDiscoverMcpTools:
             mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            tools = await discover_mcp_tools("https://mcp.example.com/", "myserver", {})
+            tools, _instructions = await discover_mcp_tools(
+                "https://mcp.example.com/", "myserver", {}
+            )
 
         assert len(tools) == 2
         assert tools[0]["function"]["name"] == "mcp__myserver__tool_a"
@@ -406,9 +421,41 @@ class TestDiscoverMcpTools:
             mock_transport.return_value.__aenter__ = AsyncMock(side_effect=ConnectionError("down"))
             mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            tools = await discover_mcp_tools("https://bad.example.com/", "bad", {})
+            result = await discover_mcp_tools("https://bad.example.com/", "bad", {})
 
-        assert tools == []
+        assert result == ([], None)
+
+    async def test_discovery_propagates_server_instructions(self) -> None:
+        """``InitializeResult.instructions`` is the standard MCP transport
+        for per-server prompt affordance prose.  The harness reads it from
+        ``discover_mcp_tools``'s second return slot to compose the
+        per-connector system-prompt block.
+        """
+        mock_tool = _make_mock_tool("signal_send", "Send a Signal message", {"type": "object"})
+        mock_result = MagicMock()
+        mock_result.tools = [mock_tool]
+
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock(
+            return_value=_mock_init_result("## Signal\n\nUse signal_send to reply.")
+        )
+        mock_session.list_tools = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("aios.mcp.client.streamable_http_client") as mock_transport,
+            patch("aios.mcp.client.ClientSession") as mock_session_cls,
+        ):
+            mock_transport.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock(), MagicMock())
+            )
+            mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            tools, instructions = await discover_mcp_tools("https://mcp.signal/", "signal", {})
+
+        assert len(tools) == 1
+        assert instructions == "## Signal\n\nUse signal_send to reply."
 
 
 # ── call_mcp_tool ─────────────────────────────────────────────────────────────

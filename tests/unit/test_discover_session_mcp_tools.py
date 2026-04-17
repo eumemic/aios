@@ -58,13 +58,14 @@ class TestDiscoverSessionMcpTools:
     async def test_no_sources_returns_empty(self) -> None:
         from aios.harness.loop import discover_session_mcp_tools
 
-        tools = await discover_session_mcp_tools(
+        tools, instructions = await discover_session_mcp_tools(
             pool=AsyncMock(),
             session_id="sess_x",
             agent=_agent(),
             connections=[],
         )
         assert tools == []
+        assert instructions == {}
 
     async def test_agent_only_enabled_server(self) -> None:
         """Only enabled mcp_toolset entries produce discovery; disabled
@@ -83,15 +84,17 @@ class TestDiscoverSessionMcpTools:
             ],
         )
 
-        async def _discover(url: str, name: str, _headers: dict[str, str]) -> list[dict[str, Any]]:
-            return [{"name": f"mcp__{name}__t", "url": url}]
+        async def _discover(
+            url: str, name: str, _headers: dict[str, str]
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [{"name": f"mcp__{name}__t", "url": url}], None
 
         with (
             patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = {}
-            tools = await discover_session_mcp_tools(
+            tools, _instructions = await discover_session_mcp_tools(
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
@@ -108,15 +111,17 @@ class TestDiscoverSessionMcpTools:
             _connection("conn_01HQR2K7VXBZ9MNPL3WYCT8G", "https://m2"),
         ]
 
-        async def _discover(url: str, name: str, _headers: dict[str, str]) -> list[dict[str, Any]]:
-            return [{"name": f"mcp__{name}__t", "url": url}]
+        async def _discover(
+            url: str, name: str, _headers: dict[str, str]
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [{"name": f"mcp__{name}__t", "url": url}], None
 
         with (
             patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = {}
-            tools = await discover_session_mcp_tools(
+            tools, _instructions = await discover_session_mcp_tools(
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=_agent(),
@@ -140,15 +145,17 @@ class TestDiscoverSessionMcpTools:
         )
         connections = [_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F", "https://m1")]
 
-        async def _discover(url: str, name: str, _headers: dict[str, str]) -> list[dict[str, Any]]:
-            return [{"name": f"mcp__{name}__t", "url": url}]
+        async def _discover(
+            url: str, name: str, _headers: dict[str, str]
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [{"name": f"mcp__{name}__t", "url": url}], None
 
         with (
             patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = {}
-            tools = await discover_session_mcp_tools(
+            tools, _instructions = await discover_session_mcp_tools(
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
@@ -175,14 +182,16 @@ class TestDiscoverSessionMcpTools:
             seen_urls.append(url)
             return {"Authorization": f"Bearer token-for-{url}"}
 
-        async def _discover(url: str, name: str, headers: dict[str, str]) -> list[dict[str, Any]]:
-            return [{"name": f"mcp__{name}__t", "auth": headers["Authorization"]}]
+        async def _discover(
+            url: str, name: str, headers: dict[str, str]
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [{"name": f"mcp__{name}__t", "auth": headers["Authorization"]}], None
 
         with (
             patch("aios.mcp.client.resolve_auth_for_url", side_effect=_fake_resolve),
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
-            tools = await discover_session_mcp_tools(
+            tools, _instructions = await discover_session_mcp_tools(
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
@@ -194,3 +203,66 @@ class TestDiscoverSessionMcpTools:
             "Bearer token-for-https://mcp.github",
             "Bearer token-for-https://m1",
         }
+
+    async def test_instructions_keyed_by_server_name(self) -> None:
+        """Each server's ``InitializeResult.instructions`` flows into the
+        returned dict under its server_name key.  Servers that supply no
+        instructions are omitted — the harness uses dict membership as
+        the trigger for rendering a per-connector affordance block.
+        """
+        from aios.harness.loop import discover_session_mcp_tools
+
+        agent = _agent(
+            mcp_servers=[McpServerSpec(name="gh", url="https://mcp.github")],
+            tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="gh")],
+        )
+        connections = [_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F", "https://m1")]
+
+        async def _discover(
+            url: str, name: str, _headers: dict[str, str]
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            # Agent server supplies nothing; connection server supplies prose.
+            if name == "gh":
+                return [], None
+            return [], "## signal\n\nbe nice"
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            resolve.return_value = {}
+            _tools, instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+                connections=connections,
+            )
+        # 'gh' returned None → omitted; connection returned prose → present.
+        assert instructions == {"conn_01HQR2K7VXBZ9MNPL3WYCT8F": "## signal\n\nbe nice"}
+
+    async def test_empty_string_instructions_omitted(self) -> None:
+        """An empty string is treated identically to ``None`` — no
+        affordance block should be rendered for a server that returned
+        ``""``.
+        """
+        from aios.harness.loop import discover_session_mcp_tools
+
+        connections = [_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F", "https://m1")]
+
+        async def _discover(
+            _url: str, _name: str, _headers: dict[str, str]
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [], ""
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            resolve.return_value = {}
+            _tools, instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=_agent(),
+                connections=connections,
+            )
+        assert instructions == {}
