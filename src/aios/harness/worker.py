@@ -5,7 +5,7 @@
 1. Configures structlog
 2. Opens the asyncpg pool
 3. Constructs the libsodium CryptoBox
-4. Creates the SandboxRegistry and TaskRegistry
+4. Creates the SandboxRegistry, TaskRegistry, and McpSessionPool
 5. Stashes globals on :mod:`aios.harness.runtime`
 6. Opens the procrastinate connector
 7. Recovers orphaned sessions (re-enqueue stuck ones)
@@ -15,7 +15,7 @@
 
 Shutdown: procrastinate's signal handlers stop accepting new jobs and wait
 for in-flight jobs. The ``finally`` block then cancels in-flight tool tasks,
-releases all containers, and closes connections.
+releases all containers, closes MCP sessions, and closes connections.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.harness.sweep import wake_sessions_needing_inference
 from aios.harness.task_registry import TaskRegistry
 from aios.logging import configure_logging, get_logger
+from aios.mcp.pool import McpSessionPool
 from aios.sandbox.registry import SandboxRegistry
 
 
@@ -55,12 +56,14 @@ async def worker_main() -> None:
     crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
     sandbox_registry = SandboxRegistry()
     task_registry = TaskRegistry()
+    mcp_session_pool = McpSessionPool()
 
     runtime.pool = pool
     runtime.crypto_box = crypto_box
     runtime.worker_id = _make_worker_id()
     runtime.sandbox_registry = sandbox_registry
     runtime.task_registry = task_registry
+    runtime.mcp_session_pool = mcp_session_pool
 
     await procrastinate_app.open_async()
 
@@ -109,6 +112,7 @@ async def worker_main() -> None:
         sandbox_registry.stop_reaper()
         await task_registry.shutdown()
         await sandbox_registry.release_all()
+        await mcp_session_pool.close_all()
         await procrastinate_app.close_async()
         await pool.close()
 
