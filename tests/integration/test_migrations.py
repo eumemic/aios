@@ -123,3 +123,65 @@ def test_migration_downgrade_drops_tables(postgres: object) -> None:
             await conn.close()
 
     asyncio.run(check())
+
+
+# Columns added by migration 0017 (focal-channel attention model). Listed
+# as (table, column) pairs used by the cycle test below.
+_MIGRATION_0017_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("sessions", "focal_channel"),
+    ("events", "orig_channel"),
+    ("events", "focal_channel_at_arrival"),
+    ("channel_bindings", "notification_mode"),
+)
+
+
+async def _column_exists(conn: asyncpg.Connection, table: str, column: str) -> bool:
+    row = await conn.fetchrow(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2",
+        table,
+        column,
+    )
+    return row is not None
+
+
+@needs_docker
+@pytest.mark.integration
+def test_migration_0017_focal_channel_cycle(postgres: object) -> None:
+    """Exercise migration 0017's up/down/up cycle.
+
+    Verifies that the focal-channel columns appear at head, are removed
+    on ``downgrade -1`` (back to 0016), and reappear on ``upgrade head``.
+    """
+    db_url = _alembic_url(postgres)
+
+    # Start at head (idempotent regardless of prior test state).
+    upgraded = _run_alembic(["upgrade", "head"], db_url)
+    assert upgraded.returncode == 0, f"initial upgrade failed:\n{upgraded.stderr}"
+
+    import asyncio
+
+    async def assert_columns(expected: bool) -> None:
+        conn = await asyncpg.connect(db_url)
+        try:
+            for table, column in _MIGRATION_0017_COLUMNS:
+                exists = await _column_exists(conn, table, column)
+                if expected:
+                    assert exists, f"{table}.{column} missing after upgrade"
+                else:
+                    assert not exists, f"{table}.{column} still present after downgrade"
+        finally:
+            await conn.close()
+
+    # 1. Columns exist at head.
+    asyncio.run(assert_columns(True))
+
+    # 2. Downgrade one step → back to 0016. Columns gone.
+    downgraded = _run_alembic(["downgrade", "-1"], db_url)
+    assert downgraded.returncode == 0, f"downgrade -1 failed:\n{downgraded.stderr}"
+    asyncio.run(assert_columns(False))
+
+    # 3. Upgrade back to head. Columns reappear.
+    re_upgraded = _run_alembic(["upgrade", "head"], db_url)
+    assert re_upgraded.returncode == 0, f"re-upgrade failed:\n{re_upgraded.stderr}"
+    asyncio.run(assert_columns(True))

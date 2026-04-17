@@ -199,12 +199,17 @@ async def call_mcp_tool(
     headers: dict[str, str],
     tool_name: str,
     arguments: dict[str, Any],
+    *,
+    meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Connect to an MCP server and invoke a tool.
 
     ``tool_name`` is the raw MCP tool name (without the ``mcp__`` prefix).
-    Returns a result dict with either ``content`` (success) or ``error``
-    (failure).
+    ``meta`` is an optional per-request metadata dict forwarded as the
+    JSON-RPC request's ``_meta`` field — used by the focal-channel
+    redesign to pass ``aios.focal_channel_path`` to connection-provided
+    MCP servers without stuffing it into arguments.  Returns a result
+    dict with either ``content`` (success) or ``error`` (failure).
     """
     try:
         from aios.harness import runtime
@@ -214,15 +219,15 @@ async def call_mcp_tool(
         if _pool is not None:
             try:
                 session, _ = await _pool.get_or_connect(url, headers)
-                result = await session.call_tool(tool_name, arguments)
+                result = await session.call_tool(tool_name, arguments, meta=meta)
             except Exception:
                 _pool.evict(url, headers)
                 session, _ = await _pool.get_or_connect(url, headers)
-                result = await session.call_tool(tool_name, arguments)
+                result = await session.call_tool(tool_name, arguments, meta=meta)
         else:
             async with AsyncExitStack() as stack:
                 session, _ = await _open_session(url, headers, stack)
-                result = await session.call_tool(tool_name, arguments)
+                result = await session.call_tool(tool_name, arguments, meta=meta)
 
         # Concatenate text content from the result.
         parts: list[str] = []

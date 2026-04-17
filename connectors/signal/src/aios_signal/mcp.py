@@ -22,7 +22,8 @@ from typing import Any
 
 import structlog
 import uvicorn
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import RequestParams
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -33,6 +34,78 @@ from .prompts import SIGNAL_SERVER_INSTRUCTIONS
 from .rpc import RpcClient
 
 log = structlog.get_logger(__name__)
+
+
+# Key under a JSON-RPC tool-call request's ``_meta`` populated by the
+# aios worker when dispatching a connection-provided tool.  Its value
+# is the focal-channel path suffix — for Signal's 3-segment address
+# ``signal/<bot>/<chat>``, the suffix is just ``<chat>`` and can be
+# decoded directly as the Signal chat id.  See the aios focal-channel
+# plan + ``aios.harness.channels.FOCAL_CHANNEL_META_KEY`` for the
+# client-side contract.
+_FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
+
+
+def _focal_chat_id_from_meta(meta: RequestParams.Meta | None) -> str:
+    """Extract the Signal ``chat_id`` from an MCP request's ``_meta``.
+
+    aios injects ``aios.focal_channel_path`` for connection-provided
+    tool calls; its value is the full focal-channel suffix (stripped
+    of ``<connector>/<account>``), which for a 3-segment Signal
+    address equals the chat id verbatim.  Missing / malformed meta
+    raises — the agent shouldn't be able to reach these tools without
+    a focal channel set (aios filters them out of the tool list when
+    focal is NULL), so any absence here is a real error to surface.
+    """
+    path: Any = None
+    if meta is not None:
+        extra = getattr(meta, "model_extra", None) or {}
+        path = extra.get(_FOCAL_CHANNEL_META_KEY)
+    if not isinstance(path, str) or not path:
+        raise ValueError(
+            "signal tools require a focal channel — aios should inject "
+            f"{_FOCAL_CHANNEL_META_KEY!r} in _meta when focal is set"
+        )
+    return path
+
+
+def _build_send_params(chat_id: str, text: str) -> dict[str, Any]:
+    """Translate ``(chat_id, text)`` into signal-cli ``send`` params.
+
+    Pure function: decodes the URL-safe chat_id, applies Signal's
+    markdown-to-textStyles transformation, and attaches either
+    ``recipient`` (DM) or ``groupId`` (group) per the decoded kind.
+    """
+    chat_type, raw_id = decode_chat_id(chat_id)
+    stripped, styles = convert_markdown_to_signal_styles(text)
+    params: dict[str, Any] = {"message": stripped}
+    if styles:
+        params["textStyles"] = styles
+    if chat_type == "group":
+        params["groupId"] = raw_id
+    else:
+        params["recipient"] = [raw_id]
+    return params
+
+
+def _build_react_params(
+    chat_id: str,
+    target_author_uuid: str,
+    target_timestamp_ms: int,
+    emoji: str,
+) -> dict[str, Any]:
+    """Translate a react request into signal-cli ``sendReaction`` params."""
+    chat_type, raw_id = decode_chat_id(chat_id)
+    params: dict[str, Any] = {
+        "emoji": emoji,
+        "targetAuthor": target_author_uuid,
+        "targetTimestamp": target_timestamp_ms,
+    }
+    if chat_type == "group":
+        params["groupId"] = raw_id
+    else:
+        params["recipient"] = [raw_id]
+    return params
 
 
 class BearerAuthMiddleware:
@@ -69,50 +142,40 @@ def build_mcp_server(*, rpc: RpcClient) -> FastMCP:
     )
 
     @mcp.tool()
-    async def signal_send(chat_id: str, text: str) -> dict[str, Any]:
-        """Send a text message to a Signal chat.
+    async def signal_send(text: str, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
+        """Send a text message to your focal Signal chat.
+
+        The chat id is taken implicitly from your focal channel —
+        aios injects it via the JSON-RPC ``_meta`` field on each call.
+        Set focal with the built-in ``switch_channel`` tool.
 
         Args:
-            chat_id: URL-safe chat ID (DM UUID or URL-safe-base64 group ID).
             text: Message body. Markdown is converted to Signal text styles.
         """
-        chat_type, raw_id = decode_chat_id(chat_id)
-        stripped, styles = convert_markdown_to_signal_styles(text)
-        params: dict[str, Any] = {"message": stripped}
-        if styles:
-            params["textStyles"] = styles
-        if chat_type == "group":
-            params["groupId"] = raw_id
-        else:
-            params["recipient"] = [raw_id]
+        chat_id = _focal_chat_id_from_meta(ctx.request_context.meta)
+        params = _build_send_params(chat_id, text)
         result = await rpc.call("send", params)
         return {"sent_at_ms": _extract_timestamp(result)}
 
     @mcp.tool()
     async def signal_react(
-        chat_id: str,
         target_author_uuid: str,
         target_timestamp_ms: int,
         emoji: str,
+        ctx: Context[Any, Any, Any],
     ) -> dict[str, Any]:
-        """React to a Signal message with an emoji.
+        """React to a message in your focal Signal chat with an emoji.
+
+        The chat id is taken implicitly from your focal channel —
+        aios injects it via the JSON-RPC ``_meta`` field on each call.
 
         Args:
-            chat_id: URL-safe chat ID where the target message lives.
             target_author_uuid: ACI UUID of the message's author.
             target_timestamp_ms: Timestamp of the target message (from inbound metadata).
             emoji: The reaction emoji.
         """
-        chat_type, raw_id = decode_chat_id(chat_id)
-        params: dict[str, Any] = {
-            "emoji": emoji,
-            "targetAuthor": target_author_uuid,
-            "targetTimestamp": target_timestamp_ms,
-        }
-        if chat_type == "group":
-            params["groupId"] = raw_id
-        else:
-            params["recipient"] = [raw_id]
+        chat_id = _focal_chat_id_from_meta(ctx.request_context.meta)
+        params = _build_react_params(chat_id, target_author_uuid, target_timestamp_ms, emoji)
         await rpc.call("sendReaction", params)
         return {"status": "ok"}
 

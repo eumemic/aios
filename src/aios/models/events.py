@@ -36,3 +36,5 @@ class Event(BaseModel):
     data: dict[str, Any]
     cumulative_tokens: int | None = Field(default=None, exclude=True)
     created_at: datetime
+    orig_channel: str | None = Field(default=None, exclude=True)
+    focal_channel_at_arrival: str | None = Field(default=None, exclude=True)

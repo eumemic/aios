@@ -115,6 +115,7 @@ class Session(BaseModel):
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
+    focal_channel: str | None = None
 
 
 class SessionUserMessage(BaseModel):

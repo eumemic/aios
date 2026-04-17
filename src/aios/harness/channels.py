@@ -1,9 +1,10 @@
-"""Channel helpers: prompt augmentation, monologue prefix, and the
-bindings → connections translation.
+"""Channel helpers: prompt augmentation, monologue prefix, bindings →
+connections translation, and focal-channel unread derivation.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 import asyncpg
@@ -11,8 +12,45 @@ import asyncpg
 from aios.db import queries
 from aios.models.channel_bindings import ChannelBinding
 from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX, Connection
+from aios.models.events import Event
 
 MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE: "
+
+# Key under a switch_channel tool_result's ``data["metadata"]`` that
+# records the target and outcome.  Set by the switch_channel handler
+# (slice 5), consumed by :func:`derive_last_seen` /
+# :func:`derive_unread_counts` here.  Its value is a dict with
+# ``{"target": str | None, "success": bool}`` shape.
+SWITCH_CHANNEL_METADATA_KEY = "switch_channel"
+
+# Top-level key inside the ``_meta`` field sent on JSON-RPC tool-call
+# requests to connection-provided MCP servers.  The value is the
+# focal-channel suffix (the focal channel address with its first two
+# ``<connector>/<account>`` segments stripped, since the connector
+# already knows its own connection identity).  The connector splits
+# this on ``/`` to recover its own per-chat identifiers.
+FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
+
+
+def focal_channel_path(focal: str | None) -> str | None:
+    """Return the connector-specific suffix of a focal address.
+
+    The ``<connector>/<account>`` prefix is information the MCP server
+    already has (it was invoked *by* that connection), so sending it
+    would be redundant; we strip it.  For a 3-segment address like
+    ``signal/<bot>/<chat>`` the suffix is just ``<chat>``.  For
+    ``telegram/<bot>/<chat>/<thread>`` it's ``<chat>/<thread>``.
+
+    Returns ``None`` if ``focal`` is ``None`` or malformed (fewer than
+    three segments) — neither should reach the dispatch path, but
+    degrading gracefully avoids leaking garbled metadata to connectors.
+    """
+    if not focal:
+        return None
+    parts = focal.split("/", 2)
+    if len(parts) < 3 or not parts[2]:
+        return None
+    return parts[2]
 
 
 def connection_server_name(c: Connection) -> str:
@@ -37,8 +75,15 @@ async def list_bindings_and_connections(
     return bindings, connections
 
 
-def build_channels_system_block(bindings: list[ChannelBinding]) -> str:
-    """Generic, connector-agnostic prose introducing the channels paradigm.
+def build_focal_paradigm_block(bindings: list[ChannelBinding]) -> str:
+    """Generic, connector-agnostic prose introducing the focal-channel paradigm.
+
+    Cache-stable: the block's text does not vary across steps, so the
+    prompt prefix stays hot.  Per-channel state (unread counts, recent
+    previews) lives in the ephemeral tail block — see
+    :func:`build_channels_tail_block` — which is rebuilt each step and
+    appended AFTER ``build_messages`` so its mutations don't bust the
+    prefix cache.
 
     Per-platform specifics (Signal markdown subset, mention syntax,
     response idioms) live in each connector and travel through the MCP
@@ -47,43 +92,120 @@ def build_channels_system_block(bindings: list[ChannelBinding]) -> str:
     """
     if not bindings:
         return ""
-    lines = ["You are bound to the following channels:"]
-    for b in bindings:
-        lines.append(f"  - {b.address}")
-    lines.append("")
-    lines.append(
-        "A channel is a conversation reachable through a connector "
-        "(Signal, Slack, etc.). Each address is path-shaped: "
-        "connector/account/chat-id."
+    return (
+        "## Channels & focal attention\n"
+        "\n"
+        "You operate across one or more connector channels (Signal, "
+        "Slack, etc.). A channel address is path-shaped: "
+        "`connector/account/chat-id`.\n"
+        "\n"
+        "At any moment you have exactly one focal channel, or none "
+        '("phone down"). Inbound messages on your focal channel '
+        "render in full in your context; inbound on other bound "
+        "channels render as short notification markers (🔔 ...). "
+        "The listing at the tail of your context shows the current "
+        "state:\n"
+        "\n"
+        "* ▸ — your focal channel.\n"
+        "* ○ — another bound channel, with unread count + preview.\n"
+        "* ◌ — a muted bound channel (counts only, no preview).\n"
+        "\n"
+        "### Shifting focus\n"
+        "\n"
+        "Call `switch_channel(target=<address>)` to focus on a "
+        "different bound channel. Its result is a re-orient block "
+        "quoting recent messages on that channel so you can pick up "
+        "the conversation in context. Call `switch_channel(target=null)` "
+        "to put your phone down — every inbound renders as a "
+        "notification, connector response tools disappear from your "
+        "tool list. Switching repeatedly is cheap but not free: each "
+        "switch's re-orient block appends tokens to your context.\n"
+        "\n"
+        "### Responding\n"
+        "\n"
+        "When focused on a channel, the connector's response tools "
+        "(e.g. `signal_send`, `signal_react`) operate on your focal "
+        "channel implicitly — no channel/chat-id argument required. "
+        "Bare assistant text is NOT delivered to any channel; it is "
+        f"internal thinking and will be prefixed with "
+        f"{MONOLOGUE_PREFIX.strip()!r} in your history as a reminder "
+        "that no human saw it. This is the teaching mechanism; do not "
+        "strip it on replay.\n"
+        "\n"
+        "### Timing\n"
+        "\n"
+        "Tools run asynchronously — new user messages can arrive while "
+        "a tool is in flight, and you will see them on your next step. "
+        "There is no obligation to respond on every step; silence is "
+        "the right choice when there is nothing new requiring a reply."
     )
-    lines.append("")
-    lines.append(
-        "To respond to a channel you must call the connector's response "
-        "tool; each connector describes its own tools in the "
-        "per-connector sections below. Bare assistant text is NOT "
-        "delivered to any channel; it is internal thinking and will be "
-        f"prefixed with {MONOLOGUE_PREFIX.strip()!r} in your "
-        "conversation history as a reminder that no human will see it."
-    )
-    lines.append("")
-    lines.append(
-        "You may take any number of tool calls before responding (web "
-        "fetches, file edits, sandbox commands). Tools run "
-        "asynchronously — new user messages can arrive while a tool is "
-        "in flight, and you will see them on your next step. There is "
-        "no obligation to respond on every step; silence is the right "
-        "choice when there is nothing new requiring a reply."
-    )
-    return "\n".join(lines)
 
 
-def augment_with_channels(base_system: str, bindings: list[ChannelBinding]) -> str:
-    block = build_channels_system_block(bindings)
+def augment_with_focal_paradigm(base_system: str, bindings: list[ChannelBinding]) -> str:
+    block = build_focal_paradigm_block(bindings)
     if not block:
         return base_system
     if base_system:
         return base_system + "\n\n" + block
     return block
+
+
+def build_channels_tail_block(
+    bindings: list[ChannelBinding],
+    events: list[Event],
+    focal_channel: str | None,
+) -> dict[str, Any] | None:
+    """Ephemeral per-step listing of bound channels with unread counts.
+
+    Rebuilt at each step from the monotonic event log; appended after
+    :func:`~aios.harness.context.build_messages` as the last user-role
+    message so per-step mutations don't bust the prompt prefix cache.
+    Pure data — the paradigm prose (what the symbols mean, how
+    switch_channel works) lives in the cache-stable
+    :func:`build_focal_paradigm_block`.
+
+    Returns ``None`` when the session has no active bindings (no
+    listing to render and the paradigm block is also omitted).
+    """
+    if not bindings:
+        return None
+
+    addresses = [b.address for b in bindings]
+    unread = derive_unread_counts(events, addresses)
+
+    # Index last inbound per channel for the preview clause.
+    last_content: dict[str, str] = {}
+    for e in events:
+        if e.kind != "message" or e.data.get("role") != "user":
+            continue
+        orig = e.orig_channel
+        if not isinstance(orig, str):
+            continue
+        content = e.data.get("content") or ""
+        if isinstance(content, str):
+            last_content[orig] = content
+
+    lines = ["━━━ Channels ━━━"]
+    for b in bindings:
+        addr = b.address
+        muted = b.notification_mode == "silent"
+        if addr == focal_channel:
+            lines.append(f"▸ {addr} (focal)")
+            continue
+        count = unread.get(addr, 0)
+        if muted:
+            lines.append(f"◌ {addr} (muted) — {count} unread")
+            continue
+        if count > 0:
+            preview = last_content.get(addr, "")
+            preview = preview.replace("\n", " ").strip()
+            if len(preview) > 60:
+                preview = preview[:60] + "…"
+            preview_clause = f': "{preview}"' if preview else ""
+            lines.append(f"○ {addr} — {count} unread{preview_clause}")
+        else:
+            lines.append(f"○ {addr} — 0 unread")
+    return {"role": "user", "content": "\n".join(lines)}
 
 
 def build_connector_instructions_block(
@@ -122,6 +244,84 @@ def augment_with_connector_instructions(
     if base_system:
         return base_system + "\n\n" + block
     return block
+
+
+def _switch_marker(e: Event) -> dict[str, Any] | None:
+    """Return the switch_channel marker on a tool_result event, if present.
+
+    Shape: ``{"target": str | None, "success": bool}``.  Any deviation
+    (missing keys, wrong types) returns None so malformed markers are
+    ignored by downstream derivation.
+    """
+    if e.kind != "message":
+        return None
+    data = e.data
+    if data.get("role") != "tool":
+        return None
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    marker = metadata.get(SWITCH_CHANNEL_METADATA_KEY)
+    if not isinstance(marker, dict):
+        return None
+    if not isinstance(marker.get("success"), bool):
+        return None
+    target = marker.get("target")
+    if target is not None and not isinstance(target, str):
+        return None
+    return marker
+
+
+def derive_last_seen(events: Iterable[Event], channel: str) -> int:
+    """Compute ``last_seen_in_X`` per the focal-channel plan.
+
+    ``last_seen_in_channel = max(
+        max(seq) over events where focal_channel_at_arrival == channel,
+        max(seq) over successful switch_channel tool_results targeting channel,
+    )``
+
+    Both terms naturally yield ``0`` when no matching event exists
+    (empty log, channel never focused, never switched to).  Failed
+    switches and ``switch_channel(target=None)`` do not anchor.
+    """
+    last = 0
+    for e in events:
+        if e.focal_channel_at_arrival == channel and e.seq > last:
+            last = e.seq
+        marker = _switch_marker(e)
+        if (
+            marker is not None
+            and marker["success"]
+            and marker["target"] == channel
+            and e.seq > last
+        ):
+            last = e.seq
+    return last
+
+
+def derive_unread_counts(events: Iterable[Event], channels: Iterable[str]) -> dict[str, int]:
+    """Compute per-channel unread counts.
+
+    ``unread_in_channel = count of events where orig_channel == channel
+    AND seq > last_seen_in_channel``.
+
+    Implementation walks the events once: first pass builds per-channel
+    last_seen via the same rules as :func:`derive_last_seen`, second
+    pass counts qualifying user events against those watermarks.  The
+    input is fully materialised into a list so both passes see the
+    same data even if the caller passes a one-shot iterator.
+    """
+    channel_list = list(channels)
+    events_list = list(events)
+    last_seen = {ch: derive_last_seen(events_list, ch) for ch in channel_list}
+    counts = dict.fromkeys(channel_list, 0)
+    for e in events_list:
+        orig = e.orig_channel
+        if orig is None or orig not in counts:
+            continue
+        if e.seq > last_seen[orig]:
+            counts[orig] += 1
+    return counts
 
 
 def _prefix_text(s: str) -> str:

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from aios.models.events import Event
@@ -39,6 +40,170 @@ _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
     "user": frozenset({"role", "content", "name"}),
     "system": frozenset({"role", "content", "name"}),
 }
+
+# Notification markers truncate the source content to this many chars
+# (plus an ellipsis when truncated) so a busy non-focal channel
+# contributes O(tens-of-tokens) per inbound to the context — cheap
+# enough to keep in-log at its seq position for episodic chronology.
+_NOTIFICATION_PREVIEW_CHARS = 80
+
+
+def _format_channel_header(metadata: dict[str, Any]) -> str:
+    """Render a one-line header describing the origin of an inbound message.
+
+    Lifted from PR #46 — folded into slice 4 so the focal-channel
+    rendering owns the single source of truth for inbound-event
+    presentation.
+
+    When a user message carries channel metadata, the raw fields are
+    whitelisted out of the chat-completions message before the model
+    ever sees them (see ``_ALLOWED_FIELDS``).  That leaves the model
+    with no way to know the sender or timestamp — values the connector
+    tools need as arguments.  Inline the salient fields into the
+    visible ``content`` so the model can read them natively.
+    """
+    if not isinstance(metadata, dict) or "channel" not in metadata:
+        return ""
+    parts: list[str] = [f"channel={metadata['channel']}"]
+    chat_type = metadata.get("chat_type")
+    if isinstance(chat_type, str) and chat_type:
+        parts.append(f"chat_type={chat_type}")
+    chat_name = metadata.get("chat_name")
+    if isinstance(chat_name, str) and chat_name:
+        parts.append(f"chat_name={chat_name!r}")
+    sender_name = metadata.get("sender_name")
+    if isinstance(sender_name, str) and sender_name:
+        parts.append(f"from={sender_name}")
+    sender_uuid = metadata.get("sender_uuid")
+    if isinstance(sender_uuid, str) and sender_uuid:
+        parts.append(f"sender_uuid={sender_uuid}")
+    timestamp_ms = metadata.get("timestamp_ms")
+    if isinstance(timestamp_ms, int):
+        iso = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat(timespec="milliseconds")
+        parts.append(f"timestamp_ms={timestamp_ms} ({iso})")
+    header = "[" + " · ".join(parts) + "]"
+    reaction = metadata.get("reaction")
+    if isinstance(reaction, dict):
+        emoji = reaction.get("emoji") or "?"
+        r_parts: list[str] = [f"reaction={emoji!r}"]
+        target_author = reaction.get("target_author_uuid")
+        if isinstance(target_author, str) and target_author:
+            r_parts.append(f"target_author_uuid={target_author}")
+        target_ts = reaction.get("target_timestamp_ms")
+        if isinstance(target_ts, int):
+            r_parts.append(f"target_timestamp_ms={target_ts}")
+        header += "\n[" + " · ".join(r_parts) + "]"
+    reply_to = metadata.get("reply_to")
+    if isinstance(reply_to, dict):
+        quoted = (reply_to.get("text") or "").replace("\n", " ").strip()
+        quote_parts: list[str] = []
+        author = reply_to.get("author_uuid")
+        if isinstance(author, str) and author:
+            quote_parts.append(f"author_uuid={author}")
+        ts = reply_to.get("timestamp_ms")
+        if isinstance(ts, int):
+            quote_parts.append(f"timestamp_ms={ts}")
+        quote_meta = " · ".join(quote_parts) if quote_parts else "?"
+        if quoted:
+            snippet = quoted if len(quoted) <= 200 else quoted[:200] + "…"
+            header += f"\n[reply_to: {quote_meta}] > {snippet}"
+        else:
+            header += f"\n[reply_to: {quote_meta}]"
+    return header
+
+
+def _notification_preview(content: str, metadata: dict[str, Any] | None) -> str:
+    """Short preview string for a notification marker.
+
+    Prefers truncated text content.  Falls back to the reaction emoji
+    for reaction events (which arrive with empty content — without the
+    fallback the marker would be blank).
+    """
+    if isinstance(content, str) and content:
+        if len(content) <= _NOTIFICATION_PREVIEW_CHARS:
+            return content
+        return content[:_NOTIFICATION_PREVIEW_CHARS] + "…"
+    if isinstance(metadata, dict):
+        reaction = metadata.get("reaction")
+        if isinstance(reaction, dict):
+            emoji = reaction.get("emoji")
+            if isinstance(emoji, str) and emoji:
+                return f"reacted {emoji}"
+    return ""
+
+
+def _format_notification_marker(
+    orig_channel: str,
+    metadata: dict[str, Any] | None,
+    content: str,
+) -> str:
+    """Render a concise, non-focal-channel notification marker.
+
+    Shape::
+
+        🔔 <orig_channel> · from=<sender_name> · <preview>
+
+    The ``from`` clause is omitted when ``sender_name`` is absent from
+    metadata.  The preview clause is omitted when content is empty and
+    there's no reaction to surface.
+    """
+    parts = [f"🔔 {orig_channel}"]
+    if isinstance(metadata, dict):
+        sender_name = metadata.get("sender_name")
+        if isinstance(sender_name, str) and sender_name:
+            parts.append(f"from={sender_name}")
+    preview = _notification_preview(content, metadata)
+    if preview:
+        parts.append(preview)
+    return " · ".join(parts)
+
+
+def render_user_event(
+    event_data: dict[str, Any],
+    orig_channel: str | None,
+    focal_channel_at_arrival: str | None,
+) -> dict[str, Any]:
+    """Render a user event into its chat-completions message form.
+
+    Slice 4 of the focal-channel redesign (issue #29): rendering is a
+    deterministic function of the event's stamped ``orig_channel`` and
+    ``focal_channel_at_arrival``.  Callers (``build_messages`` and the
+    append-time token counter in ``queries.append_event``) share this
+    helper so the context and the ``cumulative_tokens`` column stay in
+    lock-step.
+
+    Branches:
+
+    * ``orig_channel`` is ``None`` → legacy / non-connector event,
+      rendered as Phase 2 did (metadata stripped, no header, no
+      notification).  Covers direct ``POST /sessions/{id}/messages``
+      traffic and pre-migration rows.
+    * ``orig == focal_at_arrival`` (non-NULL) → full content with the
+      #46 metadata header inlined.
+    * Otherwise (focal is NULL, or focal differs from orig) →
+      notification marker: a short, emoji-prefixed one-liner surfacing
+      the origin channel, sender, and a truncated content preview.
+    """
+    msg = {k: v for k, v in event_data.items() if k != "metadata"}
+    metadata = event_data.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else None
+
+    if orig_channel is None:
+        return msg
+
+    if orig_channel == focal_channel_at_arrival:
+        if metadata:
+            header = _format_channel_header(metadata)
+            if header:
+                existing = msg.get("content") or ""
+                msg["content"] = f"{header}\n{existing}" if existing else header
+        return msg
+
+    content = event_data.get("content", "")
+    if not isinstance(content, str):
+        content = ""
+    marker = _format_notification_marker(orig_channel, metadata, content)
+    return {"role": "user", "content": marker}
 
 
 def _sanitize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -236,7 +401,7 @@ def build_messages(
         role = e.data.get("role")
 
         if role == "user":
-            msg = {k: v for k, v in e.data.items() if k != "metadata"}
+            msg = render_user_event(e.data, e.orig_channel, e.focal_channel_at_arrival)
             messages.append(msg)
             max_stimulus_seq = max(max_stimulus_seq, e.seq)
 

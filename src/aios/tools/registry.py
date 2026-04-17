@@ -44,11 +44,35 @@ class DuplicateToolError(AiosError):
     status_code = 500
 
 
-# Handler signature: async (session_id, arguments) -> result dict.
-# The result dict is appended verbatim as the ``content`` or ``error`` of
-# a tool-role message. Handlers do NOT call append_event themselves —
+@dataclass(slots=True, frozen=True)
+class ToolResult:
+    """Rich return from a tool handler.
+
+    Most handlers just return a result ``dict`` and :mod:`aios.harness.tool_dispatch`
+    serialises it as JSON into the tool-role message's ``content``.
+    Handlers that need to attach structured metadata or a plain-string
+    content to the resulting event — notably ``switch_channel`` which
+    stamps a marker consumed by the unread-derivation helpers — return
+    ``ToolResult`` instead.
+
+    * ``content`` — ``str``: used verbatim.  ``dict``: JSON-encoded.
+    * ``metadata`` — merged into the event's ``data.metadata`` (stripped
+      from the chat-completions wire shape by ``_strip_to_spec``).
+    * ``is_error`` — records a handler-level error (separate from
+      dispatch-level exceptions, which raise).
+    """
+
+    content: str | dict[str, Any]
+    metadata: dict[str, Any] | None = None
+    is_error: bool = False
+
+
+# Handler signature: async (session_id, arguments) -> result dict | ToolResult.
+# Plain dict → serialised as JSON into the tool message's ``content``.
+# :class:`ToolResult` → richer shape with optional per-event metadata.
+# Handlers do NOT call append_event themselves —
 # :mod:`aios.harness.tool_dispatch` does that.
-ToolHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+ToolHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any] | ToolResult]]
 
 
 @dataclass(slots=True, frozen=True)

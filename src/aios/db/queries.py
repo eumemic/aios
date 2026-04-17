@@ -505,6 +505,7 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
+        focal_channel=row["focal_channel"],
     )
 
 
@@ -769,6 +770,8 @@ def _row_to_event(row: asyncpg.Record) -> Event:
         data=data,
         cumulative_tokens=row["cumulative_tokens"],
         created_at=row["created_at"],
+        orig_channel=row["orig_channel"],
+        focal_channel_at_arrival=row["focal_channel_at_arrival"],
     )
 
 
@@ -790,6 +793,7 @@ async def append_event(
     session_id: str,
     kind: EventKind,
     data: dict[str, Any],
+    orig_channel: str | None = None,
 ) -> Event:
     """Append an event to ``session_id`` with gapless seq allocation.
 
@@ -802,7 +806,16 @@ async def append_event(
     running total of approximate token counts through this event.  The
     previous cumulative value is fetched inside the same transaction (under
     the session row lock), so there is no race with concurrent appenders.
+
+    Focal-channel stamping (issue #29 redesign): the session's current
+    ``focal_channel`` is read from the same UPDATE that allocates the seq
+    (via its RETURNING clause) and written to ``focal_channel_at_arrival``
+    on the new event row.  Pairing it with the caller-supplied
+    ``orig_channel`` (stamped for user events via ``append_user_message``)
+    lets the context builder render each event deterministically at arrival
+    time without ever needing to re-project past events.
     """
+    from aios.harness.context import render_user_event
     from aios.harness.tokens import approx_tokens
 
     new_id = make_id(EVENT)
@@ -811,28 +824,40 @@ async def append_event(
     async with conn.transaction():
         seq_row = await conn.fetchrow(
             "UPDATE sessions SET last_event_seq = last_event_seq + 1 "
-            "WHERE id = $1 RETURNING last_event_seq",
+            "WHERE id = $1 RETURNING last_event_seq, focal_channel",
             session_id,
         )
         if seq_row is None:
             raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
         seq = seq_row["last_event_seq"]
+        focal_at_arrival: str | None = seq_row["focal_channel"]
 
-        # Compute cumulative_tokens for message events.
+        # Compute cumulative_tokens for message events against the
+        # as-rendered form so the column stays honest for non-focal
+        # notification markers (which occupy far fewer tokens than their
+        # full-content counterparts).
         cum_tokens: int | None = None
         if kind == "message":
             prev = await _latest_cumulative_tokens(conn, session_id)
-            cum_tokens = (prev or 0) + approx_tokens(data)
+            if data.get("role") == "user" and orig_channel is not None:
+                rendered = render_user_event(data, orig_channel, focal_at_arrival)
+                cum_tokens = (prev or 0) + approx_tokens(rendered)
+            else:
+                cum_tokens = (prev or 0) + approx_tokens(data)
 
         row = await conn.fetchrow(
-            "INSERT INTO events (id, session_id, seq, kind, data, cumulative_tokens) "
-            "VALUES ($1, $2, $3, $4, $5::jsonb, $6) RETURNING *",
+            "INSERT INTO events "
+            "(id, session_id, seq, kind, data, cumulative_tokens, "
+            " orig_channel, focal_channel_at_arrival) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8) RETURNING *",
             new_id,
             session_id,
             seq,
             kind,
             data_json,
             cum_tokens,
+            orig_channel,
+            focal_at_arrival,
         )
         assert row is not None
 
@@ -1838,6 +1863,7 @@ def _row_to_channel_binding(row: asyncpg.Record) -> ChannelBinding:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
+        notification_mode=row["notification_mode"],
     )
 
 

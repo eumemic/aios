@@ -85,16 +85,28 @@ async def append_user_message(
     content: str,
     metadata: dict[str, Any] | None = None,
 ) -> Event:
-    """Append a `role: user` message event to the session log."""
+    """Append a `role: user` message event to the session log.
+
+    When the inbound path stamps ``metadata["channel"]`` (the connector's
+    full channel address), we lift it into the event's ``orig_channel``
+    column so the context builder and unread-derivation helpers can key
+    off it directly — without re-parsing a JSONB blob on every read.
+    """
     data: dict[str, Any] = {"role": "user", "content": content}
     if metadata:
         data["metadata"] = metadata
+    orig_channel: str | None = None
+    if metadata is not None:
+        channel = metadata.get("channel")
+        if isinstance(channel, str):
+            orig_channel = channel
     async with pool.acquire() as conn:
         return await queries.append_event(
             conn,
             session_id=session_id,
             kind="message",
             data=data,
+            orig_channel=orig_channel,
         )
 
 

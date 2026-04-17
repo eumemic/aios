@@ -9,8 +9,11 @@ a new one (or rely on a routing rule).
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+NotificationMode = Literal["focal_candidate", "silent"]
 
 
 class ChannelBindingCreate(BaseModel):
@@ -31,3 +34,4 @@ class ChannelBinding(BaseModel):
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
+    notification_mode: NotificationMode = "focal_candidate"

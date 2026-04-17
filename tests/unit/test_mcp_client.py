@@ -533,6 +533,77 @@ class TestCallMcpTool:
         assert "error" in result
         assert "MCP server error" in result["error"]
 
+    async def test_meta_forwarded_to_session_call_tool(self) -> None:
+        """The ``meta`` kwarg on call_mcp_tool reaches session.call_tool
+        as its ``meta=`` kwarg so it lands in the JSON-RPC request's
+        ``_meta`` field (the transport for slice 6's focal-path
+        injection on connection-provided servers).
+        """
+        mock_content = MagicMock()
+        mock_content.text = "ok"
+        mock_content.type = "text"
+        mock_result = MagicMock()
+        mock_result.content = [mock_content]
+        mock_result.isError = False
+
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        mock_session.call_tool = AsyncMock(return_value=mock_result)
+
+        meta = {"aios.focal_channel_path": "alice"}
+
+        with (
+            patch("aios.mcp.client.streamable_http_client") as mock_transport,
+            patch("aios.mcp.client.ClientSession") as mock_session_cls,
+        ):
+            mock_transport.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock(), MagicMock())
+            )
+            mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await call_mcp_tool(
+                "https://example.com/",
+                {},
+                "signal_send",
+                {"text": "hi"},
+                meta=meta,
+            )
+
+        mock_session.call_tool.assert_awaited_once_with("signal_send", {"text": "hi"}, meta=meta)
+
+    async def test_meta_defaults_to_none(self) -> None:
+        """When meta is omitted, session.call_tool is called with meta=None
+        — important for agent-declared MCP servers that should stay
+        unaware of aios internal context.
+        """
+        mock_content = MagicMock()
+        mock_content.text = "ok"
+        mock_content.type = "text"
+        mock_result = MagicMock()
+        mock_result.content = [mock_content]
+        mock_result.isError = False
+
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        mock_session.call_tool = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("aios.mcp.client.streamable_http_client") as mock_transport,
+            patch("aios.mcp.client.ClientSession") as mock_session_cls,
+        ):
+            mock_transport.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock(), MagicMock())
+            )
+            mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await call_mcp_tool("https://example.com/", {}, "tool", {})
+
+        mock_session.call_tool.assert_awaited_once_with("tool", {}, meta=None)
+
     async def test_non_text_content_handled(self) -> None:
         mock_img = MagicMock()
         mock_img.type = "image"

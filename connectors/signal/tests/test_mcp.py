@@ -3,20 +3,42 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from mcp.server.fastmcp import Context
+from mcp.shared.context import RequestContext
+from mcp.types import RequestParams
 from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
 from aios_signal.mcp import (
     BearerAuthMiddleware,
+    _build_react_params,
+    _build_send_params,
     _extract_timestamp,
+    _focal_chat_id_from_meta,
     build_mcp_app,
     build_mcp_server,
     parse_bind,
 )
+
+
+def _ctx_with_focal(chat_id: str | None) -> Context[Any, Any, Any]:
+    """Build a Context carrying an ``aios.focal_channel_path`` in ``_meta``.
+
+    The ToolManager.call_tool path accepts an explicit Context; this
+    lets us simulate what aios sends without going through a full
+    ClientSession round-trip.
+    """
+    rc = MagicMock(spec=RequestContext)
+    if chat_id is None:
+        rc.meta = None
+    else:
+        rc.meta = RequestParams.Meta.model_validate({"aios.focal_channel_path": chat_id})
+    return Context(request_context=rc)
 
 
 class FakeRpc:
@@ -31,9 +53,25 @@ class FakeRpc:
         return self._results.get(method, {})
 
 
-async def _call_tool(rpc: FakeRpc, name: str, args: dict[str, Any]) -> dict[str, Any]:
+async def _call_tool(
+    rpc: FakeRpc,
+    name: str,
+    args: dict[str, Any],
+    *,
+    focal_chat_id: str | None = None,
+) -> dict[str, Any]:
+    """Invoke a Signal MCP tool with an aios-style focal-channel meta.
+
+    Goes through ``FastMCP.tool_manager.call_tool`` so the tool handler's
+    ``ctx: Context`` dependency is filled in with the constructed meta.
+    """
     mcp = build_mcp_server(rpc=rpc)  # type: ignore[arg-type]
-    result = await mcp.call_tool(name, args)
+    result = await mcp._tool_manager.call_tool(
+        name,
+        args,
+        _ctx_with_focal(focal_chat_id),
+        convert_result=True,
+    )
     # call_tool returns (content_blocks, structured_result) when the tool
     # has an output_schema (ours do — typed dict returns).
     assert isinstance(result, tuple)
@@ -42,62 +80,119 @@ async def _call_tool(rpc: FakeRpc, name: str, args: dict[str, Any]) -> dict[str,
     return structured
 
 
-async def test_signal_send_dm() -> None:
+# ─── unit: pure helpers ─────────────────────────────────────────────────────
+
+
+class TestFocalChatIdFromMeta:
+    def test_returns_path_when_present(self) -> None:
+        meta = RequestParams.Meta.model_validate({"aios.focal_channel_path": "chat-abc"})
+        assert _focal_chat_id_from_meta(meta) == "chat-abc"
+
+    def test_none_meta_raises(self) -> None:
+        with pytest.raises(ValueError, match="focal channel"):
+            _focal_chat_id_from_meta(None)
+
+    def test_missing_key_raises(self) -> None:
+        meta = RequestParams.Meta.model_validate({"other_key": "x"})
+        with pytest.raises(ValueError, match="focal channel"):
+            _focal_chat_id_from_meta(meta)
+
+    def test_empty_string_raises(self) -> None:
+        meta = RequestParams.Meta.model_validate({"aios.focal_channel_path": ""})
+        with pytest.raises(ValueError, match="focal channel"):
+            _focal_chat_id_from_meta(meta)
+
+
+class TestBuildSendParams:
+    def test_dm_uuid(self) -> None:
+        params = _build_send_params("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "hi")
+        assert params == {
+            "message": "hi",
+            "recipient": ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
+        }
+
+    def test_group_urlsafe_base64_decoded(self) -> None:
+        params = _build_send_params("abc-def_xyz==", "hi")
+        assert params["groupId"] == "abc+def/xyz=="
+        assert "recipient" not in params
+
+    def test_markdown_produces_text_styles(self) -> None:
+        params = _build_send_params("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "**bold** now")
+        assert params["message"] == "bold now"
+        assert any("BOLD" in s for s in params["textStyles"])
+
+
+class TestBuildReactParams:
+    def test_dm_shape(self) -> None:
+        params = _build_react_params(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "cccccccc-dddd-eeee-ffff-000000000000",
+            987654,
+            "👍",
+        )
+        assert params == {
+            "emoji": "👍",
+            "targetAuthor": "cccccccc-dddd-eeee-ffff-000000000000",
+            "targetTimestamp": 987654,
+            "recipient": ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
+        }
+
+    def test_group_shape(self) -> None:
+        params = _build_react_params(
+            "abc-def_xyz==",
+            "cccccccc-dddd-eeee-ffff-000000000000",
+            987654,
+            "👍",
+        )
+        assert params["groupId"] == "abc+def/xyz=="
+        assert "recipient" not in params
+
+
+# ─── integration: tool handlers consume _meta ──────────────────────────────
+
+
+async def test_signal_send_reads_focal_from_meta() -> None:
     rpc = FakeRpc(results={"send": {"timestamp": 123456}})
     result = await _call_tool(
         rpc,
         "signal_send",
-        {"chat_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "text": "hello"},
+        {"text": "hello"},
+        focal_chat_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     )
     assert result == {"sent_at_ms": 123456}
     method, params = rpc.calls[0]
     assert method == "send"
-    assert params is not None
     assert params == {
         "message": "hello",
         "recipient": ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
     }
 
 
-async def test_signal_send_group() -> None:
-    rpc = FakeRpc(results={"send": {"timestamp": 99}})
-    # URL-safe group id — decode should reverse `-` to `+` and `_` to `/`.
-    urlsafe_group = "abc-def_xyz=="
-    await _call_tool(rpc, "signal_send", {"chat_id": urlsafe_group, "text": "hi"})
-    method, params = rpc.calls[0]
-    assert method == "send"
-    assert params is not None
-    assert params["groupId"] == "abc+def/xyz=="
-    assert "recipient" not in params
-    assert params["message"] == "hi"
+async def test_signal_send_errors_without_meta() -> None:
+    rpc = FakeRpc()
+    mcp = build_mcp_server(rpc=rpc)  # type: ignore[arg-type]
+    # No focal — aios should have filtered this tool out, but defend.
+    ctx_no_meta = _ctx_with_focal(None)
+    with pytest.raises(Exception, match="focal channel"):
+        await mcp._tool_manager.call_tool(
+            "signal_send",
+            {"text": "hi"},
+            ctx_no_meta,
+            convert_result=True,
+        )
 
 
-async def test_signal_send_with_markdown_emits_text_styles() -> None:
-    rpc = FakeRpc(results={"send": {"timestamp": 1}})
-    await _call_tool(
-        rpc,
-        "signal_send",
-        {"chat_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "text": "**bold** now"},
-    )
-    _method, params = rpc.calls[0]
-    assert params is not None
-    # Markdown stripped from message body.
-    assert params["message"] == "bold now"
-    # textStyles (plural) set with a BOLD span.
-    assert any("BOLD" in s for s in params["textStyles"])
-
-
-async def test_signal_react_dm() -> None:
+async def test_signal_react_reads_focal_from_meta() -> None:
     rpc = FakeRpc()
     await _call_tool(
         rpc,
         "signal_react",
         {
-            "chat_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             "target_author_uuid": "cccccccc-dddd-eeee-ffff-000000000000",
             "target_timestamp_ms": 987654,
             "emoji": "👍",
         },
+        focal_chat_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     )
     method, params = rpc.calls[0]
     assert method == "sendReaction"
@@ -107,6 +202,29 @@ async def test_signal_react_dm() -> None:
         "targetTimestamp": 987654,
         "recipient": ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
     }
+
+
+async def test_signal_send_group_via_meta() -> None:
+    rpc = FakeRpc(results={"send": {"timestamp": 99}})
+    await _call_tool(rpc, "signal_send", {"text": "hi"}, focal_chat_id="abc-def_xyz==")
+    _method, params = rpc.calls[0]
+    assert params is not None
+    assert params["groupId"] == "abc+def/xyz=="
+    assert "recipient" not in params
+
+
+async def test_signal_send_markdown_via_meta() -> None:
+    rpc = FakeRpc(results={"send": {"timestamp": 1}})
+    await _call_tool(
+        rpc,
+        "signal_send",
+        {"text": "**bold** now"},
+        focal_chat_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    )
+    _method, params = rpc.calls[0]
+    assert params is not None
+    assert params["message"] == "bold now"
+    assert any("BOLD" in s for s in params["textStyles"])
 
 
 async def test_signal_read_receipt() -> None:
