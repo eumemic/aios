@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from mcp.server.fastmcp import Context
+from mcp.server.fastmcp import exceptions as mcp_exceptions
 from mcp.shared.context import RequestContext
 from mcp.types import RequestParams
 from starlette.applications import Starlette
@@ -227,36 +228,36 @@ async def test_signal_send_markdown_via_meta() -> None:
     assert any("BOLD" in s for s in params["textStyles"])
 
 
-async def test_signal_read_receipt() -> None:
-    rpc = FakeRpc()
-    await _call_tool(
-        rpc,
-        "signal_read_receipt",
-        {
-            "sender_uuid": "eeeeeeee-ffff-0000-1111-222222222222",
-            "timestamp_ms_list": [100, 200, 300],
-        },
-    )
-    method, params = rpc.calls[0]
-    assert method == "sendReceipt"
-    assert params == {
-        "recipient": ["eeeeeeee-ffff-0000-1111-222222222222"],
-        "type": "read",
-        "targetTimestamp": [100, 200, 300],
-    }
+async def test_signal_read_receipt_not_exposed() -> None:
+    """``signal_read_receipt`` was dropped from the tool surface — read
+    receipts aren't a deliberate response action, and ``sendReceipt``'s
+    ``recipient`` field rejects UUIDs (accepts phone numbers only). The
+    right design is connector-side auto-receipts driven by the session's
+    ``reacting_to`` watermark, not an agent tool. See SMOKE_TEST_NOTES.md.
+    """
+    with pytest.raises(mcp_exceptions.ToolError):
+        await _call_tool(
+            FakeRpc(),
+            "signal_read_receipt",
+            {"sender_uuid": "u", "timestamp_ms_list": [1]},
+        )
 
 
 def test_extract_timestamp_happy_path() -> None:
     assert _extract_timestamp({"timestamp": 42}) == 42
 
 
-def test_extract_timestamp_rejects_junk() -> None:
-    with pytest.raises(ValueError):
-        _extract_timestamp({"no_timestamp": True})
-    with pytest.raises(ValueError):
-        _extract_timestamp({"timestamp": "42"})  # strings rejected — int-only
-    with pytest.raises(ValueError):
-        _extract_timestamp("not-a-dict")
+def test_extract_timestamp_returns_none_on_junk() -> None:
+    """signal-cli returns ``null`` on successful group sends (no timestamp).
+    That is ambiguous — RPC-level failures would raise upstream in the
+    transport layer, so reaching ``_extract_timestamp`` with a non-conforming
+    shape means the send did happen; we return ``None`` and let the caller
+    degrade to ``{"status": "ok"}`` rather than falsely reporting failure.
+    """
+    assert _extract_timestamp({"no_timestamp": True}) is None
+    assert _extract_timestamp({"timestamp": "42"}) is None  # int-only
+    assert _extract_timestamp("not-a-dict") is None
+    assert _extract_timestamp(None) is None
 
 
 def test_parse_bind() -> None:

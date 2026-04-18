@@ -136,8 +136,14 @@ class StubDaemon:
         req_id = request.get("id", 0)
 
         result: Any
-        if method == "listAccounts":
-            result = [{"number": BOT_PHONE, "uuid": BOT_UUID}]
+        if method == "version":
+            # Readiness probe — ``listAccounts`` is not implemented in
+            # signal-cli's account-scoped daemon mode, so the connector
+            # probes ``version`` instead.
+            result = {"version": "0.14.2"}
+        elif method == "listContacts":
+            # Contact-name cache at startup — empty list is fine for this test.
+            result = []
         elif method == "send":
             self.send_calls.append(params)
             result = {"timestamp": 42, "results": []}
@@ -235,6 +241,14 @@ def settings(tmp_path: Path, stub_daemon: StubDaemon) -> Settings:
     os.environ["AIOS_API_KEY"] = "stub-key"
     os.environ["AIOS_CONNECTION_ID"] = "conn_stub"
     os.environ["AIOS_SIGNAL_MCP_TOKEN"] = "stub-token"
+
+    # Write a minimal signal-cli accounts.json so discover_bot_uuid can
+    # resolve the account from disk (the connector reads this rather than
+    # RPC-ing listAccounts, which isn't available in account-scoped mode).
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "data" / "accounts.json").write_text(
+        json.dumps({"accounts": [{"number": BOT_PHONE, "uuid": BOT_UUID}]})
+    )
 
     return Settings(
         phone=BOT_PHONE,
