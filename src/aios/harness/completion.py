@@ -18,11 +18,8 @@ from typing import TYPE_CHECKING, Any
 
 import litellm
 
-# Enable LiteLLM's built-in message sanitization so cross-model replay works
-# against providers with stricter schemas (notably Anthropic, which rejects
-# empty text content blocks emitted by some OpenRouter models as
-# tool-call-only assistant turns). See
-# https://docs.litellm.ai/docs/completion/message_sanitization.
+# Anthropic rejects empty text blocks that some OpenRouter models emit on
+# tool-call-only turns; modify_params tells LiteLLM to sanitize them.
 litellm.modify_params = True
 
 if TYPE_CHECKING:
