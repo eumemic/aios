@@ -185,3 +185,49 @@ def test_migration_0017_focal_channel_cycle(postgres: object) -> None:
     re_upgraded = _run_alembic(["upgrade", "head"], db_url)
     assert re_upgraded.returncode == 0, f"re-upgrade failed:\n{re_upgraded.stderr}"
     asyncio.run(assert_columns(True))
+
+
+_MIGRATION_0018_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("agents", "triage"),
+    ("agent_versions", "triage"),
+)
+
+
+@needs_docker
+@pytest.mark.integration
+def test_migration_0018_agent_triage_cycle(postgres: object) -> None:
+    """Exercise migration 0018's up/down/up cycle for the triage column.
+
+    The triage gate is a nullable JSONB field on both the current agent
+    row and each historical version, so a downgrade has to drop both.
+    A broken downgrade would leave the ``agents`` table diverged from
+    ``agent_versions`` — subtle and easy to miss without an explicit cycle.
+    """
+    db_url = _alembic_url(postgres)
+
+    upgraded = _run_alembic(["upgrade", "head"], db_url)
+    assert upgraded.returncode == 0, f"initial upgrade failed:\n{upgraded.stderr}"
+
+    import asyncio
+
+    async def assert_columns(expected: bool) -> None:
+        conn = await asyncpg.connect(db_url)
+        try:
+            for table, column in _MIGRATION_0018_COLUMNS:
+                exists = await _column_exists(conn, table, column)
+                if expected:
+                    assert exists, f"{table}.{column} missing after upgrade"
+                else:
+                    assert not exists, f"{table}.{column} still present after downgrade"
+        finally:
+            await conn.close()
+
+    asyncio.run(assert_columns(True))
+
+    downgraded = _run_alembic(["downgrade", "-1"], db_url)
+    assert downgraded.returncode == 0, f"downgrade -1 failed:\n{downgraded.stderr}"
+    asyncio.run(assert_columns(False))
+
+    re_upgraded = _run_alembic(["upgrade", "head"], db_url)
+    assert re_upgraded.returncode == 0, f"re-upgrade failed:\n{re_upgraded.stderr}"
+    asyncio.run(assert_columns(True))

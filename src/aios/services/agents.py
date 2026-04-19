@@ -12,7 +12,7 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
-from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
+from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec, TriageConfig
 from aios.models.skills import AgentSkillRef
 from aios.services import skills as skills_service
 
@@ -30,6 +30,7 @@ async def create_agent(
     metadata: dict[str, Any],
     window_min: int,
     window_max: int,
+    triage: TriageConfig | None = None,
 ) -> Agent:
     if window_min >= window_max:
         from aios.errors import ValidationError
@@ -54,6 +55,7 @@ async def create_agent(
             metadata=metadata,
             window_min=window_min,
             window_max=window_max,
+            triage=triage,
         )
 
 
@@ -89,6 +91,7 @@ async def update_agent(
     metadata: dict[str, Any] | None = None,
     window_min: int | None = None,
     window_max: int | None = None,
+    triage: TriageConfig | None = None,
 ) -> Agent:
     skills_json_str: str | None = None
     if skills is not None:
@@ -109,6 +112,7 @@ async def update_agent(
             metadata=metadata,
             window_min=window_min,
             window_max=window_max,
+            triage=triage,
         )
 
 

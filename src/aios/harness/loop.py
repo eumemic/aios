@@ -28,8 +28,10 @@ from aios.harness.completion import stream_litellm
 from aios.harness.context import build_messages
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
+from aios.harness.triage import run_triage
 from aios.logging import get_logger
 from aios.models.agents import ToolSpec
+from aios.models.events import Event
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.tools.registry import to_openai_tools
@@ -79,6 +81,18 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     events = await sessions_service.read_windowed_events(
         pool, session_id, window_min=agent.window_min, window_max=agent.window_max
     )
+
+    # Triage gate (optional). If configured and there's a fresh user
+    # message to decide on, run a cheap classifier first and short-circuit
+    # on an "ignore" verdict. We do this BEFORE MCP discovery, skill
+    # resolution, and system-prompt augmentation so ignored messages
+    # incur only the gate call's latency.
+    if (
+        agent.triage is not None
+        and _has_new_user_stimulus(events)
+        and await _run_triage_gate(pool, session_id, agent, events)
+    ):
+        return
 
     # Check for confirmed-but-undispatched tool calls (always_ask → allow).
     # The sweep's case (c) ensures we passed the guard above.
@@ -615,3 +629,94 @@ async def _append_lifecycle(
         "lifecycle",
         {"event": event, "status": status, "stop_reason": stop_reason},
     )
+
+
+# ─── triage gate ─────────────────────────────────────────────────────────────
+
+
+def _has_new_user_stimulus(events: list[Event]) -> bool:
+    """True when there's an un-reacted user message in the log.
+
+    The triage gate only runs on new user messages. Tool-chain
+    continuations (a batch completing while the model's already
+    mid-turn) must always proceed to inference so the agent can act on
+    the result — never gate those.
+
+    A "reaction" is either an assistant message or a previously-emitted
+    ``triage_decision`` lifecycle event (both carry a ``reacting_to``
+    watermark; see :func:`aios.harness.context.should_call_model`).
+    """
+    last_reacting_to: int = 0
+    for e in reversed(events):
+        is_assistant = e.kind == "message" and e.data.get("role") == "assistant"
+        is_triage = e.kind == "lifecycle" and e.data.get("event") == "triage_decision"
+        if is_assistant or is_triage:
+            last_reacting_to = e.data.get("reacting_to", e.seq)
+            break
+    for e in events:
+        if e.seq <= last_reacting_to:
+            continue
+        if e.kind == "message" and e.data.get("role") == "user":
+            return True
+    return False
+
+
+async def _run_triage_gate(
+    pool: Any,
+    session_id: str,
+    agent: Any,
+    events: list[Event],
+) -> bool:
+    """Run the triage gate and persist the decision.
+
+    Returns ``True`` when the step should short-circuit (verdict =
+    ``ignore``), ``False`` when the main inference should proceed.
+
+    Both verdicts persist a ``triage_decision`` lifecycle event so the
+    watermark advances and the session's audit trail records every gate
+    fire. On ``ignore``, the session transitions to ``idle`` and a
+    ``turn_ended`` lifecycle event is appended — mirroring the shape of
+    a normal ``end_turn`` so SSE consumers and UIs don't need special
+    handling.
+    """
+    triage_ctx = build_messages(events, system_prompt=None)
+    verdict = await run_triage(
+        config=agent.triage,
+        messages=triage_ctx.messages,
+    )
+
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "lifecycle",
+        {
+            "event": "triage_decision",
+            "decision": verdict.decision,
+            "reason": verdict.reason,
+            "reacting_to": triage_ctx.reacting_to,
+        },
+    )
+
+    if verdict.decision == "ignore":
+        await sessions_service.set_session_status(
+            pool,
+            session_id,
+            "idle",
+            stop_reason={"type": "triage_skipped", "reason": verdict.reason},
+        )
+        await _append_lifecycle(pool, session_id, "turn_ended", "idle", "triage_skipped")
+        log.info(
+            "step.triage_skipped",
+            session_id=session_id,
+            reason=verdict.reason,
+            reacting_to=triage_ctx.reacting_to,
+        )
+        return True
+
+    log.info(
+        "step.triage_admitted",
+        session_id=session_id,
+        reason=verdict.reason,
+        reacting_to=triage_ctx.reacting_to,
+    )
+    return False

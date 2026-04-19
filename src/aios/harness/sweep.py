@@ -248,6 +248,16 @@ async def find_sessions_needing_inference(
     scope_clause = "AND s.id = $1" if session_id else ""
     scope_params: list[Any] = [session_id] if session_id else []
 
+    # A "reaction" is either an assistant message or a triage_decision
+    # lifecycle event — both carry a ``reacting_to`` watermark. Without
+    # counting triage decisions, a triage-ignored user message would
+    # remain an unreacted candidate and the sweep would re-wake it
+    # forever.
+    reaction_predicate = (
+        "((a.kind = 'message' AND a.data->>'role' = 'assistant') "
+        "OR (a.kind = 'lifecycle' AND a.data->>'event' = 'triage_decision'))"
+    )
+
     async with pool.acquire() as conn:
         candidate_rows = await conn.fetch(
             f"""
@@ -261,16 +271,14 @@ async def find_sessions_needing_inference(
                    NOT EXISTS (
                        SELECT 1 FROM events a
                         WHERE a.session_id = e.session_id
-                          AND a.kind = 'message'
-                          AND a.data->>'role' = 'assistant'
+                          AND {reaction_predicate}
                    )
                    OR
                    e.seq > COALESCE(
                        (SELECT MAX(COALESCE((a.data->>'reacting_to')::bigint, a.seq))
                           FROM events a
                          WHERE a.session_id = e.session_id
-                           AND a.kind = 'message'
-                           AND a.data->>'role' = 'assistant'),
+                           AND {reaction_predicate}),
                        0
                    )
                )
@@ -324,6 +332,8 @@ async def _filter_incomplete_batches(
     session_list = list(candidates)
 
     async with pool.acquire() as conn:
+        # Same reaction predicate as find_sessions_needing_inference —
+        # triage_decision lifecycle events count as reactions.
         unreacted_rows = await conn.fetch(
             """
             SELECT e.session_id, e.data
@@ -335,8 +345,9 @@ async def _filter_incomplete_batches(
                    (SELECT MAX(COALESCE((a.data->>'reacting_to')::bigint, a.seq))
                       FROM events a
                      WHERE a.session_id = e.session_id
-                       AND a.kind = 'message'
-                       AND a.data->>'role' = 'assistant'),
+                       AND ((a.kind = 'message' AND a.data->>'role' = 'assistant')
+                            OR (a.kind = 'lifecycle'
+                                AND a.data->>'event' = 'triage_decision'))),
                    0)
             """,
             session_list,

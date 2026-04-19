@@ -13,6 +13,31 @@ from aios.harness.context import build_messages, should_call_model
 from aios.models.events import Event
 
 
+def _triage_evt(
+    seq: int, *, decision: str = "ignore", reacting_to: int = 0, reason: str = ""
+) -> Event:
+    """Build a ``triage_decision`` lifecycle Event for testing.
+
+    Mirrors the shape written by ``aios.harness.loop._run_triage_gate``
+    so ``should_call_model`` tests exercise the real predicate.
+    """
+    return Event(
+        id=f"evt_{seq}",
+        session_id="sess_01TEST",
+        seq=seq,
+        kind="lifecycle",
+        data={
+            "event": "triage_decision",
+            "decision": decision,
+            "reason": reason,
+            "reacting_to": reacting_to,
+        },
+        created_at=datetime.now(tz=UTC),
+        orig_channel=None,
+        focal_channel_at_arrival=None,
+    )
+
+
 def _evt(
     seq: int,
     role: str,
@@ -138,6 +163,49 @@ class TestShouldCallModel:
             _evt(6, "tool", tool_call_id="y1", content="done"),
         ]
         assert should_call_model(events) is True
+
+    def test_triage_ignore_advances_watermark(self) -> None:
+        """After a triage_decision:ignore, re-wakes on the same user stimulus
+        must NOT retrigger inference. Without this, the group-chat gate would
+        re-fire on every sweep tick for messages it already dismissed."""
+        events = [
+            _evt(1, "user", content="unrelated side chat"),
+            _triage_evt(2, decision="ignore", reacting_to=1),
+        ]
+        assert should_call_model(events) is False
+
+    def test_triage_ignore_then_new_user_returns_true(self) -> None:
+        """A user message arriving after a triage-ignore is fresh stimulus.
+        The watermark from the prior decision (reacting_to=1) is below the
+        new user seq, so the gate should re-evaluate."""
+        events = [
+            _evt(1, "user", content="unrelated side chat"),
+            _triage_evt(2, decision="ignore", reacting_to=1),
+            _evt(3, "user", content="hey bot, are you there?"),
+        ]
+        assert should_call_model(events) is True
+
+    def test_triage_respond_then_assistant_reacts(self) -> None:
+        """Normal flow when triage admits: a triage_decision:respond is
+        followed by the assistant message. Both count as reactions; the
+        reverse walk picks the assistant first (lower in the log isn't
+        special — the most recent reaction is the assistant). No re-wake."""
+        events = [
+            _evt(1, "user", content="hey bot"),
+            _triage_evt(2, decision="respond", reacting_to=1),
+            _evt(3, "assistant", content="yes?"),
+        ]
+        assert should_call_model(events) is False
+
+    def test_first_turn_with_only_triage_ignore(self) -> None:
+        """A session that's never had an assistant message but has a
+        triage_decision event is still 'has reacted' — the gate's verdict
+        counts. Without this, the session would loop on first-turn logic."""
+        events = [
+            _evt(1, "user", content="not for me"),
+            _triage_evt(2, decision="ignore", reacting_to=1),
+        ]
+        assert should_call_model(events) is False
 
 
 # ─── build_messages ──────────────────────────────────────────────────────────

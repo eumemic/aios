@@ -26,6 +26,7 @@ async def create(body: AgentCreate, pool: PoolDep, _auth: AuthDep) -> Agent:
         metadata=body.metadata,
         window_min=body.window_min,
         window_max=body.window_max,
+        triage=body.triage,
     )
 
 
@@ -65,6 +66,7 @@ async def update(agent_id: str, body: AgentUpdate, pool: PoolDep, _auth: AuthDep
         metadata=body.metadata,
         window_min=body.window_min,
         window_max=body.window_max,
+        triage=body.triage,
     )
 
 

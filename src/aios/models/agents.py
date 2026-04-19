@@ -34,6 +34,42 @@ BuiltinToolType = Literal[
 PermissionPolicy = Literal["always_allow", "always_ask"]
 
 
+# ── Triage gate config ────────────────────────────────────────────────────────
+
+
+class TriageConfig(BaseModel):
+    """Pre-inference gate that decides whether the agent should respond.
+
+    When present, the harness runs one cheap model call before the main
+    inference to classify the latest stimulus as ``respond`` or
+    ``ignore``. On ``ignore`` the step emits a ``triage_decision``
+    lifecycle event (carrying a ``reacting_to`` watermark) and returns
+    without calling the main model. The user message itself is still
+    appended to the log unconditionally by the API — the gate only
+    controls the reply, not recording.
+
+    Intended for group-chat scenarios where many messages arrive but
+    few are addressed to the agent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = Field(
+        min_length=1,
+        description=(
+            "LiteLLM model string for the triage call. Use a small, fast model "
+            "(e.g. 'ollama_chat/llama3.2:1b', 'openrouter/anthropic/claude-haiku-4-5')."
+        ),
+    )
+    system: str = Field(
+        default="",
+        description=(
+            "System prompt for the triage classifier. Should instruct the model "
+            'to emit a JSON object {"decision": "respond"|"ignore", "reason": "..."}.'
+        ),
+    )
+
+
 # ── MCP server declaration ────────────────────────────────────────────────────
 
 
@@ -160,6 +196,7 @@ class AgentCreate(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     window_min: int = Field(default=50_000, ge=1)
     window_max: int = Field(default=150_000, ge=1)
+    triage: TriageConfig | None = None
 
 
 class AgentUpdate(BaseModel):
@@ -184,6 +221,7 @@ class AgentUpdate(BaseModel):
     metadata: dict[str, Any] | None = None
     window_min: int | None = Field(default=None, ge=1)
     window_max: int | None = Field(default=None, ge=1)
+    triage: TriageConfig | None = None
 
 
 class Agent(BaseModel):
@@ -201,6 +239,7 @@ class Agent(BaseModel):
     metadata: dict[str, Any]
     window_min: int
     window_max: int
+    triage: TriageConfig | None = None
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
@@ -218,4 +257,5 @@ class AgentVersion(BaseModel):
     mcp_servers: list[McpServerSpec]
     window_min: int
     window_max: int
+    triage: TriageConfig | None = None
     created_at: datetime

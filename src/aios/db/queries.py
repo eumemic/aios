@@ -34,7 +34,7 @@ from aios.ids import (
     VAULT_CREDENTIAL,
     make_id,
 )
-from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
+from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec, TriageConfig
 from aios.models.channel_bindings import ChannelBinding
 from aios.models.connections import Connection
 from aios.models.environments import Environment, EnvironmentConfig
@@ -179,6 +179,13 @@ def _parse_jsonb(raw: Any) -> Any:
     return json.loads(raw) if isinstance(raw, str) else raw
 
 
+def _parse_triage(row: asyncpg.Record) -> TriageConfig | None:
+    raw = row.get("triage") if hasattr(row, "get") else row["triage"]
+    if raw is None:
+        return None
+    return TriageConfig.model_validate(_parse_jsonb(raw))
+
+
 def _row_to_agent(row: asyncpg.Record) -> Agent:
     tools_data = _parse_jsonb(row["tools"])
     skills_data = _parse_jsonb(row["skills"])
@@ -197,6 +204,7 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
         metadata=metadata,
         window_min=row["window_min"],
         window_max=row["window_max"],
+        triage=_parse_triage(row),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -217,6 +225,7 @@ def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
         mcp_servers=[McpServerSpec.model_validate(s) for s in (mcp_data or [])],
         window_min=row["window_min"],
         window_max=row["window_max"],
+        triage=_parse_triage(row),
         created_at=row["created_at"],
     )
 
@@ -234,21 +243,23 @@ async def insert_agent(
     metadata: dict[str, Any],
     window_min: int,
     window_max: int,
+    triage: TriageConfig | None = None,
 ) -> Agent:
     new_id = make_id(AGENT)
     tools_json = json.dumps([t.model_dump() for t in tools])
     mcp_json = json.dumps([s.model_dump() for s in mcp_servers])
     metadata_json = json.dumps(metadata)
+    triage_json = json.dumps(triage.model_dump()) if triage is not None else None
     try:
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
                 INSERT INTO agents (
                     id, name, model, system, tools, skills, mcp_servers,
-                    description, metadata, window_min, window_max, version
+                    description, metadata, window_min, window_max, triage, version
                 )
                 VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
-                        $8, $9::jsonb, $10, $11, 1)
+                        $8, $9::jsonb, $10, $11, $12::jsonb, 1)
                 RETURNING *
                 """,
                 new_id,
@@ -262,6 +273,7 @@ async def insert_agent(
                 metadata_json,
                 window_min,
                 window_max,
+                triage_json,
             )
             assert row is not None
             # Snapshot version 1 into agent_versions.
@@ -269,9 +281,9 @@ async def insert_agent(
                 """
                 INSERT INTO agent_versions (
                     agent_id, version, model, system, tools, skills, mcp_servers,
-                    window_min, window_max
+                    window_min, window_max, triage
                 )
-                VALUES ($1, 1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8)
+                VALUES ($1, 1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9::jsonb)
                 """,
                 new_id,
                 model,
@@ -281,6 +293,7 @@ async def insert_agent(
                 mcp_json,
                 window_min,
                 window_max,
+                triage_json,
             )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -338,6 +351,7 @@ async def update_agent(
     metadata: dict[str, Any] | None = None,
     window_min: int | None = None,
     window_max: int | None = None,
+    triage: TriageConfig | None = None,
 ) -> Agent:
     """Update an agent, creating a new version.
 
@@ -369,6 +383,7 @@ async def update_agent(
     new_meta = metadata if metadata is not None else current.metadata
     new_wmin = window_min if window_min is not None else current.window_min
     new_wmax = window_max if window_max is not None else current.window_max
+    new_triage = triage if triage is not None else current.triage
 
     # No-op detection.
     if (
@@ -382,6 +397,7 @@ async def update_agent(
         and new_meta == current.metadata
         and new_wmin == current.window_min
         and new_wmax == current.window_max
+        and new_triage == current.triage
     ):
         return current
 
@@ -389,6 +405,7 @@ async def update_agent(
     tools_json = json.dumps([t.model_dump() for t in new_tools])
     mcp_json = json.dumps([s.model_dump() for s in new_mcp])
     meta_json = json.dumps(new_meta)
+    triage_json = json.dumps(new_triage.model_dump()) if new_triage is not None else None
 
     async with conn.transaction():
         row = await conn.fetchrow(
@@ -398,6 +415,7 @@ async def update_agent(
                    tools = $6::jsonb, skills = $7::jsonb, mcp_servers = $8::jsonb,
                    description = $9, metadata = $10::jsonb,
                    window_min = $11, window_max = $12,
+                   triage = $13::jsonb,
                    updated_at = now()
              WHERE id = $1
             RETURNING *
@@ -414,15 +432,16 @@ async def update_agent(
             meta_json,
             new_wmin,
             new_wmax,
+            triage_json,
         )
         assert row is not None
         await conn.execute(
             """
             INSERT INTO agent_versions (
                 agent_id, version, model, system, tools, skills, mcp_servers,
-                window_min, window_max
+                window_min, window_max, triage
             )
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb)
             """,
             agent_id,
             new_version,
@@ -433,6 +452,7 @@ async def update_agent(
             mcp_json,
             new_wmin,
             new_wmax,
+            triage_json,
         )
     return _row_to_agent(row)
 

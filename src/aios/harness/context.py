@@ -243,6 +243,18 @@ def _strip_to_spec(msg: dict[str, Any]) -> dict[str, Any]:
 # ─── should_call_model ──────────────────────────────────────────────────────
 
 
+def _is_triage_decision(e: Event) -> bool:
+    """True if *e* is a ``triage_decision`` lifecycle event.
+
+    Triage-decision events carry a ``reacting_to`` watermark just like
+    assistant messages; both count as "reactions" for the gating logic
+    in :func:`should_call_model`. Without this, a triage-ignored turn
+    would never advance the watermark and the worker would re-fire on
+    the same user message forever.
+    """
+    return e.kind == "lifecycle" and e.data.get("event") == "triage_decision"
+
+
 def should_call_model(events: list[Event]) -> bool:
     """Decide whether this wake should produce an inference call.
 
@@ -254,29 +266,37 @@ def should_call_model(events: list[Event]) -> bool:
 
     ``reacting_to`` is the seq of the latest user/tool event in the
     context the model was given. Events after ``reacting_to`` (excluding
-    the assistant message itself) are "new." This handles the race where
+    the reaction event itself) are "new." This handles the race where
     a tool result arrives during inference — the result has a seq after
     ``reacting_to`` and triggers a follow-up step.
+
+    Both assistant messages and ``triage_decision`` lifecycle events are
+    treated as reactions — a triage-ignored turn advances the watermark
+    via its own ``reacting_to``, so re-wakes on the same stimulus early
+    out here.
     """
     if not events:
         return False
 
-    # Find the most recent assistant message.
-    last_asst: Event | None = None
+    # Find the most recent reaction: assistant message or triage decision.
+    last_reaction: Event | None = None
     for e in reversed(events):
         if e.kind == "message" and e.data.get("role") == "assistant":
-            last_asst = e
+            last_reaction = e
+            break
+        if _is_triage_decision(e):
+            last_reaction = e
             break
 
-    if last_asst is None:
-        return True  # first turn — no assistant response yet
+    if last_reaction is None:
+        return True  # first turn — no reaction yet
 
-    # Use reacting_to if available; fall back to the assistant's own seq
+    # Use reacting_to if available; fall back to the reaction's own seq
     # (backward compat with events written before this field existed).
-    reacting_to: int = last_asst.data.get("reacting_to", last_asst.seq)
+    reacting_to: int = last_reaction.data.get("reacting_to", last_reaction.seq)
 
     # "New" = events the model hasn't reacted to.
-    new_events = [e for e in events if e.seq > reacting_to and e.seq != last_asst.seq]
+    new_events = [e for e in events if e.seq > reacting_to and e.seq != last_reaction.seq]
     if not new_events:
         return False  # duplicate / stale wake
 
