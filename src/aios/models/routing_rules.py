@@ -65,7 +65,7 @@ class RoutingRuleCreate(BaseModel):
 
 
 class RoutingRuleUpdate(BaseModel):
-    """Request body for ``PUT /v1/routing-rules/{id}``.
+    """Request body for ``PUT /v1/connections/{connection_id}/routing-rules/{rule_id}``.
 
     ``prefix`` is immutable after creation.
     """

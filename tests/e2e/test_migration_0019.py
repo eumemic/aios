@@ -51,10 +51,16 @@ def data_migration_db_url() -> Iterator[str]:
                 # stub FK targets without wiring up the full agent/session/vault
                 # chain.  The migration doesn't care about FK validity.
                 await c.execute("SET session_replication_role = replica")
+                # conn_sig1_old: archived predecessor of conn_sig1 — their
+                # (connector, account) pair is shared.  The data migration
+                # must pick the active row (conn_sig1), not the archived one,
+                # to avoid pointing live bindings/rules at an archived conn.
                 await c.execute("""
-                    INSERT INTO connections (id, connector, account, mcp_url, vault_id)
-                    VALUES ('conn_sig1', 'signal', 'alice', 'http://mcp-a', 'vlt_stub'),
-                           ('conn_sig2', 'signal', 'bob',   'http://mcp-b', 'vlt_stub')
+                    INSERT INTO connections (id, connector, account, mcp_url, vault_id, archived_at)
+                    VALUES
+                      ('conn_sig1_old', 'signal', 'alice', 'http://mcp-old', 'vlt_stub', now()),
+                      ('conn_sig1',     'signal', 'alice', 'http://mcp-a',   'vlt_stub', NULL),
+                      ('conn_sig2',     'signal', 'bob',   'http://mcp-b',   'vlt_stub', NULL)
                 """)
                 # rul_v1: exact match → prefix becomes ''
                 # rul_v2: one extra segment → prefix 'chat-a'
@@ -241,6 +247,25 @@ class TestDataMigration:
         async with mig_pool.acquire() as conn:
             row = await conn.fetchrow("SELECT id FROM channel_bindings WHERE id = 'bnd_orph'")
             assert row is None, "orphan binding should have been hard-deleted by 0019"
+
+    async def test_archived_connection_does_not_steal_active_rows(self, mig_pool: Any) -> None:
+        """Data migration must prefer the active connection when a
+        ``(connector, account)`` pair has both active and archived rows
+        (the partial uniqueness allows this — see ``test_archive``).
+        """
+        async with mig_pool.acquire() as conn:
+            # conn_sig1_old is the archived predecessor of conn_sig1.  No
+            # migrated row should reference it.
+            r_count = await conn.fetchval(
+                "SELECT count(*) FROM routing_rules WHERE connection_id = $1",
+                "conn_sig1_old",
+            )
+            b_count = await conn.fetchval(
+                "SELECT count(*) FROM channel_bindings WHERE connection_id = $1",
+                "conn_sig1_old",
+            )
+            assert r_count == 0
+            assert b_count == 0
 
     async def test_post_migration_unique_is_per_connection(self, mig_pool: Any) -> None:
         """Same prefix on different connections is allowed — uniqueness is

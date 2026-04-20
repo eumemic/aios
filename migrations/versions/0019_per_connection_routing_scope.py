@@ -32,6 +32,9 @@ def upgrade() -> None:
 
     # Exact-match (prefix = "connector/account") collapses to '' — the
     # per-connection catch-all.  Otherwise strip the first two segments.
+    # ``c.archived_at IS NULL`` matches the partial uniqueness on
+    # ``(connector, account)``; without it a pair with both archived and
+    # active rows would match ambiguously.
     op.execute("""
         UPDATE routing_rules rr
            SET connection_id = c.id,
@@ -43,7 +46,8 @@ def upgrade() -> None:
                          )
                        END
           FROM connections c
-         WHERE split_part(rr.prefix, '/', 1) = c.connector
+         WHERE c.archived_at IS NULL
+           AND split_part(rr.prefix, '/', 1) = c.connector
            AND split_part(rr.prefix, '/', 2) = c.account
     """)
 
@@ -83,7 +87,8 @@ def upgrade() -> None:
                    length(c.connector) + length(c.account) + 3
                )
           FROM connections c
-         WHERE split_part(cb.address, '/', 1) = c.connector
+         WHERE c.archived_at IS NULL
+           AND split_part(cb.address, '/', 1) = c.connector
            AND split_part(cb.address, '/', 2) = c.account
     """)
 
