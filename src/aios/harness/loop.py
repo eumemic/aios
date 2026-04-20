@@ -25,7 +25,7 @@ from typing import Any
 
 from aios.harness import runtime
 from aios.harness.completion import stream_litellm
-from aios.harness.context import build_messages
+from aios.harness.context import build_messages, separate_adjacent_user_messages
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.logging import get_logger
@@ -159,6 +159,11 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
     tail = build_channels_tail_block(bindings, events, session.focal_channel)
     if tail is not None:
         ctx.messages.append(tail)
+
+    # Block LiteLLM's adjacent-same-role merge on Anthropic so the tail
+    # block isn't concatenated into the preceding user inbound.  See
+    # :func:`separate_adjacent_user_messages` for the mechanism.
+    ctx.messages = separate_adjacent_user_messages(ctx.messages)
 
     # Dump the exact chat-completions payload we're about to send to LiteLLM
     # when AIOS_DUMP_CONTEXT is set — useful for debugging prompt construction

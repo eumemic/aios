@@ -9,7 +9,11 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from aios.harness.context import build_messages, should_call_model
+from aios.harness.context import (
+    build_messages,
+    separate_adjacent_user_messages,
+    should_call_model,
+)
 from aios.models.events import Event
 
 
@@ -943,3 +947,64 @@ class TestFocalRendering:
         msgs = build_messages([ev_early, ev_late], system_prompt=None).messages
         assert msgs[0]["content"].startswith(f"🔔 {self._CHAN_B}")
         assert msgs[1]["content"].startswith(f"[channel={self._CHAN_A}")
+
+
+class TestSeparateAdjacentUserMessages:
+    def test_inserts_empty_assistant_between_two_users(self) -> None:
+        msgs = [
+            {"role": "user", "content": "one"},
+            {"role": "user", "content": "two"},
+        ]
+        assert separate_adjacent_user_messages(msgs) == [
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": ""},
+            {"role": "user", "content": "two"},
+        ]
+
+    def test_preserves_existing_alternation(self) -> None:
+        msgs = [
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": "two"},
+        ]
+        assert separate_adjacent_user_messages(msgs) == msgs
+
+    def test_tool_result_between_users_is_not_separated(self) -> None:
+        """Adjacent means *consecutive same-role*. Tool results don't trigger."""
+        msgs = [
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
+            {"role": "tool", "tool_call_id": "a", "content": "r"},
+            {"role": "user", "content": "two"},
+        ]
+        assert separate_adjacent_user_messages(msgs) == msgs
+
+    def test_three_consecutive_users_get_two_separators(self) -> None:
+        msgs = [
+            {"role": "user", "content": "a"},
+            {"role": "user", "content": "b"},
+            {"role": "user", "content": "c"},
+        ]
+        assert separate_adjacent_user_messages(msgs) == [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": ""},
+            {"role": "user", "content": "b"},
+            {"role": "assistant", "content": ""},
+            {"role": "user", "content": "c"},
+        ]
+
+    def test_empty_input_returns_empty(self) -> None:
+        assert separate_adjacent_user_messages([]) == []
+
+    def test_system_then_user_then_user_separates_only_users(self) -> None:
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "one"},
+            {"role": "user", "content": "two"},
+        ]
+        assert separate_adjacent_user_messages(msgs) == [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": ""},
+            {"role": "user", "content": "two"},
+        ]
