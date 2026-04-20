@@ -125,11 +125,10 @@ def build_focal_paradigm_block(bindings: list[ChannelBinding]) -> str:
         "When focused on a channel, the connector's response tools "
         "(e.g. `signal_send`, `signal_react`) operate on your focal "
         "channel implicitly — no channel/chat-id argument required. "
-        "Bare assistant text is NOT delivered to any channel; it is "
-        f"internal thinking and will be prefixed with "
-        f"{MONOLOGUE_PREFIX.strip()!r} in your history as a reminder "
-        "that no human saw it. This is the teaching mechanism; do not "
-        "strip it on replay.\n"
+        "Bare assistant text is NOT delivered to any channel — it is "
+        "private thinking no human sees. Prefix any such thinking with "
+        f"{MONOLOGUE_PREFIX.strip()!r} so it is unambiguous in your "
+        "history that you understood it was internal.\n"
         "\n"
         "### Timing\n"
         "\n"
@@ -339,9 +338,10 @@ def _prefix_text(s: str) -> str:
 def apply_monologue_prefix(assistant_msg: dict[str, Any]) -> dict[str, Any]:
     """Prefix every text segment of an assistant message's content.
 
-    The prefix is persisted in the event log — the model seeing its
-    own prefix on every subsequent step IS the teaching mechanism.
-    Do not strip on replay.
+    Safety net: the paradigm prose instructs the model to prefix its own
+    bare text; this fills in the prefix when it forgets, so the log is
+    uniform from the model's perspective on replay. Idempotent — see
+    :func:`_prefix_text`.
     """
     content = assistant_msg.get("content")
     if not content:
