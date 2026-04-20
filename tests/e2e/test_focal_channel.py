@@ -86,31 +86,31 @@ async def _set_focal(pool: Any, session_id: str, focal: str | None) -> None:
         )
 
 
-async def _setup_inbound(pool: Any, agent_id: str, env_id: str, vault_id: str) -> tuple[str, str]:
-    """Create a connection + routing rule, return (connection_id, prefix)."""
+async def _setup_inbound(pool: Any, agent_id: str, env_id: str, vault_id: str) -> Any:
+    """Create a connection + per-connection catch-all routing rule, return the connection."""
     from aios.services import channels as ch_svc
     from aios.services import connections as conn_svc
 
-    account = f"focal-{_uniq()}"
     connection = await conn_svc.create_connection(
         pool,
         connector="signal",
-        account=account,
+        account=f"focal-{_uniq()}",
         mcp_url="https://m",
         vault_id=vault_id,
         metadata={},
     )
     await ch_svc.create_routing_rule(
         pool,
-        prefix=f"signal/{account}",
+        connection.id,
+        prefix="",
         target=f"agent:{agent_id}",
         session_params=SessionParams(environment_id=env_id),
     )
-    return connection.id, f"signal/{account}"
+    return connection
 
 
 async def _post_inbound(
-    pool: Any, prefix: str, path: str, content: str = "hi"
+    pool: Any, connection: Any, path: str, content: str = "hi"
 ) -> tuple[str, str, str]:
     """Resolve + append a user inbound message.
 
@@ -120,9 +120,9 @@ async def _post_inbound(
     from aios.services import channels as ch_svc
     from aios.services import sessions as sess_svc
 
-    address = f"{prefix}/{path}"
+    address = f"{connection.connector}/{connection.account}/{path}"
     with mock.patch("aios.harness.wake.defer_wake"):
-        resolution = await ch_svc.resolve_channel(pool, address)
+        resolution = await ch_svc.resolve_channel(pool, connection, path)
         event = await sess_svc.append_user_message(
             pool,
             resolution.session_id,
@@ -141,8 +141,8 @@ class TestEventStampingFromInbound:
     ) -> None:
         from aios.db import queries
 
-        _connection_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _event_id, address = await _post_inbound(pool, prefix, "chat-1")
+        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _event_id, address = await _post_inbound(pool, connection, "chat-1")
 
         async with pool.acquire() as conn:
             events = await queries.read_message_events(conn, session_id)
@@ -155,8 +155,8 @@ class TestEventStampingFromInbound:
     ) -> None:
         from aios.db import queries
 
-        _connection_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _event_id, _address = await _post_inbound(pool, prefix, "chat-1")
+        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _event_id, _address = await _post_inbound(pool, connection, "chat-1")
 
         # Session was auto-created with focal_channel NULL (phone down).
         async with pool.acquire() as conn:
@@ -169,14 +169,14 @@ class TestEventStampingFromInbound:
     ) -> None:
         from aios.db import queries
 
-        _connection_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
         # First message auto-creates the session.
-        session_id, _e1, address = await _post_inbound(pool, prefix, "chat-1")
+        session_id, _e1, address = await _post_inbound(pool, connection, "chat-1")
         # Focus the agent on this channel.
         await _set_focal(pool, session_id, address)
 
         # Second inbound on the same channel — focal matches orig.
-        _sid, _e2, _addr = await _post_inbound(pool, prefix, "chat-1", content="still here")
+        _sid, _e2, _addr = await _post_inbound(pool, connection, "chat-1", content="still here")
 
         async with pool.acquire() as conn:
             events = await queries.read_message_events(conn, session_id)
@@ -191,16 +191,16 @@ class TestEventStampingFromInbound:
         from aios.db import queries
         from aios.services import channels as ch_svc
 
-        _connection_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
         # First message on chat-A auto-creates the session.
-        session_a_id, _e1, address_a = await _post_inbound(pool, prefix, "chat-A")
+        session_a_id, _e1, address_a = await _post_inbound(pool, connection, "chat-A")
         # Focus on A.
         await _set_focal(pool, session_a_id, address_a)
         # Bind chat-B to the same session so a POST to B doesn't create a new session.
-        address_b = f"{prefix}/chat-B"
+        address_b = f"{connection.connector}/{connection.account}/chat-B"
         await ch_svc.create_binding(pool, address=address_b, session_id=session_a_id)
         # Inbound on B while focal is A.
-        _sid_b, _e2, _addr_b = await _post_inbound(pool, prefix, "chat-B", content="hi from B")
+        _sid_b, _e2, _addr_b = await _post_inbound(pool, connection, "chat-B", content="hi from B")
 
         async with pool.acquire() as conn:
             events = await queries.read_message_events(conn, session_a_id)
@@ -226,15 +226,15 @@ class TestEventStampingFromInbound:
         """
         from aios.db import queries
 
-        _connection_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e1, address_a = await _post_inbound(pool, prefix, "chat-A")
+        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _e1, address_a = await _post_inbound(pool, connection, "chat-A")
 
         # Flip focal repeatedly, appending between each flip, and assert
         # each event carries the focal that was in effect at its append.
         expected_stamps: list[str | None] = []
         for focal in (None, address_a, None, address_a):
             await _set_focal(pool, session_id, focal)
-            _sid, _eid, _addr = await _post_inbound(pool, prefix, "chat-A", content="tick")
+            _sid, _eid, _addr = await _post_inbound(pool, connection, "chat-A", content="tick")
             expected_stamps.append(focal)
 
         async with pool.acquire() as conn:
@@ -255,12 +255,12 @@ class TestEventStampingFromInbound:
         """
         from aios.db import queries
 
-        _connection_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e1, address = await _post_inbound(pool, prefix, "chat-C")
+        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _e1, address = await _post_inbound(pool, connection, "chat-C")
         await _set_focal(pool, session_id, address)
 
         async def _fire() -> None:
-            await _post_inbound(pool, prefix, "chat-C", content=f"msg-{_uniq()}")
+            await _post_inbound(pool, connection, "chat-C", content=f"msg-{_uniq()}")
 
         await asyncio.gather(*(_fire() for _ in range(5)))
 
@@ -315,8 +315,8 @@ class TestSwitchChannelHandler:
     ) -> None:
         from aios.tools.switch_channel import switch_channel_handler
 
-        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, prefix, "chat-1")
+        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
 
         result = await switch_channel_handler(session_id, {"target": address})
 
@@ -335,8 +335,8 @@ class TestSwitchChannelHandler:
     ) -> None:
         from aios.tools.switch_channel import switch_channel_handler
 
-        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, prefix, "chat-1")
+        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
         await _set_focal(runtime_pool, session_id, address)
 
         result = await switch_channel_handler(session_id, {"target": None})
@@ -356,8 +356,8 @@ class TestSwitchChannelHandler:
     ) -> None:
         from aios.tools.switch_channel import switch_channel_handler
 
-        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, prefix, "chat-1")
+        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
         await _set_focal(runtime_pool, session_id, address)  # focus on A
 
         result = await switch_channel_handler(session_id, {"target": "signal/other/fake"})
@@ -378,13 +378,13 @@ class TestSwitchChannelHandler:
     ) -> None:
         from aios.tools.switch_channel import switch_channel_handler
 
-        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
         session_id, _e, address = await _post_inbound(
-            runtime_pool, prefix, "chat-1", content="first"
+            runtime_pool, connection, "chat-1", content="first"
         )
         # Add more messages on this channel.
         for i in range(3):
-            await _post_inbound(runtime_pool, prefix, "chat-1", content=f"msg-{i}")
+            await _post_inbound(runtime_pool, connection, "chat-1", content=f"msg-{i}")
 
         result = await switch_channel_handler(session_id, {"target": address})
 
@@ -411,11 +411,11 @@ class TestSwitchChannelHandler:
         shows those 2 (below the floor — no padding from nowhere)."""
         from aios.tools.switch_channel import switch_channel_handler
 
-        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
         session_id, _e, address = await _post_inbound(
-            runtime_pool, prefix, "chat-1", content="only-one"
+            runtime_pool, connection, "chat-1", content="only-one"
         )
-        await _post_inbound(runtime_pool, prefix, "chat-1", content="only-two")
+        await _post_inbound(runtime_pool, connection, "chat-1", content="only-two")
 
         result = await switch_channel_handler(session_id, {"target": address})
         content = result.content
@@ -433,12 +433,12 @@ class TestSwitchChannelHandler:
         """Unread > FLOOR_N → all unread included, not clamped."""
         from aios.tools.switch_channel import RE_ORIENT_FLOOR_N, switch_channel_handler
 
-        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, prefix, "chat-1")
+        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
         # Post MANY messages while focal is NULL so they all count as unread.
         n = RE_ORIENT_FLOOR_N + 5
         for i in range(n):
-            await _post_inbound(runtime_pool, prefix, "chat-1", content=f"unread-{i:02d}")
+            await _post_inbound(runtime_pool, connection, "chat-1", content=f"unread-{i:02d}")
 
         result = await switch_channel_handler(session_id, {"target": address})
         content = result.content
@@ -461,12 +461,12 @@ class TestSwitchChannelHandler:
         from aios.services import sessions as sess_svc
         from aios.tools.switch_channel import switch_channel_handler
 
-        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
         # Create a session + bind an unused channel address to it.
         session_id, _e, _addr_used = await _post_inbound(
-            runtime_pool, prefix, "chat-used", content="seed"
+            runtime_pool, connection, "chat-used", content="seed"
         )
-        unused_address = f"{prefix}/chat-never"
+        unused_address = f"{connection.connector}/{connection.account}/chat-never"
         await ch_svc.create_binding(runtime_pool, address=unused_address, session_id=session_id)
         # Sanity check session exists.
         await sess_svc.get_session(runtime_pool, session_id)
@@ -495,8 +495,8 @@ class TestSwitchChannelNoOp:
     ) -> None:
         from aios.tools.switch_channel import switch_channel_handler
 
-        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, prefix, "chat-1")
+        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
         await _set_focal(runtime_pool, session_id, address)
 
         result = await switch_channel_handler(session_id, {"target": address})
@@ -520,8 +520,8 @@ class TestSwitchChannelNoOp:
     ) -> None:
         from aios.tools.switch_channel import switch_channel_handler
 
-        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, _address = await _post_inbound(runtime_pool, prefix, "chat-1")
+        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        session_id, _e, _address = await _post_inbound(runtime_pool, connection, "chat-1")
         # _post_inbound leaves focal = None (phone down) by default.
         assert await _get_session_focal(runtime_pool, session_id) is None
 
@@ -552,8 +552,8 @@ class TestSwitchChannelNoOp:
         from aios.harness.channels import SWITCH_CHANNEL_METADATA_KEY, _switch_marker
         from aios.tools.switch_channel import switch_channel_handler
 
-        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, prefix, "chat-1")
+        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
         await _set_focal(runtime_pool, session_id, address)
 
         result = await switch_channel_handler(session_id, {"target": address})
@@ -598,8 +598,8 @@ class TestEventChannelDerivation:
     ) -> None:
         from aios.db import queries
 
-        _conn_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(pool, prefix, "chat-1")
+        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(pool, connection, "chat-1")
 
         async with pool.acquire() as conn:
             events = await queries.read_message_events(conn, session_id)
@@ -614,8 +614,8 @@ class TestEventChannelDerivation:
         from aios.db import queries
         from aios.services import sessions as sess_svc
 
-        _conn_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(pool, prefix, "chat-1")
+        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(pool, connection, "chat-1")
         await _set_focal(pool, session_id, address)
 
         await sess_svc.append_event(
@@ -637,8 +637,8 @@ class TestEventChannelDerivation:
         from aios.db import queries
         from aios.services import sessions as sess_svc
 
-        _conn_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e, _address = await _post_inbound(pool, prefix, "chat-1")
+        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _e, _address = await _post_inbound(pool, connection, "chat-1")
         # focal remains None — "phone down"
         await sess_svc.append_event(
             pool,
@@ -664,9 +664,9 @@ class TestEventChannelDerivation:
         from aios.services import channels as ch_svc
         from aios.services import sessions as sess_svc
 
-        _conn_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e, addr_a = await _post_inbound(pool, prefix, "chat-A")
-        addr_b = f"{prefix}/chat-B"
+        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _e, addr_a = await _post_inbound(pool, connection, "chat-A")
+        addr_b = f"{connection.connector}/{connection.account}/chat-B"
         await ch_svc.create_binding(pool, address=addr_b, session_id=session_id)
 
         # Agent focused on A; emits an assistant message with a tool call.
@@ -716,8 +716,8 @@ class TestEventChannelDerivation:
         from aios.db import queries
         from aios.services import sessions as sess_svc
 
-        _conn_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e, _address = await _post_inbound(pool, prefix, "chat-1")
+        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _e, _address = await _post_inbound(pool, connection, "chat-1")
 
         await sess_svc.append_event(
             pool,
@@ -749,8 +749,8 @@ class TestSwitchChannelAsEvent:
         from aios.db import queries
         from aios.harness.tool_dispatch import launch_tool_calls
 
-        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, prefix, "chat-1")
+        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
 
         # Simulate an assistant message + a switch_channel tool call —
         # launch_tool_calls will invoke the handler and persist the
@@ -842,8 +842,8 @@ class TestMcpMetaInjection:
         prev_crypto = runtime.crypto_box
         runtime.crypto_box = CryptoBox(__import__("os").urandom(32))
         try:
-            _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-            session_id, _e, address = await _post_inbound(runtime_pool, prefix, "chat-1")
+            connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+            session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
 
             # The connection created by _setup_inbound has id prefix `conn_`.
             from aios.services import connections as conn_svc
@@ -907,8 +907,8 @@ class TestMcpMetaInjection:
         prev_crypto = runtime.crypto_box
         runtime.crypto_box = CryptoBox(__import__("os").urandom(32))
         try:
-            _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-            session_id, _e, address = await _post_inbound(runtime_pool, prefix, "chat-1")
+            connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+            session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
 
             # Agent-declared server: name does NOT start with conn_.
             agent_server_name = "github"
@@ -975,11 +975,11 @@ class TestOraSmokeTestRegression:
         from aios.services import channels as ch_svc
         from aios.tools.switch_channel import switch_channel_handler
 
-        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
 
         # DM with Tom — session seeded here.
         session_id, _e_seed, dm_address = await _post_inbound(
-            runtime_pool, prefix, "dm-tom", content="hey"
+            runtime_pool, connection, "dm-tom", content="hey"
         )
         # Agent is focused on dm-tom, claims "I'm Ora".
         await _set_focal(runtime_pool, session_id, dm_address)
@@ -1005,16 +1005,16 @@ class TestOraSmokeTestRegression:
         )
 
         # Now agent switches to a second channel + burst of activity.
-        qa_address = f"{prefix}/qa-group"
+        qa_address = f"{connection.connector}/{connection.account}/qa-group"
         await ch_svc.create_binding(runtime_pool, address=qa_address, session_id=session_id)
         await _set_focal(runtime_pool, session_id, qa_address)
         for i in range(30):
-            await _post_inbound(runtime_pool, prefix, "qa-group", content=f"noise-{i:02d}")
+            await _post_inbound(runtime_pool, connection, "qa-group", content=f"noise-{i:02d}")
 
         # Agent puts phone down (focal=None) and user sends the DM
         # follow-up while attention is elsewhere.
         await _set_focal(runtime_pool, session_id, None)
-        await _post_inbound(runtime_pool, prefix, "dm-tom", content="you sure about that?")
+        await _post_inbound(runtime_pool, connection, "dm-tom", content="you sure about that?")
 
         # Agent switches back to the DM.  Re-orient block must include
         # BOTH the "I'm Ora" seed and the "you sure" follow-up.
@@ -1060,16 +1060,14 @@ class TestTailBlockInStep:
         )
         await ch_svc.create_routing_rule(
             runtime_pool,
-            prefix=f"signal/{account}",
+            connection.id,
+            prefix="",
             target=f"agent:{agent_id}",
             session_params=SessionParams(environment_id=env_id),
         )
-        prefix = f"signal/{account}"
-
-        # Route one inbound to auto-create a session.
-        address = f"{prefix}/chat-1"
+        address = f"signal/{account}/chat-1"
         with mock.patch("aios.harness.wake.defer_wake"):
-            resolution = await ch_svc.resolve_channel(runtime_pool, address)
+            resolution = await ch_svc.resolve_channel(runtime_pool, connection, "chat-1")
             from aios.services import sessions as sess_svc
 
             await sess_svc.append_user_message(
@@ -1109,7 +1107,7 @@ class TestTailBlockInStep:
         from tests.e2e.harness import assistant
 
         account = f"tail2-{_uniq()}"
-        await conn_svc.create_connection(
+        connection = await conn_svc.create_connection(
             runtime_pool,
             connector="signal",
             account=account,
@@ -1119,17 +1117,15 @@ class TestTailBlockInStep:
         )
         await ch_svc.create_routing_rule(
             runtime_pool,
-            prefix=f"signal/{account}",
+            connection.id,
+            prefix="",
             target=f"agent:{agent_id}",
             session_params=SessionParams(environment_id=env_id),
         )
-        prefix = f"signal/{account}"
-
-        # Route two channels to the same session.
-        address_a = f"{prefix}/chat-A"
-        address_b = f"{prefix}/chat-B"
+        address_a = f"signal/{account}/chat-A"
+        address_b = f"signal/{account}/chat-B"
         with mock.patch("aios.harness.wake.defer_wake"):
-            resolution_a = await ch_svc.resolve_channel(runtime_pool, address_a)
+            resolution_a = await ch_svc.resolve_channel(runtime_pool, connection, "chat-A")
             session_id = resolution_a.session_id
             await ch_svc.create_binding(runtime_pool, address=address_b, session_id=session_id)
             # Focus on A and let one message land in A.

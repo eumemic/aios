@@ -30,8 +30,15 @@ def _binding(
     notification_mode: NotificationMode = "focal_candidate",
 ) -> ChannelBinding:
     now = datetime(2026, 4, 16)
+    # Reconstruct the (connection_id, path) storage form from the display
+    # address the tests supply.  The connection_id is a stable derivation
+    # of the first two segments so tests get consistent IDs.
+    parts = address.split("/", 2)
+    connector, account, path = parts[0], parts[1], parts[2] if len(parts) > 2 else ""
     return ChannelBinding(
         id=f"cbnd_{hash(address) & 0xFFFF:04x}",
+        connection_id=f"conn_{hash((connector, account)) & 0xFFFF:04x}",
+        path=path,
         address=address,
         session_id=session_id,
         created_at=now,

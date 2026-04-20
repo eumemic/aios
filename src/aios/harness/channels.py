@@ -62,15 +62,11 @@ def connection_server_name(c: Connection) -> str:
 async def list_bindings_and_connections(
     pool: asyncpg.Pool[Any], session_id: str
 ) -> tuple[list[ChannelBinding], list[Connection]]:
-    """Load the session's bindings and the distinct connections they
-    reference in a single pool acquisition.
-    """
+    """Load the session's bindings and the distinct connections they reference."""
     async with pool.acquire() as conn:
         bindings = await queries.list_session_bindings(conn, session_id)
-        pairs = {
-            (parts[0], parts[1]) for b in bindings if len(parts := b.address.split("/", 2)) >= 2
-        }
-        connections = await queries.get_connections_by_pairs(conn, list(pairs)) if pairs else []
+        conn_ids = sorted({b.connection_id for b in bindings})
+        connections = await queries.list_connections_by_ids(conn, conn_ids) if conn_ids else []
     return bindings, connections
 
 

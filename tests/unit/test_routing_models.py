@@ -114,14 +114,21 @@ class TestSessionParams:
 
 class TestRoutingRuleCreate:
     def test_valid(self) -> None:
-        r = RoutingRuleCreate(prefix="signal/test", target="agent:agent_x")
-        assert r.prefix == "signal/test"
+        r = RoutingRuleCreate(prefix="chat-abc", target="agent:agent_x")
+        assert r.prefix == "chat-abc"
         assert r.target == "agent:agent_x"
         assert r.session_params == SessionParams()
 
-    def test_rejects_empty_prefix(self) -> None:
+    def test_accepts_empty_prefix_as_catchall(self) -> None:
+        # Empty prefix is the per-connection catch-all under the
+        # per-connection-scoped routing design.
+        r = RoutingRuleCreate(prefix="", target="agent:agent_x")
+        assert r.prefix == ""
+
+    @pytest.mark.parametrize("bad", ["/A", "A/", "A//B", "..", "A/..", "../B"])
+    def test_rejects_malformed_prefix(self, bad: str) -> None:
         with pytest.raises(ValidationError):
-            RoutingRuleCreate(prefix="", target="agent:x")
+            RoutingRuleCreate(prefix=bad, target="agent:x")
 
     def test_rejects_empty_target(self) -> None:
         with pytest.raises(ValidationError):
