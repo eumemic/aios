@@ -72,10 +72,14 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     async def _noop_defer_wake(session_id: str, *, cause: str = "message") -> None:
         pass
 
+    async def _noop_defer_retry_wake(session_id: str, *, delay_seconds: float) -> None:
+        pass
+
     with (
         mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),
         mock.patch("aios.harness.completion.litellm.stream_chunk_builder", _fake_chunk_builder),
         mock.patch("aios.harness.wake.defer_wake", _noop_defer_wake),
+        mock.patch("aios.harness.loop.defer_retry_wake", _noop_defer_retry_wake),
     ):
         yield h
 
@@ -137,10 +141,14 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     async def _noop_defer_wake(session_id: str, *, cause: str = "message") -> None:
         pass
 
+    async def _noop_defer_retry_wake(session_id: str, *, delay_seconds: float) -> None:
+        pass
+
     with (
         mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),
         mock.patch("aios.harness.completion.litellm.stream_chunk_builder", _fake_chunk_builder),
         mock.patch("aios.harness.wake.defer_wake", _noop_defer_wake),
+        mock.patch("aios.harness.loop.defer_retry_wake", _noop_defer_retry_wake),
     ):
         yield h
 

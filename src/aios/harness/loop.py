@@ -28,6 +28,7 @@ from aios.harness.completion import stream_litellm
 from aios.harness.context import build_messages
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
+from aios.harness.wake import defer_retry_wake
 from aios.logging import get_logger
 from aios.models.agents import ToolSpec
 from aios.services import agents as agents_service
@@ -35,6 +36,25 @@ from aios.services import sessions as sessions_service
 from aios.tools.registry import to_openai_tools
 
 log = get_logger("aios.harness.loop")
+
+
+# Exponential backoff for transient model-call failures.  The index into
+# this table is the number of consecutive ``rescheduling`` lifecycle
+# events already in the log (see ``_count_consecutive_rescheduling``).
+# Once the index runs off the end, the retry budget is exhausted and the
+# step gives up with ``stop_reason={"type": "error"}``.
+_RETRY_BACKOFF_SECONDS: list[float] = [2, 8, 30, 120]
+
+
+def _retry_delay_for_attempt(attempt: int) -> float | None:
+    """Return the backoff delay for the given 0-indexed attempt, or ``None``.
+
+    ``attempt`` is the number of consecutive rescheduling lifecycle
+    events already logged; ``None`` signals the caller to give up.
+    """
+    if attempt >= len(_RETRY_BACKOFF_SECONDS):
+        return None
+    return _RETRY_BACKOFF_SECONDS[attempt]
 
 
 async def run_session_step(session_id: str, *, cause: str = "message") -> None:
@@ -199,28 +219,21 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
             },
         )
 
-        # Count consecutive rescheduling lifecycle events to decide
-        # whether to retry or give up.
-        consecutive = await _count_consecutive_rescheduling(pool, session_id)
-        if consecutive < 2:
-            # Retry: set status to rescheduling and defer a delayed wake.
+        # Exponential backoff — index is the number of consecutive
+        # rescheduling lifecycle events already in the log.  A successful
+        # turn between failures clears the streak so the next failure
+        # starts fresh at the smallest delay.
+        attempt = await _count_consecutive_rescheduling(pool, session_id)
+        delay = _retry_delay_for_attempt(attempt)
+        if delay is not None:
             await sessions_service.set_session_status(
                 pool, session_id, "rescheduling", stop_reason={"type": "rescheduling"}
             )
             await _append_lifecycle(pool, session_id, "turn_ended", "rescheduling", "rescheduling")
-            from aios.harness.procrastinate_app import app as procrastinate_app
-
-            try:
-                await procrastinate_app.configure_task("harness.wake_session").defer_async(
-                    session_id=session_id,
-                    cause="reschedule",
-                    schedule_in={"seconds": 5},
-                )
-            except Exception:
-                log.exception("step.reschedule_defer_failed", session_id=session_id)
+            await defer_retry_wake(session_id, delay_seconds=delay)
             return
         else:
-            # 3rd consecutive error — give up.
+            # Retry budget exhausted — surface the error.
             await sessions_service.set_session_status(
                 pool, session_id, "idle", stop_reason={"type": "error"}
             )

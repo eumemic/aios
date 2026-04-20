@@ -30,3 +30,28 @@ async def defer_wake(session_id: str, *, cause: str = "message") -> None:
         )
     except procrastinate_exceptions.AlreadyEnqueued:
         log.debug("wake.already_enqueued", session_id=session_id, cause=cause)
+
+
+async def defer_retry_wake(session_id: str, *, delay_seconds: float) -> None:
+    """Enqueue a delayed ``wake_session`` job for retry after a transient error.
+
+    Mirrors :func:`defer_wake` but schedules the job ``delay_seconds``
+    in the future via procrastinate's ``schedule_in``.  An already-queued
+    wake for the same session dedups this retry via ``queueing_lock``;
+    that's benign — the queued wake will run, hit the same error, and
+    the handler will defer a fresh retry.
+    """
+    from aios.harness.procrastinate_app import app
+
+    try:
+        await app.configure_task("harness.wake_session").defer_async(
+            session_id=session_id,
+            cause="reschedule",
+            schedule_in={"seconds": delay_seconds},
+        )
+    except procrastinate_exceptions.AlreadyEnqueued:
+        log.debug(
+            "wake.retry_already_enqueued",
+            session_id=session_id,
+            delay_seconds=delay_seconds,
+        )
