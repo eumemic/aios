@@ -1,39 +1,11 @@
-"""E2E coverage for the adjacent-user-message separator at the LiteLLM boundary.
-
-PR #69 inserts ``{"role": "assistant", "content": ""}`` between any two
-consecutive user-role messages in ``run_session_step`` so LiteLLM's
-Anthropic translator doesn't merge them into one multi-content turn.
-These tests exercise the full pipeline through ``run_session_step`` and
-assert on ``harness.model_calls`` (captured kwargs at the
-``litellm.acompletion`` boundary) to pin down that the fix actually
-reaches the wire.
-"""
+"""E2E coverage for the adjacent-user-message separator at the LiteLLM boundary."""
 
 from __future__ import annotations
 
-from typing import Any
-
 from tests.conftest import needs_docker
-from tests.e2e.harness import Harness, assistant
+from tests.e2e.harness import Harness, assistant, msg_text
 
 _TAIL_HEADER = "━━━ Channels ━━━"
-
-
-def _msg_text(msg: dict[str, Any]) -> str:
-    """Flatten a chat-completions message's content to a string.
-
-    LiteLLM's Anthropic adapter wraps cache-eligible content as
-    ``[{"type": "text", "text": "...", "cache_control": ...}]`` blocks
-    before the request leaves the boundary, so tests that read
-    ``harness.model_calls[...]['messages']`` must handle both the plain
-    string shape and the multi-block shape.
-    """
-    c = msg.get("content", "")
-    if isinstance(c, str):
-        return c
-    if isinstance(c, list):
-        return "".join(str(block.get("text", "")) for block in c if isinstance(block, dict))
-    return ""
 
 
 @needs_docker
@@ -63,25 +35,16 @@ class TestSeparatorAtLiteLLMBoundary:
             (
                 i
                 for i, m in enumerate(msgs)
-                if m.get("role") == "user" and _TAIL_HEADER in _msg_text(m)
+                if m.get("role") == "user" and _TAIL_HEADER in msg_text(m)
             ),
             None,
         )
         assert tail_idx is not None, f"tail block not found in messages: {msgs!r}"
         assert tail_idx > 0, "tail block should not be first — there's an inbound before it"
 
-        # The message immediately before the tail block must defeat the
-        # Anthropic merge: either a role transition (non-user) or
-        # explicitly the empty-assistant separator the fix inserts.
         prev = msgs[tail_idx - 1]
-        assert prev.get("role") != "user" or prev == {"role": "assistant", "content": ""}, (
-            f"user/user adjacency survived to litellm boundary: prev={prev!r}, tail={msgs[tail_idx]!r}"
-        )
-
-        # Stronger: in this specific setup (one inbound + tail block) the
-        # preceding message should be the empty-assistant separator.
         assert prev == {"role": "assistant", "content": ""}, (
-            f"expected empty-assistant separator before tail, got {prev!r}"
+            f"expected empty-assistant separator before tail, got prev={prev!r}, tail={msgs[tail_idx]!r}"
         )
 
     async def test_no_separator_when_tail_block_absent(self, harness: Harness) -> None:

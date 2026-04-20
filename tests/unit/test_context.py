@@ -32,6 +32,21 @@ def _binding(address: str, session_id: str = "sess_01TEST") -> ChannelBinding:
     )
 
 
+def _full_pipeline(
+    events: list[Event],
+    bindings: list[ChannelBinding],
+    focal_channel: str | None = None,
+) -> list[dict[str, Any]]:
+    """Compose ``build_messages`` → tail-block append → separator — the
+    same sequence ``loop.py:run_session_step`` runs before handing the
+    message list to LiteLLM."""
+    ctx = build_messages(events, system_prompt=None)
+    tail = build_channels_tail_block(bindings, events, focal_channel)
+    if tail is not None:
+        ctx.messages.append(tail)
+    return separate_adjacent_user_messages(ctx.messages)
+
+
 def _evt(
     seq: int,
     role: str,
@@ -562,22 +577,12 @@ class TestMonotonicity:
         _assert_prefix(ctx2, ctx3)
 
     def test_separator_insertion_preserves_monotonicity(self) -> None:
-        """Running the full loop.py pipeline (build_messages → tail-block
-        append → separate_adjacent_user_messages) must keep the prefix-
-        stability invariant: output(L1) is a prefix of output(L2) when
-        L1 ⊂ L2.  Pins the PR's "insertions only happen at the volatile
-        suffix" claim — a future refactor that started inserting
-        separators earlier in the message list would bust the cache and
-        this test."""
-        addr = "signal/test/1"
-        bindings = [_binding(addr)]
-
-        def _full(events: list[Event]) -> list[dict]:
-            ctx = build_messages(events, system_prompt=None)
-            tail = build_channels_tail_block(bindings, events, None)
-            if tail is not None:
-                ctx.messages.append(tail)
-            return separate_adjacent_user_messages(ctx.messages)
+        """Full pipeline (build_messages → tail-block → separator) must
+        keep the prefix-stability invariant: output(L1) is a prefix of
+        output(L2) when L1 ⊂ L2.  Pins the "insertions only at the
+        volatile suffix" claim — a refactor that inserted separators
+        into the cache-stable prefix would fail this."""
+        bindings = [_binding("signal/test/1")]
 
         l1 = [
             _evt(1, "user", content="do A"),
@@ -586,15 +591,13 @@ class TestMonotonicity:
         l2 = [*l1, _evt(3, "user", content="do B")]
         l3 = [*l2, _evt(4, "assistant", content="done B")]
 
-        out1, out2, out3 = _full(l1), _full(l2), _full(l3)
+        out1 = _full_pipeline(l1, bindings)
+        out2 = _full_pipeline(l2, bindings)
+        out3 = _full_pipeline(l3, bindings)
 
-        # The tail block lives at the end and mutates per step, so the
-        # cache-stable prefix is everything up to (but not including) the
-        # tail block.  Compare those prefixes across appends.
+        # The tail block mutates per step, so compare prefixes only up
+        # to (but not including) the tail and any separator before it.
         def _strip_tail(msgs: list[dict]) -> list[dict]:
-            # Tail block is the last user message whose content starts
-            # with the channels header.  Drop it + any separator the
-            # pipeline inserted immediately before it.
             for i in range(len(msgs) - 1, -1, -1):
                 m = msgs[i]
                 if m.get("role") == "user" and str(m.get("content", "")).startswith(
@@ -1074,37 +1077,14 @@ class TestSeparateAdjacentUserMessages:
 
 
 class TestSeparateAdjacentUserMessagesPipeline:
-    """Compose the real pipeline (``build_messages`` → tail-block append →
-    ``separate_adjacent_user_messages``) and assert the separator fires
-    exactly where adjacency actually arises from realistic event shapes.
-
-    The per-function unit tests above use synthetic message dicts; these
-    exercise the composition against ``build_messages`` output so a
-    refactor that changes that output's role sequence can't silently
-    break the fix."""
-
-    @staticmethod
-    def _pipeline(
-        events: list[Event],
-        bindings: list[ChannelBinding],
-        focal_channel: str | None = None,
-    ) -> list[dict[str, Any]]:
-        ctx = build_messages(events, system_prompt=None)
-        tail = build_channels_tail_block(bindings, events, focal_channel)
-        if tail is not None:
-            ctx.messages.append(tail)
-        return separate_adjacent_user_messages(ctx.messages)
+    """Exercise the separator against realistic ``build_messages`` output
+    (rather than synthetic dicts) so a refactor that changes the output's
+    role sequence can't silently break the fix."""
 
     def test_inbound_then_tail_block_gets_separator(self) -> None:
-        """A user inbound followed by the channels tail block (also
-        user-role) must have an empty-assistant separator inserted
-        between them."""
-        addr = "signal/test/1"
         events = [_evt(1, "user", content="hello")]
-        msgs = self._pipeline(events, [_binding(addr)])
+        msgs = _full_pipeline(events, [_binding("signal/test/1")])
 
-        # build_messages emits one user; tail block is a second user.
-        # Separator lands between them.
         assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
         assert msgs[1] == {"role": "assistant", "content": ""}
         assert msgs[2]["content"].startswith("━━━ Channels ━━━")
@@ -1112,8 +1092,8 @@ class TestSeparateAdjacentUserMessagesPipeline:
     def test_blind_spot_injection_adjacent_user_gets_separator(self) -> None:
         """``build_messages`` inlines a blind-spot tool result as a
         synthetic user message right after the horizon-setter.  When
-        the real log also has a subsequent user event, the two land
-        back-to-back in the output and need separating."""
+        a real user event follows, the two land back-to-back and need
+        separating."""
         events = [
             _evt(1, "user", content="run it"),
             _evt(2, "assistant", tool_calls=[_tc("t1")]),
@@ -1126,34 +1106,27 @@ class TestSeparateAdjacentUserMessagesPipeline:
         events[3].data["reacting_to"] = 1  # blind to tool at seq=3
         events[5].data["reacting_to"] = 5
 
-        msgs = self._pipeline(events, bindings=[])
+        msgs = _full_pipeline(events, bindings=[])
 
-        # Pre-fix role sequence (from TestMonotonicity.test_inline_injection_position):
-        #   [user, assistant, tool, assistant, user(injection), user(follow-up), assistant]
-        # Post-fix: an empty-assistant separator lands between the two user msgs.
-        roles_and_contents = [(m["role"], m.get("content", "")) for m in msgs]
-        # Find the injection (carries "RESULT" text) and assert the next
-        # message is the empty-assistant separator.
         injection_idx = next(
-            i for i, (role, c) in enumerate(roles_and_contents) if role == "user" and "RESULT" in c
+            i
+            for i, m in enumerate(msgs)
+            if m["role"] == "user" and "RESULT" in str(m.get("content", ""))
         )
         assert msgs[injection_idx + 1] == {"role": "assistant", "content": ""}
         assert msgs[injection_idx + 2]["role"] == "user"
         assert msgs[injection_idx + 2]["content"] == "anything else?"
 
     def test_alternating_events_no_tail_block_no_separator(self) -> None:
-        """Alternating user/assistant events with no tail block must
-        produce no empty-assistant insertions — guards against a buggy
-        future change that inserts gratuitously."""
+        """Guards against a future change that inserts a separator when
+        no adjacency exists (empty bindings → tail block is ``None``)."""
         events = [
             _evt(1, "user", content="hi"),
             _evt(2, "assistant", content="hello"),
             _evt(3, "user", content="bye"),
             _evt(4, "assistant", content="later"),
         ]
-        msgs = self._pipeline(events, bindings=[])
+        msgs = _full_pipeline(events, bindings=[])
 
-        # No tail block (bindings=[] → build_channels_tail_block returns None),
-        # so the output is just build_messages' alternating sequence.
         assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
         assert not any(m == {"role": "assistant", "content": ""} for m in msgs)
