@@ -22,8 +22,12 @@ from aios.models.events import Event
 def _binding(address: str, session_id: str = "sess_01TEST") -> ChannelBinding:
     """Minimal ChannelBinding for tail-block construction."""
     now = datetime(2026, 4, 17, tzinfo=UTC)
+    parts = address.split("/", 2)
+    connector, account, path = parts[0], parts[1], parts[2] if len(parts) > 2 else ""
     return ChannelBinding(
         id=f"cbnd_{abs(hash(address)) & 0xFFFF:04x}",
+        connection_id=f"conn_{abs(hash((connector, account))) & 0xFFFF:04x}",
+        path=path,
         address=address,
         session_id=session_id,
         created_at=now,

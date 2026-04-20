@@ -17,6 +17,18 @@ class TestSeparatorAtLiteLLMBoundary:
         the message list reaches ``litellm.acompletion``, the separator is
         in place immediately before the tail block."""
         from aios.services import channels as ch_svc
+        from aios.services import connections as conn_svc
+        from aios.services import vaults as vault_svc
+
+        v = await vault_svc.create_vault(harness._pool, display_name="sep-v", metadata={})
+        await conn_svc.create_connection(
+            harness._pool,
+            connector="signal",
+            account="test",
+            mcp_url="https://m",
+            vault_id=v.id,
+            metadata={},
+        )
 
         harness.script_model([assistant("ok")])
         session = await harness.start("hello")

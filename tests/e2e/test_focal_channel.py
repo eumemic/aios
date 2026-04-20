@@ -87,7 +87,13 @@ async def _set_focal(pool: Any, session_id: str, focal: str | None) -> None:
 
 
 async def _setup_inbound(pool: Any, agent_id: str, env_id: str, vault_id: str) -> tuple[str, str]:
-    """Create a connection + routing rule, return (connection_id, prefix)."""
+    """Create a connection + per-connection catch-all routing rule.
+
+    Returns ``(connection_id, address_prefix)`` where address_prefix is
+    ``signal/<account>`` — the part of the channel address before the
+    per-chat path segment.  Rules are scoped to the connection (empty
+    prefix = per-connection catch-all).
+    """
     from aios.services import channels as ch_svc
     from aios.services import connections as conn_svc
 
@@ -102,7 +108,8 @@ async def _setup_inbound(pool: Any, agent_id: str, env_id: str, vault_id: str) -
     )
     await ch_svc.create_routing_rule(
         pool,
-        prefix=f"signal/{account}",
+        connection.id,
+        prefix="",
         target=f"agent:{agent_id}",
         session_params=SessionParams(environment_id=env_id),
     )
@@ -1060,7 +1067,8 @@ class TestTailBlockInStep:
         )
         await ch_svc.create_routing_rule(
             runtime_pool,
-            prefix=f"signal/{account}",
+            connection.id,
+            prefix="",
             target=f"agent:{agent_id}",
             session_params=SessionParams(environment_id=env_id),
         )
@@ -1109,7 +1117,7 @@ class TestTailBlockInStep:
         from tests.e2e.harness import assistant
 
         account = f"tail2-{_uniq()}"
-        await conn_svc.create_connection(
+        connection = await conn_svc.create_connection(
             runtime_pool,
             connector="signal",
             account=account,
@@ -1119,7 +1127,8 @@ class TestTailBlockInStep:
         )
         await ch_svc.create_routing_rule(
             runtime_pool,
-            prefix=f"signal/{account}",
+            connection.id,
+            prefix="",
             target=f"agent:{agent_id}",
             session_params=SessionParams(environment_id=env_id),
         )
