@@ -38,3 +38,11 @@ class Event(BaseModel):
     created_at: datetime
     orig_channel: str | None = Field(default=None, exclude=True)
     focal_channel_at_arrival: str | None = Field(default=None, exclude=True)
+    # Derived "which channel does this event belong to?" — stamped at
+    # append time. For user events, == orig_channel; for assistant
+    # events, == focal_channel_at_arrival; for tool events, == the
+    # parent assistant's focal_channel_at_arrival (so a tool call
+    # started in A and completing after a switch to B still belongs to
+    # A). NULL for non-message events and for events that belong to no
+    # channel (e.g. assistant emitted while focal was cleared).
+    channel: str | None = Field(default=None, exclude=True)

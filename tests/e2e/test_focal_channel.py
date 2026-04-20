@@ -390,12 +390,15 @@ class TestSwitchChannelHandler:
 
         content = result.content
         assert isinstance(content, str)
-        assert content.startswith(f"Switched to {address}. Recent messages:")
+        assert content.startswith(f"━━━ Recap: recent messages on {address} ━━━")
+        assert content.rstrip().endswith("━━━ End recap ━━━")
         # All 4 messages should appear (under the FLOOR_N=10 floor).
         for text in ("first", "msg-0", "msg-1", "msg-2"):
             assert text in content
         # The header convention signals focal rendering was used.
         assert f"[channel={address}" in content
+        # Body lines are block-quoted.
+        assert "> [channel=" in content
 
     async def test_reorient_block_respects_floor_on_quiet_channel(
         self,
@@ -473,6 +476,260 @@ class TestSwitchChannelHandler:
         assert isinstance(content, str)
         assert "no prior messages on this channel" in content
         assert await _get_session_focal(runtime_pool, session_id) == unused_address
+
+
+class TestSwitchChannelNoOp:
+    """No-op switches (target already equals current focal) return a
+    terse ack without rebuilding the recap and without emitting the
+    switch_channel metadata marker.  Fixes the "phantom stimulus"
+    weakness — a redundant switch was re-quoting past content, which
+    weak models mis-read as fresh inbound (issue #52).
+    """
+
+    async def test_switch_to_current_focal_returns_terse_ack(
+        self,
+        runtime_pool: Any,
+        agent_id: str,
+        env_id: str,
+        vault_id: str,
+    ) -> None:
+        from aios.tools.switch_channel import switch_channel_handler
+
+        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(runtime_pool, prefix, "chat-1")
+        await _set_focal(runtime_pool, session_id, address)
+
+        result = await switch_channel_handler(session_id, {"target": address})
+
+        assert result.is_error is False
+        assert result.content == f"Focal channel is already {address}."
+        # No snapshot built — no fences, no quoted body.
+        assert "━━━" not in (result.content or "")
+        # No metadata marker emitted — the marker is reserved for real
+        # switches that change the agent's attention.
+        assert result.metadata == {}
+        # Focal stays as it was.
+        assert await _get_session_focal(runtime_pool, session_id) == address
+
+    async def test_switch_null_to_null_returns_terse_ack(
+        self,
+        runtime_pool: Any,
+        agent_id: str,
+        env_id: str,
+        vault_id: str,
+    ) -> None:
+        from aios.tools.switch_channel import switch_channel_handler
+
+        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        session_id, _e, _address = await _post_inbound(runtime_pool, prefix, "chat-1")
+        # _post_inbound leaves focal = None (phone down) by default.
+        assert await _get_session_focal(runtime_pool, session_id) is None
+
+        result = await switch_channel_handler(session_id, {"target": None})
+
+        assert result.is_error is False
+        assert result.content == "Focal channel is already None."
+        assert result.metadata == {}
+        assert await _get_session_focal(runtime_pool, session_id) is None
+
+    async def test_no_op_tool_result_carries_no_marker(
+        self,
+        runtime_pool: Any,
+        agent_id: str,
+        env_id: str,
+        vault_id: str,
+    ) -> None:
+        """A no-op switch's :class:`ToolResult` has empty metadata — so
+        once persisted by the dispatch path it carries no
+        ``switch_channel`` marker, and the marker-based anchoring path
+        in ``derive_last_seen`` / ``derive_unread_counts`` ignores it.
+
+        (``focal_channel_at_arrival == target`` stamping on any event
+        appended while focal=target still anchors through its own
+        branch — that's a separate, correct anchor and not what this
+        test is about.)
+        """
+        from aios.harness.channels import SWITCH_CHANNEL_METADATA_KEY, _switch_marker
+        from aios.tools.switch_channel import switch_channel_handler
+
+        _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(runtime_pool, prefix, "chat-1")
+        await _set_focal(runtime_pool, session_id, address)
+
+        result = await switch_channel_handler(session_id, {"target": address})
+        assert result.metadata == {}
+
+        # The dispatch path stores ``ToolResult.metadata`` under the
+        # persisted event's ``data.metadata``.  Simulate that persistence
+        # and confirm the marker-reader rejects it.
+        from aios.db import queries
+        from aios.models.events import Event
+
+        async with runtime_pool.acquire() as conn:
+            await queries.append_event(
+                conn,
+                session_id=session_id,
+                kind="message",
+                data={
+                    "role": "tool",
+                    "tool_call_id": "call_noop_synth",
+                    "content": result.content,
+                    "metadata": result.metadata,
+                },
+            )
+
+        async with runtime_pool.acquire() as conn:
+            events = await queries.read_message_events(conn, session_id)
+        noop: Event = next(e for e in events if e.data.get("tool_call_id") == "call_noop_synth")
+        assert SWITCH_CHANNEL_METADATA_KEY not in (noop.data.get("metadata") or {})
+        # Confirm the derivation helper's marker extractor ignores it
+        # (returning None is "no marker recognized here").
+        assert _switch_marker(noop) is None
+
+
+class TestEventChannelDerivation:
+    """Append-time stamping of the derived ``events.channel`` column —
+    "which channel does this event belong to?" — one predicate for
+    every downstream filter (issue #52).
+    """
+
+    async def test_user_event_channel_equals_orig_channel(
+        self, pool: Any, agent_id: str, env_id: str, vault_id: str
+    ) -> None:
+        from aios.db import queries
+
+        _conn_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(pool, prefix, "chat-1")
+
+        async with pool.acquire() as conn:
+            events = await queries.read_message_events(conn, session_id)
+
+        user_evt = next(e for e in events if e.data.get("role") == "user")
+        assert user_evt.channel == address
+        assert user_evt.channel == user_evt.orig_channel
+
+    async def test_assistant_event_channel_equals_focal_at_arrival(
+        self, pool: Any, agent_id: str, env_id: str, vault_id: str
+    ) -> None:
+        from aios.db import queries
+        from aios.services import sessions as sess_svc
+
+        _conn_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _e, address = await _post_inbound(pool, prefix, "chat-1")
+        await _set_focal(pool, session_id, address)
+
+        await sess_svc.append_event(
+            pool,
+            session_id,
+            "message",
+            {"role": "assistant", "content": "reply"},
+        )
+
+        async with pool.acquire() as conn:
+            events = await queries.read_message_events(conn, session_id)
+        asst = next(e for e in events if e.data.get("role") == "assistant")
+        assert asst.channel == address
+        assert asst.channel == asst.focal_channel_at_arrival
+
+    async def test_assistant_event_channel_null_when_phone_down(
+        self, pool: Any, agent_id: str, env_id: str, vault_id: str
+    ) -> None:
+        from aios.db import queries
+        from aios.services import sessions as sess_svc
+
+        _conn_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _e, _address = await _post_inbound(pool, prefix, "chat-1")
+        # focal remains None — "phone down"
+        await sess_svc.append_event(
+            pool,
+            session_id,
+            "message",
+            {"role": "assistant", "content": "monologue"},
+        )
+
+        async with pool.acquire() as conn:
+            events = await queries.read_message_events(conn, session_id)
+        asst = next(e for e in events if e.data.get("role") == "assistant")
+        assert asst.channel is None
+
+    async def test_tool_event_channel_from_parent_assistant_focal(
+        self, pool: Any, agent_id: str, env_id: str, vault_id: str
+    ) -> None:
+        """Tool result channel comes from its parent assistant's
+        focal_at_arrival — NOT from the live focal at tool-result
+        arrival.  A tool call started in A and completing after a
+        switch to B still belongs to A.
+        """
+        from aios.db import queries
+        from aios.services import channels as ch_svc
+        from aios.services import sessions as sess_svc
+
+        _conn_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _e, addr_a = await _post_inbound(pool, prefix, "chat-A")
+        addr_b = f"{prefix}/chat-B"
+        await ch_svc.create_binding(pool, address=addr_b, session_id=session_id)
+
+        # Agent focused on A; emits an assistant message with a tool call.
+        await _set_focal(pool, session_id, addr_a)
+        await sess_svc.append_event(
+            pool,
+            session_id,
+            "message",
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_xyz",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": "{}"},
+                    }
+                ],
+            },
+        )
+
+        # Live focal moves to B before the tool result lands.
+        await _set_focal(pool, session_id, addr_b)
+
+        await sess_svc.append_event(
+            pool,
+            session_id,
+            "message",
+            {"role": "tool", "tool_call_id": "call_xyz", "content": "ran"},
+        )
+
+        async with pool.acquire() as conn:
+            events = await queries.read_message_events(conn, session_id)
+        tool_evt = next(e for e in events if e.data.get("role") == "tool")
+        # Parent's focal was A — the tool result belongs to A.
+        assert tool_evt.channel == addr_a
+        # Confirm the live-focal alternative would have been wrong.
+        assert tool_evt.focal_channel_at_arrival == addr_b
+
+    async def test_tool_event_channel_null_when_no_parent(
+        self, pool: Any, agent_id: str, env_id: str, vault_id: str
+    ) -> None:
+        """Tool result with a tool_call_id that matches no assistant
+        tool_calls entry gets channel=NULL (shouldn't happen in the
+        real flow, but the append-time derivation has to tolerate it).
+        """
+        from aios.db import queries
+        from aios.services import sessions as sess_svc
+
+        _conn_id, prefix = await _setup_inbound(pool, agent_id, env_id, vault_id)
+        session_id, _e, _address = await _post_inbound(pool, prefix, "chat-1")
+
+        await sess_svc.append_event(
+            pool,
+            session_id,
+            "message",
+            {"role": "tool", "tool_call_id": "call_orphan", "content": "wat"},
+        )
+
+        async with pool.acquire() as conn:
+            events = await queries.read_message_events(conn, session_id)
+        tool_evt = next(e for e in events if e.data.get("role") == "tool")
+        assert tool_evt.channel is None
 
 
 class TestSwitchChannelAsEvent:
