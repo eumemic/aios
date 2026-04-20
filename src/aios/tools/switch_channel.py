@@ -24,7 +24,6 @@ from typing import Any
 from aios.db import queries
 from aios.harness import runtime
 from aios.harness.channels import (
-    MONOLOGUE_PREFIX,
     SWITCH_CHANNEL_METADATA_KEY,
     derive_unread_counts,
 )
@@ -43,9 +42,11 @@ SWITCH_CHANNEL_DESCRIPTION = (
     "notification markers in your context. Call switch_channel(target=<address>) "
     "to focus on a bound channel, or switch_channel(target=null) to clear "
     "focal (no channel focused; all inbound renders as notifications). "
-    "On a real switch the tool result includes a recap block quoting "
-    "recent messages on the target channel (both peer and your own) so "
-    "you can pick up where the conversation left off. A call whose "
+    "On a real switch the tool result includes a recap block: peer "
+    "inbound messages on the target channel plus the tool_calls you "
+    "made while focused there (which is where your outbound sends live "
+    "— e.g. signal_send arguments). Your bare assistant text is "
+    "internal monologue and is dropped from recaps. A call whose "
     "target already equals your current focal is a no-op — no recap, "
     "no re-emit."
 )
@@ -239,10 +240,17 @@ def _render_recap_event(event: Event) -> str:
     (we want headers and full bodies inside the recap, never truncated
     notification markers).
 
-    Assistant events render their text content with the
-    ``INTERNAL_MONOLOGUE:`` prefix stripped — the prefix is a teaching
-    signal for the author on replay, not useful framing when recapping
-    "what was said on this channel."
+    Assistant events drop their text content entirely and render only
+    their tool_calls — ``[you called: name(args), ...]`` (second
+    person, addressing the agent reading the recap).  The text portion
+    of a connector-aware session's assistant turn is always internal
+    monologue (see ``MONOLOGUE_PREFIX``) — private thinking the peer
+    never saw, so noise in a "catch up on this chat" view.  Any
+    load-bearing outbound content (what the agent actually said into
+    the channel) lives in the ``signal_send``-style connector tool
+    calls that follow, so rendering the tool_calls is sufficient to
+    surface it.  Assistant events with no tool_calls render as empty
+    and are dropped upstream.
 
     Tool events render as the tool output body, tagged with the tool
     call id so the agent can tie it back to its requesting assistant
@@ -256,9 +264,8 @@ def _render_recap_event(event: Event) -> str:
         return content if isinstance(content, str) else ""
 
     if role == "assistant":
-        text = _assistant_text(event.data)
-        text = _strip_monologue_prefix(text)
-        return f"[assistant] {text}".rstrip() if text else ""
+        calls = _render_tool_calls(event.data.get("tool_calls") or [])
+        return f"[you called: {calls}]" if calls else ""
 
     if role == "tool":
         content = event.data.get("content")
@@ -270,31 +277,25 @@ def _render_recap_event(event: Event) -> str:
     return ""
 
 
-def _assistant_text(data: dict[str, Any]) -> str:
-    """Extract the human-readable text from an assistant message.
+def _render_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
+    """Render an assistant's ``tool_calls`` list as ``name(args), ...``.
 
-    Assistant content may be a plain string or a list of typed blocks
-    (``{"type": "text", "text": "..."}``).  Concatenate text blocks;
-    ignore non-text blocks (tool_calls live on a sibling field, and
-    reasoning blocks aren't useful in a recap).
+    Arguments are emitted verbatim from the OpenAI chat-completions
+    tool_call shape (``function.arguments`` — a JSON string).  No
+    per-tool classification or argument extraction: the recap shows
+    every invocation's raw shape and lets the agent pick out what
+    matters (the ``text`` arg of a ``signal_send`` call, the
+    ``command`` arg of a ``bash`` call, etc.).
     """
-    content = data.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "".join(parts)
-    return ""
-
-
-def _strip_monologue_prefix(text: str) -> str:
-    """Drop the ``INTERNAL_MONOLOGUE:`` prefix from assistant recap text."""
-    return text[len(MONOLOGUE_PREFIX) :] if text.startswith(MONOLOGUE_PREFIX) else text
+    parts: list[str] = []
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        name = fn.get("name") or "?"
+        args = fn.get("arguments")
+        if not isinstance(args, str):
+            args = ""
+        parts.append(f"{name}({args})" if args else f"{name}()")
+    return ", ".join(parts)
 
 
 def _blockquote(text: str) -> str:
