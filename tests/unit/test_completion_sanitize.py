@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import litellm
+
 from aios.harness.completion import _normalize_message
 
 
@@ -75,3 +77,15 @@ class TestNormalizeMessage:
         result = _normalize_message(msg)
         assert result["content"] == ""
         assert "tool_calls" not in result
+
+
+def test_modify_params_enabled_on_import() -> None:
+    """Importing aios.harness.completion sets litellm.modify_params = True.
+
+    Without this flag, replaying an event log with ``content: ""`` +
+    ``tool_calls`` assistant turns (emitted by some OpenRouter models)
+    against an Anthropic-routed model fails with "text content blocks
+    must be non-empty". See
+    https://docs.litellm.ai/docs/completion/message_sanitization.
+    """
+    assert litellm.modify_params is True

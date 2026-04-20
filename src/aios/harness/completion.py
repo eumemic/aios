@@ -18,6 +18,10 @@ from typing import TYPE_CHECKING, Any
 
 import litellm
 
+# Anthropic rejects empty text blocks that some OpenRouter models emit on
+# tool-call-only turns; modify_params tells LiteLLM to sanitize them.
+litellm.modify_params = True
+
 if TYPE_CHECKING:
     import asyncpg
 
