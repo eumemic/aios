@@ -172,29 +172,44 @@ class TestRecapFiltering:
         assert "hello" in out
         assert "Alice" in out
 
-    def test_includes_agent_replies(self) -> None:
-        """Assistant event with focal=target (i.e. channel=target) lands
-        in the target's recap — this is the one-sided-filter fix.
+    def test_includes_agent_tool_calls(self) -> None:
+        """An assistant turn on the target channel surfaces via its
+        tool_calls — that's where the load-bearing content (what got
+        sent to the peer) lives.  Bare assistant text is monologue and
+        is dropped.
         """
         events: list[Event] = [
             _user(1, channel=CHAN_A, content="peer message"),
-            _assistant(2, focal=CHAN_A, text="agent reply"),
+            _assistant_with_tool_call(
+                2,
+                focal=CHAN_A,
+                tool_call_id="call_send",
+                name="signal_send",
+                arguments={"text": "on it"},
+            ),
         ]
         out = render_reorient_block(events, CHAN_A)
         assert "peer message" in out
-        assert "agent reply" in out
+        assert "signal_send" in out
+        assert '"text": "on it"' in out
 
-    def test_excludes_other_channel_monologues(self) -> None:
+    def test_excludes_other_channel_tool_calls(self) -> None:
         """Assistant events emitted while focal=B must NOT appear in A's
         recap — cross-channel-leakage guard.
         """
         events: list[Event] = [
             _user(1, channel=CHAN_A, content="peer on A"),
-            _assistant(2, focal=CHAN_B, text="monologue about B"),
+            _assistant_with_tool_call(
+                2,
+                focal=CHAN_B,
+                tool_call_id="call_other",
+                name="signal_send",
+                arguments={"text": "reply on B"},
+            ),
         ]
         out = render_reorient_block(events, CHAN_A)
         assert "peer on A" in out
-        assert "monologue about B" not in out
+        assert "reply on B" not in out
 
     def test_excludes_phone_down_assistant_events(self) -> None:
         """Assistant events emitted while focal=None (channel=None) have
@@ -202,11 +217,17 @@ class TestRecapFiltering:
         """
         events: list[Event] = [
             _user(1, channel=CHAN_A, content="peer"),
-            _assistant(2, focal=None, text="phone-down thought"),
+            _assistant_with_tool_call(
+                2,
+                focal=None,
+                tool_call_id="call_pd",
+                name="signal_send",
+                arguments={"text": "phone-down send"},
+            ),
         ]
         out = render_reorient_block(events, CHAN_A)
         assert "peer" in out
-        assert "phone-down thought" not in out
+        assert "phone-down send" not in out
 
     def test_includes_tool_results_via_parent_focal(self) -> None:
         """A tool result whose parent assistant had focal=target belongs
@@ -252,11 +273,106 @@ class TestRecapFiltering:
 
 
 class TestRecapRendering:
-    def test_strips_monologue_prefix_from_assistant_text(self) -> None:
+    def test_drops_pure_text_assistant_events(self) -> None:
+        """Assistant events with no tool_calls are dropped entirely —
+        they're pure internal monologue that the peer never saw.  When
+        no events carry channel-bearing content, the recap falls back
+        to the empty-channel line.
+        """
         events = [_assistant(1, focal=CHAN_A, text="hello world")]
         out = render_reorient_block(events, CHAN_A)
         assert MONOLOGUE_PREFIX not in out
-        assert "hello world" in out
+        assert "hello world" not in out
+        assert "no prior messages on this channel" in out
+
+    def test_drops_assistant_text_even_when_tool_calls_present(self) -> None:
+        """An assistant turn that both monologues AND invokes tool_calls
+        renders only the tool_calls.  The text is monologue regardless
+        of whether a send also happened.
+        """
+        events: list[Event] = [
+            _user(1, channel=CHAN_A, content="peer"),
+            _assistant_with_tool_call(
+                2,
+                focal=CHAN_A,
+                tool_call_id="call_send",
+                name="signal_send",
+                arguments={"text": "real reply"},
+            ),
+        ]
+        # Splice in text alongside the tool_calls to simulate a turn
+        # that both monologues and sends.
+        events[1].data["content"] = MONOLOGUE_PREFIX + "thinking out loud"
+        out = render_reorient_block(events, CHAN_A)
+        assert "thinking out loud" not in out
+        assert MONOLOGUE_PREFIX not in out
+        assert '"text": "real reply"' in out
+
+    def test_tool_call_arguments_are_rendered_verbatim(self) -> None:
+        """The tool_call's ``function.arguments`` JSON string is emitted
+        as-is so the agent can read any sent content (e.g. signal_send's
+        ``text`` arg) directly without per-tool classification.  Uses
+        second-person framing (``[you called: ...]``) because the recap
+        is rendered back to the agent that made the calls.
+        """
+        events: list[Event] = [
+            _assistant_with_tool_call(
+                1,
+                focal=CHAN_A,
+                tool_call_id="call_1",
+                name="signal_send",
+                arguments={"text": "hello peer", "quote_id": "abc"},
+            ),
+        ]
+        out = render_reorient_block(events, CHAN_A)
+        assert "[you called: signal_send(" in out
+        assert '"text": "hello peer"' in out
+        assert '"quote_id": "abc"' in out
+
+    def test_multiple_tool_calls_in_one_turn_are_joined(self) -> None:
+        """A single assistant event carrying multiple tool_calls renders
+        them comma-separated inside a single ``[you called: ...]`` line.
+        """
+        import json as _json
+
+        asst = _assistant(
+            1,
+            focal=CHAN_A,
+            text="",
+            with_monologue_prefix=False,
+            tool_calls=[
+                {
+                    "id": "call_a",
+                    "type": "function",
+                    "function": {
+                        "name": "signal_send",
+                        "arguments": _json.dumps({"text": "first"}),
+                    },
+                },
+                {
+                    "id": "call_b",
+                    "type": "function",
+                    "function": {
+                        "name": "signal_send",
+                        "arguments": _json.dumps({"text": "second"}),
+                    },
+                },
+                {
+                    "id": "call_c",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": _json.dumps({"command": "ls"})},
+                },
+            ],
+        )
+        out = render_reorient_block([asst], CHAN_A)
+        # All three calls appear in the recap.
+        assert '"text": "first"' in out
+        assert '"text": "second"' in out
+        assert '"command": "ls"' in out
+        # They share a single [you called: ...] wrapper, comma-joined.
+        assert out.count("[you called:") == 1
+        assert "signal_send(" in out
+        assert "bash(" in out
 
     def test_fences_top_and_bottom(self) -> None:
         events = [_user(1, channel=CHAN_A, content="msg")]
