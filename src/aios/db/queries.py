@@ -577,6 +577,29 @@ async def get_session_workspace_path(conn: asyncpg.Connection[Any], session_id: 
     return val
 
 
+async def get_session_focal_channel(conn: asyncpg.Connection[Any], session_id: str) -> str | None:
+    """Return the session's current ``focal_channel`` (or NULL = phone down)."""
+    focal: str | None = await conn.fetchval(
+        "SELECT focal_channel FROM sessions WHERE id = $1",
+        session_id,
+    )
+    return focal
+
+
+async def set_session_focal_channel(
+    conn: asyncpg.Connection[Any], session_id: str, focal: str | None
+) -> None:
+    """Mutate the session's ``focal_channel``.  Only ``switch_channel``
+    should call this — it's the single source of truth for the agent's
+    focal attention.
+    """
+    await conn.execute(
+        "UPDATE sessions SET focal_channel = $1 WHERE id = $2",
+        focal,
+        session_id,
+    )
+
+
 async def get_session_provisioning(
     conn: asyncpg.Connection[Any], session_id: str
 ) -> tuple[str, dict[str, str]]:

@@ -36,7 +36,11 @@ def upgrade() -> None:
     # Backfill existing rows.  Tool events look up their parent assistant
     # via JSONB containment on tool_calls[].id — one correlated subquery
     # per tool row, scoped to the same session, ordered by seq DESC so we
-    # pick the most recent parent if a tool_call_id somehow repeats.
+    # pick the most recent parent if a tool_call_id somehow repeats.  The
+    # subquery's predicates mirror ``_derive_event_channel`` exactly —
+    # including the ``role = 'assistant'`` and ``data ? 'tool_calls'``
+    # filters that let the planner pick the partial index
+    # ``events_assistant_tool_calls_idx`` (migration 0011).
     op.execute(
         """
         UPDATE events e SET channel =
@@ -50,6 +54,8 @@ def upgrade() -> None:
                 SELECT a.focal_channel_at_arrival FROM events a
                 WHERE a.session_id = e.session_id
                   AND a.kind = 'message'
+                  AND a.data->>'role' = 'assistant'
+                  AND a.data ? 'tool_calls'
                   AND a.data->'tool_calls' @> jsonb_build_array(
                     jsonb_build_object('id', e.data->>'tool_call_id'))
                 ORDER BY a.seq DESC LIMIT 1)

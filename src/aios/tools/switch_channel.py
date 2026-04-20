@@ -88,19 +88,18 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
     pool = runtime.require_pool()
 
     # Hold a single connection across read-current-focal, validate,
-    # update, and read-events-for-recap.  A no-op switch short-circuits
-    # before any mutation; a real switch commits the UPDATE + reads the
-    # event log on the same connection to render the recap.
+    # update, and read-events-for-recap, wrapped in a transaction so
+    # the focal UPDATE and the recap's event-log read see a consistent
+    # snapshot.  A no-op switch short-circuits before any mutation; a
+    # real switch commits the UPDATE + reads the event log on the same
+    # transaction to render the recap.
     #
     # The no-op short-circuit (target already equals current focal) is
     # what issue #52 needs — re-emitting a recap on redundant switches
     # was misleading weak models into treating the quoted past as new
     # stimulus.
-    async with pool.acquire() as conn:
-        current_focal: str | None = await conn.fetchval(
-            "SELECT focal_channel FROM sessions WHERE id = $1",
-            session_id,
-        )
+    async with pool.acquire() as conn, conn.transaction():
+        current_focal = await queries.get_session_focal_channel(conn, session_id)
 
         if target == current_focal:
             return ToolResult(
@@ -109,10 +108,7 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
             )
 
         if target is None:
-            await conn.execute(
-                "UPDATE sessions SET focal_channel = NULL WHERE id = $1",
-                session_id,
-            )
+            await queries.set_session_focal_channel(conn, session_id, None)
             return ToolResult(
                 content="Focal cleared.",
                 metadata={
@@ -134,11 +130,7 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
                 is_error=True,
             )
 
-        await conn.execute(
-            "UPDATE sessions SET focal_channel = $1 WHERE id = $2",
-            target,
-            session_id,
-        )
+        await queries.set_session_focal_channel(conn, session_id, target)
         all_events = await queries.read_message_events(conn, session_id)
 
     content = render_reorient_block(all_events, target)
