@@ -14,7 +14,7 @@ from aios.models.channel_bindings import ChannelBinding
 from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX, Connection
 from aios.models.events import Event
 
-MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE: "
+MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
 
 # Key under a switch_channel tool_result's ``data["metadata"]`` that
 # records the target and outcome — ``{"target": str | None, "success": bool}``.

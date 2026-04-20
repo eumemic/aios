@@ -346,12 +346,15 @@ class TestApplyMonologuePrefix:
     def test_string_content_prefixed(self) -> None:
         msg: dict[str, Any] = {"role": "assistant", "content": "thinking out loud"}
         out = apply_monologue_prefix(msg)
-        assert out["content"] == "INTERNAL_MONOLOGUE: thinking out loud"
+        assert out["content"] == "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: thinking out loud"
 
     def test_already_prefixed_string_unchanged(self) -> None:
-        msg: dict[str, Any] = {"role": "assistant", "content": "INTERNAL_MONOLOGUE: hi"}
+        msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: hi",
+        }
         out = apply_monologue_prefix(msg)
-        assert out["content"] == "INTERNAL_MONOLOGUE: hi"
+        assert out["content"] == "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: hi"
 
     def test_empty_string_left_alone(self) -> None:
         msg: dict[str, Any] = {"role": "assistant", "content": ""}
@@ -384,9 +387,9 @@ class TestApplyMonologuePrefix:
         }
         out = apply_monologue_prefix(msg)
         blocks = out["content"]
-        assert blocks[0] == {"type": "text", "text": "INTERNAL_MONOLOGUE: first"}
+        assert blocks[0] == {"type": "text", "text": "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: first"}
         assert blocks[1] == {"type": "tool_use", "id": "x", "name": "y", "input": {}}
-        assert blocks[2] == {"type": "text", "text": "INTERNAL_MONOLOGUE: second"}
+        assert blocks[2] == {"type": "text", "text": "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: second"}
 
     def test_list_content_tool_use_only_left_alone(self) -> None:
         msg: dict[str, Any] = {
@@ -401,13 +404,13 @@ class TestApplyMonologuePrefix:
         msg: dict[str, Any] = {
             "role": "assistant",
             "content": [
-                {"type": "text", "text": "INTERNAL_MONOLOGUE: first"},
+                {"type": "text", "text": "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: first"},
                 {"type": "text", "text": "second"},
             ],
         }
         out = apply_monologue_prefix(msg)
-        assert out["content"][0]["text"] == "INTERNAL_MONOLOGUE: first"
-        assert out["content"][1]["text"] == "INTERNAL_MONOLOGUE: second"
+        assert out["content"][0]["text"] == "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: first"
+        assert out["content"][1]["text"] == "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: second"
 
     def test_returns_new_dict_preserving_other_fields(self) -> None:
         msg: dict[str, Any] = {
