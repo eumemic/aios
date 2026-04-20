@@ -23,6 +23,14 @@ import pytest
 from tests.e2e.harness import Harness
 
 
+async def _noop_defer_wake(session_id: str, *, cause: str = "message") -> None:
+    pass
+
+
+async def _noop_defer_retry_wake(session_id: str, *, delay_seconds: float) -> None:
+    pass
+
+
 @pytest.fixture
 async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     """Function-scoped harness: real Postgres, scripted model, no Docker."""
@@ -68,12 +76,6 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
 
     def _fake_chunk_builder(*args: Any, **kwargs: Any) -> dict[str, Any]:
         return h._build_chunk_response(*args, **kwargs)
-
-    async def _noop_defer_wake(session_id: str, *, cause: str = "message") -> None:
-        pass
-
-    async def _noop_defer_retry_wake(session_id: str, *, delay_seconds: float) -> None:
-        pass
 
     with (
         mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),
@@ -137,12 +139,6 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
 
     def _fake_chunk_builder(*args: Any, **kwargs: Any) -> dict[str, Any]:
         return h._build_chunk_response(*args, **kwargs)
-
-    async def _noop_defer_wake(session_id: str, *, cause: str = "message") -> None:
-        pass
-
-    async def _noop_defer_retry_wake(session_id: str, *, delay_seconds: float) -> None:
-        pass
 
     with (
         mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),

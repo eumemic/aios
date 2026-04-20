@@ -17,43 +17,32 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aios.harness.loop import (
+    _count_consecutive_rescheduling,
+    _retry_delay_for_attempt,
+    run_session_step,
+)
+
 
 class TestRetryDelayForAttempt:
-    """Pure lookup into the backoff table."""
-
     def test_retry_delay_attempt_0_returns_2s(self) -> None:
-        from aios.harness.loop import _retry_delay_for_attempt
-
         assert _retry_delay_for_attempt(0) == 2
 
     def test_retry_delay_attempt_1_returns_8s(self) -> None:
-        from aios.harness.loop import _retry_delay_for_attempt
-
         assert _retry_delay_for_attempt(1) == 8
 
     def test_retry_delay_attempt_2_returns_30s(self) -> None:
-        from aios.harness.loop import _retry_delay_for_attempt
-
         assert _retry_delay_for_attempt(2) == 30
 
     def test_retry_delay_attempt_3_returns_120s(self) -> None:
-        from aios.harness.loop import _retry_delay_for_attempt
-
         assert _retry_delay_for_attempt(3) == 120
 
     def test_retry_delay_attempt_4_returns_none(self) -> None:
-        """After 4 consecutive reschedules, the budget is exhausted."""
-        from aios.harness.loop import _retry_delay_for_attempt
-
         assert _retry_delay_for_attempt(4) is None
 
 
 class TestCountConsecutiveRescheduling:
-    """Streak counter that resets on any non-rescheduling lifecycle event."""
-
     async def test_count_consecutive_rescheduling_empty_log_returns_zero(self) -> None:
-        from aios.harness.loop import _count_consecutive_rescheduling
-
         pool = MagicMock()
         with patch(
             "aios.harness.loop.sessions_service.read_events",
@@ -64,14 +53,7 @@ class TestCountConsecutiveRescheduling:
     async def test_count_consecutive_rescheduling_resets_on_non_rescheduling_tail(
         self,
     ) -> None:
-        """A successful turn between failures wipes the retry budget.
-
-        Regression guard: a long-ago rescheduling streak followed by a
-        clean turn_ended must not count toward the current failure's
-        attempt number.
-        """
-        from aios.harness.loop import _count_consecutive_rescheduling
-
+        """Regression: a clean turn_ended breaks the streak even if reschedulings preceded it."""
         events = [
             SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"}),
             SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"}),
@@ -207,9 +189,6 @@ class TestRunSessionStepOnModelError:
     """End-to-end behavior of the exception handler's state machine."""
 
     async def test_first_attempt_defers_retry_with_2s(self, mock_step_dependencies: Any) -> None:
-        """On the first transient failure, schedule a retry at 2 seconds."""
-        from aios.harness.loop import run_session_step
-
         with patch(
             "aios.harness.loop._count_consecutive_rescheduling",
             AsyncMock(return_value=0),
@@ -217,7 +196,6 @@ class TestRunSessionStepOnModelError:
             await run_session_step("sess_x")
 
         mock_step_dependencies.defer_retry.assert_awaited_once_with("sess_x", delay_seconds=2)
-        # Status transitions to rescheduling, not idle/error.
         status_calls = [call.args[2] for call in mock_step_dependencies.set_status.call_args_list]
         assert "rescheduling" in status_calls
         assert "idle" not in status_calls
@@ -225,9 +203,6 @@ class TestRunSessionStepOnModelError:
     async def test_exhausted_budget_raises_and_sets_idle_error(
         self, mock_step_dependencies: Any
     ) -> None:
-        """After 4 consecutive reschedules, give up: idle/error + re-raise."""
-        from aios.harness.loop import run_session_step
-
         with (
             patch(
                 "aios.harness.loop._count_consecutive_rescheduling",
@@ -238,7 +213,6 @@ class TestRunSessionStepOnModelError:
             await run_session_step("sess_x")
 
         mock_step_dependencies.defer_retry.assert_not_awaited()
-        # Final status is idle with error stop_reason.
         idle_call = next(
             call
             for call in mock_step_dependencies.set_status.call_args_list
