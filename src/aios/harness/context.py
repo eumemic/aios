@@ -505,6 +505,32 @@ def _prune_leading_orphans(messages: list[dict[str, Any]]) -> list[dict[str, Any
     return messages[start:]
 
 
+def separate_adjacent_user_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Insert an empty assistant message between any two adjacent user messages.
+
+    LiteLLM's Anthropic translator enforces strict role alternation by
+    merging adjacent same-role messages into a single multi-content-block
+    payload.  When a user inbound is immediately followed by the
+    per-step channels tail block (also user-role), Anthropic sees them
+    as one message with two text blocks — and models narrate "your
+    message included the channel state" about their own scaffolding.
+
+    Inserting a no-content assistant turn between two consecutive user
+    messages blocks the merge.  LiteLLM's ``modify_params = True`` (set
+    in ``completion.py``) sanitizes the empty content block for
+    Anthropic at request time, so no visible turn is added to the
+    on-the-wire transcript — only the role transition remains.
+    """
+    result: list[dict[str, Any]] = []
+    for msg in messages:
+        if result and result[-1].get("role") == "user" and msg.get("role") == "user":
+            result.append({"role": "assistant", "content": ""})
+        result.append(msg)
+    return result
+
+
 def _find_assistant_for_tool_call(events: list[Event], tool_call_id: str) -> Event | None:
     """Find the assistant message that contains ``tool_call_id``."""
     for e in reversed(events):
