@@ -151,7 +151,9 @@ def test_migration_0017_focal_channel_cycle(postgres: object) -> None:
     """Exercise migration 0017's up/down/up cycle.
 
     Verifies that the focal-channel columns appear at head, are removed
-    on ``downgrade -1`` (back to 0016), and reappear on ``upgrade head``.
+    when downgraded to 0016, and reappear on ``upgrade head``.  Uses an
+    explicit target revision (``0016``) rather than ``-1`` so the test
+    stays stable as new migrations are added above 0017.
     """
     db_url = _alembic_url(postgres)
 
@@ -176,12 +178,49 @@ def test_migration_0017_focal_channel_cycle(postgres: object) -> None:
     # 1. Columns exist at head.
     asyncio.run(assert_columns(True))
 
-    # 2. Downgrade one step → back to 0016. Columns gone.
-    downgraded = _run_alembic(["downgrade", "-1"], db_url)
-    assert downgraded.returncode == 0, f"downgrade -1 failed:\n{downgraded.stderr}"
+    # 2. Downgrade to 0016 → 0017's columns gone.
+    downgraded = _run_alembic(["downgrade", "0016"], db_url)
+    assert downgraded.returncode == 0, f"downgrade to 0016 failed:\n{downgraded.stderr}"
     asyncio.run(assert_columns(False))
 
     # 3. Upgrade back to head. Columns reappear.
     re_upgraded = _run_alembic(["upgrade", "head"], db_url)
     assert re_upgraded.returncode == 0, f"re-upgrade failed:\n{re_upgraded.stderr}"
     asyncio.run(assert_columns(True))
+
+
+@needs_docker
+@pytest.mark.integration
+def test_migration_0018_events_channel_cycle(postgres: object) -> None:
+    """Exercise migration 0018's up/down/up cycle.
+
+    Verifies that ``events.channel`` appears at head, is removed on
+    ``downgrade 0017``, and reappears on ``upgrade head``.
+    """
+    db_url = _alembic_url(postgres)
+
+    upgraded = _run_alembic(["upgrade", "head"], db_url)
+    assert upgraded.returncode == 0, f"initial upgrade failed:\n{upgraded.stderr}"
+
+    import asyncio
+
+    async def assert_channel(expected: bool) -> None:
+        conn = await asyncpg.connect(db_url)
+        try:
+            exists = await _column_exists(conn, "events", "channel")
+            if expected:
+                assert exists, "events.channel missing after upgrade"
+            else:
+                assert not exists, "events.channel still present after downgrade"
+        finally:
+            await conn.close()
+
+    asyncio.run(assert_channel(True))
+
+    downgraded = _run_alembic(["downgrade", "0017"], db_url)
+    assert downgraded.returncode == 0, f"downgrade to 0017 failed:\n{downgraded.stderr}"
+    asyncio.run(assert_channel(False))
+
+    re_upgraded = _run_alembic(["upgrade", "head"], db_url)
+    assert re_upgraded.returncode == 0, f"re-upgrade failed:\n{re_upgraded.stderr}"
+    asyncio.run(assert_channel(True))

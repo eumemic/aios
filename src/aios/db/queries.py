@@ -772,6 +772,7 @@ def _row_to_event(row: asyncpg.Record) -> Event:
         created_at=row["created_at"],
         orig_channel=row["orig_channel"],
         focal_channel_at_arrival=row["focal_channel_at_arrival"],
+        channel=row["channel"],
     )
 
 
@@ -785,6 +786,58 @@ async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: s
         session_id,
     )
     return val
+
+
+async def _derive_event_channel(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    kind: str,
+    data: dict[str, Any],
+    orig_channel: str | None,
+    focal_at_arrival: str | None,
+) -> str | None:
+    """Compute the derived ``channel`` for a new event, pre-insert.
+
+    User events → ``orig_channel``.
+    Assistant events → ``focal_at_arrival`` (the live focal at stamp time).
+    Tool events → the parent assistant's ``focal_channel_at_arrival``,
+    looked up by matching ``tool_call_id`` against prior assistant rows'
+    ``data->'tool_calls'``. Returns NULL if no parent is found (shouldn't
+    happen in practice — tool results only arrive for assistant-requested
+    tool calls — but the recap filter tolerates NULL).
+
+    Non-message events and message events with no identifiable role
+    return NULL.
+    """
+    if kind != "message":
+        return None
+    role = data.get("role")
+    if role == "user":
+        return orig_channel
+    if role == "assistant":
+        return focal_at_arrival
+    if role == "tool":
+        tool_call_id = data.get("tool_call_id")
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            return None
+        # Predicates match ``events_assistant_tool_calls_idx`` (partial
+        # index on (session_id, seq) for role=assistant rows that have
+        # tool_calls — migration 0011) so the planner can walk it in
+        # reverse-seq order and stop at the first matching parent.
+        parent_focal: str | None = await conn.fetchval(
+            "SELECT focal_channel_at_arrival FROM events "
+            "WHERE session_id = $1 "
+            "  AND kind = 'message' "
+            "  AND data->>'role' = 'assistant' "
+            "  AND data ? 'tool_calls' "
+            "  AND data->'tool_calls' @> jsonb_build_array("
+            "    jsonb_build_object('id', $2::text)) "
+            "ORDER BY seq DESC LIMIT 1",
+            session_id,
+            tool_call_id,
+        )
+        return parent_focal
+    return None
 
 
 async def append_event(
@@ -814,6 +867,15 @@ async def append_event(
     ``orig_channel`` (stamped for user events via ``append_user_message``)
     lets the context builder render each event deterministically at arrival
     time without ever needing to re-project past events.
+
+    Derived-channel stamping (issue #52): in the same transaction, the
+    new event's ``channel`` column is computed as — for user events,
+    ``orig_channel``; for assistant events, ``focal_at_arrival``; for
+    tool events, the parent assistant's ``focal_channel_at_arrival``
+    (looked up by matching the tool_call_id against prior assistant
+    rows' ``data->'tool_calls'``).  This answers "which channel does
+    this event belong to?" once and for all; downstream filters become
+    a single column read.
     """
     from aios.harness.context import render_user_event
     from aios.harness.tokens import approx_tokens
@@ -845,11 +907,15 @@ async def append_event(
             else:
                 cum_tokens = (prev or 0) + approx_tokens(data)
 
+        channel = await _derive_event_channel(
+            conn, session_id, kind, data, orig_channel, focal_at_arrival
+        )
+
         row = await conn.fetchrow(
             "INSERT INTO events "
             "(id, session_id, seq, kind, data, cumulative_tokens, "
-            " orig_channel, focal_channel_at_arrival) "
-            "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8) RETURNING *",
+            " orig_channel, focal_channel_at_arrival, channel) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9) RETURNING *",
             new_id,
             session_id,
             seq,
@@ -858,6 +924,7 @@ async def append_event(
             cum_tokens,
             orig_channel,
             focal_at_arrival,
+            channel,
         )
         assert row is not None
 
