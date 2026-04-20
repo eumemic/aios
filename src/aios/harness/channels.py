@@ -336,12 +336,18 @@ def _prefix_text(s: str) -> str:
 
 
 def apply_monologue_prefix(assistant_msg: dict[str, Any]) -> dict[str, Any]:
-    """Prefix every text segment of an assistant message's content.
+    """Prefix the *start* of an assistant message's text content.
 
-    Safety net: the paradigm prose instructs the model to prefix its own
-    bare text; this fills in the prefix when it forgets, so the log is
-    uniform from the model's perspective on replay. Idempotent — see
-    :func:`_prefix_text`.
+    Safety net: the paradigm prose instructs the model to open its bare
+    text with the prefix; this fills in the prefix when it forgets, so
+    the log is uniform on replay. Idempotent — see :func:`_prefix_text`.
+
+    For list-shaped content (providers that emit a reasoning block first
+    or interleave text with tool_use blocks), the prefix is stamped on
+    the *first* text block only — the message is one logical turn, and
+    stamping every text segment produced double/triple prefixes in the
+    log (observed on Gemma, which emits a ``thought\\n...`` text block
+    followed by the actual response).
     """
     content = assistant_msg.get("content")
     if not content:
@@ -349,11 +355,13 @@ def apply_monologue_prefix(assistant_msg: dict[str, Any]) -> dict[str, Any]:
     if isinstance(content, str):
         return {**assistant_msg, "content": _prefix_text(content)}
     if isinstance(content, list):
-        new_blocks: list[Any] = [
-            {**b, "text": _prefix_text(b.get("text", ""))}
-            if isinstance(b, dict) and b.get("type") == "text"
-            else b
-            for b in content
-        ]
+        new_blocks: list[Any] = []
+        prefixed = False
+        for block in content:
+            if not prefixed and isinstance(block, dict) and block.get("type") == "text":
+                new_blocks.append({**block, "text": _prefix_text(block.get("text", ""))})
+                prefixed = True
+            else:
+                new_blocks.append(block)
         return {**assistant_msg, "content": new_blocks}
     return assistant_msg
