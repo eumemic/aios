@@ -372,10 +372,11 @@ class TestApplyMonologuePrefix:
         out = apply_monologue_prefix(msg)
         assert "content" not in out
 
-    def test_list_content_all_text_blocks_prefixed(self) -> None:
-        """Multi-block content must prefix EVERY text block — not just the
-        first — so providers that interleave text with tool_use don't leave
-        later text segments unmarked.
+    def test_list_content_only_first_text_block_prefixed(self) -> None:
+        """Multi-block content must prefix ONLY the first text block.  The
+        assistant message is one logical turn; stamping every text segment
+        produced double/triple prefixes on providers (e.g. Gemma) that emit
+        a reasoning block before the actual response.
         """
         msg: dict[str, Any] = {
             "role": "assistant",
@@ -389,7 +390,7 @@ class TestApplyMonologuePrefix:
         blocks = out["content"]
         assert blocks[0] == {"type": "text", "text": "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: first"}
         assert blocks[1] == {"type": "tool_use", "id": "x", "name": "y", "input": {}}
-        assert blocks[2] == {"type": "text", "text": "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: second"}
+        assert blocks[2] == {"type": "text", "text": "second"}
 
     def test_list_content_tool_use_only_left_alone(self) -> None:
         msg: dict[str, Any] = {
@@ -399,8 +400,11 @@ class TestApplyMonologuePrefix:
         out = apply_monologue_prefix(msg)
         assert out["content"] == [{"type": "tool_use", "id": "x", "name": "y", "input": {}}]
 
-    def test_list_content_mixed_already_prefixed(self) -> None:
-        """Idempotent on a per-block basis."""
+    def test_list_content_first_block_already_prefixed_is_idempotent(self) -> None:
+        """When the first text block already carries the prefix, the call
+        is a no-op — no double-prefix, and subsequent blocks still stay
+        un-stamped (see :func:`apply_monologue_prefix`).
+        """
         msg: dict[str, Any] = {
             "role": "assistant",
             "content": [
@@ -410,7 +414,7 @@ class TestApplyMonologuePrefix:
         }
         out = apply_monologue_prefix(msg)
         assert out["content"][0]["text"] == "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: first"
-        assert out["content"][1]["text"] == "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: second"
+        assert out["content"][1]["text"] == "second"
 
     def test_returns_new_dict_preserving_other_fields(self) -> None:
         msg: dict[str, Any] = {
