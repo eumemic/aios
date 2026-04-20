@@ -1,24 +1,18 @@
 """E2E tests for migration 0019 — per-connection routing scope.
 
-Slice 2a covers the structural shape (columns, indexes, FKs) on a
-fully-migrated DB.  Slice 2b covers the data-migration path (populating
-``connection_id`` + ``path`` from the legacy address strings, dropping
-orphans that reference unregistered connections) — it uses its own
-dedicated container that stops at 0018, seeds legacy-shape rows, then
-runs the 0019 upgrade.
+``TestSchemaShape`` asserts the post-head shape on the shared migrated DB.
+``TestDataMigration`` uses a dedicated container that stops at 0018,
+seeds legacy-shape rows, then runs 0019.
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
 from collections.abc import AsyncIterator, Iterator
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+from tests.conftest import run_alembic_upgrade
 
 
 @pytest.fixture
@@ -32,33 +26,9 @@ async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
     await p.close()
 
 
-def _run_alembic(db_url: str, target: str) -> None:
-    """Run ``alembic upgrade <target>`` against ``db_url``.
-
-    Subprocess so the alembic config + migration env files control everything.
-    """
-    env = {**os.environ, "AIOS_DB_URL": db_url}
-    result = subprocess.run(
-        ["uv", "run", "alembic", "upgrade", target],
-        cwd=PROJECT_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"alembic upgrade {target} failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-        )
-
-
 @pytest.fixture(scope="module")
 def data_migration_db_url() -> Iterator[str]:
-    """Fresh container → migrate to 0018 → seed legacy-shape rows →
-    migrate to 0019.  Yields the DB URL; tests assert state on the
-    result.  Module-scoped so we pay the container/seed cost once;
-    the migration is structurally one-way so it doesn't need re-running.
-    """
+    """Fresh container → migrate to 0018 → seed legacy-shape rows → migrate to 0019."""
     from tests.conftest import _docker_available
 
     if not _docker_available():
@@ -72,27 +42,24 @@ def data_migration_db_url() -> Iterator[str]:
         host = pg.get_container_host_ip()
         port = pg.get_exposed_port(5432)
         db_url = f"postgresql://{pg.username}:{pg.password}@{host}:{port}/{pg.dbname}"
-        _run_alembic(db_url, "0018")
+        run_alembic_upgrade(db_url, "0018")
 
         async def _seed() -> None:
             c = await asyncpg.connect(db_url)
             try:
-                # session_replication_role=replica disables FK triggers for
-                # this connection, letting us insert minimal rows referencing
+                # Disable FK triggers so we can insert minimal rows against
                 # stub FK targets without wiring up the full agent/session/vault
-                # chain.  The migration we're testing doesn't care about FK
-                # validity — only whether it reshapes rules/bindings correctly.
+                # chain.  The migration doesn't care about FK validity.
                 await c.execute("SET session_replication_role = replica")
                 await c.execute("""
                     INSERT INTO connections (id, connector, account, mcp_url, vault_id)
                     VALUES ('conn_sig1', 'signal', 'alice', 'http://mcp-a', 'vlt_stub'),
                            ('conn_sig2', 'signal', 'bob',   'http://mcp-b', 'vlt_stub')
                 """)
-                # Legacy-shape routing rules:
-                #   valid1: exact connector/account match → prefix becomes ''
-                #   valid2: connector/account/chat-a      → prefix 'chat-a'
-                #   valid3: deeper path (two segments)    → prefix 'group/thread-1'
-                #   orphan: unregistered (signal,mallory) → hard-deleted
+                # rul_v1: exact match → prefix becomes ''
+                # rul_v2: one extra segment → prefix 'chat-a'
+                # rul_v3: two extra segments → prefix 'group/thread-1'
+                # rul_orph: unregistered account → hard-deleted
                 await c.execute("""
                     INSERT INTO routing_rules (id, prefix, target, session_params)
                     VALUES
@@ -101,10 +68,6 @@ def data_migration_db_url() -> Iterator[str]:
                       ('rul_v3', 'signal/bob/group/thread-1', 'session:ses_stub2', '{}'::jsonb),
                       ('rul_orph','signal/mallory/chat-z',    'session:ses_stub1', '{}'::jsonb)
                 """)
-                # Legacy-shape bindings:
-                #   valid1: signal/alice/chat-a   → conn_sig1, path 'chat-a'
-                #   valid2: signal/bob/grp/thr-2  → conn_sig2, path 'grp/thr-2'
-                #   orphan: signal/mallory/chat-z → hard-deleted
                 await c.execute("""
                     INSERT INTO channel_bindings (id, address, session_id)
                     VALUES
@@ -116,7 +79,7 @@ def data_migration_db_url() -> Iterator[str]:
                 await c.close()
 
         asyncio.run(_seed())
-        _run_alembic(db_url, "head")
+        run_alembic_upgrade(db_url, "head")
         yield db_url
 
 
@@ -132,7 +95,7 @@ async def mig_pool(data_migration_db_url: str) -> AsyncIterator[Any]:
 
 
 class TestSchemaShape:
-    """Structural assertions on the post-head schema (slice 2a)."""
+    """Structural assertions on the post-head schema."""
 
     async def test_routing_rules_connection_id(self, pool: Any) -> None:
         """``routing_rules.connection_id`` is NOT NULL and FKs to connections."""
@@ -209,7 +172,7 @@ class TestSchemaShape:
                 WHERE table_name = 'channel_bindings' AND column_name = 'address'
                 """
             )
-            assert col is None, "address column should be dropped post-0019"
+            assert col is None, "address column should be dropped"
 
     async def test_indexes_after_migration(self, pool: Any) -> None:
         """Old globally-unique indexes are gone; composite per-connection uniques exist."""
@@ -241,9 +204,9 @@ class TestSchemaShape:
 
 
 class TestDataMigration:
-    """Slice 2b — fixture seeded pre-0019, then migration applied.  All
-    assertions read from ``mig_pool`` (a pool against that post-migration
-    DB), not the shared ``pool`` fixture.
+    """Fixture seeded pre-0019, then migration applied.  Assertions read
+    from ``mig_pool`` (pool against the post-migration DB), not the shared
+    ``pool`` fixture.
     """
 
     async def test_rules_populated_and_rewritten(self, mig_pool: Any) -> None:
@@ -280,8 +243,8 @@ class TestDataMigration:
             assert row is None, "orphan binding should have been hard-deleted by 0019"
 
     async def test_post_migration_unique_is_per_connection(self, mig_pool: Any) -> None:
-        """Same prefix on different connections is allowed post-0019 —
-        the uniqueness is ``(connection_id, prefix)``, not global.
+        """Same prefix on different connections is allowed — uniqueness is
+        ``(connection_id, prefix)``, not global.
         """
         async with mig_pool.acquire() as conn:
             # Inserting a new rule with the same prefix on conn_sig2 must succeed.

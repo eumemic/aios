@@ -30,6 +30,7 @@ from aios.db import queries
 from aios.errors import NoRouteError, NotFoundError, ValidationError
 from aios.models._paths import validate_path_segments
 from aios.models.channel_bindings import ChannelBinding
+from aios.models.connections import Connection
 from aios.models.routing_rules import RoutingRule, SessionParams
 
 # ─── target parsing ─────────────────────────────────────────────────────────
@@ -266,32 +267,23 @@ class ResolveResult:
 
 
 def _render_title(template: str | None, address: str) -> str | None:
-    """Substitute ``{address}`` in a session-title template."""
     if template is None:
         return None
     return template.replace("{address}", address)
 
 
-async def resolve_channel(pool: asyncpg.Pool[Any], address: str) -> ResolveResult:
-    """Resolve a channel address to a session, creating one if a rule matches.
+async def resolve_channel(
+    pool: asyncpg.Pool[Any], connection: Connection, path: str
+) -> ResolveResult:
+    """Resolve a ``(connection, path)`` to a session, creating one if a rule matches.
 
-    Parses the address into ``(connector, account, path)``, looks up the
-    owning :class:`Connection`, then performs the binding/rule match under
-    a single transaction (so the binding's FK to ``sessions.id`` is
-    satisfied atomically).
+    Binding/rule match runs under a single transaction so the binding's
+    FK to ``sessions.id`` is satisfied atomically.
     """
-    connector, account, path = _parse_address(address)
+    address = f"{connection.connector}/{connection.account}/{path}"
     async with pool.acquire() as conn, conn.transaction():
-        pairs = await queries.get_connections_by_pairs(conn, [(connector, account)])
-        if not pairs:
-            raise NoRouteError(
-                f"no registered connection for {connector}/{account}",
-                detail={"address": address},
-            )
-        connection_id = pairs[0].id
-
-        # Optimistic path: most resolves are binding hits and need no lock.
-        existing = await queries.get_binding_by_connection_and_path(conn, connection_id, path)
+        # Optimistic: most resolves are binding hits and need no lock.
+        existing = await queries.get_binding_by_connection_and_path(conn, connection.id, path)
         if existing is not None:
             return ResolveResult(
                 session_id=existing.session_id,
@@ -299,14 +291,12 @@ async def resolve_channel(pool: asyncpg.Pool[Any], address: str) -> ResolveResul
                 created_session=False,
             )
 
-        # Miss — take a per-address advisory lock so concurrent first-time
-        # resolves of the same address don't both reach insert_binding and
-        # spuriously 409.  Re-check the binding after acquiring it: another
-        # transaction may have inserted one while we were waiting.
-        # ``hashtextextended`` gives a 64-bit key (vs ``hashtext``'s 32-bit)
-        # so unrelated addresses don't collide on the lock space.
+        # Per-address advisory lock so concurrent first-time resolves of
+        # the same address don't both reach insert_binding and spuriously
+        # 409.  ``hashtextextended`` (64-bit) avoids collisions across
+        # unrelated addresses in the lock space.
         await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", address)
-        existing = await queries.get_binding_by_connection_and_path(conn, connection_id, path)
+        existing = await queries.get_binding_by_connection_and_path(conn, connection.id, path)
         if existing is not None:
             return ResolveResult(
                 session_id=existing.session_id,
@@ -314,7 +304,7 @@ async def resolve_channel(pool: asyncpg.Pool[Any], address: str) -> ResolveResul
                 created_session=False,
             )
 
-        rule = await queries.find_matching_rule(conn, connection_id, path)
+        rule = await queries.find_matching_rule(conn, connection.id, path)
         if rule is None:
             raise NoRouteError(
                 f"no binding or rule matches address {address}",
@@ -324,8 +314,7 @@ async def resolve_channel(pool: asyncpg.Pool[Any], address: str) -> ResolveResul
         target = parse_target(rule.target)
 
         if isinstance(target, SessionTarget):
-            # Verify the session exists and is not archived — binding to
-            # an archived session would silently resurrect activity on it.
+            # Binding to an archived session would silently resurrect it.
             session = await queries.get_session(conn, target.session_id)
             if session.archived_at is not None:
                 raise NotFoundError(
@@ -335,7 +324,6 @@ async def resolve_channel(pool: asyncpg.Pool[Any], address: str) -> ResolveResul
             session_id = session.id
             created = False
         else:
-            # agent: target — spin up a fresh session.
             # Validation at create/update guarantees environment_id is set.
             assert rule.session_params.environment_id is not None
             session = await queries.insert_session(
@@ -352,7 +340,7 @@ async def resolve_channel(pool: asyncpg.Pool[Any], address: str) -> ResolveResul
             created = True
 
         binding = await queries.insert_binding(
-            conn, connection_id=connection_id, path=path, session_id=session_id
+            conn, connection_id=connection.id, path=path, session_id=session_id
         )
         return ResolveResult(
             session_id=session_id,

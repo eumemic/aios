@@ -1,22 +1,10 @@
 """Per-connection routing scope: rules and bindings owned by a connection.
 
-Moves ``routing_rules`` and ``channel_bindings`` from globally-addressable
-to per-connection-scoped:
-
-* ``routing_rules`` gains ``connection_id`` (FK, CASCADE).  ``prefix`` is
-  reinterpreted as the path portion only — the ``{connector}/{account}``
-  segments are implicit from the owning connection.  Empty string ``""``
-  is the per-connection catch-all.
-* ``channel_bindings`` gains ``connection_id`` (FK, CASCADE) plus a
-  ``path`` column.  ``address`` is dropped — read-path reconstructs the
-  full address by joining to ``connections``.
-
-Data migration: for each existing rule/binding, parse the first two
-``/``-segments as ``(connector, account)``, look up the matching
-connection, and populate the new columns (rewriting ``prefix`` / ``path``
-to the remainder).  Rows referencing an unregistered connection are
-hard-deleted with a ``WARNING`` — they were dead weight (no inbound
-route could ever fire them).
+Data migration parses each rule/binding's first two ``/``-segments as
+``(connector, account)``, looks up the matching connection, and rewrites
+``prefix`` / ``path`` to the remainder.  Rows with no matching connection
+are hard-deleted with ``RAISE WARNING`` — they were unreachable dead
+weight.
 
 Revision ID: 0019
 Revises: 0018
@@ -36,19 +24,14 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     # ── routing_rules ────────────────────────────────────────────────────
-    #
-    # Add connection_id nullable first so the UPDATE/DELETE can populate or
-    # prune before we tighten to NOT NULL.
     op.execute("""
         ALTER TABLE routing_rules
             ADD COLUMN connection_id text
                 REFERENCES connections(id) ON DELETE CASCADE
     """)
 
-    # Strip the ``{connector}/{account}/`` prefix from ``prefix``.  The
-    # CASE collapses the exact-match case ("rule for the whole connection")
-    # to ``''`` so the catch-all convention kicks in cleanly; otherwise
-    # we drop the first two segments.
+    # Exact-match (prefix = "connector/account") collapses to '' — the
+    # per-connection catch-all.  Otherwise strip the first two segments.
     op.execute("""
         UPDATE routing_rules rr
            SET connection_id = c.id,
@@ -64,9 +47,6 @@ def upgrade() -> None:
            AND split_part(rr.prefix, '/', 2) = c.account
     """)
 
-    # Log + drop orphans (rules whose connector/account pair has no
-    # registered connection — they could never have matched an inbound
-    # message routed through a connection).
     op.execute("""
         DO $$
         DECLARE r RECORD;
@@ -95,10 +75,6 @@ def upgrade() -> None:
             ADD COLUMN path text
     """)
 
-    # Populate both new columns from the address string.  ``path`` is
-    # the substring after ``{connector}/{account}/`` — always present
-    # since addresses require at least three segments (enforced by the
-    # inbound-message validator).
     op.execute("""
         UPDATE channel_bindings cb
            SET connection_id = c.id,
@@ -138,11 +114,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Restoring the pre-0019 shape is structurally possible but data-lossy
-    # (orphans are gone, and the per-connection ``prefix``/``path`` values
-    # can't be reconstituted into full addresses without connections still
-    # existing).  We reverse the schema ops best-effort and leave the
-    # content of the tables as-is where possible.
+    # Data-lossy: orphans pruned by upgrade can't be reconstituted.
     op.execute("DROP INDEX IF EXISTS channel_bindings_conn_path_uniq")
     op.execute("ALTER TABLE channel_bindings ADD COLUMN address text")
     op.execute("""
@@ -160,9 +132,6 @@ def downgrade() -> None:
     op.execute("ALTER TABLE channel_bindings DROP COLUMN connection_id")
 
     op.execute("DROP INDEX IF EXISTS routing_rules_conn_prefix_uniq")
-    # prefix already holds the path-only value; rebuilding the full prefix
-    # requires a join.  CASE covers the catch-all ('') case → plain
-    # connector/account with no trailing slash.
     op.execute("""
         UPDATE routing_rules rr
            SET prefix = CASE

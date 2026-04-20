@@ -62,14 +62,7 @@ def connection_server_name(c: Connection) -> str:
 async def list_bindings_and_connections(
     pool: asyncpg.Pool[Any], session_id: str
 ) -> tuple[list[ChannelBinding], list[Connection]]:
-    """Load the session's bindings and the distinct connections they
-    reference in a single pool acquisition.
-
-    Bindings already carry ``connection_id`` post-0019, so we can feed
-    the distinct ids straight to :func:`queries.list_connections_by_ids`
-    — no more address-string parsing to reconstruct ``(connector,
-    account)`` pairs.
-    """
+    """Load the session's bindings and the distinct connections they reference."""
     async with pool.acquire() as conn:
         bindings = await queries.list_session_bindings(conn, session_id)
         conn_ids = sorted({b.connection_id for b in bindings})

@@ -3,11 +3,7 @@
 Covers connection / channel binding / routing rule CRUD plus the
 ``resolve_channel`` resolver and the nested ``POST /v1/connections/
 {id}/routing-rules`` + inbound-message endpoints.  Runs against a real
-testcontainer Postgres with migrations applied (through 0019).
-
-Post-0019 rules and bindings are scoped per-connection: the test fixtures
-create a fresh ``(signal, <random>)`` connection for each test, and rule
-prefixes are just the path portion (no connector/account stuffing).
+testcontainer Postgres with migrations applied.
 """
 
 from __future__ import annotations
@@ -588,7 +584,7 @@ class TestResolveChannel:
         address = f"{connection.connector}/{connection.account}/chat-x"
         binding = await svc.create_binding(pool, address=address, session_id=s.id)
 
-        result = await svc.resolve_channel(pool, address)
+        result = await svc.resolve_channel(pool, connection, "chat-x")
         assert result.session_id == s.id
         assert result.binding_id == binding.id
         assert result.created_session is False
@@ -609,8 +605,7 @@ class TestResolveChannel:
             target=f"session:{s.id}",
             session_params=SessionParams(),
         )
-        address = f"{connection.connector}/{connection.account}/st/whatever"
-        result = await svc.resolve_channel(pool, address)
+        result = await svc.resolve_channel(pool, connection, "st/whatever")
         assert result.session_id == s.id
         assert result.created_session is False
 
@@ -633,10 +628,10 @@ class TestResolveChannel:
                 metadata={"source": "rule"},
             ),
         )
-        address = f"{connection.connector}/{connection.account}/at/chat-1"
-        result = await svc.resolve_channel(pool, address)
+        result = await svc.resolve_channel(pool, connection, "at/chat-1")
         assert result.created_session is True
 
+        address = f"{connection.connector}/{connection.account}/at/chat-1"
         s = await sess_svc.get_session(pool, result.session_id)
         assert s.title == f"Routed: {address}"
         assert s.metadata == {"source": "rule"}
@@ -644,17 +639,10 @@ class TestResolveChannel:
             vids = await queries.get_session_vault_ids(conn, s.id)
         assert vids == [vault_id]
 
-        # Second hit short-circuits via the binding.
-        again = await svc.resolve_channel(pool, address)
+        again = await svc.resolve_channel(pool, connection, "at/chat-1")
         assert again.session_id == result.session_id
         assert again.binding_id == result.binding_id
         assert again.created_session is False
-
-    async def test_no_connection_raises_no_route(self, pool: Any) -> None:
-        from aios.services import channels as svc
-
-        with pytest.raises(NoRouteError):
-            await svc.resolve_channel(pool, f"signal/nonexistent-{_uniq()}/chat-1")
 
     async def test_no_route_raises_when_connection_has_no_rules(
         self, pool: Any, connection: Any
@@ -662,7 +650,7 @@ class TestResolveChannel:
         from aios.services import channels as svc
 
         with pytest.raises(NoRouteError):
-            await svc.resolve_channel(pool, f"{connection.connector}/{connection.account}/unrouted")
+            await svc.resolve_channel(pool, connection, "unrouted")
 
     async def test_concurrent_resolve_same_address_returns_same_session(
         self, pool: Any, agent_id: str, env_id: str, connection: Any
@@ -681,11 +669,10 @@ class TestResolveChannel:
             target=f"agent:{agent_id}",
             session_params=SessionParams(environment_id=env_id),
         )
-        address = f"{connection.connector}/{connection.account}/race/chat-1"
 
         results = await asyncio.gather(
-            svc.resolve_channel(pool, address),
-            svc.resolve_channel(pool, address),
+            svc.resolve_channel(pool, connection, "race/chat-1"),
+            svc.resolve_channel(pool, connection, "race/chat-1"),
         )
         assert results[0].session_id == results[1].session_id
         assert results[0].binding_id == results[1].binding_id
@@ -703,7 +690,7 @@ class TestResolveChannel:
     async def test_concurrent_resolve_different_paths_do_not_block(
         self, pool: Any, agent_id: str, env_id: str, connection: Any
     ) -> None:
-        """The advisory lock must be per-address — distinct paths resolve in parallel."""
+        """Advisory lock is per-address — distinct paths resolve in parallel."""
         import asyncio
 
         from aios.services import channels as svc
@@ -715,10 +702,9 @@ class TestResolveChannel:
             target=f"agent:{agent_id}",
             session_params=SessionParams(environment_id=env_id),
         )
-        base = f"{connection.connector}/{connection.account}"
         results = await asyncio.gather(
-            svc.resolve_channel(pool, f"{base}/par/a"),
-            svc.resolve_channel(pool, f"{base}/par/b"),
+            svc.resolve_channel(pool, connection, "par/a"),
+            svc.resolve_channel(pool, connection, "par/b"),
         )
         assert results[0].session_id != results[1].session_id
         assert all(r.created_session for r in results)
@@ -744,7 +730,7 @@ class TestResolveChannel:
         old_binding = await svc.create_binding(pool, address=address, session_id=old_session.id)
         await svc.archive_binding(pool, old_binding.id)
 
-        result = await svc.resolve_channel(pool, address)
+        result = await svc.resolve_channel(pool, connection, "arch-bind/x")
         assert result.session_id != old_session.id
         assert result.created_session is True
 
@@ -766,9 +752,7 @@ class TestResolveChannel:
             session_params=SessionParams(),
         )
         with pytest.raises(NotFoundError, match="archived"):
-            await svc.resolve_channel(
-                pool, f"{connection.connector}/{connection.account}/st-arch/x"
-            )
+            await svc.resolve_channel(pool, connection, "st-arch/x")
 
 
 # ─── inbound endpoint (full HTTP) ───────────────────────────────────────────

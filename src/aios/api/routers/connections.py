@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, status
 
-from aios.api.deps import AuthDep, PoolDep
+from aios.api.deps import AuthDep, ConnectionDep, PoolDep
 from aios.errors import ValidationError
 from aios.harness.wake import defer_wake
 from aios.models._paths import validate_path_segments
@@ -85,22 +85,19 @@ async def delete(connection_id: str, pool: PoolDep, _auth: AuthDep) -> None:
 
 @router.post("/{connection_id}/messages", status_code=status.HTTP_201_CREATED)
 async def post_message(
-    connection_id: str,
+    connection: ConnectionDep,
     body: InboundMessage,
     pool: PoolDep,
     _auth: AuthDep,
 ) -> InboundMessageResponse:
-    # Empty/`..` segments would break segment-aware prefix-rule matching.
     try:
         validate_path_segments(body.path, allow_empty=False)
     except ValueError as exc:
         raise ValidationError(f"path {exc}", detail={"path": body.path}) from exc
 
-    connection = await service.get_connection(pool, connection_id)
+    resolution = await channels_service.resolve_channel(pool, connection, body.path)
+
     address = f"{connection.connector}/{connection.account}/{body.path}"
-
-    resolution = await channels_service.resolve_channel(pool, address)
-
     metadata = {**body.metadata, "channel": address}
     event = await sessions_service.append_user_message(
         pool, resolution.session_id, body.content, metadata=metadata
