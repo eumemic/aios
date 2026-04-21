@@ -24,6 +24,7 @@ async def create(body: AgentCreate, pool: PoolDep, _auth: AuthDep) -> Agent:
         mcp_servers=body.mcp_servers,
         description=body.description,
         metadata=body.metadata,
+        litellm_extra=body.litellm_extra,
         window_min=body.window_min,
         window_max=body.window_max,
     )
@@ -64,6 +65,7 @@ async def update(agent_id: str, body: AgentUpdate, pool: PoolDep, _auth: AuthDep
         mcp_servers=body.mcp_servers,
         description=body.description,
         metadata=body.metadata,
+        litellm_extra=body.litellm_extra,
         window_min=body.window_min,
         window_max=body.window_max,
     )

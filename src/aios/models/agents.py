@@ -159,6 +159,21 @@ class AgentCreate(BaseModel):
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     description: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    litellm_extra: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Provider-specific LiteLLM kwargs merged into every model "
+            "request for this agent.  Common shapes: OpenRouter "
+            "``extra_body.provider.order`` for provider pinning, "
+            "Anthropic ``thinking``, OpenAI ``reasoning_effort``, raw "
+            "sampling knobs (``temperature``, ``max_tokens``), "
+            "``api_base`` for self-hosted inference.  Validated by "
+            "LiteLLM / the provider; bad kwargs surface as tool-path "
+            "errors the model sees.  Security: ``api_base`` redirects "
+            "the model call — treat operator-set agents as trusted "
+            "and don't accept this field from untrusted principals."
+        ),
+    )
     window_min: int = Field(default=50_000, ge=1)
     window_max: int = Field(default=150_000, ge=1)
 
@@ -183,6 +198,7 @@ class AgentUpdate(BaseModel):
     mcp_servers: list[McpServerSpec] | None = None
     description: str | None = None
     metadata: dict[str, Any] | None = None
+    litellm_extra: dict[str, Any] | None = None
     window_min: int | None = Field(default=None, ge=1)
     window_max: int | None = Field(default=None, ge=1)
 
@@ -200,6 +216,7 @@ class Agent(BaseModel):
     mcp_servers: list[McpServerSpec]
     description: str | None
     metadata: dict[str, Any]
+    litellm_extra: dict[str, Any] = Field(default_factory=dict)
     window_min: int
     window_max: int
     created_at: datetime
@@ -217,6 +234,7 @@ class AgentVersion(BaseModel):
     tools: list[ToolSpec]
     skills: list[AgentSkillRef] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec]
+    litellm_extra: dict[str, Any] = Field(default_factory=dict)
     window_min: int
     window_max: int
     created_at: datetime

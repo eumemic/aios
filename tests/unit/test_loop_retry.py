@@ -93,6 +93,7 @@ def mock_step_dependencies() -> Any:
         mcp_servers=[],
         skills=[],
         system="sys",
+        litellm_extra={},
         window_min=1000,
         window_max=10000,
     )

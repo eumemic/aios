@@ -28,6 +28,7 @@ async def create_agent(
     mcp_servers: list[McpServerSpec] | None = None,
     description: str | None,
     metadata: dict[str, Any],
+    litellm_extra: dict[str, Any] | None = None,
     window_min: int,
     window_max: int,
 ) -> Agent:
@@ -52,6 +53,7 @@ async def create_agent(
             mcp_servers=mcp_servers or [],
             description=description,
             metadata=metadata,
+            litellm_extra=litellm_extra or {},
             window_min=window_min,
             window_max=window_max,
         )
@@ -91,6 +93,7 @@ async def update_agent(
     mcp_servers: list[McpServerSpec] | None = None,
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
+    litellm_extra: dict[str, Any] | None = None,
     window_min: int | None = None,
     window_max: int | None = None,
 ) -> Agent:
@@ -111,6 +114,7 @@ async def update_agent(
             mcp_servers=mcp_servers,
             description=description,
             metadata=metadata,
+            litellm_extra=litellm_extra,
             window_min=window_min,
             window_max=window_max,
         )
