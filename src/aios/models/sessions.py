@@ -19,6 +19,8 @@ from aios.models.events import Event
 
 SessionStatus = Literal["pending", "running", "idle", "rescheduling", "terminated"]
 
+MAX_USER_MESSAGE_CHARS = 1_000_000
+
 
 class SessionUsage(BaseModel):
     """Cumulative token usage across all model calls in a session."""
@@ -64,6 +66,7 @@ class SessionCreate(BaseModel):
     )
     initial_message: str | None = Field(
         default=None,
+        max_length=MAX_USER_MESSAGE_CHARS,
         description=(
             "Convenience: when set, the server appends a user.message event "
             "with this content immediately after creating the session and "

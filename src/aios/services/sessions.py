@@ -16,9 +16,7 @@ import asyncpg
 from aios.db import queries
 from aios.errors import PayloadTooLargeError
 from aios.models.events import Event, EventKind
-from aios.models.sessions import Session, SessionStatus
-
-_MAX_USER_MESSAGE_CHARS = 1_000_000
+from aios.models.sessions import MAX_USER_MESSAGE_CHARS, Session, SessionStatus
 
 
 async def create_session(
@@ -95,11 +93,11 @@ async def append_user_message(
     column so the context builder and unread-derivation helpers can key
     off it directly — without re-parsing a JSONB blob on every read.
     """
-    if len(content) > _MAX_USER_MESSAGE_CHARS:
+    if len(content) > MAX_USER_MESSAGE_CHARS:
         raise PayloadTooLargeError(
-            f"user message exceeds {_MAX_USER_MESSAGE_CHARS:,} characters "
+            f"user message exceeds {MAX_USER_MESSAGE_CHARS:,} characters "
             f"(got {len(content):,}); split into multiple messages",
-            detail={"max_chars": _MAX_USER_MESSAGE_CHARS, "got_chars": len(content)},
+            detail={"max_chars": MAX_USER_MESSAGE_CHARS, "got_chars": len(content)},
         )
     data: dict[str, Any] = {"role": "user", "content": content}
     if metadata:
