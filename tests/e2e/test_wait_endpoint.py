@@ -94,7 +94,7 @@ class TestWaitEndpoint:
             e["kind"] == "message" and e["data"].get("content") == "hello" for e in body["events"]
         )
         assert body["next_after"] == body["events"][-1]["seq"]
-        assert body["session_status"] in {"idle", "running"}
+        assert body["session_status"] in {"pending", "running", "idle"}
 
     async def test_empty_after_timeout(
         self, http_client: httpx.AsyncClient, session_id: str

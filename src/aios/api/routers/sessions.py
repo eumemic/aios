@@ -12,7 +12,7 @@ Postgres ``LISTEN``/``NOTIFY``.
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, status
 from sse_starlette import EventSourceResponse
@@ -32,6 +32,7 @@ from aios.models.sessions import (
     Session,
     SessionCreate,
     SessionInterruptRequest,
+    SessionStatus,
     SessionUpdate,
     SessionUserMessage,
     ToolConfirmationRequest,
@@ -74,7 +75,7 @@ async def list_(
     _auth: AuthDep,
     agent_id: str | None = None,
     status_filter: Annotated[
-        Literal["running", "idle", "terminated"] | None,
+        SessionStatus | None,
         Query(alias="status"),
     ] = None,
     limit: int = 50,

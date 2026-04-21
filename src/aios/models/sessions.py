@@ -1,9 +1,10 @@
 """Session resource: a running agent instance + its event log handle.
 
 A session references an agent and an environment, and tracks its current
-status (`running`, `idle`, `terminated`) plus the workspace volume path the
-sandbox uses on the host. The harness lease columns and `container_id` are
-internal — they live in the DB row but are not exposed on the wire shape.
+status (see :data:`SessionStatus`) plus the workspace volume path the
+sandbox uses on the host. The harness lease columns and `container_id`
+are internal — they live in the DB row but are not exposed on the wire
+shape.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from aios.models.events import Event
 
-SessionStatus = Literal["running", "idle", "rescheduling", "terminated"]
+SessionStatus = Literal["pending", "running", "idle", "rescheduling", "terminated"]
 
 
 class SessionUsage(BaseModel):

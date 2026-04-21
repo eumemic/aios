@@ -101,13 +101,28 @@ async def append_user_message(
         if isinstance(channel, str):
             orig_channel = channel
     async with pool.acquire() as conn:
-        return await queries.append_event(
+        event = await queries.append_event(
             conn,
             session_id=session_id,
             kind="message",
             data=data,
             orig_channel=orig_channel,
         )
+        # Flip idle → pending so polling orchestrators can distinguish
+        # "queued but not started" from "turn finished." Other states
+        # (running / rescheduling / terminated) are left alone — the
+        # worker owns the running status, and changing rescheduling
+        # would lose the retry-in-progress signal.  Narrow scope by
+        # design: the tool-result and tool-confirmation paths have the
+        # same race but are deferred; an orchestrator resolving those
+        # still has to combine status polling with event-cursor
+        # tracking.  See issue #39.
+        await conn.execute(
+            "UPDATE sessions SET status = 'pending', updated_at = now() "
+            "WHERE id = $1 AND status = 'idle'",
+            session_id,
+        )
+        return event
 
 
 async def append_event(

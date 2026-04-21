@@ -445,12 +445,17 @@ class TestBatchGating:
 @needs_docker
 class TestSessionStatus:
     async def test_status_transitions(self, harness: Harness) -> None:
-        """Session status should go idle → running → idle across a step."""
+        """Session status should go pending → running → idle across a step.
+
+        ``harness.start`` appends a user message, which flips the newly
+        created session from ``idle`` to ``pending`` (issue #39 —
+        orchestrators need to distinguish "queued" from "turn finished").
+        """
         harness.script_model([assistant("Hi!")])
         session = await harness.start("hello")
 
         s = await harness.session(session.id)
-        assert s.status == "idle"
+        assert s.status == "pending"
 
         await harness.run_until_idle(session.id)
 
