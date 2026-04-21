@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 import pytest
 
-from aios.cli.client import AiosApiError, AiosClient
+from aios.cli.client import AiosApiError, AiosClient, NonJSONResponseError
 
 
 def _mock_client(handler, *, api_key: str | None = "key-123") -> AiosClient:
@@ -81,6 +81,25 @@ def test_non_envelope_error_body_handled_gracefully():
         client.request("GET", "/x")
     assert excinfo.value.status_code == 500
     assert "internal server error" in excinfo.value.message
+
+
+def test_2xx_non_json_body_raises_non_json_response_error():
+    """A 2xx response whose body is not JSON (e.g. an HTML landing page at
+    a misconfigured URL) must raise :class:`NonJSONResponseError` so
+    callers like ``aios status`` can present a friendly message."""
+
+    def handler(_r: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"<html><body>not aios</body></html>",
+            headers={"content-type": "text/html"},
+        )
+
+    with _mock_client(handler) as client, pytest.raises(NonJSONResponseError) as excinfo:
+        client.request("GET", "/health")
+    assert excinfo.value.status_code == 200
+    assert excinfo.value.content_type == "text/html"
+    assert "<html>" in excinfo.value.snippet
 
 
 def test_params_pruned_of_none():
