@@ -135,8 +135,8 @@ def versions(
         render_list(
             state.output_format,
             envelope,
-            columns=("version", "name", "model", "created_at"),
-            max_widths={"name": 32, "model": 40},
+            columns=("version", "model", "created_at"),
+            max_widths={"model": 40},
         )
 
     run_or_die(_run)
