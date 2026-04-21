@@ -8,6 +8,7 @@ Subcommands:
 * ``aios tail``        — structured real-time session event viewer (SSE client)
 * ``aios connections`` — connection CRUD wrappers (list/create)
 * ``aios bindings``    — channel-binding CRUD wrappers (list/create)
+* ``aios rules``       — routing-rule CRUD wrappers (list/create)
 """
 
 from __future__ import annotations
@@ -89,7 +90,7 @@ def _run_migrate() -> int:
 def main() -> int:
     if len(sys.argv) < 2:
         print(
-            "usage: aios <api|worker|migrate|tail|connections|bindings>",
+            "usage: aios <api|worker|migrate|tail|connections|bindings|rules>",
             file=sys.stderr,
         )
         return 2
@@ -114,6 +115,10 @@ def main() -> int:
             from aios.cli.bindings import run as _run_bindings
 
             return _run_bindings(sys.argv[2:])
+        case "rules":
+            from aios.cli.rules import run as _run_rules
+
+            return _run_rules(sys.argv[2:])
         case _:
             print(f"aios: unknown subcommand {cmd!r}", file=sys.stderr)
             return 2
