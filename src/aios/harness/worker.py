@@ -77,9 +77,13 @@ async def worker_main() -> None:
 
     try:
         # Startup sweep: repair ghosts and wake sessions needing inference.
-        woken = await wake_sessions_needing_inference(pool, task_registry)
-        if woken:
-            log.info("worker.startup_sweep", woken=len(woken))
+        sweep = await wake_sessions_needing_inference(pool, task_registry)
+        if sweep.woken_sessions or sweep.repaired_ghosts:
+            log.info(
+                "worker.startup_sweep",
+                woken=sweep.woken_sessions,
+                repaired_ghosts=sweep.repaired_ghosts,
+            )
 
         # Reap orphaned sandbox containers.
         async with pool.acquire() as conn:
@@ -128,8 +132,12 @@ async def _periodic_sweep(
     while True:
         await asyncio.sleep(interval)
         try:
-            woken = await wake_sessions_needing_inference(pool, task_registry)
-            if woken:
-                log.info("periodic_sweep.woken", count=len(woken))
+            sweep = await wake_sessions_needing_inference(pool, task_registry)
+            if sweep.woken_sessions or sweep.repaired_ghosts:
+                log.info(
+                    "periodic_sweep.woken",
+                    count=sweep.woken_sessions,
+                    repaired_ghosts=sweep.repaired_ghosts,
+                )
         except Exception:
             log.exception("periodic_sweep.failed")

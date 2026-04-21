@@ -274,14 +274,34 @@ async def _trigger_sweep(
     """Run the sweep for this session. Called from the finally block of
     every tool task — both built-in and MCP.
     """
-    try:
-        from aios.harness.sweep import wake_sessions_needing_inference
+    from aios.harness.sweep import SweepResult, wake_sessions_needing_inference
 
-        await wake_sessions_needing_inference(
-            pool, runtime.require_task_registry(), session_id=session_id
+    sweep_start = await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {"event": "sweep_start", "site": "tail"},
+    )
+    result = SweepResult(repaired_ghosts=0, woken_sessions=0)
+    try:
+        try:
+            result = await wake_sessions_needing_inference(
+                pool, runtime.require_task_registry(), session_id=session_id
+            )
+        except Exception:
+            bound_log.warning("tool.sweep_failed")
+    finally:
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {
+                "event": "sweep_end",
+                "sweep_start_id": sweep_start.id,
+                "repaired_ghosts": result.repaired_ghosts,
+                "woken_sessions": result.woken_sessions,
+            },
         )
-    except Exception:
-        bound_log.warning("tool.sweep_failed")
 
 
 # ── MCP tool dispatch ─────────────────────────────────────────────────────────
