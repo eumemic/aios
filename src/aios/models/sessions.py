@@ -14,6 +14,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from aios.models.events import Event
+
 SessionStatus = Literal["running", "idle", "rescheduling", "terminated"]
 
 
@@ -143,6 +145,15 @@ class ToolResultRequest(BaseModel):
     tool_call_id: str = Field(description="The tool_call_id from the assistant's tool_calls.")
     content: str = Field(description="The result of executing the tool.")
     is_error: bool = Field(default=False, description="True if the tool execution failed.")
+
+
+class WaitResponse(BaseModel):
+    """Response for ``GET /v1/sessions/{id}/wait``."""
+
+    events: list[Event]
+    session_status: SessionStatus
+    session_stop_reason: dict[str, Any] | None
+    next_after: int
 
 
 class ToolConfirmationRequest(BaseModel):
