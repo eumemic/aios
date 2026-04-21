@@ -87,12 +87,39 @@ class TestDeriveLastSeen:
         ]
         assert derive_last_seen(events, "signal/a/x") == 2
 
-    def test_peripheral_focal_still_anchors(self) -> None:
-        """Focal=X at arrival, orig=Y — still anchors last_seen_in_X
-        (agent was watching X when Y's notification arrived).
+    def test_peripheral_focal_does_not_anchor(self) -> None:
+        """A user event on Y arriving while focal=X does NOT anchor
+        last_seen_in_X — it's not peer content *on* X.  The agent saw
+        something about Y, not new body content on X.
         """
         events = [_evt(5, orig="signal/a/y", focal_at="signal/a/x")]
-        assert derive_last_seen(events, "signal/a/x") == 5
+        assert derive_last_seen(events, "signal/a/x") == 0
+
+    def test_notification_on_target_does_not_anchor(self) -> None:
+        """Peer on X arriving while focal=Y renders as a notification
+        marker (preview only, not full body).  The agent was told
+        something happened on X but hasn't consumed the message, so
+        last_seen_in_X stays put until a subsequent full-render or
+        switch-to-X.
+        """
+        events = [_evt(4, orig="signal/a/x", focal_at="signal/a/y")]
+        assert derive_last_seen(events, "signal/a/x") == 0
+
+    def test_assistant_event_while_focal_does_not_anchor(self) -> None:
+        """Agent mono/tool emissions while focal=X are not peer content;
+        they don't advance last_seen_in_X.  (Kept equivalent to the old
+        output via the switch-to-X anchor that gates any focal=X span.)
+        """
+        events = [
+            _evt(
+                3,
+                role="assistant",
+                orig=None,
+                focal_at="signal/a/x",
+                data={"role": "assistant", "content": "thinking"},
+            )
+        ]
+        assert derive_last_seen(events, "signal/a/x") == 0
 
     def test_successful_switch_anchors_last_seen(self) -> None:
         events = [_switch_result(7, target="signal/a/x", success=True)]

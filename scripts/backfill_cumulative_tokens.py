@@ -48,7 +48,7 @@ async def backfill(db_url: str) -> None:
             updates: list[tuple[int, str]] = []
             for evt in events:
                 data = json.loads(evt["data"]) if isinstance(evt["data"], str) else evt["data"]
-                running += approx_tokens(data)
+                running += approx_tokens([data])
                 updates.append((running, evt["id"]))
 
             if updates:

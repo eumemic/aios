@@ -15,7 +15,7 @@ from typing import Any
 from aios.harness.channels import MONOLOGUE_PREFIX, SWITCH_CHANNEL_METADATA_KEY
 from aios.models.events import Event
 from aios.tools.switch_channel import (
-    RE_ORIENT_FLOOR_N,
+    RE_ORIENT_FLOOR_TOKENS,
     render_reorient_block,
 )
 
@@ -400,24 +400,93 @@ class TestRecapRendering:
         assert "> \\> quoted reply" in out
         assert "> > quoted reply" not in out
 
-    def test_respects_floor_on_quiet_channel(self) -> None:
-        """Fewer than FLOOR_N messages → show them all, no padding."""
+    def test_quiet_channel_renders_all_available(self) -> None:
+        """A channel with less than the token floor's worth of history
+        renders whatever exists — no padding from thin air, no floor-
+        induced truncation.
+        """
         events = [_user(i, channel=CHAN_A, content=f"m{i}") for i in range(1, 3)]
         out = render_reorient_block(events, CHAN_A)
         assert "m1" in out
         assert "m2" in out
 
-    def test_includes_all_unread_when_over_floor(self) -> None:
-        """Unread > FLOOR_N → all unread included, not clamped to FLOOR_N."""
-        n = RE_ORIENT_FLOOR_N + 5
-        # Seqs 1..n; last_seen starts at 0, so every event has seq >
-        # last_seen and counts as unread.  Also clear focal_at_arrival
-        # so the derivation doesn't anchor the watermark mid-stream.
+    def test_no_upper_cap_on_large_unread(self) -> None:
+        """Unread peer content exceeding the token floor is emitted in
+        full — the floor is a minimum, not a cap.  Truncating would
+        silently lose peer messages the agent just switched back to
+        read, which is the whole point of the recap.
+        """
+        # Build enough unread peers to blow past the floor.  Each msg
+        # is ~200 rendered chars (50 tokens-ish via approx), so 80 of
+        # them is ~4000 tokens — well over the 2000 floor.
+        body = "x" * 200
         events: list[Event] = [
-            _user(i, channel=CHAN_A, content=f"m{i:02d}") for i in range(1, n + 1)
+            _user(i, channel=CHAN_A, content=f"m{i:03d} {body}") for i in range(1, 81)
         ]
+        # Arrive as notifications (focal != orig) so every event is
+        # genuinely unread under the new watermark semantics.
         for e in events:
-            e.focal_channel_at_arrival = None
+            e.focal_channel_at_arrival = CHAN_B
+            e.channel = CHAN_A  # peers still belong to their origin channel
         out = render_reorient_block(events, CHAN_A)
-        for i in range(1, n + 1):
-            assert f"m{i:02d}" in out
+        for i in range(1, 81):
+            assert f"m{i:03d}" in out, f"unread peer m{i:03d} missing from recap"
+
+    def test_backfills_older_context_to_floor(self) -> None:
+        """Small unread + plenty of older consumed history → recap
+        walks past the unread to pad up to the token floor.  This is
+        the "re-orient even if technically nothing's new" case.
+        """
+        # 60 older peer events on A, all full-rendered while focal=A —
+        # already consumed, not unread.  ~200 chars each ≈ 3000 tokens
+        # of available history, more than the 2000-token floor.
+        body = "x" * 200
+        older = [_user(i, channel=CHAN_A, content=f"old{i:02d} {body}") for i in range(1, 61)]
+        # One trailing unread peer that arrived as a notification.
+        new = _user(100, channel=CHAN_A, content="fresh", sender="Alice")
+        new.focal_channel_at_arrival = CHAN_B
+        events: list[Event] = [*older, new]
+        out = render_reorient_block(events, CHAN_A)
+        assert "fresh" in out
+        # Floor enforces padding: we should see older content backfilled,
+        # not just the single unread event.
+        assert "old60" in out
+        # Rough size check — rendered body should be at least floor-ish
+        # (give ±20% headroom for fence/blockquote overhead and the
+        # approx_tokens `max(1, ...)` on empty-ish pieces).
+        assert len(out) >= RE_ORIENT_FLOOR_TOKENS * 4 * 0.8
+
+    def test_chatty_agent_tail_does_not_starve_peer_content(self) -> None:
+        """Issue #75 regression.  Agent emits many mono-only assistant
+        turns on the target channel (which render to empty strings in
+        the recap).  Under the old slice-then-filter pipeline these
+        empties consumed slots and squeezed peer content out of the
+        window.  The new render-then-budget pipeline skips empties
+        without charging the budget, so peer messages always surface.
+        """
+        events: list[Event] = [
+            _user(1, channel=CHAN_A, content="peer earlier", sender="Alice"),
+            *[_assistant(10 + i, focal=CHAN_A, text=f"mono {i}") for i in range(20)],
+            _user(100, channel=CHAN_A, content="peer later", sender="Alice"),
+            *[_assistant(200 + i, focal=CHAN_A, text=f"post-mono {i}") for i in range(20)],
+        ]
+        out = render_reorient_block(events, CHAN_A)
+        assert "peer earlier" in out
+        assert "peer later" in out
+        # Mono-only assistants render empty (no tool_calls → dropped).
+        assert "mono " not in out
+        assert "post-mono" not in out
+
+    def test_notification_peer_surfaces_on_switch(self) -> None:
+        """A peer message that arrived on X while focal was elsewhere is
+        a notification-only render in the agent's live context (preview,
+        not body).  On switch-to-X the recap must surface the body — it's
+        unread under the new watermark semantics and force-included.
+        """
+        # Peer on A arrived while focal=B → notification-only render.
+        peer = _user(1, channel=CHAN_A, content="full body please", sender="Alice")
+        peer.focal_channel_at_arrival = CHAN_B
+        # Keep event.channel = CHAN_A (peer still belongs to A by orig).
+        out = render_reorient_block([peer], CHAN_A)
+        assert "full body please" in out
+        assert "Alice" in out

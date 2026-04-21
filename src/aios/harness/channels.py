@@ -267,20 +267,35 @@ def _switch_marker(e: Event) -> dict[str, Any] | None:
 
 
 def derive_last_seen(events: Iterable[Event], channel: str) -> int:
-    """Compute ``last_seen_in_X`` per the focal-channel plan.
+    """Compute ``last_seen_in_X`` — the max seq where the agent consumed
+    peer content on ``channel``.
 
-    ``last_seen_in_channel = max(
-        max(seq) over events where focal_channel_at_arrival == channel,
-        max(seq) over successful switch_channel tool_results targeting channel,
-    )``
+    Consumption happens via two signals:
 
-    Both terms naturally yield ``0`` when no matching event exists
-    (empty log, channel never focused, never switched to).  Failed
-    switches and ``switch_channel(target=None)`` do not anchor.
+    1. A peer event whose body rendered full-content in the agent's
+       context: ``orig_channel == channel`` AND
+       ``focal_channel_at_arrival == channel``.  (A peer event on
+       ``channel`` arriving while focal is elsewhere renders only as a
+       notification marker — heads-up, not body — so it does not
+       anchor.)
+    2. A successful ``switch_channel(target=channel)`` tool_result
+       marker: the recap quotes recent peer content on ``channel`` so
+       the switch itself counts as consumption.
+
+    Agent emissions (assistant/tool events) don't anchor — they're not
+    peer content.  Failed switches and ``switch_channel(target=None)``
+    don't anchor.  Returns ``0`` when no consumption has happened.
+
+    Output is identical to an earlier rule that anchored on *any* event
+    with ``focal_at_arrival == channel``: focal transitions always go
+    through ``switch_channel``, whose own marker already anchors past
+    any prior peer-on-channel events, so the extra focal-based anchoring
+    only moved ``last_seen`` forward within a span already covered by
+    peer/switch anchors.  The new form is equivalent but easier to read.
     """
     last = 0
     for e in events:
-        if e.focal_channel_at_arrival == channel and e.seq > last:
+        if e.orig_channel == channel and e.focal_channel_at_arrival == channel and e.seq > last:
             last = e.seq
         marker = _switch_marker(e)
         if (
@@ -297,7 +312,9 @@ def derive_unread_counts(events: Iterable[Event], channels: Iterable[str]) -> di
     """Compute per-channel unread counts.
 
     ``unread_in_channel = count of events where orig_channel == channel
-    AND seq > last_seen_in_channel``.
+    AND seq > last_seen_in_channel`` — i.e. peer events on the channel
+    whose body the agent hasn't yet consumed (see :func:`derive_last_seen`
+    for the consumption definition).
 
     Single pass: build every channel's ``last_seen`` watermark and
     collect candidate events in one walk, then count candidates whose
@@ -309,17 +326,16 @@ def derive_unread_counts(events: Iterable[Event], channels: Iterable[str]) -> di
     last_seen = dict.fromkeys(channel_set, 0)
     candidates: list[tuple[str, int]] = []
     for e in events:
-        focal = e.focal_channel_at_arrival
-        if focal in last_seen and e.seq > last_seen[focal]:
-            last_seen[focal] = e.seq
+        orig = e.orig_channel
+        if isinstance(orig, str) and orig in last_seen:
+            if e.focal_channel_at_arrival == orig and e.seq > last_seen[orig]:
+                last_seen[orig] = e.seq
+            candidates.append((orig, e.seq))
         marker = _switch_marker(e)
         if marker is not None and marker["success"]:
             target = marker["target"]
             if target in last_seen and e.seq > last_seen[target]:
                 last_seen[target] = e.seq
-        orig = e.orig_channel
-        if isinstance(orig, str) and orig in last_seen:
-            candidates.append((orig, e.seq))
     counts = dict.fromkeys(channel_set, 0)
     for orig, seq in candidates:
         if seq > last_seen[orig]:

@@ -1,8 +1,10 @@
 """Token counting helpers.
 
-* :func:`approx_tokens` — fast, dependency-free ``len // 4`` estimate
-  used by the cumulative-tokens column and context windowing.  Suitable
-  for boundary decisions where ±10 % accuracy is fine.
+* :func:`approx_tokens` — cost estimate for a sequence of chat-
+  completions messages, delegating to :func:`litellm.token_counter`.
+  Single source of truth: the ``cumulative_tokens`` column, context
+  windowing, and per-tool budgeting (e.g. the ``switch_channel``
+  recap floor) all go through this.
 
 * :func:`tokens_to_drop` — snap boundary math shared by the DB-level
   windowed reader and the pure-function ``select_window``.
@@ -10,29 +12,33 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from typing import Any
 
-# ─── cheap estimator (no external deps) ────────────────────────────────────
+from litellm import token_counter
+
+# ─── estimator (delegates to litellm's local tokenizers) ──────────────────
 
 
-def approx_tokens(message: dict[str, Any]) -> int:
-    """Rough token count for a chat-completions message dict.
+def approx_tokens(messages: Iterable[Mapping[str, Any]]) -> int:
+    """Estimate the chat-completions token cost of ``messages``.
 
-    Counts characters in ``content`` plus ``tool_calls[].function.{name,
-    arguments}`` and divides by 4.  Returns at least 1.
+    Delegates to :func:`litellm.token_counter` with no ``model``
+    argument, so the default tokenizer applies.  Accurate to within
+    ~10 % across providers — fine for windowing boundaries and budget
+    decisions, without coupling every call site to a specific model.
 
-    This is the single source of truth for the ``cumulative_tokens``
-    column on the events table and for the chunked-window boundary
-    computation.  If the formula changes, run the backfill script to
-    recompute stored values.
+    Takes an iterable of chat-completions-shaped dicts, not raw
+    strings: callers that want to cost a single message pass ``[msg]``.
+    The canonical shape is a list, so passing a bare dict would be a
+    bug (it'd iterate the dict's keys as messages).
+
+    ``cumulative_tokens`` storage depends on this formula.  If the
+    implementation changes (e.g. a different tokenizer, passing
+    ``model=...``), re-run the backfill script to keep stored values
+    honest.
     """
-    content = message.get("content") or ""
-    tool_calls = message.get("tool_calls") or []
-    total_chars = len(content)
-    for tc in tool_calls:
-        fn = tc.get("function") or {}
-        total_chars += len(fn.get("name") or "") + len(fn.get("arguments") or "")
-    return max(1, total_chars // 4)
+    return int(token_counter(messages=list(messages)))
 
 
 # ─── snap boundary math ───────────────────────────────────────────────────
