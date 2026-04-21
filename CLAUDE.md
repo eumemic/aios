@@ -85,6 +85,15 @@ They don't share connections; they share Postgres state.
 - **Co-Authored-By trailer** on AI-authored commits.
 - **Ask non-trivial design decisions** before writing code.
 
+## How to approach changes
+
+- **Investigate before fixing** — when something behaves oddly (unexpected errors, stuck jobs, state inconsistencies), find the root cause first. Don't kill processes, delete rows, or reset state as a shortcut.
+- **Fail hard, no fallbacks** — no silent skipping, no dummy values, no error suppression. The model sees raw errors and retries through the session log; that IS the design.
+- **Correct-by-construction** — the Key invariants below (gapless seq, monotonic context, tool-always-appends-result) are examples of this stance. Prefer designs that produce valid state in one pass over multi-stage corrective pipelines.
+- **Push back on bad requests** — if a request conflicts with existing architecture, or has an obvious root-cause fix the user missed, flag it before implementing. You have context the user may not in the moment.
+- **Don't deprecate, delete** — remove old code paths rather than leaving shims. Git history preserves them.
+- **After refactors, grep exhaustively** — for any rename or move, search the whole tree (including tests) for the old name before declaring done.
+
 ## Key invariants
 
 1. **Gapless seq per session** — every `append_event` locks the session row, increments `last_event_seq`, inserts. No gaps.
