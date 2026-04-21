@@ -7,15 +7,22 @@ one place without creating a circular ``api → harness`` dependency.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from procrastinate import exceptions as procrastinate_exceptions
 from procrastinate.types import JSONValue
 
 from aios.logging import get_logger
+from aios.services import sessions as sessions_service
+
+if TYPE_CHECKING:
+    import asyncpg
 
 log = get_logger("aios.harness.wake")
 
 
 async def defer_wake(
+    pool: asyncpg.Pool[Any],
     session_id: str,
     *,
     cause: str = "message",
@@ -32,8 +39,18 @@ async def defer_wake(
     (procrastinate's ``schedule_in``).  ``wake_reason`` is a short string
     carried as a task kwarg and surfaced to the agent at wake time when
     ``cause == "scheduled"``; see ``run_session_step``.
+
+    Appends a ``wake_deferred`` span event before enqueuing — emitted
+    regardless of whether procrastinate coalesces this deferral with
+    an existing queued wake, so the profiler (issue #132) can observe
+    coalescing as N ``wake_deferred`` → 1 ``step_start``.
     """
     from aios.harness.procrastinate_app import app
+
+    span_data: dict[str, Any] = {"event": "wake_deferred", "cause": cause}
+    if delay_seconds is not None:
+        span_data["delay_seconds"] = delay_seconds
+    await sessions_service.append_event(pool, session_id, "span", span_data)
 
     task_kwargs: dict[str, JSONValue] = {"session_id": session_id, "cause": cause}
     if wake_reason is not None:
@@ -58,7 +75,12 @@ async def defer_wake(
         )
 
 
-async def defer_retry_wake(session_id: str, *, delay_seconds: float) -> None:
+async def defer_retry_wake(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    delay_seconds: float,
+) -> None:
     """Enqueue a delayed ``wake_session`` job for retry after a transient error.
 
     Mirrors :func:`defer_wake` but schedules the job ``delay_seconds``
@@ -68,6 +90,13 @@ async def defer_retry_wake(session_id: str, *, delay_seconds: float) -> None:
     the handler will defer a fresh retry.
     """
     from aios.harness.procrastinate_app import app
+
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {"event": "wake_deferred", "cause": "reschedule", "delay_seconds": delay_seconds},
+    )
 
     try:
         await app.configure_task(

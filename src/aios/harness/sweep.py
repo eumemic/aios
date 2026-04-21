@@ -432,5 +432,5 @@ async def wake_sessions_needing_inference(
     await find_and_repair_ghosts(pool, task_registry, session_id=session_id)
     session_ids = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
     for sid in session_ids:
-        await defer_wake(sid, cause="sweep")
+        await defer_wake(pool, sid, cause="sweep")
     return session_ids

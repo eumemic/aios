@@ -21,7 +21,7 @@ and proceeds.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
@@ -34,6 +34,11 @@ from aios.logging import get_logger
 from aios.models.agents import ToolSpec
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
+
+if TYPE_CHECKING:
+    import asyncpg
+
+    from aios.harness.task_registry import TaskRegistry
 
 log = get_logger("aios.harness.loop")
 
@@ -68,6 +73,53 @@ async def run_session_step(
     pool = runtime.require_pool()
     task_registry = runtime.require_task_registry()
 
+    # Outermost span pair: brackets the entire step (issue #131).  Emitted
+    # before the sweep guard so early-outs are also measured — a "wasted
+    # wake" cost shows up as a ``step_start``/``step_end`` pair with no
+    # ``context_build_*`` inside.  ``step_start_id`` backpointer on the
+    # end event matches the ``context_build_start_id`` convention.
+    step_start = await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {"event": "step_start", "cause": cause},
+    )
+    retry_delay: float | None = None
+    try:
+        retry_delay = await _run_session_step_body(
+            pool, task_registry, session_id, cause=cause, wake_reason=wake_reason
+        )
+    finally:
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {"event": "step_end", "step_start_id": step_start.id},
+        )
+
+    # Fire retry deferral AFTER ``step_end`` so its ``wake_deferred`` lands
+    # in step N+1's temporal window, not step N's. Under the "all
+    # wake_deferred since previous step_end" pairing rule, emitting
+    # inside the body would make the reschedule invisible to the next
+    # step's queue-latency calculation — the one path where delay is
+    # a known quantity (the retry backoff).
+    if retry_delay is not None:
+        await defer_retry_wake(pool, session_id, delay_seconds=retry_delay)
+
+
+async def _run_session_step_body(
+    pool: asyncpg.Pool[Any],
+    task_registry: TaskRegistry,
+    session_id: str,
+    *,
+    cause: str,
+    wake_reason: str | None,
+) -> float | None:
+    """Returns the retry backoff delay when the model errored and the
+    outer function should ``defer_retry_wake`` after ``step_end``; ``None``
+    otherwise.  Keeping the actual ``defer_retry_wake`` call outside the
+    body is what makes the reschedule's ``wake_deferred`` land in the
+    next step's temporal window."""
     if cause == "scheduled" and wake_reason:
         await sessions_service.append_event(
             pool,
@@ -84,7 +136,7 @@ async def run_session_step(
     needs = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
     if session_id not in needs:
         log.debug("step.early_out", session_id=session_id, cause=cause)
-        return
+        return None
 
     session = await sessions_service.get_session(pool, session_id)
 
@@ -133,7 +185,7 @@ async def run_session_step(
             session_id=session_id,
             count=len(pending),
         )
-        return
+        return None
 
     # Span the remainder of the prologue so "why is the step slow?"
     # can separate context-build cost from model-call cost (issue #78).
@@ -254,8 +306,7 @@ async def run_session_step(
                 pool, session_id, "rescheduling", stop_reason={"type": "rescheduling"}
             )
             await _append_lifecycle(pool, session_id, "turn_ended", "rescheduling", "rescheduling")
-            await defer_retry_wake(session_id, delay_seconds=delay)
-            return
+            return delay
 
         await sessions_service.set_session_status(
             pool, session_id, "idle", stop_reason={"type": "error"}
@@ -390,6 +441,7 @@ async def run_session_step(
         )
         await _append_lifecycle(pool, session_id, "turn_ended", "idle", "end_turn")
         log.info("step.turn_ended", session_id=session_id, cause=cause)
+    return None
 
 
 def _switch_channel_tool_spec() -> dict[str, Any]:

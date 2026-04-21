@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -200,7 +200,7 @@ class TestRunSessionStepOnModelError:
         ):
             await run_session_step("sess_x")
 
-        mock_step_dependencies.defer_retry.assert_awaited_once_with("sess_x", delay_seconds=2)
+        mock_step_dependencies.defer_retry.assert_awaited_once_with(ANY, "sess_x", delay_seconds=2)
         status_calls = [call.args[2] for call in mock_step_dependencies.set_status.call_args_list]
         assert "rescheduling" in status_calls
         assert "idle" not in status_calls

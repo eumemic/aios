@@ -8,15 +8,27 @@ agent never actually gets a step at T+delay.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aios.harness.loop import run_session_step
 
 
+def _message_appends(append_event: AsyncMock) -> list[tuple[Any, ...]]:
+    """Extract positional args of ``append_event`` calls with ``kind == 'message'``.
+
+    ``run_session_step`` now wraps its body in ``step_start``/``step_end``
+    span appends (issue #131), so a raw ``await_count`` check is no longer
+    the right assertion.  Filter to the ``message`` kind to focus on the
+    scheduled-wake marker specifically.
+    """
+    return [call.args for call in append_event.await_args_list if call.args[2] == "message"]
+
+
 class TestScheduledWakeMarker:
     async def test_marker_appended_before_sweep_for_scheduled_wake(self) -> None:
-        append_event = AsyncMock()
+        append_event = AsyncMock(return_value=SimpleNamespace(id="ev_x"))
         with (
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
             patch(
@@ -34,10 +46,9 @@ class TestScheduledWakeMarker:
         ):
             await run_session_step("sess_x", cause="scheduled", wake_reason="ping home")
 
-        assert append_event.await_count == 1
-        call = append_event.await_args
-        assert call is not None
-        args, _ = call.args, call.kwargs
+        messages = _message_appends(append_event)
+        assert len(messages) == 1
+        args = messages[0]
         assert args[2] == "message"
         assert args[3] == {
             "role": "user",
@@ -45,7 +56,7 @@ class TestScheduledWakeMarker:
         }
 
     async def test_no_marker_for_non_scheduled_causes(self) -> None:
-        append_event = AsyncMock()
+        append_event = AsyncMock(return_value=SimpleNamespace(id="ev_x"))
         with (
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
             patch(
@@ -65,11 +76,11 @@ class TestScheduledWakeMarker:
             await run_session_step("sess_x", cause="reschedule", wake_reason=None)
             await run_session_step("sess_x", cause="tool_result", wake_reason=None)
 
-        append_event.assert_not_awaited()
+        assert _message_appends(append_event) == []
 
     async def test_scheduled_cause_without_reason_is_noop(self) -> None:
         """Defensive: ``cause="scheduled"`` with no reason attached doesn't inject noise."""
-        append_event = AsyncMock()
+        append_event = AsyncMock(return_value=SimpleNamespace(id="ev_x"))
         with (
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
             patch(
@@ -87,7 +98,7 @@ class TestScheduledWakeMarker:
         ):
             await run_session_step("sess_x", cause="scheduled", wake_reason=None)
 
-        append_event.assert_not_awaited()
+        assert _message_appends(append_event) == []
 
 
 class TestDeferWakeExtension:
@@ -103,10 +114,13 @@ class TestDeferWakeExtension:
         from aios.harness.procrastinate_app import app
         from aios.harness.wake import defer_wake
 
+        monkeypatch.setattr("aios.harness.wake.sessions_service.append_event", AsyncMock())
+
         patched: App
         with app.replace_connector(InMemoryConnector()) as patched:
             before = datetime.now(UTC)
             await defer_wake(
+                MagicMock(),
                 "sess_x",
                 cause="scheduled",
                 delay_seconds=42,
@@ -127,14 +141,16 @@ class TestDeferWakeExtension:
                 <= after + timedelta(seconds=42)
             )
 
-    async def test_defer_wake_without_delay_is_immediate(self) -> None:
+    async def test_defer_wake_without_delay_is_immediate(self, monkeypatch: Any) -> None:
         from procrastinate.testing import InMemoryConnector
 
         from aios.harness.procrastinate_app import app
         from aios.harness.wake import defer_wake
 
+        monkeypatch.setattr("aios.harness.wake.sessions_service.append_event", AsyncMock())
+
         with app.replace_connector(InMemoryConnector()) as patched:
-            await defer_wake("sess_x", cause="message")
+            await defer_wake(MagicMock(), "sess_x", cause="message")
 
             (job,) = patched.connector.jobs.values()
             assert job["scheduled_at"] is None

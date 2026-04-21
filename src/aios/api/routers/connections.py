@@ -102,7 +102,7 @@ async def post_message(
     event = await sessions_service.append_user_message(
         pool, resolution.session_id, body.content, metadata=metadata
     )
-    await defer_wake(resolution.session_id, cause="inbound_message")
+    await defer_wake(pool, resolution.session_id, cause="inbound_message")
 
     return InboundMessageResponse(
         session_id=resolution.session_id,
