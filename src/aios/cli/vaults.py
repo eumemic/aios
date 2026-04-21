@@ -55,6 +55,17 @@ async def run_async(argv: list[str]) -> int:
     )
     archive.add_argument("vault_id", help="Vault id")
 
+    delete = sub.add_parser(
+        "delete",
+        help="Hard-delete a vault (irreversible; prefer `archive` instead)",
+    )
+    delete.add_argument("vault_id", help="Vault id")
+    delete.add_argument(
+        "--yes",
+        action="store_true",
+        help="Required to confirm hard-delete (no interactive prompt)",
+    )
+
     update = sub.add_parser("update", help="Update a vault's display name or metadata")
     update.add_argument("vault_id", help="Vault id")
     update.add_argument("--display-name", default=None, help="New display name")
@@ -97,6 +108,14 @@ async def run_async(argv: list[str]) -> int:
         return await _get(api_url, api_key, vault_id=args.vault_id)
     if args.verb == "archive":
         return await _archive(api_url, api_key, vault_id=args.vault_id)
+    if args.verb == "delete":
+        if not args.yes:
+            print(
+                f"{_PROG}: hard-delete is irreversible; pass --yes to confirm",
+                file=sys.stderr,
+            )
+            return 2
+        return await _delete(api_url, api_key, vault_id=args.vault_id)
     if args.verb == "update":
         metadata: dict[str, Any] | None = None
         if args.metadata_json is not None:
@@ -161,6 +180,17 @@ async def _update(
         print_http_error(_PROG, response)
         return 2
     print(json.dumps(response.json(), indent=2))
+    return 0
+
+
+async def _delete(api_url: str, api_key: str, *, vault_id: str) -> int:
+    url = f"{api_url.rstrip('/')}/v1/vaults/{vault_id}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with async_client() as client:
+        response = await client.delete(url, headers=headers)
+    if response.status_code != 204:
+        print_http_error(_PROG, response)
+        return 2
     return 0
 
 
