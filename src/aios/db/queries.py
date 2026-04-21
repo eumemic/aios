@@ -959,7 +959,7 @@ async def lookup_tool_name_by_call_id(
     tool results whose name is already in ``data``).
     """
     name: str | None = await conn.fetchval(
-        "SELECT tc->>'name' "
+        "SELECT tc->'function'->>'name' "
         "FROM events, "
         "     jsonb_array_elements(data->'tool_calls') AS tc "
         "WHERE session_id = $1 "

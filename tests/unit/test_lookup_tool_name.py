@@ -46,6 +46,7 @@ class TestLookupToolNameByCallId:
         assert "tool_calls" in sql
         assert "assistant" in sql
         assert "jsonb_array_elements" in sql or "@>" in sql
+        assert "function" in sql
 
 
 # ─── submit_tool_result name injection ───────────────────────────────────────
