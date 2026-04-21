@@ -273,12 +273,6 @@ async def _trigger_sweep(
 ) -> None:
     """Run the sweep for this session. Called from the finally block of
     every tool task — both built-in and MCP.
-
-    Brackets the sweep with a ``sweep_start``/``sweep_end`` span pair
-    (``site="tail"``). The tail site exercises the full composite sweep
-    (ghost repair + find + defer), so ``sweep_end`` carries the real
-    ``repaired_ghosts`` and ``woken_sessions`` counts from
-    :class:`SweepResult`.
     """
     from aios.harness.sweep import SweepResult, wake_sessions_needing_inference
 
