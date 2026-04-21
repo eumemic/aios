@@ -118,30 +118,21 @@ def _parse_spans(raw_events: list[dict[str, Any]]) -> list[Span]:
     return spans
 
 
-_START_ID_FIELDS = {
-    "step_end": "step_start_id",
-    "sweep_end": "sweep_start_id",
-    "context_build_end": "context_build_start_id",
-    "model_request_end": "model_request_start_id",
-    "tool_execute_end": "tool_execute_start_id",
-    "sandbox_provision_end": "sandbox_provision_start_id",
-}
-
-
 def _pair_spans(spans: list[Span]) -> tuple[dict[str, Pair], list[str]]:
     """Return (pairs_by_start_id, warnings).
 
-    Pairs ``*_end`` back to ``*_start`` via the backpointer convention.
-    ``wake_deferred`` is a singular span with no pair. Unpaired ends are
-    reported as warnings but do not fail the profile.
+    Pairs ``*_end`` back to ``*_start`` via the backpointer convention
+    (``<phase>_start_id`` lives on the end event). ``wake_deferred`` is
+    singular with no pair. Unpaired ends are reported as warnings but do
+    not fail the profile.
     """
     by_id = {s.id: s for s in spans}
     pairs: dict[str, Pair] = {}
     warnings: list[str] = []
     for s in spans:
-        field_name = _START_ID_FIELDS.get(s.event)
-        if field_name is None:
+        if not s.event.endswith("_end"):
             continue
+        field_name = f"{s.event.removesuffix('_end')}_start_id"
         start_id = s.data.get(field_name)
         if not isinstance(start_id, str):
             warnings.append(f"seq={s.seq} {s.event}: missing {field_name}")
@@ -224,7 +215,7 @@ def compute_profile(
         (p for p in pairs.values() if p.start.event == "step_start"),
         key=lambda p: p.start.seq,
     )
-    if turns is not None and turns > 0:
+    if turns is not None:
         step_pairs = _slice_last_turns(step_pairs, turns)
 
     if not step_pairs:
