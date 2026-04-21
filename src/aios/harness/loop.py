@@ -259,6 +259,7 @@ async def run_session_step(
             model=agent.model,
             messages=ctx.messages,
             tools=tools if tools else None,
+            extra=agent.litellm_extra or None,
             pool=pool,
             session_id=session_id,
         )
