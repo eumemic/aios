@@ -49,7 +49,12 @@ def _event_to_sse(event_dict: dict[str, Any]) -> ServerSentEvent:
 
 
 def _serialize_event(row: asyncpg.Record) -> dict[str, Any]:
-    """Convert an asyncpg event row to a JSON-friendly dict."""
+    """Convert an asyncpg event row to a JSON-friendly dict.
+
+    ``orig_channel`` and ``channel`` come along so downstream consumers
+    (e.g. the ``aios tail`` CLI) can tag user messages and spot
+    wrong-channel sends without re-querying.
+    """
     import json
 
     raw_data = row["data"]
@@ -61,6 +66,8 @@ def _serialize_event(row: asyncpg.Record) -> dict[str, Any]:
         "kind": row["kind"],
         "data": parsed,
         "created_at": row["created_at"].isoformat(),
+        "orig_channel": row["orig_channel"],
+        "channel": row["channel"],
     }
 
 
