@@ -85,5 +85,5 @@ def test_delete_is_hard_delete_with_yes(mocked_cli):
 def test_delete_refuses_without_yes_and_makes_no_request(mocked_cli):
     result = runner.invoke(app, ["vaults", "credentials", "delete", "vlt_1", "cred_1"])
     assert result.exit_code == 2
-    assert "irreversible" in result.output
+    assert "--yes" in result.output
     assert mocked_cli.captured.method == ""  # no HTTP call was made
