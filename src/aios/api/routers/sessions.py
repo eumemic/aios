@@ -11,6 +11,7 @@ Postgres ``LISTEN``/``NOTIFY``.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Query, status
@@ -23,6 +24,7 @@ from aios.api.deps import (
     ProcrastinateDep,
 )
 from aios.api.sse import sse_event_stream
+from aios.db.listen import listen_for_events
 from aios.harness.wake import defer_wake
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
@@ -34,6 +36,7 @@ from aios.models.sessions import (
     SessionUserMessage,
     ToolConfirmationRequest,
     ToolResultRequest,
+    WaitResponse,
 )
 from aios.services import sessions as service
 
@@ -225,4 +228,53 @@ async def stream_events(
     return EventSourceResponse(
         sse_event_stream(db_url, pool, session_id, after_seq=after_seq),
         ping=15,
+    )
+
+
+@router.get("/{session_id}/wait")
+async def wait_for_events(
+    session_id: str,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    _auth: AuthDep,
+    after_seq: int = 0,
+    timeout_seconds: Annotated[int, Query(alias="timeout", ge=0, le=60)] = 30,
+) -> WaitResponse:
+    """Long-poll for new events past ``after_seq``.
+
+    Blocks up to ``timeout`` seconds for events to arrive; returns an empty
+    list if none land in time. Alternative to SSE for clients whose HTTP
+    stack can't reliably consume server-sent events (notably Node's
+    ``fetch`` — see issue #40).
+    """
+    await service.get_session(pool, session_id)
+
+    async with listen_for_events(db_url, session_id) as queue:
+        events = await service.read_events(pool, session_id, after_seq=after_seq)
+        if not events and timeout_seconds > 0:
+            # The channel carries both committed-event IDs and transient
+            # streaming delta payloads (shaped like {"delta": "..."}); only
+            # the former advance the log, so delta pokes must not count
+            # against the wait budget.
+            deadline = asyncio.get_running_loop().time() + timeout_seconds
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=remaining)
+                except TimeoutError:
+                    break
+                if payload.startswith("{"):
+                    continue
+                events = await service.read_events(pool, session_id, after_seq=after_seq)
+                if events:
+                    break
+
+    session = await service.get_session(pool, session_id)
+    return WaitResponse(
+        events=events,
+        session_status=session.status,
+        session_stop_reason=session.stop_reason,
+        next_after=events[-1].seq if events else after_seq,
     )
