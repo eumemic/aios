@@ -7,65 +7,50 @@ from aios.harness.tokens import approx_tokens
 
 
 class TestApproxTokens:
-    def test_content_only(self) -> None:
-        msg = {"role": "user", "content": "hello world"}
-        # 11 chars / 4 = 2
-        assert approx_tokens(msg) == 2
+    """approx_tokens delegates to litellm's local tokenizer with no
+    model specified.  Exact counts depend on tokenizer version, so
+    these tests pin invariants rather than specific numbers.
+    """
 
-    def test_empty_content_returns_one(self) -> None:
-        msg = {"role": "user", "content": ""}
-        assert approx_tokens(msg) == 1
+    def test_non_empty_message_costs_something(self) -> None:
+        assert approx_tokens([{"role": "user", "content": "hello world"}]) >= 1
 
-    def test_no_content_key_returns_one(self) -> None:
-        msg = {"role": "assistant"}
-        assert approx_tokens(msg) == 1
+    def test_longer_content_costs_more(self) -> None:
+        short = [{"role": "user", "content": "hi"}]
+        long = [{"role": "user", "content": "hello, this is a longer message"}]
+        assert approx_tokens(long) > approx_tokens(short)
 
-    def test_tool_calls_counted(self) -> None:
-        msg = {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "tc_1",
-                    "type": "function",
-                    "function": {"name": "bash", "arguments": '{"command": "ls"}'},
-                }
-            ],
-        }
-        # "bash" (4) + '{"command": "ls"}' (17) = 21 chars / 4 = 5
-        assert approx_tokens(msg) == 5
+    def test_empty_list_is_cheap(self) -> None:
+        """litellm charges a small constant for chat framing even on an
+        empty list; we just need it not to raise and not to explode.
+        """
+        assert 0 <= approx_tokens([]) < 10
 
-    def test_content_plus_tool_calls(self) -> None:
-        msg = {
-            "role": "assistant",
-            "content": "Let me check.",
-            "tool_calls": [
-                {
-                    "id": "tc_1",
-                    "type": "function",
-                    "function": {"name": "read", "arguments": '{"path": "/tmp/x"}'},
-                }
-            ],
-        }
-        # "Let me check." (13) + "read" (4) + '{"path": "/tmp/x"}' (18) = 35 / 4 = 8
-        assert approx_tokens(msg) == 8
+    def test_tool_calls_increase_cost(self) -> None:
+        plain = [{"role": "assistant", "content": ""}]
+        with_call = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tc_1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                    }
+                ],
+            }
+        ]
+        assert approx_tokens(with_call) > approx_tokens(plain)
 
-    def test_tool_result_message(self) -> None:
-        msg = {"role": "tool", "tool_call_id": "tc_1", "content": "file contents here"}
-        # 18 chars / 4 = 4
-        assert approx_tokens(msg) == 4
-
-    def test_multiple_tool_calls(self) -> None:
-        msg = {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"id": "a", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
-                {"id": "b", "type": "function", "function": {"name": "read", "arguments": "{}"}},
-            ],
-        }
-        # "bash" (4) + "{}" (2) + "read" (4) + "{}" (2) = 12 / 4 = 3
-        assert approx_tokens(msg) == 3
+    def test_multi_message_list_sums(self) -> None:
+        msgs = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+            {"role": "user", "content": "third"},
+        ]
+        assert approx_tokens(msgs) > approx_tokens(msgs[:1])
+        assert approx_tokens(msgs) > approx_tokens(msgs[:2])
 
 
 class TestApproxTokensUnderFocalRendering:
@@ -91,11 +76,11 @@ class TestApproxTokensUnderFocalRendering:
         focal_render = render_user_event(data, self._CHAN, self._CHAN)
         notif_render = render_user_event(data, self._CHAN, "signal/bot/other")
 
-        assert approx_tokens(notif_render) < approx_tokens(focal_render)
+        assert approx_tokens([notif_render]) < approx_tokens([focal_render])
 
     def test_legacy_null_matches_raw_data(self) -> None:
         """orig=None → Phase 2 rendering: tokens match the raw data
         (minus metadata stripping, which is content-preserving)."""
         data = {"role": "user", "content": "hello"}
         rendered = render_user_event(data, None, None)
-        assert approx_tokens(rendered) == approx_tokens(data)
+        assert approx_tokens([rendered]) == approx_tokens([data])

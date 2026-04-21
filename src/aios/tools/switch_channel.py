@@ -215,23 +215,23 @@ def render_reorient_block(all_events: list[Event], target: str) -> str:
         e.seq for e in target_events if e.orig_channel == target and e.seq > last_seen
     }
 
-    rendered_blocks: list[str] = []
+    rendered_msgs: list[dict[str, Any]] = []
     token_total = 0
     for e in reversed(target_events):
-        block = _render_recap_event(e)
-        if not block:
+        msg = _render_recap_event(e)
+        if msg is None:
             continue
-        rendered_blocks.append(block)
-        token_total += approx_tokens({"content": block})
+        rendered_msgs.append(msg)
+        token_total += approx_tokens([msg])
         unread_peer_seqs.discard(e.seq)
         if not unread_peer_seqs and token_total >= RE_ORIENT_FLOOR_TOKENS:
             break
 
-    if not rendered_blocks:
+    if not rendered_msgs:
         return f"Switched to {target}. (no prior messages on this channel)"
 
-    rendered_blocks.reverse()
-    quoted_body = _blockquote("\n\n".join(rendered_blocks))
+    rendered_msgs.reverse()
+    quoted_body = _blockquote("\n\n".join(m["content"] for m in rendered_msgs))
     return f"━━━ Recap: recent messages on {target} ━━━\n{quoted_body}\n━━━ End recap ━━━"
 
 
@@ -258,8 +258,16 @@ def _switch_channel_tool_result_tcids(all_events: list[Event]) -> set[str]:
     return tcids
 
 
-def _render_recap_event(event: Event) -> str:
-    """Render a single event into its body-of-the-recap text form.
+def _render_recap_event(event: Event) -> dict[str, Any] | None:
+    """Render a single event into a chat-completions message dict for
+    the recap body, or ``None`` if the event contributes nothing.
+
+    Returning a message dict (rather than a bare content string) keeps
+    the recap's token-budget loop honest: :func:`approx_tokens` works
+    natively on chat-completions message lists, so no caller has to
+    wrap rendered text in a synthetic ``{"content": s}`` shape just to
+    get it counted.  The caller extracts ``msg["content"]`` for the
+    final blockquote assembly.
 
     User events go through :func:`render_user_event` with
     ``focal_at_arrival=orig_channel`` to force the full-content branch
@@ -275,7 +283,7 @@ def _render_recap_event(event: Event) -> str:
     load-bearing outbound content (what the agent actually said into
     the channel) lives in the ``signal_send``-style connector tool
     calls that follow, so rendering the tool_calls is sufficient to
-    surface it.  Assistant events with no tool_calls render as empty
+    surface it.  Assistant events with no tool_calls render as ``None``
     and are dropped upstream.
 
     Tool events render as the tool output body, tagged with the tool
@@ -287,20 +295,28 @@ def _render_recap_event(event: Event) -> str:
     if role == "user":
         rendered = render_user_event(event.data, event.orig_channel, event.orig_channel)
         content = rendered.get("content")
-        return content if isinstance(content, str) else ""
+        if not isinstance(content, str) or not content:
+            return None
+        return {"role": "user", "content": content}
 
     if role == "assistant":
         calls = _render_tool_calls(event.data.get("tool_calls") or [])
-        return f"[you called: {calls}]" if calls else ""
+        if not calls:
+            return None
+        return {"role": "assistant", "content": f"[you called: {calls}]"}
 
     if role == "tool":
         content = event.data.get("content")
-        if not isinstance(content, str):
-            content = ""
+        if not isinstance(content, str) or not content:
+            return None
         tcid = event.data.get("tool_call_id") or "?"
-        return f"[tool result {tcid}] {content}".rstrip() if content else ""
+        return {
+            "role": "tool",
+            "tool_call_id": str(tcid),
+            "content": f"[tool result {tcid}] {content}".rstrip(),
+        }
 
-    return ""
+    return None
 
 
 def _render_tool_calls(tool_calls: list[dict[str, Any]]) -> str:

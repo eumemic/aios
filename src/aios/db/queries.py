@@ -926,9 +926,9 @@ async def append_event(
             prev = await _latest_cumulative_tokens(conn, session_id)
             if data.get("role") == "user" and orig_channel is not None:
                 rendered = render_user_event(data, orig_channel, focal_at_arrival)
-                cum_tokens = (prev or 0) + approx_tokens(rendered)
+                cum_tokens = (prev or 0) + approx_tokens([rendered])
             else:
-                cum_tokens = (prev or 0) + approx_tokens(data)
+                cum_tokens = (prev or 0) + approx_tokens([data])
 
         channel = await _derive_event_channel(
             conn, session_id, kind, data, orig_channel, focal_at_arrival
