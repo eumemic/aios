@@ -20,6 +20,7 @@ Called from three sites:
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
@@ -33,6 +34,21 @@ from aios.logging import get_logger
 from aios.services import sessions as sessions_service
 
 log = get_logger("aios.harness.sweep")
+
+
+@dataclass(frozen=True, slots=True)
+class SweepResult:
+    """Return value of :func:`wake_sessions_needing_inference`.
+
+    Exposes both counts so the tail-site sweep span can stamp them on
+    ``sweep_end`` without unrolling the composition. ``woken_sessions``
+    is the number of procrastinate wakes deferred; ``repaired_ghosts``
+    is the number of synthetic tool-error events appended during ghost
+    repair.
+    """
+
+    repaired_ghosts: int
+    woken_sessions: int
 
 
 # ─── ghost repair ────────────────────────────────────────────────────────────
@@ -420,17 +436,19 @@ async def wake_sessions_needing_inference(
     task_registry: TaskRegistry,
     *,
     session_id: str | None = None,
-) -> set[str]:
+) -> SweepResult:
     """The main sweep function.
 
     1. Repairs ghosts (appends synthetic error results).
     2. Finds sessions needing inference.
     3. Defers procrastinate wakes for those sessions.
 
-    Returns the set of session IDs that were woken.
+    Returns a :class:`SweepResult` carrying the repaired-ghost count and
+    the number of procrastinate wakes deferred, so the tail-site
+    ``sweep_end`` span can stamp both without unrolling the composition.
     """
-    await find_and_repair_ghosts(pool, task_registry, session_id=session_id)
-    session_ids = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
-    for sid in session_ids:
+    repaired = await find_and_repair_ghosts(pool, task_registry, session_id=session_id)
+    woken = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
+    for sid in woken:
         await defer_wake(pool, sid, cause="sweep")
-    return session_ids
+    return SweepResult(repaired_ghosts=len(repaired), woken_sessions=len(woken))

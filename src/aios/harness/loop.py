@@ -133,7 +133,33 @@ async def _run_session_step_body(
 
     # Sweep-based guard: does this session actually need work?
     # Prevents wasted DB/model calls from stale or duplicate wakes.
-    needs = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
+    #
+    # Bracket with a ``sweep_start``/``sweep_end`` span pair (site="entry").
+    # Only ``find_sessions_needing_inference`` runs here — no ghost repair,
+    # no ``defer_wake`` — so ``repaired_ghosts`` is always 0. ``woken_sessions``
+    # at ``site="entry"`` is 0 or 1: it records whether the guard determined
+    # this specific session had work. 0 indicates a wasted wake.
+    sweep_start = await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {"event": "sweep_start", "site": "entry"},
+    )
+    needs: set[str] = set()
+    try:
+        needs = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
+    finally:
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {
+                "event": "sweep_end",
+                "sweep_start_id": sweep_start.id,
+                "repaired_ghosts": 0,
+                "woken_sessions": 1 if session_id in needs else 0,
+            },
+        )
     if session_id not in needs:
         log.debug("step.early_out", session_id=session_id, cause=cause)
         return None

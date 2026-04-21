@@ -163,7 +163,14 @@ class TestStepStartEndSpans:
         ):
             await run_session_step("sess_x", cause="message")
 
-        assert _span_event_names(append_event) == ["step_start", "step_end"]
+        # Entry-site sweep spans wrap the guard check even on the
+        # wasted-wake path, so the profiler can see the SQL cost.
+        assert _span_event_names(append_event) == [
+            "step_start",
+            "sweep_start",
+            "sweep_end",
+            "step_end",
+        ]
         # step_end must reference step_start by id
         start_id = append_event.await_args_list[0].args[3]
         assert start_id == {"event": "step_start", "cause": "message"}
@@ -361,6 +368,8 @@ class TestStepStartEndSpans:
 
         assert _span_event_names(append_event) == [
             "step_start",
+            "sweep_start",
+            "sweep_end",
             "context_build_start",
             "context_build_end",
             "model_request_start",
