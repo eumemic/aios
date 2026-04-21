@@ -297,6 +297,32 @@ class TestUpdateVaultCredential:
         assert "required" in capsys.readouterr().err.lower()
 
 
+class TestDeleteVaultCredential:
+    async def test_deletes_when_yes_passed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("delete", _mock_response(204, None))
+
+        with patch("aios.cli.vault_credentials.async_client", return_value=client):
+            rc = await run_async(["delete", "vcr_01", "--vault-id", "vlt_01", "--yes"])
+
+        assert rc == 0
+        assert client.delete.await_args.args[0].endswith("/v1/vaults/vlt_01/credentials/vcr_01")
+
+    async def test_refuses_without_yes(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("delete", _mock_response(204, None))
+
+        with patch("aios.cli.vault_credentials.async_client", return_value=client):
+            rc = await run_async(["delete", "vcr_01", "--vault-id", "vlt_01"])
+
+        assert rc != 0
+        err = capsys.readouterr().err.lower()
+        assert "--yes" in err or "confirm" in err
+        client.delete.assert_not_awaited()
+
+
 class TestDispatch:
     async def test_unknown_verb_prints_usage(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

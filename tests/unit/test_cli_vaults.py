@@ -271,6 +271,46 @@ class TestUpdateVault:
         assert call.kwargs["json"] == {"metadata": md}
 
 
+class TestDeleteVault:
+    async def test_deletes_when_yes_passed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("delete", _mock_response(204, None))
+
+        with patch("aios.cli.vaults.async_client", return_value=client):
+            rc = await run_async(["delete", "vlt_01", "--yes"])
+
+        assert rc == 0
+        assert client.delete.await_args.args[0].endswith("/v1/vaults/vlt_01")
+
+    async def test_refuses_without_yes(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        # No --yes → should NOT hit the server.
+        client = _mock_async_client("delete", _mock_response(204, None))
+
+        with patch("aios.cli.vaults.async_client", return_value=client):
+            rc = await run_async(["delete", "vlt_01"])
+
+        assert rc != 0
+        err = capsys.readouterr().err.lower()
+        assert "--yes" in err or "confirm" in err
+        # Crucially: no HTTP call issued
+        client.delete.assert_not_awaited()
+
+    async def test_http_error_returns_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("delete", _mock_response(404, {"error": "not found"}))
+
+        with patch("aios.cli.vaults.async_client", return_value=client):
+            rc = await run_async(["delete", "vlt_missing", "--yes"])
+
+        assert rc != 0
+        assert "404" in capsys.readouterr().err
+
+
 class TestDispatch:
     async def test_unknown_verb_prints_usage(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
