@@ -48,15 +48,36 @@ def _retry_delay_for_attempt(attempt: int) -> float | None:
     return _RETRY_BACKOFF_SECONDS[attempt]
 
 
-async def run_session_step(session_id: str, *, cause: str = "message") -> None:
+async def run_session_step(
+    session_id: str,
+    *,
+    cause: str = "message",
+    wake_reason: str | None = None,
+) -> None:
     """Run one inference step for the session.
 
     Called by the procrastinate ``wake_session`` task. The procrastinate
     ``lock`` parameter guarantees only one step runs per session at a
     time.
+
+    When ``cause == "scheduled"`` and ``wake_reason`` is set (the
+    ``schedule_wake`` tool's delayed wake), a user-role marker is
+    appended before the sweep guard so the model has something to
+    react to on this step.
     """
     pool = runtime.require_pool()
     task_registry = runtime.require_task_registry()
+
+    if cause == "scheduled" and wake_reason:
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "message",
+            {
+                "role": "user",
+                "content": f"[Your scheduled wake fired. Reason: {wake_reason}]",
+            },
+        )
 
     # Sweep-based guard: does this session actually need work?
     # Prevents wasted DB/model calls from stale or duplicate wakes.
