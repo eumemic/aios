@@ -20,8 +20,10 @@ from contextlib import contextmanager
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
 
 from aios.cli.sse import SseMessage, parse_sse_lines
+from aios.models.common import ErrorResponse
 
 
 class AiosApiError(Exception):
@@ -54,6 +56,7 @@ class AiosClient:
         base_url: str,
         api_key: str | None,
         timeout: float = 60.0,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -64,6 +67,7 @@ class AiosClient:
             base_url=self.base_url,
             headers=headers,
             timeout=httpx.Timeout(timeout, read=timeout),
+            transport=transport,
         )
 
     def close(self) -> None:
@@ -172,17 +176,18 @@ def _raise_for_error(response: httpx.Response) -> None:
             message=response.text.strip() or response.reason_phrase or f"HTTP {status}",
         ) from None
 
-    if isinstance(body, dict) and isinstance(body.get("error"), dict):
-        err = body["error"]
+    try:
+        envelope = ErrorResponse.model_validate(body)
+    except ValidationError:
         raise AiosApiError(
             status_code=status,
-            error_type=str(err.get("type", "http_error")),
-            message=str(err.get("message", f"HTTP {status}")),
-            detail=err.get("detail") if isinstance(err.get("detail"), dict) else None,
-        )
+            error_type="http_error",
+            message=json.dumps(body) if body is not None else f"HTTP {status}",
+        ) from None
 
     raise AiosApiError(
         status_code=status,
-        error_type="http_error",
-        message=json.dumps(body) if body is not None else f"HTTP {status}",
+        error_type=envelope.error.type,
+        message=envelope.error.message,
+        detail=envelope.error.detail,
     )

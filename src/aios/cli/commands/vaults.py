@@ -9,6 +9,7 @@ import typer
 
 from aios.cli.commands._shared import (
     fetch_all,
+    just_client,
     render_list,
     render_single,
     with_client,
@@ -47,7 +48,7 @@ def list_(
                 if all_
                 else client.request("GET", "/v1/vaults", params={"limit": limit, "after": after})
             )
-        render_list(state, envelope, columns=_VAULT_COLS)
+        render_list(state.output_format, envelope, columns=_VAULT_COLS)
 
     run_or_die(_run)
 
@@ -55,10 +56,10 @@ def list_(
 @app.command("get")
 def get(ctx: typer.Context, vault_id: str) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("GET", f"/v1/vaults/{vault_id}")
-        render_single(state, obj)
+        render_single(obj)
 
     run_or_die(_run)
 
@@ -76,10 +77,10 @@ def create(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("POST", "/v1/vaults", json_body=payload)
-        render_single(state, obj)
+        render_single(obj)
         return None
 
     run_or_die(_run)
@@ -99,10 +100,10 @@ def update(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("PUT", f"/v1/vaults/{vault_id}", json_body=payload)
-        render_single(state, obj)
+        render_single(obj)
         return None
 
     run_or_die(_run)
@@ -111,10 +112,10 @@ def update(
 @app.command("archive")
 def archive(ctx: typer.Context, vault_id: str) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("POST", f"/v1/vaults/{vault_id}/archive")
-        render_single(state, obj)
+        render_single(obj)
 
     run_or_die(_run)
 
@@ -122,7 +123,7 @@ def archive(ctx: typer.Context, vault_id: str) -> None:
 @app.command("delete")
 def delete(ctx: typer.Context, vault_id: str) -> None:
     def _run() -> None:
-        _state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/vaults/{vault_id}")
 
@@ -149,7 +150,7 @@ def cred_list(
                 if all_
                 else client.request("GET", path, params={"limit": limit, "after": after})
             )
-        render_list(state, envelope, columns=_CRED_COLS)
+        render_list(state.output_format, envelope, columns=_CRED_COLS)
 
     run_or_die(_run)
 
@@ -157,10 +158,10 @@ def cred_list(
 @credentials.command("get")
 def cred_get(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("GET", f"/v1/vaults/{vault_id}/credentials/{credential_id}")
-        render_single(state, obj)
+        render_single(obj)
 
     run_or_die(_run)
 
@@ -179,10 +180,10 @@ def cred_create(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("POST", f"/v1/vaults/{vault_id}/credentials", json_body=payload)
-        render_single(state, obj)
+        render_single(obj)
         return None
 
     run_or_die(_run)
@@ -203,14 +204,14 @@ def cred_update(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request(
                 "PUT",
                 f"/v1/vaults/{vault_id}/credentials/{credential_id}",
                 json_body=payload,
             )
-        render_single(state, obj)
+        render_single(obj)
         return None
 
     run_or_die(_run)
@@ -219,12 +220,12 @@ def cred_update(
 @credentials.command("archive")
 def cred_archive(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request(
                 "POST", f"/v1/vaults/{vault_id}/credentials/{credential_id}/archive"
             )
-        render_single(state, obj)
+        render_single(obj)
 
     run_or_die(_run)
 
@@ -232,7 +233,7 @@ def cred_archive(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
 @credentials.command("delete")
 def cred_delete(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
     def _run() -> None:
-        _state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/vaults/{vault_id}/credentials/{credential_id}")
 

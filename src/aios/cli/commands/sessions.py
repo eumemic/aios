@@ -11,6 +11,7 @@ import typer
 
 from aios.cli.commands._shared import (
     fetch_all,
+    just_client,
     render_list,
     render_single,
     with_client,
@@ -49,7 +50,7 @@ def list_(
                     "/v1/sessions",
                     params={**params, "limit": limit, "after": after},
                 )
-        render_list(state, envelope, columns=_SESSION_COLS, max_widths=_SESSION_MAXW)
+        render_list(state.output_format, envelope, columns=_SESSION_COLS, max_widths=_SESSION_MAXW)
 
     run_or_die(_run)
 
@@ -57,10 +58,10 @@ def list_(
 @app.command("get", help="Fetch a session by id.")
 def get(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("GET", f"/v1/sessions/{session_id}")
-        render_single(state, obj)
+        render_single(obj)
 
     run_or_die(_run)
 
@@ -97,10 +98,10 @@ def create(
                 payload["title"] = title
             if message is not None:
                 payload["initial_message"] = message
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("POST", "/v1/sessions", json_body=payload)
-        render_single(state, obj)
+        render_single(obj)
         return None
 
     run_or_die(_run)
@@ -120,10 +121,10 @@ def update(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("PUT", f"/v1/sessions/{session_id}", json_body=payload)
-        render_single(state, obj)
+        render_single(obj)
         return None
 
     run_or_die(_run)
@@ -132,10 +133,10 @@ def update(
 @app.command("archive", help="Archive a session (status=terminated, soft).")
 def archive(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("POST", f"/v1/sessions/{session_id}/archive")
-        render_single(state, obj)
+        render_single(obj)
 
     run_or_die(_run)
 
@@ -143,7 +144,7 @@ def archive(ctx: typer.Context, session_id: str) -> None:
 @app.command("delete", help="Hard-delete a session.")
 def delete(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:
-        _state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/sessions/{session_id}")
 
@@ -167,10 +168,10 @@ def send(
             except json.JSONDecodeError as exc:
                 print_error(f"invalid --metadata JSON: {exc}")
                 return 64
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             event = client.request("POST", f"/v1/sessions/{session_id}/messages", json_body=body)
-        render_single(state, event)
+        render_single(event)
         return None
 
     run_or_die(_run)
@@ -183,13 +184,13 @@ def interrupt(
     reason: Annotated[str | None, typer.Option("--reason")] = None,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         body: dict[str, Any] = {}
         if reason is not None:
             body["reason"] = reason
         with client:
             obj = client.request("POST", f"/v1/sessions/{session_id}/interrupt", json_body=body)
-        render_single(state, obj)
+        render_single(obj)
 
     run_or_die(_run)
 
@@ -238,7 +239,7 @@ def events(
                     params={**params, "limit": limit},
                 )
         render_list(
-            state,
+            state.output_format,
             envelope,
             columns=("seq", "kind", "created_at"),
         )
@@ -359,13 +360,13 @@ def tool_result(
     error: Annotated[bool, typer.Option("--error", help="Mark the result as a failure.")] = False,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         body = {"tool_call_id": call_id, "content": content, "is_error": error}
         with client:
             event = client.request(
                 "POST", f"/v1/sessions/{session_id}/tool-results", json_body=body
             )
-        render_single(state, event)
+        render_single(event)
 
     run_or_die(_run)
 
@@ -383,7 +384,7 @@ def tool_confirm(
         if allow == deny:
             print_error("exactly one of --allow or --deny must be provided")
             return 64
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         body: dict[str, Any] = {
             "tool_call_id": call_id,
             "result": "allow" if allow else "deny",
@@ -394,7 +395,7 @@ def tool_confirm(
             event = client.request(
                 "POST", f"/v1/sessions/{session_id}/tool-confirmations", json_body=body
             )
-        render_single(state, event)
+        render_single(event)
         return None
 
     run_or_die(_run)

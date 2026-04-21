@@ -9,6 +9,7 @@ import typer
 
 from aios.cli.commands._shared import (
     fetch_all,
+    just_client,
     render_list,
     render_single,
     with_client,
@@ -43,7 +44,7 @@ def list_(
                     "/v1/channel-bindings",
                     params={**params, "limit": limit, "after": after},
                 )
-        render_list(state, envelope, columns=_COLS, max_widths=_MAXW)
+        render_list(state.output_format, envelope, columns=_COLS, max_widths=_MAXW)
 
     run_or_die(_run)
 
@@ -51,10 +52,10 @@ def list_(
 @app.command("get")
 def get(ctx: typer.Context, binding_id: str) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("GET", f"/v1/channel-bindings/{binding_id}")
-        render_single(state, obj)
+        render_single(obj)
 
     run_or_die(_run)
 
@@ -72,10 +73,10 @@ def create(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("POST", "/v1/channel-bindings", json_body=payload)
-        render_single(state, obj)
+        render_single(obj)
         return None
 
     run_or_die(_run)
@@ -84,7 +85,7 @@ def create(
 @app.command("delete")
 def delete(ctx: typer.Context, binding_id: str) -> None:
     def _run() -> None:
-        _state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/channel-bindings/{binding_id}")
 

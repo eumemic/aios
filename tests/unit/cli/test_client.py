@@ -15,18 +15,13 @@ import pytest
 from aios.cli.client import AiosApiError, AiosClient
 
 
-def _mock_client(handler) -> AiosClient:
+def _mock_client(handler, *, api_key: str | None = "key-123") -> AiosClient:
     """Build an AiosClient whose underlying httpx.Client uses ``handler``."""
-    transport = httpx.MockTransport(handler)
-    client = AiosClient(base_url="http://test.invalid", api_key="key-123")
-    # Swap in a MockTransport-backed Client with the same headers.
-    client._client.close()
-    client._client = httpx.Client(
-        transport=transport,
+    return AiosClient(
         base_url="http://test.invalid",
-        headers={"Authorization": "Bearer key-123", "Accept": "application/json"},
+        api_key=api_key,
+        transport=httpx.MockTransport(handler),
     )
-    return client
 
 
 def test_bearer_header_sent():
@@ -49,15 +44,7 @@ def test_missing_api_key_sends_no_auth_header():
         captured["auth"] = request.headers.get("Authorization")
         return httpx.Response(200, json={"ok": True})
 
-    transport = httpx.MockTransport(handler)
-    client = AiosClient(base_url="http://test.invalid", api_key=None)
-    client._client.close()
-    client._client = httpx.Client(
-        transport=transport,
-        base_url="http://test.invalid",
-        headers={"Accept": "application/json"},
-    )
-    with client:
+    with _mock_client(handler, api_key=None) as client:
         client.request("GET", "/health")
     assert captured["auth"] is None
 

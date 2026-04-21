@@ -61,17 +61,15 @@ def test_resolve_base_url_precedence(monkeypatch):
 
 
 def test_resolve_base_url_fallback_uses_api_port(monkeypatch):
-    # get_cli_settings is LRU-cached across tests; clear it so this test
-    # observes the monkeypatched env.
-    from aios.cli.config import get_cli_settings
-
     monkeypatch.delenv("AIOS_URL", raising=False)
     monkeypatch.setenv("AIOS_API_PORT", "8090")
-    get_cli_settings.cache_clear()
-    try:
-        assert resolve_base_url(None) == "http://127.0.0.1:8090"
-    finally:
-        get_cli_settings.cache_clear()
+    assert resolve_base_url(None) == "http://127.0.0.1:8090"
+
+
+def test_resolve_base_url_default_port(monkeypatch):
+    monkeypatch.delenv("AIOS_URL", raising=False)
+    monkeypatch.delenv("AIOS_API_PORT", raising=False)
+    assert resolve_base_url(None) == "http://127.0.0.1:8080"
 
 
 def test_create_payload_requires_source(monkeypatch):

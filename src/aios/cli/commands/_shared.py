@@ -12,39 +12,43 @@ from typing import Any
 import typer
 
 from aios.cli.client import AiosClient
-from aios.cli.output import print_json, print_table
+from aios.cli.output import OutputFormat, print_json, print_note, print_table
 from aios.cli.runtime import CliState, get_state
 
 
 def with_client(ctx: typer.Context) -> tuple[CliState, AiosClient]:
-    """Return (state, client) for a command body."""
+    """Return (state, client) for a command body. Use when ``output_format`` or
+    ``verbose`` is needed alongside the client."""
     state = get_state(ctx)
     return state, state.client()
 
 
-def render_single(state: CliState, obj: Any) -> None:
-    """Print a single resource. Always JSON regardless of --format (matches the
-    server's shape directly), because single-resource dicts contain nested
-    structures that don't tabulate well.
+def just_client(ctx: typer.Context) -> AiosClient:
+    """Return only the client. Use for commands that never render a list."""
+    return get_state(ctx).client()
+
+
+def render_single(obj: Any) -> None:
+    """Print a single resource. Always JSON regardless of ``--format`` because
+    single-resource dicts contain nested structures that don't tabulate well.
     """
     print_json(obj)
 
 
 def render_list(
-    state: CliState,
+    output_format: OutputFormat,
     envelope: dict[str, Any],
     *,
     columns: Sequence[str],
     headers: Sequence[str] | None = None,
     max_widths: dict[str, int] | None = None,
 ) -> None:
-    """Print a ListResponse envelope.
+    """Print a ``ListResponse`` envelope honoring ``output_format``.
 
-    In ``table`` format, prints a table of ``data`` rows using ``columns``,
-    and emits a dim hint if ``has_more`` is True. In ``json`` format,
-    dumps the full envelope (data + has_more + next_after).
+    JSON: dump the full envelope (data + has_more + next_after).
+    Table: render ``data`` rows; emit a dim hint if ``has_more``.
     """
-    if state.output_format == "json":
+    if output_format == "json":
         print_json(envelope)
         return
 
@@ -53,8 +57,6 @@ def render_list(
     print_table(data, columns, headers=headers, max_widths=max_widths)
     if envelope.get("has_more"):
         nxt = envelope.get("next_after")
-        from aios.cli.output import print_note
-
         if nxt is not None:
             print_note(f"… more results. Re-run with --after {nxt}")
         else:

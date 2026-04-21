@@ -9,6 +9,7 @@ import typer
 
 from aios.cli.commands._shared import (
     fetch_all,
+    just_client,
     render_list,
     render_single,
     with_client,
@@ -37,7 +38,7 @@ def list_(
                 if all_
                 else client.request("GET", "/v1/skills", params={"limit": limit, "after": after})
             )
-        render_list(state, envelope, columns=_COLS)
+        render_list(state.output_format, envelope, columns=_COLS)
 
     run_or_die(_run)
 
@@ -45,10 +46,10 @@ def list_(
 @app.command("get", help="Fetch a skill.")
 def get(ctx: typer.Context, skill_id: str) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("GET", f"/v1/skills/{skill_id}")
-        render_single(state, obj)
+        render_single(obj)
 
     run_or_die(_run)
 
@@ -74,10 +75,10 @@ def create(
         )
         if isinstance(payload, int):
             return payload
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("POST", "/v1/skills", json_body=payload)
-        render_single(state, obj)
+        render_single(obj)
         return None
 
     run_or_die(_run)
@@ -86,7 +87,7 @@ def create(
 @app.command("delete", help="Soft-archive a skill.")
 def delete(ctx: typer.Context, skill_id: str) -> None:
     def _run() -> None:
-        _state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/skills/{skill_id}")
 
@@ -111,7 +112,7 @@ def versions(
                 else client.request("GET", path, params={"limit": limit, "after": after})
             )
         render_list(
-            state,
+            state.output_format,
             envelope,
             columns=("version", "name", "description", "created_at"),
             max_widths={"description": 60, "name": 32},
@@ -123,10 +124,10 @@ def versions(
 @app.command("version", help="Fetch a specific skill version.")
 def version(ctx: typer.Context, skill_id: str, version: int) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("GET", f"/v1/skills/{skill_id}/versions/{version}")
-        render_single(state, obj)
+        render_single(obj)
 
     run_or_die(_run)
 
@@ -154,10 +155,10 @@ def version_create(
             except PayloadError as exc:
                 print_error(str(exc))
                 return 64
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("POST", f"/v1/skills/{skill_id}/versions", json_body=payload)
-        render_single(state, obj)
+        render_single(obj)
         return None
 
     run_or_die(_run)

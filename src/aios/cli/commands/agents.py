@@ -9,6 +9,7 @@ import typer
 
 from aios.cli.commands._shared import (
     fetch_all,
+    just_client,
     render_list,
     render_single,
     with_client,
@@ -41,7 +42,7 @@ def list_(
                 envelope = client.request(
                     "GET", "/v1/agents", params={"limit": limit, "after": after}
                 )
-        render_list(state, envelope, columns=_COLS, max_widths=_MAXW)
+        render_list(state.output_format, envelope, columns=_COLS, max_widths=_MAXW)
 
     run_or_die(_run)
 
@@ -49,10 +50,10 @@ def list_(
 @app.command("get", help="Fetch a single agent by id.")
 def get(ctx: typer.Context, agent_id: str) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             agent = client.request("GET", f"/v1/agents/{agent_id}")
-        render_single(state, agent)
+        render_single(agent)
 
     run_or_die(_run)
 
@@ -70,10 +71,10 @@ def create(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             agent = client.request("POST", "/v1/agents", json_body=payload)
-        render_single(state, agent)
+        render_single(agent)
         return None
 
     run_or_die(_run)
@@ -93,10 +94,10 @@ def update(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             agent = client.request("PUT", f"/v1/agents/{agent_id}", json_body=payload)
-        render_single(state, agent)
+        render_single(agent)
         return None
 
     run_or_die(_run)
@@ -105,7 +106,7 @@ def update(
 @app.command("delete", help="Soft-archive an agent.")
 def delete(ctx: typer.Context, agent_id: str) -> None:
     def _run() -> None:
-        _state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/agents/{agent_id}")
 
@@ -132,7 +133,7 @@ def versions(
                     params={"limit": limit, "after": after},
                 )
         render_list(
-            state,
+            state.output_format,
             envelope,
             columns=("version", "name", "model", "created_at"),
             max_widths={"name": 32, "model": 40},
@@ -144,9 +145,9 @@ def versions(
 @app.command("version", help="Fetch a specific agent version.")
 def version(ctx: typer.Context, agent_id: str, version: int) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        client = just_client(ctx)
         with client:
             obj = client.request("GET", f"/v1/agents/{agent_id}/versions/{version}")
-        render_single(state, obj)
+        render_single(obj)
 
     run_or_die(_run)
