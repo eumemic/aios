@@ -26,6 +26,7 @@ import json
 from typing import Any
 
 import asyncpg
+import jsonschema  # type: ignore[import-untyped]
 
 from aios.harness import runtime
 from aios.logging import get_logger
@@ -103,6 +104,20 @@ async def _execute_tool_async(
             await _append_tool_result(pool, session_id, call_id, name, error=err.message)
             return
 
+        # Validate arguments against the tool's parameters_schema before
+        # dispatch.  Weaker models often emit tool calls with wrong
+        # parameter names or types; without validation, the handler runs
+        # against partially-malformed input (e.g. a missing required key
+        # becomes ``None``, a bad-name key becomes an ignored extra) and
+        # silently returns a no-op-shaped result.  The model sees the
+        # no-op as "worked," loops forever.  Surfacing the schema errors
+        # explicitly gives the model feedback to self-correct.
+        schema_error = _validate_arguments(arguments, tool.parameters_schema)
+        if schema_error is not None:
+            bound_log.info("tool.schema_error", error=schema_error)
+            await _append_tool_result(pool, session_id, call_id, name, error=schema_error)
+            return
+
         # Invoke handler.  Handlers return either a plain dict (JSON-
         # encoded into the tool message's content) or a ToolResult
         # (carries per-event metadata and/or a plain-string content).
@@ -155,6 +170,36 @@ def _parse_arguments(raw_args: Any) -> dict[str, Any] | None:
     except (json.JSONDecodeError, TypeError):
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> str | None:
+    """Validate ``arguments`` against the tool's JSON Schema.
+
+    Returns ``None`` on success, or a human-readable error string that
+    enumerates every validation failure (missing required keys,
+    unexpected extra keys, wrong types).  The string is what ends up in
+    the tool_result's ``error`` body, so the model sees every issue at
+    once and can self-correct without iterating one-at-a-time.
+
+    The schema is the same dict registered with the tool and sent to
+    the model as the tool's ``parameters``, so a mismatch genuinely
+    indicates the model didn't follow the contract — not a framework
+    bug.  Surfacing specific paths (e.g. ``foo.bar[2]``) and
+    passed-value previews keeps the feedback actionable.
+    """
+    validator = jsonschema.Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(arguments), key=lambda e: list(e.absolute_path))
+    if not errors:
+        return None
+    lines = [
+        f"Arguments failed schema validation. You sent: {json.dumps(arguments)}",
+        "Errors:",
+    ]
+    for err in errors:
+        path = ".".join(str(p) for p in err.absolute_path) or "<root>"
+        lines.append(f"  - at {path}: {err.message}")
+    lines.append("Look at the tool's `parameters` schema for the correct shape and retry.")
+    return "\n".join(lines)
 
 
 async def _append_tool_result(
