@@ -117,6 +117,9 @@ def test_archive_uses_delete(mocked_cli):
     assert result.exit_code == 0, result.output
     assert mocked_cli.captured.method == "DELETE"
     assert mocked_cli.captured.path == "/v1/channel-bindings/cbn_01"
+    # Success line on stdout so scripts + humans get a visible ack.
+    assert "archived" in result.output
+    assert "cbn_01" in result.output
 
 
 def test_http_error_nonzero_exit(mocked_cli):

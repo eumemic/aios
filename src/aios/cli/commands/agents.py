@@ -15,7 +15,7 @@ from aios.cli.commands._shared import (
     with_client,
 )
 from aios.cli.files import PayloadError, load_payload
-from aios.cli.output import print_error
+from aios.cli.output import print_error, print_success
 from aios.cli.runtime import run_or_die
 
 app = typer.Typer(name="agents", help="Manage agents.", no_args_is_help=True)
@@ -109,6 +109,7 @@ def delete(ctx: typer.Context, agent_id: str) -> None:
         client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/agents/{agent_id}")
+        print_success("archived", agent_id)
 
     run_or_die(_run)
 

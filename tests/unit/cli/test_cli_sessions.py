@@ -29,3 +29,7 @@ def test_delete_is_hard_delete_with_yes(mocked_cli):
     assert result.exit_code == 0, result.output
     assert mocked_cli.captured.method == "DELETE"
     assert mocked_cli.captured.path == "/v1/sessions/sess_1"
+    # Confirmation line on stdout — "deleted <id>" gives scripts something to
+    # grep and humans a visible ack (the server returns 204 with no body).
+    assert "deleted" in result.output
+    assert "sess_1" in result.output

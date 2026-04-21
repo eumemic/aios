@@ -15,7 +15,7 @@ from aios.cli.commands._shared import (
     with_client,
 )
 from aios.cli.files import PayloadError, load_payload, walk_skill_dir
-from aios.cli.output import print_error
+from aios.cli.output import print_error, print_success
 from aios.cli.runtime import run_or_die
 
 app = typer.Typer(name="skills", help="Manage skills.", no_args_is_help=True)
@@ -90,6 +90,7 @@ def delete(ctx: typer.Context, skill_id: str) -> None:
         client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/skills/{skill_id}")
+        print_success("archived", skill_id)
 
     run_or_die(_run)
 

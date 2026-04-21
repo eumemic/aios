@@ -17,7 +17,7 @@ from aios.cli.commands._shared import (
     with_client,
 )
 from aios.cli.files import PayloadError, load_json_object, load_payload
-from aios.cli.output import cyan, dim, print_error
+from aios.cli.output import cyan, dim, print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
 from aios.cli.tail_format import iter_formatted_events
 
@@ -164,6 +164,7 @@ def delete(
         client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/sessions/{session_id}")
+        print_success("deleted", session_id)
         return None
 
     run_or_die(_run)
