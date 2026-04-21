@@ -1,39 +1,20 @@
 [project]
-name = "aios"
+name = "aios-telegram"
 version = "0.1.0"
-description = "Open-source agent runtime: Postgres-backed sessions, Docker sandbox, any LiteLLM model"
+description = "Telegram connector for aios"
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [{ name = "aios contributors" }]
 
 dependencies = [
-    # HTTP + SSE
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.32",
-    "sse-starlette>=2.1",
-    # Validation + settings
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    # Postgres + migrations + job queue
-    "asyncpg>=0.30",
-    "alembic>=1.13",
-    "sqlalchemy>=2.0",          # required by alembic even when used without the ORM
-    "procrastinate==3.8.1",     # exact pin so the task/connector API stays stable
-    "psycopg[binary]>=3.2",     # required by procrastinate; aios uses asyncpg directly
-    # Sandbox
-    "aiodocker>=0.23",
-    # Crypto + ids
-    "pynacl>=1.5",
-    "python-ulid>=3.0",
-    # LLM client
-    "litellm>=1.55",
-    # MCP client
-    "mcp>=1.20",
-    # Web tools
     "httpx>=0.27",
-    # Observability
+    "mcp>=1.20,<2.0",
+    "uvicorn[standard]>=0.32",
     "structlog>=24.4",
+    "python-telegram-bot>=22.6,<23",
 ]
 
 [dependency-groups]
@@ -41,25 +22,19 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-mock>=3.14",
-    "httpx>=0.27",                # FastAPI TestClient backend
-    "testcontainers[postgres]>=4.8",
     "ruff>=0.8",
     "mypy>=1.13",
 ]
 
 [project.scripts]
-aios = "aios.__main__:main"
+aios-telegram = "aios_telegram.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/aios"]
-
-# ─── uv workspace ────────────────────────────────────────────────────────────
-[tool.uv.workspace]
-members = ["connectors/signal", "connectors/telegram"]
+packages = ["src/aios_telegram"]
 
 # ─── ruff ────────────────────────────────────────────────────────────────────
 [tool.ruff]
@@ -69,25 +44,23 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # pyflakes
-    "I",   # isort
-    "B",   # bugbear
-    "UP",  # pyupgrade
-    "SIM", # simplify
-    "RUF", # ruff-specific
-    "TID", # tidy imports
-    "ASYNC", # async-specific lints
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+    "RUF",
+    "TID",
+    "ASYNC",
 ]
 ignore = [
-    "E501",  # line length is enforced by the formatter
+    "E501",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = [
-    "B011",       # allow asserts in tests
-]
+"tests/**/*.py" = ["B011"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -107,15 +80,7 @@ no_implicit_optional = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = [
-    "litellm.*",
-    "mcp.*",
-    "aiodocker.*",
-    "procrastinate.*",
-    "testcontainers.*",
-    "asyncpg",
-    "asyncpg.*",
-]
+module = ["mcp.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -130,8 +95,4 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
-]
-markers = [
-    "integration: tests requiring a Postgres testcontainer",
-    "e2e: end-to-end tests requiring Docker + a real or recorded model",
 ]
