@@ -74,9 +74,16 @@ def test_archive_uses_post(mocked_cli):
     assert mocked_cli.captured.path == "/v1/vaults/vlt_1/credentials/cred_1/archive"
 
 
-def test_delete_is_hard_delete(mocked_cli):
+def test_delete_is_hard_delete_with_yes(mocked_cli):
     mocked_cli.queue_response(httpx.Response(204))
-    result = runner.invoke(app, ["vaults", "credentials", "delete", "vlt_1", "cred_1"])
+    result = runner.invoke(app, ["vaults", "credentials", "delete", "vlt_1", "cred_1", "--yes"])
     assert result.exit_code == 0, result.output
     assert mocked_cli.captured.method == "DELETE"
     assert mocked_cli.captured.path == "/v1/vaults/vlt_1/credentials/cred_1"
+
+
+def test_delete_refuses_without_yes_and_makes_no_request(mocked_cli):
+    result = runner.invoke(app, ["vaults", "credentials", "delete", "vlt_1", "cred_1"])
+    assert result.exit_code == 2
+    assert "irreversible" in result.output
+    assert mocked_cli.captured.method == ""  # no HTTP call was made

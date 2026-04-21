@@ -140,12 +140,26 @@ def archive(ctx: typer.Context, vault_id: str) -> None:
     run_or_die(_run)
 
 
-@app.command("delete")
-def delete(ctx: typer.Context, vault_id: str) -> None:
-    def _run() -> None:
+@app.command(
+    "delete",
+    help="Hard-delete a vault (irreversible; prefer `archive` instead).",
+)
+def delete(
+    ctx: typer.Context,
+    vault_id: str,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Required to confirm hard-delete (no interactive prompt)."),
+    ] = False,
+) -> None:
+    def _run() -> int | None:
+        if not yes:
+            print_error("hard-delete is irreversible; pass --yes to confirm")
+            return 2
         client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/vaults/{vault_id}")
+        return None
 
     run_or_die(_run)
 
@@ -262,11 +276,26 @@ def cred_archive(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
     run_or_die(_run)
 
 
-@credentials.command("delete")
-def cred_delete(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
-    def _run() -> None:
+@credentials.command(
+    "delete",
+    help="Hard-delete a credential (irreversible; prefer `archive` instead).",
+)
+def cred_delete(
+    ctx: typer.Context,
+    vault_id: str,
+    credential_id: str,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Required to confirm hard-delete (no interactive prompt)."),
+    ] = False,
+) -> None:
+    def _run() -> int | None:
+        if not yes:
+            print_error("hard-delete is irreversible; pass --yes to confirm")
+            return 2
         client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/vaults/{vault_id}/credentials/{credential_id}")
+        return None
 
     run_or_die(_run)
