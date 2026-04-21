@@ -42,6 +42,12 @@ async def run_async(argv: list[str]) -> int:
     get = sub.add_parser("get", help="Show a single connection by id")
     get.add_argument("connection_id", help="Connection id")
 
+    archive = sub.add_parser(
+        "archive",
+        help="Archive a connection (soft-delete, retained for audit)",
+    )
+    archive.add_argument("connection_id", help="Connection id")
+
     create = sub.add_parser("create", help="Create a new connection")
     create.add_argument("--connector", required=True, help="Connector type (e.g. signal)")
     create.add_argument("--account", required=True, help="Account identifier (e.g. bot uuid)")
@@ -67,6 +73,8 @@ async def run_async(argv: list[str]) -> int:
         return await _list(api_url, api_key)
     if args.verb == "get":
         return await _get(api_url, api_key, connection_id=args.connection_id)
+    if args.verb == "archive":
+        return await _archive(api_url, api_key, connection_id=args.connection_id)
     if args.verb == "create":
         return await _create(
             api_url,
@@ -78,6 +86,17 @@ async def run_async(argv: list[str]) -> int:
         )
     parser.print_usage(sys.stderr)
     return 2
+
+
+async def _archive(api_url: str, api_key: str, *, connection_id: str) -> int:
+    url = f"{api_url.rstrip('/')}/v1/connections/{connection_id}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with async_client() as client:
+        response = await client.delete(url, headers=headers)
+    if response.status_code != 204:
+        print_http_error(_PROG, response)
+        return 2
+    return 0
 
 
 async def _get(api_url: str, api_key: str, *, connection_id: str) -> int:

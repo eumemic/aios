@@ -281,6 +281,28 @@ class TestGetRule:
         assert "required" in capsys.readouterr().err.lower()
 
 
+class TestArchiveRule:
+    async def test_archives_via_delete_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("delete", _mock_response(204, None))
+
+        with patch("aios.cli.rules.async_client", return_value=client):
+            rc = await run_async(["archive", "rul_01", "--connection-id", "conn_01"])
+
+        assert rc == 0
+        assert client.delete.await_args.args[0].endswith(
+            "/v1/connections/conn_01/routing-rules/rul_01"
+        )
+
+    async def test_missing_connection_id_exits_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        rc = await run_async(["archive", "rul_01"])
+        assert rc != 0
+        assert "required" in capsys.readouterr().err.lower()
+
+
 class TestDispatch:
     async def test_unknown_verb_prints_usage(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

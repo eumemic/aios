@@ -186,6 +186,31 @@ class TestGetConnection:
         assert "required" in err or "arguments" in err
 
 
+class TestArchiveConnection:
+    async def test_archives_via_delete_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("delete", _mock_response(204, None))
+
+        with patch("aios.cli.connections.async_client", return_value=client):
+            rc = await run_async(["archive", "conn_01"])
+
+        assert rc == 0
+        client.delete.assert_awaited_once()
+        assert client.delete.await_args.args[0].endswith("/v1/connections/conn_01")
+
+    async def test_http_error_returns_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("delete", _mock_response(404, {"error": "not found"}))
+
+        with patch("aios.cli.connections.async_client", return_value=client):
+            rc = await run_async(["archive", "conn_missing"])
+
+        assert rc != 0
+        assert "404" in capsys.readouterr().err
+
+
 class TestDispatch:
     async def test_unknown_verb_prints_usage(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

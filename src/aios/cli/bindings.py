@@ -45,6 +45,12 @@ async def run_async(argv: list[str]) -> int:
     get = sub.add_parser("get", help="Show a single binding by id")
     get.add_argument("binding_id", help="Binding id")
 
+    archive = sub.add_parser(
+        "archive",
+        help="Archive a channel binding (soft-delete, retained for audit)",
+    )
+    archive.add_argument("binding_id", help="Binding id")
+
     create = sub.add_parser("create", help="Create a new channel binding")
     create.add_argument(
         "--address",
@@ -76,6 +82,8 @@ async def run_async(argv: list[str]) -> int:
         return await _list(api_url, api_key, session_id=args.session_id)
     if args.verb == "get":
         return await _get(api_url, api_key, binding_id=args.binding_id)
+    if args.verb == "archive":
+        return await _archive(api_url, api_key, binding_id=args.binding_id)
     if args.verb == "create":
         return await _create(
             api_url,
@@ -85,6 +93,17 @@ async def run_async(argv: list[str]) -> int:
         )
     parser.print_usage(sys.stderr)
     return 2
+
+
+async def _archive(api_url: str, api_key: str, *, binding_id: str) -> int:
+    url = f"{api_url.rstrip('/')}/v1/channel-bindings/{binding_id}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with async_client() as client:
+        response = await client.delete(url, headers=headers)
+    if response.status_code != 204:
+        print_http_error(_PROG, response)
+        return 2
+    return 0
 
 
 async def _get(api_url: str, api_key: str, *, binding_id: str) -> int:
