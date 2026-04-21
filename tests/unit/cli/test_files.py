@@ -54,17 +54,47 @@ def test_load_invalid_json_raises(tmp_path: Path):
 
 
 def test_walk_skill_dir(tmp_path: Path):
-    skill = tmp_path / "skill"
+    """Keys are prefixed with the root directory's basename.
+
+    The server's ``_extract_skill_metadata`` parses the directory name
+    from the ``SKILL.md`` key and rejects bare ``SKILL.md``. Prepending
+    ``root.name`` gives it the ``my-skill/SKILL.md`` shape it requires.
+    """
+    skill = tmp_path / "my-skill"
     skill.mkdir()
     (skill / "SKILL.md").write_text("---\nname: x\ndescription: y\n---\nhello")
     (skill / "inner").mkdir()
     (skill / "inner" / "helper.py").write_text("print(1)")
 
     files = walk_skill_dir(skill)
-    assert "SKILL.md" in files
-    assert files["SKILL.md"].startswith("---")
-    assert "inner/helper.py" in files
-    assert files["inner/helper.py"] == "print(1)"
+    assert "my-skill/SKILL.md" in files
+    assert files["my-skill/SKILL.md"].startswith("---")
+    assert "my-skill/inner/helper.py" in files
+    assert files["my-skill/inner/helper.py"] == "print(1)"
+    # A bare ``SKILL.md`` key would be rejected by the server.
+    assert "SKILL.md" not in files
+
+
+def test_walk_skill_dir_matches_server_contract(tmp_path: Path):
+    """End-to-end shape check: the dict returned by ``walk_skill_dir``
+    round-trips through the server's ``_extract_skill_metadata`` without
+    the *"SKILL.md must be inside a directory"* failure that motivated
+    the fix."""
+    from aios.services.skills import _extract_skill_metadata
+
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: my-skill\ndescription: does a thing\n---\nbody")
+    (skill / "helper.py").write_text("print(1)")
+
+    files = walk_skill_dir(skill)
+    directory, name, description, normalized = _extract_skill_metadata(files)
+    assert directory == "my-skill"
+    assert name == "my-skill"
+    assert description == "does a thing"
+    # Normalized keys have the directory prefix stripped.
+    assert "SKILL.md" in normalized
+    assert "helper.py" in normalized
 
 
 def test_walk_skill_dir_missing_skill_md(tmp_path: Path):

@@ -98,9 +98,15 @@ def resolve_payload(
 def walk_skill_dir(root: Path) -> dict[str, str]:
     """Build the ``files`` dict a skills endpoint expects from a directory.
 
-    Keys are POSIX-style paths relative to ``root``. Values are file contents
-    (text, UTF-8). A ``SKILL.md`` must exist directly under ``root``; the
-    server validates this but we check early for a friendlier error.
+    Keys are POSIX-style paths of the form ``{root.name}/<relpath>``: the
+    server's ``_extract_skill_metadata`` parses the directory name from the
+    ``SKILL.md`` key, so a bare ``SKILL.md`` is rejected with
+    *"SKILL.md must be inside a directory"*. Prepending ``root.name`` gives
+    the server the ``my-skill/SKILL.md`` shape it expects.
+
+    Values are file contents (text, UTF-8). A ``SKILL.md`` must exist
+    directly under ``root``; the server validates this but we check early
+    for a friendlier error.
     """
     if not root.is_dir():
         raise PayloadError(f"not a directory: {root}")
@@ -108,13 +114,19 @@ def walk_skill_dir(root: Path) -> dict[str, str]:
     if not skill_md.is_file():
         raise PayloadError(f"missing SKILL.md at {skill_md}")
 
+    # ``Path("foo/").name`` is ``"foo"`` — trailing slashes don't matter.
+    # We do need ``resolve()`` though so ``Path(".")`` / ``Path("")`` still
+    # yield a meaningful directory name rather than ``""``.
+    prefix = root.resolve().name
+
     files: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
+        key = f"{prefix}/{rel}"
         try:
-            files[rel] = path.read_text(encoding="utf-8")
+            files[key] = path.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
             raise PayloadError(f"non-UTF-8 file in skill: {path}: {exc}") from exc
     return files
