@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
@@ -11,6 +11,16 @@ from aios.tools.schedule_wake import (
     ScheduleWakeArgumentError,
     schedule_wake_handler,
 )
+
+
+@pytest.fixture(autouse=True)
+def mock_runtime_pool(monkeypatch: Any) -> None:
+    """Stub the worker-only runtime pool so ``defer_wake``'s new pool
+    argument (issue #131) resolves without a live worker_main context."""
+    monkeypatch.setattr(
+        "aios.tools.schedule_wake.runtime.require_pool",
+        lambda: MagicMock(),
+    )
 
 
 class TestScheduleWakeHandler:
@@ -24,6 +34,7 @@ class TestScheduleWakeHandler:
         )
 
         mock_defer.assert_awaited_once_with(
+            ANY,
             "sess_01TEST",
             cause="scheduled",
             delay_seconds=30,

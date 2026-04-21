@@ -65,7 +65,7 @@ async def create(
     )
     if body.initial_message is not None:
         await service.append_user_message(pool, session.id, body.initial_message)
-        await defer_wake(session.id, cause="initial_message")
+        await defer_wake(pool, session.id, cause="initial_message")
         session = await service.get_session(pool, session.id)
     return session
 
@@ -135,7 +135,7 @@ async def post_message(
     event = await service.append_user_message(
         pool, session_id, body.content, metadata=body.metadata or None
     )
-    await defer_wake(session_id, cause="message")
+    await defer_wake(pool, session_id, cause="message")
     return event
 
 
@@ -174,7 +174,7 @@ async def submit_tool_result(
     if body.is_error:
         data["is_error"] = True
     event = await service.append_event(pool, session_id, "message", data)
-    await defer_wake(session_id, cause="custom_tool_result")
+    await defer_wake(pool, session_id, cause="custom_tool_result")
     return event
 
 
@@ -196,7 +196,7 @@ async def submit_tool_confirmation(
     else:
         deny_msg = body.deny_message or "Tool use denied by user."
         event = await service.confirm_tool_deny(pool, session_id, body.tool_call_id, deny_msg)
-    await defer_wake(session_id, cause="tool_confirmation")
+    await defer_wake(pool, session_id, cause="tool_confirmation")
     return event
 
 

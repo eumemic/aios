@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from aios.errors import AiosError
+from aios.harness import runtime
 from aios.harness.wake import defer_wake
 from aios.tools.registry import registry
 
@@ -78,6 +79,7 @@ async def schedule_wake_handler(session_id: str, arguments: dict[str, Any]) -> d
         raise ScheduleWakeArgumentError("reason must be a non-empty string")
 
     await defer_wake(
+        runtime.require_pool(),
         session_id,
         cause="scheduled",
         delay_seconds=delay_seconds,

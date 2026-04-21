@@ -21,7 +21,7 @@ and proceeds.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
@@ -34,6 +34,11 @@ from aios.logging import get_logger
 from aios.models.agents import ToolSpec
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
+
+if TYPE_CHECKING:
+    import asyncpg
+
+    from aios.harness.task_registry import TaskRegistry
 
 log = get_logger("aios.harness.loop")
 
@@ -68,6 +73,38 @@ async def run_session_step(
     pool = runtime.require_pool()
     task_registry = runtime.require_task_registry()
 
+    # Outermost span pair: brackets the entire step (issue #131).  Emitted
+    # before the sweep guard so early-outs are also measured — a "wasted
+    # wake" cost shows up as a ``step_start``/``step_end`` pair with no
+    # ``context_build_*`` inside.  ``step_start_id`` backpointer on the
+    # end event matches the ``context_build_start_id`` convention.
+    step_start = await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {"event": "step_start", "cause": cause},
+    )
+    try:
+        await _run_session_step_body(
+            pool, task_registry, session_id, cause=cause, wake_reason=wake_reason
+        )
+    finally:
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {"event": "step_end", "step_start_id": step_start.id},
+        )
+
+
+async def _run_session_step_body(
+    pool: asyncpg.Pool[Any],
+    task_registry: TaskRegistry,
+    session_id: str,
+    *,
+    cause: str,
+    wake_reason: str | None,
+) -> None:
     if cause == "scheduled" and wake_reason:
         await sessions_service.append_event(
             pool,
@@ -254,7 +291,7 @@ async def run_session_step(
                 pool, session_id, "rescheduling", stop_reason={"type": "rescheduling"}
             )
             await _append_lifecycle(pool, session_id, "turn_ended", "rescheduling", "rescheduling")
-            await defer_retry_wake(session_id, delay_seconds=delay)
+            await defer_retry_wake(pool, session_id, delay_seconds=delay)
             return
 
         await sessions_service.set_session_status(
