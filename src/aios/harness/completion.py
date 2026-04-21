@@ -69,8 +69,21 @@ def inject_cache_breakpoints(
     LiteLLM strips them for providers that don't support them (e.g. OpenAI),
     so this is safe to apply unconditionally.
 
-    Places breakpoints on the system message, last tool definition, and
-    last conversation message (3 of Anthropic's max 4).
+    Places breakpoints on:
+
+    1. **System message** — cache-stable across steps.
+    2. **Last tool definition** — cache-stable while tools don't change.
+    3. **Last stable conversation message** — the last event-sourced
+       message, skipping the trailing channels tail block (which
+       mutates every step: unread counts, previews) and any
+       empty-assistant separator inserted before it by
+       :func:`separate_adjacent_user_messages`.
+
+    Skipping the tail is load-bearing: with the breakpoint on the tail
+    itself, the conversation prefix never gets its own cache entry and
+    has to be re-cache-created every step.  Placing it on the last
+    stable message lets the prefix cache across steps — next step's
+    conversation-through-last-event is byte-identical and hits.
     """
     if not messages:
         return
@@ -81,9 +94,67 @@ def inject_cache_breakpoints(
     if tools:
         tools[-1]["cache_control"] = _CACHE_CONTROL
 
-    last = messages[-1]
-    if last.get("role") != "system":
-        _set_content_block_cache(last)
+    idx = _last_stable_message_index(messages)
+    if idx is not None and messages[idx].get("role") != "system":
+        _set_content_block_cache(messages[idx])
+
+
+def _last_stable_message_index(messages: list[dict[str, Any]]) -> int | None:
+    """Return the index of the last cache-stable message, or ``None``.
+
+    Walks backward from the end, skipping:
+
+    * The channels tail block — identified by its content signature
+      ``━━━ Channels ━━━`` (always the last user-role message when
+      present).
+    * Any empty-assistant separator — inserted by
+      :func:`~aios.harness.context.separate_adjacent_user_messages` to
+      defeat Anthropic's adjacent-user-merge; carries no real content
+      and would be a wasted breakpoint.
+
+    If nothing stable remains (messages list is just system + tail +
+    separator), returns ``None``.
+    """
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if _is_tail_block(msg) or _is_empty_assistant(msg):
+            continue
+        return i
+    return None
+
+
+def _is_tail_block(msg: dict[str, Any]) -> bool:
+    """Detect the channels tail block by its content signature.
+
+    The tail block renders with a ``━━━ Channels ━━━`` header as the
+    first line of its user-role content.  That string is unlikely to
+    appear in genuine peer text, so a substring-match is safe enough
+    for cache-breakpoint placement.
+    """
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content.startswith("━━━ Channels ━━━")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str) and text.startswith("━━━ Channels ━━━"):
+                    return True
+    return False
+
+
+def _is_empty_assistant(msg: dict[str, Any]) -> bool:
+    """Detect the role-transition separator: ``assistant`` + empty content."""
+    if msg.get("role") != "assistant":
+        return False
+    if msg.get("tool_calls"):
+        return False
+    content = msg.get("content")
+    if content == "" or content is None:
+        return True
+    return isinstance(content, list) and not content
 
 
 def _normalize_usage(raw: dict[str, Any]) -> dict[str, int]:

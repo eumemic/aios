@@ -207,7 +207,59 @@ class TestInjectCacheBreakpoints:
         inject_cache_breakpoints(msgs, tools)
         assert msgs[0]["content"][0]["cache_control"] == _CACHE_CONTROL
         assert tools[0]["cache_control"] == _CACHE_CONTROL
-        assert msgs[1]["content"][0]["cache_control"] == _CACHE_CONTROL
+
+    def test_skips_tail_block_and_marks_prior_message(self) -> None:
+        """The channels tail block mutates every step; caching it is
+        pointless — every next step's tail is different, so the prefix
+        cache never hits.  Breakpoint goes on the last *stable*
+        message (the event-sourced one just before the tail).
+        """
+        tail = _msg("user", "━━━ Channels ━━━\n▸ channel_id=x (focal)")
+        msgs = [
+            _msg("system", "sys"),
+            _msg("user", "hi there"),
+            _msg("assistant", "hello"),
+            tail,
+        ]
+        inject_cache_breakpoints(msgs, None)
+        # Last stable message (the assistant) gets the breakpoint.
+        assert msgs[2]["content"] == [
+            {"type": "text", "text": "hello", "cache_control": _CACHE_CONTROL}
+        ]
+        # Tail block stays un-annotated.
+        assert msgs[3]["content"] == tail["content"]
+
+    def test_skips_tail_and_adjacency_separator(self) -> None:
+        """When the last stable event was user-role,
+        ``separate_adjacent_user_messages`` inserts an empty-assistant
+        separator before the tail.  The breakpoint must skip *both* —
+        annotating an empty content block would be a wasted breakpoint
+        (and may not survive Anthropic's empty-block sanitization).
+        """
+        tail = _msg("user", "━━━ Channels ━━━\n▸ channel_id=x (focal)")
+        stable = _msg("user", "real peer message")
+        separator = {"role": "assistant", "content": ""}
+        msgs = [_msg("system", "sys"), stable, separator, tail]
+        inject_cache_breakpoints(msgs, None)
+        # Breakpoint lands on the stable user message, not the separator.
+        assert msgs[1]["content"] == [
+            {"type": "text", "text": "real peer message", "cache_control": _CACHE_CONTROL}
+        ]
+        # Separator stays bare; tail stays bare.
+        assert msgs[2] == {"role": "assistant", "content": ""}
+        assert msgs[3]["content"] == tail["content"]
+
+    def test_tail_only_context_falls_back_to_system_and_tool(self) -> None:
+        """Degenerate case: only system + tail.  No stable conversation
+        message exists — the last-stable-message rule produces nothing,
+        but the system breakpoint still applies."""
+        tail = _msg("user", "━━━ Channels ━━━\n▸ channel_id=x (focal)")
+        msgs = [_msg("system", "sys"), tail]
+        inject_cache_breakpoints(msgs, None)
+        assert msgs[0]["content"] == [
+            {"type": "text", "text": "sys", "cache_control": _CACHE_CONTROL}
+        ]
+        assert msgs[1]["content"] == tail["content"]  # un-annotated
 
     def test_content_already_list(self) -> None:
         """When content is already a list of blocks, annotate the last block."""
