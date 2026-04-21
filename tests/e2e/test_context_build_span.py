@@ -57,7 +57,7 @@ class TestContextBuildSpan:
         # Poison ``build_messages`` on the specific step we drive next.
         with (
             mock.patch(
-                "aios.harness.loop.build_messages",
+                "aios.harness.step_context.build_messages",
                 side_effect=RuntimeError("boom"),
             ),
             pytest.raises(RuntimeError, match="boom"),

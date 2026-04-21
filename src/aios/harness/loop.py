@@ -25,7 +25,7 @@ from typing import Any
 
 from aios.harness import runtime
 from aios.harness.completion import stream_litellm
-from aios.harness.context import build_messages, separate_adjacent_user_messages
+from aios.harness.step_context import compose_step_context
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.harness.wake import defer_retry_wake
@@ -33,7 +33,6 @@ from aios.logging import get_logger
 from aios.models.agents import ToolSpec
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
-from aios.tools.registry import to_openai_tools
 
 log = get_logger("aios.harness.loop")
 
@@ -149,67 +148,15 @@ async def run_session_step(
     )
 
     try:
-        # Discovery runs before prompt assembly because each MCP server's
-        # instructions feed the per-connector affordance block.
-        tools = to_openai_tools(agent.tools)
-        # Inject the built-in switch_channel tool when the session has any
-        # active bindings — it's the only way the agent can mutate its
-        # focal attention, so expose it whenever focal-aware rendering is
-        # relevant.  Agents don't need to opt in via ``agent.tools``; the
-        # focal machinery is session-state-level, not agent-level.
-        if bindings:
-            tools.append(_switch_channel_tool_spec())
-        mcp_instructions: dict[str, str] = {}
-        if agent.mcp_servers or connections:
-            mcp_tools, mcp_instructions = await discover_session_mcp_tools(
-                pool, session_id, agent, connections
-            )
-            # Hide connection-provided MCP tools when the agent is in the
-            # "phone down" state (focal_channel is NULL).  You can't type in
-            # a chat app unless you're in a chat — the agent must call
-            # switch_channel first if it wants to send.
-            mcp_tools = _hide_conn_tools_when_phone_down(mcp_tools, session.focal_channel)
-            tools.extend(mcp_tools)
-
-        # Resolve skills and augment system prompt.
-        from aios.harness.channels import (
-            augment_with_connector_instructions,
-            augment_with_focal_paradigm,
-            build_channels_tail_block,
+        step_ctx = await compose_step_context(
+            pool,
+            session_id,
+            session=session,
+            agent=agent,
+            bindings=bindings,
+            connections=connections,
+            events=events,
         )
-        from aios.harness.skills import augment_system_prompt, provision_skill_files
-        from aios.services import skills as skills_service
-
-        skill_versions = (
-            await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
-        )
-        system_prompt = augment_system_prompt(agent.system, skill_versions)
-        system_prompt = augment_with_focal_paradigm(system_prompt, bindings)
-        system_prompt = augment_with_connector_instructions(
-            system_prompt, mcp_instructions, connections
-        )
-
-        # Provision skill files to workspace (idempotent, host-side writes).
-        if skill_versions:
-            await provision_skill_files(session_id, skill_versions)
-
-        ctx = build_messages(
-            events,
-            system_prompt=system_prompt,
-        )
-
-        # The tail block lives *after* build_messages so its per-step
-        # mutations (unread counts, previews) don't bust the prefix cache.
-        # Paradigm prose (symbol meanings, switch_channel semantics) stays
-        # in the cache-stable system prompt above.
-        tail = build_channels_tail_block(bindings, events, session.focal_channel)
-        if tail is not None:
-            ctx.messages.append(tail)
-
-        # Block LiteLLM's adjacent-same-role merge on Anthropic so the tail
-        # block isn't concatenated into the preceding user inbound.  See
-        # :func:`separate_adjacent_user_messages` for the mechanism.
-        ctx.messages = separate_adjacent_user_messages(ctx.messages)
     except Exception:
         await sessions_service.append_event(
             pool,
@@ -223,6 +170,15 @@ async def run_session_step(
         )
         raise
 
+    messages = step_ctx.messages
+    tools = step_ctx.tools
+
+    # Provision skill files to workspace (idempotent, host-side writes).
+    if step_ctx.skill_versions:
+        from aios.harness.skills import provision_skill_files
+
+        await provision_skill_files(session_id, step_ctx.skill_versions)
+
     await sessions_service.append_event(
         pool,
         session_id,
@@ -232,7 +188,7 @@ async def run_session_step(
             "context_build_start_id": context_build_start.id,
             "is_error": False,
             "event_count_read": len(events),
-            "message_count": len(ctx.messages),
+            "message_count": len(messages),
             "tools_count": len(tools),
         },
     )
@@ -240,7 +196,7 @@ async def run_session_step(
     # Dump the exact chat-completions payload we're about to send to LiteLLM
     # when AIOS_DUMP_CONTEXT is set — useful for debugging prompt construction
     # (header inlining, system-prompt augmentation, tool list shape).
-    await _dump_context_if_enabled(session_id, agent.model, ctx.messages, tools)
+    await _dump_context_if_enabled(session_id, agent.model, messages, tools)
 
     # Mark session as running.
     await sessions_service.set_session_status(pool, session_id, "running")
@@ -257,7 +213,7 @@ async def run_session_step(
     try:
         assistant_msg, usage, cost_usd = await stream_litellm(
             model=agent.model,
-            messages=ctx.messages,
+            messages=messages,
             tools=tools if tools else None,
             extra=agent.litellm_extra or None,
             pool=pool,
@@ -326,7 +282,7 @@ async def run_session_step(
     # Inject reacting_to so should_call_model knows what this response
     # was based on. This is the seq of the latest user/tool event in the
     # context — events after this seq are "new" on the next wake.
-    assistant_msg["reacting_to"] = ctx.reacting_to
+    assistant_msg["reacting_to"] = step_ctx.reacting_to
 
     # Append assistant message to the session log (unfenced — procrastinate
     # lock provides mutual exclusion).
