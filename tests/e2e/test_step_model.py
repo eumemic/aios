@@ -622,10 +622,20 @@ class TestReactingTo:
 @needs_docker
 class TestStreamingInference:
     async def test_streaming_basic_chat(self, harness: Harness) -> None:
-        """Streaming produces the same final result as non-streaming."""
+        """Streaming produces the same final result as non-streaming.
+
+        Opens ``listen_for_events`` around the step so the dynamic-streaming
+        decision (issue #81) sees a subscriber and picks the streaming path.
+        """
+        from aios.config import get_settings
+        from aios.db.listen import listen_for_events
+
         harness.script_model([assistant("Hello, world!")])
         session = await harness.start("Say hello")
-        await harness.run_until_idle(session.id)
+
+        settings = get_settings()
+        async with listen_for_events(settings.db_url, session.id):
+            await harness.run_until_idle(session.id)
 
         events = await harness.events(session.id)
         assert last_assistant_content(events) == "Hello, world!"
@@ -639,6 +649,8 @@ class TestStreamingInference:
 
     async def test_streaming_tool_round_trip(self, harness: Harness) -> None:
         """Streaming works correctly with tool calls."""
+        from aios.config import get_settings
+        from aios.db.listen import listen_for_events
 
         async def echo_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
             return {"output": arguments.get("text", "")}
@@ -651,7 +663,10 @@ class TestStreamingInference:
             ]
         )
         session = await harness.start("echo streamed", tools=[])
-        await harness.run_until_idle(session.id)
+
+        settings = get_settings()
+        async with listen_for_events(settings.db_url, session.id):
+            await harness.run_until_idle(session.id)
 
         events = await harness.events(session.id)
         tr = first_tool_result(events)
@@ -695,15 +710,33 @@ class TestStreamingInference:
 
     async def test_streaming_reacting_to_preserved(self, harness: Harness) -> None:
         """reacting_to field is set correctly on streamed responses."""
+        from aios.config import get_settings
+        from aios.db.listen import listen_for_events
+
         harness.script_model([assistant("Streamed response")])
         session = await harness.start("hello")
-        await harness.run_until_idle(session.id)
+
+        settings = get_settings()
+        async with listen_for_events(settings.db_url, session.id):
+            await harness.run_until_idle(session.id)
 
         events = await harness.events(session.id)
         asst = next(e for e in events if e.data.get("role") == "assistant")
         assert "reacting_to" in asst.data
         user_seq = next(e.seq for e in events if e.data.get("role") == "user")
         assert asst.data["reacting_to"] == user_seq
+
+    async def test_no_subscriber_uses_non_streaming_path(self, harness: Harness) -> None:
+        """Dynamic streaming (issue #81): with no SSE subscriber, the worker
+        picks the non-streaming code path to avoid the proxy latency tax
+        (OpenRouter→Groq is 3x slower streaming without a consumer)."""
+        harness.script_model([assistant("fast path")])
+        session = await harness.start("run")
+        # No ``listen_for_events`` → no advisory lock → worker sees no
+        # subscriber → non-streaming.
+        await harness.run_until_idle(session.id)
+
+        assert harness.model_calls[0].get("stream") is not True
 
     async def test_streaming_empty_content_chunks_skipped(self, harness: Harness) -> None:
         """Tool-only responses (no text content) don't produce deltas."""

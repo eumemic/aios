@@ -23,8 +23,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
-from aios.harness.completion import stream_litellm
+from aios.harness.completion import call_litellm, stream_litellm
 from aios.harness.step_context import compose_step_context
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
@@ -209,16 +210,28 @@ async def run_session_step(
         {"event": "model_request_start"},
     )
 
-    # Call the model exactly once (streaming — deltas go to SSE via pg_notify).
+    # Call the model exactly once.  Stream deltas via pg_notify only when
+    # an SSE subscriber is attached (issue #81); otherwise run the faster
+    # non-streaming path.  OpenRouter-style proxies can be 2-3x slower on
+    # the streaming path when nobody is consuming the deltas.
+    subscribed = await has_subscriber(pool, session_id)
     try:
-        assistant_msg, usage, cost_usd = await stream_litellm(
-            model=agent.model,
-            messages=messages,
-            tools=tools if tools else None,
-            extra=agent.litellm_extra or None,
-            pool=pool,
-            session_id=session_id,
-        )
+        if subscribed:
+            assistant_msg, usage, cost_usd = await stream_litellm(
+                model=agent.model,
+                messages=messages,
+                tools=tools if tools else None,
+                extra=agent.litellm_extra or None,
+                pool=pool,
+                session_id=session_id,
+            )
+        else:
+            assistant_msg, usage, cost_usd = await call_litellm(
+                model=agent.model,
+                messages=messages,
+                tools=tools if tools else None,
+                extra=agent.litellm_extra or None,
+            )
     except Exception:
         log.exception("step.litellm_failed", session_id=session_id)
         await sessions_service.append_event(
