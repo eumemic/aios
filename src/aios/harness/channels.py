@@ -99,7 +99,8 @@ def build_focal_paradigm_block(bindings: list[ChannelBinding]) -> str:
         "render in full in your context; inbound on other bound "
         "channels render as short notification markers (🔔 ...). "
         "The listing at the tail of your context shows the current "
-        "state:\n"
+        "state, with each channel's `channel_id=<id>` explicitly "
+        "labelled:\n"
         "\n"
         "* ▸ — your focal channel.\n"
         "* ○ — another bound channel, with unread count + preview.\n"
@@ -107,14 +108,17 @@ def build_focal_paradigm_block(bindings: list[ChannelBinding]) -> str:
         "\n"
         "### Shifting focus\n"
         "\n"
-        "Call `switch_channel(target=<address>)` to focus on a "
-        "different bound channel. Its result is a re-orient block "
+        "Call `switch_channel(channel_id=<id>)` to focus on a "
+        "different bound channel — copy the `channel_id` value from "
+        "the tail block listing or from the `channel_id=<id>` field "
+        "of a notification marker.  Its result is a re-orient block "
         "quoting recent messages on that channel so you can pick up "
-        "the conversation in context. Call `switch_channel(target=null)` "
-        "to put your phone down — every inbound renders as a "
-        "notification, connector response tools disappear from your "
-        "tool list. Switching repeatedly is cheap but not free: each "
-        "switch's re-orient block appends tokens to your context.\n"
+        "the conversation in context.  Call "
+        "`switch_channel(channel_id=null)` to put your phone down — "
+        "every inbound renders as a notification, connector response "
+        "tools disappear from your tool list.  Switching repeatedly "
+        "is cheap but not free: each switch's re-orient block appends "
+        "tokens to your context.\n"
         "\n"
         "### Responding\n"
         "\n"
@@ -184,11 +188,11 @@ def build_channels_tail_block(
         addr = b.address
         muted = b.notification_mode == "silent"
         if addr == focal_channel:
-            lines.append(f"▸ {addr} (focal)")
+            lines.append(f"▸ channel_id={addr} (focal)")
             continue
         count = unread.get(addr, 0)
         if muted:
-            lines.append(f"◌ {addr} (muted) — {count} unread")
+            lines.append(f"◌ channel_id={addr} (muted) — {count} unread")
             continue
         if count > 0:
             preview = last_content.get(addr, "")
@@ -196,9 +200,9 @@ def build_channels_tail_block(
             if len(preview) > 60:
                 preview = preview[:60] + "…"
             preview_clause = f': "{preview}"' if preview else ""
-            lines.append(f"○ {addr} — {count} unread{preview_clause}")
+            lines.append(f"○ channel_id={addr} — {count} unread{preview_clause}")
         else:
-            lines.append(f"○ {addr} — 0 unread")
+            lines.append(f"○ channel_id={addr} — 0 unread")
     return {"role": "user", "content": "\n".join(lines)}
 
 
