@@ -135,67 +135,107 @@ async def run_session_step(
         )
         return
 
-    # Discovery runs before prompt assembly because each MCP server's
-    # instructions feed the per-connector affordance block.
-    tools = to_openai_tools(agent.tools)
-    # Inject the built-in switch_channel tool when the session has any
-    # active bindings — it's the only way the agent can mutate its
-    # focal attention, so expose it whenever focal-aware rendering is
-    # relevant.  Agents don't need to opt in via ``agent.tools``; the
-    # focal machinery is session-state-level, not agent-level.
-    if bindings:
-        tools.append(_switch_channel_tool_spec())
-    mcp_instructions: dict[str, str] = {}
-    if agent.mcp_servers or connections:
-        mcp_tools, mcp_instructions = await discover_session_mcp_tools(
-            pool, session_id, agent, connections
+    # Span the remainder of the prologue so "why is the step slow?"
+    # can separate context-build cost from model-call cost (issue #78).
+    # Bracketing starts AFTER the dispatch early-return so every start
+    # has a matching end; on failure we still emit the end with
+    # ``is_error: True`` and re-raise, matching the ``model_request_*``
+    # symmetry.
+    context_build_start = await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {"event": "context_build_start"},
+    )
+
+    try:
+        # Discovery runs before prompt assembly because each MCP server's
+        # instructions feed the per-connector affordance block.
+        tools = to_openai_tools(agent.tools)
+        # Inject the built-in switch_channel tool when the session has any
+        # active bindings — it's the only way the agent can mutate its
+        # focal attention, so expose it whenever focal-aware rendering is
+        # relevant.  Agents don't need to opt in via ``agent.tools``; the
+        # focal machinery is session-state-level, not agent-level.
+        if bindings:
+            tools.append(_switch_channel_tool_spec())
+        mcp_instructions: dict[str, str] = {}
+        if agent.mcp_servers or connections:
+            mcp_tools, mcp_instructions = await discover_session_mcp_tools(
+                pool, session_id, agent, connections
+            )
+            # Hide connection-provided MCP tools when the agent is in the
+            # "phone down" state (focal_channel is NULL).  You can't type in
+            # a chat app unless you're in a chat — the agent must call
+            # switch_channel first if it wants to send.
+            mcp_tools = _hide_conn_tools_when_phone_down(mcp_tools, session.focal_channel)
+            tools.extend(mcp_tools)
+
+        # Resolve skills and augment system prompt.
+        from aios.harness.channels import (
+            augment_with_connector_instructions,
+            augment_with_focal_paradigm,
+            build_channels_tail_block,
         )
-        # Hide connection-provided MCP tools when the agent is in the
-        # "phone down" state (focal_channel is NULL).  You can't type in
-        # a chat app unless you're in a chat — the agent must call
-        # switch_channel first if it wants to send.
-        mcp_tools = _hide_conn_tools_when_phone_down(mcp_tools, session.focal_channel)
-        tools.extend(mcp_tools)
+        from aios.harness.skills import augment_system_prompt, provision_skill_files
+        from aios.services import skills as skills_service
 
-    # Resolve skills and augment system prompt.
-    from aios.harness.channels import (
-        augment_with_connector_instructions,
-        augment_with_focal_paradigm,
-        build_channels_tail_block,
+        skill_versions = (
+            await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
+        )
+        system_prompt = augment_system_prompt(agent.system, skill_versions)
+        system_prompt = augment_with_focal_paradigm(system_prompt, bindings)
+        system_prompt = augment_with_connector_instructions(
+            system_prompt, mcp_instructions, connections
+        )
+
+        # Provision skill files to workspace (idempotent, host-side writes).
+        if skill_versions:
+            await provision_skill_files(session_id, skill_versions)
+
+        ctx = build_messages(
+            events,
+            system_prompt=system_prompt,
+        )
+
+        # The tail block lives *after* build_messages so its per-step
+        # mutations (unread counts, previews) don't bust the prefix cache.
+        # Paradigm prose (symbol meanings, switch_channel semantics) stays
+        # in the cache-stable system prompt above.
+        tail = build_channels_tail_block(bindings, events, session.focal_channel)
+        if tail is not None:
+            ctx.messages.append(tail)
+
+        # Block LiteLLM's adjacent-same-role merge on Anthropic so the tail
+        # block isn't concatenated into the preceding user inbound.  See
+        # :func:`separate_adjacent_user_messages` for the mechanism.
+        ctx.messages = separate_adjacent_user_messages(ctx.messages)
+    except Exception:
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {
+                "event": "context_build_end",
+                "context_build_start_id": context_build_start.id,
+                "is_error": True,
+            },
+        )
+        raise
+
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {
+            "event": "context_build_end",
+            "context_build_start_id": context_build_start.id,
+            "is_error": False,
+            "event_count_read": len(events),
+            "message_count": len(ctx.messages),
+            "tools_count": len(tools),
+        },
     )
-    from aios.harness.skills import augment_system_prompt, provision_skill_files
-    from aios.services import skills as skills_service
-
-    skill_versions = (
-        await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
-    )
-    system_prompt = augment_system_prompt(agent.system, skill_versions)
-    system_prompt = augment_with_focal_paradigm(system_prompt, bindings)
-    system_prompt = augment_with_connector_instructions(
-        system_prompt, mcp_instructions, connections
-    )
-
-    # Provision skill files to workspace (idempotent, host-side writes).
-    if skill_versions:
-        await provision_skill_files(session_id, skill_versions)
-
-    ctx = build_messages(
-        events,
-        system_prompt=system_prompt,
-    )
-
-    # The tail block lives *after* build_messages so its per-step
-    # mutations (unread counts, previews) don't bust the prefix cache.
-    # Paradigm prose (symbol meanings, switch_channel semantics) stays
-    # in the cache-stable system prompt above.
-    tail = build_channels_tail_block(bindings, events, session.focal_channel)
-    if tail is not None:
-        ctx.messages.append(tail)
-
-    # Block LiteLLM's adjacent-same-role merge on Anthropic so the tail
-    # block isn't concatenated into the preceding user inbound.  See
-    # :func:`separate_adjacent_user_messages` for the mechanism.
-    ctx.messages = separate_adjacent_user_messages(ctx.messages)
 
     # Dump the exact chat-completions payload we're about to send to LiteLLM
     # when AIOS_DUMP_CONTEXT is set — useful for debugging prompt construction
