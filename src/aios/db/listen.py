@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING
 
 import asyncpg
 
+from aios.db.sse_lock import acquire_subscriber_lock
 from aios.logging import get_logger
 
 if TYPE_CHECKING:
@@ -131,6 +132,10 @@ async def listen_for_events(
                 pass
 
     await conn.add_listener(channel, _callback)
+    # Hold a shared advisory lock on this dedicated connection so the
+    # worker can detect that an SSE subscriber exists (issue #81).
+    # pg_locks releases automatically on connection close — no cleanup.
+    await acquire_subscriber_lock(conn, session_id)
     try:
         yield queue
     finally:
