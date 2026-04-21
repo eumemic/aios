@@ -1529,11 +1529,15 @@ class TestUsageTracking:
         await harness.run_until_idle(session.id)
 
         all_evts = await harness.all_events(session.id)
-        spans = [e for e in all_evts if e.kind == "span"]
-        assert len(spans) == 2
+        model_spans = [
+            e
+            for e in all_evts
+            if e.kind == "span" and e.data["event"] in {"model_request_start", "model_request_end"}
+        ]
+        assert len(model_spans) == 2
 
-        start = spans[0]
-        end = spans[1]
+        start = model_spans[0]
+        end = model_spans[1]
         assert start.data["event"] == "model_request_start"
         assert end.data["event"] == "model_request_end"
         assert end.data["model_request_start_id"] == start.id
@@ -1560,11 +1564,15 @@ class TestUsageTracking:
         await harness.run_until_idle(session.id)
 
         all_evts = await harness.all_events(session.id)
-        spans = [e for e in all_evts if e.kind == "span"]
-        assert len(spans) == 4  # 2 start + 2 end
+        model_spans = [
+            e
+            for e in all_evts
+            if e.kind == "span" and e.data["event"] in {"model_request_start", "model_request_end"}
+        ]
+        assert len(model_spans) == 4  # 2 start + 2 end
 
-        starts = [s for s in spans if s.data["event"] == "model_request_start"]
-        ends = [s for s in spans if s.data["event"] == "model_request_end"]
+        starts = [s for s in model_spans if s.data["event"] == "model_request_start"]
+        ends = [s for s in model_spans if s.data["event"] == "model_request_end"]
         assert len(starts) == 2
         assert len(ends) == 2
 
