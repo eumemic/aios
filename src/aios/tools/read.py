@@ -88,7 +88,7 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
 
     settings = get_settings()
     sandbox = runtime.require_sandbox_registry()
-    handle = await sandbox.get_or_provision(session_id)
+    handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
     # cat -n numbers lines (1-indexed) with the format `   N\tCONTENT`.
     # sed -n 'START,ENDp' slices by line number. Using cat first means

@@ -21,7 +21,7 @@ class _StubRegistry:
     def __init__(self, handle: ContainerHandle) -> None:
         self._handle = handle
 
-    async def get_or_provision(self, session_id: str) -> ContainerHandle:
+    async def get_or_provision(self, session_id: str, **_kwargs: Any) -> ContainerHandle:
         return self._handle
 
 
@@ -46,12 +46,17 @@ def stub_handle() -> ContainerHandle:
 
 @pytest.fixture
 def stub_registry(stub_handle: ContainerHandle) -> Any:
-    previous = runtime.sandbox_registry
+    from unittest.mock import MagicMock
+
+    prev_registry = runtime.sandbox_registry
+    prev_pool = runtime.pool
     runtime.sandbox_registry = _StubRegistry(stub_handle)  # type: ignore[assignment]
+    runtime.pool = MagicMock()
     try:
         yield
     finally:
-        runtime.sandbox_registry = previous
+        runtime.sandbox_registry = prev_registry
+        runtime.pool = prev_pool
 
 
 class TestArguments:

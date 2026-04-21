@@ -65,7 +65,7 @@ async def glob_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
 
     settings = get_settings()
     sandbox = runtime.require_sandbox_registry()
-    handle = await sandbox.get_or_provision(session_id)
+    handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
     cmd = f"rg --files --glob {shlex.quote(pattern)} {shlex.quote(path)} 2>/dev/null | head -500"
 

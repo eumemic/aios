@@ -83,7 +83,7 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
 
     settings = get_settings()
     sandbox = runtime.require_sandbox_registry()
-    handle = await sandbox.get_or_provision(session_id)
+    handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
     content_bytes = content.encode("utf-8")
     b64 = base64.b64encode(content_bytes).decode("ascii")
