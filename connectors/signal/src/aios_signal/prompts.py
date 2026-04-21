@@ -8,9 +8,35 @@ heading.
 Covers only the tools this server actually exposes — ``signal_send``,
 ``signal_react``, ``signal_read_receipt``.  Telling the model about
 tools that don't exist would be worse than silence.
+
+The instructions are composed per-run: ``build_instructions`` prepends
+an identity block (bot's own ``sender_uuid`` + phone number) to the
+static body so the agent can recognise itself in group messages
+instead of confabulating about who the other participants are
+(issue #55).
 """
 
 from __future__ import annotations
+
+
+def build_instructions(*, bot_uuid: str, phone: str) -> str:
+    """Compose the MCP ``initialize`` instructions with the bot's identity.
+
+    The agent would otherwise have no reliable source of truth for which
+    ``sender_uuid`` is itself — models have been observed confabulating
+    identities in group chats when this is absent.
+    """
+    identity = (
+        "## Your identity on this Signal account\n"
+        "\n"
+        f"- **sender_uuid**: `{bot_uuid}` — this is YOU.  In group "
+        "messages, any inbound whose header shows this uuid is your own "
+        "prior message, not another participant.\n"
+        f"- **phone**: `{phone}` — this Signal account is identified to "
+        "peers by this number.\n"
+    )
+    return identity + "\n" + SIGNAL_SERVER_INSTRUCTIONS
+
 
 SIGNAL_SERVER_INSTRUCTIONS = """\
 ## chat_id

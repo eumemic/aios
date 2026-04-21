@@ -35,7 +35,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .addressing import decode_chat_id
 from .markdown import convert_markdown_to_signal_styles
-from .prompts import SIGNAL_SERVER_INSTRUCTIONS
+from .prompts import build_instructions
 from .rpc import RpcClient
 
 log = structlog.get_logger(__name__)
@@ -139,10 +139,10 @@ class BearerAuthMiddleware:
         await self._app(scope, receive, send)
 
 
-def build_mcp_server(*, rpc: RpcClient) -> FastMCP:
+def build_mcp_server(*, rpc: RpcClient, bot_uuid: str, phone: str) -> FastMCP:
     mcp = FastMCP(
         "aios-signal",
-        instructions=SIGNAL_SERVER_INSTRUCTIONS,
+        instructions=build_instructions(bot_uuid=bot_uuid, phone=phone),
         stateless_http=True,
     )
 
