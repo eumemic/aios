@@ -142,12 +142,29 @@ def archive(ctx: typer.Context, session_id: str) -> None:
     run_or_die(_run)
 
 
-@app.command("delete", help="Hard-delete a session.")
-def delete(ctx: typer.Context, session_id: str) -> None:
-    def _run() -> None:
+@app.command(
+    "delete",
+    help="Hard-delete a session (irreversible; prefer `archive` instead).",
+)
+def delete(
+    ctx: typer.Context,
+    session_id: str,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Required to confirm hard-delete (no interactive prompt)."),
+    ] = False,
+) -> None:
+    def _run() -> int | None:
+        if not yes:
+            print_error(
+                "hard-delete is irreversible; pass --yes to confirm "
+                "(or use `aios sessions archive` for a reversible soft-delete)"
+            )
+            return 2
         client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/sessions/{session_id}")
+        return None
 
     run_or_die(_run)
 
