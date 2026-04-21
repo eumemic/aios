@@ -35,8 +35,12 @@ from aios.harness.procrastinate_app import app
     retry=False,
     pass_context=False,
 )
-async def wake_session(session_id: str, cause: str = "message") -> None:
+async def wake_session(
+    session_id: str,
+    cause: str = "message",
+    wake_reason: str | None = None,
+) -> None:
     """Run one inference step for the session."""
     from aios.harness.loop import run_session_step
 
-    await run_session_step(session_id, cause=cause)
+    await run_session_step(session_id, cause=cause, wake_reason=wake_reason)

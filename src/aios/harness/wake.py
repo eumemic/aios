@@ -8,28 +8,54 @@ one place without creating a circular ``api → harness`` dependency.
 from __future__ import annotations
 
 from procrastinate import exceptions as procrastinate_exceptions
+from procrastinate.types import JSONValue
 
 from aios.logging import get_logger
 
 log = get_logger("aios.harness.wake")
 
 
-async def defer_wake(session_id: str, *, cause: str = "message") -> None:
+async def defer_wake(
+    session_id: str,
+    *,
+    cause: str = "message",
+    delay_seconds: float | None = None,
+    wake_reason: str | None = None,
+) -> None:
     """Enqueue a ``wake_session`` job, swallowing ``AlreadyEnqueued``.
 
     If a wake is already queued for this session (``queueing_lock``
     deduplication), the existing job will process any new events when
     it runs — no need for a second job.
+
+    ``delay_seconds`` schedules the job that many seconds in the future
+    (procrastinate's ``schedule_in``).  ``wake_reason`` is a short string
+    carried as a task kwarg and surfaced to the agent at wake time when
+    ``cause == "scheduled"``; see ``run_session_step``.
     """
     from aios.harness.procrastinate_app import app
 
+    task_kwargs: dict[str, JSONValue] = {"session_id": session_id, "cause": cause}
+    if wake_reason is not None:
+        task_kwargs["wake_reason"] = wake_reason
+
+    if delay_seconds is not None:
+        deferrer = app.configure_task(
+            "harness.wake_session",
+            schedule_in={"seconds": delay_seconds},
+        )
+    else:
+        deferrer = app.configure_task("harness.wake_session")
+
     try:
-        await app.configure_task("harness.wake_session").defer_async(
+        await deferrer.defer_async(**task_kwargs)
+    except procrastinate_exceptions.AlreadyEnqueued:
+        log.debug(
+            "wake.already_enqueued",
             session_id=session_id,
             cause=cause,
+            delay_seconds=delay_seconds,
         )
-    except procrastinate_exceptions.AlreadyEnqueued:
-        log.debug("wake.already_enqueued", session_id=session_id, cause=cause)
 
 
 async def defer_retry_wake(session_id: str, *, delay_seconds: float) -> None:

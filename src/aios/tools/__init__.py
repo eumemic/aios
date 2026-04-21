@@ -25,6 +25,7 @@ from aios.tools import edit as _edit  # noqa: F401
 from aios.tools import glob as _glob  # noqa: F401
 from aios.tools import grep as _grep  # noqa: F401
 from aios.tools import read as _read  # noqa: F401
+from aios.tools import schedule_wake as _schedule_wake  # noqa: F401
 from aios.tools import search_events as _search_events  # noqa: F401
 from aios.tools import switch_channel as _switch_channel  # noqa: F401
 from aios.tools import web_fetch as _web_fetch  # noqa: F401

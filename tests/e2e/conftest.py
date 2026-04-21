@@ -23,7 +23,13 @@ import pytest
 from tests.e2e.harness import Harness
 
 
-async def _noop_defer_wake(session_id: str, *, cause: str = "message") -> None:
+async def _noop_defer_wake(
+    session_id: str,
+    *,
+    cause: str = "message",
+    delay_seconds: float | None = None,
+    wake_reason: str | None = None,
+) -> None:
     pass
 
 

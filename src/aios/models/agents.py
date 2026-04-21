@@ -27,6 +27,7 @@ BuiltinToolType = Literal[
     "web_search",
     "search_events",
     "cancel",
+    "schedule_wake",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled
