@@ -303,6 +303,66 @@ class TestArchiveRule:
         assert "required" in capsys.readouterr().err.lower()
 
 
+class TestUpdateRule:
+    async def test_puts_expected_body_with_target_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _setup_env(monkeypatch)
+        updated = {
+            "id": "rul_01",
+            "connection_id": "conn_01",
+            "prefix": "group",
+            "target": "agent:new-model",
+            "session_params": {
+                "environment_id": None,
+                "vault_ids": [],
+                "title": None,
+                "metadata": {},
+            },
+            "created_at": "2026-04-20T00:00:00Z",
+            "updated_at": "2026-04-20T00:01:00Z",
+            "archived_at": None,
+        }
+        client = _mock_async_client("put", _mock_response(200, updated))
+
+        with patch("aios.cli.rules.async_client", return_value=client):
+            rc = await run_async(
+                [
+                    "update",
+                    "rul_01",
+                    "--connection-id",
+                    "conn_01",
+                    "--target",
+                    "agent:new-model",
+                ]
+            )
+
+        assert rc == 0
+        call = client.put.await_args
+        assert call.args[0].endswith("/v1/connections/conn_01/routing-rules/rul_01")
+        # Only target provided; session_params omitted from body
+        assert call.kwargs["json"] == {"target": "agent:new-model"}
+
+    async def test_puts_with_session_params_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("put", _mock_response(200, {}))
+        sp = {"environment_id": "env_02"}
+        with patch("aios.cli.rules.async_client", return_value=client):
+            rc = await run_async(
+                [
+                    "update",
+                    "rul_01",
+                    "--connection-id",
+                    "conn_01",
+                    "--session-params-json",
+                    json.dumps(sp),
+                ]
+            )
+        assert rc == 0
+        call = client.put.await_args
+        assert call.kwargs["json"] == {"session_params": sp}
+
+
 class TestDispatch:
     async def test_unknown_verb_prints_usage(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
