@@ -1,8 +1,12 @@
-"""Operator-facing CLI subcommands (progresses #35 item 4).
+"""aios client CLI.
 
-Each submodule implements one top-level verb group (``connections``,
-eventually ``vaults``, ``routing-rules``, etc.).  Dispatched from
-:mod:`aios.__main__`.
+The typer app in ``app.py`` wires every subcommand. Resource modules in
+``commands/`` implement CRUD against the HTTP API via :class:`AiosClient`.
+
+Entry points:
+
+* ``aios <subcommand>`` (via ``[project.scripts]`` in ``pyproject.toml``)
+* ``python -m aios <subcommand>`` (via ``__main__.py``)
 """
 
 from __future__ import annotations

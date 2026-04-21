@@ -1,0 +1,144 @@
+"""``aios connections ...`` — connector-instance CRUD + inbound-message helper."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Annotated, Any
+
+import typer
+
+from aios.cli.commands._shared import (
+    fetch_all,
+    render_list,
+    render_single,
+    with_client,
+)
+from aios.cli.files import PayloadError, load_payload
+from aios.cli.output import print_error
+from aios.cli.runtime import run_or_die
+
+app = typer.Typer(name="connections", help="Manage connector connections.", no_args_is_help=True)
+
+_COLS = ("id", "connector", "account", "mcp_url", "updated_at")
+_MAXW = {"connector": 20, "account": 40, "mcp_url": 40}
+
+
+@app.command("list")
+def list_(
+    ctx: typer.Context,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
+    after: Annotated[str | None, typer.Option("--after")] = None,
+    all_: Annotated[bool, typer.Option("--all")] = False,
+) -> None:
+    def _run() -> None:
+        state, client = with_client(ctx)
+        with client:
+            envelope = (
+                fetch_all(client, "/v1/connections")
+                if all_
+                else client.request(
+                    "GET", "/v1/connections", params={"limit": limit, "after": after}
+                )
+            )
+        render_list(state, envelope, columns=_COLS, max_widths=_MAXW)
+
+    run_or_die(_run)
+
+
+@app.command("get")
+def get(ctx: typer.Context, connection_id: str) -> None:
+    def _run() -> None:
+        state, client = with_client(ctx)
+        with client:
+            obj = client.request("GET", f"/v1/connections/{connection_id}")
+        render_single(state, obj)
+
+    run_or_die(_run)
+
+
+@app.command("create", help="Create a connection (ConnectionCreate shape).")
+def create(
+    ctx: typer.Context,
+    file: Annotated[Path | None, typer.Option("--file")] = None,
+    stdin: Annotated[bool, typer.Option("--stdin")] = False,
+    data: Annotated[str | None, typer.Option("--data")] = None,
+) -> None:
+    def _run() -> int | None:
+        try:
+            payload = load_payload(file, stdin, data)
+        except PayloadError as exc:
+            print_error(str(exc))
+            return 64
+        state, client = with_client(ctx)
+        with client:
+            obj = client.request("POST", "/v1/connections", json_body=payload)
+        render_single(state, obj)
+        return None
+
+    run_or_die(_run)
+
+
+@app.command("update", help="Update a connection (ConnectionUpdate shape).")
+def update(
+    ctx: typer.Context,
+    connection_id: str,
+    file: Annotated[Path | None, typer.Option("--file")] = None,
+    stdin: Annotated[bool, typer.Option("--stdin")] = False,
+    data: Annotated[str | None, typer.Option("--data")] = None,
+) -> None:
+    def _run() -> int | None:
+        try:
+            payload = load_payload(file, stdin, data)
+        except PayloadError as exc:
+            print_error(str(exc))
+            return 64
+        state, client = with_client(ctx)
+        with client:
+            obj = client.request("PUT", f"/v1/connections/{connection_id}", json_body=payload)
+        render_single(state, obj)
+        return None
+
+    run_or_die(_run)
+
+
+@app.command("delete")
+def delete(ctx: typer.Context, connection_id: str) -> None:
+    def _run() -> None:
+        _state, client = with_client(ctx)
+        with client:
+            client.request("DELETE", f"/v1/connections/{connection_id}")
+
+    run_or_die(_run)
+
+
+@app.command(
+    "inbound",
+    help="Post an InboundMessage to a connection (simulates a connector delivery).",
+)
+def inbound(
+    ctx: typer.Context,
+    connection_id: str,
+    path: Annotated[str, typer.Option("--path", help="Channel path segment after connection.")],
+    content: Annotated[str, typer.Option("--content")],
+    metadata: Annotated[
+        str | None, typer.Option("--metadata", help="Optional JSON metadata object.")
+    ] = None,
+) -> None:
+    def _run() -> int | None:
+        body: dict[str, Any] = {"path": path, "content": content}
+        if metadata is not None:
+            try:
+                body["metadata"] = json.loads(metadata)
+            except json.JSONDecodeError as exc:
+                print_error(f"invalid --metadata JSON: {exc}")
+                return 64
+        state, client = with_client(ctx)
+        with client:
+            obj = client.request(
+                "POST", f"/v1/connections/{connection_id}/messages", json_body=body
+            )
+        render_single(state, obj)
+        return None
+
+    run_or_die(_run)
