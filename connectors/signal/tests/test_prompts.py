@@ -36,6 +36,30 @@ class TestBuildInstructions:
         result = build_instructions(bot_uuid="u", phone="+1")
         assert isinstance(result, str)
 
+    def test_includes_profile_name_when_set(self) -> None:
+        result = build_instructions(bot_uuid="u", phone="+1", profile_name="Bot McBotface")
+        assert "Bot McBotface" in result
+
+    def test_profile_name_line_labeled(self) -> None:
+        """Profile-name line uses the same ``**label**:`` shape as the
+        other identity bullets so the agent can parse the block
+        consistently."""
+        result = build_instructions(bot_uuid="u", phone="+1", profile_name="Bot McBotface")
+        assert "profile_name" in result
+
+    def test_omits_profile_name_line_when_none(self) -> None:
+        result = build_instructions(bot_uuid="u", phone="+1")
+        # The whole "profile_name" token should be absent when the caller
+        # has no name to report — we don't render an empty line.
+        assert "profile_name" not in result
+
+    def test_omits_profile_name_line_when_empty_string(self) -> None:
+        """Empty string is equivalent to None — don't render a blank
+        entry.  signal-cli's ``listContacts`` filters empties already,
+        but we belt-and-braces it at the render layer too."""
+        result = build_instructions(bot_uuid="u", phone="+1", profile_name="")
+        assert "profile_name" not in result
+
 
 class TestGroupRoster:
     def test_no_groups_no_roster_section(self) -> None:
