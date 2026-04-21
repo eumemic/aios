@@ -103,8 +103,8 @@ def update(
     run_or_die(_run)
 
 
-@app.command("delete", help="Soft-archive an agent.")
-def delete(ctx: typer.Context, agent_id: str) -> None:
+@app.command("archive", help="Archive an agent (soft-delete, retained for audit).")
+def archive(ctx: typer.Context, agent_id: str) -> None:
     def _run() -> None:
         client = just_client(ctx)
         with client:

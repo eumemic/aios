@@ -84,8 +84,8 @@ def create(
     run_or_die(_run)
 
 
-@app.command("delete", help="Soft-archive a skill.")
-def delete(ctx: typer.Context, skill_id: str) -> None:
+@app.command("archive", help="Archive a skill (soft-delete, retained for audit).")
+def archive(ctx: typer.Context, skill_id: str) -> None:
     def _run() -> None:
         client = just_client(ctx)
         with client:
