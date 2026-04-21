@@ -5,10 +5,10 @@ on ``VaultCreate`` is a free-form JSON object; CLI accepts it as
 ``--metadata-json`` (optional; default ``{}``) — same shape as
 ``aios rules --session-params-json``.
 
-Credential management (``/v1/vaults/<id>/credentials``) is deliberately
-NOT surfaced here — the credential payload is ``auth_type``-dependent
-with several ``SecretStr`` branches and warrants its own
-``aios vaults credentials <verb>`` subcommand group in a later PR.
+Credential management (``/v1/vaults/<id>/credentials``) lives in its
+own top-level sibling — :mod:`aios.cli.vault_credentials` — matching
+the flat one-group-per-top-level-subcommand shape the other CLI
+modules follow.
 """
 
 from __future__ import annotations

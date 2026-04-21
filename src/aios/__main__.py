@@ -10,6 +10,7 @@ Subcommands:
 * ``aios bindings``    — channel-binding CRUD wrappers (list/create)
 * ``aios rules``       — routing-rule CRUD wrappers (list/create)
 * ``aios vaults``      — vault CRUD wrappers (list/create)
+* ``aios vault-credentials`` — vault credential inspection (list)
 """
 
 from __future__ import annotations
@@ -91,7 +92,7 @@ def _run_migrate() -> int:
 def main() -> int:
     if len(sys.argv) < 2:
         print(
-            "usage: aios <api|worker|migrate|tail|connections|bindings|rules|vaults>",
+            "usage: aios <api|worker|migrate|tail|connections|bindings|rules|vaults|vault-credentials>",
             file=sys.stderr,
         )
         return 2
@@ -124,6 +125,10 @@ def main() -> int:
             from aios.cli.vaults import run as _run_vaults
 
             return _run_vaults(sys.argv[2:])
+        case "vault-credentials":
+            from aios.cli.vault_credentials import run as _run_vault_credentials
+
+            return _run_vault_credentials(sys.argv[2:])
         case _:
             print(f"aios: unknown subcommand {cmd!r}", file=sys.stderr)
             return 2
