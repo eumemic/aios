@@ -90,10 +90,11 @@ async def _execute_query(
 
 
 SEARCH_EVENTS_DESCRIPTION = (
-    "Query this session's event log using PostgreSQL SQL. events_search sees "
-    "the FULL session log — a superset of what's in your live context window. "
-    "Use it to recover memory that has scrolled out, or to filter across the "
-    "session on dimensions your context window doesn't surface directly.\n\n"
+    "Query this session's message log using PostgreSQL SQL. events_search "
+    "sees every message event for the session — a superset of what's in your "
+    "live context window — so use it to recover memory that has scrolled out "
+    "or to filter across the session on dimensions your context doesn't "
+    "surface directly.\n\n"
     "IMPORTANT — content_text is the RAW stored content, not the rendered "
     "form you see in live context. Channel headers, sender/timestamp lines, "
     "notification markers for non-focal channels, and recap fences are all "

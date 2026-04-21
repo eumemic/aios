@@ -23,10 +23,11 @@ Four promotions, all backfillable from existing JSONB and stamped by
 * ``sender_name`` — ``data->'metadata'->>'sender_name'`` for user events
                     carrying connector metadata.
 
-Pattern mirrors migration 0018 (``channel`` column promotion). The
-``events_search`` view is recreated to expose all four plus ``channel`` (on
-the table since 0018 but not previously surfaced), keeping the
-``kind = 'message'`` filter from migration 0013. Span exposure and raw-data
+Follows migration 0018's column-promotion pattern (derive-at-append +
+single backfill query).  The ``events_search`` view is recreated to expose
+all four columns plus ``channel`` (on the table since 0018 but not
+previously surfaced), keeping the ``kind = 'message'`` filter from
+migration 0013.  Span exposure and raw-data
 JSONB access are deliberately deferred — they leak cost/token signal, which
 is problematic for agents running on behalf of an agency-on-behalf-of-a-
 customer, and want a real per-agent tool-access-control primitive first.
