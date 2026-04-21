@@ -44,10 +44,12 @@ async def defer_retry_wake(session_id: str, *, delay_seconds: float) -> None:
     from aios.harness.procrastinate_app import app
 
     try:
-        await app.configure_task("harness.wake_session").defer_async(
+        await app.configure_task(
+            "harness.wake_session",
+            schedule_in={"seconds": delay_seconds},
+        ).defer_async(
             session_id=session_id,
             cause="reschedule",
-            schedule_in={"seconds": delay_seconds},
         )
     except procrastinate_exceptions.AlreadyEnqueued:
         log.debug(
