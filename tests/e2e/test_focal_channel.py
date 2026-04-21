@@ -318,7 +318,7 @@ class TestSwitchChannelHandler:
         connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
         session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
 
-        result = await switch_channel_handler(session_id, {"target": address})
+        result = await switch_channel_handler(session_id, {"channel_id": address})
 
         assert result.is_error is False
         assert await _get_session_focal(runtime_pool, session_id) == address
@@ -339,7 +339,7 @@ class TestSwitchChannelHandler:
         session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
         await _set_focal(runtime_pool, session_id, address)
 
-        result = await switch_channel_handler(session_id, {"target": None})
+        result = await switch_channel_handler(session_id, {"channel_id": None})
 
         assert result.is_error is False
         assert await _get_session_focal(runtime_pool, session_id) is None
@@ -360,7 +360,7 @@ class TestSwitchChannelHandler:
         session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
         await _set_focal(runtime_pool, session_id, address)  # focus on A
 
-        result = await switch_channel_handler(session_id, {"target": "signal/other/fake"})
+        result = await switch_channel_handler(session_id, {"channel_id": "signal/other/fake"})
 
         assert result.is_error is True
         # Focal is unchanged after an invalid switch.
@@ -386,7 +386,7 @@ class TestSwitchChannelHandler:
         for i in range(3):
             await _post_inbound(runtime_pool, connection, "chat-1", content=f"msg-{i}")
 
-        result = await switch_channel_handler(session_id, {"target": address})
+        result = await switch_channel_handler(session_id, {"channel_id": address})
 
         content = result.content
         assert isinstance(content, str)
@@ -417,7 +417,7 @@ class TestSwitchChannelHandler:
         )
         await _post_inbound(runtime_pool, connection, "chat-1", content="only-two")
 
-        result = await switch_channel_handler(session_id, {"target": address})
+        result = await switch_channel_handler(session_id, {"channel_id": address})
         content = result.content
         assert isinstance(content, str)
         assert "only-one" in content
@@ -449,7 +449,7 @@ class TestSwitchChannelHandler:
                 runtime_pool, connection, "chat-1", content=f"unread-{i:02d} {body}"
             )
 
-        result = await switch_channel_handler(session_id, {"target": address})
+        result = await switch_channel_handler(session_id, {"channel_id": address})
         content = result.content
         assert isinstance(content, str)
         # Every unread message body should appear in the re-orient block.
@@ -480,7 +480,7 @@ class TestSwitchChannelHandler:
         # Sanity check session exists.
         await sess_svc.get_session(runtime_pool, session_id)
 
-        result = await switch_channel_handler(session_id, {"target": unused_address})
+        result = await switch_channel_handler(session_id, {"channel_id": unused_address})
         content = result.content
         assert isinstance(content, str)
         assert "no prior messages on this channel" in content
@@ -508,7 +508,7 @@ class TestSwitchChannelNoOp:
         session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
         await _set_focal(runtime_pool, session_id, address)
 
-        result = await switch_channel_handler(session_id, {"target": address})
+        result = await switch_channel_handler(session_id, {"channel_id": address})
 
         assert result.is_error is False
         assert result.content == f"Focal channel is already {address}."
@@ -534,7 +534,7 @@ class TestSwitchChannelNoOp:
         # _post_inbound leaves focal = None (phone down) by default.
         assert await _get_session_focal(runtime_pool, session_id) is None
 
-        result = await switch_channel_handler(session_id, {"target": None})
+        result = await switch_channel_handler(session_id, {"channel_id": None})
 
         assert result.is_error is False
         assert result.content == "Focal channel is already None."
@@ -565,7 +565,7 @@ class TestSwitchChannelNoOp:
         session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
         await _set_focal(runtime_pool, session_id, address)
 
-        result = await switch_channel_handler(session_id, {"target": address})
+        result = await switch_channel_handler(session_id, {"channel_id": address})
         assert result.metadata == {}
 
         # The dispatch path stores ``ToolResult.metadata`` under the
@@ -778,7 +778,7 @@ class TestSwitchChannelAsEvent:
                             "type": "function",
                             "function": {
                                 "name": "switch_channel",
-                                "arguments": json.dumps({"target": address}),
+                                "arguments": json.dumps({"channel_id": address}),
                             },
                         }
                     ],
@@ -793,7 +793,7 @@ class TestSwitchChannelAsEvent:
                     "type": "function",
                     "function": {
                         "name": "switch_channel",
-                        "arguments": json.dumps({"target": address}),
+                        "arguments": json.dumps({"channel_id": address}),
                     },
                 }
             ],
@@ -1027,7 +1027,7 @@ class TestOraSmokeTestRegression:
 
         # Agent switches back to the DM.  Re-orient block must include
         # BOTH the "I'm Ora" seed and the "you sure" follow-up.
-        result = await switch_channel_handler(session_id, {"target": dm_address})
+        result = await switch_channel_handler(session_id, {"channel_id": dm_address})
         content = result.content
         assert isinstance(content, str)
         assert "I'm Ora" in content, f"missing referent in re-orient block:\n{content}"
@@ -1100,7 +1100,7 @@ class TestTailBlockInStep:
         content = msg_text(messages[-1])
         assert "━━━ Channels ━━━" in content
         # NULL focal at this point → no ▸ marker, the one binding appears as ○.
-        assert f"○ {address}" in content
+        assert f"○ channel_id={address}" in content
         assert "▸" not in content
 
     async def test_tail_block_reflects_focal_and_unread_changes(
@@ -1167,8 +1167,8 @@ class TestTailBlockInStep:
         messages = harness.model_calls[-1]["messages"]
         assert messages[-1]["role"] == "user"
         content_step1 = msg_text(messages[-1])
-        assert f"▸ {address_a} (focal)" in content_step1
-        assert f"○ {address_b} — 2 unread" in content_step1
+        assert f"▸ channel_id={address_a} (focal)" in content_step1
+        assert f"○ channel_id={address_b} — 2 unread" in content_step1
         assert "msg-b2" in content_step1  # preview of latest unread
 
         # Step 2: change focal to B and run again.  Tail block reflects.
@@ -1182,7 +1182,7 @@ class TestTailBlockInStep:
         harness.script_model([assistant("noted")])
         await harness.run_step(session_id)
         content_step2 = msg_text(harness.model_calls[-1]["messages"][-1])
-        assert f"▸ {address_b} (focal)" in content_step2
+        assert f"▸ channel_id={address_b} (focal)" in content_step2
         # A is now non-focal; no unread for A yet since we never switched
         # away after its last focal-stamp, but the listing should show it.
-        assert f"○ {address_a}" in content_step2
+        assert f"○ channel_id={address_a}" in content_step2
