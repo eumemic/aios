@@ -156,6 +156,45 @@ class TestCreateBinding:
         assert "required" in capsys.readouterr().err.lower()
 
 
+class TestGetBinding:
+    async def test_prints_single_resource(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        binding = {
+            "id": "cbn_01",
+            "connection_id": "conn_01",
+            "path": "group/abc",
+            "address": "signal/+15550001/group/abc",
+            "session_id": "sess_01",
+            "created_at": "2026-04-20T00:00:00Z",
+            "updated_at": "2026-04-20T00:00:00Z",
+            "archived_at": None,
+            "notification_mode": "focal_candidate",
+        }
+        client = _mock_async_client("get", _mock_response(200, binding))
+
+        with patch("aios.cli.bindings.async_client", return_value=client):
+            rc = await run_async(["get", "cbn_01"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "cbn_01" in out
+        assert client.get.await_args.args[0].endswith("/v1/channel-bindings/cbn_01")
+
+    async def test_http_error_returns_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("get", _mock_response(404, {"error": "not found"}))
+
+        with patch("aios.cli.bindings.async_client", return_value=client):
+            rc = await run_async(["get", "cbn_missing"])
+
+        assert rc != 0
+        assert "404" in capsys.readouterr().err
+
+
 class TestDispatch:
     async def test_unknown_verb_prints_usage(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

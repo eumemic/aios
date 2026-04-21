@@ -217,6 +217,30 @@ class TestCreateVaultCredential:
         assert "required" in capsys.readouterr().err.lower()
 
 
+class TestGetVaultCredential:
+    async def test_prints_single_resource(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("get", _mock_response(200, _CREATED_CREDENTIAL))
+
+        with patch("aios.cli.vault_credentials.async_client", return_value=client):
+            rc = await run_async(["get", "vcr_new", "--vault-id", "vlt_01"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "vcr_new" in out
+        assert client.get.await_args.args[0].endswith("/v1/vaults/vlt_01/credentials/vcr_new")
+
+    async def test_missing_vault_id_exits_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        rc = await run_async(["get", "vcr_01"])
+        assert rc != 0
+        assert "required" in capsys.readouterr().err.lower()
+
+
 class TestDispatch:
     async def test_unknown_verb_prints_usage(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

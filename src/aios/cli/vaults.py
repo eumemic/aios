@@ -42,6 +42,9 @@ async def run_async(argv: list[str]) -> int:
 
     sub.add_parser("list", help="List vaults")
 
+    get = sub.add_parser("get", help="Show a single vault by id")
+    get.add_argument("vault_id", help="Vault id")
+
     create = sub.add_parser("create", help="Create a new vault")
     create.add_argument(
         "--display-name",
@@ -71,6 +74,8 @@ async def run_async(argv: list[str]) -> int:
 
     if args.verb == "list":
         return await _list(api_url, api_key)
+    if args.verb == "get":
+        return await _get(api_url, api_key, vault_id=args.vault_id)
     if args.verb == "create":
         try:
             metadata = _parse_metadata(args.metadata_json)
@@ -97,6 +102,18 @@ def _parse_metadata(raw: str | None) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise CliError(f"{_PROG}: --metadata-json must be a JSON object")
     return parsed
+
+
+async def _get(api_url: str, api_key: str, *, vault_id: str) -> int:
+    url = f"{api_url.rstrip('/')}/v1/vaults/{vault_id}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with async_client() as client:
+        response = await client.get(url, headers=headers)
+    if response.status_code != 200:
+        print_http_error(_PROG, response)
+        return 2
+    print(json.dumps(response.json(), indent=2))
+    return 0
 
 
 async def _list(api_url: str, api_key: str) -> int:
