@@ -50,6 +50,22 @@ async def run_async(argv: list[str]) -> int:
     archive.add_argument("credential_id", help="Credential id")
     archive.add_argument("--vault-id", required=True, help="Owning vault id")
 
+    update = sub.add_parser(
+        "update",
+        help="Update a credential (body from file; mcp_server_url + auth_type are immutable)",
+    )
+    update.add_argument("credential_id", help="Credential id")
+    update.add_argument("--vault-id", required=True, help="Owning vault id")
+    update.add_argument(
+        "--body-file",
+        required=True,
+        help=(
+            "Path to a JSON file containing the VaultCredentialUpdate body, "
+            "or '-' to read from stdin.  Same secret-hygiene argument as "
+            "`create`: tokens passed as shell args leak into history."
+        ),
+    )
+
     create = sub.add_parser("create", help="Create a new credential in a vault")
     create.add_argument("--vault-id", required=True, help="Owning vault id")
     create.add_argument(
@@ -87,6 +103,19 @@ async def run_async(argv: list[str]) -> int:
         return await _archive(
             api_url, api_key, vault_id=args.vault_id, credential_id=args.credential_id
         )
+    if args.verb == "update":
+        try:
+            body = _read_body(args.body_file)
+        except CliError as err:
+            print(str(err), file=sys.stderr)
+            return 2
+        return await _update(
+            api_url,
+            api_key,
+            vault_id=args.vault_id,
+            credential_id=args.credential_id,
+            body=body,
+        )
     if args.verb == "create":
         try:
             body = _read_body(args.body_file)
@@ -119,6 +148,25 @@ def _read_body(path: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise CliError(f"{_PROG}: --body-file must contain a JSON object")
     return parsed
+
+
+async def _update(
+    api_url: str,
+    api_key: str,
+    *,
+    vault_id: str,
+    credential_id: str,
+    body: dict[str, Any],
+) -> int:
+    url = f"{api_url.rstrip('/')}/v1/vaults/{vault_id}/credentials/{credential_id}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with async_client() as client:
+        response = await client.put(url, headers=headers, json=body)
+    if response.status_code != 200:
+        print_http_error(_PROG, response)
+        return 2
+    print(json.dumps(response.json(), indent=2))
+    return 0
 
 
 async def _archive(api_url: str, api_key: str, *, vault_id: str, credential_id: str) -> int:

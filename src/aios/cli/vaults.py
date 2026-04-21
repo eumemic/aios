@@ -51,6 +51,15 @@ async def run_async(argv: list[str]) -> int:
     )
     archive.add_argument("vault_id", help="Vault id")
 
+    update = sub.add_parser("update", help="Update a vault's display name or metadata")
+    update.add_argument("vault_id", help="Vault id")
+    update.add_argument("--display-name", default=None, help="New display name")
+    update.add_argument(
+        "--metadata-json",
+        default=None,
+        help="New metadata (JSON object, replaces existing)",
+    )
+
     create = sub.add_parser("create", help="Create a new vault")
     create.add_argument(
         "--display-name",
@@ -84,6 +93,21 @@ async def run_async(argv: list[str]) -> int:
         return await _get(api_url, api_key, vault_id=args.vault_id)
     if args.verb == "archive":
         return await _archive(api_url, api_key, vault_id=args.vault_id)
+    if args.verb == "update":
+        metadata: dict[str, Any] | None = None
+        if args.metadata_json is not None:
+            try:
+                metadata = _parse_metadata(args.metadata_json)
+            except CliError as err:
+                print(str(err), file=sys.stderr)
+                return 2
+        return await _update(
+            api_url,
+            api_key,
+            vault_id=args.vault_id,
+            display_name=args.display_name,
+            metadata=metadata,
+        )
     if args.verb == "create":
         try:
             metadata = _parse_metadata(args.metadata_json)
@@ -110,6 +134,30 @@ def _parse_metadata(raw: str | None) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise CliError(f"{_PROG}: --metadata-json must be a JSON object")
     return parsed
+
+
+async def _update(
+    api_url: str,
+    api_key: str,
+    *,
+    vault_id: str,
+    display_name: str | None,
+    metadata: dict[str, Any] | None,
+) -> int:
+    url = f"{api_url.rstrip('/')}/v1/vaults/{vault_id}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    body: dict[str, Any] = {}
+    if display_name is not None:
+        body["display_name"] = display_name
+    if metadata is not None:
+        body["metadata"] = metadata
+    async with async_client() as client:
+        response = await client.put(url, headers=headers, json=body)
+    if response.status_code != 200:
+        print_http_error(_PROG, response)
+        return 2
+    print(json.dumps(response.json(), indent=2))
+    return 0
 
 
 async def _archive(api_url: str, api_key: str, *, vault_id: str) -> int:

@@ -239,6 +239,38 @@ class TestArchiveVault:
         assert "404" in capsys.readouterr().err
 
 
+class TestUpdateVault:
+    async def test_puts_with_display_name_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _setup_env(monkeypatch)
+        updated = {
+            "id": "vlt_01",
+            "display_name": "renamed",
+            "metadata": {},
+            "created_at": "2026-04-20T00:00:00Z",
+            "updated_at": "2026-04-20T00:01:00Z",
+            "archived_at": None,
+        }
+        client = _mock_async_client("put", _mock_response(200, updated))
+
+        with patch("aios.cli.vaults.async_client", return_value=client):
+            rc = await run_async(["update", "vlt_01", "--display-name", "renamed"])
+
+        assert rc == 0
+        call = client.put.await_args
+        assert call.args[0].endswith("/v1/vaults/vlt_01")
+        assert call.kwargs["json"] == {"display_name": "renamed"}
+
+    async def test_puts_with_metadata_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("put", _mock_response(200, {}))
+        md = {"env": "staging"}
+        with patch("aios.cli.vaults.async_client", return_value=client):
+            rc = await run_async(["update", "vlt_01", "--metadata-json", json.dumps(md)])
+        assert rc == 0
+        call = client.put.await_args
+        assert call.kwargs["json"] == {"metadata": md}
+
+
 class TestDispatch:
     async def test_unknown_verb_prints_usage(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

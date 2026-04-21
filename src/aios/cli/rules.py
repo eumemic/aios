@@ -52,6 +52,18 @@ async def run_async(argv: list[str]) -> int:
     archive.add_argument("rule_id", help="Rule id")
     archive.add_argument("--connection-id", required=True, help="Owning connection id")
 
+    update = sub.add_parser(
+        "update", help="Update a routing rule's target or session_params (prefix is immutable)"
+    )
+    update.add_argument("rule_id", help="Rule id")
+    update.add_argument("--connection-id", required=True, help="Owning connection id")
+    update.add_argument("--target", default=None, help="New target")
+    update.add_argument(
+        "--session-params-json",
+        default=None,
+        help="New SessionParams (JSON object, replaces existing)",
+    )
+
     create = sub.add_parser("create", help="Create a new routing rule")
     create.add_argument("--connection-id", required=True, help="Owning connection id")
     create.add_argument(
@@ -93,6 +105,22 @@ async def run_async(argv: list[str]) -> int:
         return await _archive(
             api_url, api_key, connection_id=args.connection_id, rule_id=args.rule_id
         )
+    if args.verb == "update":
+        session_params: dict[str, Any] | None = None
+        if args.session_params_json is not None:
+            try:
+                session_params = _parse_session_params(args.session_params_json)
+            except CliError as err:
+                print(str(err), file=sys.stderr)
+                return 2
+        return await _update(
+            api_url,
+            api_key,
+            connection_id=args.connection_id,
+            rule_id=args.rule_id,
+            target=args.target,
+            session_params=session_params,
+        )
     if args.verb == "create":
         try:
             session_params = _parse_session_params(args.session_params_json)
@@ -121,6 +149,31 @@ def _parse_session_params(raw: str | None) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise CliError(f"{_PROG}: --session-params-json must be a JSON object")
     return parsed
+
+
+async def _update(
+    api_url: str,
+    api_key: str,
+    *,
+    connection_id: str,
+    rule_id: str,
+    target: str | None,
+    session_params: dict[str, Any] | None,
+) -> int:
+    url = f"{api_url.rstrip('/')}/v1/connections/{connection_id}/routing-rules/{rule_id}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    body: dict[str, Any] = {}
+    if target is not None:
+        body["target"] = target
+    if session_params is not None:
+        body["session_params"] = session_params
+    async with async_client() as client:
+        response = await client.put(url, headers=headers, json=body)
+    if response.status_code != 200:
+        print_http_error(_PROG, response)
+        return 2
+    print(json.dumps(response.json(), indent=2))
+    return 0
 
 
 async def _archive(api_url: str, api_key: str, *, connection_id: str, rule_id: str) -> int:
