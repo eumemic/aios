@@ -26,7 +26,6 @@ from aios.api.deps import (
 from aios.api.sse import sse_event_stream
 from aios.db import queries as db_queries
 from aios.db.listen import listen_for_events
-from aios.db.queries import lookup_tool_name_by_call_id
 from aios.harness.wake import defer_wake
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
@@ -169,9 +168,9 @@ async def submit_tool_result(
 ) -> Event:
     """Submit a custom tool result. Appends a tool-role message and wakes the session."""
     async with pool.acquire() as conn:
-        name = await lookup_tool_name_by_call_id(conn, session_id, body.tool_call_id)
+        name = await db_queries.lookup_tool_name_by_call_id(conn, session_id, body.tool_call_id)
         if name is None:
-            raise HTTPException(status_code=422, detail="tool_call_id not found")
+            raise HTTPException(status_code=404, detail="tool_call_id not found")
         data: dict[str, Any] = {
             "role": "tool",
             "tool_call_id": body.tool_call_id,

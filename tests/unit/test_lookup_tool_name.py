@@ -77,7 +77,7 @@ class TestSubmitToolResultNameInjection:
 
         with (
             patch(
-                "aios.api.routers.sessions.lookup_tool_name_by_call_id",
+                "aios.api.routers.sessions.db_queries.lookup_tool_name_by_call_id",
                 new_callable=AsyncMock,
                 return_value="get_weather",
             ) as mock_lookup,
@@ -103,8 +103,8 @@ class TestSubmitToolResultNameInjection:
         data = call_args.kwargs["data"]
         assert data["name"] == "get_weather"
 
-    async def test_raises_422_when_lookup_returns_none(self) -> None:
-        """When lookup returns None, submit_tool_result must raise HTTP 422."""
+    async def test_raises_404_when_lookup_returns_none(self) -> None:
+        """When lookup returns None, submit_tool_result must raise HTTP 404."""
         import pytest
         from fastapi import HTTPException
 
@@ -116,7 +116,7 @@ class TestSubmitToolResultNameInjection:
 
         with (
             patch(
-                "aios.api.routers.sessions.lookup_tool_name_by_call_id",
+                "aios.api.routers.sessions.db_queries.lookup_tool_name_by_call_id",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -127,7 +127,7 @@ class TestSubmitToolResultNameInjection:
             )
             with pytest.raises(HTTPException) as exc_info:
                 await submit_tool_result("sess_01", body, pool, _auth=None)
-        assert exc_info.value.status_code == 422
+        assert exc_info.value.status_code == 404
         assert exc_info.value.detail == "tool_call_id not found"
 
     async def test_is_error_still_injected(self) -> None:
@@ -142,7 +142,7 @@ class TestSubmitToolResultNameInjection:
 
         with (
             patch(
-                "aios.api.routers.sessions.lookup_tool_name_by_call_id",
+                "aios.api.routers.sessions.db_queries.lookup_tool_name_by_call_id",
                 new_callable=AsyncMock,
                 return_value="bash",
             ),
