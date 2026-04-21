@@ -15,7 +15,7 @@ from aios.cli.commands._shared import (
     with_client,
 )
 from aios.cli.files import PayloadError, load_json_object, load_payload, resolve_payload
-from aios.cli.output import print_error
+from aios.cli.output import print_error, print_success
 from aios.cli.runtime import run_or_die
 
 app = typer.Typer(name="vaults", help="Manage vaults and credentials.", no_args_is_help=True)
@@ -154,11 +154,15 @@ def delete(
 ) -> None:
     def _run() -> int | None:
         if not yes:
-            print_error("hard-delete is irreversible; pass --yes to confirm")
+            print_error(
+                "hard-delete is irreversible; pass --yes to confirm "
+                "(or use `aios vaults archive` for a reversible soft-delete)"
+            )
             return 2
         client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/vaults/{vault_id}")
+        print_success("deleted", vault_id)
         return None
 
     run_or_die(_run)
@@ -291,11 +295,15 @@ def cred_delete(
 ) -> None:
     def _run() -> int | None:
         if not yes:
-            print_error("hard-delete is irreversible; pass --yes to confirm")
+            print_error(
+                "hard-delete is irreversible; pass --yes to confirm "
+                "(or use `aios vaults credentials archive` for a reversible soft-delete)"
+            )
             return 2
         client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/vaults/{vault_id}/credentials/{credential_id}")
+        print_success("deleted", credential_id)
         return None
 
     run_or_die(_run)

@@ -160,3 +160,13 @@ def print_error(message: str) -> None:
 def print_note(message: str) -> None:
     """Write a dim informational note to stderr (so it doesn't pollute stdout pipes)."""
     sys.stderr.write(dim(message, stream=sys.stderr) + "\n")
+
+
+def print_success(verb: str, resource_id: str) -> None:
+    """Write a ``<verb> <id>`` confirmation line to stdout for terminal verbs.
+
+    Used by archive/delete commands whose server returns no body: we still
+    want to give the user a visible acknowledgement and something scripts
+    can grep for.
+    """
+    sys.stdout.write(f"{green(verb)} {resource_id}\n")

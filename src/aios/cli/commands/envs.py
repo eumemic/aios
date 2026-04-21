@@ -15,7 +15,7 @@ from aios.cli.commands._shared import (
     with_client,
 )
 from aios.cli.files import PayloadError, load_payload
-from aios.cli.output import print_error
+from aios.cli.output import print_error, print_success
 from aios.cli.runtime import run_or_die
 
 app = typer.Typer(name="envs", help="Manage environments (sandbox configs).", no_args_is_help=True)
@@ -101,11 +101,12 @@ def update(
     run_or_die(_run)
 
 
-@app.command("delete")
+@app.command("delete", help="Soft-archive an environment.")
 def delete(ctx: typer.Context, env_id: str) -> None:
     def _run() -> None:
         client = just_client(ctx)
         with client:
             client.request("DELETE", f"/v1/environments/{env_id}")
+        print_success("archived", env_id)
 
     run_or_die(_run)
