@@ -24,6 +24,7 @@ from tests.e2e.harness import Harness
 
 
 async def _noop_defer_wake(
+    pool: Any,
     session_id: str,
     *,
     cause: str = "message",
@@ -33,7 +34,7 @@ async def _noop_defer_wake(
     pass
 
 
-async def _noop_defer_retry_wake(session_id: str, *, delay_seconds: float) -> None:
+async def _noop_defer_retry_wake(pool: Any, session_id: str, *, delay_seconds: float) -> None:
     pass
 
 
