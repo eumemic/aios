@@ -35,8 +35,9 @@ async def list_(
     _auth: AuthDep,
     limit: int = 50,
     after: str | None = None,
+    name: str | None = None,
 ) -> ListResponse[Agent]:
-    items = await service.list_agents(pool, limit=limit, after=after)
+    items = await service.list_agents(pool, limit=limit, after=after, name=name)
     return ListResponse[Agent](
         data=items,
         has_more=len(items) == limit,

@@ -298,19 +298,23 @@ async def get_agent(conn: asyncpg.Connection[Any], agent_id: str) -> Agent:
 
 
 async def list_agents(
-    conn: asyncpg.Connection[Any], *, limit: int = 50, after: str | None = None
+    conn: asyncpg.Connection[Any],
+    *,
+    limit: int = 50,
+    after: str | None = None,
+    name: str | None = None,
 ) -> list[Agent]:
-    if after is None:
-        rows = await conn.fetch(
-            "SELECT * FROM agents WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
-            limit,
-        )
-    else:
-        rows = await conn.fetch(
-            "SELECT * FROM agents WHERE archived_at IS NULL AND id < $1 ORDER BY id DESC LIMIT $2",
-            after,
-            limit,
-        )
+    where = ["archived_at IS NULL"]
+    args: list[Any] = []
+    if name is not None:
+        args.append(name)
+        where.append(f"name = ${len(args)}")
+    if after is not None:
+        args.append(after)
+        where.append(f"id < ${len(args)}")
+    args.append(limit)
+    sql = f"SELECT * FROM agents WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
+    rows = await conn.fetch(sql, *args)
     return [_row_to_agent(r) for r in rows]
 
 

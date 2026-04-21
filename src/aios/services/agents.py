@@ -63,10 +63,14 @@ async def get_agent(pool: asyncpg.Pool[Any], agent_id: str) -> Agent:
 
 
 async def list_agents(
-    pool: asyncpg.Pool[Any], *, limit: int = 50, after: str | None = None
+    pool: asyncpg.Pool[Any],
+    *,
+    limit: int = 50,
+    after: str | None = None,
+    name: str | None = None,
 ) -> list[Agent]:
     async with pool.acquire() as conn:
-        return await queries.list_agents(conn, limit=limit, after=after)
+        return await queries.list_agents(conn, limit=limit, after=after, name=name)
 
 
 async def archive_agent(pool: asyncpg.Pool[Any], agent_id: str) -> None:
