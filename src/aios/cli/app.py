@@ -84,6 +84,7 @@ from aios.cli.commands import rules as _rules  # noqa: E402
 from aios.cli.commands import sessions as _sessions  # noqa: E402
 from aios.cli.commands import skills as _skills  # noqa: E402
 from aios.cli.commands import status as _status  # noqa: E402
+from aios.cli.commands import tail as _tail  # noqa: E402
 from aios.cli.commands import vaults as _vaults  # noqa: E402
 
 app.add_typer(_agents.app, name="agents")
@@ -98,3 +99,4 @@ app.add_typer(_envs.app, name="envs")
 _ops.register(app)
 _status.register(app)
 _chat.register(app)
+_tail.register(app)

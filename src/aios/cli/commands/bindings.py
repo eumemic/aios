@@ -60,19 +60,36 @@ def get(ctx: typer.Context, binding_id: str) -> None:
     run_or_die(_run)
 
 
-@app.command("create", help="Create a channel binding (address + session_id).")
+@app.command("create", help="Create a channel binding.")
 def create(
     ctx: typer.Context,
+    address: Annotated[
+        str | None,
+        typer.Option("--address", help="Full channel address (e.g. signal/+15550001/group/abc)."),
+    ] = None,
+    session_id: Annotated[
+        str | None, typer.Option("--session-id", help="Session id to bind the address to.")
+    ] = None,
     file: Annotated[Path | None, typer.Option("--file")] = None,
     stdin: Annotated[bool, typer.Option("--stdin")] = False,
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
-        try:
-            payload = load_payload(file, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+        ergonomic = address is not None or session_id is not None
+        if ergonomic:
+            if any([file, stdin, data]):
+                print_error("combine ergonomic flags OR --file/--stdin/--data, not both")
+                return 64
+            if address is None or session_id is None:
+                print_error("--address and --session-id are both required")
+                return 64
+            payload: dict[str, object] = {"address": address, "session_id": session_id}
+        else:
+            try:
+                payload = load_payload(file, stdin, data)
+            except PayloadError as exc:
+                print_error(str(exc))
+                return 64
         client = just_client(ctx)
         with client:
             obj = client.request("POST", "/v1/channel-bindings", json_body=payload)
@@ -82,8 +99,8 @@ def create(
     run_or_die(_run)
 
 
-@app.command("delete")
-def delete(ctx: typer.Context, binding_id: str) -> None:
+@app.command("archive", help="Archive a channel binding (soft-delete, retained for audit).")
+def archive(ctx: typer.Context, binding_id: str) -> None:
     def _run() -> None:
         client = just_client(ctx)
         with client:

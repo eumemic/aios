@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -64,19 +65,43 @@ def get(ctx: typer.Context, vault_id: str) -> None:
     run_or_die(_run)
 
 
-@app.command("create", help="Create a vault (VaultCreate shape).")
+@app.command("create", help="Create a vault.")
 def create(
     ctx: typer.Context,
+    display_name: Annotated[
+        str | None,
+        typer.Option("--display-name", help="Human-readable name (1-128 chars)."),
+    ] = None,
+    metadata_json: Annotated[
+        str | None,
+        typer.Option("--metadata-json", help="JSON object of vault metadata."),
+    ] = None,
     file: Annotated[Path | None, typer.Option("--file")] = None,
     stdin: Annotated[bool, typer.Option("--stdin")] = False,
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
-        try:
-            payload = load_payload(file, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+        ergonomic = display_name is not None or metadata_json is not None
+        if ergonomic:
+            if any([file, stdin, data]):
+                print_error("combine ergonomic flags OR --file/--stdin/--data, not both")
+                return 64
+            if display_name is None:
+                print_error("--display-name is required")
+                return 64
+            payload: dict[str, Any] = {"display_name": display_name}
+            if metadata_json is not None:
+                try:
+                    payload["metadata"] = json.loads(metadata_json)
+                except json.JSONDecodeError as exc:
+                    print_error(f"invalid --metadata-json: {exc}")
+                    return 64
+        else:
+            try:
+                payload = load_payload(file, stdin, data)
+            except PayloadError as exc:
+                print_error(str(exc))
+                return 64
         client = just_client(ctx)
         with client:
             obj = client.request("POST", "/v1/vaults", json_body=payload)
@@ -166,17 +191,29 @@ def cred_get(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
     run_or_die(_run)
 
 
-@credentials.command("create", help="Create a credential in a vault (VaultCredentialCreate).")
+@credentials.command("create", help="Create a credential in a vault.")
 def cred_create(
     ctx: typer.Context,
     vault_id: str,
+    body_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--body-file",
+            help=(
+                "Path to a JSON file containing the full VaultCredentialCreate body. "
+                "Using a file avoids leaking secrets (tokens, client secrets) into "
+                "shell history. Alias for --file."
+            ),
+        ),
+    ] = None,
     file: Annotated[Path | None, typer.Option("--file")] = None,
     stdin: Annotated[bool, typer.Option("--stdin")] = False,
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
+        source = body_file or file
         try:
-            payload = load_payload(file, stdin, data)
+            payload = load_payload(source, stdin, data)
         except PayloadError as exc:
             print_error(str(exc))
             return 64

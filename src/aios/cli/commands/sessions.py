@@ -19,6 +19,7 @@ from aios.cli.commands._shared import (
 from aios.cli.files import PayloadError, load_payload
 from aios.cli.output import cyan, dim, print_error
 from aios.cli.runtime import get_state, run_or_die
+from aios.cli.tail_format import format_event
 
 app = typer.Typer(name="sessions", help="Manage sessions.", no_args_is_help=True)
 
@@ -256,6 +257,14 @@ def stream(
         bool,
         typer.Option("--raw", help="Print each SSE message as JSON (no event pretty-printing)."),
     ] = False,
+    pretty: Annotated[
+        bool,
+        typer.Option(
+            "--pretty",
+            help="Use the structured one-line formatter (same as `aios tail`). "
+            "Skips delta events and lifecycle-span noise.",
+        ),
+    ] = False,
 ) -> None:
     def _run() -> None:
         state = get_state(ctx)
@@ -267,11 +276,59 @@ def stream(
                     sys.stdout.write(json.dumps({"event": msg.event, "data": msg.data}) + "\n")
                     sys.stdout.flush()
                     continue
+                if pretty:
+                    if msg.event == "event":
+                        try:
+                            event = json.loads(msg.data)
+                        except json.JSONDecodeError:
+                            continue
+                        line = format_event(event)
+                        if line is not None:
+                            sys.stdout.write(line + "\n")
+                            sys.stdout.flush()
+                    elif msg.event == "done":
+                        break
+                    continue
                 _render_sse(msg.event, msg.data)
                 if msg.event == "done":
                     break
 
     run_or_die(_run)
+
+
+@app.command(
+    "tail",
+    help="Structured one-line real-time viewer — equivalent to `aios tail`.",
+)
+def tail(
+    ctx: typer.Context,
+    session_id: str,
+    from_seq: Annotated[int, typer.Option("--from-seq", min=0)] = 0,
+) -> None:
+    def _run() -> None:
+        _tail_session(ctx, session_id, from_seq=from_seq)
+
+    run_or_die(_run)
+
+
+def _tail_session(ctx: typer.Context, session_id: str, *, from_seq: int) -> None:
+    """Shared implementation for ``aios sessions tail`` / top-level ``aios tail``."""
+    state = get_state(ctx)
+    client = state.client()
+    with client, client.stream_session(session_id, after_seq=from_seq) as messages:
+        for msg in messages:
+            if msg.event != "event":
+                if msg.event == "done":
+                    return
+                continue
+            try:
+                event = json.loads(msg.data)
+            except json.JSONDecodeError:
+                continue
+            line = format_event(event)
+            if line is not None:
+                sys.stdout.write(line + "\n")
+                sys.stdout.flush()
 
 
 def _render_sse(event: str, data: str) -> None:

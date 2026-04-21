@@ -58,19 +58,64 @@ def get(ctx: typer.Context, connection_id: str) -> None:
     run_or_die(_run)
 
 
-@app.command("create", help="Create a connection (ConnectionCreate shape).")
+@app.command("create", help="Create a connection.")
 def create(
     ctx: typer.Context,
+    connector: Annotated[
+        str | None, typer.Option("--connector", help="Connector type (e.g. signal).")
+    ] = None,
+    account: Annotated[
+        str | None, typer.Option("--account", help="Account identifier (e.g. bot uuid).")
+    ] = None,
+    mcp_url: Annotated[str | None, typer.Option("--mcp-url", help="MCP server URL.")] = None,
+    vault_id: Annotated[
+        str | None, typer.Option("--vault-id", help="Vault id with the MCP credential.")
+    ] = None,
+    metadata_json: Annotated[
+        str | None,
+        typer.Option("--metadata-json", help="JSON object of connection metadata."),
+    ] = None,
     file: Annotated[Path | None, typer.Option("--file")] = None,
     stdin: Annotated[bool, typer.Option("--stdin")] = False,
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
-        try:
-            payload = load_payload(file, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+        ergonomic = any(v is not None for v in (connector, account, mcp_url, vault_id))
+        if ergonomic:
+            if any([file, stdin, data]):
+                print_error("combine ergonomic flags OR --file/--stdin/--data, not both")
+                return 64
+            missing = [
+                name
+                for name, v in (
+                    ("--connector", connector),
+                    ("--account", account),
+                    ("--mcp-url", mcp_url),
+                    ("--vault-id", vault_id),
+                )
+                if v is None
+            ]
+            if missing:
+                print_error(f"missing required flag(s): {', '.join(missing)}")
+                return 64
+            payload: dict[str, Any] = {
+                "connector": connector,
+                "account": account,
+                "mcp_url": mcp_url,
+                "vault_id": vault_id,
+            }
+            if metadata_json is not None:
+                try:
+                    payload["metadata"] = json.loads(metadata_json)
+                except json.JSONDecodeError as exc:
+                    print_error(f"invalid --metadata-json: {exc}")
+                    return 64
+        else:
+            try:
+                payload = load_payload(file, stdin, data)
+            except PayloadError as exc:
+                print_error(str(exc))
+                return 64
         client = just_client(ctx)
         with client:
             obj = client.request("POST", "/v1/connections", json_body=payload)
@@ -103,8 +148,8 @@ def update(
     run_or_die(_run)
 
 
-@app.command("delete")
-def delete(ctx: typer.Context, connection_id: str) -> None:
+@app.command("archive", help="Archive a connection (soft-delete, retained for audit).")
+def archive(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
         client = just_client(ctx)
         with client:

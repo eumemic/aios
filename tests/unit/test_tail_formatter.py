@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from aios.tail import format_event
+from aios.cli.tail_format import format_event
 
 
 def _msg(
