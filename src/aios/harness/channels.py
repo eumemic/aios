@@ -331,20 +331,15 @@ def derive_unread_counts(events: Iterable[Event], channels: Iterable[str]) -> di
     candidates: list[tuple[str, int]] = []
     for e in events:
         orig = e.orig_channel
-        if (
-            isinstance(orig, str)
-            and orig in last_seen
-            and e.focal_channel_at_arrival == orig
-            and e.seq > last_seen[orig]
-        ):
-            last_seen[orig] = e.seq
+        if isinstance(orig, str) and orig in last_seen:
+            if e.focal_channel_at_arrival == orig and e.seq > last_seen[orig]:
+                last_seen[orig] = e.seq
+            candidates.append((orig, e.seq))
         marker = _switch_marker(e)
         if marker is not None and marker["success"]:
             target = marker["target"]
             if target in last_seen and e.seq > last_seen[target]:
                 last_seen[target] = e.seq
-        if isinstance(orig, str) and orig in last_seen:
-            candidates.append((orig, e.seq))
     counts = dict.fromkeys(channel_set, 0)
     for orig, seq in candidates:
         if seq > last_seen[orig]:
