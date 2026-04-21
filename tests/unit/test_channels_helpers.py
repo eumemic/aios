@@ -261,7 +261,7 @@ class TestBuildChannelsTailBlock:
         block = build_channels_tail_block([_binding(self._ALICE)], [], focal_channel=self._ALICE)
         assert block is not None
         content = block["content"]
-        assert "▸ signal/bot/alice (focal)" in content
+        assert "▸ channel_id=signal/bot/alice (focal)" in content
         # Focal line must not advertise an unread count — you ARE in it.
         # Check that no digit appears on the focal line.
         focal_line = next(ln for ln in content.splitlines() if "▸" in ln)
@@ -279,7 +279,7 @@ class TestBuildChannelsTailBlock:
         )
         assert block is not None
         content = block["content"]
-        assert "○ signal/bot/family — 2 unread" in content
+        assert "○ channel_id=signal/bot/family — 2 unread" in content
 
     def test_non_focal_preview_truncated(self) -> None:
         long = "x" * 200
@@ -313,7 +313,7 @@ class TestBuildChannelsTailBlock:
         )
         assert block is not None
         content = block["content"]
-        assert f"◌ {self._ANNOUNCEMENTS} (muted) — 1 unread" in content
+        assert f"◌ channel_id={self._ANNOUNCEMENTS} (muted) — 1 unread" in content
         # No preview (no quoted content).
         assert "system noise" not in content
 
@@ -343,7 +343,7 @@ class TestBuildChannelsTailBlock:
         )
         assert block is not None
         content = block["content"]
-        assert f"○ {self._FAMILY} — 0 unread" in content
+        assert f"○ channel_id={self._FAMILY} — 0 unread" in content
 
 
 # ── apply_monologue_prefix ─────────────────────────────────────────────────

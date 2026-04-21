@@ -46,30 +46,34 @@ SWITCH_CHANNEL_DESCRIPTION = (
     "Shift your attention to a different bound channel, or put your phone "
     "down entirely. When focused on a channel, inbound messages on that "
     "channel render in full; inbound on other channels show up as short "
-    "notification markers in your context. Call switch_channel(target=<address>) "
-    "to focus on a bound channel, or switch_channel(target=null) to clear "
+    "notification markers in your context. Call "
+    "switch_channel(channel_id=<id>) to focus on a bound channel — use one "
+    "of the channel_ids listed in the channels tail block or named in a "
+    "notification marker. Call switch_channel(channel_id=null) to clear "
     "focal (no channel focused; all inbound renders as notifications). "
     "On a real switch the tool result includes a recap block: peer "
     "inbound messages on the target channel plus the tool_calls you "
     "made while focused there (which is where your outbound sends live "
     "— e.g. signal_send arguments). Your bare assistant text is "
     "internal monologue and is dropped from recaps. A call whose "
-    "target already equals your current focal is a no-op — no recap, "
-    "no re-emit."
+    "channel_id already equals your current focal is a no-op — no "
+    "recap, no re-emit."
 )
 
 SWITCH_CHANNEL_PARAMETERS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "target": {
+        "channel_id": {
             "type": ["string", "null"],
             "description": (
-                "The channel address to focus on (must be a bound channel "
-                "on this session), or null to clear focal."
+                "The channel_id to focus on (must be a bound channel on "
+                "this session — look it up from the channels tail block "
+                "or the most recent notification marker), or null to "
+                "clear focal."
             ),
         },
     },
-    "required": ["target"],
+    "required": ["channel_id"],
     "additionalProperties": False,
 }
 
@@ -83,10 +87,10 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
     current focal) return a terse ack with empty metadata — they didn't
     actually change the agent's attention and shouldn't anchor anything.
     """
-    target = arguments.get("target")
+    target = arguments.get("channel_id")
     if target is not None and not isinstance(target, str):
         return ToolResult(
-            content=("Invalid target: must be a channel address string or null."),
+            content=("Invalid channel_id: must be a channel_id string or null."),
             metadata={
                 SWITCH_CHANNEL_METADATA_KEY: {"target": None, "success": False},
             },

@@ -950,7 +950,7 @@ class TestFocalRendering:
             )
         ]
         content = build_messages(events, system_prompt=None).messages[0]["content"]
-        assert content.startswith(f"🔔 {self._CHAN_B}")
+        assert content.startswith(f"🔔 channel_id={self._CHAN_B}")
         assert "from=Bob" in content
         assert "hey there" in content
 
@@ -959,17 +959,33 @@ class TestFocalRendering:
         md = {"channel": self._CHAN_B, "sender_name": "Bob"}
         events = [_evt(1, "user", content="hey", metadata=md, focal_channel_at_arrival=None)]
         content = build_messages(events, system_prompt=None).messages[0]["content"]
-        assert content.startswith(f"🔔 {self._CHAN_B}")
+        assert content.startswith(f"🔔 channel_id={self._CHAN_B}")
 
     def test_notification_omits_sender_when_absent(self) -> None:
-        """No sender_name → no ``from=`` clause, just channel + preview."""
+        """No sender_name → no ``from=`` clause, just channel + preview
+        on the header line.  Hint line follows unconditionally.
+        """
         md = {"channel": self._CHAN_B}
         events = [
             _evt(1, "user", content="hey", metadata=md, focal_channel_at_arrival=self._CHAN_A)
         ]
         content = build_messages(events, system_prompt=None).messages[0]["content"]
         assert "from=" not in content
-        assert content == f"🔔 {self._CHAN_B} · hey"
+        header, hint = content.split("\n", 1)
+        assert header == f"🔔 channel_id={self._CHAN_B} · hey"
+        assert hint.startswith("(to respond, call switch_channel(channel_id=")
+
+    def test_notification_hint_names_the_channel_id(self) -> None:
+        """The ``to respond...`` hint line includes the same channel_id
+        as the marker, so weaker models can copy-paste it directly into
+        a ``switch_channel`` call.
+        """
+        md = {"channel": self._CHAN_B, "sender_name": "Bob"}
+        events = [
+            _evt(1, "user", content="hey", metadata=md, focal_channel_at_arrival=self._CHAN_A)
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert f"switch_channel(channel_id='{self._CHAN_B}')" in content
 
     def test_notification_truncation_at_80_chars(self) -> None:
         long = "x" * 200
@@ -1015,7 +1031,7 @@ class TestFocalRendering:
             focal_channel_at_arrival=self._CHAN_A,
         )
         msgs = build_messages([ev_early, ev_late], system_prompt=None).messages
-        assert msgs[0]["content"].startswith(f"🔔 {self._CHAN_B}")
+        assert msgs[0]["content"].startswith(f"🔔 channel_id={self._CHAN_B}")
         assert msgs[1]["content"].startswith(f"[channel={self._CHAN_A}")
 
 

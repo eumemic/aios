@@ -137,13 +137,16 @@ def _format_notification_marker(
 
     Shape::
 
-        🔔 <orig_channel> · from=<sender_name> · <preview>
+        🔔 channel_id=<orig_channel> · from=<sender_name> · <preview>
+        (to respond, call switch_channel(channel_id=<orig_channel>) first)
 
     The ``from`` clause is omitted when ``sender_name`` is absent from
     metadata.  The preview clause is omitted when content is empty and
-    there's no reaction to surface.
+    there's no reaction to surface.  The trailing hint line is always
+    emitted — it tells the reader how to turn this notification into
+    full-content context.
     """
-    parts = [f"🔔 {orig_channel}"]
+    parts = [f"🔔 channel_id={orig_channel}"]
     if isinstance(metadata, dict):
         sender_name = metadata.get("sender_name")
         if isinstance(sender_name, str) and sender_name:
@@ -151,7 +154,9 @@ def _format_notification_marker(
     preview = _notification_preview(content, metadata)
     if preview:
         parts.append(preview)
-    return " · ".join(parts)
+    header = " · ".join(parts)
+    hint = f"(to respond, call switch_channel(channel_id={orig_channel!r}) first)"
+    return f"{header}\n{hint}"
 
 
 def render_user_event(
