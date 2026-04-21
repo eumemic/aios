@@ -241,6 +241,26 @@ class TestGetVaultCredential:
         assert "required" in capsys.readouterr().err.lower()
 
 
+class TestArchiveVaultCredential:
+    async def test_archives_via_post_archive_endpoint_and_prints_resource(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        archived = {**_CREATED_CREDENTIAL, "archived_at": "2026-04-20T00:01:00Z"}
+        client = _mock_async_client("post", _mock_response(200, archived))
+
+        with patch("aios.cli.vault_credentials.async_client", return_value=client):
+            rc = await run_async(["archive", "vcr_new", "--vault-id", "vlt_01"])
+
+        assert rc == 0
+        assert client.post.await_args.args[0].endswith(
+            "/v1/vaults/vlt_01/credentials/vcr_new/archive"
+        )
+        out = capsys.readouterr().out
+        assert "vcr_new" in out
+        assert "archived_at" in out
+
+
 class TestDispatch:
     async def test_unknown_verb_prints_usage(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
