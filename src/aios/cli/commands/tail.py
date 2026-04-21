@@ -23,9 +23,9 @@ def register(app: typer.Typer) -> None:
     def tail(
         ctx: typer.Context,
         session_id: str,
-        from_seq: Annotated[int, typer.Option("--from-seq", min=0)] = 0,
+        after_seq: Annotated[int, typer.Option("--after-seq", min=0)] = 0,
     ) -> None:
         def _run() -> None:
-            tail_session(ctx, session_id, from_seq=from_seq)
+            tail_session(ctx, session_id, after_seq=after_seq)
 
         run_or_die(_run)
