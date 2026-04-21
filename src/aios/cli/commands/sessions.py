@@ -16,10 +16,10 @@ from aios.cli.commands._shared import (
     render_single,
     with_client,
 )
-from aios.cli.files import PayloadError, load_payload
+from aios.cli.files import PayloadError, load_json_object, load_payload
 from aios.cli.output import cyan, dim, print_error
 from aios.cli.runtime import get_state, run_or_die
-from aios.cli.tail_format import format_event
+from aios.cli.tail_format import iter_formatted_events
 
 app = typer.Typer(name="sessions", help="Manage sessions.", no_args_is_help=True)
 
@@ -165,9 +165,9 @@ def send(
         body: dict[str, Any] = {"content": message}
         if metadata is not None:
             try:
-                body["metadata"] = json.loads(metadata)
-            except json.JSONDecodeError as exc:
-                print_error(f"invalid --metadata JSON: {exc}")
+                body["metadata"] = load_json_object(metadata, "--metadata")
+            except PayloadError as exc:
+                print_error(str(exc))
                 return 64
         client = just_client(ctx)
         with client:
@@ -267,27 +267,16 @@ def stream(
     ] = False,
 ) -> None:
     def _run() -> None:
-        state = get_state(ctx)
-        client = state.client()
         sys.stdout.write(dim(f"streaming {cyan(session_id)} after_seq={after_seq}\n"))
+        if pretty:
+            tail_session(ctx, session_id, from_seq=after_seq)
+            return
+        client = get_state(ctx).client()
         with client, client.stream_session(session_id, after_seq=after_seq) as messages:
             for msg in messages:
                 if raw:
                     sys.stdout.write(json.dumps({"event": msg.event, "data": msg.data}) + "\n")
                     sys.stdout.flush()
-                    continue
-                if pretty:
-                    if msg.event == "event":
-                        try:
-                            event = json.loads(msg.data)
-                        except json.JSONDecodeError:
-                            continue
-                        line = format_event(event)
-                        if line is not None:
-                            sys.stdout.write(line + "\n")
-                            sys.stdout.flush()
-                    elif msg.event == "done":
-                        break
                     continue
                 _render_sse(msg.event, msg.data)
                 if msg.event == "done":
@@ -306,29 +295,18 @@ def tail(
     from_seq: Annotated[int, typer.Option("--from-seq", min=0)] = 0,
 ) -> None:
     def _run() -> None:
-        _tail_session(ctx, session_id, from_seq=from_seq)
+        tail_session(ctx, session_id, from_seq=from_seq)
 
     run_or_die(_run)
 
 
-def _tail_session(ctx: typer.Context, session_id: str, *, from_seq: int) -> None:
+def tail_session(ctx: typer.Context, session_id: str, *, from_seq: int) -> None:
     """Shared implementation for ``aios sessions tail`` / top-level ``aios tail``."""
-    state = get_state(ctx)
-    client = state.client()
+    client = get_state(ctx).client()
     with client, client.stream_session(session_id, after_seq=from_seq) as messages:
-        for msg in messages:
-            if msg.event != "event":
-                if msg.event == "done":
-                    return
-                continue
-            try:
-                event = json.loads(msg.data)
-            except json.JSONDecodeError:
-                continue
-            line = format_event(event)
-            if line is not None:
-                sys.stdout.write(line + "\n")
-                sys.stdout.flush()
+        for line in iter_formatted_events(messages):
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
 
 
 def _render_sse(event: str, data: str) -> None:

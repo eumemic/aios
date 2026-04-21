@@ -89,7 +89,16 @@ def test_create_from_data_json(mocked_cli):
 def test_create_rejects_both_ergonomic_and_file(mocked_cli):
     result = runner.invoke(
         app,
-        ["bindings", "create", "--address", "x", "--data", "{}"],
+        [
+            "bindings",
+            "create",
+            "--address",
+            "x",
+            "--session-id",
+            "s",
+            "--data",
+            "{}",
+        ],
     )
     assert result.exit_code == 64
     assert "not both" in result.output

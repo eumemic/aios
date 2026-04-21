@@ -14,7 +14,7 @@ from aios.cli.commands._shared import (
     render_single,
     with_client,
 )
-from aios.cli.files import PayloadError, load_payload
+from aios.cli.files import PayloadError, resolve_payload
 from aios.cli.output import print_error
 from aios.cli.runtime import run_or_die
 
@@ -75,21 +75,17 @@ def create(
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
-        ergonomic = address is not None or session_id is not None
-        if ergonomic:
-            if any([file, stdin, data]):
-                print_error("combine ergonomic flags OR --file/--stdin/--data, not both")
-                return 64
+        ergonomic: dict[str, object] | None = None
+        if address is not None or session_id is not None:
             if address is None or session_id is None:
                 print_error("--address and --session-id are both required")
                 return 64
-            payload: dict[str, object] = {"address": address, "session_id": session_id}
-        else:
-            try:
-                payload = load_payload(file, stdin, data)
-            except PayloadError as exc:
-                print_error(str(exc))
-                return 64
+            ergonomic = {"address": address, "session_id": session_id}
+        try:
+            payload = resolve_payload(ergonomic, file, stdin, data)
+        except PayloadError as exc:
+            print_error(str(exc))
+            return 64
         client = just_client(ctx)
         with client:
             obj = client.request("POST", "/v1/channel-bindings", json_body=payload)

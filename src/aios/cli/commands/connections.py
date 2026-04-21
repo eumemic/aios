@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -15,7 +14,7 @@ from aios.cli.commands._shared import (
     render_single,
     with_client,
 )
-from aios.cli.files import PayloadError, load_payload
+from aios.cli.files import PayloadError, load_json_object, load_payload, resolve_payload
 from aios.cli.output import print_error
 from aios.cli.runtime import run_or_die
 
@@ -80,11 +79,8 @@ def create(
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
-        ergonomic = any(v is not None for v in (connector, account, mcp_url, vault_id))
-        if ergonomic:
-            if any([file, stdin, data]):
-                print_error("combine ergonomic flags OR --file/--stdin/--data, not both")
-                return 64
+        ergonomic: dict[str, Any] | None = None
+        if any(v is not None for v in (connector, account, mcp_url, vault_id)):
             missing = [
                 name
                 for name, v in (
@@ -98,7 +94,7 @@ def create(
             if missing:
                 print_error(f"missing required flag(s): {', '.join(missing)}")
                 return 64
-            payload: dict[str, Any] = {
+            ergonomic = {
                 "connector": connector,
                 "account": account,
                 "mcp_url": mcp_url,
@@ -106,16 +102,15 @@ def create(
             }
             if metadata_json is not None:
                 try:
-                    payload["metadata"] = json.loads(metadata_json)
-                except json.JSONDecodeError as exc:
-                    print_error(f"invalid --metadata-json: {exc}")
+                    ergonomic["metadata"] = load_json_object(metadata_json, "--metadata-json")
+                except PayloadError as exc:
+                    print_error(str(exc))
                     return 64
-        else:
-            try:
-                payload = load_payload(file, stdin, data)
-            except PayloadError as exc:
-                print_error(str(exc))
-                return 64
+        try:
+            payload = resolve_payload(ergonomic, file, stdin, data)
+        except PayloadError as exc:
+            print_error(str(exc))
+            return 64
         client = just_client(ctx)
         with client:
             obj = client.request("POST", "/v1/connections", json_body=payload)
@@ -175,9 +170,9 @@ def inbound(
         body: dict[str, Any] = {"path": path, "content": content}
         if metadata is not None:
             try:
-                body["metadata"] = json.loads(metadata)
-            except json.JSONDecodeError as exc:
-                print_error(f"invalid --metadata JSON: {exc}")
+                body["metadata"] = load_json_object(metadata, "--metadata")
+            except PayloadError as exc:
+                print_error(str(exc))
                 return 64
         client = just_client(ctx)
         with client:

@@ -11,7 +11,7 @@ from typing import Annotated
 
 import typer
 
-from aios.cli.commands.sessions import _tail_session
+from aios.cli.commands.sessions import tail_session
 from aios.cli.runtime import run_or_die
 
 
@@ -26,6 +26,6 @@ def register(app: typer.Typer) -> None:
         from_seq: Annotated[int, typer.Option("--from-seq", min=0)] = 0,
     ) -> None:
         def _run() -> None:
-            _tail_session(ctx, session_id, from_seq=from_seq)
+            tail_session(ctx, session_id, from_seq=from_seq)
 
         run_or_die(_run)

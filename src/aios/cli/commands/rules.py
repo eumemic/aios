@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -15,7 +14,7 @@ from aios.cli.commands._shared import (
     render_single,
     with_client,
 )
-from aios.cli.files import PayloadError, load_payload
+from aios.cli.files import PayloadError, load_json_object, load_payload, resolve_payload
 from aios.cli.output import print_error
 from aios.cli.runtime import run_or_die
 
@@ -89,29 +88,25 @@ def create(
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
-        ergonomic = prefix is not None or target is not None
-        if ergonomic:
-            if any([file, stdin, data]):
-                print_error("combine ergonomic flags OR --file/--stdin/--data, not both")
-                return 64
+        ergonomic: dict[str, Any] | None = None
+        if prefix is not None or target is not None:
             if prefix is None or target is None:
                 print_error("--prefix and --target are both required")
                 return 64
-            payload: dict[str, Any] = {"prefix": prefix, "target": target}
+            ergonomic = {"prefix": prefix, "target": target, "session_params": {}}
             if session_params_json is not None:
                 try:
-                    payload["session_params"] = json.loads(session_params_json)
-                except json.JSONDecodeError as exc:
-                    print_error(f"invalid --session-params-json: {exc}")
+                    ergonomic["session_params"] = load_json_object(
+                        session_params_json, "--session-params-json"
+                    )
+                except PayloadError as exc:
+                    print_error(str(exc))
                     return 64
-            else:
-                payload["session_params"] = {}
-        else:
-            try:
-                payload = load_payload(file, stdin, data)
-            except PayloadError as exc:
-                print_error(str(exc))
-                return 64
+        try:
+            payload = resolve_payload(ergonomic, file, stdin, data)
+        except PayloadError as exc:
+            print_error(str(exc))
+            return 64
         client = just_client(ctx)
         with client:
             obj = client.request(

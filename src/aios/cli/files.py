@@ -61,6 +61,40 @@ def _decode(raw: str, *, source: str) -> dict[str, Any]:
     return value
 
 
+def load_json_object(raw: str, field_name: str) -> dict[str, Any]:
+    """Decode a JSON object from a single flag value (e.g. ``--metadata-json``).
+
+    Raises :class:`PayloadError` on invalid JSON or a non-object top level.
+    Callers translate to a CLI error via ``print_error(str(exc)); return 64``.
+    """
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise PayloadError(f"invalid {field_name}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise PayloadError(f"{field_name} must be a JSON object, not {type(value).__name__}")
+    return value
+
+
+def resolve_payload(
+    ergonomic: dict[str, Any] | None,
+    file: Path | None,
+    stdin: bool,
+    data: str | None,
+) -> dict[str, Any]:
+    """Pick the create/update payload from either ergonomic flags or --file/--stdin/--data.
+
+    ``ergonomic`` is the dict the caller built from per-resource flags, or
+    ``None`` if no ergonomic flag was provided. Raises :class:`PayloadError`
+    if both sources were given or if neither is present.
+    """
+    if ergonomic is not None:
+        if file is not None or stdin or data is not None:
+            raise PayloadError("combine ergonomic flags OR --file/--stdin/--data, not both")
+        return ergonomic
+    return load_payload(file, stdin, data)
+
+
 def walk_skill_dir(root: Path) -> dict[str, str]:
     """Build the ``files`` dict a skills endpoint expects from a directory.
 

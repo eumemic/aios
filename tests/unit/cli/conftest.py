@@ -36,25 +36,25 @@ class Captured:
 class MockedCli:
     """Handle returned by the ``mocked_cli`` fixture.
 
-    Callers set ``response`` to the ``httpx.Response`` they want next, then
-    invoke a typer command. After the call, ``captured`` has the request
-    shape.
+    Callers queue responses via ``queue_response(httpx.Response(...))``; each
+    request pops the next queued response. After a call, ``captured`` has
+    the request shape (method/path/query/body).
     """
 
     captured: Captured
-    response_factory: list[Any]
+    response_queue: list[httpx.Response]
 
     def queue_response(self, response: httpx.Response) -> None:
-        self.response_factory.append(response)
+        self.response_queue.append(response)
 
 
 @pytest.fixture
 def mocked_cli(monkeypatch: pytest.MonkeyPatch) -> MockedCli:
     """Monkey-patch ``CliState.client`` to return an AiosClient with a MockTransport.
 
-    The test queues responses into ``handle.response_factory`` via
-    ``handle.queue_response(httpx.Response(...))``; each request pops the
-    next queued response (or raises if empty).
+    Tests call ``handle.queue_response(httpx.Response(...))`` before invoking
+    a command; each request pops the next queued response (or returns 500
+    if the queue is empty).
     """
     captured = Captured()
     captured.reset()
@@ -87,4 +87,4 @@ def mocked_cli(monkeypatch: pytest.MonkeyPatch) -> MockedCli:
     monkeypatch.setattr(CliState, "client", _client)
     monkeypatch.setenv("AIOS_API_KEY", "test-key")
     monkeypatch.setenv("AIOS_URL", "http://test.invalid")
-    return MockedCli(captured=captured, response_factory=responses)
+    return MockedCli(captured=captured, response_queue=responses)

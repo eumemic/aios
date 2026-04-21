@@ -10,10 +10,34 @@ Skips transient streaming-delta payloads; only persisted events (kind
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable, Iterator
 from typing import Any
+
+from aios.cli.sse import SseMessage
 
 MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
 CONTENT_PREVIEW_MAX = 240
+
+
+def iter_formatted_events(messages: Iterable[SseMessage]) -> Iterator[str]:
+    """Consume SSE messages, yield pretty-formatted event lines.
+
+    Skips ``delta`` and non-``event`` messages; returns cleanly on ``done``.
+    Lets callers drive the loop so they can decide how/where to write.
+    """
+    for msg in messages:
+        if msg.event == "done":
+            return
+        if msg.event != "event":
+            continue
+        try:
+            event = json.loads(msg.data)
+        except json.JSONDecodeError:
+            continue
+        line = format_event(event)
+        if line is not None:
+            yield line
 
 
 def format_event(event: dict[str, Any]) -> str | None:
