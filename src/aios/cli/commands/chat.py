@@ -197,12 +197,19 @@ def _stream_until_idle(
             client.request("POST", f"/v1/sessions/{session_id}/interrupt", json_body={})
         sys.stderr.write(yellow("\n  [ctrl-c: interrupt requested]\n", stream=sys.stderr))
 
+    # Track whether any content delta arrived during the current assistant
+    # turn. Reset when a new assistant message is finalized so subsequent
+    # turns start fresh. On fast/cached turns, no deltas arrive and we must
+    # render the full message content directly from the final event.
+    turn_state = {"streamed_any_delta": False}
+
     previous_handler = signal.signal(signal.SIGINT, _handle_sigint)
     try:
         with client.stream_session(session_id, after_seq=last_seq) as messages:
             for msg in messages:
                 if msg.event == "delta":
-                    _write_delta(msg.data)
+                    if _write_delta(msg.data):
+                        turn_state["streamed_any_delta"] = True
                     continue
                 if msg.event == "done":
                     sys.stdout.write(dim("\n[session terminated]\n"))
@@ -216,7 +223,7 @@ def _stream_until_idle(
                 new_seq = obj.get("seq")
                 if isinstance(new_seq, int) and new_seq > last_seq:
                     last_seq = new_seq
-                _render_chat_event(obj, verbose=verbose)
+                _render_chat_event(obj, verbose=verbose, turn_state=turn_state)
                 if _is_turn_end(obj):
                     sys.stdout.write(dim(f"  [turn ended at seq={last_seq}]\n"))
                     return last_seq
@@ -225,18 +232,21 @@ def _stream_until_idle(
     return last_seq
 
 
-def _write_delta(data: str) -> None:
+def _write_delta(data: str) -> bool:
+    """Write a delta chunk to stdout. Returns True if a non-empty chunk was written."""
     try:
         obj = json.loads(data)
     except json.JSONDecodeError:
-        return
+        return False
     chunk = obj.get("delta")
-    if isinstance(chunk, str):
+    if isinstance(chunk, str) and chunk:
         sys.stdout.write(chunk)
         sys.stdout.flush()
+        return True
+    return False
 
 
-def _render_chat_event(obj: dict[str, Any], *, verbose: bool) -> None:
+def _render_chat_event(obj: dict[str, Any], *, verbose: bool, turn_state: dict[str, bool]) -> None:
     kind = obj.get("kind")
     data = obj.get("data") or {}
     if kind == "message":
@@ -248,13 +258,16 @@ def _render_chat_event(obj: dict[str, Any], *, verbose: bool) -> None:
             return
         if role == "assistant":
             if content and not tool_calls:
-                # Content may have already been streamed via deltas. The final
-                # event also carries it — detect by checking if we've already
-                # written non-empty text in this turn. Simpler: write a newline
-                # to terminate the delta stream, and suppress the full-content
-                # re-render. If no deltas came (e.g. non-streaming model),
-                # write the content now.
-                sys.stdout.write("\n")
+                # Content may have already been streamed via deltas. If we
+                # saw any delta in this turn, just terminate the line;
+                # otherwise (fast/cached turn, no deltas arrived) render the
+                # full content now.
+                if turn_state["streamed_any_delta"]:
+                    sys.stdout.write("\n")
+                else:
+                    sys.stdout.write(content + "\n")
+                # Reset for the next assistant message in the same turn.
+                turn_state["streamed_any_delta"] = False
                 return
             for call in tool_calls:
                 name = (call.get("function") or {}).get("name", "?")
