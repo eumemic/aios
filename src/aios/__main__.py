@@ -1,10 +1,11 @@
 """CLI entrypoint: ``python -m aios <subcommand>``.
 
-Phase 2 wires up all three subcommands:
+Subcommands:
 
 * ``aios api``     — uvicorn boot of the FastAPI app
 * ``aios worker``  — procrastinate worker process (runs the harness loop)
 * ``aios migrate`` — alembic upgrade head + procrastinate schema apply
+* ``aios tail``    — structured real-time session event viewer (SSE client)
 """
 
 from __future__ import annotations
@@ -85,7 +86,7 @@ def _run_migrate() -> int:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("usage: aios <api|worker|migrate>", file=sys.stderr)
+        print("usage: aios <api|worker|migrate|tail>", file=sys.stderr)
         return 2
 
     cmd = sys.argv[1]
@@ -96,6 +97,10 @@ def main() -> int:
             return _run_worker()
         case "migrate":
             return _run_migrate()
+        case "tail":
+            from aios.tail import run as _run_tail
+
+            return _run_tail(sys.argv[2:])
         case _:
             print(f"aios: unknown subcommand {cmd!r}", file=sys.stderr)
             return 2
