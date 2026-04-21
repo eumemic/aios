@@ -24,7 +24,7 @@ class _StubRegistry:
         self._handle = handle
         self.get_or_provision_calls: list[str] = []
 
-    async def get_or_provision(self, session_id: str) -> ContainerHandle:
+    async def get_or_provision(self, session_id: str, **_kwargs: Any) -> ContainerHandle:
         self.get_or_provision_calls.append(session_id)
         return self._handle
 
@@ -53,13 +53,18 @@ def stub_handle() -> ContainerHandle:
 @pytest.fixture
 def stub_registry(stub_handle: ContainerHandle) -> _StubRegistry:
     """Install a stub sandbox registry on the runtime module, restore after."""
-    previous = runtime.sandbox_registry
+    from unittest.mock import MagicMock
+
+    prev_registry = runtime.sandbox_registry
+    prev_pool = runtime.pool
     stub = _StubRegistry(stub_handle)
     runtime.sandbox_registry = stub  # type: ignore[assignment]
+    runtime.pool = MagicMock()
     try:
         yield stub
     finally:
-        runtime.sandbox_registry = previous
+        runtime.sandbox_registry = prev_registry
+        runtime.pool = prev_pool
 
 
 class TestArguments:

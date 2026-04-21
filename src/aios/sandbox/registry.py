@@ -21,11 +21,15 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any
 
 from aios.logging import get_logger
 from aios.sandbox.container import ContainerHandle
 from aios.sandbox.provisioner import force_remove, list_managed_containers, provision_for_session
 from aios.sandbox.provisioner import release as provisioner_release
+
+if TYPE_CHECKING:
+    import asyncpg
 
 log = get_logger("aios.sandbox.registry")
 
@@ -46,8 +50,18 @@ class SandboxRegistry:
             self._locks[session_id] = lock
         return lock
 
-    async def get_or_provision(self, session_id: str) -> ContainerHandle:
-        """Return the cached handle, or provision a new container."""
+    async def get_or_provision(
+        self,
+        session_id: str,
+        *,
+        pool: asyncpg.Pool[Any] | None = None,
+    ) -> ContainerHandle:
+        """Return the cached handle, or provision a new container.
+
+        Passing ``pool`` emits a ``sandbox_provision_*`` span pair on
+        the cold-start path only (issue #78) — warm hits stay
+        zero-observable-cost.
+        """
         handle = self._handles.get(session_id)
         if handle is not None:
             self._last_used[session_id] = time.monotonic()
@@ -58,10 +72,39 @@ class SandboxRegistry:
             if handle is not None:
                 self._last_used[session_id] = time.monotonic()
                 return handle
-            handle = await provision_for_session(session_id)
+            handle = await self._provision_with_span(session_id, pool=pool)
             self._handles[session_id] = handle
             self._last_used[session_id] = time.monotonic()
             return handle
+
+    async def _provision_with_span(
+        self, session_id: str, *, pool: asyncpg.Pool[Any] | None
+    ) -> ContainerHandle:
+        if pool is None:
+            return await provision_for_session(session_id)
+
+        from aios.services import sessions as sessions_service
+
+        span_start = await sessions_service.append_event(
+            pool, session_id, "span", {"event": "sandbox_provision_start"}
+        )
+        is_error = False
+        handle: ContainerHandle | None = None
+        try:
+            handle = await provision_for_session(session_id)
+            return handle
+        except Exception:
+            is_error = True
+            raise
+        finally:
+            end_payload: dict[str, Any] = {
+                "event": "sandbox_provision_end",
+                "sandbox_provision_start_id": span_start.id,
+                "is_error": is_error,
+            }
+            if handle is not None:
+                end_payload["container_id"] = handle.container_id[:12]
+            await sessions_service.append_event(pool, session_id, "span", end_payload)
 
     async def release(self, session_id: str) -> None:
         """Tear down one session's container. No-op if not cached."""

@@ -110,7 +110,7 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
 
     settings = get_settings()
     sandbox = runtime.require_sandbox_registry()
-    handle = await sandbox.get_or_provision(session_id)
+    handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
     quoted_path = shlex.quote(path)
 
