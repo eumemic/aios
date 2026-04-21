@@ -155,12 +155,16 @@ def mock_step_dependencies() -> Any:
             AsyncMock(return_value=[]),
         ),
         patch(
-            "aios.harness.loop.to_openai_tools",
-            return_value=[],
-        ),
-        patch(
-            "aios.harness.loop.build_messages",
-            return_value=SimpleNamespace(messages=[], reacting_to=0),
+            "aios.harness.loop.compose_step_context",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    model="openrouter/x",
+                    messages=[],
+                    tools=[],
+                    reacting_to=0,
+                    skill_versions=[],
+                )
+            ),
         ),
         patch(
             "aios.harness.loop.sessions_service.set_session_status",

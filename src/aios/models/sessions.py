@@ -157,6 +157,20 @@ class WaitResponse(BaseModel):
     next_after: int
 
 
+class ContextResponse(BaseModel):
+    """Response for ``GET /v1/sessions/{id}/context``.
+
+    The exact chat-completions payload the worker would send to LiteLLM
+    if a step ran right now.  Dry-run: no side effects — no events
+    appended, no status bump, no skill files provisioned.
+    """
+
+    session_id: str
+    model: str
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]]
+
+
 class ToolConfirmationRequest(BaseModel):
     """Request body for ``POST /v1/sessions/{id}/tool-confirmations``.
 

@@ -27,6 +27,7 @@ from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db.pool import close_pool, create_pool
 from aios.errors import install_exception_handlers
+from aios.harness import runtime
 from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.logging import configure_logging, get_logger
 
@@ -46,10 +47,18 @@ def create_app() -> FastAPI:
         app.state.crypto_box = crypto_box
         app.state.procrastinate = procrastinate_app
         app.state.db_url = settings.db_url
+        # The ``/context`` endpoint (issue #60) reuses the worker's
+        # ``compose_step_context`` → ``discover_session_mcp_tools`` path,
+        # which reaches for ``runtime.require_crypto_box()`` to decrypt
+        # per-vault MCP OAuth tokens.  Mirror the worker's globals on the
+        # API side so the shared composer works from either process.
+        prev_crypto = runtime.crypto_box
+        runtime.crypto_box = crypto_box
         try:
             yield
         finally:
             log.info("api.shutdown")
+            runtime.crypto_box = prev_crypto
             await procrastinate_app.close_async()
             await pool.close()
             await close_pool()

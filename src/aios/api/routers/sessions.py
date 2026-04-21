@@ -29,6 +29,7 @@ from aios.harness.wake import defer_wake
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
 from aios.models.sessions import (
+    ContextResponse,
     Session,
     SessionCreate,
     SessionInterruptRequest,
@@ -213,6 +214,59 @@ async def list_events(
         data=items,
         has_more=len(items) == limit,
         next_after=str(items[-1].seq) if items else None,
+    )
+
+
+@router.get("/{session_id}/context")
+async def get_context(
+    session_id: str,
+    pool: PoolDep,
+    _auth: AuthDep,
+) -> ContextResponse:
+    """Return the chat-completions payload the worker would send next.
+
+    Dry-run preview for debugging prompt construction.  Reuses the exact
+    composer the worker's step function uses (:func:`compose_step_context`)
+    so the endpoint's output is byte-identical to what the next model
+    call would see — no divergence.  Side effects (skill provisioning,
+    session-status bumps, event appends) are omitted; the endpoint is
+    read-only.
+    """
+    from aios.harness.channels import list_bindings_and_connections
+    from aios.harness.step_context import compose_step_context
+    from aios.models.agents import Agent, AgentVersion
+    from aios.services import agents as agents_service
+
+    session = await service.get_session(pool, session_id)
+
+    agent: Agent | AgentVersion
+    if session.agent_version is not None:
+        agent = await agents_service.get_agent_version(
+            pool, session.agent_id, session.agent_version
+        )
+    else:
+        agent = await agents_service.get_agent(pool, session.agent_id)
+
+    bindings, connections = await list_bindings_and_connections(pool, session_id)
+
+    events = await service.read_windowed_events(
+        pool, session_id, window_min=agent.window_min, window_max=agent.window_max
+    )
+
+    step_ctx = await compose_step_context(
+        pool,
+        session_id,
+        session=session,
+        agent=agent,
+        bindings=bindings,
+        connections=connections,
+        events=events,
+    )
+    return ContextResponse(
+        session_id=session_id,
+        model=step_ctx.model,
+        messages=step_ctx.messages,
+        tools=step_ctx.tools,
     )
 
 
