@@ -139,10 +139,22 @@ class BearerAuthMiddleware:
         await self._app(scope, receive, send)
 
 
-def build_mcp_server(*, rpc: RpcClient, bot_uuid: str, phone: str) -> FastMCP:
+def build_mcp_server(
+    *,
+    rpc: RpcClient,
+    bot_uuid: str,
+    phone: str,
+    groups: list[Any] | None = None,
+    contact_names: dict[str, str] | None = None,
+) -> FastMCP:
     mcp = FastMCP(
         "aios-signal",
-        instructions=build_instructions(bot_uuid=bot_uuid, phone=phone),
+        instructions=build_instructions(
+            bot_uuid=bot_uuid,
+            phone=phone,
+            groups=groups,
+            contact_names=contact_names,
+        ),
         stateless_http=True,
     )
 
