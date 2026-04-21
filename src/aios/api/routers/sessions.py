@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Query, status
 from sse_starlette import EventSourceResponse
 
 from aios.api.deps import (
@@ -26,6 +26,7 @@ from aios.api.deps import (
 from aios.api.sse import sse_event_stream
 from aios.db import queries as db_queries
 from aios.db.listen import listen_for_events
+from aios.errors import NotFoundError
 from aios.harness.wake import defer_wake
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
@@ -170,7 +171,7 @@ async def submit_tool_result(
     async with pool.acquire() as conn:
         name = await db_queries.lookup_tool_name_by_call_id(conn, session_id, body.tool_call_id)
         if name is None:
-            raise HTTPException(status_code=404, detail="tool_call_id not found")
+            raise NotFoundError(f"tool_call_id {body.tool_call_id!r} not found")
         data: dict[str, Any] = {
             "role": "tool",
             "tool_call_id": body.tool_call_id,

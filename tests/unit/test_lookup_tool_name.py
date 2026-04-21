@@ -5,9 +5,12 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from aios.db.queries import (
     lookup_tool_name_by_call_id,
 )
+from aios.errors import NotFoundError
 
 # ─── lookup_tool_name_by_call_id ─────────────────────────────────────────────
 
@@ -103,11 +106,8 @@ class TestSubmitToolResultNameInjection:
         data = call_args.kwargs["data"]
         assert data["name"] == "get_weather"
 
-    async def test_raises_404_when_lookup_returns_none(self) -> None:
-        """When lookup returns None, submit_tool_result must raise HTTP 404."""
-        import pytest
-        from fastapi import HTTPException
-
+    async def test_raises_not_found_when_lookup_returns_none(self) -> None:
+        """When lookup returns None, submit_tool_result must raise NotFoundError."""
         from aios.api.routers.sessions import submit_tool_result
         from aios.models.sessions import ToolResultRequest
 
@@ -125,10 +125,9 @@ class TestSubmitToolResultNameInjection:
                 tool_call_id="call_missing",
                 content="result",
             )
-            with pytest.raises(HTTPException) as exc_info:
+            with pytest.raises(NotFoundError) as exc_info:
                 await submit_tool_result("sess_01", body, pool, _auth=None)
-        assert exc_info.value.status_code == 404
-        assert exc_info.value.detail == "tool_call_id not found"
+        assert "call_missing" in str(exc_info.value)
 
     async def test_is_error_still_injected(self) -> None:
         """is_error flag survives alongside name injection."""
