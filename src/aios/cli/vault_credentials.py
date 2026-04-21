@@ -1,9 +1,11 @@
-"""``aios vault-credentials <verb>`` — operator CLI for credential inspection.
+"""``aios vault-credentials <verb>`` — operator CLI for credential CRUD.
 
-Scope for this module: ``list`` only.  Credential *creation* has an
-``auth_type``-dependent schema branch (``mcp_oauth`` vs
-``static_bearer``) with several ``SecretStr`` fields whose CLI flag
-design deserves its own PR.
+Verbs: ``list`` (#108) and ``create`` (this PR).  ``create`` takes the
+full ``VaultCredentialCreate`` body from a file (``--body-file <path>``
+or ``-`` for stdin) rather than per-field flags — the schema branches
+on ``auth_type`` with several ``SecretStr`` fields, and passing
+secrets as shell args would leak them to shell history.  The
+``kubectl create -f`` pattern sidesteps both concerns.
 
 Uses :mod:`aios.cli._http` for env + HTTP + error-format plumbing.
 """
@@ -30,12 +32,24 @@ async def run_async(argv: list[str]) -> int:
     """Parse ``argv`` and dispatch to a verb handler."""
     parser = argparse.ArgumentParser(
         prog=_PROG,
-        description="Inspect aios vault credentials.",
+        description="Manage aios vault credentials.",
     )
     sub = parser.add_subparsers(dest="verb")
 
     lst = sub.add_parser("list", help="List credentials in a vault")
     lst.add_argument("--vault-id", required=True, help="Owning vault id")
+
+    create = sub.add_parser("create", help="Create a new credential in a vault")
+    create.add_argument("--vault-id", required=True, help="Owning vault id")
+    create.add_argument(
+        "--body-file",
+        required=True,
+        help=(
+            "Path to a JSON file containing the full VaultCredentialCreate "
+            "body, or '-' to read from stdin.  Using a file avoids leaking "
+            "secret fields (tokens, client secrets) into shell history."
+        ),
+    )
 
     try:
         args = parser.parse_args(argv)
@@ -54,8 +68,38 @@ async def run_async(argv: list[str]) -> int:
 
     if args.verb == "list":
         return await _list(api_url, api_key, vault_id=args.vault_id)
+    if args.verb == "create":
+        try:
+            body = _read_body(args.body_file)
+        except CliError as err:
+            print(str(err), file=sys.stderr)
+            return 2
+        return await _create(api_url, api_key, vault_id=args.vault_id, body=body)
     parser.print_usage(sys.stderr)
     return 2
+
+
+def _read_body(path: str) -> dict[str, Any]:
+    """Read a JSON object from ``path``.  ``-`` reads stdin.
+
+    Raises :class:`CliError` for IO failures, malformed JSON, or
+    non-object top-level values.
+    """
+    if path == "-":
+        raw = sys.stdin.read()
+    else:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                raw = fh.read()
+        except OSError as exc:
+            raise CliError(f"{_PROG}: cannot read --body-file {path!r}: {exc}") from exc
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CliError(f"{_PROG}: --body-file contents are not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise CliError(f"{_PROG}: --body-file must contain a JSON object")
+    return parsed
 
 
 async def _list(api_url: str, api_key: str, *, vault_id: str) -> int:
@@ -68,4 +112,22 @@ async def _list(api_url: str, api_key: str, *, vault_id: str) -> int:
         return 2
     body: dict[str, Any] = response.json()
     print(json.dumps(body.get("data", []), indent=2))
+    return 0
+
+
+async def _create(
+    api_url: str,
+    api_key: str,
+    *,
+    vault_id: str,
+    body: dict[str, Any],
+) -> int:
+    url = f"{api_url.rstrip('/')}/v1/vaults/{vault_id}/credentials"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with async_client() as client:
+        response = await client.post(url, headers=headers, json=body)
+    if response.status_code not in {200, 201}:
+        print_http_error(_PROG, response)
+        return 2
+    print(json.dumps(response.json(), indent=2))
     return 0
