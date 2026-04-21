@@ -147,11 +147,17 @@ def build_mcp_server(
     groups: list[Any] | None = None,
     contact_names: dict[str, str] | None = None,
 ) -> FastMCP:
+    # If `listContacts` included the bot's own entry, use its display
+    # name as the profile_name for the identity block.  Absent when the
+    # bot hasn't set a profile or isn't listed in its own contacts —
+    # `build_instructions` renders nothing for that case.
+    profile_name = (contact_names or {}).get(bot_uuid)
     mcp = FastMCP(
         "aios-signal",
         instructions=build_instructions(
             bot_uuid=bot_uuid,
             phone=phone,
+            profile_name=profile_name,
             groups=groups,
             contact_names=contact_names,
         ),

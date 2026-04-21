@@ -327,6 +327,39 @@ def test_build_mcp_app_returns_starlette() -> None:
     assert isinstance(app, Starlette)
 
 
+def test_build_mcp_server_surfaces_profile_name_from_contacts() -> None:
+    """When ``contact_names`` contains the bot's own uuid, its display
+    name flows into the identity block as ``profile_name``.  Signal's
+    ``listContacts`` sometimes includes the account owner's own profile
+    entry; when it does, this gives the agent the same self-reference
+    peers see (progresses #55 beyond uuid/phone).
+    """
+    rpc = FakeRpc()
+    mcp = build_mcp_server(
+        rpc=rpc,
+        bot_uuid="test-bot-uuid",
+        phone="+15550000000",
+        contact_names={"test-bot-uuid": "Bot McBotface", "other-uuid": "Alice"},
+    )  # type: ignore[arg-type]
+    assert "profile_name" in mcp.instructions
+    assert "Bot McBotface" in mcp.instructions
+
+
+def test_build_mcp_server_omits_profile_name_when_bot_not_in_contacts() -> None:
+    """Graceful-if-missing: if ``listContacts`` doesn't include the bot's
+    own uuid, the profile-name line is simply absent.  Same rendering
+    as calling ``build_mcp_server`` without ``contact_names`` at all.
+    """
+    rpc = FakeRpc()
+    mcp = build_mcp_server(
+        rpc=rpc,
+        bot_uuid="test-bot-uuid",
+        phone="+15550000000",
+        contact_names={"other-uuid": "Alice"},
+    )  # type: ignore[arg-type]
+    assert "profile_name" not in mcp.instructions
+
+
 def test_build_mcp_server_passes_signal_instructions() -> None:
     """The MCP server's ``instructions`` field is the transport for
     Signal's per-connector affordance prose; aios reads it from the

@@ -28,6 +28,7 @@ def build_instructions(
     *,
     bot_uuid: str,
     phone: str,
+    profile_name: str | None = None,
     groups: list[GroupInfo] | None = None,
     contact_names: dict[str, str] | None = None,
 ) -> str:
@@ -38,6 +39,11 @@ def build_instructions(
     identities in group chats when this is absent.  The group-roster
     block makes every participant knowable without having to wait for
     them to speak; silent peers don't effectively disappear.
+
+    ``profile_name``, when set, is the display name peers see for this
+    account.  Rendered as a third identity bullet; omitted entirely if
+    ``None`` or empty so an un-set-profile account doesn't get a blank
+    line in the system prompt.
     """
     identity = (
         "## Your identity on this Signal account\n"
@@ -48,6 +54,8 @@ def build_instructions(
         f"- **phone**: `{phone}` — this Signal account is identified to "
         "peers by this number.\n"
     )
+    if profile_name:
+        identity += f"- **profile_name**: `{profile_name}` — your display name on Signal.\n"
     roster = _render_group_roster(bot_uuid, groups or [], contact_names or {})
     return identity + roster + "\n" + SIGNAL_SERVER_INSTRUCTIONS
 
