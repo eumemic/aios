@@ -45,7 +45,7 @@ class TestLookupToolNameByCallId:
         sql: str = conn.fetchval.call_args.args[0]
         assert "tool_calls" in sql
         assert "assistant" in sql
-        assert "jsonb_array_elements" in sql or "@>" in sql
+        assert "jsonb_array_elements" in sql
         assert "function" in sql
 
 
@@ -82,7 +82,7 @@ class TestSubmitToolResultNameInjection:
                 return_value="get_weather",
             ) as mock_lookup,
             patch(
-                "aios.api.routers.sessions.service.append_event",
+                "aios.api.routers.sessions.db_queries.append_event",
                 new_callable=AsyncMock,
                 return_value=fake_event,
             ) as mock_append,
@@ -98,20 +98,21 @@ class TestSubmitToolResultNameInjection:
             await submit_tool_result("sess_01", body, pool, _auth=None)
 
         mock_lookup.assert_called_once()
-        # service.append_event(pool, session_id, kind, data) — data is positional arg [3]
+        # db_queries.append_event(conn, session_id=..., kind=..., data=...) — data is a kwarg
         call_args = mock_append.call_args
-        data = call_args.args[3] if len(call_args.args) > 3 else call_args.kwargs["data"]
+        data = call_args.kwargs["data"]
         assert data["name"] == "get_weather"
 
-    async def test_name_not_injected_when_lookup_returns_none(self) -> None:
-        """When lookup returns None, data must not have a 'name' key."""
+    async def test_raises_422_when_lookup_returns_none(self) -> None:
+        """When lookup returns None, submit_tool_result must raise HTTP 422."""
+        import pytest
+        from fastapi import HTTPException
+
         from aios.api.routers.sessions import submit_tool_result
         from aios.models.sessions import ToolResultRequest
 
         conn = AsyncMock()
         pool = self._make_pool(conn)
-
-        fake_event = MagicMock()
 
         with (
             patch(
@@ -119,25 +120,15 @@ class TestSubmitToolResultNameInjection:
                 new_callable=AsyncMock,
                 return_value=None,
             ),
-            patch(
-                "aios.api.routers.sessions.service.append_event",
-                new_callable=AsyncMock,
-                return_value=fake_event,
-            ) as mock_append,
-            patch(
-                "aios.api.routers.sessions.defer_wake",
-                new_callable=AsyncMock,
-            ),
         ):
             body = ToolResultRequest(
                 tool_call_id="call_missing",
                 content="result",
             )
-            await submit_tool_result("sess_01", body, pool, _auth=None)
-
-        call_args = mock_append.call_args
-        data = call_args.args[3] if len(call_args.args) > 3 else call_args.kwargs["data"]
-        assert "name" not in data
+            with pytest.raises(HTTPException) as exc_info:
+                await submit_tool_result("sess_01", body, pool, _auth=None)
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.detail == "tool_call_id not found"
 
     async def test_is_error_still_injected(self) -> None:
         """is_error flag survives alongside name injection."""
@@ -156,7 +147,7 @@ class TestSubmitToolResultNameInjection:
                 return_value="bash",
             ),
             patch(
-                "aios.api.routers.sessions.service.append_event",
+                "aios.api.routers.sessions.db_queries.append_event",
                 new_callable=AsyncMock,
                 return_value=fake_event,
             ) as mock_append,
@@ -173,6 +164,6 @@ class TestSubmitToolResultNameInjection:
             await submit_tool_result("sess_01", body, pool, _auth=None)
 
         call_args = mock_append.call_args
-        data = call_args.args[3] if len(call_args.args) > 3 else call_args.kwargs["data"]
+        data = call_args.kwargs["data"]
         assert data["name"] == "bash"
         assert data["is_error"] is True

@@ -955,8 +955,8 @@ async def lookup_tool_name_by_call_id(
     index (kind='message', role='assistant', data ? 'tool_calls') so the
     planner can resolve this without a sequential scan.
 
-    Returns ``None`` when no matching tool call is found (e.g. for built-in
-    tool results whose name is already in ``data``).
+    Returns ``None`` when no matching parent assistant tool call is found for
+    the given *tool_call_id*.
     """
     name: str | None = await conn.fetchval(
         "SELECT tc->'function'->>'name' "

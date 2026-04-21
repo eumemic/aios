@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, HTTPException, Query, status
 from sse_starlette import EventSourceResponse
 
 from aios.api.deps import (
@@ -24,6 +24,7 @@ from aios.api.deps import (
     ProcrastinateDep,
 )
 from aios.api.sse import sse_event_stream
+from aios.db import queries as db_queries
 from aios.db.listen import listen_for_events
 from aios.db.queries import lookup_tool_name_by_call_id
 from aios.harness.wake import defer_wake
@@ -169,16 +170,19 @@ async def submit_tool_result(
     """Submit a custom tool result. Appends a tool-role message and wakes the session."""
     async with pool.acquire() as conn:
         name = await lookup_tool_name_by_call_id(conn, session_id, body.tool_call_id)
-    data: dict[str, Any] = {
-        "role": "tool",
-        "tool_call_id": body.tool_call_id,
-        "content": body.content,
-    }
-    if name is not None:
-        data["name"] = name
-    if body.is_error:
-        data["is_error"] = True
-    event = await service.append_event(pool, session_id, "message", data)
+        if name is None:
+            raise HTTPException(status_code=422, detail="tool_call_id not found")
+        data: dict[str, Any] = {
+            "role": "tool",
+            "tool_call_id": body.tool_call_id,
+            "name": name,
+            "content": body.content,
+        }
+        if body.is_error:
+            data["is_error"] = True
+        event = await db_queries.append_event(
+            conn, session_id=session_id, kind="message", data=data
+        )
     await defer_wake(pool, session_id, cause="custom_tool_result")
     return event
 
