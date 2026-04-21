@@ -25,13 +25,20 @@ from aios.db import queries
 from aios.harness import runtime
 from aios.harness.channels import (
     SWITCH_CHANNEL_METADATA_KEY,
-    derive_unread_counts,
+    derive_last_seen,
 )
 from aios.harness.context import render_user_event
+from aios.harness.tokens import approx_tokens
 from aios.models.events import Event
 from aios.tools.registry import ToolResult, registry
 
-RE_ORIENT_FLOOR_N = 10
+# Minimum rendered-content size the recap pads up to when there isn't
+# enough genuinely-unread peer content to justify the space on its own.
+# ~2000 approx tokens ≈ 8000 chars ≈ a couple of chat turns of recent
+# context — enough to re-orient without flooding the tool_result with
+# stale history.  The floor is a minimum only; if unread peer content
+# exceeds it, the recap emits all of it uncapped.
+RE_ORIENT_FLOOR_TOKENS = 2000
 SWITCH_CHANNEL_TOOL_NAME = "switch_channel"
 
 
@@ -163,9 +170,16 @@ def render_reorient_block(all_events: list[Event], target: str) -> str:
     ``switch_channel`` are excluded to prevent the recursive embedding
     that made prior recaps quote their own predecessors.
 
-    Size is ``max(unread_in_target, RE_ORIENT_FLOOR_N)``: the floor
-    gives a quiet-channel context refresher, the unread-count term
-    ensures no unread message gets silently skipped on switch-in.
+    Sizing: walk ``target_events`` right-to-left, render each, skip
+    empties (mono-only assistants), accumulate rendered blocks.  Stop
+    when BOTH: every genuinely unread peer event on ``target`` has been
+    included, AND the running ``approx_tokens`` total is at least
+    :data:`RE_ORIENT_FLOOR_TOKENS`.  No upper cap — if unread backlog
+    is huge, the recap emits all of it and relies on the harness's
+    chunked-window snap (``cumulative_tokens``-driven) to manage
+    downstream context pressure.  This "render-then-budget" order
+    (rather than "slice-then-render-then-filter-empty") ensures that
+    slots spent on empty renders don't eat into the floor.
 
     Output shape::
 
@@ -192,19 +206,31 @@ def render_reorient_block(all_events: list[Event], target: str) -> str:
     if not target_events:
         return f"Switched to {target}. (no prior messages on this channel)"
 
-    unread = derive_unread_counts(all_events, [target]).get(target, 0)
-    n = max(unread, RE_ORIENT_FLOOR_N)
-    recent = target_events[-n:] if n < len(target_events) else target_events
+    # Events the agent hasn't yet consumed the body of on ``target`` —
+    # either they arrived while focal was elsewhere (notification only)
+    # or predate any consumption anchor.  These MUST appear in the
+    # recap regardless of the token floor.
+    last_seen = derive_last_seen(all_events, target)
+    unread_peer_seqs = {
+        e.seq for e in target_events if e.orig_channel == target and e.seq > last_seen
+    }
 
     rendered_blocks: list[str] = []
-    for e in recent:
+    token_total = 0
+    for e in reversed(target_events):
         block = _render_recap_event(e)
-        if block:
-            rendered_blocks.append(block)
+        if not block:
+            continue
+        rendered_blocks.append(block)
+        token_total += approx_tokens({"content": block})
+        unread_peer_seqs.discard(e.seq)
+        if not unread_peer_seqs and token_total >= RE_ORIENT_FLOOR_TOKENS:
+            break
 
     if not rendered_blocks:
         return f"Switched to {target}. (no prior messages on this channel)"
 
+    rendered_blocks.reverse()
     quoted_body = _blockquote("\n\n".join(rendered_blocks))
     return f"━━━ Recap: recent messages on {target} ━━━\n{quoted_body}\n━━━ End recap ━━━"
 
