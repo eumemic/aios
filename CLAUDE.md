@@ -28,6 +28,39 @@ uv run python -m aios api      # API server on :8090
 uv run python -m aios worker   # procrastinate worker
 ```
 
+### Client CLI
+
+`aios` is a typer-based client CLI that talks to a running API. Config is read from env (`AIOS_URL`, `AIOS_API_KEY`) or `.env`; every command accepts `--url` / `--api-key` overrides and a global `--format {table,json}`.
+
+```bash
+# Reachability + auth check
+uv run aios status
+
+# Resource inspection
+uv run aios agents list
+uv run aios agents get <agent_id>
+uv run aios sessions list --status running
+uv run aios sessions events <session_id> --kind message
+
+# Interactive chat (creates a session, streams the reply)
+uv run aios chat --agent <agent_id> --environment-id <env_id>
+
+# One-shot: send a message and stream until the turn ends
+uv run aios chat --agent <agent_id> --environment-id <env_id> -m "list /workspace"
+
+# Tail a running session from another terminal
+uv run aios sessions stream <session_id>
+
+# Post a user message without entering the REPL
+uv run aios sessions send <session_id> "hello"
+
+# Create resources from JSON (thin wire — server validates)
+uv run aios agents create --file agent.json
+uv run aios skills create --dir path/to/my-skill --title "My Skill"
+```
+
+Every resource has CRUD subcommands. See `aios <resource> --help` for specifics. Operator commands (`aios api`, `aios worker`, `aios migrate`) are also typer-backed but keep their original behavior.
+
 ## Architecture
 
 aios is an event-driven agent runtime. The headline property: **every tool is implicitly async** — the model stays responsive to user messages even while tools are running.
