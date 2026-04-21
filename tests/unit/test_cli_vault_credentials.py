@@ -1,13 +1,18 @@
 """Unit tests for ``aios vault-credentials <verb>`` CLI (progresses #35 item 4).
 
-Scope: ``list`` only — credential *creation* has an ``auth_type``-
-dependent schema branch with several ``SecretStr`` fields; that
-warrants its own PR with a deliberate CLI flag design.
+Covers ``list`` and ``create`` (#108 + this PR).  ``create`` takes
+``--body-file`` (or ``-`` for stdin) rather than per-field flags: the
+credential schema branches on ``auth_type`` with several ``SecretStr``
+fields, and passing secrets as shell args leaks them into history.
+``--body-file`` is the ``kubectl create -f`` pattern — operator hands
+the CLI a JSON file they prepared locally.
 """
 
 from __future__ import annotations
 
+import io
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -98,6 +103,116 @@ class TestListVaultCredentials:
     ) -> None:
         _setup_env(monkeypatch)
         rc = await run_async(["list"])
+        assert rc != 0
+        assert "required" in capsys.readouterr().err.lower()
+
+
+_CREATED_CREDENTIAL: dict[str, Any] = {
+    "id": "vcr_new",
+    "vault_id": "vlt_01",
+    "display_name": "Signal MCP bearer",
+    "mcp_server_url": "http://mcp.signal.local",
+    "auth_type": "static_bearer",
+    "metadata": {},
+    "created_at": "2026-04-20T00:00:00Z",
+    "updated_at": "2026-04-20T00:00:00Z",
+    "archived_at": None,
+}
+
+
+class TestCreateVaultCredential:
+    async def test_posts_body_read_from_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _setup_env(monkeypatch)
+        body = {
+            "display_name": "Signal MCP bearer",
+            "mcp_server_url": "http://mcp.signal.local",
+            "auth_type": "static_bearer",
+            "bearer_token": "tok_secret",
+        }
+        body_file = tmp_path / "cred.json"
+        body_file.write_text(json.dumps(body))
+        client = _mock_async_client("post", _mock_response(201, _CREATED_CREDENTIAL))
+
+        with patch("aios.cli.vault_credentials.async_client", return_value=client):
+            rc = await run_async(
+                [
+                    "create",
+                    "--vault-id",
+                    "vlt_01",
+                    "--body-file",
+                    str(body_file),
+                ]
+            )
+
+        assert rc == 0
+        client.post.assert_awaited_once()
+        call = client.post.await_args
+        assert call.args[0].endswith("/v1/vaults/vlt_01/credentials")
+        assert call.kwargs["json"] == body
+
+    async def test_posts_body_read_from_stdin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _setup_env(monkeypatch)
+        body = {
+            "display_name": "piped",
+            "mcp_server_url": "http://m",
+            "auth_type": "static_bearer",
+            "bearer_token": "tok_secret",
+        }
+        client = _mock_async_client("post", _mock_response(201, _CREATED_CREDENTIAL))
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(body)))
+
+        with patch("aios.cli.vault_credentials.async_client", return_value=client):
+            rc = await run_async(["create", "--vault-id", "vlt_01", "--body-file", "-"])
+
+        assert rc == 0
+        assert client.post.await_args.kwargs["json"] == body
+
+    async def test_missing_body_file_exits_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        rc = await run_async(
+            [
+                "create",
+                "--vault-id",
+                "vlt_01",
+                "--body-file",
+                "/nonexistent/path/cred.json",
+            ]
+        )
+        assert rc != 0
+        err = capsys.readouterr().err.lower()
+        assert "body-file" in err or "no such" in err or "cannot" in err
+
+    async def test_invalid_json_body_exits_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        body_file = tmp_path / "bad.json"
+        body_file.write_text("not-json{{")
+        rc = await run_async(["create", "--vault-id", "vlt_01", "--body-file", str(body_file)])
+        assert rc != 0
+        err = capsys.readouterr().err.lower()
+        assert "json" in err
+
+    async def test_non_object_json_body_exits_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        body_file = tmp_path / "arr.json"
+        body_file.write_text("[]")
+        rc = await run_async(["create", "--vault-id", "vlt_01", "--body-file", str(body_file)])
+        assert rc != 0
+        err = capsys.readouterr().err.lower()
+        assert "object" in err or "json" in err
+
+    async def test_missing_required_flag_exits_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        rc = await run_async(["create", "--vault-id", "vlt_01"])  # no --body-file
         assert rc != 0
         assert "required" in capsys.readouterr().err.lower()
 
