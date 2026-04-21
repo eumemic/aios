@@ -65,6 +65,11 @@ class ConflictError(AiosError):
     status_code = 409
 
 
+class PayloadTooLargeError(AiosError):
+    error_type = "payload_too_large"
+    status_code = 413
+
+
 class UnauthorizedError(AiosError):
     error_type = "unauthorized"
     status_code = 401
