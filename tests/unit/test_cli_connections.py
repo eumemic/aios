@@ -140,6 +140,52 @@ class TestCreateConnection:
         assert "required" in capsys.readouterr().err.lower()
 
 
+class TestGetConnection:
+    async def test_prints_single_resource(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        connection = {
+            "id": "conn_01",
+            "connector": "signal",
+            "account": "+15550001",
+            "mcp_url": "http://m",
+            "vault_id": "vlt_01",
+            "archived_at": None,
+        }
+        client = _mock_async_client("get", _mock_response(200, connection))
+
+        with patch("aios.cli.connections.async_client", return_value=client):
+            rc = await run_async(["get", "conn_01"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "conn_01" in out
+        assert "signal" in out
+        assert client.get.await_args.args[0].endswith("/v1/connections/conn_01")
+
+    async def test_http_error_returns_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("get", _mock_response(404, {"error": "not found"}))
+
+        with patch("aios.cli.connections.async_client", return_value=client):
+            rc = await run_async(["get", "conn_missing"])
+
+        assert rc != 0
+        assert "404" in capsys.readouterr().err
+
+    async def test_missing_id_exits_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        rc = await run_async(["get"])
+        assert rc != 0
+        err = capsys.readouterr().err.lower()
+        assert "required" in err or "arguments" in err
+
+
 class TestDispatch:
     async def test_unknown_verb_prints_usage(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

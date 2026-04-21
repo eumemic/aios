@@ -39,6 +39,10 @@ async def run_async(argv: list[str]) -> int:
     lst = sub.add_parser("list", help="List credentials in a vault")
     lst.add_argument("--vault-id", required=True, help="Owning vault id")
 
+    get = sub.add_parser("get", help="Show a single credential by id")
+    get.add_argument("credential_id", help="Credential id")
+    get.add_argument("--vault-id", required=True, help="Owning vault id")
+
     create = sub.add_parser("create", help="Create a new credential in a vault")
     create.add_argument("--vault-id", required=True, help="Owning vault id")
     create.add_argument(
@@ -68,6 +72,10 @@ async def run_async(argv: list[str]) -> int:
 
     if args.verb == "list":
         return await _list(api_url, api_key, vault_id=args.vault_id)
+    if args.verb == "get":
+        return await _get(
+            api_url, api_key, vault_id=args.vault_id, credential_id=args.credential_id
+        )
     if args.verb == "create":
         try:
             body = _read_body(args.body_file)
@@ -100,6 +108,18 @@ def _read_body(path: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise CliError(f"{_PROG}: --body-file must contain a JSON object")
     return parsed
+
+
+async def _get(api_url: str, api_key: str, *, vault_id: str, credential_id: str) -> int:
+    url = f"{api_url.rstrip('/')}/v1/vaults/{vault_id}/credentials/{credential_id}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with async_client() as client:
+        response = await client.get(url, headers=headers)
+    if response.status_code != 200:
+        print_http_error(_PROG, response)
+        return 2
+    print(json.dumps(response.json(), indent=2))
+    return 0
 
 
 async def _list(api_url: str, api_key: str, *, vault_id: str) -> int:

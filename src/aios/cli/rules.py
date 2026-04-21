@@ -41,6 +41,10 @@ async def run_async(argv: list[str]) -> int:
     lst = sub.add_parser("list", help="List routing rules for a connection")
     lst.add_argument("--connection-id", required=True, help="Owning connection id")
 
+    get = sub.add_parser("get", help="Show a single routing rule by id")
+    get.add_argument("rule_id", help="Rule id")
+    get.add_argument("--connection-id", required=True, help="Owning connection id")
+
     create = sub.add_parser("create", help="Create a new routing rule")
     create.add_argument("--connection-id", required=True, help="Owning connection id")
     create.add_argument(
@@ -76,6 +80,8 @@ async def run_async(argv: list[str]) -> int:
 
     if args.verb == "list":
         return await _list(api_url, api_key, connection_id=args.connection_id)
+    if args.verb == "get":
+        return await _get(api_url, api_key, connection_id=args.connection_id, rule_id=args.rule_id)
     if args.verb == "create":
         try:
             session_params = _parse_session_params(args.session_params_json)
@@ -104,6 +110,18 @@ def _parse_session_params(raw: str | None) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise CliError(f"{_PROG}: --session-params-json must be a JSON object")
     return parsed
+
+
+async def _get(api_url: str, api_key: str, *, connection_id: str, rule_id: str) -> int:
+    url = f"{api_url.rstrip('/')}/v1/connections/{connection_id}/routing-rules/{rule_id}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with async_client() as client:
+        response = await client.get(url, headers=headers)
+    if response.status_code != 200:
+        print_http_error(_PROG, response)
+        return 2
+    print(json.dumps(response.json(), indent=2))
+    return 0
 
 
 async def _list(api_url: str, api_key: str, *, connection_id: str) -> int:

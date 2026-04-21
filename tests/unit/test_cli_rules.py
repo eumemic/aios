@@ -240,6 +240,47 @@ class TestCreateRule:
         assert "json" in err or "session-params" in err
 
 
+class TestGetRule:
+    async def test_prints_single_resource(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        rule = {
+            "id": "rul_01",
+            "connection_id": "conn_01",
+            "prefix": "group",
+            "target": "agent:claude-sonnet-4",
+            "session_params": {
+                "environment_id": None,
+                "vault_ids": [],
+                "title": None,
+                "metadata": {},
+            },
+            "created_at": "2026-04-20T00:00:00Z",
+            "updated_at": "2026-04-20T00:00:00Z",
+            "archived_at": None,
+        }
+        client = _mock_async_client("get", _mock_response(200, rule))
+
+        with patch("aios.cli.rules.async_client", return_value=client):
+            rc = await run_async(["get", "rul_01", "--connection-id", "conn_01"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "rul_01" in out
+        assert client.get.await_args.args[0].endswith(
+            "/v1/connections/conn_01/routing-rules/rul_01"
+        )
+
+    async def test_missing_connection_id_exits_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        rc = await run_async(["get", "rul_01"])
+        assert rc != 0
+        assert "required" in capsys.readouterr().err.lower()
+
+
 class TestDispatch:
     async def test_unknown_verb_prints_usage(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

@@ -164,6 +164,43 @@ class TestCreateVault:
         assert "required" in capsys.readouterr().err.lower()
 
 
+class TestGetVault:
+    async def test_prints_single_resource(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        vault = {
+            "id": "vlt_01",
+            "display_name": "Signal secrets",
+            "metadata": {},
+            "created_at": "2026-04-20T00:00:00Z",
+            "updated_at": "2026-04-20T00:00:00Z",
+            "archived_at": None,
+        }
+        client = _mock_async_client("get", _mock_response(200, vault))
+
+        with patch("aios.cli.vaults.async_client", return_value=client):
+            rc = await run_async(["get", "vlt_01"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "vlt_01" in out
+        assert "Signal secrets" in out
+        assert client.get.await_args.args[0].endswith("/v1/vaults/vlt_01")
+
+    async def test_http_error_returns_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _setup_env(monkeypatch)
+        client = _mock_async_client("get", _mock_response(404, {"error": "not found"}))
+
+        with patch("aios.cli.vaults.async_client", return_value=client):
+            rc = await run_async(["get", "vlt_missing"])
+
+        assert rc != 0
+        assert "404" in capsys.readouterr().err
+
+
 class TestDispatch:
     async def test_unknown_verb_prints_usage(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
