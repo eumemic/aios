@@ -47,6 +47,21 @@ class AiosApiError(Exception):
         self.detail = detail or {}
 
 
+class NonJSONResponseError(Exception):
+    """Raised when a 2xx response body cannot be decoded as JSON.
+
+    Typically means the configured URL is not an aios API (e.g. points at
+    an HTML landing page). Callers (notably ``aios status``) handle this
+    explicitly to give a friendlier message than a raw decode traceback.
+    """
+
+    def __init__(self, *, status_code: int, content_type: str, snippet: str) -> None:
+        super().__init__(f"non-JSON response (status={status_code}, content-type={content_type!r})")
+        self.status_code = status_code
+        self.content_type = content_type
+        self.snippet = snippet
+
+
 class AiosClient:
     """Synchronous client bound to a single aios API base URL + bearer key."""
 
@@ -118,7 +133,15 @@ class AiosClient:
                 return None
             _raise_for_error(response)
         if 200 <= response.status_code < 300:
-            return response.json()
+            try:
+                return response.json()
+            except (ValueError, json.JSONDecodeError) as exc:
+                snippet = response.text.strip()[:200]
+                raise NonJSONResponseError(
+                    status_code=response.status_code,
+                    content_type=response.headers.get("content-type", ""),
+                    snippet=snippet,
+                ) from exc
         _raise_for_error(response)
         return None  # unreachable; keeps type checker happy
 

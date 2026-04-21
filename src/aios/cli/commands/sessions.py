@@ -269,7 +269,7 @@ def stream(
     def _run() -> None:
         sys.stdout.write(dim(f"streaming {cyan(session_id)} after_seq={after_seq}\n"))
         if pretty:
-            tail_session(ctx, session_id, from_seq=after_seq)
+            tail_session(ctx, session_id, after_seq=after_seq)
             return
         client = get_state(ctx).client()
         with client, client.stream_session(session_id, after_seq=after_seq) as messages:
@@ -292,18 +292,18 @@ def stream(
 def tail(
     ctx: typer.Context,
     session_id: str,
-    from_seq: Annotated[int, typer.Option("--from-seq", min=0)] = 0,
+    after_seq: Annotated[int, typer.Option("--after-seq", min=0)] = 0,
 ) -> None:
     def _run() -> None:
-        tail_session(ctx, session_id, from_seq=from_seq)
+        tail_session(ctx, session_id, after_seq=after_seq)
 
     run_or_die(_run)
 
 
-def tail_session(ctx: typer.Context, session_id: str, *, from_seq: int) -> None:
+def tail_session(ctx: typer.Context, session_id: str, *, after_seq: int) -> None:
     """Shared implementation for ``aios sessions tail`` / top-level ``aios tail``."""
     client = get_state(ctx).client()
-    with client, client.stream_session(session_id, after_seq=from_seq) as messages:
+    with client, client.stream_session(session_id, after_seq=after_seq) as messages:
         for line in iter_formatted_events(messages):
             sys.stdout.write(line + "\n")
             sys.stdout.flush()

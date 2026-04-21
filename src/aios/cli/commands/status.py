@@ -6,7 +6,7 @@ import sys
 
 import typer
 
-from aios.cli.client import AiosApiError
+from aios.cli.client import AiosApiError, NonJSONResponseError
 from aios.cli.output import cyan, green, print_json, red, yellow
 from aios.cli.runtime import get_state, run_or_die
 
@@ -35,6 +35,11 @@ def register(app: typer.Typer) -> None:
         try:
             health = client.request("GET", "/health")
             sys.stdout.write(f"health:  {green('ok')} ({health})\n")
+        except NonJSONResponseError:
+            sys.stdout.write(
+                f"health:  {red('fail')} (server returned non-JSON response (not aios?))\n"
+            )
+            return 1
         except AiosApiError as exc:
             sys.stdout.write(f"health:  {red('fail')} ({exc.message})\n")
             return 1
@@ -56,6 +61,14 @@ def register(app: typer.Typer) -> None:
         payload: dict[str, object] = {"url": state.base_url, "api_key_set": bool(state.api_key)}
         try:
             payload["health"] = client.request("GET", "/health")
+        except NonJSONResponseError as exc:
+            payload["health_error"] = {
+                "type": "non_json_response",
+                "message": "server returned non-JSON response (not aios?)",
+                "content_type": exc.content_type,
+            }
+            print_json(payload)
+            return 1
         except AiosApiError as exc:
             payload["health_error"] = {"type": exc.error_type, "message": exc.message}
             print_json(payload)
