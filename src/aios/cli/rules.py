@@ -40,6 +40,10 @@ async def run_async(argv: list[str]) -> int:
 
     lst = sub.add_parser("list", help="List routing rules for a connection")
     lst.add_argument("--connection-id", required=True, help="Owning connection id")
+    lst.add_argument("--limit", type=int, default=None, help="Max items per page")
+    lst.add_argument(
+        "--after", default=None, help="Pagination cursor (pass next_after from prior response)"
+    )
 
     get = sub.add_parser("get", help="Show a single routing rule by id")
     get.add_argument("rule_id", help="Rule id")
@@ -98,7 +102,13 @@ async def run_async(argv: list[str]) -> int:
         return 2
 
     if args.verb == "list":
-        return await _list(api_url, api_key, connection_id=args.connection_id)
+        return await _list(
+            api_url,
+            api_key,
+            connection_id=args.connection_id,
+            limit=args.limit,
+            after=args.after,
+        )
     if args.verb == "get":
         return await _get(api_url, api_key, connection_id=args.connection_id, rule_id=args.rule_id)
     if args.verb == "archive":
@@ -199,16 +209,27 @@ async def _get(api_url: str, api_key: str, *, connection_id: str, rule_id: str) 
     return 0
 
 
-async def _list(api_url: str, api_key: str, *, connection_id: str) -> int:
+async def _list(
+    api_url: str,
+    api_key: str,
+    *,
+    connection_id: str,
+    limit: int | None,
+    after: str | None,
+) -> int:
     url = f"{api_url.rstrip('/')}/v1/connections/{connection_id}/routing-rules"
     headers = {"Authorization": f"Bearer {api_key}"}
+    params: dict[str, Any] = {}
+    if limit is not None:
+        params["limit"] = limit
+    if after is not None:
+        params["after"] = after
     async with async_client() as client:
-        response = await client.get(url, headers=headers)
+        response = await client.get(url, headers=headers, params=params)
     if response.status_code != 200:
         print_http_error(_PROG, response)
         return 2
-    body: dict[str, Any] = response.json()
-    print(json.dumps(body.get("data", []), indent=2))
+    print(json.dumps(response.json(), indent=2))
     return 0
 
 

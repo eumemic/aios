@@ -41,6 +41,10 @@ async def run_async(argv: list[str]) -> int:
         default=None,
         help="Filter to bindings for this session id",
     )
+    lst.add_argument("--limit", type=int, default=None, help="Max items per page")
+    lst.add_argument(
+        "--after", default=None, help="Pagination cursor (pass next_after from prior response)"
+    )
 
     get = sub.add_parser("get", help="Show a single binding by id")
     get.add_argument("binding_id", help="Binding id")
@@ -79,7 +83,13 @@ async def run_async(argv: list[str]) -> int:
         return 2
 
     if args.verb == "list":
-        return await _list(api_url, api_key, session_id=args.session_id)
+        return await _list(
+            api_url,
+            api_key,
+            session_id=args.session_id,
+            limit=args.limit,
+            after=args.after,
+        )
     if args.verb == "get":
         return await _get(api_url, api_key, binding_id=args.binding_id)
     if args.verb == "archive":
@@ -118,19 +128,29 @@ async def _get(api_url: str, api_key: str, *, binding_id: str) -> int:
     return 0
 
 
-async def _list(api_url: str, api_key: str, *, session_id: str | None) -> int:
+async def _list(
+    api_url: str,
+    api_key: str,
+    *,
+    session_id: str | None,
+    limit: int | None,
+    after: str | None,
+) -> int:
     url = f"{api_url.rstrip('/')}/v1/channel-bindings"
     headers = {"Authorization": f"Bearer {api_key}"}
-    params: dict[str, str] = {}
+    params: dict[str, Any] = {}
     if session_id is not None:
         params["session_id"] = session_id
+    if limit is not None:
+        params["limit"] = limit
+    if after is not None:
+        params["after"] = after
     async with async_client() as client:
         response = await client.get(url, headers=headers, params=params)
     if response.status_code != 200:
         print_http_error(_PROG, response)
         return 2
-    body: dict[str, Any] = response.json()
-    print(json.dumps(body.get("data", []), indent=2))
+    print(json.dumps(response.json(), indent=2))
     return 0
 
 

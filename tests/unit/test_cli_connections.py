@@ -70,6 +70,44 @@ class TestListConnections:
         assert "signal" in out
         assert "+15550001" in out
 
+    async def test_list_output_includes_pagination_metadata(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``list`` prints the full server response including
+        ``has_more`` / ``next_after`` so paginating scripts can drive
+        the next page."""
+        _setup_env(monkeypatch)
+        payload = {
+            "data": [{"id": "conn_01"}],
+            "has_more": True,
+            "next_after": "conn_01",
+        }
+        client = _mock_async_client("get", _mock_response(200, payload))
+
+        with patch("aios.cli.connections.async_client", return_value=client):
+            rc = await run_async(["list"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "has_more" in out
+        assert "next_after" in out
+
+    async def test_list_passes_limit_and_after_as_params(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _setup_env(monkeypatch)
+        payload = {"data": [], "has_more": False, "next_after": None}
+        client = _mock_async_client("get", _mock_response(200, payload))
+
+        with patch("aios.cli.connections.async_client", return_value=client):
+            rc = await run_async(["list", "--limit", "10", "--after", "conn_prev"])
+
+        assert rc == 0
+        call = client.get.await_args
+        params = call.kwargs.get("params") or {}
+        assert params.get("limit") == 10
+        assert params.get("after") == "conn_prev"
+
     async def test_http_error_returns_nonzero(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
