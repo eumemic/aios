@@ -833,6 +833,63 @@ async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: s
     return val
 
 
+def _derive_tool_name(kind: str, data: dict[str, Any]) -> str | None:
+    """Compute the stamped ``tool_name`` column for a new event.
+
+    For tool-result events the name lives at ``data->>'name'``.  For
+    assistant events that requested tools, the first tool_call's function
+    name is promoted — multi-tool turns remain discoverable by that first
+    name; the full list still lives in ``data->'tool_calls'``.  Pure
+    function; paths mirror the backfill in migration 0022 so old and new
+    rows stay byte-equivalent in this column.
+    """
+    if kind != "message":
+        return None
+    role = data.get("role")
+    if role == "tool":
+        name = data.get("name")
+        return name if isinstance(name, str) else None
+    if role == "assistant":
+        tool_calls = data.get("tool_calls")
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return None
+        first = tool_calls[0]
+        if not isinstance(first, dict):
+            return None
+        function = first.get("function")
+        if not isinstance(function, dict):
+            return None
+        name = function.get("name")
+        return name if isinstance(name, str) else None
+    return None
+
+
+def _derive_sender_name(kind: str, data: dict[str, Any]) -> str | None:
+    """Sender name for user events carrying connector metadata; else NULL."""
+    if kind != "message" or data.get("role") != "user":
+        return None
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    name = metadata.get("sender_name")
+    return name if isinstance(name, str) else None
+
+
+def _derive_is_error(kind: str, data: dict[str, Any]) -> bool | None:
+    """Error flag on tool-result events; NULL when unset.
+
+    The field is written only when truthy — successful results omit it —
+    so the column is TRUE on failure and NULL otherwise.  Matches the
+    existing semantics in ``src/aios/harness/tool_dispatch.py``.
+    """
+    if kind != "message":
+        return None
+    flag = data.get("is_error")
+    if flag is None:
+        return None
+    return bool(flag)
+
+
 async def _derive_event_channel(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -955,12 +1012,26 @@ async def append_event(
         channel = await _derive_event_channel(
             conn, session_id, kind, data, orig_channel, focal_at_arrival
         )
+        # Pure promotions: role and the three tool/user-derived columns are
+        # stamped from the same JSON paths the 0022 backfill uses.  Agents
+        # query these via events_search; they're absent from the Event
+        # pydantic model (query-side surface only).
+        role: str | None = None
+        if kind == "message":
+            raw_role = data.get("role")
+            if isinstance(raw_role, str):
+                role = raw_role
+        tool_name = _derive_tool_name(kind, data)
+        is_error = _derive_is_error(kind, data)
+        sender_name = _derive_sender_name(kind, data)
 
         row = await conn.fetchrow(
             "INSERT INTO events "
             "(id, session_id, seq, kind, data, cumulative_tokens, "
-            " orig_channel, focal_channel_at_arrival, channel) "
-            "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9) RETURNING *",
+            " orig_channel, focal_channel_at_arrival, channel, "
+            " role, tool_name, is_error, sender_name) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, "
+            " $10, $11, $12, $13) RETURNING *",
             new_id,
             session_id,
             seq,
@@ -970,6 +1041,10 @@ async def append_event(
             orig_channel,
             focal_at_arrival,
             channel,
+            role,
+            tool_name,
+            is_error,
+            sender_name,
         )
         assert row is not None
 

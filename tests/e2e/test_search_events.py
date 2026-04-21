@@ -1,15 +1,18 @@
 """E2E tests for the search_events built-in tool.
 
 Exercises the full stack: real Postgres (testcontainer), the events_search
-view created by migration 0010, and the search_events tool handler querying
-against real event data. Verifies session scoping, result formatting, SQL
-validation, and read-only enforcement.
+view (created by migration 0010, restricted to messages by 0013, widened
+with promoted paradigm columns by 0022), and the search_events tool handler
+querying against real event data. Verifies session scoping, result
+formatting, SQL validation, read-only enforcement, and that the promoted
+columns (channel, tool_name, is_error, sender_name) are stamped correctly.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from aios.harness import runtime
 from aios.tools.search_events import search_events_handler
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant
@@ -102,7 +105,7 @@ class TestSearchEvents:
         assert result_b["result"] == "No results."
 
     async def test_select_star(self, harness: Harness) -> None:
-        """SELECT * returns all expected columns."""
+        """SELECT * returns all widened-view columns (migration 0022)."""
         session_id = await self._setup_session(harness)
 
         result = await search_events_handler(
@@ -113,11 +116,21 @@ class TestSearchEvents:
         )
 
         text = result["result"]
-        # Header line should contain all view columns
         header = text.split("\n")[0]
-        for col in ("id", "seq", "role", "created_at", "content_text"):
-            assert col in header
-        # kind column should NOT be present (view is messages-only now)
+        for col in (
+            "id",
+            "seq",
+            "role",
+            "channel",
+            "tool_name",
+            "is_error",
+            "sender_name",
+            "created_at",
+            "content_text",
+        ):
+            assert col in header, f"missing column {col!r} in header: {header}"
+        # kind column should NOT be present (view is still messages-only;
+        # span exposure deferred — see issue #117 follow-up).
         assert "kind" not in header
 
     async def test_sql_validation_rejects_insert(self, harness: Harness) -> None:
@@ -182,7 +195,8 @@ class TestSearchEvents:
         Lifecycle, span, and interrupt events are harness internals — they
         should not leak into the agent's search results.  After migration
         0013 the view filters to ``kind = 'message'`` and drops the ``kind``
-        column entirely.
+        column entirely.  Migration 0022 keeps this filter in place — span
+        exposure is deferred pending a per-agent tool-access-control design.
         """
         session_id = await self._setup_session(harness)
 
@@ -203,3 +217,185 @@ class TestSearchEvents:
 
         text = result["result"]
         assert str(msg_count) in text, f"expected {msg_count} rows in view, got: {text}"
+
+
+@needs_docker
+class TestPromotedColumns:
+    """Migration 0022: role, channel, tool_name, is_error, sender_name.
+
+    Append synthetic events covering each shape `append_event` needs to
+    handle (user with metadata, assistant with tool_calls, tool result
+    success, tool result failure) and verify each column is stamped and
+    queryable via events_search.
+    """
+
+    async def _bare_session(self, harness: Harness) -> str:
+        """Create a session with no scripted model calls — we only need
+        the session row so we can hand-append events against it."""
+        harness.script_model([])
+        session = await harness.start("seed", tools=["search_events"])
+        return session.id
+
+    async def test_channel_column_stamped_and_queryable(self, harness: Harness) -> None:
+        """User events carry the metadata.channel through to events.channel."""
+        from aios.services import sessions as sessions_service
+
+        session_id = await self._bare_session(harness)
+        pool = runtime.require_pool()
+        await sessions_service.append_user_message(
+            pool,
+            session_id,
+            "hello on A",
+            metadata={"channel": "slack:CHANA", "sender_name": "alice"},
+        )
+        await sessions_service.append_user_message(
+            pool,
+            session_id,
+            "hello on B",
+            metadata={"channel": "slack:CHANB", "sender_name": "bob"},
+        )
+
+        # Direct column read via the pool to sidestep the
+        # session-scoping machinery on events_search.
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT channel, sender_name FROM events "
+                "WHERE session_id = $1 AND kind = 'message' "
+                "AND data->>'role' = 'user' ORDER BY seq",
+                session_id,
+            )
+        channels = [r["channel"] for r in rows]
+        senders = [r["sender_name"] for r in rows]
+        # The seed message from `start()` has no channel metadata.
+        assert channels[-2:] == ["slack:CHANA", "slack:CHANB"]
+        assert senders[-2:] == ["alice", "bob"]
+
+        # And queryable via the view.
+        result = await search_events_handler(
+            session_id,
+            {
+                "query": (
+                    "SELECT channel, sender_name, content_text "
+                    "FROM events_search WHERE channel = 'slack:CHANA'"
+                ),
+            },
+        )
+        assert "slack:CHANA" in result["result"]
+        assert "alice" in result["result"]
+        assert "hello on A" in result["result"]
+        assert "CHANB" not in result["result"]
+
+    async def test_tool_name_column_for_assistant_and_tool_rows(self, harness: Harness) -> None:
+        """Assistant turns with tool_calls promote the first name;
+        tool-result rows promote data.name."""
+        from aios.db import queries
+
+        session_id = await self._bare_session(harness)
+        pool = runtime.require_pool()
+        async with pool.acquire() as conn:
+            await queries.append_event(
+                conn,
+                session_id=session_id,
+                kind="message",
+                data={
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{}"},
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "read", "arguments": "{}"},
+                        },
+                    ],
+                },
+            )
+            await queries.append_event(
+                conn,
+                session_id=session_id,
+                kind="message",
+                data={
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "name": "bash",
+                    "content": "hello",
+                },
+            )
+
+        result = await search_events_handler(
+            session_id,
+            {
+                "query": (
+                    "SELECT role, tool_name FROM events_search "
+                    "WHERE tool_name = 'bash' ORDER BY seq"
+                ),
+            },
+        )
+        text = result["result"]
+        # Both the assistant row (first tool_call was 'bash') and the tool
+        # row (name='bash') should match.
+        assert text.count("bash") >= 2
+        assert "assistant" in text
+        assert "tool" in text
+        # The second tool_call's name is NOT promoted — multi-tool turns
+        # expose only the first — so this query returns no rows.
+        result2 = await search_events_handler(
+            session_id,
+            {"query": "SELECT 1 FROM events_search WHERE tool_name = 'read'"},
+        )
+        assert result2["result"] == "No results."
+
+    async def test_is_error_column_nullable_true_only(self, harness: Harness) -> None:
+        """is_error is TRUE on failures, NULL on success — never FALSE."""
+        from aios.db import queries
+
+        session_id = await self._bare_session(harness)
+        pool = runtime.require_pool()
+        async with pool.acquire() as conn:
+            await queries.append_event(
+                conn,
+                session_id=session_id,
+                kind="message",
+                data={
+                    "role": "tool",
+                    "tool_call_id": "call_ok",
+                    "name": "bash",
+                    "content": "ok",
+                },
+            )
+            await queries.append_event(
+                conn,
+                session_id=session_id,
+                kind="message",
+                data={
+                    "role": "tool",
+                    "tool_call_id": "call_boom",
+                    "name": "bash",
+                    "content": '{"error": "nope"}',
+                    "is_error": True,
+                },
+            )
+
+        # Direct column read — the view formatter stringifies NULLs to
+        # 'NULL' which conflates with FALSE otherwise.
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT data->>'tool_call_id' AS tcid, is_error FROM events "
+                "WHERE session_id = $1 AND kind = 'message' "
+                "AND data->>'role' = 'tool' ORDER BY seq",
+                session_id,
+            )
+        by_tcid = {r["tcid"]: r["is_error"] for r in rows}
+        assert by_tcid["call_ok"] is None
+        assert by_tcid["call_boom"] is True
+
+        # The `WHERE is_error` predicate implicitly excludes NULL.
+        result = await search_events_handler(
+            session_id,
+            {"query": "SELECT count(*) AS n FROM events_search WHERE is_error"},
+        )
+        assert "1" in result["result"]
