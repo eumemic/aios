@@ -5,8 +5,8 @@ so both verbs require ``--connection-id``.  The nested ``SessionParams``
 block is accepted as a JSON string via ``--session-params-json``; absent
 flag means the rule is created with an empty ``SessionParams``.
 
-Env handling and exit semantics mirror :mod:`aios.cli.connections` —
-wraps the same API with an optional JSON-blob flag for the nested param.
+Env handling, ``httpx`` setup, and HTTP-error formatting live in
+:mod:`aios.cli._http`.
 """
 
 from __future__ import annotations
@@ -14,11 +14,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 from typing import Any
 
-import httpx
+from aios.cli._http import CliError, async_client, print_http_error, require_env
+
+_PROG = "aios rules"
 
 
 def run(argv: list[str]) -> int:
@@ -32,7 +33,7 @@ async def run_async(argv: list[str]) -> int:
     ``argv`` is the slice *after* ``rules``.
     """
     parser = argparse.ArgumentParser(
-        prog="aios rules",
+        prog=_PROG,
         description="Manage aios routing rules (per-connection).",
     )
     sub = parser.add_subparsers(dest="verb")
@@ -68,8 +69,8 @@ async def run_async(argv: list[str]) -> int:
         return 2
 
     try:
-        api_url, api_key = _require_env()
-    except _CliError as err:
+        api_url, api_key = require_env(_PROG)
+    except CliError as err:
         print(str(err), file=sys.stderr)
         return 2
 
@@ -78,7 +79,7 @@ async def run_async(argv: list[str]) -> int:
     if args.verb == "create":
         try:
             session_params = _parse_session_params(args.session_params_json)
-        except _CliError as err:
+        except CliError as err:
             print(str(err), file=sys.stderr)
             return 2
         return await _create(
@@ -93,44 +94,25 @@ async def run_async(argv: list[str]) -> int:
     return 2
 
 
-class _CliError(Exception):
-    """Raised for user-visible config errors (missing env, bad JSON, etc.)."""
-
-
-def _require_env() -> tuple[str, str]:
-    api_key = os.environ.get("AIOS_API_KEY")
-    if not api_key:
-        raise _CliError("aios rules: AIOS_API_KEY is required")
-    api_url = os.environ.get(
-        "AIOS_API_URL",
-        f"http://{os.environ.get('AIOS_API_HOST', '127.0.0.1')}"
-        f":{os.environ.get('AIOS_API_PORT', '8080')}",
-    )
-    return api_url, api_key
-
-
 def _parse_session_params(raw: str | None) -> dict[str, Any]:
     if raw is None:
         return {}
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise _CliError(f"aios rules: --session-params-json is not valid JSON: {exc}") from exc
+        raise CliError(f"{_PROG}: --session-params-json is not valid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
-        raise _CliError("aios rules: --session-params-json must be a JSON object")
+        raise CliError(f"{_PROG}: --session-params-json must be a JSON object")
     return parsed
 
 
 async def _list(api_url: str, api_key: str, *, connection_id: str) -> int:
     url = f"{api_url.rstrip('/')}/v1/connections/{connection_id}/routing-rules"
     headers = {"Authorization": f"Bearer {api_key}"}
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with async_client() as client:
         response = await client.get(url, headers=headers)
     if response.status_code != 200:
-        print(
-            f"aios rules: HTTP {response.status_code}: {response.text}",
-            file=sys.stderr,
-        )
+        print_http_error(_PROG, response)
         return 2
     body: dict[str, Any] = response.json()
     print(json.dumps(body.get("data", []), indent=2))
@@ -149,13 +131,10 @@ async def _create(
     url = f"{api_url.rstrip('/')}/v1/connections/{connection_id}/routing-rules"
     headers = {"Authorization": f"Bearer {api_key}"}
     payload = {"prefix": prefix, "target": target, "session_params": session_params}
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with async_client() as client:
         response = await client.post(url, headers=headers, json=payload)
     if response.status_code not in {200, 201}:
-        print(
-            f"aios rules: HTTP {response.status_code}: {response.text}",
-            file=sys.stderr,
-        )
+        print_http_error(_PROG, response)
         return 2
     print(json.dumps(response.json(), indent=2))
     return 0

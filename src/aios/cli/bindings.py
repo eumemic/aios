@@ -1,10 +1,8 @@
 """``aios bindings <verb>`` — operator CLI for channel-binding CRUD.
 
-Wraps ``POST``/``GET /v1/channel-bindings`` so the onboarding
-walkthrough doesn't need a chain of curl invocations (#35 item 4).
-Mirrors :mod:`aios.cli.connections`: reads ``AIOS_API_KEY`` +
-``AIOS_API_URL`` / ``AIOS_API_HOST``+``AIOS_API_PORT`` from env and
-pipes through httpx.
+Wraps ``POST``/``GET /v1/channel-bindings`` (#35 item 4).  Env
+handling, ``httpx`` setup, and HTTP-error formatting live in
+:mod:`aios.cli._http`.
 """
 
 from __future__ import annotations
@@ -12,11 +10,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 from typing import Any
 
-import httpx
+from aios.cli._http import CliError, async_client, print_http_error, require_env
+
+_PROG = "aios bindings"
 
 
 def run(argv: list[str]) -> int:
@@ -31,7 +30,7 @@ async def run_async(argv: list[str]) -> int:
     ``aios bindings list`` this is ``["list"]``.
     """
     parser = argparse.ArgumentParser(
-        prog="aios bindings",
+        prog=_PROG,
         description="Manage aios channel bindings (address → session mappings).",
     )
     sub = parser.add_subparsers(dest="verb")
@@ -65,8 +64,8 @@ async def run_async(argv: list[str]) -> int:
         return 2
 
     try:
-        api_url, api_key = _require_env()
-    except _CliError as err:
+        api_url, api_key = require_env(_PROG)
+    except CliError as err:
         print(str(err), file=sys.stderr)
         return 2
 
@@ -83,35 +82,16 @@ async def run_async(argv: list[str]) -> int:
     return 2
 
 
-class _CliError(Exception):
-    """Raised for user-visible config errors (missing env, etc.)."""
-
-
-def _require_env() -> tuple[str, str]:
-    api_key = os.environ.get("AIOS_API_KEY")
-    if not api_key:
-        raise _CliError("aios bindings: AIOS_API_KEY is required")
-    api_url = os.environ.get(
-        "AIOS_API_URL",
-        f"http://{os.environ.get('AIOS_API_HOST', '127.0.0.1')}"
-        f":{os.environ.get('AIOS_API_PORT', '8080')}",
-    )
-    return api_url, api_key
-
-
 async def _list(api_url: str, api_key: str, *, session_id: str | None) -> int:
     url = f"{api_url.rstrip('/')}/v1/channel-bindings"
     headers = {"Authorization": f"Bearer {api_key}"}
     params: dict[str, str] = {}
     if session_id is not None:
         params["session_id"] = session_id
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with async_client() as client:
         response = await client.get(url, headers=headers, params=params)
     if response.status_code != 200:
-        print(
-            f"aios bindings: HTTP {response.status_code}: {response.text}",
-            file=sys.stderr,
-        )
+        print_http_error(_PROG, response)
         return 2
     body: dict[str, Any] = response.json()
     print(json.dumps(body.get("data", []), indent=2))
@@ -128,13 +108,10 @@ async def _create(
     url = f"{api_url.rstrip('/')}/v1/channel-bindings"
     headers = {"Authorization": f"Bearer {api_key}"}
     payload = {"address": address, "session_id": session_id}
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with async_client() as client:
         response = await client.post(url, headers=headers, json=payload)
     if response.status_code not in {200, 201}:
-        print(
-            f"aios bindings: HTTP {response.status_code}: {response.text}",
-            file=sys.stderr,
-        )
+        print_http_error(_PROG, response)
         return 2
     print(json.dumps(response.json(), indent=2))
     return 0

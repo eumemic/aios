@@ -64,7 +64,7 @@ class TestListBindings:
         }
         client = _mock_async_client("get", _mock_response(200, payload))
 
-        with patch("aios.cli.bindings.httpx.AsyncClient", return_value=client):
+        with patch("aios.cli.bindings.async_client", return_value=client):
             rc = await run_async(["list"])
 
         assert rc == 0
@@ -78,7 +78,7 @@ class TestListBindings:
         payload = {"data": [], "has_more": False, "next_after": None}
         client = _mock_async_client("get", _mock_response(200, payload))
 
-        with patch("aios.cli.bindings.httpx.AsyncClient", return_value=client):
+        with patch("aios.cli.bindings.async_client", return_value=client):
             rc = await run_async(["list", "--session-id", "sess_target"])
 
         assert rc == 0
@@ -95,7 +95,7 @@ class TestListBindings:
         _setup_env(monkeypatch)
         client = _mock_async_client("get", _mock_response(500, {"error": "boom"}))
 
-        with patch("aios.cli.bindings.httpx.AsyncClient", return_value=client):
+        with patch("aios.cli.bindings.async_client", return_value=client):
             rc = await run_async(["list"])
 
         assert rc != 0
@@ -127,7 +127,7 @@ class TestCreateBinding:
         }
         client = _mock_async_client("post", _mock_response(201, created))
 
-        with patch("aios.cli.bindings.httpx.AsyncClient", return_value=client):
+        with patch("aios.cli.bindings.async_client", return_value=client):
             rc = await run_async(
                 [
                     "create",
