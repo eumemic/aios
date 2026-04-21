@@ -27,6 +27,35 @@ async def in_memory_app() -> AsyncIterator[App]:
         yield patched
 
 
+class TestE2EConftestMockSignatures:
+    """The e2e conftest installs no-op mocks in place of ``defer_wake`` and
+    ``defer_retry_wake``.  If the mocks' signatures drift from the real
+    functions', every e2e test crashes with ``TypeError`` at the first
+    deferral.  This is exactly what happened when PR #138 added ``pool`` as
+    the first positional arg but forgot to update the conftest — catch
+    future drift with a signature-equality assertion."""
+
+    def test_noop_defer_wake_matches_real_defer_wake(self) -> None:
+        import inspect
+
+        from aios.harness.wake import defer_wake
+        from tests.e2e.conftest import _noop_defer_wake
+
+        real_params = list(inspect.signature(defer_wake).parameters.keys())
+        mock_params = list(inspect.signature(_noop_defer_wake).parameters.keys())
+        assert real_params == mock_params
+
+    def test_noop_defer_retry_wake_matches_real(self) -> None:
+        import inspect
+
+        from aios.harness.wake import defer_retry_wake
+        from tests.e2e.conftest import _noop_defer_retry_wake
+
+        real_params = list(inspect.signature(defer_retry_wake).parameters.keys())
+        mock_params = list(inspect.signature(_noop_defer_retry_wake).parameters.keys())
+        assert real_params == mock_params
+
+
 class TestWakeDeferredEvent:
     async def test_defer_wake_emits_span_with_cause(self, in_memory_app: App) -> None:
         from aios.harness.wake import defer_wake
