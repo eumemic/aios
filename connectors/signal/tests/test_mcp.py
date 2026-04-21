@@ -66,7 +66,7 @@ async def _call_tool(
     Goes through ``FastMCP.tool_manager.call_tool`` so the tool handler's
     ``ctx: Context`` dependency is filled in with the constructed meta.
     """
-    mcp = build_mcp_server(rpc=rpc)  # type: ignore[arg-type]
+    mcp = build_mcp_server(rpc=rpc, bot_uuid="test-bot-uuid", phone="+15550000000")  # type: ignore[arg-type]
     result = await mcp._tool_manager.call_tool(
         name,
         args,
@@ -171,7 +171,7 @@ async def test_signal_send_reads_focal_from_meta() -> None:
 
 async def test_signal_send_errors_without_meta() -> None:
     rpc = FakeRpc()
-    mcp = build_mcp_server(rpc=rpc)  # type: ignore[arg-type]
+    mcp = build_mcp_server(rpc=rpc, bot_uuid="test-bot-uuid", phone="+15550000000")  # type: ignore[arg-type]
     # No focal — aios should have filtered this tool out, but defend.
     ctx_no_meta = _ctx_with_focal(None)
     with pytest.raises(Exception, match="focal channel"):
@@ -322,7 +322,7 @@ async def test_bearer_auth_rejects_non_bearer_scheme() -> None:
 
 def test_build_mcp_app_returns_starlette() -> None:
     rpc = FakeRpc()
-    mcp = build_mcp_server(rpc=rpc)  # type: ignore[arg-type]
+    mcp = build_mcp_server(rpc=rpc, bot_uuid="test-bot-uuid", phone="+15550000000")  # type: ignore[arg-type]
     app = build_mcp_app(mcp, token="t")
     assert isinstance(app, Starlette)
 
@@ -336,9 +336,13 @@ def test_build_mcp_server_passes_signal_instructions() -> None:
     from aios_signal.prompts import SIGNAL_SERVER_INSTRUCTIONS
 
     rpc = FakeRpc()
-    mcp = build_mcp_server(rpc=rpc)  # type: ignore[arg-type]
-    assert mcp.instructions == SIGNAL_SERVER_INSTRUCTIONS
-    # Sanity-check the prose covers the v1 toolset.
+    mcp = build_mcp_server(rpc=rpc, bot_uuid="test-bot-uuid", phone="+15550000000")  # type: ignore[arg-type]
+    # The static tool prose comes through verbatim — ``build_instructions``
+    # prepends an identity block but doesn't rewrite the body.
+    assert SIGNAL_SERVER_INSTRUCTIONS in mcp.instructions
     assert "signal_send" in mcp.instructions
     assert "signal_react" in mcp.instructions
     assert "signal_read_receipt" in mcp.instructions
+    # Identity block is present and names this bot.
+    assert "test-bot-uuid" in mcp.instructions
+    assert "+15550000000" in mcp.instructions

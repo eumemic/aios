@@ -49,7 +49,10 @@ async def run(cfg: Settings) -> None:
                 messages=daemon.listener.messages(),
                 contact_names=contact_names,
             )
-            mcp_app = build_mcp_app(build_mcp_server(rpc=daemon.rpc), token=cfg.mcp_token)
+            mcp_app = build_mcp_app(
+                build_mcp_server(rpc=daemon.rpc, bot_uuid=bot_uuid, phone=cfg.phone),
+                token=cfg.mcp_token,
+            )
             host, port = parse_bind(cfg.mcp_bind)
 
             try:
