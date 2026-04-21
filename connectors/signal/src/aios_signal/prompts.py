@@ -10,21 +10,34 @@ Covers only the tools this server actually exposes — ``signal_send``,
 tools that don't exist would be worse than silence.
 
 The instructions are composed per-run: ``build_instructions`` prepends
-an identity block (bot's own ``sender_uuid`` + phone number) to the
-static body so the agent can recognise itself in group messages
-instead of confabulating about who the other participants are
-(issue #55).
+an identity block (bot's own ``sender_uuid`` + phone number) and a
+group-roster block (who's in each group the bot is a member of) to
+the static body so the agent knows who it is and who it's talking to
+without having to learn that from inbound traffic (issues #55, #57).
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-def build_instructions(*, bot_uuid: str, phone: str) -> str:
-    """Compose the MCP ``initialize`` instructions with the bot's identity.
+if TYPE_CHECKING:
+    from .daemon import GroupInfo
 
-    The agent would otherwise have no reliable source of truth for which
+
+def build_instructions(
+    *,
+    bot_uuid: str,
+    phone: str,
+    groups: list[GroupInfo] | None = None,
+    contact_names: dict[str, str] | None = None,
+) -> str:
+    """Compose the MCP ``initialize`` instructions with identity + roster.
+
+    The agent otherwise has no reliable source of truth for which
     ``sender_uuid`` is itself — models have been observed confabulating
-    identities in group chats when this is absent.
+    identities in group chats when this is absent.  The group-roster
+    block makes every participant knowable without having to wait for
+    them to speak; silent peers don't effectively disappear.
     """
     identity = (
         "## Your identity on this Signal account\n"
@@ -35,7 +48,30 @@ def build_instructions(*, bot_uuid: str, phone: str) -> str:
         f"- **phone**: `{phone}` — this Signal account is identified to "
         "peers by this number.\n"
     )
-    return identity + "\n" + SIGNAL_SERVER_INSTRUCTIONS
+    roster = _render_group_roster(bot_uuid, groups or [], contact_names or {})
+    return identity + roster + "\n" + SIGNAL_SERVER_INSTRUCTIONS
+
+
+def _render_group_roster(
+    bot_uuid: str,
+    groups: list[GroupInfo],
+    contact_names: dict[str, str],
+) -> str:
+    if not groups:
+        return ""
+    lines: list[str] = ["\n## Your Signal groups\n"]
+    for g in groups:
+        name = g.name or "(unnamed)"
+        lines.append(f"\n- `{g.id}` — {name}")
+        for uuid in g.member_uuids:
+            if uuid == bot_uuid:
+                tag = "(YOU)"
+            else:
+                display = contact_names.get(uuid)
+                tag = display if display else "(name unknown)"
+            lines.append(f"    - `{uuid}`: {tag}")
+    lines.append("")
+    return "\n".join(lines) + "\n"
 
 
 SIGNAL_SERVER_INSTRUCTIONS = """\

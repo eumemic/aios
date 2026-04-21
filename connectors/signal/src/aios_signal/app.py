@@ -31,11 +31,13 @@ async def run(cfg: Settings) -> None:
     ) as daemon:
         bot_uuid = await daemon.discover_bot_uuid()
         contact_names = await daemon.list_contacts()
+        groups = await daemon.list_groups()
         log.info(
             "signal.ready",
             bot_uuid=bot_uuid,
             phone=cfg.phone,
             contacts=len(contact_names),
+            groups=len(groups),
         )
 
         async with IngestClient(
@@ -50,7 +52,13 @@ async def run(cfg: Settings) -> None:
                 contact_names=contact_names,
             )
             mcp_app = build_mcp_app(
-                build_mcp_server(rpc=daemon.rpc, bot_uuid=bot_uuid, phone=cfg.phone),
+                build_mcp_server(
+                    rpc=daemon.rpc,
+                    bot_uuid=bot_uuid,
+                    phone=cfg.phone,
+                    groups=groups,
+                    contact_names=contact_names,
+                ),
                 token=cfg.mcp_token,
             )
             host, port = parse_bind(cfg.mcp_bind)

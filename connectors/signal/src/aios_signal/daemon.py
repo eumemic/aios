@@ -11,13 +11,30 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
 import structlog
 
+from .addressing import encode_chat_id
 from .errors import BotAccountNotFoundError, DaemonCrashError
 from .rpc import RpcClient, RpcListener
+
+
+@dataclass(frozen=True)
+class GroupInfo:
+    """One Signal group the bot is a member of.
+
+    ``id`` is the URL-safe-base64 form used as the channel-path suffix
+    (``signal/<bot>/<id>``).  ``member_uuids`` are the ACI UUIDs of the
+    other participants; cross-reference with ``list_contacts`` for
+    display names.
+    """
+
+    id: str
+    name: str
+    member_uuids: list[str]
 
 log = structlog.get_logger(__name__)
 
@@ -180,6 +197,53 @@ class SignalDaemon:
             f"signal-cli has no account for {self.phone} in {accounts_json}. "
             f"Run `signal-cli -a {self.phone} register` first."
         )
+
+    async def list_groups(self) -> list[GroupInfo]:
+        """Return the bot's group memberships via signal-cli ``listGroups``.
+
+        Best-effort: returns an empty list on RPC failure or malformed
+        responses.  Group IDs are re-encoded into URL-safe base64 so the
+        caller can use them directly as channel-path suffixes
+        (``signal/<bot>/<id>``) — matching :func:`encode_chat_id`'s
+        ``group`` branch.  Groups missing either an ``id`` or ``members``
+        are dropped; the agent-facing roster is supposed to be a
+        complete picture of "who is in this room with me."
+        """
+        try:
+            result = await self.rpc.call("listGroups", {})
+        except Exception:
+            log.warning("signal.list_groups.failed", exc_info=True)
+            return []
+        if not isinstance(result, list):
+            return []
+        out: list[GroupInfo] = []
+        for entry in result:
+            if not isinstance(entry, dict):
+                continue
+            raw_id = entry.get("id")
+            members = entry.get("members")
+            if not isinstance(raw_id, str) or not raw_id:
+                continue
+            if not isinstance(members, list) or not members:
+                continue
+            name = entry.get("name") if isinstance(entry.get("name"), str) else ""
+            member_uuids: list[str] = []
+            for m in members:
+                if not isinstance(m, dict):
+                    continue
+                uuid = m.get("uuid")
+                if isinstance(uuid, str) and uuid:
+                    member_uuids.append(uuid)
+            if not member_uuids:
+                continue
+            out.append(
+                GroupInfo(
+                    id=encode_chat_id(raw_id, "group"),
+                    name=name or "",
+                    member_uuids=member_uuids,
+                )
+            )
+        return out
 
     async def list_contacts(self) -> dict[str, str]:
         """Return a ``{uuid: display_name}`` map from signal-cli's contact store.
