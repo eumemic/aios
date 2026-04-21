@@ -17,6 +17,7 @@ from procrastinate import App as ProcrastinateApp
 from aios.config import Settings, get_settings
 from aios.crypto.vault import CryptoBox
 from aios.errors import UnauthorizedError
+from aios.models.connections import Connection
 
 
 def get_pool(request: Request) -> asyncpg.Pool:
@@ -73,3 +74,17 @@ CryptoBoxDep = Annotated[CryptoBox, Depends(get_crypto_box)]
 ProcrastinateDep = Annotated[ProcrastinateApp, Depends(get_procrastinate)]
 DbUrlDep = Annotated[str, Depends(get_db_url)]
 AuthDep = Annotated[None, Depends(require_bearer_auth)]
+
+
+async def resolve_connection(connection_id: str, pool: PoolDep) -> Connection:
+    """Resolve a ``{connection_id}`` path param to a ``Connection`` row.
+
+    Used by all endpoints nested under ``/v1/connections/{connection_id}/...``
+    to fail fast with 404 before any business logic runs.
+    """
+    from aios.services import connections as service
+
+    return await service.get_connection(pool, connection_id)
+
+
+ConnectionDep = Annotated[Connection, Depends(resolve_connection)]

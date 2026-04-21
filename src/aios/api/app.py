@@ -15,10 +15,10 @@ from fastapi import FastAPI
 from aios.api.routers import (
     agents,
     channel_bindings,
+    connection_routing_rules,
     connections,
     environments,
     health,
-    routing_rules,
     sessions,
     skills,
     vaults,
@@ -70,7 +70,7 @@ def create_app() -> FastAPI:
     app.include_router(vaults.router)
     app.include_router(connections.router)
     app.include_router(channel_bindings.router)
-    app.include_router(routing_rules.router)
+    app.include_router(connection_routing_rules.router)
     return app
 
 

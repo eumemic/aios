@@ -17,7 +17,12 @@ NotificationMode = Literal["focal_candidate", "silent"]
 
 
 class ChannelBindingCreate(BaseModel):
-    """Request body for ``POST /v1/channel-bindings``."""
+    """Request body for ``POST /v1/channel-bindings``.
+
+    ``address`` is the full display form ``{connector}/{account}/{path}``.
+    The service layer parses it, resolves the owning connection, and
+    stores the binding as ``(connection_id, path)`` internally.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -26,9 +31,16 @@ class ChannelBindingCreate(BaseModel):
 
 
 class ChannelBinding(BaseModel):
-    """Read view of a channel binding."""
+    """Read view of a channel binding.
+
+    ``address`` is computed on read (``{connector}/{account}/{path}``) —
+    storage is normalized as ``(connection_id, path)`` so the display form
+    stays a single source of truth: the owning connection.
+    """
 
     id: str
+    connection_id: str
+    path: str
     address: str
     session_id: str
     created_at: datetime

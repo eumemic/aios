@@ -74,9 +74,7 @@ async def archive_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Con
         if connection.archived_at is not None:
             # Let the query raise its canonical "already archived" error.
             return await queries.archive_connection(conn, connection_id)
-        active = await queries.count_active_bindings_for_connection(
-            conn, connector=connection.connector, account=connection.account
-        )
+        active = await queries.count_active_bindings_for_connection(conn, connection_id)
         if active > 0:
             raise ConflictError(
                 f"connection {connection_id} has {active} active channel binding"

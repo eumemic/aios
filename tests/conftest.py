@@ -110,15 +110,11 @@ def db_url(postgres_container: Any) -> str:
     return f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
 
-@pytest.fixture(scope="module")
-def migrated_db_url(db_url: str) -> str:
-    """Run alembic upgrade head against the testcontainer DB and return its URL."""
-    env = {
-        **os.environ,
-        "AIOS_DB_URL": db_url,
-    }
+def run_alembic_upgrade(db_url: str, target: str = "head") -> None:
+    """Run ``alembic upgrade <target>`` against ``db_url`` via subprocess."""
+    env = {**os.environ, "AIOS_DB_URL": db_url}
     result = subprocess.run(
-        ["uv", "run", "alembic", "upgrade", "head"],
+        ["uv", "run", "alembic", "upgrade", target],
         cwd=PROJECT_ROOT,
         env=env,
         capture_output=True,
@@ -127,8 +123,14 @@ def migrated_db_url(db_url: str) -> str:
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"alembic upgrade failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+            f"alembic upgrade {target} failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
+
+
+@pytest.fixture(scope="module")
+def migrated_db_url(db_url: str) -> str:
+    """Run alembic upgrade head against the testcontainer DB and return its URL."""
+    run_alembic_upgrade(db_url, "head")
     return db_url
 
 

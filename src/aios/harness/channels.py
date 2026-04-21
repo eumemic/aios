@@ -62,15 +62,11 @@ def connection_server_name(c: Connection) -> str:
 async def list_bindings_and_connections(
     pool: asyncpg.Pool[Any], session_id: str
 ) -> tuple[list[ChannelBinding], list[Connection]]:
-    """Load the session's bindings and the distinct connections they
-    reference in a single pool acquisition.
-    """
+    """Load the session's bindings and the distinct connections they reference."""
     async with pool.acquire() as conn:
         bindings = await queries.list_session_bindings(conn, session_id)
-        pairs = {
-            (parts[0], parts[1]) for b in bindings if len(parts := b.address.split("/", 2)) >= 2
-        }
-        connections = await queries.get_connections_by_pairs(conn, list(pairs)) if pairs else []
+        conn_ids = sorted({b.connection_id for b in bindings})
+        connections = await queries.list_connections_by_ids(conn, conn_ids) if conn_ids else []
     return bindings, connections
 
 
@@ -352,12 +348,18 @@ def _prefix_text(s: str) -> str:
 
 
 def apply_monologue_prefix(assistant_msg: dict[str, Any]) -> dict[str, Any]:
-    """Prefix every text segment of an assistant message's content.
+    """Prefix the *start* of an assistant message's text content.
 
-    Safety net: the paradigm prose instructs the model to prefix its own
-    bare text; this fills in the prefix when it forgets, so the log is
-    uniform from the model's perspective on replay. Idempotent — see
-    :func:`_prefix_text`.
+    Safety net: the paradigm prose instructs the model to open its bare
+    text with the prefix; this fills in the prefix when it forgets, so
+    the log is uniform on replay. Idempotent — see :func:`_prefix_text`.
+
+    For list-shaped content (providers that emit a reasoning block first
+    or interleave text with tool_use blocks), the prefix is stamped on
+    the *first* text block only — the message is one logical turn, and
+    stamping every text segment produced double/triple prefixes in the
+    log (observed on Gemma, which emits a ``thought\\n...`` text block
+    followed by the actual response).
     """
     content = assistant_msg.get("content")
     if not content:
@@ -365,11 +367,13 @@ def apply_monologue_prefix(assistant_msg: dict[str, Any]) -> dict[str, Any]:
     if isinstance(content, str):
         return {**assistant_msg, "content": _prefix_text(content)}
     if isinstance(content, list):
-        new_blocks: list[Any] = [
-            {**b, "text": _prefix_text(b.get("text", ""))}
-            if isinstance(b, dict) and b.get("type") == "text"
-            else b
-            for b in content
-        ]
+        new_blocks: list[Any] = []
+        prefixed = False
+        for block in content:
+            if not prefixed and isinstance(block, dict) and block.get("type") == "text":
+                new_blocks.append({**block, "text": _prefix_text(block.get("text", ""))})
+                prefixed = True
+            else:
+                new_blocks.append(block)
         return {**assistant_msg, "content": new_blocks}
     return assistant_msg

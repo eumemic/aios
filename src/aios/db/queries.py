@@ -1867,6 +1867,27 @@ async def update_connection(
     return _row_to_connection(row)
 
 
+async def list_connections_by_ids(
+    conn: asyncpg.Connection[Any],
+    ids: list[str],
+) -> list[Connection]:
+    """Active connections with the given ``ids``.  Empty input → no roundtrip.
+
+    Results are ordered by ``c.id`` so callers can feed them into the
+    system prompt in a stable order — prompt-cache stability depends
+    on it.  Used by :func:`aios.harness.channels.list_bindings_and_connections`
+    where the ``ids`` come from the distinct ``binding.connection_id``
+    values of a session's bindings.
+    """
+    if not ids:
+        return []
+    rows = await conn.fetch(
+        "SELECT * FROM connections WHERE id = ANY($1::text[]) AND archived_at IS NULL ORDER BY id",
+        ids,
+    )
+    return [_row_to_connection(r) for r in rows]
+
+
 async def get_connections_by_pairs(
     conn: asyncpg.Connection[Any],
     pairs: list[tuple[str, str]],
@@ -1923,32 +1944,42 @@ async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) 
 
 
 async def count_active_bindings_for_connection(
-    conn: asyncpg.Connection[Any], *, connector: str, account: str
+    conn: asyncpg.Connection[Any], connection_id: str
 ) -> int:
-    """Count active channel bindings whose address is scoped to this
-    (connector, account). Used to block connection archival while sessions
-    are still reachable via those bindings — archiving the connection would
-    silently drop the connection-provided MCP tools from any live session.
-
-    Uses ``starts_with`` (literal prefix match) rather than ``LIKE`` so
-    accounts containing ``%`` or ``_`` don't expand into wildcard matches.
+    """Count active channel bindings owned by this connection.  Used to
+    block connection archival while sessions are still reachable via
+    those bindings — archiving the connection would silently drop the
+    connection-provided MCP tools from any live session.
     """
-    prefix = f"{connector}/{account}/"
     val: int = await conn.fetchval(
-        "SELECT COUNT(*) FROM channel_bindings "
-        "WHERE starts_with(address, $1) AND archived_at IS NULL",
-        prefix,
+        "SELECT COUNT(*) FROM channel_bindings WHERE connection_id = $1 AND archived_at IS NULL",
+        connection_id,
     )
     return val
 
 
 # ─── channel bindings ───────────────────────────────────────────────────────
+#
+# The display ``address`` is computed on read by joining connections —
+# storage is normalized as ``(connection_id, path)``.  All selects go
+# through ``_BINDING_SELECT`` which tacks the connector/account columns
+# onto the row, consumed by ``_row_to_channel_binding`` to rebuild
+# ``address`` for the API response.
+
+_BINDING_SELECT = """
+    SELECT cb.*, c.connector, c.account
+      FROM channel_bindings cb
+      JOIN connections c ON c.id = cb.connection_id
+"""
 
 
 def _row_to_channel_binding(row: asyncpg.Record) -> ChannelBinding:
+    address = f"{row['connector']}/{row['account']}/{row['path']}"
     return ChannelBinding(
         id=row["id"],
-        address=row["address"],
+        connection_id=row["connection_id"],
+        path=row["path"],
+        address=address,
         session_id=row["session_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -1960,37 +1991,54 @@ def _row_to_channel_binding(row: asyncpg.Record) -> ChannelBinding:
 async def insert_binding(
     conn: asyncpg.Connection[Any],
     *,
-    address: str,
+    connection_id: str,
+    path: str,
     session_id: str,
 ) -> ChannelBinding:
+    """Insert a ``(connection_id, path) → session_id`` binding.
+
+    Returns the fully-populated read view (address reconstructed from the
+    owning connection).  A CTE does the insert + connection join in one
+    roundtrip.
+    """
     new_id = make_id(CHANNEL_BINDING)
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO channel_bindings (id, address, session_id)
-            VALUES ($1, $2, $3)
-            RETURNING *
+            WITH inserted AS (
+                INSERT INTO channel_bindings (id, connection_id, path, session_id)
+                VALUES ($1, $2, $3, $4)
+                RETURNING *
+            )
+            SELECT i.*, c.connector, c.account
+              FROM inserted i
+              JOIN connections c ON c.id = i.connection_id
             """,
             new_id,
-            address,
+            connection_id,
+            path,
             session_id,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
-            f"an active binding for address {address!r} already exists",
-            detail={"address": address},
+            f"an active binding for path {path!r} on connection {connection_id} already exists",
+            detail={"connection_id": connection_id, "path": path},
         ) from exc
     except asyncpg.ForeignKeyViolationError as exc:
+        # Could be either the session FK or the connection FK — look up to
+        # produce the correct message.  (The common case is a bad
+        # ``session_id``; ``connection_id`` is resolved by the service layer
+        # before the insert.)
         raise NotFoundError(
-            f"session {session_id} not found",
-            detail={"session_id": session_id},
+            "session or connection not found for binding",
+            detail={"connection_id": connection_id, "session_id": session_id},
         ) from exc
     assert row is not None
     return _row_to_channel_binding(row)
 
 
 async def get_binding(conn: asyncpg.Connection[Any], binding_id: str) -> ChannelBinding:
-    row = await conn.fetchrow("SELECT * FROM channel_bindings WHERE id = $1", binding_id)
+    row = await conn.fetchrow(_BINDING_SELECT + " WHERE cb.id = $1", binding_id)
     if row is None:
         raise NotFoundError(
             f"channel binding {binding_id} not found",
@@ -1999,12 +2047,15 @@ async def get_binding(conn: asyncpg.Connection[Any], binding_id: str) -> Channel
     return _row_to_channel_binding(row)
 
 
-async def get_binding_by_address(
-    conn: asyncpg.Connection[Any], address: str
+async def get_binding_by_connection_and_path(
+    conn: asyncpg.Connection[Any], connection_id: str, path: str
 ) -> ChannelBinding | None:
+    """Fast-path lookup used by the channel resolver (binding hit tier)."""
     row = await conn.fetchrow(
-        "SELECT * FROM channel_bindings WHERE address = $1 AND archived_at IS NULL",
-        address,
+        _BINDING_SELECT
+        + " WHERE cb.connection_id = $1 AND cb.path = $2 AND cb.archived_at IS NULL",
+        connection_id,
+        path,
     )
     if row is None:
         return None
@@ -2018,19 +2069,16 @@ async def list_bindings(
     limit: int = 50,
     after: str | None = None,
 ) -> list[ChannelBinding]:
-    clauses: list[str] = ["archived_at IS NULL"]
+    clauses: list[str] = ["cb.archived_at IS NULL"]
     args: list[Any] = []
     if session_id is not None:
         args.append(session_id)
-        clauses.append(f"session_id = ${len(args)}")
+        clauses.append(f"cb.session_id = ${len(args)}")
     if after is not None:
         args.append(after)
-        clauses.append(f"id < ${len(args)}")
+        clauses.append(f"cb.id < ${len(args)}")
     args.append(limit)
-    sql = (
-        f"SELECT * FROM channel_bindings WHERE {' AND '.join(clauses)} "
-        f"ORDER BY id DESC LIMIT ${len(args)}"
-    )
+    sql = _BINDING_SELECT + f" WHERE {' AND '.join(clauses)} ORDER BY cb.id DESC LIMIT ${len(args)}"
     rows = await conn.fetch(sql, *args)
     return [_row_to_channel_binding(r) for r in rows]
 
@@ -2040,11 +2088,11 @@ async def list_session_bindings(
 ) -> list[ChannelBinding]:
     """Every active binding for ``session_id``, unpaginated.
 
-    Distinct from the paginated :func:`list_bindings` used by the CRUD
-    list endpoint — the step function wants them all in one shot.
+    The step function consumes this in one shot (see
+    :func:`aios.harness.channels.list_bindings_and_connections`).
     """
     rows = await conn.fetch(
-        "SELECT * FROM channel_bindings WHERE session_id = $1 AND archived_at IS NULL ORDER BY id",
+        _BINDING_SELECT + " WHERE cb.session_id = $1 AND cb.archived_at IS NULL ORDER BY cb.id",
         session_id,
     )
     return [_row_to_channel_binding(r) for r in rows]
@@ -2052,8 +2100,17 @@ async def list_session_bindings(
 
 async def archive_binding(conn: asyncpg.Connection[Any], binding_id: str) -> ChannelBinding:
     row = await conn.fetchrow(
-        "UPDATE channel_bindings SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        """
+        WITH updated AS (
+            UPDATE channel_bindings
+               SET archived_at = now(), updated_at = now()
+             WHERE id = $1 AND archived_at IS NULL
+            RETURNING *
+        )
+        SELECT u.*, c.connector, c.account
+          FROM updated u
+          JOIN connections c ON c.id = u.connection_id
+        """,
         binding_id,
     )
     if row is None:
@@ -2072,6 +2129,7 @@ def _row_to_routing_rule(row: asyncpg.Record) -> RoutingRule:
     params_data = json.loads(raw_params) if isinstance(raw_params, str) else raw_params
     return RoutingRule(
         id=row["id"],
+        connection_id=row["connection_id"],
         prefix=row["prefix"],
         target=row["target"],
         session_params=SessionParams.model_validate(params_data),
@@ -2084,6 +2142,7 @@ def _row_to_routing_rule(row: asyncpg.Record) -> RoutingRule:
 async def insert_routing_rule(
     conn: asyncpg.Connection[Any],
     *,
+    connection_id: str,
     prefix: str,
     target: str,
     session_params: SessionParams,
@@ -2093,61 +2152,84 @@ async def insert_routing_rule(
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO routing_rules (id, prefix, target, session_params)
-            VALUES ($1, $2, $3, $4::jsonb)
+            INSERT INTO routing_rules (id, connection_id, prefix, target, session_params)
+            VALUES ($1, $2, $3, $4, $5::jsonb)
             RETURNING *
             """,
             new_id,
+            connection_id,
             prefix,
             target,
             params_json,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
-            f"an active routing rule for prefix {prefix!r} already exists",
-            detail={"prefix": prefix},
+            f"an active routing rule for prefix {prefix!r} on connection "
+            f"{connection_id} already exists",
+            detail={"connection_id": connection_id, "prefix": prefix},
+        ) from exc
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise NotFoundError(
+            f"connection {connection_id} not found",
+            detail={"connection_id": connection_id},
         ) from exc
     assert row is not None
     return _row_to_routing_rule(row)
 
 
-async def get_routing_rule(conn: asyncpg.Connection[Any], rule_id: str) -> RoutingRule:
-    row = await conn.fetchrow("SELECT * FROM routing_rules WHERE id = $1", rule_id)
+async def get_routing_rule(
+    conn: asyncpg.Connection[Any], connection_id: str, rule_id: str
+) -> RoutingRule:
+    """Get a rule scoped to the given connection.
+
+    The connection scope in the URL is load-bearing: a 404 on
+    ``connections/A/routing-rules/<rid-belonging-to-B>`` is correct
+    behavior (rather than leaking connection A's knowledge of rule B).
+    """
+    row = await conn.fetchrow(
+        "SELECT * FROM routing_rules WHERE id = $1 AND connection_id = $2",
+        rule_id,
+        connection_id,
+    )
     if row is None:
         raise NotFoundError(
-            f"routing rule {rule_id} not found",
-            detail={"id": rule_id},
+            f"routing rule {rule_id} not found on connection {connection_id}",
+            detail={"id": rule_id, "connection_id": connection_id},
         )
     return _row_to_routing_rule(row)
 
 
 async def list_routing_rules(
-    conn: asyncpg.Connection[Any], *, limit: int = 50, after: str | None = None
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    limit: int = 50,
+    after: str | None = None,
 ) -> list[RoutingRule]:
-    if after is None:
-        rows = await conn.fetch(
-            "SELECT * FROM routing_rules WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
-            limit,
-        )
-    else:
-        rows = await conn.fetch(
-            "SELECT * FROM routing_rules WHERE archived_at IS NULL AND id < $1 "
-            "ORDER BY id DESC LIMIT $2",
-            after,
-            limit,
-        )
+    clauses: list[str] = ["connection_id = $1", "archived_at IS NULL"]
+    args: list[Any] = [connection_id]
+    if after is not None:
+        args.append(after)
+        clauses.append(f"id < ${len(args)}")
+    args.append(limit)
+    sql = (
+        f"SELECT * FROM routing_rules WHERE {' AND '.join(clauses)} "
+        f"ORDER BY id DESC LIMIT ${len(args)}"
+    )
+    rows = await conn.fetch(sql, *args)
     return [_row_to_routing_rule(r) for r in rows]
 
 
 async def update_routing_rule(
     conn: asyncpg.Connection[Any],
+    connection_id: str,
     rule_id: str,
     *,
     target: str | None = None,
     session_params: SessionParams | None = None,
 ) -> RoutingRule:
     sets: list[str] = []
-    args: list[Any] = [rule_id]
+    args: list[Any] = [rule_id, connection_id]
     if target is not None:
         args.append(target)
         sets.append(f"target = ${len(args)}")
@@ -2155,56 +2237,72 @@ async def update_routing_rule(
         args.append(json.dumps(session_params.model_dump()))
         sets.append(f"session_params = ${len(args)}::jsonb")
     if not sets:
-        return await get_routing_rule(conn, rule_id)
+        return await get_routing_rule(conn, connection_id, rule_id)
     sets.append("updated_at = now()")
-    sql = f"UPDATE routing_rules SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    sql = (
+        f"UPDATE routing_rules SET {', '.join(sets)} "
+        "WHERE id = $1 AND connection_id = $2 RETURNING *"
+    )
     row = await conn.fetchrow(sql, *args)
     if row is None:
         raise NotFoundError(
-            f"routing rule {rule_id} not found",
-            detail={"id": rule_id},
+            f"routing rule {rule_id} not found on connection {connection_id}",
+            detail={"id": rule_id, "connection_id": connection_id},
         )
     return _row_to_routing_rule(row)
 
 
-async def archive_routing_rule(conn: asyncpg.Connection[Any], rule_id: str) -> RoutingRule:
+async def archive_routing_rule(
+    conn: asyncpg.Connection[Any], connection_id: str, rule_id: str
+) -> RoutingRule:
     row = await conn.fetchrow(
         "UPDATE routing_rules SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        "WHERE id = $1 AND connection_id = $2 AND archived_at IS NULL RETURNING *",
         rule_id,
+        connection_id,
     )
     if row is None:
         raise NotFoundError(
-            f"routing rule {rule_id} not found or already archived",
-            detail={"id": rule_id},
+            f"routing rule {rule_id} not found on connection {connection_id} or already archived",
+            detail={"id": rule_id, "connection_id": connection_id},
         )
     return _row_to_routing_rule(row)
 
 
-async def find_matching_rule(conn: asyncpg.Connection[Any], address: str) -> RoutingRule | None:
-    """Longest-matching segment-aware prefix lookup.
+async def find_matching_rule(
+    conn: asyncpg.Connection[Any], connection_id: str, path: str
+) -> RoutingRule | None:
+    """Longest-matching segment-aware prefix lookup within a connection.
 
-    ``signal`` matches ``signal/abc/x`` but not ``signalfoo``: the second
-    clause requires a literal ``prefix + "/"`` boundary.  Substring
-    equality (rather than ``LIKE``) is used so meta-characters in the
-    prefix (``_``, ``%``) are matched literally — a prefix of
-    ``foo_bar`` must not match ``fooXbar/baz``.
+    Three disjuncts:
+
+    * ``prefix = ''`` is the per-connection catch-all and sorts last
+      under ``ORDER BY length DESC``.
+    * ``path = prefix`` for exact-match rules (e.g. rule prefix ``chat-a``
+      and inbound path ``chat-a``).
+    * Segment-aware extension: the path begins with ``prefix || '/'``, so
+      ``group/thread-1`` matches a rule of ``group`` but not ``grou``.
+      Substring equality (not ``LIKE``) keeps ``%``/``_`` in prefixes
+      literal.
     """
     row = await conn.fetchrow(
         """
         SELECT * FROM routing_rules
         WHERE archived_at IS NULL
+          AND connection_id = $1
           AND (
-              $1 = prefix
+              prefix = ''
+              OR $2 = prefix
               OR (
-                  length($1) > length(prefix)
-                  AND substring($1, 1, length(prefix) + 1) = prefix || '/'
+                  length($2) > length(prefix)
+                  AND substring($2, 1, length(prefix) + 1) = prefix || '/'
               )
           )
         ORDER BY length(prefix) DESC
         LIMIT 1
         """,
-        address,
+        connection_id,
+        path,
     )
     if row is None:
         return None
