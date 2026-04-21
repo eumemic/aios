@@ -942,6 +942,38 @@ async def _derive_event_channel(
     return None
 
 
+async def lookup_tool_name_by_call_id(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_call_id: str,
+) -> str | None:
+    """Look up the function name for a tool call by its call ID.
+
+    Scans assistant message events that carry ``tool_calls`` to find the
+    entry whose ``id`` matches *tool_call_id* and returns its
+    ``function.name``.  Uses the ``events_assistant_tool_calls_idx`` partial
+    index (kind='message', role='assistant', data ? 'tool_calls') so the
+    planner can resolve this without a sequential scan.
+
+    Returns ``None`` when no matching tool call is found (e.g. for built-in
+    tool results whose name is already in ``data``).
+    """
+    name: str | None = await conn.fetchval(
+        "SELECT tc->>'name' "
+        "FROM events, "
+        "     jsonb_array_elements(data->'tool_calls') AS tc "
+        "WHERE session_id = $1 "
+        "  AND kind = 'message' "
+        "  AND data->>'role' = 'assistant' "
+        "  AND data ? 'tool_calls' "
+        "  AND tc->>'id' = $2 "
+        "ORDER BY seq DESC LIMIT 1",
+        session_id,
+        tool_call_id,
+    )
+    return name
+
+
 async def append_event(
     conn: asyncpg.Connection[Any],
     *,
