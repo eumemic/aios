@@ -78,7 +78,10 @@ async def _execute_tool_async(
     session_id: str,
     call: dict[str, Any],
 ) -> None:
-    """Execute one tool call: parse, invoke, append result, defer wake."""
+    """Execute one tool call: parse, invoke, append result, defer wake.
+
+    Brackets the lifecycle in a ``tool_execute_*`` span pair (issue #78).
+    """
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
     name = function.get("name") or ""
@@ -86,11 +89,24 @@ async def _execute_tool_async(
 
     bound_log = log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name)
 
+    span_start = await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {
+            "event": "tool_execute_start",
+            "tool_call_id": call_id,
+            "tool_name": name,
+        },
+    )
+    is_error = False
+
     try:
         # Parse arguments.
         arguments = _parse_arguments(raw_args)
         if arguments is None:
             bound_log.warning("tool.bad_arguments")
+            is_error = True
             await _append_tool_result(
                 pool, session_id, call_id, name, error="arguments were not valid JSON"
             )
@@ -101,6 +117,7 @@ async def _execute_tool_async(
             tool = registry.get(name)
         except ToolNotFoundError as err:
             bound_log.warning("tool.not_registered")
+            is_error = True
             await _append_tool_result(pool, session_id, call_id, name, error=err.message)
             return
 
@@ -115,6 +132,7 @@ async def _execute_tool_async(
         schema_error = _validate_arguments(arguments, tool.parameters_schema)
         if schema_error is not None:
             bound_log.info("tool.schema_error", error=schema_error)
+            is_error = True
             await _append_tool_result(pool, session_id, call_id, name, error=schema_error)
             return
 
@@ -136,6 +154,7 @@ async def _execute_tool_async(
                 event_data["metadata"] = result.metadata
             if result.is_error:
                 event_data["is_error"] = True
+                is_error = True
         else:
             event_data["content"] = json.dumps(result, ensure_ascii=False)
         bound_log.info("tool.completed")
@@ -148,16 +167,30 @@ async def _execute_tool_async(
 
     except asyncio.CancelledError:
         bound_log.info("tool.cancelled")
+        is_error = True
         await _append_tool_result(pool, session_id, call_id, name, error="cancelled")
 
     except Exception as err:
         bound_log.exception("tool.handler_failed")
+        is_error = True
         _evict_session_container(session_id)
         await _append_tool_result(
             pool, session_id, call_id, name, error=f"{type(err).__name__}: {err}"
         )
 
     finally:
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {
+                "event": "tool_execute_end",
+                "tool_execute_start_id": span_start.id,
+                "tool_call_id": call_id,
+                "tool_name": name,
+                "is_error": is_error,
+            },
+        )
         await _trigger_sweep(pool, session_id, bound_log)
 
 
@@ -318,10 +351,23 @@ async def _execute_mcp_tool_async(
 
     bound_log = log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name)
 
+    span_start = await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {
+            "event": "tool_execute_start",
+            "tool_call_id": call_id,
+            "tool_name": name,
+        },
+    )
+    is_error = False
+
     try:
         arguments = _parse_arguments(raw_args)
         if arguments is None:
             bound_log.warning("mcp_tool.bad_arguments")
+            is_error = True
             await _append_tool_result(
                 pool, session_id, call_id, name, error="arguments were not valid JSON"
             )
@@ -331,6 +377,7 @@ async def _execute_mcp_tool_async(
         url = mcp_server_map.get(server_name)
         if url is None:
             bound_log.warning("mcp_tool.server_not_found", server_name=server_name)
+            is_error = True
             await _append_tool_result(
                 pool, session_id, call_id, name, error=f"MCP server {server_name!r} not found"
             )
@@ -347,6 +394,7 @@ async def _execute_mcp_tool_async(
                 # focal is NULL — loop.py filters them out of the tool
                 # list in that state — but defend in depth if it slips
                 # through (stale tool_calls, etc.).
+                is_error = True
                 await _append_tool_result(
                     pool,
                     session_id,
@@ -365,28 +413,43 @@ async def _execute_mcp_tool_async(
         result = await call_mcp_tool(url, headers, tool_name, arguments, meta=meta)
 
         content_str = json.dumps(result, ensure_ascii=False)
-        is_error = "error" in result
+        mcp_is_error = "error" in result
         event_data: dict[str, Any] = {
             "role": "tool",
             "tool_call_id": call_id,
             "name": name,
             "content": content_str,
         }
-        if is_error:
+        if mcp_is_error:
             event_data["is_error"] = True
+            is_error = True
 
-        bound_log.info("mcp_tool.completed", is_error=is_error)
+        bound_log.info("mcp_tool.completed", is_error=mcp_is_error)
         await sessions_service.append_event(pool, session_id, "message", event_data)
 
     except asyncio.CancelledError:
         bound_log.info("mcp_tool.cancelled")
+        is_error = True
         await _append_tool_result(pool, session_id, call_id, name, error="cancelled")
 
     except Exception as err:
         bound_log.exception("mcp_tool.handler_failed")
+        is_error = True
         await _append_tool_result(
             pool, session_id, call_id, name, error=f"{type(err).__name__}: {err}"
         )
 
     finally:
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {
+                "event": "tool_execute_end",
+                "tool_execute_start_id": span_start.id,
+                "tool_call_id": call_id,
+                "tool_name": name,
+                "is_error": is_error,
+            },
+        )
         await _trigger_sweep(pool, session_id, bound_log)
