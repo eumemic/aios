@@ -194,7 +194,7 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
 
     # Call the model exactly once (streaming — deltas go to SSE via pg_notify).
     try:
-        assistant_msg, usage = await stream_litellm(
+        assistant_msg, usage, cost_usd = await stream_litellm(
             model=agent.model,
             messages=ctx.messages,
             tools=tools if tools else None,
@@ -212,6 +212,7 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
                 "model_request_start_id": start_event.id,
                 "is_error": True,
                 "model_usage": {},
+                "cost_usd": None,
             },
         )
 
@@ -231,7 +232,7 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
         await _append_lifecycle(pool, session_id, "turn_ended", "idle", "error")
         raise
 
-    # Emit span end with per-request token usage.
+    # Emit span end with per-request token usage and LiteLLM-reported cost.
     await sessions_service.append_event(
         pool,
         session_id,
@@ -241,6 +242,7 @@ async def run_session_step(session_id: str, *, cause: str = "message") -> None:
             "model_request_start_id": start_event.id,
             "is_error": False,
             "model_usage": usage,
+            "cost_usd": cost_usd,
         },
     )
 

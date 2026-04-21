@@ -2,9 +2,12 @@
 
 Provides two variants:
 
-* :func:`call_litellm` — non-streaming, returns ``(message, usage)``.
+* :func:`call_litellm` — non-streaming, returns ``(message, usage, cost)``.
 * :func:`stream_litellm` — streaming, delivers per-token deltas via
-  ``pg_notify`` and returns ``(message, usage)``.
+  ``pg_notify`` and returns ``(message, usage, cost)``.
+
+``cost`` is the LiteLLM-computed USD cost for the request, or ``None``
+when the provider/model didn't report one.
 
 Model API keys are resolved by LiteLLM from standard environment variables
 (``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``, etc.) based on the model string
@@ -157,6 +160,23 @@ def _is_empty_assistant(msg: dict[str, Any]) -> bool:
     return isinstance(content, list) and not content
 
 
+def _extract_cost(response: Any) -> float | None:
+    """Pull the per-request USD cost LiteLLM computes post-call.
+
+    LiteLLM populates ``response._hidden_params["response_cost"]`` during
+    its logging pipeline. Missing attribute, missing key, or ``None``
+    value all mean the provider didn't report cost — the harness passes
+    ``None`` through rather than guessing.
+    """
+    hidden = getattr(response, "_hidden_params", None)
+    if not hidden:
+        return None
+    cost = hidden.get("response_cost")
+    if cost is None:
+        return None
+    return float(cost)
+
+
 def _normalize_usage(raw: dict[str, Any]) -> dict[str, int]:
     """Map LiteLLM's usage field names to our canonical names.
 
@@ -183,13 +203,14 @@ async def call_litellm(
     tools: list[dict[str, Any]] | None = None,
     api_base: str | None = None,
     extra: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], dict[str, int]]:
-    """Call ``litellm.acompletion`` and return ``(message, usage)``.
+) -> tuple[dict[str, Any], dict[str, int], float | None]:
+    """Call ``litellm.acompletion`` and return ``(message, usage, cost)``.
 
     Returns the message exactly as litellm produced it, including any
     provider-specific extensions like ``reasoning_content`` or
     ``thinking_blocks``. The harness stores the message dict opaquely.
-    Usage is normalized to our canonical field names.
+    Usage is normalized to our canonical field names. Cost is LiteLLM's
+    per-request USD figure, or ``None`` when the provider doesn't report it.
     """
     inject_cache_breakpoints(messages, tools)
 
@@ -209,13 +230,14 @@ async def call_litellm(
     usage = _normalize_usage(
         usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else usage_obj or {}
     )
+    cost = _extract_cost(response)
     message = response["choices"][0]["message"]
     # litellm returns a Message object that supports model_dump()
     if hasattr(message, "model_dump"):
         result: dict[str, Any] = message.model_dump()
-        return _normalize_message(result), usage
+        return _normalize_message(result), usage, cost
     if isinstance(message, dict):
-        return _normalize_message(message), usage
+        return _normalize_message(message), usage, cost
     raise TypeError(f"unexpected message type from litellm.acompletion: {type(message).__name__}")
 
 
@@ -228,8 +250,8 @@ async def stream_litellm(
     extra: dict[str, Any] | None = None,
     pool: asyncpg.Pool[Any],
     session_id: str,
-) -> tuple[dict[str, Any], dict[str, int]]:
-    """Call ``litellm.acompletion`` with streaming, returning ``(message, usage)``.
+) -> tuple[dict[str, Any], dict[str, int], float | None]:
+    """Call ``litellm.acompletion`` with streaming, returning ``(message, usage, cost)``.
 
     Each content delta fires a transient ``pg_notify`` on the session's
     event channel. SSE clients receive these as ``event: delta`` — no DB
@@ -265,12 +287,13 @@ async def stream_litellm(
     usage = _normalize_usage(
         usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else usage_obj or {}
     )
+    cost = _extract_cost(assembled)
     message = assembled["choices"][0]["message"]
     if hasattr(message, "model_dump"):
         result: dict[str, Any] = message.model_dump()
-        return _normalize_message(result), usage
+        return _normalize_message(result), usage, cost
     if isinstance(message, dict):
-        return _normalize_message(message), usage
+        return _normalize_message(message), usage, cost
     raise TypeError(f"unexpected message type from stream_chunk_builder: {type(message).__name__}")
 
 

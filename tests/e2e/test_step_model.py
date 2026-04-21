@@ -1535,6 +1535,8 @@ class TestUsageTracking:
         assert end.data["is_error"] is False
         assert end.data["model_usage"]["input_tokens"] == 10
         assert end.data["model_usage"]["output_tokens"] == 5
+        assert "cost_usd" in end.data
+        assert end.data["cost_usd"] is None
 
     async def test_span_events_for_multi_step(self, harness: Harness) -> None:
         """Two model calls produce two span pairs."""
