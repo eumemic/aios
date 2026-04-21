@@ -423,22 +423,29 @@ class TestSwitchChannelHandler:
         assert "only-one" in content
         assert "only-two" in content
 
-    async def test_reorient_block_includes_all_unread_when_over_floor(
+    async def test_reorient_block_includes_all_unread(
         self,
         runtime_pool: Any,
         agent_id: str,
         env_id: str,
         vault_id: str,
     ) -> None:
-        """Unread > FLOOR_N → all unread included, not clamped."""
-        from aios.tools.switch_channel import RE_ORIENT_FLOOR_N, switch_channel_handler
+        """Every genuinely-unread peer event must appear in the recap
+        regardless of the token floor — the floor is a minimum, not a
+        cap.  Post enough messages that the total rendered content
+        exceeds ``RE_ORIENT_FLOOR_TOKENS`` and verify nothing is
+        truncated.
+        """
+        from aios.tools.switch_channel import switch_channel_handler
 
         _conn_id, prefix = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
         session_id, _e, address = await _post_inbound(runtime_pool, prefix, "chat-1")
-        # Post MANY messages while focal is NULL so they all count as unread.
-        n = RE_ORIENT_FLOOR_N + 5
+        # Post MANY messages while focal is NULL so they all count as
+        # unread, with enough content per message to overflow the floor.
+        body = "x" * 200
+        n = 60
         for i in range(n):
-            await _post_inbound(runtime_pool, prefix, "chat-1", content=f"unread-{i:02d}")
+            await _post_inbound(runtime_pool, prefix, "chat-1", content=f"unread-{i:02d} {body}")
 
         result = await switch_channel_handler(session_id, {"target": address})
         content = result.content
