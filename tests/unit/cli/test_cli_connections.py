@@ -116,6 +116,9 @@ def test_archive_uses_delete(mocked_cli):
     assert result.exit_code == 0, result.output
     assert mocked_cli.captured.method == "DELETE"
     assert mocked_cli.captured.path == "/v1/connections/conn_01"
+    # Success line on stdout so scripts + humans get a visible ack.
+    assert "archived" in result.output
+    assert "conn_01" in result.output
 
 
 def test_inbound_posts_to_messages(mocked_cli):
