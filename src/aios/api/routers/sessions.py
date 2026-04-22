@@ -26,6 +26,7 @@ from aios.api.deps import (
 from aios.api.sse import sse_event_stream
 from aios.db import queries
 from aios.db.listen import listen_for_events
+from aios.errors import NotFoundError
 from aios.harness.wake import defer_wake
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
@@ -171,20 +172,23 @@ async def submit_tool_result(
     Stamps the tool's ``name`` into the event data by looking it up on the
     parent assistant's ``tool_calls`` array — same source the harness uses
     for built-in/MCP results — so the derived ``tool_name`` column stays
-    populated for custom tools too (issue #133).
+    populated for custom tools too (issue #133).  Returns 404 when the
+    ``tool_call_id`` has no matching parent assistant tool call, since a
+    result with no parent is a client bug that would leave an orphan row.
     """
     async with pool.acquire() as conn:
         name = await queries.lookup_tool_name_by_call_id(conn, session_id, body.tool_call_id)
-    data: dict[str, Any] = {
-        "role": "tool",
-        "tool_call_id": body.tool_call_id,
-        "content": body.content,
-    }
-    if name is not None:
-        data["name"] = name
-    if body.is_error:
-        data["is_error"] = True
-    event = await service.append_event(pool, session_id, "message", data)
+        if name is None:
+            raise NotFoundError(f"tool_call_id {body.tool_call_id!r} not found")
+        data: dict[str, Any] = {
+            "role": "tool",
+            "tool_call_id": body.tool_call_id,
+            "content": body.content,
+            "name": name,
+        }
+        if body.is_error:
+            data["is_error"] = True
+        event = await queries.append_event(conn, session_id=session_id, kind="message", data=data)
     await defer_wake(pool, session_id, cause="custom_tool_result")
     return event
 
