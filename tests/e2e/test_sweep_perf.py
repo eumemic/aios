@@ -35,19 +35,18 @@ from tests.support import find_subplans_over_events
 # ─── fixture: pathological session ───────────────────────────────────────────
 
 
-async def _seed_pathological(
-    pool: asyncpg.Pool[Any],
-    *,
-    n_sessions: int = 3,
-    n_assistant_per: int = 400,
-    n_unreacted_per: int = 30,
-) -> list[str]:
-    """Seed ``n_sessions`` sessions each with a realistic shape that triggers
-    the N+1 pathology: many assistant messages (each with reacting_to set)
-    plus a handful of unreacted user messages at the tail. Returns the
-    seeded session ids.
+_N_SESSIONS = 3
+_N_ASSISTANT_PER = 400
+_N_UNREACTED_PER = 30
+
+
+async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
+    """Seed the shape that triggers the pre-#140 correlated-subquery
+    pathology: multiple sessions, each with many assistant messages
+    carrying ``reacting_to``, plus unreacted user messages at the tail.
+    Returns the seeded session ids.
     """
-    session_ids: list[str] = [f"sess_perf_{i:03d}" for i in range(n_sessions)]
+    session_ids: list[str] = [f"sess_perf_{i:03d}" for i in range(_N_SESSIONS)]
 
     async with pool.acquire() as conn:
         # Dependencies for the session FK chain.
@@ -79,7 +78,7 @@ async def _seed_pathological(
             # the previous user event (seq = 2*i for i-th assistant).
             rows = []
             seq = 1
-            for i in range(n_assistant_per):
+            for i in range(_N_ASSISTANT_PER):
                 # user msg
                 rows.append(
                     (
@@ -112,7 +111,7 @@ async def _seed_pathological(
                 seq += 1
             # A handful of **unreacted** user messages at the tail —
             # candidates the sweep must notice.
-            for j in range(n_unreacted_per):
+            for j in range(_N_UNREACTED_PER):
                 rows.append(
                     (
                         f"ev_tail_u_{sid}_{j}",
@@ -180,7 +179,7 @@ class TestNoCorrelatedSubplanOverEvents:
         )
 
     async def test_unreacted_rows_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
-        session_ids = [f"sess_perf_{i:03d}" for i in range(3)]
+        session_ids = [f"sess_perf_{i:03d}" for i in range(_N_SESSIONS)]
         plan = await _explain(seeded_pool, UNREACTED_ROWS_SQL, session_ids)
         found = find_subplans_over_events(plan)
         assert not found, (

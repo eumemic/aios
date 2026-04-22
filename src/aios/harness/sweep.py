@@ -74,14 +74,6 @@ GHOST_ASST_SQL = """
        {scope_clause}
 """
 
-GHOST_RESULT_SQL = """
-    SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
-      FROM events e
-     WHERE e.session_id = ANY($1::text[])
-       AND e.kind = 'message'
-       AND e.role = 'tool'
-"""
-
 GHOST_LIFECYCLE_SQL = """
     SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
       FROM events e
@@ -91,9 +83,6 @@ GHOST_LIFECYCLE_SQL = """
        AND e.data->>'result' = 'allow'
 """
 
-# CTE hoists MAX(reacting_to) out of the outer scan. The correlated form
-# ran 2338 times on JN's events table (~3.8s); the hoisted form is one
-# pass per session (~4ms). Do NOT inline this back into a per-row subquery.
 CANDIDATE_ROWS_SQL = """
     WITH session_max_reacting AS (
         SELECT session_id,
@@ -131,7 +120,6 @@ CONFIRMED_ROWS_SQL = """
        {scope_clause}
 """
 
-# Same CTE hoist as CANDIDATE_ROWS_SQL — identical pathology.
 UNREACTED_ROWS_SQL = """
     WITH session_max_reacting AS (
         SELECT session_id,
@@ -206,7 +194,7 @@ async def find_and_repair_ghosts(
 
         session_ids = list({r["session_id"] for r in asst_rows})
 
-        result_rows = await conn.fetch(GHOST_RESULT_SQL, session_ids)
+        result_rows = await conn.fetch(ALL_RESULT_ROWS_SQL, session_ids)
         results_by_session: dict[str, set[str]] = {}
         for r in result_rows:
             results_by_session.setdefault(r["session_id"], set()).add(r["tool_call_id"])

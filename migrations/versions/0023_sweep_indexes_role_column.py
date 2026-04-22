@@ -20,6 +20,14 @@ The ``role`` column was backfilled in 0022 from ``data->>'role'`` for every
 message-kind row, so the set of rows covered by each partial index is
 unchanged byte-for-byte.
 
+Runtime: seconds on small deployments (<100k rows); expect ~10-30 minutes
+per index on 100M-row tables. CONCURRENTLY does not block reads or writes
+during the build, so running during a normal traffic window is safe — but
+the migration command itself will not return until both indexes finish.
+If the build fails mid-flight, the partially-built ``*_new`` index lingers
+as INVALID; drop it manually (``DROP INDEX CONCURRENTLY IF EXISTS
+events_tool_result_idx_new``) before retrying.
+
 Revision ID: 0023
 Revises: 0022
 """
