@@ -13,7 +13,7 @@ import asyncio
 
 import structlog
 
-from .bot import build_application, discover_bot_id, install_handler, run_application
+from .bot import build_application, discover_bot_identity, install_handler, run_application
 from .config import Settings
 from .ingest import IngestClient
 from .mcp import build_mcp_app, build_mcp_server, parse_bind, serve_mcp
@@ -25,7 +25,7 @@ async def run(cfg: Settings) -> None:
     application = build_application(cfg.bot_token)
     await application.initialize()
     try:
-        bot_id = await discover_bot_id(application)
+        identity = await discover_bot_identity(application)
     except BaseException:
         await application.shutdown()
         raise
@@ -35,11 +35,19 @@ async def run(cfg: Settings) -> None:
         api_key=cfg.aios_api_key,
         connection_id=cfg.aios_connection_id,
     ) as ingest:
-        install_handler(application, bot_id=bot_id, ingest=ingest)
-        mcp_app = build_mcp_app(build_mcp_server(bot=application.bot), token=cfg.mcp_token)
+        install_handler(application, bot_id=identity.id, ingest=ingest)
+        mcp_app = build_mcp_app(
+            build_mcp_server(
+                bot=application.bot,
+                bot_id=identity.id,
+                first_name=identity.first_name,
+                username=identity.username,
+            ),
+            token=cfg.mcp_token,
+        )
         host, port = parse_bind(cfg.mcp_bind)
 
-        log.info("telegram.ready", bot_id=bot_id)
+        log.info("telegram.ready", bot_id=identity.id)
 
         try:
             async with asyncio.TaskGroup() as tg:

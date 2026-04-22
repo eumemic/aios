@@ -27,7 +27,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 from telegram import Bot
 
-from .prompts import TELEGRAM_SERVER_INSTRUCTIONS
+from .prompts import build_instructions
 
 log = structlog.get_logger(__name__)
 
@@ -92,10 +92,20 @@ class BearerAuthMiddleware:
         await self._app(scope, receive, send)
 
 
-def build_mcp_server(*, bot: Bot) -> FastMCP:
+def build_mcp_server(
+    *,
+    bot: Bot,
+    bot_id: int,
+    first_name: str,
+    username: str | None = None,
+) -> FastMCP:
     mcp = FastMCP(
         "aios-telegram",
-        instructions=TELEGRAM_SERVER_INSTRUCTIONS,
+        instructions=build_instructions(
+            bot_id=bot_id,
+            first_name=first_name,
+            username=username,
+        ),
         stateless_http=True,
     )
 
