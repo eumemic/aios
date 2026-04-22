@@ -11,13 +11,15 @@ import typer
 
 from aios.cli.commands._shared import (
     fetch_all,
+    fetch_all_events,
     just_client,
     render_list,
     render_single,
     with_client,
 )
 from aios.cli.files import PayloadError, load_json_object, load_payload
-from aios.cli.output import cyan, dim, print_error, print_success
+from aios.cli.output import cyan, dim, print_error, print_json, print_success
+from aios.cli.profile import compute_profile, profile_to_dict, render_profile
 from aios.cli.runtime import get_state, run_or_die
 from aios.cli.tail_format import iter_formatted_events
 
@@ -228,40 +230,55 @@ def events(
 ) -> None:
     def _run() -> None:
         state, client = with_client(ctx)
-        params: dict[str, Any] = {"after_seq": after_seq, "kind": kind}
         with client:
             if all_:
-                # The events endpoint paginates by seq, not cursor id. Walk
-                # pages manually, bumping after_seq to the last seen seq.
-                data: list[dict[str, Any]] = []
-                cursor_seq = after_seq
-                while True:
-                    page = client.request(
-                        "GET",
-                        f"/v1/sessions/{session_id}/events",
-                        params={"after_seq": cursor_seq, "kind": kind, "limit": 200},
-                    )
-                    assert isinstance(page, dict)
-                    page_data = page.get("data", [])
-                    if not page_data:
-                        break
-                    data.extend(page_data)
-                    last_seq = page_data[-1].get("seq")
-                    if not page.get("has_more") or last_seq is None:
-                        break
-                    cursor_seq = int(last_seq)
-                envelope = {"data": data, "has_more": False, "next_after": None}
+                data = fetch_all_events(client, session_id, kind=kind, after_seq=after_seq)
+                envelope: dict[str, Any] = {
+                    "data": data,
+                    "has_more": False,
+                    "next_after": None,
+                }
             else:
                 envelope = client.request(
                     "GET",
                     f"/v1/sessions/{session_id}/events",
-                    params={**params, "limit": limit},
+                    params={"after_seq": after_seq, "kind": kind, "limit": limit},
                 )
         render_list(
             state.output_format,
             envelope,
             columns=("seq", "kind", "created_at"),
         )
+
+    run_or_die(_run)
+
+
+@app.command(
+    "profile",
+    help="Per-phase latency breakdown of a session's span events.",
+)
+def profile(
+    ctx: typer.Context,
+    session_id: str,
+    turns: Annotated[
+        int | None,
+        typer.Option(
+            "--turns",
+            min=1,
+            help="Restrict to the last N turns (a turn starts at a user- or time-initiated wake).",
+        ),
+    ] = None,
+) -> None:
+    def _run() -> None:
+        state, client = with_client(ctx)
+        with client:
+            events_data = fetch_all_events(client, session_id, kind="span")
+
+        result = compute_profile(events_data, turns=turns)
+        if state.output_format == "json":
+            print_json(profile_to_dict(result))
+        else:
+            sys.stdout.write(render_profile(result))
 
     run_or_die(_run)
 

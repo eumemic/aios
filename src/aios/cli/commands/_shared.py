@@ -93,3 +93,38 @@ def fetch_all(
         if cursor is None:
             break
     return {"data": accumulated, "has_more": False, "next_after": None}
+
+
+def fetch_all_events(
+    client: AiosClient,
+    session_id: str,
+    *,
+    kind: str | None = None,
+    after_seq: int = 0,
+    page_size: int = 200,
+) -> list[dict[str, Any]]:
+    """Walk every page of ``/v1/sessions/:id/events`` and return the raw list.
+
+    The events endpoint paginates by ``after_seq`` (monotonic session seq),
+    not by the cursor id that :func:`fetch_all` consumes — so it needs its
+    own walker. Returns just the event list; callers can wrap in an
+    envelope for ``render_list`` or consume directly.
+    """
+    accumulated: list[dict[str, Any]] = []
+    cursor_seq = after_seq
+    while True:
+        page = client.request(
+            "GET",
+            f"/v1/sessions/{session_id}/events",
+            params={"after_seq": cursor_seq, "kind": kind, "limit": page_size},
+        )
+        assert isinstance(page, dict)
+        page_data = page.get("data", [])
+        if not page_data:
+            break
+        accumulated.extend(page_data)
+        last_seq = page_data[-1].get("seq")
+        if not page.get("has_more") or last_seq is None:
+            break
+        cursor_seq = int(last_seq)
+    return accumulated
