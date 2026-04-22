@@ -51,6 +51,123 @@ class SweepResult:
     woken_sessions: int
 
 
+# ─── query constants ─────────────────────────────────────────────────────────
+#
+# Sweep SQL lives here as module constants so tests/e2e/test_sweep_perf.py
+# can EXPLAIN the exact production query text — a structural assertion
+# guards against accidental reintroduction of the correlated-subquery
+# N+1 pattern that #140 fixed. Column predicates use ``role`` (from
+# migration 0022) instead of ``data->>'role'``; partial indexes were
+# re-predicated to match in migration 0023. The two MAX(reacting_to)
+# queries use a CTE to hoist the aggregation out of the outer scan —
+# see PR #NNN for the ~800-900x speedup that revealed.
+
+
+GHOST_ASST_SQL = """
+    SELECT e.session_id, e.data
+      FROM events e
+      JOIN sessions s ON s.id = e.session_id
+     WHERE s.archived_at IS NULL
+       AND e.kind = 'message'
+       AND e.role = 'assistant'
+       AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
+       {scope_clause}
+"""
+
+GHOST_RESULT_SQL = """
+    SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
+      FROM events e
+     WHERE e.session_id = ANY($1::text[])
+       AND e.kind = 'message'
+       AND e.role = 'tool'
+"""
+
+GHOST_LIFECYCLE_SQL = """
+    SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
+      FROM events e
+     WHERE e.session_id = ANY($1::text[])
+       AND e.kind = 'lifecycle'
+       AND e.data->>'event' = 'tool_confirmed'
+       AND e.data->>'result' = 'allow'
+"""
+
+# CTE hoists MAX(reacting_to) out of the outer scan. The correlated form
+# ran 2338 times on JN's events table (~3.8s); the hoisted form is one
+# pass per session (~4ms). Do NOT inline this back into a per-row subquery.
+CANDIDATE_ROWS_SQL = """
+    WITH session_max_reacting AS (
+        SELECT session_id,
+               MAX(COALESCE((data->>'reacting_to')::bigint, seq)) AS max_reacting
+          FROM events
+         WHERE kind = 'message' AND role = 'assistant'
+         GROUP BY session_id
+    )
+    SELECT DISTINCT e.session_id
+      FROM events e
+      JOIN sessions s ON s.id = e.session_id
+      LEFT JOIN session_max_reacting smr ON smr.session_id = e.session_id
+     WHERE s.archived_at IS NULL
+       AND e.kind = 'message'
+       AND e.role <> 'assistant'
+       AND (smr.max_reacting IS NULL OR e.seq > smr.max_reacting)
+       {scope_clause}
+"""
+
+CONFIRMED_ROWS_SQL = """
+    SELECT DISTINCT lc.session_id
+      FROM events lc
+      JOIN sessions s ON s.id = lc.session_id
+     WHERE s.archived_at IS NULL
+       AND lc.kind = 'lifecycle'
+       AND lc.data->>'event' = 'tool_confirmed'
+       AND lc.data->>'result' = 'allow'
+       AND NOT EXISTS (
+           SELECT 1 FROM events tr
+            WHERE tr.session_id = lc.session_id
+              AND tr.kind = 'message'
+              AND tr.role = 'tool'
+              AND tr.data->>'tool_call_id' = lc.data->>'tool_call_id'
+       )
+       {scope_clause}
+"""
+
+# Same CTE hoist as CANDIDATE_ROWS_SQL — identical pathology.
+UNREACTED_ROWS_SQL = """
+    WITH session_max_reacting AS (
+        SELECT session_id,
+               MAX(COALESCE((data->>'reacting_to')::bigint, seq)) AS max_reacting
+          FROM events
+         WHERE kind = 'message' AND role = 'assistant'
+           AND session_id = ANY($1::text[])
+         GROUP BY session_id
+    )
+    SELECT e.session_id, e.data
+      FROM events e
+      LEFT JOIN session_max_reacting smr ON smr.session_id = e.session_id
+     WHERE e.session_id = ANY($1::text[])
+       AND e.kind = 'message'
+       AND e.role <> 'assistant'
+       AND e.seq > COALESCE(smr.max_reacting, 0)
+"""
+
+ALL_RESULT_ROWS_SQL = """
+    SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
+      FROM events e
+     WHERE e.session_id = ANY($1::text[])
+       AND e.kind = 'message'
+       AND e.role = 'tool'
+"""
+
+ALL_ASST_ROWS_SQL = """
+    SELECT e.session_id, e.data
+      FROM events e
+     WHERE e.session_id = ANY($1::text[])
+       AND e.kind = 'message'
+       AND e.role = 'assistant'
+       AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
+"""
+
+
 # ─── ghost repair ────────────────────────────────────────────────────────────
 
 
@@ -80,16 +197,7 @@ async def find_and_repair_ghosts(
 
     async with pool.acquire() as conn:
         asst_rows = await conn.fetch(
-            f"""
-            SELECT e.session_id, e.data
-              FROM events e
-              JOIN sessions s ON s.id = e.session_id
-             WHERE s.archived_at IS NULL
-               AND e.kind = 'message'
-               AND e.data->>'role' = 'assistant'
-               AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
-               {scope_clause}
-            """,
+            GHOST_ASST_SQL.format(scope_clause=scope_clause),
             *scope_params,
         )
 
@@ -98,31 +206,12 @@ async def find_and_repair_ghosts(
 
         session_ids = list({r["session_id"] for r in asst_rows})
 
-        result_rows = await conn.fetch(
-            """
-            SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
-              FROM events e
-             WHERE e.session_id = ANY($1::text[])
-               AND e.kind = 'message'
-               AND e.data->>'role' = 'tool'
-            """,
-            session_ids,
-        )
+        result_rows = await conn.fetch(GHOST_RESULT_SQL, session_ids)
         results_by_session: dict[str, set[str]] = {}
         for r in result_rows:
             results_by_session.setdefault(r["session_id"], set()).add(r["tool_call_id"])
 
-        lifecycle_rows = await conn.fetch(
-            """
-            SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
-              FROM events e
-             WHERE e.session_id = ANY($1::text[])
-               AND e.kind = 'lifecycle'
-               AND e.data->>'event' = 'tool_confirmed'
-               AND e.data->>'result' = 'allow'
-            """,
-            session_ids,
-        )
+        lifecycle_rows = await conn.fetch(GHOST_LIFECYCLE_SQL, session_ids)
         confirmed_by_session: dict[str, set[str]] = {}
         for r in lifecycle_rows:
             confirmed_by_session.setdefault(r["session_id"], set()).add(r["tool_call_id"])
@@ -266,32 +355,7 @@ async def find_sessions_needing_inference(
 
     async with pool.acquire() as conn:
         candidate_rows = await conn.fetch(
-            f"""
-            SELECT DISTINCT e.session_id
-              FROM events e
-              JOIN sessions s ON s.id = e.session_id
-             WHERE s.archived_at IS NULL
-               AND e.kind = 'message'
-               AND e.data->>'role' != 'assistant'
-               AND (
-                   NOT EXISTS (
-                       SELECT 1 FROM events a
-                        WHERE a.session_id = e.session_id
-                          AND a.kind = 'message'
-                          AND a.data->>'role' = 'assistant'
-                   )
-                   OR
-                   e.seq > COALESCE(
-                       (SELECT MAX(COALESCE((a.data->>'reacting_to')::bigint, a.seq))
-                          FROM events a
-                         WHERE a.session_id = e.session_id
-                           AND a.kind = 'message'
-                           AND a.data->>'role' = 'assistant'),
-                       0
-                   )
-               )
-               {scope_clause}
-            """,
+            CANDIDATE_ROWS_SQL.format(scope_clause=scope_clause),
             *scope_params,
         )
 
@@ -299,23 +363,7 @@ async def find_sessions_needing_inference(
 
         # Case (c) bypasses the batch filter — confirmed tools need dispatch.
         confirmed_rows = await conn.fetch(
-            f"""
-            SELECT DISTINCT lc.session_id
-              FROM events lc
-              JOIN sessions s ON s.id = lc.session_id
-             WHERE s.archived_at IS NULL
-               AND lc.kind = 'lifecycle'
-               AND lc.data->>'event' = 'tool_confirmed'
-               AND lc.data->>'result' = 'allow'
-               AND NOT EXISTS (
-                   SELECT 1 FROM events tr
-                    WHERE tr.session_id = lc.session_id
-                      AND tr.kind = 'message'
-                      AND tr.data->>'role' = 'tool'
-                      AND tr.data->>'tool_call_id' = lc.data->>'tool_call_id'
-               )
-               {scope_clause}
-            """,
+            CONFIRMED_ROWS_SQL.format(scope_clause=scope_clause),
             *scope_params,
         )
         confirmed_sessions = {r["session_id"] for r in confirmed_rows}
@@ -340,46 +388,9 @@ async def _filter_incomplete_batches(
     session_list = list(candidates)
 
     async with pool.acquire() as conn:
-        unreacted_rows = await conn.fetch(
-            """
-            SELECT e.session_id, e.data
-              FROM events e
-             WHERE e.session_id = ANY($1::text[])
-               AND e.kind = 'message'
-               AND e.data->>'role' != 'assistant'
-               AND e.seq > COALESCE(
-                   (SELECT MAX(COALESCE((a.data->>'reacting_to')::bigint, a.seq))
-                      FROM events a
-                     WHERE a.session_id = e.session_id
-                       AND a.kind = 'message'
-                       AND a.data->>'role' = 'assistant'),
-                   0)
-            """,
-            session_list,
-        )
-
-        all_result_rows = await conn.fetch(
-            """
-            SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
-              FROM events e
-             WHERE e.session_id = ANY($1::text[])
-               AND e.kind = 'message'
-               AND e.data->>'role' = 'tool'
-            """,
-            session_list,
-        )
-
-        all_asst_rows = await conn.fetch(
-            """
-            SELECT e.session_id, e.data
-              FROM events e
-             WHERE e.session_id = ANY($1::text[])
-               AND e.kind = 'message'
-               AND e.data->>'role' = 'assistant'
-               AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
-            """,
-            session_list,
-        )
+        unreacted_rows = await conn.fetch(UNREACTED_ROWS_SQL, session_list)
+        all_result_rows = await conn.fetch(ALL_RESULT_ROWS_SQL, session_list)
+        all_asst_rows = await conn.fetch(ALL_ASST_ROWS_SQL, session_list)
 
     unreacted_by_sid = _group_event_data(unreacted_rows)
     results_by_sid = _group_tool_call_ids(all_result_rows)
