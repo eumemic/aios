@@ -170,12 +170,14 @@ class TestNoCorrelatedSubplanOverEvents:
     a correlated SubPlan. That shape was the N+1 pathology behind #140."""
 
     async def test_candidate_rows_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
-        plan = await _explain(seeded_pool, CANDIDATE_ROWS_SQL.format(scope_clause=""))
+        plan = await _explain(
+            seeded_pool, CANDIDATE_ROWS_SQL.format(scope_clause="", cte_scope_clause="")
+        )
         found = find_subplans_over_events(plan)
         assert not found, (
             f"N+1 regression in find_sessions_needing_inference candidate query: "
             f"{len(found)} correlated subplan(s) over events. "
-            f"See PR #NNN — this query must hoist MAX(reacting_to) via a CTE."
+            f"See PR #145 — this query must hoist MAX(reacting_to) via a CTE."
         )
 
     async def test_unreacted_rows_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
@@ -201,7 +203,7 @@ class TestSweepQueryBudget:
     async def test_candidate_rows_buffer_budget(self, seeded_pool: asyncpg.Pool[Any]) -> None:
         async with seeded_pool.acquire() as conn:
             result = await conn.fetchval(
-                f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {CANDIDATE_ROWS_SQL.format(scope_clause='')}"
+                f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {CANDIDATE_ROWS_SQL.format(scope_clause='', cte_scope_clause='')}"
             )
         if isinstance(result, str):
             result = json.loads(result)

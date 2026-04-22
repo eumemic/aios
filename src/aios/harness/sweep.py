@@ -60,7 +60,7 @@ class SweepResult:
 # migration 0022) instead of ``data->>'role'``; partial indexes were
 # re-predicated to match in migration 0023. The two MAX(reacting_to)
 # queries use a CTE to hoist the aggregation out of the outer scan —
-# see PR #NNN for the ~800-900x speedup that revealed.
+# see PR #145 for the ~800-900x speedup that revealed.
 
 
 GHOST_ASST_SQL = """
@@ -89,6 +89,7 @@ CANDIDATE_ROWS_SQL = """
                MAX(COALESCE((data->>'reacting_to')::bigint, seq)) AS max_reacting
           FROM events
          WHERE kind = 'message' AND role = 'assistant'
+         {cte_scope_clause}
          GROUP BY session_id
     )
     SELECT DISTINCT e.session_id
@@ -339,11 +340,15 @@ async def find_sessions_needing_inference(
     yet ready. Case (c) sessions bypass this filter.
     """
     scope_clause = "AND s.id = $1" if session_id else ""
+    # CANDIDATE_ROWS_SQL's CTE aggregates per-session; when scoped, prune it
+    # to the target session too so the planner isn't leaning on predicate-
+    # pushdown-through-GROUP-BY to rescue an unscoped scan at scale.
+    cte_scope_clause = "AND session_id = $1" if session_id else ""
     scope_params: list[Any] = [session_id] if session_id else []
 
     async with pool.acquire() as conn:
         candidate_rows = await conn.fetch(
-            CANDIDATE_ROWS_SQL.format(scope_clause=scope_clause),
+            CANDIDATE_ROWS_SQL.format(scope_clause=scope_clause, cte_scope_clause=cte_scope_clause),
             *scope_params,
         )
 
