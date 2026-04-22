@@ -190,31 +190,31 @@ class TestSubmitToolResultStampsName:
             )
         assert tool_name == "get_weather"
 
-    async def test_unknown_call_id_leaves_name_unset(
+    async def test_unknown_call_id_returns_404(
         self,
         http_client: httpx.AsyncClient,
         pool: Any,
         session_id: str,
     ) -> None:
-        """When no parent assistant is found, ``name`` stays absent.
+        """Submitting a result for a ``tool_call_id`` with no parent is a
+        client bug; the server rejects it and appends no event.
 
-        The operation still succeeds — the server does not reject a
-        submission whose ``tool_call_id`` can't be matched to a parent —
-        and the derived ``tool_name`` column simply stays NULL.  Same
-        shape the code had before the fix; just no upgrade possible.
+        An orphan tool-role event (no matching assistant tool_call) would
+        leave a row with NULL ``tool_name`` in ``events`` that cannot be
+        reconciled with any parent.  Per CLAUDE.md's "fail hard, no
+        fallbacks" rule, the server refuses to store it.
         """
         r = await http_client.post(
             f"/v1/sessions/{session_id}/tool-results",
             json={"tool_call_id": "call_nonexistent", "content": "whatever"},
         )
-        assert r.status_code == 201, r.text
-        event = r.json()
-        assert "name" not in event["data"]
+        assert r.status_code == 404, r.text
+        assert r.json()["error"]["type"] == "not_found"
 
         async with pool.acquire() as conn:
-            tool_name = await conn.fetchval(
-                "SELECT tool_name FROM events WHERE session_id = $1 AND seq = $2",
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM events "
+                "WHERE session_id = $1 AND kind = 'message' AND data->>'role' = 'tool'",
                 session_id,
-                event["seq"],
             )
-        assert tool_name is None
+        assert count == 0
