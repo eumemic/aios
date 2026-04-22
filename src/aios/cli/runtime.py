@@ -7,6 +7,8 @@ module at its tail to register sub-apps).
 
 from __future__ import annotations
 
+import contextlib
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,7 +43,11 @@ def run_or_die(fn: Callable[[], int | None]) -> None:
     """Execute ``fn`` and translate ``AiosApiError`` into a clean CLI exit.
 
     Keeps tracebacks hidden and prints the server's error envelope.
-    Non-API exceptions bubble.
+    ``BrokenPipeError`` during output rendering — raised when a downstream
+    consumer (pipe, pager, script) closed its end while we were writing —
+    resolves to a silent ``exit 0``; by the time we're rendering, any
+    server-side mutation has already landed, and we don't want pipe
+    failures to mask that (issue #116).  Non-API exceptions bubble.
     """
     try:
         rc = fn()
@@ -51,8 +57,34 @@ def run_or_die(fn: Callable[[], int | None]) -> None:
             print_error(f"detail: {exc.detail}")
         exit_code = 2 if exc.status_code == 401 else 1
         raise typer.Exit(exit_code) from exc
+    except BrokenPipeError:
+        _silence_stdout()
+        raise typer.Exit(0) from None
     except KeyboardInterrupt:
         sys.stderr.write("\n")
         raise typer.Exit(130) from None
     if rc:
         raise typer.Exit(rc)
+
+
+def _silence_stdout() -> None:
+    """Swap ``sys.stdout`` for ``/dev/null`` so later writes (notably the
+    interpreter-shutdown flush) don't re-raise ``BrokenPipeError`` on the
+    closed pipe.
+
+    Python 3.13 routes ``__del__`` exceptions through
+    ``sys.unraisablehook`` — it no longer silently drops them as earlier
+    versions did — so we also explicitly close the original stream when
+    it's the real process stdout, swallowing the ``BrokenPipeError`` the
+    flush inside ``close()`` will raise.  Pytest capture streams and
+    test monkeypatches are left untouched so teardown can restore them.
+    """
+    # Kept open for the remainder of the process; closing the devnull
+    # stream would make subsequent writes (or the shutdown flush) raise
+    # again.
+    devnull = open(os.devnull, "w")  # noqa: SIM115
+    old = sys.stdout
+    sys.stdout = devnull
+    if sys.__stdout__ is not None and old is sys.__stdout__:
+        with contextlib.suppress(Exception):
+            old.close()
