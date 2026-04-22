@@ -7,6 +7,12 @@ import asyncio
 from aios.harness.task_registry import TaskRegistry
 
 
+def _future() -> asyncio.Future[None]:
+    """Standalone Future for sync tests — Python 3.14 dropped the implicit
+    loop that ``asyncio.get_event_loop()`` used to autocreate."""
+    return asyncio.new_event_loop().create_future()
+
+
 async def _sleeper() -> None:
     await asyncio.sleep(3600)
 
@@ -14,13 +20,13 @@ async def _sleeper() -> None:
 class TestBasicLifecycle:
     def test_add_and_count(self) -> None:
         reg = TaskRegistry()
-        task = asyncio.get_event_loop().create_future()
+        task = _future()
         reg.add("sess_1", "call_a", task)  # type: ignore[arg-type]
         assert reg.in_flight_count("sess_1") == 1
 
     def test_remove(self) -> None:
         reg = TaskRegistry()
-        task = asyncio.get_event_loop().create_future()
+        task = _future()
         reg.add("sess_1", "call_a", task)  # type: ignore[arg-type]
         reg.remove("sess_1", "call_a")
         assert reg.in_flight_count("sess_1") == 0
@@ -71,16 +77,16 @@ class TestInFlightQueries:
 
     def test_in_flight_tool_call_ids(self) -> None:
         reg = TaskRegistry()
-        f1 = asyncio.get_event_loop().create_future()
-        f2 = asyncio.get_event_loop().create_future()
+        f1 = _future()
+        f2 = _future()
         reg.add("sess_1", "call_a", f1)  # type: ignore[arg-type]
         reg.add("sess_1", "call_b", f2)  # type: ignore[arg-type]
         assert reg.in_flight_tool_call_ids("sess_1") == {"call_a", "call_b"}
 
     def test_in_flight_tool_call_ids_excludes_done(self) -> None:
         reg = TaskRegistry()
-        f1 = asyncio.get_event_loop().create_future()
-        f2 = asyncio.get_event_loop().create_future()
+        f1 = _future()
+        f2 = _future()
         f2.set_result(None)  # mark as done
         reg.add("sess_1", "call_a", f1)  # type: ignore[arg-type]
         reg.add("sess_1", "call_b", f2)  # type: ignore[arg-type]
@@ -88,9 +94,9 @@ class TestInFlightQueries:
 
     def test_all_in_flight_tool_call_ids(self) -> None:
         reg = TaskRegistry()
-        f1 = asyncio.get_event_loop().create_future()
-        f2 = asyncio.get_event_loop().create_future()
-        f3 = asyncio.get_event_loop().create_future()
+        f1 = _future()
+        f2 = _future()
+        f3 = _future()
         f3.set_result(None)  # done — should be excluded
         reg.add("sess_1", "call_a", f1)  # type: ignore[arg-type]
         reg.add("sess_2", "call_b", f2)  # type: ignore[arg-type]
@@ -100,7 +106,7 @@ class TestInFlightQueries:
 
     def test_all_in_flight_excludes_sessions_with_no_active(self) -> None:
         reg = TaskRegistry()
-        f1 = asyncio.get_event_loop().create_future()
+        f1 = _future()
         f1.set_result(None)  # done
         reg.add("sess_1", "call_a", f1)  # type: ignore[arg-type]
         assert reg.all_in_flight_tool_call_ids() == {}

@@ -17,6 +17,7 @@ prefix.
 from __future__ import annotations
 
 import json
+from functools import cache
 from typing import TYPE_CHECKING, Any
 
 import litellm
@@ -61,16 +62,69 @@ def _set_content_block_cache(msg: dict[str, Any]) -> None:
         content[-1]["cache_control"] = _CACHE_CONTROL
 
 
+# LiteLLM providers that proxy Anthropic models and forward ``cache_control``
+# markers unchanged (OpenRouter's ``anthropic/*`` routes, Bedrock's
+# ``anthropic.*`` SKUs, Vertex AI's ``claude-*`` SKUs). Matching on provider
+# alone isn't sufficient — the same providers also host non-Anthropic models
+# (``openrouter/openai/*``, ``bedrock/amazon.titan-*``) that break on the
+# content-block format. We additionally require the model name to carry
+# ``claude`` or ``anthropic``.
+_ANTHROPIC_PROXY_PROVIDERS = frozenset({"openrouter", "bedrock", "vertex_ai"})
+
+
+@cache
+def _supports_anthropic_cache_control(model: str) -> bool:
+    """True when ``model`` accepts Anthropic ``cache_control`` markers.
+
+    Used to gate ``inject_cache_breakpoints`` — see its docstring for why
+    the gate is necessary. Unknown model strings return ``False`` so we
+    default to the safe no-op.
+
+    Covers direct Anthropic plus Anthropic-backed routes through
+    OpenRouter / Bedrock / Vertex (all of which preserve ``cache_control``
+    for Claude models). Non-Claude models on those same proxies stay
+    gated out because they don't necessarily handle the content-block
+    content shape that applying cache markers forces us into.
+
+    Cached: called once per inference step, result is a pure function of
+    the model string, and the distinct-model-string cardinality is low
+    (agents typically reuse one or two).
+    """
+    try:
+        model_name, provider, _, _ = litellm.get_llm_provider(model)
+    except Exception:
+        return False
+    if provider == "anthropic":
+        return True
+    if provider in _ANTHROPIC_PROXY_PROVIDERS:
+        lower = (model_name or model).lower()
+        return "claude" in lower or "anthropic" in lower
+    return False
+
+
 def inject_cache_breakpoints(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
+    model: str,
 ) -> None:
-    """Annotate messages and tools with ``cache_control`` breakpoints.
+    """Annotate messages and tools with Anthropic ``cache_control`` breakpoints.
 
     Anthropic's prompt caching requires explicit ``cache_control`` markers
     on **content blocks** (not on message dicts) to create cache entries.
-    LiteLLM strips them for providers that don't support them (e.g. OpenAI),
-    so this is safe to apply unconditionally.
+    Applying them means converting string ``content`` into a list of
+    content blocks — because only blocks can carry the marker.
+
+    **Gated on model.** The earlier implementation applied this
+    unconditionally under the assumption that "LiteLLM strips
+    cache_control for providers that don't support it." In practice
+    LiteLLM strips the ``cache_control`` key but leaves the list-of-
+    blocks content format, and some OpenAI-compatible servers (notably
+    MLX-based local Qwen servers) silently return empty completions
+    when a ``tool``-role message arrives as a content-block list. The
+    gate keeps the feature for Anthropic-backed routes (direct
+    Anthropic, plus ``openrouter/anthropic/*``, ``bedrock/anthropic.*``,
+    and ``vertex_ai/claude-*`` — all of which forward cache markers to
+    Anthropic) and leaves string content untouched for everyone else.
 
     Places breakpoints on:
 
@@ -89,6 +143,8 @@ def inject_cache_breakpoints(
     conversation-through-last-event is byte-identical and hits.
     """
     if not messages:
+        return
+    if not _supports_anthropic_cache_control(model):
         return
 
     if messages[0].get("role") == "system":
@@ -212,7 +268,7 @@ async def call_litellm(
     Usage is normalized to our canonical field names. Cost is LiteLLM's
     per-request USD figure, or ``None`` when the provider doesn't report it.
     """
-    inject_cache_breakpoints(messages, tools)
+    inject_cache_breakpoints(messages, tools, model)
 
     kwargs: dict[str, Any] = {
         "model": model,
@@ -259,7 +315,7 @@ async def stream_litellm(
     assembled via ``litellm.stream_chunk_builder`` and returned for
     storage as a normal event.
     """
-    inject_cache_breakpoints(messages, tools)
+    inject_cache_breakpoints(messages, tools, model)
 
     kwargs: dict[str, Any] = {
         "model": model,

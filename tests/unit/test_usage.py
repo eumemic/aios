@@ -10,6 +10,12 @@ from aios.harness.completion import (
     inject_cache_breakpoints,
 )
 
+# Model string that LiteLLM routes through the Anthropic provider — used to
+# exercise the branch of inject_cache_breakpoints that actually mutates
+# messages. See TestInjectCacheBreakpointsProviderGuard for the non-Anthropic
+# case.
+_ANTHROPIC_MODEL = "anthropic/claude-opus-4-6"
+
 
 class TestNormalizeUsage:
     """Tests for _normalize_usage which maps LiteLLM fields to our names."""
@@ -141,7 +147,7 @@ def _tool_def(name: str) -> dict[str, Any]:
 class TestInjectCacheBreakpoints:
     def test_system_message_annotated(self) -> None:
         msgs = [_msg("system", "you are helpful"), _msg("user", "hi")]
-        inject_cache_breakpoints(msgs, None)
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         assert msgs[0]["content"] == [
             {"type": "text", "text": "you are helpful", "cache_control": _CACHE_CONTROL}
         ]
@@ -149,13 +155,13 @@ class TestInjectCacheBreakpoints:
     def test_last_tool_annotated(self) -> None:
         msgs = [_msg("system", "sys"), _msg("user", "hi")]
         tools = [_tool_def("bash"), _tool_def("read")]
-        inject_cache_breakpoints(msgs, tools)
+        inject_cache_breakpoints(msgs, tools, _ANTHROPIC_MODEL)
         assert "cache_control" not in tools[0]
         assert tools[1]["cache_control"] == _CACHE_CONTROL
 
     def test_last_conversation_message_annotated(self) -> None:
         msgs = [_msg("system", "sys"), _msg("user", "hi")]
-        inject_cache_breakpoints(msgs, None)
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         assert msgs[1]["content"] == [
             {"type": "text", "text": "hi", "cache_control": _CACHE_CONTROL}
         ]
@@ -163,7 +169,7 @@ class TestInjectCacheBreakpoints:
     def test_no_system_message(self) -> None:
         """First non-system message is not annotated; only last is."""
         msgs = [_msg("user", "hi"), _msg("assistant", "hello")]
-        inject_cache_breakpoints(msgs, None)
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         assert msgs[0]["content"] == "hi"  # untouched
         assert msgs[1]["content"] == [
             {"type": "text", "text": "hello", "cache_control": _CACHE_CONTROL}
@@ -171,20 +177,20 @@ class TestInjectCacheBreakpoints:
 
     def test_no_tools(self) -> None:
         msgs = [_msg("system", "sys"), _msg("user", "hi")]
-        inject_cache_breakpoints(msgs, None)
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         # No crash; system and last message still annotated via content blocks.
         assert msgs[0]["content"][0]["cache_control"] == _CACHE_CONTROL
         assert msgs[1]["content"][0]["cache_control"] == _CACHE_CONTROL
 
     def test_empty_messages(self) -> None:
-        inject_cache_breakpoints([], None)  # no crash
+        inject_cache_breakpoints([], None, _ANTHROPIC_MODEL)  # no crash
 
     def test_system_only_no_double_annotate(self) -> None:
         """When the only message is the system message, it gets one
         annotation from the system-message rule.  The last-message rule
         skips it to avoid redundancy."""
         msgs = [_msg("system", "sys")]
-        inject_cache_breakpoints(msgs, None)
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         assert msgs[0]["content"] == [
             {"type": "text", "text": "sys", "cache_control": _CACHE_CONTROL}
         ]
@@ -196,7 +202,7 @@ class TestInjectCacheBreakpoints:
             {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
             {"role": "tool", "tool_call_id": "a", "content": "done"},
         ]
-        inject_cache_breakpoints(msgs, None)
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         assert msgs[3]["content"] == [
             {"type": "text", "text": "done", "cache_control": _CACHE_CONTROL}
         ]
@@ -204,7 +210,7 @@ class TestInjectCacheBreakpoints:
     def test_all_three_breakpoints(self) -> None:
         msgs = [_msg("system", "sys"), _msg("user", "hi")]
         tools = [_tool_def("bash")]
-        inject_cache_breakpoints(msgs, tools)
+        inject_cache_breakpoints(msgs, tools, _ANTHROPIC_MODEL)
         assert msgs[0]["content"][0]["cache_control"] == _CACHE_CONTROL
         assert tools[0]["cache_control"] == _CACHE_CONTROL
 
@@ -221,7 +227,7 @@ class TestInjectCacheBreakpoints:
             _msg("assistant", "hello"),
             tail,
         ]
-        inject_cache_breakpoints(msgs, None)
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         # Last stable message (the assistant) gets the breakpoint.
         assert msgs[2]["content"] == [
             {"type": "text", "text": "hello", "cache_control": _CACHE_CONTROL}
@@ -240,7 +246,7 @@ class TestInjectCacheBreakpoints:
         stable = _msg("user", "real peer message")
         separator = {"role": "assistant", "content": ""}
         msgs = [_msg("system", "sys"), stable, separator, tail]
-        inject_cache_breakpoints(msgs, None)
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         # Breakpoint lands on the stable user message, not the separator.
         assert msgs[1]["content"] == [
             {"type": "text", "text": "real peer message", "cache_control": _CACHE_CONTROL}
@@ -255,7 +261,7 @@ class TestInjectCacheBreakpoints:
         but the system breakpoint still applies."""
         tail = _msg("user", "━━━ Channels ━━━\n▸ channel_id=x (focal)")
         msgs = [_msg("system", "sys"), tail]
-        inject_cache_breakpoints(msgs, None)
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         assert msgs[0]["content"] == [
             {"type": "text", "text": "sys", "cache_control": _CACHE_CONTROL}
         ]
@@ -273,6 +279,81 @@ class TestInjectCacheBreakpoints:
                 ],
             },
         ]
-        inject_cache_breakpoints(msgs, None)
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         assert "cache_control" not in msgs[1]["content"][0]
         assert msgs[1]["content"][1]["cache_control"] == _CACHE_CONTROL
+
+
+class TestInjectCacheBreakpointsProviderGuard:
+    """The gate that prevents cache_control injection for non-Anthropic providers.
+
+    Reason: some OpenAI-compatible servers (notably MLX-based local model
+    servers) return empty completions when a ``tool``-role message arrives
+    in content-block format. Silently swallowing responses is worse than
+    skipping the optimization, so we only mutate for providers that need it.
+    """
+
+    def test_openai_model_unchanged(self) -> None:
+        msgs = [_msg("system", "sys"), _msg("user", "hi")]
+        tools = [_tool_def("bash")]
+        inject_cache_breakpoints(msgs, tools, "openai/gpt-4o")
+        assert msgs[0]["content"] == "sys"
+        assert msgs[1]["content"] == "hi"
+        assert "cache_control" not in tools[0]
+
+    def test_local_openai_compat_model_unchanged(self) -> None:
+        """The exact shape that surfaced the MLX-Qwen empty-response bug:
+        a tool-role last message with plain-string content must remain a
+        plain string after the gate kicks in."""
+        msgs = [
+            _msg("system", "sys"),
+            _msg("user", "do it"),
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
+            {"role": "tool", "tool_call_id": "a", "content": "done"},
+        ]
+        inject_cache_breakpoints(msgs, None, "openai/mlx-community/Qwen3.6-35B-A3B-4bit-DWQ")
+        assert msgs[3]["content"] == "done"  # still a string, no blocks
+
+    def test_unknown_model_unchanged(self) -> None:
+        """Unknown model strings fall through the LiteLLM provider probe and
+        default to the safe no-op."""
+        msgs = [_msg("system", "sys"), _msg("user", "hi")]
+        inject_cache_breakpoints(msgs, None, "completely-unknown-model-string")
+        assert msgs[0]["content"] == "sys"
+        assert msgs[1]["content"] == "hi"
+
+    def test_openrouter_anthropic_annotated(self) -> None:
+        """OpenRouter's ``anthropic/*`` routes forward ``cache_control`` to
+        Anthropic, so they must still get injection. This is the path the
+        README quickstart uses."""
+        msgs = [_msg("system", "sys"), _msg("user", "hi")]
+        inject_cache_breakpoints(msgs, None, "openrouter/anthropic/claude-opus-4")
+        assert msgs[1]["content"] == [
+            {"type": "text", "text": "hi", "cache_control": _CACHE_CONTROL}
+        ]
+
+    def test_openrouter_non_anthropic_unchanged(self) -> None:
+        """A non-Claude model on OpenRouter stays gated out — we don't know
+        whether the downstream provider tolerates content-block format."""
+        msgs = [_msg("system", "sys"), _msg("user", "hi")]
+        inject_cache_breakpoints(msgs, None, "openrouter/openai/gpt-4o")
+        assert msgs[1]["content"] == "hi"
+
+    def test_bedrock_claude_annotated(self) -> None:
+        msgs = [_msg("system", "sys"), _msg("user", "hi")]
+        inject_cache_breakpoints(msgs, None, "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0")
+        assert msgs[1]["content"] == [
+            {"type": "text", "text": "hi", "cache_control": _CACHE_CONTROL}
+        ]
+
+    def test_bedrock_non_claude_unchanged(self) -> None:
+        msgs = [_msg("system", "sys"), _msg("user", "hi")]
+        inject_cache_breakpoints(msgs, None, "bedrock/amazon.titan-text-express-v1")
+        assert msgs[1]["content"] == "hi"
+
+    def test_vertex_claude_annotated(self) -> None:
+        msgs = [_msg("system", "sys"), _msg("user", "hi")]
+        inject_cache_breakpoints(msgs, None, "vertex_ai/claude-3-5-sonnet@20240620")
+        assert msgs[1]["content"] == [
+            {"type": "text", "text": "hi", "cache_control": _CACHE_CONTROL}
+        ]
