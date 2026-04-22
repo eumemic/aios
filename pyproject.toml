@@ -136,4 +136,5 @@ addopts = [
 markers = [
     "integration: tests requiring a Postgres testcontainer",
     "e2e: end-to-end tests requiring Docker + a real or recorded model",
+    "slow: heavy tests (benchmarks, large fixtures) — skipped on PR CI, run nightly",
 ]
