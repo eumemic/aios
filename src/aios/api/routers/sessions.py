@@ -24,6 +24,7 @@ from aios.api.deps import (
     ProcrastinateDep,
 )
 from aios.api.sse import sse_event_stream
+from aios.db import queries
 from aios.db.listen import listen_for_events
 from aios.harness.wake import defer_wake
 from aios.models.common import ListResponse
@@ -165,12 +166,22 @@ async def submit_tool_result(
     pool: PoolDep,
     _auth: AuthDep,
 ) -> Event:
-    """Submit a custom tool result. Appends a tool-role message and wakes the session."""
+    """Submit a custom tool result. Appends a tool-role message and wakes the session.
+
+    Stamps the tool's ``name`` into the event data by looking it up on the
+    parent assistant's ``tool_calls`` array — same source the harness uses
+    for built-in/MCP results — so the derived ``tool_name`` column stays
+    populated for custom tools too (issue #133).
+    """
+    async with pool.acquire() as conn:
+        name = await queries.lookup_tool_name_by_call_id(conn, session_id, body.tool_call_id)
     data: dict[str, Any] = {
         "role": "tool",
         "tool_call_id": body.tool_call_id,
         "content": body.content,
     }
+    if name is not None:
+        data["name"] = name
     if body.is_error:
         data["is_error"] = True
     event = await service.append_event(pool, session_id, "message", data)
