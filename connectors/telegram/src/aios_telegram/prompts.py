@@ -7,9 +7,49 @@ heading.
 
 Covers only the tool this server exposes — ``telegram_send``. Telling the
 model about tools that don't exist would be worse than silence.
+
+``build_instructions`` prepends an identity block (the bot's own numeric
+``bot_id``, ``@username``, and display ``first_name``) so the agent knows
+who it is on Telegram without having to learn that from inbound traffic
+(issue #55).
 """
 
 from __future__ import annotations
+
+
+def build_instructions(
+    *,
+    bot_id: int,
+    first_name: str,
+    username: str | None = None,
+) -> str:
+    """Compose the MCP ``initialize`` instructions with identity prelude.
+
+    All three identity fields come from ``Bot.get_me()`` at connector
+    startup.  ``bot_id`` and ``first_name`` are guaranteed by Telegram's
+    schema; ``username`` is optional (a bot can exist without one during
+    BotFather setup) and its bullet is omitted when absent or empty.
+    ``bot_id`` doubles as the ``<account>`` segment of this connector's
+    channel addresses.
+    """
+    lines = [
+        "## Your identity on this Telegram bot account",
+        "",
+        f"- **bot_id**: `{bot_id}` — this is YOU.  In group chats, any "
+        f"inbound whose header shows this id is your own prior message, "
+        f"not another participant.  It also appears as the ``<account>`` "
+        f"segment of every ``telegram/<account>/<chat_id>`` address.",
+    ]
+    if username:
+        lines.append(
+            f"- **username**: `@{username}` — what users type to mention "
+            f"you in chats and how people refer to your bot."
+        )
+    if first_name:
+        lines.append(f"- **first_name**: `{first_name}` — your display name on Telegram.")
+    identity = "\n".join(lines) + "\n"
+    return identity + "\n" + TELEGRAM_SERVER_INSTRUCTIONS
+
 
 TELEGRAM_SERVER_INSTRUCTIONS = """\
 ## chat_id

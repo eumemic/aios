@@ -60,7 +60,9 @@ def test_focal_meta_not_integer_raises() -> None:
 
 
 async def _call_send(bot: Bot, text: str, *, focal: str | None) -> dict[str, Any]:
-    mcp = build_mcp_server(bot=bot)
+    # Identity args are required by build_mcp_server but not exercised by
+    # telegram_send — dummy values keep these tool tests focused.
+    mcp = build_mcp_server(bot=bot, bot_id=1, first_name="Test", username="test_bot")
     result = await mcp._tool_manager.call_tool(
         "telegram_send",
         {"text": text},
@@ -95,6 +97,31 @@ async def test_telegram_send_group_negative_chat_id() -> None:
 
     assert out == {"message_id": 7}
     bot.send_message.assert_awaited_once_with(chat_id=-1001234567890, text="yo")
+
+
+# ─── build_mcp_server identity plumbing ─────────────────────────────────────
+
+
+def test_build_mcp_server_threads_identity_into_instructions() -> None:
+    """The bot's identity fields (issue #55) must end up in FastMCP's
+    ``instructions`` so they surface in ``InitializeResult``."""
+    bot = MagicMock(spec=Bot)
+    mcp = build_mcp_server(bot=bot, bot_id=987654321, first_name="Example", username="example_bot")
+    assert mcp.instructions is not None
+    assert "987654321" in mcp.instructions
+    assert "@example_bot" in mcp.instructions
+    assert "Example" in mcp.instructions
+
+
+def test_build_mcp_server_omits_username_when_absent() -> None:
+    """Bots without a set ``username`` should get an identity block
+    that simply lacks that bullet — ``first_name`` stays present."""
+    bot = MagicMock(spec=Bot)
+    mcp = build_mcp_server(bot=bot, bot_id=42, first_name="Example", username=None)
+    assert mcp.instructions is not None
+    assert "42" in mcp.instructions
+    assert "Example" in mcp.instructions
+    assert "username" not in mcp.instructions
 
 
 # ─── bearer auth middleware ─────────────────────────────────────────────────

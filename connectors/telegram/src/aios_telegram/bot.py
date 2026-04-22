@@ -3,8 +3,10 @@
 Three responsibilities:
 
 1. Build the PTB ``Application`` from the bot token.
-2. Discover the bot's numeric id on startup (the ``<account>`` segment of
-   channel addresses) via ``Bot.get_me()``.
+2. Discover the bot's identity on startup (numeric id, ``@username``,
+   display ``first_name``) via ``Bot.get_me()`` — surfaced to the agent
+   in the MCP init instructions (issue #55).  The numeric id doubles as
+   the ``<account>`` segment of channel addresses.
 3. Register a single message handler that parses each incoming text
    message and POSTs it to aios via :class:`aios_telegram.ingest.IngestClient`.
 
@@ -16,33 +18,58 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 
 import structlog
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
-from .errors import BotIdentityError
 from .ingest import IngestClient, build_metadata
 from .parse import parse_message
 
 log = structlog.get_logger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class BotIdentity:
+    """Bot's own surface on Telegram, captured from ``Bot.get_me()``.
+
+    ``id`` and ``first_name`` are guaranteed by Telegram's schema —
+    BotFather sets a ``first_name`` at creation time and the numeric id
+    is always present.  ``username`` is optional: a bot can exist without
+    one during the initial BotFather configuration window.  The
+    renderer in ``prompts.py`` omits ``username`` when unset.
+    """
+
+    id: int
+    first_name: str
+    username: str | None
+
+
 def build_application(token: str) -> Application:  # type: ignore[type-arg]
     return Application.builder().token(token).build()
 
 
-async def discover_bot_id(application: Application) -> int:  # type: ignore[type-arg]
-    """Call ``getMe`` and return the bot's numeric user id.
+async def discover_bot_identity(application: Application) -> BotIdentity:  # type: ignore[type-arg]
+    """Call ``getMe`` and return the bot's identity surface.
 
-    Raises :class:`BotIdentityError` if Telegram's response is unusable.
-    Called once on startup after ``application.initialize()``.
+    Called once on startup after ``application.initialize()``.  PTB's
+    ``User`` schema guarantees ``id`` and ``first_name``; a genuinely
+    malformed response would raise inside ``get_me`` or violate PTB's
+    types, so we trust the fields here.
     """
     me = await application.bot.get_me()
-    if not me.id:
-        raise BotIdentityError("getMe returned no id")
-    log.info("telegram.bot.identified", bot_id=me.id, username=me.username)
-    return int(me.id)
+    log.info(
+        "telegram.bot.identified",
+        bot_id=me.id,
+        username=me.username,
+        first_name=me.first_name,
+    )
+    return BotIdentity(
+        id=int(me.id),
+        first_name=me.first_name,
+        username=me.username or None,
+    )
 
 
 def install_handler(
