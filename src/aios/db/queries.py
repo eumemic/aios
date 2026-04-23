@@ -1108,18 +1108,20 @@ async def read_events(
     after_seq: int = 0,
     kind: EventKind | None = None,
     limit: int = 200,
+    newest_first: bool = False,
 ) -> list[Event]:
+    order = "DESC" if newest_first else "ASC"
     if kind is None:
         rows = await conn.fetch(
-            "SELECT * FROM events WHERE session_id = $1 AND seq > $2 ORDER BY seq ASC LIMIT $3",
+            f"SELECT * FROM events WHERE session_id = $1 AND seq > $2 ORDER BY seq {order} LIMIT $3",
             session_id,
             after_seq,
             limit,
         )
     else:
         rows = await conn.fetch(
-            "SELECT * FROM events WHERE session_id = $1 AND seq > $2 AND kind = $3 "
-            "ORDER BY seq ASC LIMIT $4",
+            f"SELECT * FROM events WHERE session_id = $1 AND seq > $2 AND kind = $3 "
+            f"ORDER BY seq {order} LIMIT $4",
             session_id,
             after_seq,
             kind,

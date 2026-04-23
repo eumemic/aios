@@ -54,19 +54,43 @@ class TestCountConsecutiveRescheduling:
         self,
     ) -> None:
         """Regression: a clean turn_ended breaks the streak even if reschedulings preceded it."""
-        events = [
-            SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"}),
+        # Lifecycle log (oldest → newest):
+        #   resched, resched, end_turn, resched
+        # The counter reads newest-first, so it sees resched (count=1) then
+        # end_turn which breaks the streak. Only the trailing single counts.
+        events_newest_first = [
             SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"}),
             SimpleNamespace(data={"event": "turn_ended", "stop_reason": "end_turn"}),
+            SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"}),
             SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"}),
         ]
         pool = MagicMock()
         with patch(
             "aios.harness.loop.sessions_service.read_events",
-            AsyncMock(return_value=events),
+            AsyncMock(return_value=events_newest_first),
         ):
-            # Only the trailing single rescheduling counts.
             assert await _count_consecutive_rescheduling(pool, "sess_x") == 1
+
+    async def test_count_consecutive_rescheduling_reads_bounded_newest_first_tail(
+        self,
+    ) -> None:
+        """The default ASC + LIMIT 200 scan drops the recent tail on long
+        sessions (the bulk of lifecycle events are early ``turn_ended``).
+        Guard the call shape: newest-first and a bound small enough that a
+        long session's ancient rows can't crowd out recent reschedulings.
+        """
+        mock_read = AsyncMock(
+            return_value=[
+                SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"})
+            ]
+            * 5
+        )
+        pool = MagicMock()
+        with patch("aios.harness.loop.sessions_service.read_events", mock_read):
+            assert await _count_consecutive_rescheduling(pool, "sess_x") == 5
+        kwargs = mock_read.call_args.kwargs
+        assert kwargs["newest_first"] is True
+        assert kwargs["limit"] <= 10
 
 
 # ─── exception handler tests ──────────────────────────────────────────────────
