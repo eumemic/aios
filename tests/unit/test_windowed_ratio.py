@@ -78,7 +78,7 @@ async def test_no_cumulative_falls_back_to_full_read() -> None:
 @pytest.mark.asyncio
 async def test_below_n_ratio_1_matches_today() -> None:
     """With fewer than N samples, model_token_ratio returns 1.0 and the
-    math must match the pre-#160 behavior: drop_local = tokens_to_drop(total).
+    math reduces to plain tokens_to_drop(total) — no ratio applied.
     """
     conn = _FakeConn(total_local=3_000, ratio_k=10, ratio_actual=0, ratio_local=0)
     # window_min=1000, window_max=2000 → chunk size 1000.

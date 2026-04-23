@@ -186,9 +186,7 @@ async def _run_session_step_body(
     for c in connections:
         mcp_server_map[connection_server_name(c)] = c.mcp_url
 
-    # Read windowed message events for this session.  ``model=agent.model``
-    # feeds the issue #160 per-model ratio correction so the configured
-    # ``window_min`` / ``window_max`` are honored as provider tokens.
+    # Read windowed message events for this session.
     events = await sessions_service.read_windowed_events(
         pool,
         session_id,
@@ -347,13 +345,10 @@ async def _run_session_step_body(
         await _append_lifecycle(pool, session_id, "turn_ended", "idle", "error")
         raise
 
-    # Emit span end with per-request token usage and LiteLLM-reported cost.
-    # Stamp ``local_tokens`` + ``model`` for issue #160: the per-model token
-    # ratio is derived from SUM(actual)/SUM(local) over recent successful
-    # ends for the same model, pulled by ``model_token_ratio`` at windowing
-    # time.  ``local_tokens`` is of the full payload (messages + tools) so
-    # it matches what the provider actually counted; the error branch above
-    # deliberately stays un-stamped (partial index excludes it).
+    # ``local_tokens`` costs the full payload (messages + tools) so it
+    # matches what the provider counts.  The error branch above stays
+    # un-stamped — the calibration partial index excludes rows missing
+    # ``local_tokens`` / ``model``.
     local_tokens = approx_tokens(messages, tools=tools)
     await sessions_service.append_event(
         pool,

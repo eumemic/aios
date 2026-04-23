@@ -1579,10 +1579,10 @@ class TestUsageTracking:
         assert end.data["model_usage"]["output_tokens"] == 5
         assert "cost_usd" in end.data
         assert end.data["cost_usd"] is None
-        # Issue #160: calibration fields stamped on every successful end span.
-        # Recompute approx_tokens from the exact payload the harness captured
-        # litellm receiving; a future refactor that stamps on the wrong list
-        # would slowly skew the ratio without this equality check noticing.
+        # Recompute approx_tokens from the exact payload the harness
+        # captured litellm receiving; a future refactor that stamps on the
+        # wrong list would slowly skew the ratio without this equality
+        # check noticing.
         from aios.harness.tokens import approx_tokens
 
         assert harness.model_calls, "expected at least one litellm call"

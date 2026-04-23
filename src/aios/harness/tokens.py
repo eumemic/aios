@@ -43,8 +43,9 @@ def approx_tokens(
     per-event ``cumulative_tokens`` call sites in ``append_event`` do
     NOT pass tools: tool-schema overhead isn't per-event, and baking
     it into per-event counts would perturb the running sum whenever
-    the agent's tool list changes.  The per-model ratio correction
-    (issue #160) absorbs the per-request tools overhead at read time.
+    the agent's tool list changes.  The per-model ratio correction in
+    ``read_windowed_events`` absorbs the per-request tools overhead at
+    read time.
 
     ``cumulative_tokens`` storage depends on this formula.  If the
     implementation changes (e.g. a different tokenizer, passing

@@ -839,7 +839,7 @@ async def model_token_ratio(
     *,
     n: int = 100,
 ) -> float:
-    """Per-model actual/local token correction (issue #160).
+    """Per-model actual/local token correction.
 
     Returns ``SUM(actual) / SUM(local)`` over the most recent ``n``
     successful ``model_request_end`` spans for ``model``.  Below ``n``
@@ -1232,13 +1232,14 @@ async def read_windowed_events(
     ``cumulative_tokens`` is stored in model-agnostic units (see
     :func:`aios.harness.tokens.approx_tokens`), so the raw value
     systematically diverges from what the provider actually counts —
-    ~18 % low on Sonnet 4.6, ~34 % low on Opus 4.7.  Issue #160 corrects
-    for this at read time: ``window_min`` / ``window_max`` are interpreted
-    as provider tokens, ``total_effective = total_local * R`` where
-    ``R = model_token_ratio(model)``, and the drop boundary is translated
-    back to local units for the ``cumulative_tokens`` index scan.  When
-    the model has fewer than ``model_token_ratio``'s sample threshold,
-    ``R`` falls back to ``1.0`` and behavior matches pre-#160 exactly.
+    ~18 % low on Sonnet 4.6, ~34 % low on Opus 4.7.  This function
+    corrects for that at read time: ``window_min`` / ``window_max`` are
+    interpreted as provider tokens, ``total_effective = total_local * R``
+    where ``R = model_token_ratio(model)``, and the drop boundary is
+    translated back to local units for the ``cumulative_tokens`` index
+    scan.  When the model has fewer than ``model_token_ratio``'s sample
+    threshold, ``R`` is ``1.0`` and the math reduces to the plain
+    chunked-snap algorithm.
 
     ``model`` must be the session's currently-active mind string —
     ``agent.model`` on the session's pinned agent/version.  The same
@@ -1246,15 +1247,15 @@ async def read_windowed_events(
     ``model_request_end`` spans, so stamp-side and query-side stay
     partitioned on identical keys.
 
-    Prefix-cache invariant (versus the pre-#160 design): the chunked-snap
-    algorithm gave a *strict* guarantee of byte-identical prompt prefix
-    within a snap chunk.  This function weakens that to a *quantitatively-
-    bounded* guarantee: R can shift slightly between consecutive reads as
-    new calibration samples land, which can nudge ``drop_local`` across an
-    event boundary and invalidate the prefix cache for that turn.  With
-    ``n=100`` the per-step drift is <1 % for the models we've measured, so
-    the expected invalidation rate is well below Anthropic's ~5-minute
-    cache TTL.  Not equivalent to the original invariant; accept-the-noise
+    Prefix-cache invariant: the plain chunked-snap algorithm gave a
+    *strict* guarantee of byte-identical prompt prefix within a snap
+    chunk.  With the ratio correction this weakens to a
+    *quantitatively-bounded* guarantee: R can shift slightly between
+    consecutive reads as new calibration samples land, which can nudge
+    ``drop_local`` across an event boundary and invalidate the prefix
+    cache for that turn.  With ``n=100`` samples, per-step drift in R is
+    <1 % for the models we've measured, so the expected invalidation rate
+    is well below Anthropic's ~5-minute cache TTL — accept-the-noise
     tradeoff documented here for the next reader.
 
     Falls back to :func:`read_message_events` (loading all events) when

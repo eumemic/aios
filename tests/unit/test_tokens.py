@@ -89,8 +89,9 @@ class TestApproxTokensUnderFocalRendering:
 
 
 class TestApproxTokensWithTools:
-    """The ``tools=`` kwarg exists so the issue #160 span-stamp call site
-    can cost the exact payload the provider sees (messages + tools).
+    """The ``tools=`` kwarg exists so the ``model_request_end`` span-stamp
+    call site can cost the exact payload the provider sees (messages +
+    tools).
 
     The two existing call sites in ``db/queries.py`` (per-event
     cumulative_tokens) and ``tools/switch_channel.py`` (recap budget) hand
