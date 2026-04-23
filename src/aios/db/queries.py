@@ -1110,9 +1110,6 @@ async def read_events(
     limit: int = 200,
     newest_first: bool = False,
 ) -> list[Event]:
-    # ``newest_first`` flips ORDER BY to DESC so a bounded ``limit`` returns
-    # the tail of the log instead of the oldest N rows — needed for "last K
-    # events" tail scans on sessions longer than the limit (issue #154).
     order = "DESC" if newest_first else "ASC"
     if kind is None:
         rows = await conn.fetch(

@@ -706,10 +706,8 @@ async def _count_consecutive_rescheduling(pool: Any, session_id: str) -> int:
     with ``stop_reason == "rescheduling"`` at the end of the lifecycle
     event sequence. A non-rescheduling event breaks the streak.
     """
-    # Newest-first, bounded to the retry budget + 1: we only care whether the
-    # tail streak has reached budget exhaustion. Reading ASC with the default
-    # LIMIT would return the oldest 200 lifecycle events on long sessions and
-    # miss the recent tail entirely (issue #154).
+    # Only the tail matters; reading ASC with the default LIMIT would miss the
+    # recent streak entirely on a session with >limit lifecycle events.
     lifecycle_events = await sessions_service.read_events(
         pool,
         session_id,

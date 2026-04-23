@@ -71,47 +71,26 @@ class TestCountConsecutiveRescheduling:
         ):
             assert await _count_consecutive_rescheduling(pool, "sess_x") == 1
 
-    async def test_count_consecutive_rescheduling_finds_tail_on_long_session(self) -> None:
-        """Regression for #154: on a session with more lifecycle events than the
-        default LIMIT, the counter must see the *recent* tail, not the oldest
-        200 rows — which in a long-running session are overwhelmingly early
-        ``end_turn`` events, yielding a spurious count of 0 and pinning retries
-        at the RETRY[0]=2s backoff forever.
-
-        This test stubs ``read_events`` with a function that honors the real
-        DB's ``LIMIT`` + ``ORDER BY`` semantics, so the arg shape decides the
-        result — exactly what the production query does.
+    async def test_count_consecutive_rescheduling_reads_bounded_newest_first_tail(
+        self,
+    ) -> None:
+        """The default ASC + LIMIT 200 scan drops the recent tail on long
+        sessions (the bulk of lifecycle events are early ``turn_ended``).
+        Guard the call shape: newest-first and a bound small enough that a
+        long session's ancient rows can't crowd out recent reschedulings.
         """
-        fake_log = [
-            SimpleNamespace(seq=i, data={"event": "turn_ended", "stop_reason": "end_turn"})
-            for i in range(300)
-        ] + [
-            SimpleNamespace(
-                seq=300 + i, data={"event": "turn_ended", "stop_reason": "rescheduling"}
-            )
-            for i in range(5)
-        ]
-
-        async def stub_read_events(
-            pool: Any,
-            session_id: str,
-            *,
-            after_seq: int = 0,
-            kind: str | None = None,
-            limit: int = 200,
-            newest_first: bool = False,
-        ) -> list[Any]:
-            filtered = [e for e in fake_log if e.seq > after_seq]
-            if newest_first:
-                filtered = list(reversed(filtered))
-            return filtered[:limit]
-
+        mock_read = AsyncMock(
+            return_value=[
+                SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"})
+            ]
+            * 5
+        )
         pool = MagicMock()
-        with patch(
-            "aios.harness.loop.sessions_service.read_events",
-            AsyncMock(side_effect=stub_read_events),
-        ):
+        with patch("aios.harness.loop.sessions_service.read_events", mock_read):
             assert await _count_consecutive_rescheduling(pool, "sess_x") == 5
+        kwargs = mock_read.call_args.kwargs
+        assert kwargs["newest_first"] is True
+        assert kwargs["limit"] <= 10
 
 
 # ─── exception handler tests ──────────────────────────────────────────────────
