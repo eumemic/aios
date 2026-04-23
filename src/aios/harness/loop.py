@@ -354,7 +354,7 @@ async def _run_session_step_body(
     # time.  ``local_tokens`` is of the full payload (messages + tools) so
     # it matches what the provider actually counted; the error branch above
     # deliberately stays un-stamped (partial index excludes it).
-    local_tokens = approx_tokens(messages, tools=tools or None)
+    local_tokens = approx_tokens(messages, tools=tools)
     await sessions_service.append_event(
         pool,
         session_id,

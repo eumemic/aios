@@ -123,31 +123,6 @@ async def test_ratio_below_1_drops_fewer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_defensive_ratio_zero_treated_as_1(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A pathological recorded ratio must not zero-divide."""
-    monkeypatch.setattr(
-        queries,
-        "model_token_ratio",
-        AsyncMock(return_value=0.0),
-    )
-    conn = MagicMock()
-    conn.fetchval = AsyncMock(return_value=3_000)
-
-    async def _fetch(_sql: str, *args: Any) -> list[Any]:
-        conn._last_fetch_args = args
-        return []
-
-    conn.fetch = _fetch
-    await queries.read_windowed_events(
-        conn, "sess_x", window_min=1_000, window_max=2_000, model="m"
-    )
-    # ratio clamped to 1.0 → drop = 1000 (same as the ratio=1 case).
-    assert conn._last_fetch_args[1] == 1_000
-
-
-@pytest.mark.asyncio
 async def test_ceil_div_never_overshoots_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

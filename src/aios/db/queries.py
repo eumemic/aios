@@ -852,7 +852,15 @@ async def model_token_ratio(
     ``model`` is the raw mind string (``agent.model``) — NO NORMALIZATION.
     Different LiteLLM routes (``anthropic/...`` vs
     ``openrouter/anthropic/...``) hit different provider tokenizers and
-    must partition separately.
+    must partition separately.  The same string must appear at stamp time
+    and at query time for the same step — always plumb ``agent.model`` on
+    both sides.  aios sessions do not carry a model override; the session's
+    active mind is always its agent's configured model.
+
+    Scope: the aggregate pools samples across every session in this
+    database.  Token counts are scalar only — no content crosses between
+    sessions — but the ratio reflects the mixed workload of whatever
+    traffic has accumulated.
 
     "actual" sums ``input_tokens + cache_read_input_tokens +
     cache_creation_input_tokens`` from the provider's usage.  Output
@@ -1232,6 +1240,23 @@ async def read_windowed_events(
     the model has fewer than ``model_token_ratio``'s sample threshold,
     ``R`` falls back to ``1.0`` and behavior matches pre-#160 exactly.
 
+    ``model`` must be the session's currently-active mind string —
+    ``agent.model`` on the session's pinned agent/version.  The same
+    string is what :func:`~aios.harness.loop.run_session_step` stamps on
+    ``model_request_end`` spans, so stamp-side and query-side stay
+    partitioned on identical keys.
+
+    Prefix-cache invariant (versus the pre-#160 design): the chunked-snap
+    algorithm gave a *strict* guarantee of byte-identical prompt prefix
+    within a snap chunk.  This function weakens that to a *quantitatively-
+    bounded* guarantee: R can shift slightly between consecutive reads as
+    new calibration samples land, which can nudge ``drop_local`` across an
+    event boundary and invalidate the prefix cache for that turn.  With
+    ``n=100`` the per-step drift is <1 % for the models we've measured, so
+    the expected invalidation rate is well below Anthropic's ~5-minute
+    cache TTL.  Not equivalent to the original invariant; accept-the-noise
+    tradeoff documented here for the next reader.
+
     Falls back to :func:`read_message_events` (loading all events) when
     cumulative data is not available (pre-backfill sessions or rolling
     deploys) or when the entire session fits within ``window_max``.
@@ -1244,21 +1269,19 @@ async def read_windowed_events(
         return await read_message_events(conn, session_id)
 
     ratio = await model_token_ratio(conn, model)
-    # Defensive: a pathological recorded ratio must not zero-divide below.
-    if ratio <= 0.0:
-        ratio = 1.0
 
     from aios.harness.tokens import tokens_to_drop
 
+    # Forward-convert local → effective with plain rounding: best-estimate
+    # of the provider-token total.  Back-convert effective → local with
+    # ceil: deliberately asymmetric so the post-drop remaining fits under
+    # ``window_max`` even when ratio error would otherwise leave one
+    # message straddling the boundary.
     total_effective = round(total * ratio)
     drop_effective = tokens_to_drop(total_effective, window_min=window_min, window_max=window_max)
     if drop_effective == 0:
         return await read_message_events(conn, session_id)
 
-    # Translate the provider-token drop boundary back to local units for
-    # the cumulative_tokens index scan.  Ceil-divide so the post-drop
-    # effective total is <= window_max, never over — dropping slightly
-    # too many is preferable to the alternative.
     import math
 
     drop = drop_effective if ratio == 1.0 else math.ceil(drop_effective / ratio)

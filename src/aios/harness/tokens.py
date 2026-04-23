@@ -51,10 +51,12 @@ def approx_tokens(
     ``model=...``), re-run the backfill script to keep stored values
     honest.
     """
-    kwargs: dict[str, Any] = {"messages": list(messages)}
-    if tools:
-        kwargs["tools"] = list(tools)
-    return int(token_counter(**kwargs))
+    return int(
+        token_counter(
+            messages=list(messages),
+            tools=list(tools) if tools else None,
+        )
+    )
 
 
 # ─── snap boundary math ───────────────────────────────────────────────────
