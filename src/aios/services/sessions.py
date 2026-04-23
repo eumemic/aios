@@ -150,10 +150,16 @@ async def read_events(
     after_seq: int = 0,
     kind: EventKind | None = None,
     limit: int = 200,
+    newest_first: bool = False,
 ) -> list[Event]:
     async with pool.acquire() as conn:
         return await queries.read_events(
-            conn, session_id, after_seq=after_seq, kind=kind, limit=limit
+            conn,
+            session_id,
+            after_seq=after_seq,
+            kind=kind,
+            limit=limit,
+            newest_first=newest_first,
         )
 
 

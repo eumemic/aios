@@ -54,19 +54,64 @@ class TestCountConsecutiveRescheduling:
         self,
     ) -> None:
         """Regression: a clean turn_ended breaks the streak even if reschedulings preceded it."""
-        events = [
-            SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"}),
+        # Lifecycle log (oldest → newest):
+        #   resched, resched, end_turn, resched
+        # The counter reads newest-first, so it sees resched (count=1) then
+        # end_turn which breaks the streak. Only the trailing single counts.
+        events_newest_first = [
             SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"}),
             SimpleNamespace(data={"event": "turn_ended", "stop_reason": "end_turn"}),
+            SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"}),
             SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"}),
         ]
         pool = MagicMock()
         with patch(
             "aios.harness.loop.sessions_service.read_events",
-            AsyncMock(return_value=events),
+            AsyncMock(return_value=events_newest_first),
         ):
-            # Only the trailing single rescheduling counts.
             assert await _count_consecutive_rescheduling(pool, "sess_x") == 1
+
+    async def test_count_consecutive_rescheduling_finds_tail_on_long_session(self) -> None:
+        """Regression for #154: on a session with more lifecycle events than the
+        default LIMIT, the counter must see the *recent* tail, not the oldest
+        200 rows — which in a long-running session are overwhelmingly early
+        ``end_turn`` events, yielding a spurious count of 0 and pinning retries
+        at the RETRY[0]=2s backoff forever.
+
+        This test stubs ``read_events`` with a function that honors the real
+        DB's ``LIMIT`` + ``ORDER BY`` semantics, so the arg shape decides the
+        result — exactly what the production query does.
+        """
+        fake_log = [
+            SimpleNamespace(seq=i, data={"event": "turn_ended", "stop_reason": "end_turn"})
+            for i in range(300)
+        ] + [
+            SimpleNamespace(
+                seq=300 + i, data={"event": "turn_ended", "stop_reason": "rescheduling"}
+            )
+            for i in range(5)
+        ]
+
+        async def stub_read_events(
+            pool: Any,
+            session_id: str,
+            *,
+            after_seq: int = 0,
+            kind: str | None = None,
+            limit: int = 200,
+            newest_first: bool = False,
+        ) -> list[Any]:
+            filtered = [e for e in fake_log if e.seq > after_seq]
+            if newest_first:
+                filtered = list(reversed(filtered))
+            return filtered[:limit]
+
+        pool = MagicMock()
+        with patch(
+            "aios.harness.loop.sessions_service.read_events",
+            AsyncMock(side_effect=stub_read_events),
+        ):
+            assert await _count_consecutive_rescheduling(pool, "sess_x") == 5
 
 
 # ─── exception handler tests ──────────────────────────────────────────────────
