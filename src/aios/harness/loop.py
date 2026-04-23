@@ -679,11 +679,14 @@ async def _dispatch_confirmed_tools(
             if tcid:
                 completed.add(tcid)
 
-    # Read lifecycle events to find tool_confirmed allow events.
+    # Read the recent tail; on long sessions the default ASC scan would read
+    # the oldest 200 lifecycle events and miss any fresh tool_confirmed.
     lifecycle_events = await sessions_service.read_events(
         pool,
         session_id,
         kind="lifecycle",
+        newest_first=True,
+        limit=200,
     )
     confirmed: set[str] = set()
     for e in lifecycle_events:
