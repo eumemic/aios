@@ -28,6 +28,7 @@ from aios.harness import runtime
 from aios.harness.completion import call_litellm, stream_litellm
 from aios.harness.step_context import compose_step_context
 from aios.harness.sweep import find_sessions_needing_inference
+from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.harness.wake import defer_retry_wake
 from aios.logging import get_logger
@@ -187,7 +188,11 @@ async def _run_session_step_body(
 
     # Read windowed message events for this session.
     events = await sessions_service.read_windowed_events(
-        pool, session_id, window_min=agent.window_min, window_max=agent.window_max
+        pool,
+        session_id,
+        window_min=agent.window_min,
+        window_max=agent.window_max,
+        model=agent.model,
     )
 
     # Check for confirmed-but-undispatched tool calls (always_ask → allow).
@@ -340,7 +345,12 @@ async def _run_session_step_body(
         await _append_lifecycle(pool, session_id, "turn_ended", "idle", "error")
         raise
 
-    # Emit span end with per-request token usage and LiteLLM-reported cost.
+    # ``local_tokens`` costs the full payload (messages + tools) so it
+    # matches what the provider counts.  The error branch above stays
+    # un-stamped; its ``is_error=True`` alone is enough to keep it out of
+    # calibration reads (the partial index and the aggregate query both
+    # filter on ``is_error=false``).
+    local_tokens = approx_tokens(messages, tools=tools)
     await sessions_service.append_event(
         pool,
         session_id,
@@ -351,6 +361,8 @@ async def _run_session_step_body(
             "is_error": False,
             "model_usage": usage,
             "cost_usd": cost_usd,
+            "local_tokens": local_tokens,
+            "model": agent.model,
         },
     )
 

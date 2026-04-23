@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, ClassVar
+
 from aios.harness.context import render_user_event
 from aios.harness.tokens import approx_tokens
 
@@ -84,3 +86,38 @@ class TestApproxTokensUnderFocalRendering:
         data = {"role": "user", "content": "hello"}
         rendered = render_user_event(data, None, None)
         assert approx_tokens([rendered]) == approx_tokens([data])
+
+
+class TestApproxTokensWithTools:
+    """The ``tools=`` kwarg exists so the ``model_request_end`` span-stamp
+    call site can cost the exact payload the provider sees (messages +
+    tools).
+
+    The two existing call sites in ``db/queries.py`` (per-event
+    cumulative_tokens) and ``tools/switch_channel.py`` (recap budget) hand
+    messages only — these tests pin that the default behavior is
+    byte-identical whether the kwarg is omitted, None, or [].
+    """
+
+    _MSGS: ClassVar[list[dict[str, Any]]] = [{"role": "user", "content": "what files are here"}]
+    _TOOL: ClassVar[dict[str, Any]] = {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    }
+
+    def test_tools_increase_cost(self) -> None:
+        assert approx_tokens(self._MSGS, tools=[self._TOOL]) > approx_tokens(self._MSGS)
+
+    def test_tools_none_identical_to_omitted(self) -> None:
+        assert approx_tokens(self._MSGS, tools=None) == approx_tokens(self._MSGS)
+
+    def test_tools_empty_list_identical_to_omitted(self) -> None:
+        assert approx_tokens(self._MSGS, tools=[]) == approx_tokens(self._MSGS)

@@ -14,6 +14,7 @@ seqs even when the API and the harness are appending concurrently.
 from __future__ import annotations
 
 import json
+import math
 from types import EllipsisType
 from typing import Any
 
@@ -833,6 +834,76 @@ async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: s
     return val
 
 
+async def model_token_ratio(
+    conn: asyncpg.Connection[Any],
+    model: str,
+    *,
+    n: int = 100,
+) -> float:
+    """Per-model actual/local token correction.
+
+    Returns ``SUM(actual) / SUM(local)`` over the most recent ``n``
+    successful ``model_request_end`` spans for ``model``.  Below ``n``
+    samples: returns ``1.0`` — R is too noisy to trust and applying it
+    would churn the prefix cache.  At or above ``n``: aggregates exactly
+    the last ``n`` samples.  The single parameter governs both the
+    activation threshold and the sliding-window size, so per-step drift
+    in R is bounded by the window itself.
+
+    ``model`` is the raw mind string (``agent.model``) — NO NORMALIZATION.
+    Different LiteLLM routes (``anthropic/...`` vs
+    ``openrouter/anthropic/...``) hit different provider tokenizers and
+    must partition separately.  The same string must appear at stamp time
+    and at query time for the same step — always plumb ``agent.model`` on
+    both sides.  aios sessions do not carry a model override; the session's
+    active mind is always its agent's configured model.
+
+    Scope: the aggregate pools samples across every session in this
+    database.  Token counts are scalar only — no content crosses between
+    sessions — but the ratio reflects the mixed workload of whatever
+    traffic has accumulated.
+
+    "actual" sums ``input_tokens + cache_read_input_tokens +
+    cache_creation_input_tokens`` from the provider's usage.  Output
+    tokens are excluded: we're correcting the size of the context we
+    sent, not what the model returned.  Uses the
+    ``events_model_request_end_calibration_idx`` partial index (migration
+    0024).
+    """
+    row = await conn.fetchrow(
+        """
+        WITH recent AS (
+            SELECT
+                (data->'model_usage'->>'input_tokens')::bigint              AS it,
+                (data->'model_usage'->>'cache_read_input_tokens')::bigint    AS cr,
+                (data->'model_usage'->>'cache_creation_input_tokens')::bigint AS cc,
+                (data->>'local_tokens')::bigint                               AS lt
+            FROM events
+            WHERE kind = 'span'
+              AND data->>'event' = 'model_request_end'
+              AND (data->>'is_error')::boolean = false
+              AND data->>'model' = $1
+              AND data ? 'local_tokens'
+              AND (data->>'local_tokens')::bigint > 0
+            ORDER BY seq DESC
+            LIMIT $2
+        )
+        SELECT
+            COUNT(*)                                                 AS k,
+            COALESCE(SUM(COALESCE(it, 0) + COALESCE(cr, 0)
+                         + COALESCE(cc, 0)), 0)::bigint              AS total_actual,
+            COALESCE(SUM(lt), 0)::bigint                             AS total_local
+        FROM recent
+        """,
+        model,
+        n,
+    )
+    assert row is not None
+    if row["k"] < n:
+        return 1.0
+    return float(row["total_actual"]) / float(row["total_local"])
+
+
 def _derive_tool_name(kind: str, data: dict[str, Any]) -> str | None:
     """Compute the stamped ``tool_name`` column for a new event.
 
@@ -1149,12 +1220,45 @@ async def read_windowed_events(
     *,
     window_min: int,
     window_max: int,
+    model: str,
 ) -> list[Event]:
     """Read message events for the session's trailing context window.
 
     Uses the ``cumulative_tokens`` column to compute the chunked-window
     snap boundary (same math as :func:`~aios.harness.window.select_window`)
     and loads only the events past that boundary.
+
+    ``cumulative_tokens`` is stored in model-agnostic units (see
+    :func:`aios.harness.tokens.approx_tokens`), so the raw value
+    systematically diverges from what the provider actually counts —
+    ~18 % low on Sonnet 4.6, ~34 % low on Opus 4.7.  This function
+    corrects for that at read time: ``window_min`` / ``window_max`` are
+    interpreted as provider tokens, ``total_effective = total_local * R``
+    where ``R = model_token_ratio(model)``, and the drop boundary is
+    translated back to local units for the ``cumulative_tokens`` index
+    scan.  When the model has fewer than ``model_token_ratio``'s sample
+    threshold, ``R`` is ``1.0`` and the math reduces to the plain
+    chunked-snap algorithm.
+
+    ``model`` must be the session's currently-active mind string —
+    ``agent.model`` on the session's pinned agent/version.  The same
+    string is what :func:`~aios.harness.loop.run_session_step` stamps on
+    ``model_request_end`` spans, so stamp-side and query-side stay
+    partitioned on identical keys.
+
+    Prefix-cache invariant: the plain chunked-snap algorithm gave a
+    *strict* guarantee of byte-identical prompt prefix within a snap
+    chunk.  With the ratio correction this weakens to a
+    *quantitatively-bounded* guarantee: R can shift slightly between
+    consecutive reads as new calibration samples land, which can nudge
+    ``drop_local`` across an event boundary and invalidate the prefix
+    cache for that turn.  With ``n=100`` samples, per-step drift in R is
+    <1 % for the models we've measured, so the expected invalidation rate
+    is well below Anthropic's ~5-minute cache TTL — accept-the-noise
+    tradeoff documented here for the next reader.  Revisit the ``n``
+    default in :func:`model_token_ratio` if a newly-onboarded model
+    shows per-sample CV above ~5 %, or if prefix-cache invalidation ever
+    shows up in telemetry for a steady-state workload.
 
     Falls back to :func:`read_message_events` (loading all events) when
     cumulative data is not available (pre-backfill sessions or rolling
@@ -1167,11 +1271,29 @@ async def read_windowed_events(
     if total is None:
         return await read_message_events(conn, session_id)
 
+    # Skip the ratio lookup when the session cannot possibly need a drop.
+    # ``total <= window_min`` guarantees ``total * R <= window_max`` for
+    # any ``R <= window_max / window_min`` — a ceiling of 3.0 for the
+    # default 50k/150k config, well above any measured per-model ratio.
+    # Saves one DB query on the common small-session path.
+    if total <= window_min:
+        return await read_message_events(conn, session_id)
+
+    ratio = await model_token_ratio(conn, model)
+
     from aios.harness.tokens import tokens_to_drop
 
-    drop = tokens_to_drop(total, window_min=window_min, window_max=window_max)
-    if drop == 0:
+    # Forward-convert local → effective with plain rounding: best-estimate
+    # of the provider-token total.  Back-convert effective → local with
+    # ceil: deliberately asymmetric so the post-drop remaining fits under
+    # ``window_max`` even when ratio error would otherwise leave one
+    # message straddling the boundary.
+    total_effective = round(total * ratio)
+    drop_effective = tokens_to_drop(total_effective, window_min=window_min, window_max=window_max)
+    if drop_effective == 0:
         return await read_message_events(conn, session_id)
+
+    drop = math.ceil(drop_effective / ratio)
 
     # Bounded range scan: only events past the boundary.
     rows = await conn.fetch(

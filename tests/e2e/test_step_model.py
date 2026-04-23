@@ -1579,6 +1579,17 @@ class TestUsageTracking:
         assert end.data["model_usage"]["output_tokens"] == 5
         assert "cost_usd" in end.data
         assert end.data["cost_usd"] is None
+        # Recompute approx_tokens from the exact payload the harness
+        # captured litellm receiving; a future refactor that stamps on the
+        # wrong list would slowly skew the ratio without this equality
+        # check noticing.
+        from aios.harness.tokens import approx_tokens
+
+        assert harness.model_calls, "expected at least one litellm call"
+        sent = harness.model_calls[-1]
+        expected_local = approx_tokens(sent["messages"], tools=sent.get("tools"))
+        assert end.data["local_tokens"] == expected_local
+        assert end.data["model"] == "fake/test"
 
     async def test_span_events_for_multi_step(self, harness: Harness) -> None:
         """Two model calls produce two span pairs."""

@@ -265,7 +265,11 @@ async def get_context(
     bindings, connections = await list_bindings_and_connections(pool, session_id)
 
     events = await service.read_windowed_events(
-        pool, session_id, window_min=agent.window_min, window_max=agent.window_max
+        pool,
+        session_id,
+        window_min=agent.window_min,
+        window_max=agent.window_max,
+        model=agent.model,
     )
 
     step_ctx = await compose_step_context(
