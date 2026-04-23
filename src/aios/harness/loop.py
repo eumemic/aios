@@ -28,6 +28,7 @@ from aios.harness import runtime
 from aios.harness.completion import call_litellm, stream_litellm
 from aios.harness.step_context import compose_step_context
 from aios.harness.sweep import find_sessions_needing_inference
+from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.harness.wake import defer_retry_wake
 from aios.logging import get_logger
@@ -185,9 +186,15 @@ async def _run_session_step_body(
     for c in connections:
         mcp_server_map[connection_server_name(c)] = c.mcp_url
 
-    # Read windowed message events for this session.
+    # Read windowed message events for this session.  ``model=agent.model``
+    # feeds the issue #160 per-model ratio correction so the configured
+    # ``window_min`` / ``window_max`` are honored as provider tokens.
     events = await sessions_service.read_windowed_events(
-        pool, session_id, window_min=agent.window_min, window_max=agent.window_max
+        pool,
+        session_id,
+        window_min=agent.window_min,
+        window_max=agent.window_max,
+        model=agent.model,
     )
 
     # Check for confirmed-but-undispatched tool calls (always_ask → allow).
@@ -341,6 +348,13 @@ async def _run_session_step_body(
         raise
 
     # Emit span end with per-request token usage and LiteLLM-reported cost.
+    # Stamp ``local_tokens`` + ``model`` for issue #160: the per-model token
+    # ratio is derived from SUM(actual)/SUM(local) over recent successful
+    # ends for the same model, pulled by ``model_token_ratio`` at windowing
+    # time.  ``local_tokens`` is of the full payload (messages + tools) so
+    # it matches what the provider actually counted; the error branch above
+    # deliberately stays un-stamped (partial index excludes it).
+    local_tokens = approx_tokens(messages, tools=tools or None)
     await sessions_service.append_event(
         pool,
         session_id,
@@ -351,6 +365,8 @@ async def _run_session_step_body(
             "is_error": False,
             "model_usage": usage,
             "cost_usd": cost_usd,
+            "local_tokens": local_tokens,
+            "model": agent.model,
         },
     )
 

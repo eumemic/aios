@@ -20,7 +20,11 @@ from litellm import token_counter
 # ─── estimator (delegates to litellm's local tokenizers) ──────────────────
 
 
-def approx_tokens(messages: Iterable[Mapping[str, Any]]) -> int:
+def approx_tokens(
+    messages: Iterable[Mapping[str, Any]],
+    *,
+    tools: Iterable[Mapping[str, Any]] | None = None,
+) -> int:
     """Estimate the chat-completions token cost of ``messages``.
 
     Delegates to :func:`litellm.token_counter` with no ``model``
@@ -33,12 +37,24 @@ def approx_tokens(messages: Iterable[Mapping[str, Any]]) -> int:
     The canonical shape is a list, so passing a bare dict would be a
     bug (it'd iterate the dict's keys as messages).
 
+    ``tools`` is optional and only passed by the model_request_end
+    span-stamp call site so the recorded ``local_tokens`` matches the
+    full payload the provider actually sees (messages + tools).  The
+    per-event ``cumulative_tokens`` call sites in ``append_event`` do
+    NOT pass tools: tool-schema overhead isn't per-event, and baking
+    it into per-event counts would perturb the running sum whenever
+    the agent's tool list changes.  The per-model ratio correction
+    (issue #160) absorbs the per-request tools overhead at read time.
+
     ``cumulative_tokens`` storage depends on this formula.  If the
     implementation changes (e.g. a different tokenizer, passing
     ``model=...``), re-run the backfill script to keep stored values
     honest.
     """
-    return int(token_counter(messages=list(messages)))
+    kwargs: dict[str, Any] = {"messages": list(messages)}
+    if tools:
+        kwargs["tools"] = list(tools)
+    return int(token_counter(**kwargs))
 
 
 # ─── snap boundary math ───────────────────────────────────────────────────

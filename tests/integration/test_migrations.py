@@ -90,6 +90,8 @@ def test_migration_creates_all_tables(postgres: object) -> None:
                 "agents_name_uniq",
                 "events_session_seq_idx",
                 "events_session_message_seq_idx",
+                # Migration 0024 (issue #160): per-model token-ratio lookup.
+                "events_model_request_end_calibration_idx",
             ):
                 assert required in index_names, f"missing index {required}"
         finally:

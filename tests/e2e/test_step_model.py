@@ -1579,6 +1579,10 @@ class TestUsageTracking:
         assert end.data["model_usage"]["output_tokens"] == 5
         assert "cost_usd" in end.data
         assert end.data["cost_usd"] is None
+        # Issue #160: calibration fields stamped on every successful end span.
+        assert isinstance(end.data["local_tokens"], int)
+        assert end.data["local_tokens"] > 0
+        assert end.data["model"] == "fake/test"
 
     async def test_span_events_for_multi_step(self, harness: Harness) -> None:
         """Two model calls produce two span pairs."""

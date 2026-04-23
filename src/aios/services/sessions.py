@@ -174,10 +174,15 @@ async def read_windowed_events(
     *,
     window_min: int,
     window_max: int,
+    model: str,
 ) -> list[Event]:
     async with pool.acquire() as conn:
         return await queries.read_windowed_events(
-            conn, session_id, window_min=window_min, window_max=window_max
+            conn,
+            session_id,
+            window_min=window_min,
+            window_max=window_max,
+            model=model,
         )
 
 
