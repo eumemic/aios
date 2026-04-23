@@ -52,6 +52,30 @@ class TestApproxTokens:
         assert approx_tokens(msgs) > approx_tokens(msgs[:1])
         assert approx_tokens(msgs) > approx_tokens(msgs[:2])
 
+    def test_tools_increase_cost(self) -> None:
+        """Tool schemas occupy space in Anthropic's prompt; excluding them
+        from the local estimate is the systematic bias issue #158 calibrates
+        away. Including them narrows the gap.
+        """
+        msgs = [{"role": "user", "content": "list files"}]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "Execute a shell command in the sandbox",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "shell command"},
+                        },
+                        "required": ["command"],
+                    },
+                },
+            }
+        ]
+        assert approx_tokens(msgs, tools=tools) > approx_tokens(msgs)
+
 
 class TestApproxTokensUnderFocalRendering:
     """The cumulative_tokens column is computed against the as-rendered

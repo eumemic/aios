@@ -833,6 +833,54 @@ async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: s
     return val
 
 
+async def recent_token_correction(conn: asyncpg.Connection[Any], session_id: str) -> float:
+    """Ratio of provider input_tokens to our local estimate from the most
+    recent successful turn, or 1.0 when no calibrated pair is available.
+
+    The provider's exact count of every prompt is already in the log
+    (``model_request_end.data.model_usage.input_tokens``); pairing it with
+    the preceding ``context_build_end``'s ``local_token_estimate`` yields a
+    ratio that encodes the systematic bias in our offline tokenizer for this
+    session's content shape. Self-corrects each turn — no external calls, no
+    stored state.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT
+            (mre.data->'model_usage'->>'input_tokens')::bigint AS provider_tokens,
+            (cbe.data->>'local_token_estimate')::bigint        AS local_tokens
+        FROM events mre
+        JOIN LATERAL (
+            SELECT data FROM events
+            WHERE session_id = mre.session_id
+              AND kind = 'span'
+              AND data->>'event' = 'context_build_end'
+              AND seq < mre.seq
+            ORDER BY seq DESC
+            LIMIT 1
+        ) cbe ON TRUE
+        WHERE mre.session_id = $1
+          AND mre.kind = 'span'
+          AND mre.data->>'event' = 'model_request_end'
+          AND COALESCE((mre.data->>'is_error')::boolean, false) = false
+          AND (mre.data->'model_usage'->>'input_tokens')::bigint > 0
+          -- Filter AFTER the LATERAL so an uncalibrated cbe rejects its own
+          -- mre rather than silently walking to an older step's cbe and
+          -- producing a cross-step ratio.
+          AND cbe.data ? 'local_token_estimate'
+        ORDER BY mre.seq DESC
+        LIMIT 1
+        """,
+        session_id,
+    )
+    if row is None:
+        return 1.0
+    local = row["local_tokens"]
+    if not local or local <= 0:
+        return 1.0
+    return float(row["provider_tokens"]) / float(local)
+
+
 def _derive_tool_name(kind: str, data: dict[str, Any]) -> str | None:
     """Compute the stamped ``tool_name`` column for a new event.
 
@@ -1152,35 +1200,35 @@ async def read_windowed_events(
 ) -> list[Event]:
     """Read message events for the session's trailing context window.
 
-    Uses the ``cumulative_tokens`` column to compute the chunked-window
-    snap boundary (same math as :func:`~aios.harness.window.select_window`)
-    and loads only the events past that boundary.
+    ``window_min`` / ``window_max`` are operator-facing budgets on *provider*
+    input tokens; ``cumulative_tokens`` is stored in our local tokenizer's
+    space. The windowing decision runs in provider space and the resulting
+    drop boundary is translated back to local space for the column predicate.
 
     Falls back to :func:`read_message_events` (loading all events) when
     cumulative data is not available (pre-backfill sessions or rolling
     deploys) or when the entire session fits within ``window_max``.
     """
-    # Index seek: total cumulative tokens from the latest message event.
-    total = await _latest_cumulative_tokens(conn, session_id)
-
-    # Fallback: no cumulative data yet — load everything.
-    if total is None:
+    total_local = await _latest_cumulative_tokens(conn, session_id)
+    if total_local is None:
         return await read_message_events(conn, session_id)
 
     from aios.harness.tokens import tokens_to_drop
 
-    drop = tokens_to_drop(total, window_min=window_min, window_max=window_max)
-    if drop == 0:
+    correction = await recent_token_correction(conn, session_id)
+    total_provider = int(total_local * correction)
+    drop_provider = tokens_to_drop(total_provider, window_min=window_min, window_max=window_max)
+    if drop_provider == 0:
         return await read_message_events(conn, session_id)
 
-    # Bounded range scan: only events past the boundary.
+    drop_local = int(drop_provider / correction)
     rows = await conn.fetch(
         "SELECT * FROM events "
         "WHERE session_id = $1 AND kind = 'message' "
         "AND cumulative_tokens > $2 "
         "ORDER BY seq ASC",
         session_id,
-        drop,
+        drop_local,
     )
     return [_row_to_event(r) for r in rows]
 

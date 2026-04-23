@@ -28,6 +28,7 @@ from aios.harness import runtime
 from aios.harness.completion import call_litellm, stream_litellm
 from aios.harness.step_context import compose_step_context
 from aios.harness.sweep import find_sessions_needing_inference
+from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.harness.wake import defer_retry_wake
 from aios.logging import get_logger
@@ -269,6 +270,7 @@ async def _run_session_step_body(
             "event_count_read": len(events),
             "message_count": len(messages),
             "tools_count": len(tools),
+            "local_token_estimate": approx_tokens(messages, tools=tools),
         },
     )
 

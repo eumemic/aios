@@ -20,7 +20,11 @@ from litellm import token_counter
 # ─── estimator (delegates to litellm's local tokenizers) ──────────────────
 
 
-def approx_tokens(messages: Iterable[Mapping[str, Any]]) -> int:
+def approx_tokens(
+    messages: Iterable[Mapping[str, Any]],
+    *,
+    tools: Iterable[Mapping[str, Any]] | None = None,
+) -> int:
     """Estimate the chat-completions token cost of ``messages``.
 
     Delegates to :func:`litellm.token_counter` with no ``model``
@@ -33,12 +37,23 @@ def approx_tokens(messages: Iterable[Mapping[str, Any]]) -> int:
     The canonical shape is a list, so passing a bare dict would be a
     bug (it'd iterate the dict's keys as messages).
 
+    Pass ``tools`` to include the tool schemas in the estimate. On
+    Anthropic routes in particular, tool definitions consume real
+    tokens in the prompt; excluding them produces a systematically
+    low estimate that the windower then has to correct for at read
+    time (see :func:`recent_token_correction`).
+
     ``cumulative_tokens`` storage depends on this formula.  If the
     implementation changes (e.g. a different tokenizer, passing
     ``model=...``), re-run the backfill script to keep stored values
     honest.
     """
-    return int(token_counter(messages=list(messages)))
+    return int(
+        token_counter(
+            messages=list(messages),
+            tools=list(tools) if tools is not None else None,
+        )
+    )
 
 
 # ─── snap boundary math ───────────────────────────────────────────────────
