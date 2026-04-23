@@ -270,7 +270,7 @@ async def _run_session_step_body(
             "event_count_read": len(events),
             "message_count": len(messages),
             "tools_count": len(tools),
-            "local_token_estimate": approx_tokens(messages, tools=tools),
+            "local_token_estimate": approx_tokens(messages),
         },
     )
 

@@ -14,6 +14,7 @@ seqs even when the API and the harness are appending concurrently.
 from __future__ import annotations
 
 import json
+import math
 from types import EllipsisType
 from typing import Any
 
@@ -875,10 +876,7 @@ async def recent_token_correction(conn: asyncpg.Connection[Any], session_id: str
     )
     if row is None:
         return 1.0
-    local = row["local_tokens"]
-    if not local or local <= 0:
-        return 1.0
-    return float(row["provider_tokens"]) / float(local)
+    return float(row["provider_tokens"]) / float(row["local_tokens"])
 
 
 def _derive_tool_name(kind: str, data: dict[str, Any]) -> str | None:
@@ -1221,7 +1219,9 @@ async def read_windowed_events(
     if drop_provider == 0:
         return await read_message_events(conn, session_id)
 
-    drop_local = int(drop_provider / correction)
+    # ceil so we drop AT LEAST enough local tokens to satisfy the
+    # provider-space drop — truncating would leave one message over-budget.
+    drop_local = math.ceil(drop_provider / correction)
     rows = await conn.fetch(
         "SELECT * FROM events "
         "WHERE session_id = $1 AND kind = 'message' "

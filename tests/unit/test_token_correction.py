@@ -37,11 +37,6 @@ class TestRecentTokenCorrection:
         got = await recent_token_correction(conn, "sess_x")
         assert got == pytest.approx(634052 / 417894)
 
-    async def test_zero_local_tokens_returns_one(self, conn: Any) -> None:
-        """Malformed / empty local estimate — no safe division, fall back."""
-        conn.fetchrow.return_value = {"provider_tokens": 1000, "local_tokens": 0}
-        assert await recent_token_correction(conn, "sess_x") == 1.0
-
     async def test_identity_ratio_when_tokenizers_agree(self, conn: Any) -> None:
         conn.fetchrow.return_value = {"provider_tokens": 500, "local_tokens": 500}
         assert await recent_token_correction(conn, "sess_x") == 1.0
