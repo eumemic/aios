@@ -347,8 +347,9 @@ async def _run_session_step_body(
 
     # ``local_tokens`` costs the full payload (messages + tools) so it
     # matches what the provider counts.  The error branch above stays
-    # un-stamped — the calibration partial index excludes rows missing
-    # ``local_tokens`` / ``model``.
+    # un-stamped; its ``is_error=True`` alone is enough to keep it out of
+    # calibration reads (the partial index and the aggregate query both
+    # filter on ``is_error=false``).
     local_tokens = approx_tokens(messages, tools=tools)
     await sessions_service.append_event(
         pool,

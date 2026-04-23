@@ -77,8 +77,12 @@ async def test_no_cumulative_falls_back_to_full_read() -> None:
 
 @pytest.mark.asyncio
 async def test_below_n_ratio_1_matches_today() -> None:
-    """With fewer than N samples, model_token_ratio returns 1.0 and the
-    math reduces to plain tokens_to_drop(total) — no ratio applied.
+    """Load-bearing backward-compatibility fence.  Do not delete.
+
+    While model_token_ratio is still warming up (or on a model the DB has
+    never seen), it returns 1.0 and ``read_windowed_events`` must behave
+    byte-identically to the pre-ratio chunked-snap algorithm — otherwise
+    the "gradual rollout" rollout property breaks.  This test pins that.
     """
     conn = _FakeConn(total_local=3_000, ratio_k=10, ratio_actual=0, ratio_local=0)
     # window_min=1000, window_max=2000 → chunk size 1000.

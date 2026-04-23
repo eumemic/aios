@@ -14,6 +14,7 @@ seqs even when the API and the harness are appending concurrently.
 from __future__ import annotations
 
 import json
+import math
 from types import EllipsisType
 from typing import Any
 
@@ -900,8 +901,6 @@ async def model_token_ratio(
     assert row is not None
     if row["k"] < n:
         return 1.0
-    if row["total_local"] <= 0 or row["total_actual"] <= 0:
-        return 1.0
     return float(row["total_actual"]) / float(row["total_local"])
 
 
@@ -1256,7 +1255,10 @@ async def read_windowed_events(
     cache for that turn.  With ``n=100`` samples, per-step drift in R is
     <1 % for the models we've measured, so the expected invalidation rate
     is well below Anthropic's ~5-minute cache TTL — accept-the-noise
-    tradeoff documented here for the next reader.
+    tradeoff documented here for the next reader.  Revisit the ``n``
+    default in :func:`model_token_ratio` if a newly-onboarded model
+    shows per-sample CV above ~5 %, or if prefix-cache invalidation ever
+    shows up in telemetry for a steady-state workload.
 
     Falls back to :func:`read_message_events` (loading all events) when
     cumulative data is not available (pre-backfill sessions or rolling
@@ -1267,6 +1269,14 @@ async def read_windowed_events(
 
     # Fallback: no cumulative data yet — load everything.
     if total is None:
+        return await read_message_events(conn, session_id)
+
+    # Skip the ratio lookup when the session cannot possibly need a drop.
+    # ``total <= window_min`` guarantees ``total * R <= window_max`` for
+    # any ``R <= window_max / window_min`` — a ceiling of 3.0 for the
+    # default 50k/150k config, well above any measured per-model ratio.
+    # Saves one DB query on the common small-session path.
+    if total <= window_min:
         return await read_message_events(conn, session_id)
 
     ratio = await model_token_ratio(conn, model)
@@ -1283,9 +1293,7 @@ async def read_windowed_events(
     if drop_effective == 0:
         return await read_message_events(conn, session_id)
 
-    import math
-
-    drop = drop_effective if ratio == 1.0 else math.ceil(drop_effective / ratio)
+    drop = math.ceil(drop_effective / ratio)
 
     # Bounded range scan: only events past the boundary.
     rows = await conn.fetch(

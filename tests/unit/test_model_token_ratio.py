@@ -1,10 +1,10 @@
 """Unit tests for :func:`aios.db.queries.model_token_ratio`.
 
-The SQL itself (partial-index coverage, JSON extraction, is_error filter,
-model-string partitioning, LIMIT-based sliding window) is exercised in
-``tests/e2e/test_model_token_ratio_sql.py`` against a real Postgres.  These
-tests pin the Python-side contract: below-N fallback, zero-totals
-defensive path, and the SUM/SUM arithmetic.
+The SQL itself — partial-index coverage, JSON extraction, is_error
+filter, model-string partitioning, and LIMIT-based sliding window — is
+exercised against a real Postgres in
+``tests/e2e/test_model_token_ratio_sql.py``.  These tests pin the
+Python-side contract only: below-N fallback and the SUM/SUM arithmetic.
 """
 
 from __future__ import annotations
@@ -49,21 +49,6 @@ class TestModelTokenRatio:
         conn = _mock_conn(k=100, total_actual=11_824, total_local=10_000)
         ratio = await model_token_ratio(conn, "model-x", n=100)
         assert ratio == pytest.approx(1.1824)
-
-    @pytest.mark.asyncio
-    async def test_zero_total_local_returns_1(self) -> None:
-        """Defensive: a row with k>=n but total_local=0 (shouldn't happen
-        because the WHERE filters local_tokens>0, but guard anyway).
-        """
-        conn = _mock_conn(k=50, total_actual=100, total_local=0)
-        ratio = await model_token_ratio(conn, "model-x", n=30)
-        assert ratio == 1.0
-
-    @pytest.mark.asyncio
-    async def test_zero_total_actual_returns_1(self) -> None:
-        conn = _mock_conn(k=50, total_actual=0, total_local=10_000)
-        ratio = await model_token_ratio(conn, "model-x", n=30)
-        assert ratio == 1.0
 
     @pytest.mark.asyncio
     async def test_default_n_is_100(self) -> None:
