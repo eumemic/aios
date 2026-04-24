@@ -32,14 +32,9 @@ class _FakeConn:
         total_local: int | None,
         ratio_n: int,
         ratio_mean: float,
-        ratio_stddev: float = 0.0,
     ) -> None:
         self.total_local = total_local
-        self.ratio_row = {
-            "n": ratio_n,
-            "mean_ratio": ratio_mean,
-            "stddev_ratio": ratio_stddev,
-        }
+        self.ratio_row = {"n": ratio_n, "mean_ratio": ratio_mean}
         self.fetch_calls: list[tuple[Any, ...]] = []
 
     async def fetchval(self, _sql: str, *_args: Any) -> int | None:
@@ -102,12 +97,15 @@ async def test_ratio_above_1_drops_more() -> None:
     """ratio=1.5 inflates total_effective so the drop boundary crosses a
     snap, and the returned drop_local ceil-divides back.
 
-    total_local=1500, ratio=1.5 → total_effective=2250.
+    total_local=1500, ratio≈1.5 → total_effective≈2250.
     window_min=1000, window_max=2000, chunk=1000.
     overshoot=250 → drop_effective=1000.
-    drop_local = ceil(1000 / 1.5) = 667.
+    drop_local = ceil(1000 / ratio) = 667.
+
+    Uses ratio_n=100 so the sigma_prior bucket (0.004 at n=100) is tight
+    enough to quantize raw=1.5 to exactly 1.5.
     """
-    conn = _FakeConn(total_local=1_500, ratio_n=5, ratio_mean=1.5)
+    conn = _FakeConn(total_local=1_500, ratio_n=100, ratio_mean=1.5)
     await queries.read_windowed_events(
         conn, "sess_x", window_min=1_000, window_max=2_000, model="m", overhead_local=0
     )

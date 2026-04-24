@@ -15,6 +15,8 @@ regression.
 
 from __future__ import annotations
 
+import uuid
+
 from aios.harness.tokens import approx_tokens
 from aios.models.agents import ToolSpec
 from aios.services import agents as agents_service
@@ -35,11 +37,16 @@ class TestWindowingOverhead:
             "Use tools when appropriate. "
         ) * 60
 
+        # Unique model name isolates this test's calibration aggregate
+        # from any other e2e case that uses the shared "fake/test" alias
+        # — otherwise leftover model_request_end spans from earlier tests
+        # can activate a per-fake/test R that perturbs the windowing math.
+        model = f"fake/overhead-{uuid.uuid4().hex[:8]}"
         env = await environments_service.create_environment(harness._pool, name="overhead-env")
         agent = await agents_service.create_agent(
             harness._pool,
             name="overhead-agent",
-            model="fake/test",
+            model=model,
             system=system,
             tools=[ToolSpec(type=t) for t in ("bash", "read", "write", "edit", "glob", "grep")],
             description=None,
@@ -90,11 +97,15 @@ class TestWindowingOverhead:
             "You are a test assistant. Be helpful, harmless, and honest. "
             "Use tools when appropriate. "
         ) * 60
+        # Same isolation reason as the sibling test — per-model calibration
+        # is shared across e2e cases by default if the model string isn't
+        # unique.
+        model = f"fake/overhead-tail-{uuid.uuid4().hex[:8]}"
         env = await environments_service.create_environment(harness._pool, name="overhead-tail-env")
         agent = await agents_service.create_agent(
             harness._pool,
             name="overhead-tail-agent",
-            model="fake/test",
+            model=model,
             system=system,
             tools=[ToolSpec(type=t) for t in ("bash", "read", "write", "edit", "glob", "grep")],
             description=None,

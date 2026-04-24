@@ -839,6 +839,15 @@ _MODEL_TOKEN_RATIO_MIN_SAMPLES = 5
 _MODEL_TOKEN_RATIO_MIN = 0.5
 _MODEL_TOKEN_RATIO_BUCKET_FLOOR = 0.001
 _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS = 60.0
+# Fixed per-sample stddev prior for the tokenizer ratio.  Empirically,
+# observed per-span CV is ~0.5-1.5 % across the models we've measured
+# (Opus 4.7: 0.75 %; Haiku 4.5: ~1 %), so 0.02 is a conservative upper
+# bound.  Keeping this fixed (rather than using the observed sample
+# stddev) makes the bucket width a deterministic function of ``n`` alone
+# — the core property #170 / #171 require: quantization stability is a
+# function of ``(n, mean)`` only, independent of the noisy observed-
+# stddev estimate that wobbles at small n.
+_MODEL_TOKEN_RATIO_SIGMA_PRIOR = 0.02
 _model_token_ratio_cache: dict[tuple[str, float], tuple[float, float]] = {}
 
 
@@ -855,21 +864,24 @@ async def model_token_ratio(
 ) -> float:
     """Per-model actual/local token correction.
 
-    Treats R as a fixed tokenizer parameter estimated from noisy observed
-    spans.  Returns the lifetime unweighted mean of per-span
-    ``actual/local`` ratios for successful ``model_request_end`` spans
-    for ``model``, quantized to a bucket derived from the standard error
-    of those same per-span ratios.  With very little data, returns
-    ``1.0`` so newly seen models preserve the old model-agnostic
-    windowing behavior until calibration is meaningful.
+    Treats R as a fixed tokenizer parameter estimated from noisy
+    observed spans.  Returns the lifetime unweighted mean of per-span
+    ``actual/local`` ratios, quantized to a prior-shaped bucket
+    ``max(k_bucket * sigma_prior / sqrt(n), 0.001)``.  With very little
+    data, returns ``1.0`` so newly seen models preserve the old
+    model-agnostic windowing behavior until calibration is meaningful.
 
-    The bucket width is ``max(k_bucket * stddev(per_span_ratio) / sqrt(n),
-    0.001)``.  The floor prevents tiny floating-point changes in a mature
-    aggregate from nudging ``read_windowed_events`` across event
-    boundaries and invalidating provider prefix caches every turn.  The
-    returned ratio is clamped to ``0.5`` as a physical lower bound: when
+    ``sigma_prior`` is a fixed per-sample spread prior (see
+    :data:`_MODEL_TOKEN_RATIO_SIGMA_PRIOR`).  Using the prior instead of
+    the observed sample stddev is what makes the bucket width a
+    deterministic function of ``n`` alone — the quantized R depends on
+    ``(n, mean)`` only.
+
+    The bucket floor (``0.001``) guards against float rounding nudging
+    the drop boundary across an event at very large ``n``.  The returned
+    ratio is clamped to ``0.5`` as a physical lower bound: when
     calibration data is pathological, prefer near-neutral windowing over
-    dividing by a near-zero R and dropping almost everything.
+    dividing by a near-zero R.
 
     Mature calibrated ratios are cached in-process for 60 seconds.  The
     lifetime aggregate is intentionally slow-moving, and caching prevents
@@ -932,9 +944,8 @@ async def model_token_ratio(
               AND (data->>'local_tokens')::bigint > 0
         )
         SELECT
-            COUNT(*)::bigint                                AS n,
-            COALESCE(AVG(it / NULLIF(lt, 0)), 0)::float      AS mean_ratio,
-            COALESCE(STDDEV(it / NULLIF(lt, 0)), 0)::float   AS stddev_ratio
+            COUNT(*)::bigint                            AS n,
+            COALESCE(AVG(it / NULLIF(lt, 0)), 0)::float AS mean_ratio
         FROM calibration
         """,
         model,
@@ -944,9 +955,10 @@ async def model_token_ratio(
         return 1.0
 
     raw = float(row["mean_ratio"])
-    stddev_ratio = float(row["stddev_ratio"] or 0.0)
-    standard_error = stddev_ratio / math.sqrt(float(row["n"]))
-    bucket = max(k_bucket * standard_error, _MODEL_TOKEN_RATIO_BUCKET_FLOOR)
+    bucket = max(
+        k_bucket * _MODEL_TOKEN_RATIO_SIGMA_PRIOR / math.sqrt(float(row["n"])),
+        _MODEL_TOKEN_RATIO_BUCKET_FLOOR,
+    )
     quantized = round(raw / bucket) * bucket
     ratio = max(quantized, _MODEL_TOKEN_RATIO_MIN)
     _model_token_ratio_cache[cache_key] = (
