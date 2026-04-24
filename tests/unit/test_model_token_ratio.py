@@ -51,12 +51,12 @@ class TestModelTokenRatio:
         assert ratio == pytest.approx(1.1824)
 
     @pytest.mark.asyncio
-    async def test_default_n_is_100(self) -> None:
-        # With k=99 and no explicit n, the 100-default should return 1.0.
-        conn = _mock_conn(k=99, total_actual=1_500, total_local=1_000)
+    async def test_default_n_is_30(self) -> None:
+        # k=29 with no explicit n: 30-default returns 1.0.
+        conn = _mock_conn(k=29, total_actual=1_500, total_local=1_000)
         assert await model_token_ratio(conn, "model-x") == 1.0
-        # k=100 activates the default threshold.
-        conn2 = _mock_conn(k=100, total_actual=1_500, total_local=1_000)
+        # k=30 activates the default threshold.
+        conn2 = _mock_conn(k=30, total_actual=1_500, total_local=1_000)
         assert await model_token_ratio(conn2, "model-x") == pytest.approx(1.5)
 
     @pytest.mark.asyncio
