@@ -76,9 +76,10 @@ async def compose_step_context(
         build_channels_tail_block,
     )
     from aios.harness.loop import (
-        _hide_conn_tools_when_phone_down,
+        _hide_focal_channel_tools_when_phone_down,
         _switch_channel_tool_spec,
         discover_session_mcp_tools,
+        mcp_channel_context_by_server,
     )
     from aios.harness.skills import augment_system_prompt
     from aios.services import skills as skills_service
@@ -94,9 +95,16 @@ async def compose_step_context(
         mcp_tools, mcp_instructions = await discover_session_mcp_tools(
             pool, session_id, agent, connections
         )
-        # Hide connection-provided MCP tools when focal is NULL — can't
-        # type into a chat you aren't attending to.
-        mcp_tools = _hide_conn_tools_when_phone_down(mcp_tools, session.focal_channel)
+        # Hide focal-channel MCP tools when focal is NULL — can't type
+        # into a chat you aren't attending to.
+        channel_context_by_server = mcp_channel_context_by_server(
+            agent.tools,
+            connections,
+            agent_mcp_server_names={s.name for s in agent.mcp_servers},
+        )
+        mcp_tools = _hide_focal_channel_tools_when_phone_down(
+            mcp_tools, session.focal_channel, channel_context_by_server
+        )
         tools.extend(mcp_tools)
 
     skill_versions = (

@@ -1,10 +1,9 @@
 """Unit tests for discover_session_mcp_tools.
 
 Covers the collect-URLs-then-discover shape: agent-declared MCP
-(filtered by enabled mcp_toolset entries) unioned with
-connection-provided MCP (derived from session bindings → connections).
-The MCP SDK and auth lookup are both mocked; only the orchestration
-is under test here.
+(filtered by enabled mcp_toolset entries), plus the legacy compatibility
+projection from session bindings → connections. The MCP SDK and auth lookup
+are both mocked; only the orchestration is under test here.
 """
 
 from __future__ import annotations
@@ -176,10 +175,17 @@ class TestDiscoverSessionMcpTools:
         )
         connections = [_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F", "https://m1")]
 
-        seen_urls: list[str] = []
+        seen: list[tuple[str, str | None]] = []
 
-        async def _fake_resolve(_pool: Any, _cb: Any, _sid: str, url: str) -> dict[str, str]:
-            seen_urls.append(url)
+        async def _fake_resolve(
+            _pool: Any,
+            _cb: Any,
+            _sid: str,
+            url: str,
+            *,
+            connection_vault_id: str | None = None,
+        ) -> dict[str, str]:
+            seen.append((url, connection_vault_id))
             return {"Authorization": f"Bearer token-for-{url}"}
 
         async def _discover(
@@ -197,7 +203,7 @@ class TestDiscoverSessionMcpTools:
                 agent=agent,
                 connections=connections,
             )
-        assert sorted(seen_urls) == ["https://m1", "https://mcp.github"]
+        assert sorted(seen) == [("https://m1", "vlt_x"), ("https://mcp.github", None)]
         auths = {t["auth"] for t in tools}
         assert auths == {
             "Bearer token-for-https://mcp.github",

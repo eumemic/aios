@@ -22,12 +22,11 @@ MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
 # per-channel ``last_seen`` watermark off successful switches.
 SWITCH_CHANNEL_METADATA_KEY = "switch_channel"
 
-# Top-level key inside the ``_meta`` field sent on JSON-RPC tool-call
-# requests to connection-provided MCP servers.  The value is the
-# focal-channel suffix (the focal channel address with its first two
-# ``<connector>/<account>`` segments stripped, since the connector
-# already knows its own connection identity).  The connector splits
-# this on ``/`` to recover its own per-chat identifiers.
+# Top-level key inside the ``_meta`` field sent on JSON-RPC tool-call requests
+# to focal-channel MCP toolsets. The value is the focal-channel suffix (the
+# focal channel address with its first two ``<connector>/<account>`` segments
+# stripped). The MCP server splits this on ``/`` to recover its own per-chat
+# identifiers.
 FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
 
 
@@ -53,8 +52,8 @@ def focal_channel_path(focal: str | None) -> str | None:
 
 
 def connection_server_name(c: Connection) -> str:
-    # c.id is "conn_<ULID>" — the ids.CONNECTION prefix is already the
-    # reserved namespace marker, so use it directly instead of stuttering.
+    # Legacy compatibility projection: connection rows can still be surfaced
+    # as MCP servers while integrations migrate to agent-declared MCP servers.
     assert c.id.startswith(CONNECTION_SERVER_NAME_PREFIX)
     return c.id
 

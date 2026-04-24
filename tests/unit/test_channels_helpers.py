@@ -85,9 +85,8 @@ def _connection(cid: str, connector: str = "signal", account: str = "acct") -> C
 
 
 class TestConnectionServerName:
-    """The connection id already starts with the reserved ``conn_``
-    prefix (via ``ids.CONNECTION``), so it doubles as the server name
-    directly — no stutter, still unambiguous by construction.
+    """The legacy connection-to-MCP projection uses the connection id directly
+    as the server name: no stutter, still unambiguous by construction.
     """
 
     def test_uses_id_directly(self) -> None:

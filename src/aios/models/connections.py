@@ -1,13 +1,17 @@
 """Connection resource and inbound-message DTOs.
 
-A *connection* is a registered ``(connector, account)`` pair plus the
-MCP URL the connector exposes for the agent to send replies back through.
-The address scheme used by the routing layer is::
+A *connection* is a registered ``(connector, account)`` pair used by the
+inbound channel router. The address scheme used by the routing layer is::
 
     {connector}/{account}/{path}
 
 where ``path`` is whatever sub-segments the connector emits for inbound
 messages (typically a chat or thread id).
+
+``mcp_url`` / ``vault_id`` remain on the resource as a compatibility
+projection for older connector setups. New channel-aware MCP integrations
+should declare normal agent ``mcp_servers`` and use session vaults for
+credentials.
 """
 
 from __future__ import annotations
@@ -17,9 +21,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-# Reserved prefix for MCP server names derived from a connection.  Keeps
-# connection-provided servers disjoint from agent-declared ones in the
-# shared mcp_server_map.
+# Legacy prefix for MCP server names projected from connection rows. New
+# channel-aware MCP integrations should use normal agent ``mcp_servers`` plus
+# ``mcp_toolset.channel_context`` instead of relying on this namespace.
 CONNECTION_SERVER_NAME_PREFIX = "conn_"
 
 

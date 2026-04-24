@@ -980,7 +980,7 @@ class TestInboundEndpoint:
 
 class TestListSessionBindings:
     """Unpaginated "all bindings for this session" lookup used by the
-    step function to derive connection-provided MCP URLs.
+    step function to derive channel account context.
     """
 
     async def test_empty_when_no_bindings(self, pool: Any, agent_id: str, env_id: str) -> None:

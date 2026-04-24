@@ -2181,17 +2181,6 @@ async def get_connections_by_pairs(
     return [_row_to_connection(r) for r in rows]
 
 
-async def get_connection_vault_for_url(
-    conn: asyncpg.Connection[Any], mcp_server_url: str
-) -> str | None:
-    """Vault id of the active connection owning ``mcp_server_url``, else ``None``."""
-    val: str | None = await conn.fetchval(
-        "SELECT vault_id FROM connections WHERE mcp_url = $1 AND archived_at IS NULL LIMIT 1",
-        mcp_server_url,
-    )
-    return val
-
-
 async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
     row = await conn.fetchrow(
         "UPDATE connections SET archived_at = now(), updated_at = now() "
@@ -2211,8 +2200,8 @@ async def count_active_bindings_for_connection(
 ) -> int:
     """Count active channel bindings owned by this connection.  Used to
     block connection archival while sessions are still reachable via
-    those bindings — archiving the connection would silently drop the
-    connection-provided MCP tools from any live session.
+    those bindings — archiving the connection would break inbound routing
+    and the legacy MCP projection for any live session.
     """
     val: int = await conn.fetchval(
         "SELECT COUNT(*) FROM channel_bindings WHERE connection_id = $1 AND archived_at IS NULL",
