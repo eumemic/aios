@@ -31,11 +31,17 @@ from aios.sandbox.container import ContainerError, ContainerHandle
 
 log = get_logger("aios.sandbox.provisioner")
 
-# Label applied at ``docker run`` time. The worker's orphan reaper lists
-# containers with this label at startup and removes any whose session_id
-# does not match an active worker lease.
+# Labels applied at ``docker run`` time. The worker's orphan reaper lists
+# containers with the managed+instance labels at startup and removes any
+# whose session_id does not match an active worker lease.
+#
+# The instance label scopes the reaper to containers belonging to this
+# aios deployment — critical when multiple worktrees or deployed instances
+# share a Docker daemon, otherwise worker A's startup would kill worker B's
+# running sandboxes.
 MANAGED_LABEL_KEY = "aios.managed"
 MANAGED_LABEL_VALUE = "true"
+INSTANCE_LABEL_KEY = "aios.instance_id"
 SESSION_LABEL_KEY = "aios.session_id"
 
 # Well-known hosts for public package registries.  Added to the iptables
@@ -146,6 +152,8 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         f"{workspace_path}:/workspace",
         "--label",
         f"{MANAGED_LABEL_KEY}={MANAGED_LABEL_VALUE}",
+        "--label",
+        f"{INSTANCE_LABEL_KEY}={settings.instance_id}",
         "--label",
         f"{SESSION_LABEL_KEY}={session_id}",
         "--network",
@@ -362,21 +370,27 @@ async def release(handle: ContainerHandle) -> None:
 
 
 async def list_managed_containers() -> list[tuple[str, str]]:
-    """List all containers labelled ``aios.managed=true``.
+    """List containers for this aios instance.
 
-    Returns a list of ``(container_id, session_id)`` tuples, where
-    ``session_id`` is read from the container's ``aios.session_id`` label.
-    Containers missing the session label are returned with an empty
-    string as their session_id (shouldn't happen, but we're defensive).
+    Returns ``(container_id, session_id)`` tuples for containers labelled
+    both ``aios.managed=true`` and ``aios.instance_id=<current instance>``.
+    ``session_id`` is read from the container's ``aios.session_id`` label;
+    containers missing that label are returned with an empty string
+    (shouldn't happen, but we're defensive).
 
-    Used by the worker's orphan reaper at startup.
+    Used by the worker's orphan reaper at startup. The instance filter is
+    load-bearing: without it, one worker's reaper would kill containers
+    belonging to a concurrent worker on the same Docker daemon.
     """
+    settings = get_settings()
     ps_argv = [
         "docker",
         "ps",
         "--quiet",
         "--filter",
         f"label={MANAGED_LABEL_KEY}={MANAGED_LABEL_VALUE}",
+        "--filter",
+        f"label={INSTANCE_LABEL_KEY}={settings.instance_id}",
     ]
     rc, stdout_bytes, stderr_bytes = await _run_docker(ps_argv)
     if rc != 0:

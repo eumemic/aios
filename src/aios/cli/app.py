@@ -97,6 +97,7 @@ from aios.cli.commands import agents as _agents  # noqa: E402
 from aios.cli.commands import bindings as _bindings  # noqa: E402
 from aios.cli.commands import chat as _chat  # noqa: E402
 from aios.cli.commands import connections as _connections  # noqa: E402
+from aios.cli.commands import dev as _dev  # noqa: E402
 from aios.cli.commands import envs as _envs  # noqa: E402
 from aios.cli.commands import ops as _ops  # noqa: E402
 from aios.cli.commands import rules as _rules  # noqa: E402
@@ -114,6 +115,7 @@ app.add_typer(_connections.app, name="connections")
 app.add_typer(_bindings.app, name="bindings")
 app.add_typer(_rules.app, name="rules")
 app.add_typer(_envs.app, name="envs")
+app.add_typer(_dev.app, name="dev")
 
 _ops.register(app)
 _status.register(app)

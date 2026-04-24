@@ -23,10 +23,30 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="AIOS_",
-        env_file=".env",
+        # Layered: user-level shared secrets (seeded once) then per-worktree
+        # overrides. Later file wins; process env still beats both. `~` is not
+        # expanded by pydantic-settings, so we resolve Path.home() explicitly.
+        # Missing files are silently skipped.
+        env_file=(
+            str(Path.home() / ".aios" / "secrets.env"),
+            ".env",
+        ),
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+    )
+
+    # ── instance identity ──────────────────────────────────────────────────
+    instance_id: str = Field(
+        default="default",
+        pattern=r"^[a-z_][a-z0-9_]*$",
+        description="Distinguishes concurrent aios deployments on a shared host. "
+        "Flows into Docker container labels so each worker's orphan-reaper only "
+        "touches its own containers, and into dev-bootstrap DB naming. The "
+        "`default` value preserves pre-existing single-instance behavior; `aios "
+        "dev bootstrap` writes a unique value per git worktree. The pattern "
+        "restricts the value to chars safe for Postgres identifiers and Docker "
+        "labels.",
     )
 
     # ── auth + crypto (required) ───────────────────────────────────────────
