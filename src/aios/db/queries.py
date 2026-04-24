@@ -863,21 +863,23 @@ async def model_token_ratio(
     sessions — but the ratio reflects the mixed workload of whatever
     traffic has accumulated.
 
-    "actual" sums ``input_tokens + cache_read_input_tokens +
-    cache_creation_input_tokens`` from the provider's usage.  Output
-    tokens are excluded: we're correcting the size of the context we
-    sent, not what the model returned.  Uses the
-    ``events_model_request_end_calibration_idx`` partial index (migration
-    0024).
+    "actual" is the provider's ``input_tokens`` usage value, which
+    LiteLLM normalizes to the OpenAI convention: ``input_tokens`` is
+    **the full prompt count**, including any cached-read or
+    cache-creation portion.  Do NOT sum ``cache_read_input_tokens`` or
+    ``cache_creation_input_tokens`` on top — they are breakdown metrics
+    within the same total, not disjoint extensions.  Output tokens are
+    excluded: we're correcting the size of the context we sent, not
+    what the model returned.  Uses the
+    ``events_model_request_end_calibration_idx`` partial index
+    (migration 0024).
     """
     row = await conn.fetchrow(
         """
         WITH recent AS (
             SELECT
-                (data->'model_usage'->>'input_tokens')::bigint              AS it,
-                (data->'model_usage'->>'cache_read_input_tokens')::bigint    AS cr,
-                (data->'model_usage'->>'cache_creation_input_tokens')::bigint AS cc,
-                (data->>'local_tokens')::bigint                               AS lt
+                (data->'model_usage'->>'input_tokens')::bigint AS it,
+                (data->>'local_tokens')::bigint                 AS lt
             FROM events
             WHERE kind = 'span'
               AND data->>'event' = 'model_request_end'
@@ -889,10 +891,9 @@ async def model_token_ratio(
             LIMIT $2
         )
         SELECT
-            COUNT(*)                                                 AS k,
-            COALESCE(SUM(COALESCE(it, 0) + COALESCE(cr, 0)
-                         + COALESCE(cc, 0)), 0)::bigint              AS total_actual,
-            COALESCE(SUM(lt), 0)::bigint                             AS total_local
+            COUNT(*)                                AS k,
+            COALESCE(SUM(it), 0)::bigint            AS total_actual,
+            COALESCE(SUM(lt), 0)::bigint            AS total_local
         FROM recent
         """,
         model,

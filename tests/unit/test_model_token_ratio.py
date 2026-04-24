@@ -68,3 +68,15 @@ class TestModelTokenRatio:
         # Positional args after the SQL string: (model, n)
         assert args.args[1] == "anthropic/claude-sonnet-4-6"
         assert args.args[2] == 200
+
+    @pytest.mark.asyncio
+    async def test_sql_does_not_sum_cache_fields(self) -> None:
+        """Regression: summing ``cache_*`` breakdown fields with
+        ``input_tokens`` double-counts and roughly doubles R on
+        cache-hot workloads."""
+        conn = _mock_conn(k=0, total_actual=0, total_local=0)
+        await model_token_ratio(conn, "model-x", n=1)
+        sql = conn.fetchrow.await_args.args[0]
+        assert sql.count("'input_tokens'") == 1
+        assert "cache_read_input_tokens" not in sql
+        assert "cache_creation_input_tokens" not in sql

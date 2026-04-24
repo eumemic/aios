@@ -97,10 +97,15 @@ class TestModelTokenRatioSQL:
             ratio = await queries.model_token_ratio(conn, model, n=30)
         assert ratio == pytest.approx(1.5)
 
-    async def test_sums_cache_tokens_into_actual(self, harness: Harness) -> None:
-        """Anthropic's usage splits input into plain + cache_read +
-        cache_creation.  The ratio has to count the total prefill, not just
-        the uncached slice."""
+    async def test_ignores_cache_breakdown_fields(self, harness: Harness) -> None:
+        """LiteLLM normalizes Anthropic's usage to the OpenAI convention:
+        ``input_tokens`` is already the full prompt count (including any
+        cached-read and cache-creation portions).  ``cache_read_input_tokens``
+        and ``cache_creation_input_tokens`` are breakdown metrics within
+        that total — they MUST NOT be summed on top.  This case pins the
+        invariant: seeding spans with nonzero cache_* fields does not
+        change the ratio; only ``input_tokens`` and ``local_tokens``
+        contribute."""
         model = f"test-model-{uuid.uuid4().hex[:8]}"
         session = await harness.start("seed")
         for _ in range(30):
@@ -109,13 +114,14 @@ class TestModelTokenRatioSQL:
                 session.id,
                 model=model,
                 local_tokens=100,
-                input_tokens=50,
+                input_tokens=150,
                 cache_read=60,
                 cache_creation=40,
             )
         async with harness._pool.acquire() as conn:
             ratio = await queries.model_token_ratio(conn, model, n=30)
-        # total_actual per span = 50+60+40 = 150 → ratio = 150/100 = 1.5
+        # total_actual per span = input_tokens = 150 (cache_* ignored).
+        # ratio = 150/100 = 1.5.
         assert ratio == pytest.approx(1.5)
 
     async def test_excludes_error_spans(self, harness: Harness) -> None:
