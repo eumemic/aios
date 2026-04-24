@@ -248,7 +248,8 @@ async def get_context(
     read-only.
     """
     from aios.harness.channels import list_bindings_and_connections
-    from aios.harness.step_context import compose_step_context
+    from aios.harness.step_context import compose_step_context, compute_step_prelude
+    from aios.harness.tokens import approx_tokens
     from aios.models.agents import Agent, AgentVersion
     from aios.services import agents as agents_service
 
@@ -264,21 +265,33 @@ async def get_context(
 
     bindings, connections = await list_bindings_and_connections(pool, session_id)
 
-    events = await service.read_windowed_events(
-        pool,
-        session_id,
-        window_min=agent.window_min,
-        window_max=agent.window_max,
-        model=agent.model,
-    )
-
-    step_ctx = await compose_step_context(
+    prelude = await compute_step_prelude(
         pool,
         session_id,
         session=session,
         agent=agent,
         bindings=bindings,
         connections=connections,
+    )
+    overhead_local = approx_tokens(
+        [{"role": "system", "content": prelude.system_prompt}],
+        tools=prelude.tools,
+    )
+
+    events = await service.read_windowed_events(
+        pool,
+        session_id,
+        window_min=agent.window_min,
+        window_max=agent.window_max,
+        model=agent.model,
+        overhead_local=overhead_local,
+    )
+
+    step_ctx = await compose_step_context(
+        session=session,
+        agent=agent,
+        bindings=bindings,
+        prelude=prelude,
         events=events,
     )
     return ContextResponse(

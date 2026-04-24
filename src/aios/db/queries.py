@@ -1222,6 +1222,7 @@ async def read_windowed_events(
     window_min: int,
     window_max: int,
     model: str,
+    overhead_local: int,
 ) -> list[Event]:
     """Read message events for the session's trailing context window.
 
@@ -1240,6 +1241,14 @@ async def read_windowed_events(
     scan.  When the model has fewer than ``model_token_ratio``'s sample
     threshold, ``R`` is ``1.0`` and the math reduces to the plain
     chunked-snap algorithm.
+
+    ``overhead_local`` is the token cost the caller will add on top of
+    the returned events — system prompt plus tool schemas — in local
+    (``approx_tokens``) units.  It is NOT included in
+    ``cumulative_tokens``, so the windower has to subtract it from the
+    effective budget up-front or the sent prompt will exceed
+    ``window_max`` by the overhead amount.  Callers that don't have any
+    such overhead (preview tooling, test scaffolds) pass ``0``.
 
     ``model`` must be the session's currently-active mind string —
     ``agent.model`` on the session's pinned agent/version.  The same
@@ -1271,15 +1280,23 @@ async def read_windowed_events(
     if total is None:
         return await read_message_events(conn, session_id)
 
-    # Skip the ratio lookup when the session cannot possibly need a drop.
-    # ``total <= window_min`` guarantees ``total * R <= window_max`` for
-    # any ``R <= window_max / window_min`` — a ceiling of 3.0 for the
-    # default 50k/150k config, well above any measured per-model ratio.
-    # Saves one DB query on the common small-session path.
-    if total <= window_min:
-        return await read_message_events(conn, session_id)
-
     ratio = await model_token_ratio(conn, model)
+
+    # Shrink the effective window by the caller's overhead contribution.
+    # Apply R to overhead_local up-front so the subtraction happens in the
+    # same effective (provider-token) space tokens_to_drop operates in.
+    overhead_effective = round(overhead_local * ratio)
+    events_window_max = window_max - overhead_effective
+    events_window_min = max(0, window_min - overhead_effective)
+    if events_window_max <= 0:
+        raise ValueError(
+            f"system+tools overhead ({overhead_effective} provider tokens) "
+            f"exceeds window_max ({window_max}); no budget remains for events"
+        )
+
+    total_effective = round(total * ratio)
+    if total_effective <= events_window_max:
+        return await read_message_events(conn, session_id)
 
     from aios.harness.tokens import tokens_to_drop
 
@@ -1288,8 +1305,9 @@ async def read_windowed_events(
     # ceil: deliberately asymmetric so the post-drop remaining fits under
     # ``window_max`` even when ratio error would otherwise leave one
     # message straddling the boundary.
-    total_effective = round(total * ratio)
-    drop_effective = tokens_to_drop(total_effective, window_min=window_min, window_max=window_max)
+    drop_effective = tokens_to_drop(
+        total_effective, window_min=events_window_min, window_max=events_window_max
+    )
     if drop_effective == 0:
         return await read_message_events(conn, session_id)
 

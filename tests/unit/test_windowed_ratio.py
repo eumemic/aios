@@ -69,7 +69,7 @@ def _stub_read_message_events(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_no_cumulative_falls_back_to_full_read() -> None:
     conn = _FakeConn(total_local=None, ratio_k=0, ratio_actual=0, ratio_local=0)
     result = await queries.read_windowed_events(
-        conn, "sess_x", window_min=1_000, window_max=2_000, model="m"
+        conn, "sess_x", window_min=1_000, window_max=2_000, model="m", overhead_local=0
     )
     # Fallback short-circuit — ratio never consulted.
     assert result == ["_fallback_sentinel"]
@@ -88,7 +88,7 @@ async def test_below_n_ratio_1_matches_today() -> None:
     # window_min=1000, window_max=2000 → chunk size 1000.
     # total=3000 → overshoot 1000 → drop 1000 (one chunk).
     await queries.read_windowed_events(
-        conn, "sess_x", window_min=1_000, window_max=2_000, model="m"
+        conn, "sess_x", window_min=1_000, window_max=2_000, model="m", overhead_local=0
     )
     assert conn.fetch_calls, "expected bounded range scan to be called"
     # Second positional arg to conn.fetch is the drop value.
@@ -108,7 +108,7 @@ async def test_ratio_above_1_drops_more() -> None:
     """
     conn = _FakeConn(total_local=1_500, ratio_k=100, ratio_actual=150, ratio_local=100)
     await queries.read_windowed_events(
-        conn, "sess_x", window_min=1_000, window_max=2_000, model="m"
+        conn, "sess_x", window_min=1_000, window_max=2_000, model="m", overhead_local=0
     )
     _session_id, drop_local = conn.fetch_calls[-1]
     assert drop_local == 667
@@ -119,7 +119,7 @@ async def test_ratio_below_1_drops_fewer() -> None:
     """ratio=0.5 deflates total_effective below window_max → no drop."""
     conn = _FakeConn(total_local=3_000, ratio_k=100, ratio_actual=50, ratio_local=100)
     result = await queries.read_windowed_events(
-        conn, "sess_x", window_min=1_000, window_max=2_000, model="m"
+        conn, "sess_x", window_min=1_000, window_max=2_000, model="m", overhead_local=0
     )
     # total_effective = 1500 < 2000 → drop_effective = 0 → fallback.
     assert result == ["_fallback_sentinel"]
@@ -151,7 +151,7 @@ async def test_ceil_div_never_overshoots_window(
 
     conn.fetch = _fetch
     await queries.read_windowed_events(
-        conn, "sess_x", window_min=window_min, window_max=window_max, model="m"
+        conn, "sess_x", window_min=window_min, window_max=window_max, model="m", overhead_local=0
     )
     drop_local = captured["drop_local"]
     remaining_local = total_local - drop_local
