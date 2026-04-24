@@ -28,7 +28,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from aios.harness.context import build_messages, separate_adjacent_user_messages
+from aios.harness.context import (
+    build_messages,
+    separate_adjacent_user_messages,
+    stub_missing_reasoning_content,
+)
 from aios.tools.registry import to_openai_tools
 
 if TYPE_CHECKING:
@@ -165,6 +169,12 @@ async def compose_step_context(
     # Block LiteLLM's adjacent-same-role merge on Anthropic so the tail
     # isn't concatenated into the preceding user inbound.
     messages = separate_adjacent_user_messages(ctx.messages)
+
+    # Unblock thinking-mode models: DeepSeek V4 Flash rejects assistant
+    # turns without reasoning_content.  Empty stub is ignored by all
+    # non-thinking providers we've tested (Anthropic, OpenAI, Gemini,
+    # Llama, non-thinking DeepSeek).
+    stub_missing_reasoning_content(messages)
 
     return StepContext(
         model=agent.model,

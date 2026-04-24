@@ -510,6 +510,29 @@ def _prune_leading_orphans(messages: list[dict[str, Any]]) -> list[dict[str, Any
     return messages[start:]
 
 
+def stub_missing_reasoning_content(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Ensure every assistant message carries ``reasoning_content``.
+
+    Thinking-mode models (DeepSeek V4 Flash, etc.) reject transcripts
+    whose assistant turns lack this field: ``The reasoning_content in the
+    thinking mode must be passed back to the API``.  Non-thinking models
+    (Anthropic / OpenAI / Gemini / Llama / DeepSeek v3 — all probed)
+    ignore the field entirely, so setting an empty stub unconditionally
+    costs nothing and lets cross-model sessions use thinking models for
+    a single turn without poisoning their replay on other providers.
+
+    Mutates messages in place and returns the list for chaining.  Skips
+    messages that already have a reasoning_content set (from a prior
+    thinking-model turn whose output we preserved opaquely in the log).
+    """
+    for msg in messages:
+        if msg.get("role") == "assistant" and "reasoning_content" not in msg:
+            msg["reasoning_content"] = ""
+    return messages
+
+
 def separate_adjacent_user_messages(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:

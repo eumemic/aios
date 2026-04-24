@@ -14,6 +14,7 @@ from aios.harness.context import (
     build_messages,
     separate_adjacent_user_messages,
     should_call_model,
+    stub_missing_reasoning_content,
 )
 from aios.models.channel_bindings import ChannelBinding
 from aios.models.events import Event
@@ -1094,6 +1095,58 @@ class TestSeparateAdjacentUserMessages:
             {"role": "assistant", "content": ""},
             {"role": "user", "content": "two"},
         ]
+
+
+class TestStubMissingReasoningContent:
+    def test_adds_empty_stub_to_assistant_without_reasoning(self) -> None:
+        msgs = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        stub_missing_reasoning_content(msgs)
+        assert msgs[1] == {"role": "assistant", "content": "hello", "reasoning_content": ""}
+
+    def test_preserves_existing_reasoning_content(self) -> None:
+        msgs = [
+            {"role": "assistant", "content": "ok", "reasoning_content": "deep thoughts"},
+        ]
+        stub_missing_reasoning_content(msgs)
+        assert msgs[0]["reasoning_content"] == "deep thoughts"
+
+    def test_ignores_user_messages(self) -> None:
+        msgs = [{"role": "user", "content": "hi"}]
+        stub_missing_reasoning_content(msgs)
+        assert msgs[0] == {"role": "user", "content": "hi"}
+
+    def test_ignores_tool_messages(self) -> None:
+        msgs = [{"role": "tool", "tool_call_id": "x", "content": "result"}]
+        stub_missing_reasoning_content(msgs)
+        assert msgs[0] == {"role": "tool", "tool_call_id": "x", "content": "result"}
+
+    def test_stubs_empty_assistant_separator(self) -> None:
+        """The empty-assistant separator inserted by
+        :func:`separate_adjacent_user_messages` is still an assistant
+        message and must also carry the stub."""
+        msgs = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": ""},
+            {"role": "user", "content": "b"},
+        ]
+        stub_missing_reasoning_content(msgs)
+        assert msgs[1] == {"role": "assistant", "content": "", "reasoning_content": ""}
+
+    def test_mutates_in_place_and_returns(self) -> None:
+        msgs = [{"role": "assistant", "content": "x"}]
+        returned = stub_missing_reasoning_content(msgs)
+        assert returned is msgs
+
+    def test_handles_tool_call_assistants(self) -> None:
+        msgs = [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
+        ]
+        stub_missing_reasoning_content(msgs)
+        assert msgs[0]["reasoning_content"] == ""
+        assert msgs[0]["tool_calls"] == [{"id": "a"}]
 
 
 class TestSeparateAdjacentUserMessagesPipeline:

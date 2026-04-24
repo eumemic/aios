@@ -55,8 +55,14 @@ class TestSeparatorAtLiteLLMBoundary:
         assert tail_idx > 0, "tail block should not be first — there's an inbound before it"
 
         prev = msgs[tail_idx - 1]
-        assert prev == {"role": "assistant", "content": ""}, (
+        # The separator is an empty-assistant message.  ``reasoning_content``
+        # is stubbed empty too so thinking-mode providers don't reject the
+        # transcript (see ``stub_missing_reasoning_content``).
+        assert prev.get("role") == "assistant" and prev.get("content") == "", (
             f"expected empty-assistant separator before tail, got prev={prev!r}, tail={msgs[tail_idx]!r}"
+        )
+        assert prev.get("reasoning_content") == "", (
+            f"expected reasoning_content stub on separator, got prev={prev!r}"
         )
 
     async def test_no_separator_when_tail_block_absent(self, harness: Harness) -> None:
