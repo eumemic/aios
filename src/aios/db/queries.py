@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from types import EllipsisType
 from typing import Any
 
@@ -834,21 +835,47 @@ async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: s
     return val
 
 
+_MODEL_TOKEN_RATIO_MIN_SAMPLES = 5
+_MODEL_TOKEN_RATIO_MIN = 0.5
+_MODEL_TOKEN_RATIO_BUCKET_FLOOR = 0.001
+_MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS = 60.0
+_model_token_ratio_cache: dict[tuple[str, float], tuple[float, float]] = {}
+
+
+def _clear_model_token_ratio_cache() -> None:
+    """Clear the process-local token-ratio cache for tests."""
+    _model_token_ratio_cache.clear()
+
+
 async def model_token_ratio(
     conn: asyncpg.Connection[Any],
     model: str,
     *,
-    n: int = 30,
+    k_bucket: float = 2.0,
 ) -> float:
     """Per-model actual/local token correction.
 
-    Returns ``SUM(actual) / SUM(local)`` over the most recent ``n``
-    successful ``model_request_end`` spans for ``model``.  Below ``n``
-    samples: returns ``1.0`` — R is too noisy to trust and applying it
-    would churn the prefix cache.  At or above ``n``: aggregates exactly
-    the last ``n`` samples.  The single parameter governs both the
-    activation threshold and the sliding-window size, so per-step drift
-    in R is bounded by the window itself.
+    Treats R as a fixed tokenizer parameter estimated from noisy observed
+    spans.  Returns the lifetime unweighted mean of per-span
+    ``actual/local`` ratios for successful ``model_request_end`` spans
+    for ``model``, quantized to a bucket derived from the standard error
+    of those same per-span ratios.  With very little data, returns
+    ``1.0`` so newly seen models preserve the old model-agnostic
+    windowing behavior until calibration is meaningful.
+
+    The bucket width is ``max(k_bucket * stddev(per_span_ratio) / sqrt(n),
+    0.001)``.  The floor prevents tiny floating-point changes in a mature
+    aggregate from nudging ``read_windowed_events`` across event
+    boundaries and invalidating provider prefix caches every turn.  The
+    returned ratio is clamped to ``0.5`` as a physical lower bound: when
+    calibration data is pathological, prefer near-neutral windowing over
+    dividing by a near-zero R and dropping almost everything.
+
+    Mature calibrated ratios are cached in-process for 60 seconds.  The
+    lifetime aggregate is intentionally slow-moving, and caching prevents
+    every windowing call from rescanning all historical calibration spans.
+    Below-threshold results are not cached, so newly accumulating models
+    can activate as soon as the minimum sample count is reached.
 
     ``model`` is the raw mind string (``agent.model``) — NO NORMALIZATION.
     Different LiteLLM routes (``anthropic/...`` vs
@@ -874,35 +901,59 @@ async def model_token_ratio(
     ``events_model_request_end_calibration_idx`` partial index
     (migration 0024).
     """
+    if k_bucket <= 0:
+        raise ValueError("k_bucket must be positive")
+
+    cache_key = (model, k_bucket)
+    now = time.monotonic()
+    cached = _model_token_ratio_cache.get(cache_key)
+    if cached is not None:
+        expires_at, ratio = cached
+        if expires_at > now:
+            return ratio
+        del _model_token_ratio_cache[cache_key]
+
     row = await conn.fetchrow(
         """
-        WITH recent AS (
+        WITH calibration AS (
             SELECT
-                (data->'model_usage'->>'input_tokens')::bigint AS it,
-                (data->>'local_tokens')::bigint                 AS lt
+                (data->'model_usage'->>'input_tokens')::float AS it,
+                (data->>'local_tokens')::bigint                AS lt
             FROM events
             WHERE kind = 'span'
               AND data->>'event' = 'model_request_end'
               AND (data->>'is_error')::boolean = false
               AND data->>'model' = $1
               AND data ? 'local_tokens'
+              AND data ? 'model'
+              -- Exclude old/malformed success spans before casting.
+              AND (data->'model_usage') ? 'input_tokens'
+              AND (data->'model_usage'->>'input_tokens') IS NOT NULL
               AND (data->>'local_tokens')::bigint > 0
-            ORDER BY seq DESC
-            LIMIT $2
         )
         SELECT
-            COUNT(*)                                AS k,
-            COALESCE(SUM(it), 0)::bigint            AS total_actual,
-            COALESCE(SUM(lt), 0)::bigint            AS total_local
-        FROM recent
+            COUNT(*)::bigint                                AS n,
+            COALESCE(AVG(it / NULLIF(lt, 0)), 0)::float      AS mean_ratio,
+            COALESCE(STDDEV(it / NULLIF(lt, 0)), 0)::float   AS stddev_ratio
+        FROM calibration
         """,
         model,
-        n,
     )
     assert row is not None
-    if row["k"] < n:
+    if row["n"] < _MODEL_TOKEN_RATIO_MIN_SAMPLES:
         return 1.0
-    return float(row["total_actual"]) / float(row["total_local"])
+
+    raw = float(row["mean_ratio"])
+    stddev_ratio = float(row["stddev_ratio"] or 0.0)
+    standard_error = stddev_ratio / math.sqrt(float(row["n"]))
+    bucket = max(k_bucket * standard_error, _MODEL_TOKEN_RATIO_BUCKET_FLOOR)
+    quantized = round(raw / bucket) * bucket
+    ratio = max(quantized, _MODEL_TOKEN_RATIO_MIN)
+    _model_token_ratio_cache[cache_key] = (
+        now + _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS,
+        ratio,
+    )
+    return ratio
 
 
 def _derive_tool_name(kind: str, data: dict[str, Any]) -> str | None:
@@ -1258,16 +1309,11 @@ async def read_windowed_events(
 
     Prefix-cache invariant: the plain chunked-snap algorithm gave a
     *strict* guarantee of byte-identical prompt prefix within a snap
-    chunk.  With the ratio correction this weakens to a
-    *quantitatively-bounded* guarantee: R can shift slightly between
-    consecutive reads as new calibration samples land, which can nudge
-    ``drop_local`` across an event boundary and invalidate the prefix
-    cache for that turn.  With ``n=30`` samples, per-step drift in R
-    scales with the per-sample CV — Opus measured at ~0.2 % CV, putting
-    drift well below Anthropic's ~5-minute cache TTL.  Revisit the ``n``
-    default in :func:`model_token_ratio` if a newly-onboarded model
-    shows per-sample CV above ~1 %, or if prefix-cache invalidation ever
-    shows up in telemetry for a steady-state workload.
+    chunk.  With the ratio correction this remains stable in practice
+    because :func:`model_token_ratio` uses a lifetime aggregate and
+    standard-error bucketing, so mature calibrations do not drift on every
+    new sample.  Early calibrations are coarse by design and converge as
+    the sample count grows.
 
     Falls back to :func:`read_message_events` (loading all events) when
     cumulative data is not available (pre-backfill sessions or rolling

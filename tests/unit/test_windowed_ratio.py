@@ -21,8 +21,8 @@ class _FakeConn:
     """Minimal asyncpg.Connection stand-in.
 
     ``fetchval`` serves ``_latest_cumulative_tokens`` (total local tokens).
-    ``fetchrow`` serves ``model_token_ratio`` (the ``SELECT k, total_actual,
-    total_local`` row).  ``fetch`` captures the bounded range scan's args so
+    ``fetchrow`` serves ``model_token_ratio`` (the lifetime calibration
+    aggregate row).  ``fetch`` captures the bounded range scan's args so
     tests can assert the computed ``drop_local``.
     """
 
@@ -30,15 +30,15 @@ class _FakeConn:
         self,
         *,
         total_local: int | None,
-        ratio_k: int,
-        ratio_actual: int,
-        ratio_local: int,
+        ratio_n: int,
+        ratio_mean: float,
+        ratio_stddev: float = 0.0,
     ) -> None:
         self.total_local = total_local
         self.ratio_row = {
-            "k": ratio_k,
-            "total_actual": ratio_actual,
-            "total_local": ratio_local,
+            "n": ratio_n,
+            "mean_ratio": ratio_mean,
+            "stddev_ratio": ratio_stddev,
         }
         self.fetch_calls: list[tuple[Any, ...]] = []
 
@@ -58,6 +58,7 @@ def _stub_read_message_events(monkeypatch: pytest.MonkeyPatch) -> None:
     """Short-circuit ``read_message_events`` so no real DB is hit when the
     code path falls back to 'load everything'.  We sentinel its return so
     tests can detect the fallback."""
+    queries._clear_model_token_ratio_cache()
     monkeypatch.setattr(
         queries,
         "read_message_events",
@@ -67,7 +68,7 @@ def _stub_read_message_events(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_no_cumulative_falls_back_to_full_read() -> None:
-    conn = _FakeConn(total_local=None, ratio_k=0, ratio_actual=0, ratio_local=0)
+    conn = _FakeConn(total_local=None, ratio_n=0, ratio_mean=0.0)
     result = await queries.read_windowed_events(
         conn, "sess_x", window_min=1_000, window_max=2_000, model="m", overhead_local=0
     )
@@ -76,15 +77,15 @@ async def test_no_cumulative_falls_back_to_full_read() -> None:
 
 
 @pytest.mark.asyncio
-async def test_below_n_ratio_1_matches_today() -> None:
+async def test_insufficient_ratio_1_matches_today() -> None:
     """Load-bearing backward-compatibility fence.  Do not delete.
 
-    While model_token_ratio is still warming up (or on a model the DB has
-    never seen), it returns 1.0 and ``read_windowed_events`` must behave
+    While model_token_ratio has too few samples (or on a model the
+    DB has never seen), it returns 1.0 and ``read_windowed_events`` must behave
     byte-identically to the pre-ratio chunked-snap algorithm — otherwise
     the "gradual rollout" rollout property breaks.  This test pins that.
     """
-    conn = _FakeConn(total_local=3_000, ratio_k=10, ratio_actual=0, ratio_local=0)
+    conn = _FakeConn(total_local=3_000, ratio_n=4, ratio_mean=0.0)
     # window_min=1000, window_max=2000 → chunk size 1000.
     # total=3000 → overshoot 1000 → drop 1000 (one chunk).
     await queries.read_windowed_events(
@@ -106,7 +107,7 @@ async def test_ratio_above_1_drops_more() -> None:
     overshoot=250 → drop_effective=1000.
     drop_local = ceil(1000 / 1.5) = 667.
     """
-    conn = _FakeConn(total_local=1_500, ratio_k=100, ratio_actual=150, ratio_local=100)
+    conn = _FakeConn(total_local=1_500, ratio_n=5, ratio_mean=1.5)
     await queries.read_windowed_events(
         conn, "sess_x", window_min=1_000, window_max=2_000, model="m", overhead_local=0
     )
@@ -117,7 +118,7 @@ async def test_ratio_above_1_drops_more() -> None:
 @pytest.mark.asyncio
 async def test_ratio_below_1_drops_fewer() -> None:
     """ratio=0.5 deflates total_effective below window_max → no drop."""
-    conn = _FakeConn(total_local=3_000, ratio_k=100, ratio_actual=50, ratio_local=100)
+    conn = _FakeConn(total_local=3_000, ratio_n=5, ratio_mean=0.5)
     result = await queries.read_windowed_events(
         conn, "sess_x", window_min=1_000, window_max=2_000, model="m", overhead_local=0
     )
