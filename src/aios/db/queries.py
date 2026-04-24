@@ -838,7 +838,7 @@ async def model_token_ratio(
     conn: asyncpg.Connection[Any],
     model: str,
     *,
-    n: int = 100,
+    n: int = 30,
 ) -> float:
     """Per-model actual/local token correction.
 
@@ -1253,12 +1253,11 @@ async def read_windowed_events(
     *quantitatively-bounded* guarantee: R can shift slightly between
     consecutive reads as new calibration samples land, which can nudge
     ``drop_local`` across an event boundary and invalidate the prefix
-    cache for that turn.  With ``n=100`` samples, per-step drift in R is
-    <1 % for the models we've measured, so the expected invalidation rate
-    is well below Anthropic's ~5-minute cache TTL — accept-the-noise
-    tradeoff documented here for the next reader.  Revisit the ``n``
+    cache for that turn.  With ``n=30`` samples, per-step drift in R
+    scales with the per-sample CV — Opus measured at ~0.2 % CV, putting
+    drift well below Anthropic's ~5-minute cache TTL.  Revisit the ``n``
     default in :func:`model_token_ratio` if a newly-onboarded model
-    shows per-sample CV above ~5 %, or if prefix-cache invalidation ever
+    shows per-sample CV above ~1 %, or if prefix-cache invalidation ever
     shows up in telemetry for a steady-state workload.
 
     Falls back to :func:`read_message_events` (loading all events) when
