@@ -43,6 +43,21 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
+class StepPrelude:
+    """Events-independent portion of a step's payload.
+
+    Everything here depends only on ``agent`` / ``bindings`` /
+    ``connections`` / ``session`` — not on which events windowing picks.
+    Computed before windowing so ``read_windowed_events`` can subtract
+    the overhead from the budget (see ``overhead_local`` there).
+    """
+
+    system_prompt: str
+    tools: list[dict[str, Any]]
+    skill_versions: list[SkillVersion]
+
+
+@dataclass(frozen=True)
 class StepContext:
     """Composed inputs for a single model call."""
 
@@ -53,7 +68,7 @@ class StepContext:
     skill_versions: list[SkillVersion]
 
 
-async def compose_step_context(
+async def compute_step_prelude(
     pool: asyncpg.Pool[Any],
     session_id: str,
     *,
@@ -61,19 +76,17 @@ async def compose_step_context(
     agent: Agent | AgentVersion,
     bindings: list[ChannelBinding],
     connections: list[Connection],
-    events: list[Event],
-) -> StepContext:
-    """Compose the chat-completions payload for a step.
+) -> StepPrelude:
+    """Build the events-independent parts of the step payload.
 
-    Callers must have already loaded ``session`` / ``agent`` / ``bindings``
-    / ``connections`` / ``events`` so the endpoint and the worker pay
-    the same I/O cost profile.  This function adds MCP discovery and
-    skill-ref resolution on top.
+    Exists so windowing can know the system+tools overhead before it
+    picks the event slate.  The returned ``StepPrelude`` feeds
+    :func:`compose_step_context` unchanged, so the composed prompt stays
+    byte-identical to what it was before the split.
     """
     from aios.harness.channels import (
         augment_with_connector_instructions,
         augment_with_focal_paradigm,
-        build_channels_tail_block,
     )
     from aios.harness.loop import (
         _hide_conn_tools_when_phone_down,
@@ -108,7 +121,29 @@ async def compose_step_context(
         system_prompt, mcp_instructions, connections
     )
 
-    ctx = build_messages(events, system_prompt=system_prompt)
+    return StepPrelude(
+        system_prompt=system_prompt,
+        tools=tools,
+        skill_versions=skill_versions,
+    )
+
+
+async def compose_step_context(
+    *,
+    session: Session,
+    agent: Agent | AgentVersion,
+    bindings: list[ChannelBinding],
+    prelude: StepPrelude,
+    events: list[Event],
+) -> StepContext:
+    """Compose the chat-completions payload for a step.
+
+    Takes a prelude built by :func:`compute_step_prelude` and the
+    windowed events slate; glues them into the final message list.
+    """
+    from aios.harness.channels import build_channels_tail_block
+
+    ctx = build_messages(events, system_prompt=prelude.system_prompt)
 
     # Tail block lives *after* build_messages so its per-step mutations
     # (unread counts, previews) don't bust the prefix cache.  Paradigm
@@ -124,7 +159,7 @@ async def compose_step_context(
     return StepContext(
         model=agent.model,
         messages=messages,
-        tools=tools,
+        tools=prelude.tools,
         reacting_to=ctx.reacting_to,
-        skill_versions=skill_versions,
+        skill_versions=prelude.skill_versions,
     )

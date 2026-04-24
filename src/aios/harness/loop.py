@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
 from aios.harness.completion import call_litellm, stream_litellm
-from aios.harness.step_context import compose_step_context
+from aios.harness.step_context import compose_step_context, compute_step_prelude
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
@@ -186,6 +186,23 @@ async def _run_session_step_body(
     for c in connections:
         mcp_server_map[connection_server_name(c)] = c.mcp_url
 
+    # Build the events-independent prelude (system prompt + tools)
+    # before windowing so its overhead can be subtracted from the
+    # window budget — otherwise the sent prompt can exceed window_max
+    # by exactly that overhead.
+    prelude = await compute_step_prelude(
+        pool,
+        session_id,
+        session=session,
+        agent=agent,
+        bindings=bindings,
+        connections=connections,
+    )
+    overhead_local = approx_tokens(
+        [{"role": "system", "content": prelude.system_prompt}],
+        tools=prelude.tools,
+    )
+
     # Read windowed message events for this session.
     events = await sessions_service.read_windowed_events(
         pool,
@@ -193,6 +210,7 @@ async def _run_session_step_body(
         window_min=agent.window_min,
         window_max=agent.window_max,
         model=agent.model,
+        overhead_local=overhead_local,
     )
 
     # Check for confirmed-but-undispatched tool calls (always_ask → allow).
@@ -233,12 +251,10 @@ async def _run_session_step_body(
 
     try:
         step_ctx = await compose_step_context(
-            pool,
-            session_id,
             session=session,
             agent=agent,
             bindings=bindings,
-            connections=connections,
+            prelude=prelude,
             events=events,
         )
     except Exception:
