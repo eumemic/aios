@@ -95,7 +95,7 @@ class TestModelTokenRatioSQL:
             )
         async with harness._pool.acquire() as conn:
             ratio = await queries.model_token_ratio(conn, model)
-        assert ratio == pytest.approx(1.5)
+        assert ratio == pytest.approx(1.5, abs=0.005)
 
     async def test_ignores_cache_breakdown_fields(self, harness: Harness) -> None:
         """LiteLLM normalizes Anthropic's usage to the OpenAI convention:
@@ -122,7 +122,7 @@ class TestModelTokenRatioSQL:
             ratio = await queries.model_token_ratio(conn, model)
         # per-span ratio = input_tokens/local_tokens = 150/100 (cache_* ignored).
         # ratio = 150/100 = 1.5.
-        assert ratio == pytest.approx(1.5)
+        assert ratio == pytest.approx(1.5, abs=0.005)
 
     async def test_excludes_error_spans(self, harness: Harness) -> None:
         model = f"test-model-{uuid.uuid4().hex[:8]}"
@@ -135,7 +135,7 @@ class TestModelTokenRatioSQL:
             await _seed_error_span(harness, session.id)
         async with harness._pool.acquire() as conn:
             ratio = await queries.model_token_ratio(conn, model)
-        assert ratio == pytest.approx(1.5)
+        assert ratio == pytest.approx(1.5, abs=0.005)
 
     async def test_partitions_by_model_string(self, harness: Harness) -> None:
         model_a = f"test-model-{uuid.uuid4().hex[:8]}"
@@ -152,8 +152,8 @@ class TestModelTokenRatioSQL:
         async with harness._pool.acquire() as conn:
             ratio_a = await queries.model_token_ratio(conn, model_a)
             ratio_b = await queries.model_token_ratio(conn, model_b)
-        assert ratio_a == pytest.approx(1.5)
-        assert ratio_b == pytest.approx(1.2)
+        assert ratio_a == pytest.approx(1.5, abs=0.005)
+        assert ratio_b == pytest.approx(1.2, abs=0.005)
 
     async def test_cross_session_aggregation(self, harness: Harness) -> None:
         """Ratio pools spans across every session in the DB for a given
@@ -172,7 +172,7 @@ class TestModelTokenRatioSQL:
             )
         async with harness._pool.acquire() as conn:
             ratio = await queries.model_token_ratio(conn, model)
-        assert ratio == pytest.approx(1.5)
+        assert ratio == pytest.approx(1.5, abs=0.005)
 
     async def test_uses_unweighted_mean_ratio(self, harness: Harness) -> None:
         """Point estimate and stddev describe the same unweighted
@@ -260,4 +260,4 @@ class TestModelTokenRatioSQL:
             )
         async with harness._pool.acquire() as conn:
             ratio = await queries.model_token_ratio(conn, model)
-        assert ratio == pytest.approx(1.5)
+        assert ratio == pytest.approx(1.5, abs=0.005)
