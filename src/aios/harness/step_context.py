@@ -50,11 +50,19 @@ class StepPrelude:
     ``connections`` / ``session`` — not on which events windowing picks.
     Computed before windowing so ``read_windowed_events`` can subtract
     the overhead from the budget (see ``overhead_local`` there).
+
+    ``tail_block_upper_bound_local`` is the worst-case size of the
+    channels tail block the composer will append after windowing — a
+    conservative bound computed from ``bindings`` alone (no events, no
+    unread counts).  Reserving this ahead of time keeps the send-time
+    payload under ``window_max`` even when the tail renders at its
+    fattest (every channel at 9999 unread with a maxed-out preview).
     """
 
     system_prompt: str
     tools: list[dict[str, Any]]
     skill_versions: list[SkillVersion]
+    tail_block_upper_bound_local: int
 
 
 @dataclass(frozen=True)
@@ -87,6 +95,7 @@ async def compute_step_prelude(
     from aios.harness.channels import (
         augment_with_connector_instructions,
         augment_with_focal_paradigm,
+        max_tail_block_local,
     )
     from aios.harness.loop import (
         _hide_conn_tools_when_phone_down,
@@ -125,6 +134,7 @@ async def compute_step_prelude(
         system_prompt=system_prompt,
         tools=tools,
         skill_versions=skill_versions,
+        tail_block_upper_bound_local=max_tail_block_local(bindings),
     )
 
 

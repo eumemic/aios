@@ -148,6 +148,32 @@ def augment_with_focal_paradigm(base_system: str, bindings: list[ChannelBinding]
     return block
 
 
+def max_tail_block_local(bindings: list[ChannelBinding]) -> int:
+    """Worst-case local-token cost of :func:`build_channels_tail_block`.
+
+    Called at windowing time when the *actual* tail block isn't yet
+    knowable (it depends on the windowed events).  Returns the upper
+    bound by synthesizing the fattest line each binding can contribute
+    — non-focal, non-muted, 9999 unread, with a maxed-out preview —
+    then summing via :func:`~aios.harness.tokens.approx_tokens`.  The
+    produced tail at send time is guaranteed ≤ this bound, so reserving
+    it from the window budget never overshoots ``window_max``.
+
+    Returns 0 when no bindings: :func:`build_channels_tail_block`
+    returns ``None`` in that case and the composer appends nothing.
+    """
+    from aios.harness.tokens import approx_tokens
+
+    if not bindings:
+        return 0
+    lines = ["━━━ Channels ━━━"]
+    for b in bindings:
+        # Preview length matches the 60-char truncation + ellipsis in
+        # build_channels_tail_block above.
+        lines.append(f'○ channel_id={b.address} — 9999 unread: "{"x" * 61}"')
+    return approx_tokens([{"role": "user", "content": "\n".join(lines)}])
+
+
 def build_channels_tail_block(
     bindings: list[ChannelBinding],
     events: list[Event],

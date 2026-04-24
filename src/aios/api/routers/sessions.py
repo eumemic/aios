@@ -273,9 +273,12 @@ async def get_context(
         bindings=bindings,
         connections=connections,
     )
-    overhead_local = approx_tokens(
-        [{"role": "system", "content": prelude.system_prompt}],
-        tools=prelude.tools,
+    overhead_local = (
+        approx_tokens(
+            [{"role": "system", "content": prelude.system_prompt}],
+            tools=prelude.tools,
+        )
+        + prelude.tail_block_upper_bound_local
     )
 
     events = await service.read_windowed_events(
