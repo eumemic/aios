@@ -60,7 +60,6 @@ as focal-channel aware:
     {
       "type": "mcp_toolset",
       "mcp_server_name": "telegram",
-      "default_config": {"permission_policy": {"type": "always_allow"}},
       "channel_context": {"type": "focal"}
     }
   ]

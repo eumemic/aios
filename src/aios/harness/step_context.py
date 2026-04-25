@@ -101,6 +101,7 @@ async def compose_step_context(
             agent.tools,
             connections,
             agent_mcp_server_names={s.name for s in agent.mcp_servers},
+            agent_mcp_server_urls={s.url for s in agent.mcp_servers},
         )
         mcp_tools = _hide_focal_channel_tools_when_phone_down(
             mcp_tools, session.focal_channel, channel_context_by_server

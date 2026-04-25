@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from aios.harness.loop import (
-    _hide_conn_tools_when_phone_down,
     _hide_focal_channel_tools_when_phone_down,
     _is_mcp_tool,
     _tc_name,
@@ -16,6 +17,7 @@ from aios.models.agents import (
     McpToolsetConfig,
     ToolSpec,
 )
+from aios.models.connections import Connection
 from aios.tools.registry import to_openai_tools
 
 
@@ -92,6 +94,27 @@ class TestResolveMcpPermission:
             ToolSpec(type="mcp_toolset", mcp_server_name="github"),
         ]
         assert resolve_mcp_permission("mcp__github__create_issue", tools) is None
+
+    def test_focal_channel_toolset_defaults_to_always_allow(self) -> None:
+        tools = [
+            ToolSpec(
+                type="mcp_toolset",
+                mcp_server_name="signal",
+                channel_context=McpChannelContext(type="focal"),
+            ),
+        ]
+        assert resolve_mcp_permission("mcp__signal__signal_send", tools) == "always_allow"
+
+    def test_explicit_permission_beats_focal_default(self) -> None:
+        tools = [
+            ToolSpec(
+                type="mcp_toolset",
+                mcp_server_name="signal",
+                permission="always_ask",
+                channel_context=McpChannelContext(type="focal"),
+            ),
+        ]
+        assert resolve_mcp_permission("mcp__signal__signal_send", tools) == "always_ask"
 
     def test_wrong_server_not_matched(self) -> None:
         tools = [
@@ -216,13 +239,29 @@ class TestHideFocalChannelToolsWhenPhoneDown:
         )
         assert contexts == {"signal": "focal"}
 
+    def test_agent_server_url_suppresses_legacy_connection_context(self) -> None:
+        now = datetime(2026, 4, 16)
+        connection = Connection(
+            id="conn_01HQR2K7VXBZ9MNPL3WYCT8F",
+            connector="signal",
+            account="acct",
+            mcp_url="https://m1",
+            vault_id="vlt_x",
+            metadata={},
+            created_at=now,
+            updated_at=now,
+        )
 
-class TestLegacyHideConnToolsWhenPhoneDown:
-    def test_legacy_wrapper_still_hides_conn_prefix(self) -> None:
-        tools = [
-            _tool("mcp__conn_abc__signal_send"),
-            _tool("mcp__github__create_issue"),
-        ]
-        result = _hide_conn_tools_when_phone_down(tools, None)
-        names = [t["function"]["name"] for t in result]  # type: ignore[index]
-        assert names == ["mcp__github__create_issue"]
+        contexts = mcp_channel_context_by_server(
+            [
+                ToolSpec(
+                    type="mcp_toolset",
+                    mcp_server_name="signal",
+                    channel_context=McpChannelContext(type="focal"),
+                ),
+            ],
+            [connection],
+            agent_mcp_server_names={"signal"},
+            agent_mcp_server_urls={"https://m1"},
+        )
+        assert contexts == {"signal": "focal"}

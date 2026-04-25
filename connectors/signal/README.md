@@ -68,7 +68,6 @@ as focal-channel aware:
     {
       "type": "mcp_toolset",
       "mcp_server_name": "signal",
-      "default_config": {"permission_policy": {"type": "always_allow"}},
       "channel_context": {"type": "focal"}
     }
   ]

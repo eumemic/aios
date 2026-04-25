@@ -184,13 +184,14 @@ async def _run_session_step_body(
 
     mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
     agent_mcp_server_names = set(mcp_server_map)
+    agent_mcp_server_urls = set(mcp_server_map.values())
     legacy_connection_server_names: set[str] = set()
     connection_vault_by_server: dict[str, str] = {}
     for c in connections:
         # Compatibility projection: inbound channel accounts can still expose
         # their MCP server until agents declare those servers directly.
         name = connection_server_name(c)
-        if name not in agent_mcp_server_names:
+        if name not in agent_mcp_server_names and c.mcp_url not in agent_mcp_server_urls:
             mcp_server_map[name] = c.mcp_url
             legacy_connection_server_names.add(name)
             connection_vault_by_server[name] = c.vault_id
@@ -198,6 +199,7 @@ async def _run_session_step_body(
         agent.tools,
         connections,
         agent_mcp_server_names=agent_mcp_server_names,
+        agent_mcp_server_urls=agent_mcp_server_urls,
     )
 
     # Read windowed message events for this session.
@@ -537,6 +539,7 @@ def mcp_channel_context_by_server(
     connections: list[Any] | None = None,
     *,
     agent_mcp_server_names: set[str] | None = None,
+    agent_mcp_server_urls: set[str] | None = None,
 ) -> dict[str, str]:
     """Return server_name -> channel context type for MCP toolsets.
 
@@ -559,9 +562,10 @@ def mcp_channel_context_by_server(
         from aios.harness.channels import connection_server_name
 
         agent_names = agent_mcp_server_names or set()
+        agent_urls = agent_mcp_server_urls or set()
         for c in connections:
             name = connection_server_name(c)
-            if name not in agent_names:
+            if name not in agent_names and c.mcp_url not in agent_urls:
                 contexts.setdefault(name, "focal")
     return contexts
 
@@ -588,22 +592,6 @@ def _hide_focal_channel_tools_when_phone_down(
             continue
         filtered.append(tool)
     return filtered
-
-
-def _hide_conn_tools_when_phone_down(
-    mcp_tools: list[dict[str, Any]], focal_channel: str | None
-) -> list[dict[str, Any]]:
-    """Backward-compatible wrapper for legacy conn-prefix MCP projections."""
-    from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
-
-    contexts = {
-        name.split("__", 2)[1]: "focal"
-        for tool in mcp_tools
-        if (name := tool.get("function", {}).get("name", "")).startswith(
-            f"mcp__{CONNECTION_SERVER_NAME_PREFIX}"
-        )
-    }
-    return _hide_focal_channel_tools_when_phone_down(mcp_tools, focal_channel, contexts)
 
 
 async def _dump_context_if_enabled(
@@ -680,7 +668,9 @@ def resolve_mcp_permission(
 
     ``always_allow_server_names`` is a compatibility hook for legacy
     connection-projected MCP servers. New channel-aware MCP should express
-    this on the agent's normal ``mcp_toolset`` config.
+    this on the agent's normal ``mcp_toolset`` config. Focal-channel MCP
+    toolsets default to ``always_allow`` because declaring channel context is
+    already the operator's trust decision for that server.
     """
     server_name = name.split("__", 2)[1]
     for spec in agent_tools:
@@ -688,7 +678,11 @@ def resolve_mcp_permission(
             cfg = spec.default_config
             if cfg and cfg.permission_policy:
                 return cfg.permission_policy.type
-            return spec.permission
+            if spec.permission:
+                return spec.permission
+            if spec.channel_context is not None and spec.channel_context.type == "focal":
+                return "always_allow"
+            return None
     if always_allow_server_names and server_name in always_allow_server_names:
         return "always_allow"
     return None
@@ -712,6 +706,8 @@ async def discover_session_mcp_tools(
     ``connections`` is retained as a compatibility projection for legacy
     channel accounts that still carry MCP URLs. New integrations should
     declare MCP servers on the agent and credentials in session vaults.
+    If a connection's URL is already declared on the agent, the normal
+    agent server owns discovery and the connection projection is skipped.
     """
     import asyncio
 
@@ -725,13 +721,23 @@ async def discover_session_mcp_tools(
         if spec.type == "mcp_toolset" and spec.enabled and spec.mcp_server_name:
             enabled_server_names.add(spec.mcp_server_name)
     agent_server_names = {s.name for s in agent.mcp_servers}
+    agent_server_urls = {s.url for s in agent.mcp_servers}
+    enabled_agent_server_by_url: dict[str, str] = {}
     for s in agent.mcp_servers:
         if s.name in enabled_server_names:
             servers.append((s.name, s.url, None))
+            enabled_agent_server_by_url.setdefault(s.url, s.name)
 
+    instruction_aliases: dict[str, str] = {}
     for c in connections:
         name = connection_server_name(c)
-        if name not in agent_server_names:
+        if name in agent_server_names:
+            continue
+        if c.mcp_url in agent_server_urls:
+            if source_name := enabled_agent_server_by_url.get(c.mcp_url):
+                instruction_aliases[name] = source_name
+            continue
+        else:
             servers.append((name, c.mcp_url, c.vault_id))
 
     if not servers:
@@ -760,6 +766,9 @@ async def discover_session_mcp_tools(
         for (name, _url, _vault_id), (_tools, instructions) in zip(servers, results, strict=True)
         if instructions
     }
+    for alias_name, source_name in instruction_aliases.items():
+        if instructions := instructions_by_server.get(source_name):
+            instructions_by_server[alias_name] = instructions
     return tools, instructions_by_server
 
 
