@@ -16,6 +16,7 @@ prefix.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from functools import cache
 from typing import TYPE_CHECKING, Any
@@ -25,6 +26,14 @@ import litellm
 # Anthropic rejects empty text blocks that some OpenRouter models emit on
 # tool-call-only turns; modify_params tells LiteLLM to sanitize them.
 litellm.modify_params = True
+
+# Default per-call bounds. Kept here so they're visible at the wrapper boundary
+# rather than buried in defaults that drift between LiteLLM versions. Agents
+# can override either via ``litellm_extra``; the spread happens after these
+# defaults so user values win. The harness's job-level cap in ``run_session_step``
+# is the safety net if both are bypassed somehow.
+_REQUEST_TIMEOUT_S = 300.0
+_STREAM_INACTIVITY_TIMEOUT_S = 60.0
 
 if TYPE_CHECKING:
     import asyncpg
@@ -273,6 +282,7 @@ async def call_litellm(
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
+        "timeout": _REQUEST_TIMEOUT_S,
     }
     if tools:
         kwargs["tools"] = tools
@@ -321,6 +331,8 @@ async def stream_litellm(
         "model": model,
         "messages": messages,
         "stream": True,
+        "timeout": _REQUEST_TIMEOUT_S,
+        "stream_timeout": _STREAM_INACTIVITY_TIMEOUT_S,
     }
     if tools:
         kwargs["tools"] = tools
@@ -331,8 +343,20 @@ async def stream_litellm(
 
     response = await litellm.acompletion(**kwargs)
 
+    # Per-chunk inactivity guard. The ``stream_timeout`` kwarg above is
+    # LiteLLM's own per-chunk bound, but its behavior varies by provider
+    # adapter. Wrapping each ``__anext__`` with our own ``wait_for`` makes
+    # the bound deterministic regardless of provider — a stalled connection
+    # raises ``TimeoutError`` after ``_STREAM_INACTIVITY_TIMEOUT_S`` rather
+    # than hanging the worker. (Required for the harness's zero-hang
+    # guarantee — see also ``run_session_step``'s job-level cap.)
     chunks: list[Any] = []
-    async for chunk in response:
+    aiter = response.__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=_STREAM_INACTIVITY_TIMEOUT_S)
+        except StopAsyncIteration:
+            break
         chunks.append(chunk)
         content = chunk.choices[0].delta.content
         if content:

@@ -21,6 +21,7 @@ and proceeds.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from aios.db.sse_lock import has_subscriber
@@ -45,6 +46,15 @@ log = get_logger("aios.harness.loop")
 
 
 _RETRY_BACKOFF_SECONDS: list[float] = [2, 8, 30, 120]
+
+# Wall-clock cap on a single ``run_session_step`` invocation. The harness's
+# zero-hang guarantee: per-call timeouts (LiteLLM, MCP, tool dispatch, etc.)
+# are the precise instruments, but if any future code path bypasses them
+# this cap fires and forces a clean rescheduling. Sized to fit the longest
+# legitimate single-turn use (300s = matches the ``_REQUEST_TIMEOUT_S`` in
+# ``completion.py`` so the model call alone can occupy almost the whole
+# budget).
+_JOB_TIMEOUT_S = 300.0
 
 
 def _retry_delay_for_attempt(attempt: int) -> float | None:
@@ -87,9 +97,19 @@ async def run_session_step(
     )
     retry_delay: float | None = None
     try:
-        retry_delay = await _run_session_step_body(
-            pool, task_registry, session_id, cause=cause, wake_reason=wake_reason
-        )
+        try:
+            retry_delay = await asyncio.wait_for(
+                _run_session_step_body(
+                    pool, task_registry, session_id, cause=cause, wake_reason=wake_reason
+                ),
+                timeout=_JOB_TIMEOUT_S,
+            )
+        except TimeoutError:
+            # Job-level safety net: a per-call timeout was missing or didn't
+            # fire. Force a reschedulable error state so the next wake can
+            # proceed (matches what the body's litellm-error handler does).
+            log.exception("step.job_timeout", session_id=session_id, timeout=_JOB_TIMEOUT_S)
+            retry_delay = await _handle_step_timeout(pool, session_id)
     finally:
         await sessions_service.append_event(
             pool,
@@ -641,8 +661,6 @@ async def discover_session_mcp_tools(
     omitted from the dict — the harness uses presence in the dict as
     the trigger for rendering a per-connector affordance block.
     """
-    import asyncio
-
     from aios.harness.channels import connection_server_name
     from aios.mcp.client import discover_mcp_tools, resolve_auth_for_url
 
@@ -731,6 +749,35 @@ async def _dispatch_confirmed_tools(
         tc for tc in asst_tool_calls if tc.get("id") in confirmed and tc.get("id") not in completed
     ]
     return pending
+
+
+async def _handle_step_timeout(pool: Any, session_id: str) -> float | None:
+    """Synthesize a reschedulable error state when the job-level cap fires.
+
+    Mirrors the rescheduling logic in the litellm-error handler so the
+    session ends each step in a clean status regardless of which path
+    surfaced the failure. Returns the retry delay (seconds) when the
+    backoff budget allows, ``None`` for a terminal failure.
+    """
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {"event": "step_timeout", "timeout_seconds": _JOB_TIMEOUT_S},
+    )
+    attempt = await _count_consecutive_rescheduling(pool, session_id)
+    delay = _retry_delay_for_attempt(attempt)
+    if delay is not None:
+        await sessions_service.set_session_status(
+            pool, session_id, "rescheduling", stop_reason={"type": "rescheduling"}
+        )
+        await _append_lifecycle(pool, session_id, "turn_ended", "rescheduling", "rescheduling")
+        return delay
+    await sessions_service.set_session_status(
+        pool, session_id, "idle", stop_reason={"type": "error"}
+    )
+    await _append_lifecycle(pool, session_id, "turn_ended", "idle", "error")
+    return None
 
 
 async def _count_consecutive_rescheduling(pool: Any, session_id: str) -> int:

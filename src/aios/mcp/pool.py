@@ -33,6 +33,11 @@ from aios.logging import get_logger
 
 log = get_logger("aios.mcp.pool")
 
+# Mirrors the per-call bound used by :mod:`aios.mcp.client`. The pool's
+# pooled sessions share a connection-level timeout so a stalled MCP server
+# can't keep the worker on a dead socket indefinitely.
+_MCP_HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
+
 type _PoolKey = tuple[str, str]
 
 
@@ -87,7 +92,9 @@ class McpSessionPool:
         stack: AsyncExitStack = AsyncExitStack()
         await stack.__aenter__()
         try:
-            http_client: Any = await stack.enter_async_context(httpx.AsyncClient(headers=headers))
+            http_client: Any = await stack.enter_async_context(
+                httpx.AsyncClient(headers=headers, timeout=_MCP_HTTPX_TIMEOUT)
+            )
             read_stream, write_stream, _ = await stack.enter_async_context(
                 streamable_http_client(url, http_client=http_client)
             )

@@ -14,6 +14,7 @@ as regular function-calling tools.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import AsyncExitStack
 from typing import Any
@@ -33,6 +34,18 @@ log = get_logger("aios.mcp.client")
 
 MAX_TOOLS_PER_SERVER = 128
 
+# Per-call bound for ``session.call_tool``. The harness needs every external
+# await to have a finite ceiling so the worker can't hang on a misbehaving
+# MCP server. Mirrors the same intent as the LiteLLM call timeouts in
+# ``harness/completion.py``.
+_TOOL_CALL_TIMEOUT_S = 120.0
+
+# httpx client bounds for MCP transport. ``read`` is the longest leg —
+# tool calls that do real work (DB lookups, external APIs) commonly take
+# tens of seconds. Connect/write/pool are tight because they're network
+# fast paths.
+_MCP_HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
+
 
 async def _open_session(
     url: str, headers: dict[str, str], stack: AsyncExitStack
@@ -42,7 +55,9 @@ async def _open_session(
     Returns the session along with the ``InitializeResult`` so callers can
     read server-supplied metadata (notably ``instructions``).
     """
-    http_client = await stack.enter_async_context(httpx.AsyncClient(headers=headers))
+    http_client = await stack.enter_async_context(
+        httpx.AsyncClient(headers=headers, timeout=_MCP_HTTPX_TIMEOUT)
+    )
     read_stream, write_stream, _ = await stack.enter_async_context(
         streamable_http_client(url, http_client=http_client)
     )
@@ -219,15 +234,24 @@ async def call_mcp_tool(
         if _pool is not None:
             try:
                 session, _ = await _pool.get_or_connect(url, headers)
-                result = await session.call_tool(tool_name, arguments, meta=meta)
+                result = await asyncio.wait_for(
+                    session.call_tool(tool_name, arguments, meta=meta),
+                    timeout=_TOOL_CALL_TIMEOUT_S,
+                )
             except Exception:
                 _pool.evict(url, headers)
                 session, _ = await _pool.get_or_connect(url, headers)
-                result = await session.call_tool(tool_name, arguments, meta=meta)
+                result = await asyncio.wait_for(
+                    session.call_tool(tool_name, arguments, meta=meta),
+                    timeout=_TOOL_CALL_TIMEOUT_S,
+                )
         else:
             async with AsyncExitStack() as stack:
                 session, _ = await _open_session(url, headers, stack)
-                result = await session.call_tool(tool_name, arguments, meta=meta)
+                result = await asyncio.wait_for(
+                    session.call_tool(tool_name, arguments, meta=meta),
+                    timeout=_TOOL_CALL_TIMEOUT_S,
+                )
 
         # Concatenate text content from the result.
         parts: list[str] = []
