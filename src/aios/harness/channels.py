@@ -22,21 +22,22 @@ MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
 SWITCH_CHANNEL_METADATA_KEY = "switch_channel"
 
 # Top-level key inside the ``_meta`` field sent on JSON-RPC MCP tool-call
-# requests when a focal channel is set. The value is the focal-channel suffix
-# (the focal channel address with its first two ``<connector>/<account>``
-# segments stripped). MCP servers that understand aios channels can split this
-# on ``/`` to recover their own per-chat identifiers; other servers ignore it.
-FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
+# requests when a focal channel is set. The value is the account-relative
+# focal channel: the stored channel address with only the leading
+# ``<connector>/`` attachment segment stripped. MCP servers that understand
+# aios channels can split this on ``/`` to recover account and chat-specific
+# identifiers; other servers ignore it.
+FOCAL_CHANNEL_META_KEY = "aios.focal_channel"
 
 
-def focal_channel_path(focal: str | None) -> str | None:
-    """Return the connector-specific suffix of a focal address.
+def focal_channel_meta_value(focal: str | None) -> str | None:
+    """Return the account-relative value for MCP focal-channel ``_meta``.
 
-    The ``<connector>/<account>`` prefix is information the MCP server
-    already has from its own service identity and session credential, so
-    sending it would be redundant; we strip it.  For a 3-segment address like
-    ``signal/<bot>/<chat>`` the suffix is just ``<chat>``.  For
-    ``telegram/<bot>/<chat>/<thread>`` it's ``<chat>/<thread>``.
+    A stored focal address is ``<connector>/<account>/<path>``. The connector
+    already knows its own attachment namespace from the MCP session, so the
+    meta value carries ``<account>/<path>``. For ``signal/<bot>/<chat>`` this
+    returns ``<bot>/<chat>``; for ``telegram/<bot>/<chat>/<thread>`` it returns
+    ``<bot>/<chat>/<thread>``.
 
     Returns ``None`` if ``focal`` is ``None`` or malformed (fewer than
     three segments) — neither should reach the dispatch path, but
@@ -45,9 +46,9 @@ def focal_channel_path(focal: str | None) -> str | None:
     if not focal:
         return None
     parts = focal.split("/", 2)
-    if len(parts) < 3 or not parts[2]:
+    if len(parts) < 3 or not parts[1] or not parts[2]:
         return None
-    return parts[2]
+    return f"{parts[1]}/{parts[2]}"
 
 
 async def list_session_bindings(pool: asyncpg.Pool[Any], session_id: str) -> list[ChannelBinding]:

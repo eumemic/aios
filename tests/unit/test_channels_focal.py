@@ -8,7 +8,7 @@ from aios.harness.channels import (
     SWITCH_CHANNEL_METADATA_KEY,
     derive_last_seen,
     derive_unread_counts,
-    focal_channel_path,
+    focal_channel_meta_value,
 )
 from aios.models.events import Event, EventKind
 
@@ -254,31 +254,31 @@ class TestDeriveUnreadCounts:
         assert counts == {"signal/a/x": 1}
 
 
-class TestFocalChannelPath:
-    """Suffix-extraction helper for MCP _meta injection (slice 6)."""
+class TestFocalChannelMetaValue:
+    """Account-relative focal-channel helper for MCP _meta injection."""
 
     def test_three_segment_address(self) -> None:
         # Signal shape: signal/<bot>/<chat_id>
-        assert focal_channel_path("signal/bot/alice") == "alice"
+        assert focal_channel_meta_value("signal/bot/alice") == "bot/alice"
 
     def test_four_segment_address_preserves_inner_slashes(self) -> None:
         # Telegram forum-thread shape: telegram/<bot>/<chat>/<thread>
-        assert focal_channel_path("telegram/bot/chat/thread") == "chat/thread"
+        assert focal_channel_meta_value("telegram/bot/chat/thread") == "bot/chat/thread"
 
     def test_deep_address_preserves_all_tail_segments(self) -> None:
-        # Defensive: connectors may use arbitrarily deep suffixes.
-        assert focal_channel_path("x/y/a/b/c") == "a/b/c"
+        # Defensive: connectors may use arbitrarily deep channel paths.
+        assert focal_channel_meta_value("x/y/a/b/c") == "y/a/b/c"
 
     def test_none_returns_none(self) -> None:
-        assert focal_channel_path(None) is None
+        assert focal_channel_meta_value(None) is None
 
     def test_empty_string_returns_none(self) -> None:
-        assert focal_channel_path("") is None
+        assert focal_channel_meta_value("") is None
 
     def test_malformed_two_segments_returns_none(self) -> None:
-        # Missing suffix — should not leak a garbled value.
-        assert focal_channel_path("signal/bot") is None
+        # Missing channel path — should not leak a garbled value.
+        assert focal_channel_meta_value("signal/bot") is None
 
     def test_trailing_slash_yields_empty_suffix_is_none(self) -> None:
-        # "signal/bot/" → 3 segments but suffix is empty → None.
-        assert focal_channel_path("signal/bot/") is None
+        # "signal/bot/" → 3 segments but channel path is empty → None.
+        assert focal_channel_meta_value("signal/bot/") is None

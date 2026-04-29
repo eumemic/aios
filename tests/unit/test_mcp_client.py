@@ -410,7 +410,7 @@ class TestCallMcpTool:
         mock_session.initialize = AsyncMock()
         mock_session.call_tool = AsyncMock(return_value=mock_result)
 
-        meta = {"aios.focal_channel_path": "alice"}
+        meta = {"aios.focal_channel": "acct/alice"}
 
         with (
             patch("aios.mcp.client.streamable_http_client") as mock_transport,

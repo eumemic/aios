@@ -826,12 +826,11 @@ class TestSwitchChannelAsEvent:
 
 
 class TestMcpMetaInjection:
-    """Channel-aware MCP toolsets receive the focal channel path via the
-    JSON-RPC ``_meta`` field, without stuffing it into arguments. Normal MCP
-    servers don't get the meta stamp.
+    """MCP tool calls receive account-relative focal-channel context via the
+    JSON-RPC ``_meta`` field, without stuffing it into arguments.
     """
 
-    async def test_channel_aware_mcp_dispatch_injects_focal_suffix_into_meta(
+    async def test_mcp_dispatch_injects_account_relative_focal_meta(
         self,
         runtime_pool: Any,
         agent_id: str,
@@ -877,14 +876,14 @@ class TestMcpMetaInjection:
                     session_id,
                     tool_call_dict,
                     mcp_server_map,
-                    focal_channel=address,  # focal=A → suffix=chat-1
+                    focal_channel=address,
                 )
 
-            # Verify call_mcp_tool was invoked with the focal suffix meta.
+            # Verify call_mcp_tool was invoked with account-relative focal meta.
             _args, kwargs = mock_call.call_args
             meta = kwargs.get("meta")
             assert isinstance(meta, dict)
-            assert meta == {"aios.focal_channel_path": "chat-1"}
+            assert meta == {"aios.focal_channel": address.split("/", 1)[1]}
         finally:
             runtime.crypto_box = prev_crypto
 
@@ -938,7 +937,7 @@ class TestMcpMetaInjection:
                 )
 
             _args, kwargs = mock_call.call_args
-            assert kwargs.get("meta") == {"aios.focal_channel_path": "chat-1"}
+            assert kwargs.get("meta") == {"aios.focal_channel": address.split("/", 1)[1]}
         finally:
             runtime.crypto_box = prev_crypto
 

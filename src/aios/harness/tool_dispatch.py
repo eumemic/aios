@@ -321,7 +321,7 @@ def launch_mcp_tool_calls(
     were emitted (captured at step top in ``run_session_step`` so a
     concurrent ``switch_channel`` in the same batch cannot race the
     ``chat_id`` injection).  Passed through to each task so MCP calls can
-    stamp ``_meta`` with the suffix when a focal channel is set.
+    stamp ``_meta`` with account-relative focal-channel context when set.
     """
     _launch_tasks(
         session_id,
@@ -358,12 +358,12 @@ async def _execute_mcp_tool_async(
 ) -> None:
     """Execute one MCP tool call: connect, invoke, append result, defer wake.
 
-    When a focal channel is set, its suffix is stamped into the JSON-RPC
-    request's ``_meta`` so servers that understand aios channel context can
-    resolve channel-specific identifiers without the model having to pass
-    them explicitly.  The ``focal_channel`` snapshot is emission-time — a
-    concurrent ``switch_channel`` in the same assistant batch does not race
-    this injection.
+    When a focal channel is set, its account-relative value is stamped into
+    the JSON-RPC request's ``_meta`` so servers that understand aios channel
+    context can resolve channel-specific identifiers without the model having
+    to pass them explicitly.  The ``focal_channel`` snapshot is emission-time
+    — a concurrent ``switch_channel`` in the same assistant batch does not
+    race this injection.
     """
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
@@ -404,12 +404,12 @@ async def _execute_mcp_tool_async(
             )
             return
 
-        from aios.harness.channels import FOCAL_CHANNEL_META_KEY, focal_channel_path
+        from aios.harness.channels import FOCAL_CHANNEL_META_KEY, focal_channel_meta_value
         from aios.mcp.client import call_mcp_tool, resolve_auth_for_url
 
-        suffix = focal_channel_path(focal_channel)
+        focal_meta = focal_channel_meta_value(focal_channel)
         meta: dict[str, Any] | None = (
-            {FOCAL_CHANNEL_META_KEY: suffix} if suffix is not None else None
+            {FOCAL_CHANNEL_META_KEY: focal_meta} if focal_meta is not None else None
         )
 
         crypto_box = runtime.require_crypto_box()
