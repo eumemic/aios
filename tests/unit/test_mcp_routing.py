@@ -8,7 +8,6 @@ from aios.harness.loop import (
     resolve_mcp_permission,
 )
 from aios.models.agents import (
-    McpChannelContext,
     McpPermissionPolicy,
     McpToolsetConfig,
     ToolSpec,
@@ -90,23 +89,12 @@ class TestResolveMcpPermission:
         ]
         assert resolve_mcp_permission("mcp__github__create_issue", tools) is None
 
-    def test_channel_context_does_not_change_default_permission(self) -> None:
-        tools = [
-            ToolSpec(
-                type="mcp_toolset",
-                mcp_server_name="signal",
-                channel_context=McpChannelContext(type="focal"),
-            ),
-        ]
-        assert resolve_mcp_permission("mcp__signal__signal_send", tools) is None
-
-    def test_explicit_permission_beats_focal_default(self) -> None:
+    def test_flat_permission_applies_to_signal_server(self) -> None:
         tools = [
             ToolSpec(
                 type="mcp_toolset",
                 mcp_server_name="signal",
                 permission="always_ask",
-                channel_context=McpChannelContext(type="focal"),
             ),
         ]
         assert resolve_mcp_permission("mcp__signal__signal_send", tools) == "always_ask"

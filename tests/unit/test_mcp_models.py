@@ -8,7 +8,6 @@ import pytest
 
 from aios.models.agents import (
     AgentCreate,
-    McpChannelContext,
     McpPermissionPolicy,
     McpServerSpec,
     McpToolConfig,
@@ -84,16 +83,6 @@ class TestMcpToolConfig:
         assert cfg.enabled is True
 
 
-class TestMcpChannelContextCompat:
-    def test_focal_context_default(self) -> None:
-        ctx = McpChannelContext()
-        assert ctx.type == "focal"
-
-    def test_extra_fields_rejected(self) -> None:
-        with pytest.raises(ValueError):
-            McpChannelContext(type="focal", path="chat")  # type: ignore[call-arg]
-
-
 class TestToolSpecMcpToolset:
     def test_basic_mcp_toolset(self) -> None:
         spec = ToolSpec(type="mcp_toolset", mcp_server_name="github")
@@ -131,18 +120,13 @@ class TestToolSpecMcpToolset:
         assert len(spec.configs) == 1
         assert spec.configs[0].name == "create_issue"
 
-    def test_mcp_toolset_accepts_legacy_channel_context(self) -> None:
-        spec = ToolSpec(
-            type="mcp_toolset",
-            mcp_server_name="signal",
-            channel_context=McpChannelContext(type="focal"),
-        )
-        assert spec.channel_context is not None
-        assert spec.channel_context.type == "focal"
-
-    def test_channel_context_only_allowed_on_mcp_toolset(self) -> None:
+    def test_channel_context_is_not_part_of_mcp_toolset_schema(self) -> None:
         with pytest.raises(ValueError, match="channel_context"):
-            ToolSpec(type="bash", channel_context=McpChannelContext(type="focal"))
+            ToolSpec(
+                type="mcp_toolset",
+                mcp_server_name="signal",
+                channel_context={"type": "focal"},  # type: ignore[call-arg]
+            )
 
     def test_mcp_toolset_round_trip(self) -> None:
         spec = ToolSpec(
@@ -196,4 +180,3 @@ class TestBackwardCompat:
         assert all(s.mcp_server_name is None for s in specs)
         assert all(s.default_config is None for s in specs)
         assert all(s.configs is None for s in specs)
-        assert all(s.channel_context is None for s in specs)

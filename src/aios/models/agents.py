@@ -83,20 +83,6 @@ class McpToolConfig(BaseModel):
     permission_policy: McpPermissionPolicy | None = None
 
 
-class McpChannelContext(BaseModel):
-    """Deprecated channel-context marker for older agent configs.
-
-    The runtime now injects focal-channel metadata into every MCP call when
-    the session has a focal channel, so this field is no longer used to gate
-    tool visibility, permissions, or dispatch behavior. It remains accepted on
-    ``mcp_toolset`` entries so existing stored agent JSON validates.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    type: Literal["focal"] = "focal"
-
-
 # ── Tool declaration ──────────────────────────────────────────────────────────
 
 
@@ -131,7 +117,6 @@ class ToolSpec(BaseModel):
     mcp_server_name: str | None = None
     default_config: McpToolsetConfig | None = None
     configs: list[McpToolConfig] | None = None
-    channel_context: McpChannelContext | None = None
 
     @model_validator(mode="after")
     def _check_type_fields(self) -> ToolSpec:
@@ -144,8 +129,6 @@ class ToolSpec(BaseModel):
         elif self.type == "mcp_toolset":
             if self.mcp_server_name is None:
                 raise ValueError("mcp_toolset requires mcp_server_name")
-        elif self.channel_context is not None:
-            raise ValueError("channel_context is only supported for mcp_toolset")
         return self
 
 
