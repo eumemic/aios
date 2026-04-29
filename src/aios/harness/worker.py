@@ -34,7 +34,10 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.harness import runtime
 from aios.harness.procrastinate_app import app as procrastinate_app
-from aios.harness.sweep import wake_sessions_needing_inference
+from aios.harness.sweep import (
+    reap_stalled_jobs,
+    wake_sessions_needing_inference,
+)
 from aios.harness.task_registry import TaskRegistry
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
@@ -76,7 +79,13 @@ async def worker_main() -> None:
     sweep_task: asyncio.Task[None] | None = None
 
     try:
-        # Startup sweep: repair ghosts and wake sessions needing inference.
+        # Startup sweep:
+        #   1. Reap stalled procrastinate jobs (workers that died without
+        #      releasing their session lock — laptop sleep, OOM, crash).
+        #      Must run BEFORE the wake sweep so freshly-unblocked sessions
+        #      get re-enqueued in the same pass.
+        #   2. Repair tool-call ghosts and wake sessions needing inference.
+        await reap_stalled_jobs(procrastinate_app.job_manager)
         sweep = await wake_sessions_needing_inference(pool, task_registry)
         if sweep.woken_sessions or sweep.repaired_ghosts:
             log.info(
@@ -97,7 +106,7 @@ async def worker_main() -> None:
 
         # Start periodic sweep (every 30s).
         sweep_task = asyncio.create_task(
-            _periodic_sweep(pool, task_registry, interval=30),
+            _periodic_sweep(pool, task_registry, procrastinate_app.job_manager, interval=30),
             name="periodic_sweep",
         )
 
@@ -124,6 +133,7 @@ async def worker_main() -> None:
 async def _periodic_sweep(
     pool: asyncpg.Pool[Any],
     task_registry: TaskRegistry,
+    job_manager: Any,
     *,
     interval: int = 30,
 ) -> None:
@@ -132,6 +142,9 @@ async def _periodic_sweep(
     while True:
         await asyncio.sleep(interval)
         try:
+            # Reap stalled jobs first so any unblocked sessions get re-enqueued
+            # in the same tick (mirrors worker_main's startup sequence).
+            await reap_stalled_jobs(job_manager)
             sweep = await wake_sessions_needing_inference(pool, task_registry)
             if sweep.woken_sessions or sweep.repaired_ghosts:
                 log.info(
