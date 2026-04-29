@@ -265,3 +265,19 @@ class TestHideFocalChannelToolsWhenPhoneDown:
             agent_mcp_server_urls={"https://m1"},
         )
         assert contexts == {"signal": "focal"}
+
+    def test_channel_only_connection_does_not_add_legacy_context(self) -> None:
+        now = datetime(2026, 4, 16)
+        connection = Connection(
+            id="conn_01HQR2K7VXBZ9MNPL3WYCT8F",
+            connector="signal",
+            account="acct",
+            mcp_url=None,
+            vault_id=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+        )
+
+        contexts = mcp_channel_context_by_server([], [connection])
+        assert contexts == {}
