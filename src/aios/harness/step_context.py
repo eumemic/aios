@@ -97,12 +97,7 @@ async def compose_step_context(
         )
         # Hide focal-channel MCP tools when focal is NULL — can't type
         # into a chat you aren't attending to.
-        channel_context_by_server = mcp_channel_context_by_server(
-            agent.tools,
-            connections,
-            agent_mcp_server_names={s.name for s in agent.mcp_servers},
-            agent_mcp_server_urls={s.url for s in agent.mcp_servers},
-        )
+        channel_context_by_server = mcp_channel_context_by_server(agent.tools)
         mcp_tools = _hide_focal_channel_tools_when_phone_down(
             mcp_tools, session.focal_channel, channel_context_by_server
         )

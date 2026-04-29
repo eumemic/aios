@@ -67,17 +67,12 @@ async def resolve_auth_for_url(
     crypto_box: CryptoBox,
     session_id: str,
     mcp_server_url: str,
-    *,
-    connection_vault_id: str | None = None,
 ) -> dict[str, str]:
     """Resolve MCP auth headers for ``mcp_server_url``.
 
-    Normal agent-declared MCP servers resolve through the session's bound
-    vaults (``session_vaults``). Legacy connection-projected MCP servers pass
-    ``connection_vault_id`` explicitly; that vault then owns auth resolution
-    for this call. A legacy connection vault with no matching credential
-    returns ``{}`` rather than falling back, preventing a misconfigured
-    connection from silently leaking a tenant-level credential.
+    Agent-declared MCP servers resolve through the session's bound vaults
+    (``session_vaults``). The agent chooses a tool name; the worker resolves
+    the server URL from agent config and injects the matching vault credential.
 
     For ``mcp_oauth`` credentials whose ``expires_at`` falls within the
     refresh skew window, the access token is transparently refreshed
@@ -87,19 +82,10 @@ async def resolve_auth_for_url(
     to the stale token.
     """
     async with pool.acquire() as conn:
-        if connection_vault_id is not None:
-            vault_result = await queries.resolve_vault_credential(
-                conn, vault_id=connection_vault_id, mcp_server_url=mcp_server_url
-            )
-            if vault_result is None:
-                return {}
-            blob, auth_type = vault_result
-            vault_id = connection_vault_id
-        else:
-            session_result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
-            if session_result is None:
-                return {}
-            blob, auth_type, vault_id = session_result
+        session_result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
+        if session_result is None:
+            return {}
+        blob, auth_type, vault_id = session_result
 
         if auth_type == "mcp_oauth":
             payload = json.loads(crypto_box.decrypt(blob))

@@ -9,9 +9,8 @@ where ``path`` is whatever sub-segments the connector emits for inbound
 messages (typically a chat or thread id).
 
 ``mcp_url`` / ``vault_id`` are optional compatibility fields for older
-connector setups that projected MCP tools from connections. New
-channel-aware MCP integrations should leave them unset, declare normal
-agent ``mcp_servers``, and use session vaults for credentials.
+connection records. Runtime MCP discovery uses normal agent
+``mcp_servers`` and session vaults for credentials.
 """
 
 from __future__ import annotations
@@ -21,9 +20,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# Legacy prefix for MCP server names projected from connection rows. New
-# channel-aware MCP integrations should use normal agent ``mcp_servers`` plus
-# ``mcp_toolset.channel_context`` instead of relying on this namespace.
+# Connection ids use this prefix. The stable id is also used as the
+# per-connection instruction alias key when connector MCP instructions are
+# rendered into a session prompt.
 CONNECTION_SERVER_NAME_PREFIX = "conn_"
 
 

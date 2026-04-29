@@ -47,15 +47,6 @@ log = get_logger("aios.harness.loop")
 _RETRY_BACKOFF_SECONDS: list[float] = [2, 8, 30, 120]
 
 
-def _legacy_connection_mcp(c: Any) -> tuple[str, str] | None:
-    """Return legacy connection-projected MCP config when fully present."""
-    mcp_url = getattr(c, "mcp_url", None)
-    vault_id = getattr(c, "vault_id", None)
-    if isinstance(mcp_url, str) and mcp_url and isinstance(vault_id, str) and vault_id:
-        return mcp_url, vault_id
-    return None
-
-
 def _retry_delay_for_attempt(attempt: int) -> float | None:
     """Return the backoff delay for ``attempt``, or ``None`` if the budget is spent."""
     if attempt >= len(_RETRY_BACKOFF_SECONDS):
@@ -187,33 +178,12 @@ async def _run_session_step_body(
     else:
         agent = await agents_service.get_agent(pool, session.agent_id)
 
-    from aios.harness.channels import connection_server_name, list_bindings_and_connections
+    from aios.harness.channels import list_bindings_and_connections
 
     bindings, connections = await list_bindings_and_connections(pool, session_id)
 
     mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
-    agent_mcp_server_names = set(mcp_server_map)
-    agent_mcp_server_urls = set(mcp_server_map.values())
-    legacy_connection_server_names: set[str] = set()
-    connection_vault_by_server: dict[str, str] = {}
-    for c in connections:
-        # Compatibility projection: only rows that still carry both legacy
-        # MCP fields expose a connection-scoped server.
-        legacy_mcp = _legacy_connection_mcp(c)
-        if legacy_mcp is None:
-            continue
-        mcp_url, vault_id = legacy_mcp
-        name = connection_server_name(c)
-        if name not in agent_mcp_server_names and mcp_url not in agent_mcp_server_urls:
-            mcp_server_map[name] = mcp_url
-            legacy_connection_server_names.add(name)
-            connection_vault_by_server[name] = vault_id
-    channel_context_by_server = mcp_channel_context_by_server(
-        agent.tools,
-        connections,
-        agent_mcp_server_names=agent_mcp_server_names,
-        agent_mcp_server_urls=agent_mcp_server_urls,
-    )
+    channel_context_by_server = mcp_channel_context_by_server(agent.tools)
 
     # Read windowed message events for this session.
     events = await sessions_service.read_windowed_events(
@@ -239,7 +209,6 @@ async def _run_session_step_body(
                 pending_mcp,
                 mcp_server_map,
                 channel_context_by_server=channel_context_by_server,
-                connection_vault_by_server=connection_vault_by_server,
                 focal_channel=session.focal_channel,
             )
         log.info(
@@ -440,11 +409,7 @@ async def _run_session_step_body(
             name = _tc_name(tc)
             if _is_mcp_tool(name):
                 # MCP tools default to always_ask (unlike built-in always_allow).
-                perm = resolve_mcp_permission(
-                    name,
-                    agent.tools,
-                    always_allow_server_names=legacy_connection_server_names,
-                )
+                perm = resolve_mcp_permission(name, agent.tools)
                 if perm == "always_allow":
                     mcp_immediate.append(tc)
                 else:
@@ -472,7 +437,6 @@ async def _run_session_step_body(
                 mcp_immediate,
                 mcp_server_map,
                 channel_context_by_server=channel_context_by_server,
-                connection_vault_by_server=connection_vault_by_server,
                 focal_channel=session.focal_channel,
             )
             log.info(
@@ -549,16 +513,11 @@ def _mcp_server_name_from_tool_name(name: str) -> str | None:
 
 def mcp_channel_context_by_server(
     agent_tools: list[ToolSpec],
-    connections: list[Any] | None = None,
-    *,
-    agent_mcp_server_names: set[str] | None = None,
-    agent_mcp_server_urls: set[str] | None = None,
 ) -> dict[str, str]:
     """Return server_name -> channel context type for MCP toolsets.
 
-    New code gets this from normal agent ``mcp_toolset`` declarations. The
-    optional ``connections`` argument is a compatibility projection for legacy
-    channel accounts that still carry an MCP URL and vault id.
+    Channel-aware MCP behavior is declared on normal agent ``mcp_toolset``
+    entries; connections do not contribute MCP server context.
     """
     contexts: dict[str, str] = {}
     for spec in agent_tools:
@@ -570,20 +529,6 @@ def mcp_channel_context_by_server(
         ):
             continue
         contexts[spec.mcp_server_name] = spec.channel_context.type
-
-    if connections:
-        from aios.harness.channels import connection_server_name
-
-        agent_names = agent_mcp_server_names or set()
-        agent_urls = agent_mcp_server_urls or set()
-        for c in connections:
-            legacy_mcp = _legacy_connection_mcp(c)
-            if legacy_mcp is None:
-                continue
-            mcp_url, _vault_id = legacy_mcp
-            name = connection_server_name(c)
-            if name not in agent_names and mcp_url not in agent_urls:
-                contexts.setdefault(name, "focal")
     return contexts
 
 
@@ -673,8 +618,6 @@ def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
 def resolve_mcp_permission(
     name: str,
     agent_tools: list[ToolSpec],
-    *,
-    always_allow_server_names: set[str] | None = None,
 ) -> str | None:
     """Look up the permission policy for an MCP tool.
 
@@ -683,11 +626,8 @@ def resolve_mcp_permission(
     tool name, then returns the ``default_config.permission_policy.type``
     or ``None`` (which callers treat as ``always_ask``).
 
-    ``always_allow_server_names`` is a compatibility hook for legacy
-    connection-projected MCP servers. New channel-aware MCP should express
-    this on the agent's normal ``mcp_toolset`` config. Focal-channel MCP
-    toolsets default to ``always_allow`` because declaring channel context is
-    already the operator's trust decision for that server.
+    Focal-channel MCP toolsets default to ``always_allow`` because declaring
+    channel context is already the operator's trust decision for that server.
     """
     server_name = name.split("__", 2)[1]
     for spec in agent_tools:
@@ -700,8 +640,6 @@ def resolve_mcp_permission(
             if spec.channel_context is not None and spec.channel_context.type == "focal":
                 return "always_allow"
             return None
-    if always_allow_server_names and server_name in always_allow_server_names:
-        return "always_allow"
     return None
 
 
@@ -720,18 +658,16 @@ async def discover_session_mcp_tools(
     omitted from the dict — the harness uses presence in the dict as
     the trigger for rendering a per-connector affordance block.
 
-    ``connections`` is retained as a compatibility projection for legacy
-    channel accounts that still carry MCP URL/vault pairs. New integrations
-    should declare MCP servers on the agent and credentials in session vaults.
-    If a connection's URL is already declared on the agent, the normal
-    agent server owns discovery and the connection projection is skipped.
+    ``connections`` is used only to alias connector-specific MCP
+    ``instructions`` back to bound channel accounts for prompt rendering.
+    Connections do not contribute MCP servers or credentials.
     """
     import asyncio
 
     from aios.harness.channels import connection_server_name
     from aios.mcp.client import discover_mcp_tools, resolve_auth_for_url
 
-    servers: list[tuple[str, str, str | None]] = []
+    servers: list[tuple[str, str]] = []
 
     enabled_server_names: set[str] = set()
     focal_server_names: set[str] = set()
@@ -740,56 +676,37 @@ async def discover_session_mcp_tools(
             enabled_server_names.add(spec.mcp_server_name)
             if spec.channel_context is not None and spec.channel_context.type == "focal":
                 focal_server_names.add(spec.mcp_server_name)
-    agent_server_names = {s.name for s in agent.mcp_servers}
-    agent_server_urls = {s.url for s in agent.mcp_servers}
-    enabled_agent_server_by_url: dict[str, str] = {}
     for s in agent.mcp_servers:
         if s.name in enabled_server_names:
-            servers.append((s.name, s.url, None))
-            enabled_agent_server_by_url.setdefault(s.url, s.name)
+            servers.append((s.name, s.url))
 
     instruction_aliases: dict[str, str] = {}
     for c in connections:
         name = connection_server_name(c)
-        legacy_mcp = _legacy_connection_mcp(c)
-        if legacy_mcp is None:
-            if c.connector in focal_server_names:
-                instruction_aliases[name] = c.connector
-            continue
-        mcp_url, vault_id = legacy_mcp
-        if name in agent_server_names:
-            continue
-        if mcp_url in agent_server_urls:
-            if source_name := enabled_agent_server_by_url.get(mcp_url):
-                instruction_aliases[name] = source_name
-            continue
-        else:
-            servers.append((name, mcp_url, vault_id))
+        if c.connector in focal_server_names:
+            instruction_aliases[name] = c.connector
 
     if not servers:
         return [], {}
 
     crypto_box = runtime.require_crypto_box()
 
-    async def _discover_one(
-        name: str, url: str, connection_vault_id: str | None
-    ) -> tuple[list[dict[str, Any]], str | None]:
+    async def _discover_one(name: str, url: str) -> tuple[list[dict[str, Any]], str | None]:
         headers = await resolve_auth_for_url(
             pool,
             crypto_box,
             session_id,
             url,
-            connection_vault_id=connection_vault_id,
         )
         return await discover_mcp_tools(url, name, headers)
 
-    results = await asyncio.gather(*[_discover_one(n, u, v) for n, u, v in servers])
+    results = await asyncio.gather(*[_discover_one(n, u) for n, u in servers])
     tools: list[dict[str, Any]] = [
         tool for (tool_list, _instructions) in results for tool in tool_list
     ]
     instructions_by_server: dict[str, str] = {
         name: instructions
-        for (name, _url, _vault_id), (_tools, instructions) in zip(servers, results, strict=True)
+        for (name, _url), (_tools, instructions) in zip(servers, results, strict=True)
         if instructions
     }
     for alias_name, source_name in instruction_aliases.items():

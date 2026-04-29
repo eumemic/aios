@@ -2201,7 +2201,7 @@ async def count_active_bindings_for_connection(
     """Count active channel bindings owned by this connection.  Used to
     block connection archival while sessions are still reachable via
     those bindings — archiving the connection would break inbound routing
-    and the legacy MCP projection for any live session.
+    for any live session.
     """
     val: int = await conn.fetchval(
         "SELECT COUNT(*) FROM channel_bindings WHERE connection_id = $1 AND archived_at IS NULL",
