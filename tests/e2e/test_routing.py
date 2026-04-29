@@ -93,6 +93,27 @@ async def connection(pool: Any, vault_id: str) -> Any:
 
 
 class TestConnectionCRUD:
+    async def test_create_channel_only_connection(self, pool: Any) -> None:
+        from aios.services import connections as svc
+
+        c = await svc.create_connection(
+            pool,
+            connector="signal",
+            account=f"channel-only-{_uniq()}",
+            metadata={"region": "us"},
+        )
+        assert c.id.startswith("conn_")
+        assert c.connector == "signal"
+        assert c.mcp_url is None
+        assert c.vault_id is None
+        assert c.metadata == {"region": "us"}
+        assert c.archived_at is None
+
+        fetched = await svc.get_connection(pool, c.id)
+        assert fetched.id == c.id
+        assert fetched.mcp_url is None
+        assert fetched.vault_id is None
+
     async def test_create_and_get(self, pool: Any, vault_id: str) -> None:
         from aios.services import connections as svc
 
@@ -147,6 +168,21 @@ class TestConnectionCRUD:
         )
         updated = await svc.update_connection(pool, c.id, mcp_url="https://new")
         assert updated.mcp_url == "https://new"
+
+    async def test_clear_legacy_mcp_fields(self, pool: Any, vault_id: str) -> None:
+        from aios.services import connections as svc
+
+        c = await svc.create_connection(
+            pool,
+            connector="signal",
+            account=f"clear-{_uniq()}",
+            mcp_url="https://old",
+            vault_id=vault_id,
+            metadata={},
+        )
+        updated = await svc.update_connection(pool, c.id, mcp_url=None, vault_id=None)
+        assert updated.mcp_url is None
+        assert updated.vault_id is None
 
     async def test_archive(self, pool: Any, vault_id: str) -> None:
         from aios.services import connections as svc
@@ -784,15 +820,13 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
 
 class TestNestedRoutingRulesEndpoint:
     async def test_create_and_get_nested(
-        self, http_client: httpx.AsyncClient, agent_id: str, env_id: str, vault_id: str
+        self, http_client: httpx.AsyncClient, agent_id: str, env_id: str
     ) -> None:
         r = await http_client.post(
             "/v1/connections",
             json={
                 "connector": "signal",
                 "account": f"nested-{_uniq()}",
-                "mcp_url": "https://m",
-                "vault_id": vault_id,
             },
         )
         assert r.status_code == 201, r.text
@@ -864,7 +898,7 @@ class TestInboundEndpoint:
         http_client: httpx.AsyncClient,
         agent_id: str,
         env_id: str,
-        vault_id: str,
+        _vault_id: str,
     ) -> tuple[str, str]:
         """Create a connection + catch-all rule.  Returns (connection_id, account)."""
         account = f"http-{_uniq()}"
@@ -873,8 +907,6 @@ class TestInboundEndpoint:
             json={
                 "connector": "signal",
                 "account": account,
-                "mcp_url": "https://m",
-                "vault_id": vault_id,
             },
         )
         assert r.status_code == 201, r.text
@@ -935,9 +967,7 @@ class TestInboundEndpoint:
         )
         assert r.status_code == 404
 
-    async def test_no_route_returns_404(
-        self, http_client: httpx.AsyncClient, vault_id: str
-    ) -> None:
+    async def test_no_route_returns_404(self, http_client: httpx.AsyncClient) -> None:
         """Connection exists but no rule matches the resulting path."""
         account = f"unrouted-{_uniq()}"
         r = await http_client.post(
@@ -945,8 +975,6 @@ class TestInboundEndpoint:
             json={
                 "connector": "signal",
                 "account": account,
-                "mcp_url": "https://m",
-                "vault_id": vault_id,
             },
         )
         connection_id = r.json()["id"]

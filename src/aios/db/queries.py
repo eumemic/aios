@@ -2030,8 +2030,8 @@ async def insert_connection(
     *,
     connector: str,
     account: str,
-    mcp_url: str,
-    vault_id: str,
+    mcp_url: str | None,
+    vault_id: str | None,
     metadata: dict[str, Any],
 ) -> Connection:
     new_id = make_id(CONNECTION)
@@ -2096,16 +2096,16 @@ async def update_connection(
     conn: asyncpg.Connection[Any],
     connection_id: str,
     *,
-    mcp_url: str | None = None,
-    vault_id: str | None = None,
+    mcp_url: str | None = _UNSET,
+    vault_id: str | None = _UNSET,
     metadata: dict[str, Any] | None = None,
 ) -> Connection:
     sets: list[str] = []
     args: list[Any] = [connection_id]
-    if mcp_url is not None:
+    if mcp_url is not _UNSET:
         args.append(mcp_url)
         sets.append(f"mcp_url = ${len(args)}")
-    if vault_id is not None:
+    if vault_id is not _UNSET:
         args.append(vault_id)
         sets.append(f"vault_id = ${len(args)}")
     if metadata is not None:

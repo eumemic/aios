@@ -16,6 +16,13 @@ from aios.models.routing_rules import (
 
 class TestConnectionCreate:
     def test_valid(self) -> None:
+        c = ConnectionCreate(connector="signal", account="alice")
+        assert c.connector == "signal"
+        assert c.mcp_url is None
+        assert c.vault_id is None
+        assert c.metadata == {}
+
+    def test_valid_with_legacy_mcp_projection(self) -> None:
         c = ConnectionCreate(
             connector="signal",
             account="alice",
@@ -25,12 +32,21 @@ class TestConnectionCreate:
         assert c.connector == "signal"
         assert c.metadata == {}
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"mcp_url": "https://mcp.example.com"},
+            {"vault_id": "vlt_abc"},
+        ],
+    )
+    def test_legacy_mcp_fields_are_a_pair(self, kwargs: dict[str, str]) -> None:
+        with pytest.raises(ValidationError, match="mcp_url and vault_id"):
+            ConnectionCreate(connector="signal", account="alice", **kwargs)
+
     def test_with_metadata(self) -> None:
         c = ConnectionCreate(
             connector="signal",
             account="alice",
-            mcp_url="https://mcp.example.com",
-            vault_id="vlt_abc",
             metadata={"source": "manual"},
         )
         assert c.metadata == {"source": "manual"}
@@ -40,19 +56,12 @@ class TestConnectionCreate:
             ConnectionCreate(
                 connector="signal",
                 account="alice",
-                mcp_url="https://m",
-                vault_id="vlt_abc",
                 bogus="x",  # type: ignore[call-arg]
             )
 
     def test_rejects_empty_connector(self) -> None:
         with pytest.raises(ValidationError):
-            ConnectionCreate(
-                connector="",
-                account="alice",
-                mcp_url="https://m",
-                vault_id="vlt_abc",
-            )
+            ConnectionCreate(connector="", account="alice")
 
     @pytest.mark.parametrize(
         ("field", "value"),
@@ -62,8 +71,6 @@ class TestConnectionCreate:
         kwargs: dict[str, str] = {
             "connector": "signal",
             "account": "alice",
-            "mcp_url": "https://m",
-            "vault_id": "vlt_abc",
         }
         kwargs[field] = value
         with pytest.raises(ValidationError, match="must not contain '/'"):

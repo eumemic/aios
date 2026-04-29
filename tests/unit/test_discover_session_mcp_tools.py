@@ -43,6 +43,20 @@ def _connection(cid: str, url: str) -> Connection:
     )
 
 
+def _channel_only_connection(cid: str, connector: str = "signal") -> Connection:
+    now = datetime(2026, 4, 16)
+    return Connection(
+        id=cid,
+        connector=connector,
+        account="acct",
+        mcp_url=None,
+        vault_id=None,
+        metadata={},
+        created_at=now,
+        updated_at=now,
+    )
+
+
 def _agent(
     mcp_servers: list[McpServerSpec] | None = None,
     tools: list[ToolSpec] | None = None,
@@ -135,6 +149,25 @@ class TestDiscoverSessionMcpTools:
             "mcp__conn_01HQR2K7VXBZ9MNPL3WYCT8G__t",
         }
 
+    async def test_channel_only_connections_do_not_project_mcp(self) -> None:
+        from aios.harness.loop import discover_session_mcp_tools
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.discover_mcp_tools", new_callable=AsyncMock) as discover,
+        ):
+            tools, instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=_agent(),
+                connections=[_channel_only_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F")],
+            )
+
+        assert tools == []
+        assert instructions == {}
+        resolve.assert_not_called()
+        discover.assert_not_called()
+
     async def test_agent_and_connections_combined(self) -> None:
         from aios.harness.loop import discover_session_mcp_tools
 
@@ -205,6 +238,48 @@ class TestDiscoverSessionMcpTools:
             )
 
         assert seen == [("https://m1", None)]
+        assert tools == [{"name": "mcp__signal__t", "url": "https://m1"}]
+        assert instructions == {
+            "signal": "send via focal",
+            "conn_01HQR2K7VXBZ9MNPL3WYCT8F": "send via focal",
+        }
+
+    async def test_channel_only_connection_aliases_matching_focal_server_instructions(
+        self,
+    ) -> None:
+        from aios.harness.loop import discover_session_mcp_tools
+        from aios.models.agents import McpChannelContext
+
+        agent = _agent(
+            mcp_servers=[McpServerSpec(name="signal", url="https://m1")],
+            tools=[
+                ToolSpec(
+                    type="mcp_toolset",
+                    enabled=True,
+                    mcp_server_name="signal",
+                    channel_context=McpChannelContext(type="focal"),
+                )
+            ],
+        )
+        connections = [_channel_only_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F")]
+
+        async def _discover(
+            url: str, name: str, _headers: dict[str, str]
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [{"name": f"mcp__{name}__t", "url": url}], "send via focal"
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            resolve.return_value = {}
+            tools, instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+                connections=connections,
+            )
+
         assert tools == [{"name": "mcp__signal__t", "url": "https://m1"}]
         assert instructions == {
             "signal": "send via focal",

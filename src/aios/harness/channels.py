@@ -211,11 +211,11 @@ def build_connector_instructions_block(
 ) -> str:
     """Render per-connector affordance prose grouped by connection.
 
-    ``instructions_by_server`` maps server_name (which for connection-
-    provided MCP servers equals ``connection_server_name(c)``) to the
-    server's ``InitializeResult.instructions`` string.  Connections are
-    iterated in the caller-supplied order so the prompt is stable
-    across steps (cache friendly).
+    ``instructions_by_server`` maps server_name to the server's
+    ``InitializeResult.instructions`` string. For connection-scoped
+    rendering, discovery aliases the relevant MCP server instructions under
+    ``connection_server_name(c)``. Connections are iterated in the
+    caller-supplied order so the prompt is stable across steps.
 
     Connections without an entry in the dict are skipped — a connector
     that supplies no instructions contributes no block.

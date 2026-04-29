@@ -1,4 +1,4 @@
-"""``aios connections ...`` — connector-instance CRUD + inbound-message helper."""
+"""``aios connections ...`` — inbound account CRUD + message helper."""
 
 from __future__ import annotations
 
@@ -18,10 +18,10 @@ from aios.cli.files import PayloadError, load_json_object, load_payload, resolve
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import run_or_die
 
-app = typer.Typer(name="connections", help="Manage connector connections.", no_args_is_help=True)
+app = typer.Typer(name="connections", help="Manage inbound channel accounts.", no_args_is_help=True)
 
-_COLS = ("id", "connector", "account", "mcp_url", "updated_at")
-_MAXW = {"connector": 20, "account": 40, "mcp_url": 40}
+_COLS = ("id", "connector", "account", "updated_at")
+_MAXW = {"connector": 20, "account": 40}
 
 
 @app.command("list")
@@ -66,9 +66,11 @@ def create(
     account: Annotated[
         str | None, typer.Option("--account", help="Account identifier (e.g. bot uuid).")
     ] = None,
-    mcp_url: Annotated[str | None, typer.Option("--mcp-url", help="MCP server URL.")] = None,
+    mcp_url: Annotated[
+        str | None, typer.Option("--mcp-url", help="Legacy connection-projected MCP URL.")
+    ] = None,
     vault_id: Annotated[
-        str | None, typer.Option("--vault-id", help="Vault id with the MCP credential.")
+        str | None, typer.Option("--vault-id", help="Legacy MCP credential vault id.")
     ] = None,
     metadata_json: Annotated[
         str | None,
@@ -80,14 +82,12 @@ def create(
 ) -> None:
     def _run() -> int | None:
         ergonomic: dict[str, Any] | None = None
-        if any(v is not None for v in (connector, account, mcp_url, vault_id)):
+        if any(v is not None for v in (connector, account, mcp_url, vault_id, metadata_json)):
             missing = [
                 name
                 for name, v in (
                     ("--connector", connector),
                     ("--account", account),
-                    ("--mcp-url", mcp_url),
-                    ("--vault-id", vault_id),
                 )
                 if v is None
             ]
@@ -97,9 +97,11 @@ def create(
             ergonomic = {
                 "connector": connector,
                 "account": account,
-                "mcp_url": mcp_url,
-                "vault_id": vault_id,
             }
+            if mcp_url is not None:
+                ergonomic["mcp_url"] = mcp_url
+            if vault_id is not None:
+                ergonomic["vault_id"] = vault_id
             if metadata_json is not None:
                 try:
                     ergonomic["metadata"] = load_json_object(metadata_json, "--metadata-json")

@@ -66,11 +66,13 @@ async def get(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connection:
 async def update(
     connection_id: str, body: ConnectionUpdate, pool: PoolDep, _auth: AuthDep
 ) -> Connection:
+    from aios.db.queries import _UNSET
+
     return await service.update_connection(
         pool,
         connection_id,
-        mcp_url=body.mcp_url,
-        vault_id=body.vault_id,
+        mcp_url=body.mcp_url if "mcp_url" in body.model_fields_set else _UNSET,
+        vault_id=body.vault_id if "vault_id" in body.model_fields_set else _UNSET,
         metadata=body.metadata,
     )
 

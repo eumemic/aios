@@ -76,16 +76,14 @@ as focal-channel aware:
 
 ### 4. Register the aios connection
 
-The connection is the inbound channel account. `mcp_url` and `vault_id` are
-still required by the current API for legacy compatibility; normal MCP
-discovery comes from the agent config above.
+The connection is the inbound channel account. Normal MCP discovery comes from
+the agent config above; the vault is supplied through the routing rule's
+session params.
 
 ```
 CONN=$(curl -X POST :8090/v1/connections -d "{
   \"connector\": \"signal\",
-  \"account\": \"<bot-aci-uuid-from-step-1>\",
-  \"mcp_url\": \"http://localhost:9100/mcp\",
-  \"vault_id\": \"$VLT\"
+  \"account\": \"<bot-aci-uuid-from-step-1>\"
 }" | jq -r .id)
 ```
 

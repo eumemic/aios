@@ -47,6 +47,15 @@ log = get_logger("aios.harness.loop")
 _RETRY_BACKOFF_SECONDS: list[float] = [2, 8, 30, 120]
 
 
+def _legacy_connection_mcp(c: Any) -> tuple[str, str] | None:
+    """Return legacy connection-projected MCP config when fully present."""
+    mcp_url = getattr(c, "mcp_url", None)
+    vault_id = getattr(c, "vault_id", None)
+    if isinstance(mcp_url, str) and mcp_url and isinstance(vault_id, str) and vault_id:
+        return mcp_url, vault_id
+    return None
+
+
 def _retry_delay_for_attempt(attempt: int) -> float | None:
     """Return the backoff delay for ``attempt``, or ``None`` if the budget is spent."""
     if attempt >= len(_RETRY_BACKOFF_SECONDS):
@@ -188,13 +197,17 @@ async def _run_session_step_body(
     legacy_connection_server_names: set[str] = set()
     connection_vault_by_server: dict[str, str] = {}
     for c in connections:
-        # Compatibility projection: inbound channel accounts can still expose
-        # their MCP server until agents declare those servers directly.
+        # Compatibility projection: only rows that still carry both legacy
+        # MCP fields expose a connection-scoped server.
+        legacy_mcp = _legacy_connection_mcp(c)
+        if legacy_mcp is None:
+            continue
+        mcp_url, vault_id = legacy_mcp
         name = connection_server_name(c)
-        if name not in agent_mcp_server_names and c.mcp_url not in agent_mcp_server_urls:
-            mcp_server_map[name] = c.mcp_url
+        if name not in agent_mcp_server_names and mcp_url not in agent_mcp_server_urls:
+            mcp_server_map[name] = mcp_url
             legacy_connection_server_names.add(name)
-            connection_vault_by_server[name] = c.vault_id
+            connection_vault_by_server[name] = vault_id
     channel_context_by_server = mcp_channel_context_by_server(
         agent.tools,
         connections,
@@ -545,7 +558,7 @@ def mcp_channel_context_by_server(
 
     New code gets this from normal agent ``mcp_toolset`` declarations. The
     optional ``connections`` argument is a compatibility projection for legacy
-    channel accounts that still carry an MCP URL.
+    channel accounts that still carry an MCP URL and vault id.
     """
     contexts: dict[str, str] = {}
     for spec in agent_tools:
@@ -564,8 +577,12 @@ def mcp_channel_context_by_server(
         agent_names = agent_mcp_server_names or set()
         agent_urls = agent_mcp_server_urls or set()
         for c in connections:
+            legacy_mcp = _legacy_connection_mcp(c)
+            if legacy_mcp is None:
+                continue
+            mcp_url, _vault_id = legacy_mcp
             name = connection_server_name(c)
-            if name not in agent_names and c.mcp_url not in agent_urls:
+            if name not in agent_names and mcp_url not in agent_urls:
                 contexts.setdefault(name, "focal")
     return contexts
 
@@ -704,8 +721,8 @@ async def discover_session_mcp_tools(
     the trigger for rendering a per-connector affordance block.
 
     ``connections`` is retained as a compatibility projection for legacy
-    channel accounts that still carry MCP URLs. New integrations should
-    declare MCP servers on the agent and credentials in session vaults.
+    channel accounts that still carry MCP URL/vault pairs. New integrations
+    should declare MCP servers on the agent and credentials in session vaults.
     If a connection's URL is already declared on the agent, the normal
     agent server owns discovery and the connection projection is skipped.
     """
@@ -717,9 +734,12 @@ async def discover_session_mcp_tools(
     servers: list[tuple[str, str, str | None]] = []
 
     enabled_server_names: set[str] = set()
+    focal_server_names: set[str] = set()
     for spec in agent.tools:
         if spec.type == "mcp_toolset" and spec.enabled and spec.mcp_server_name:
             enabled_server_names.add(spec.mcp_server_name)
+            if spec.channel_context is not None and spec.channel_context.type == "focal":
+                focal_server_names.add(spec.mcp_server_name)
     agent_server_names = {s.name for s in agent.mcp_servers}
     agent_server_urls = {s.url for s in agent.mcp_servers}
     enabled_agent_server_by_url: dict[str, str] = {}
@@ -731,14 +751,20 @@ async def discover_session_mcp_tools(
     instruction_aliases: dict[str, str] = {}
     for c in connections:
         name = connection_server_name(c)
+        legacy_mcp = _legacy_connection_mcp(c)
+        if legacy_mcp is None:
+            if c.connector in focal_server_names:
+                instruction_aliases[name] = c.connector
+            continue
+        mcp_url, vault_id = legacy_mcp
         if name in agent_server_names:
             continue
-        if c.mcp_url in agent_server_urls:
-            if source_name := enabled_agent_server_by_url.get(c.mcp_url):
+        if mcp_url in agent_server_urls:
+            if source_name := enabled_agent_server_by_url.get(mcp_url):
                 instruction_aliases[name] = source_name
             continue
         else:
-            servers.append((name, c.mcp_url, c.vault_id))
+            servers.append((name, mcp_url, vault_id))
 
     if not servers:
         return [], {}
