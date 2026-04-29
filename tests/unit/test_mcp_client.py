@@ -289,7 +289,7 @@ class TestDiscoverMcpTools:
         """``InitializeResult.instructions`` is the standard MCP transport
         for per-server prompt affordance prose.  The harness reads it from
         ``discover_mcp_tools``'s second return slot to compose the
-        per-connector system-prompt block.
+        per-server system-prompt block.
         """
         mock_tool = _make_mock_tool("signal_send", "Send a Signal message", {"type": "object"})
         mock_result = MagicMock()

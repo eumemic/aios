@@ -1,13 +1,12 @@
 """Unit tests for discover_session_mcp_tools.
 
 Covers the collect-URLs-then-discover shape: agent-declared MCP filtered by
-enabled mcp_toolset entries. Connections are present only to alias
-connector-specific MCP instructions into connector-aware prompt blocks.
+enabled mcp_toolset entries. MCP instructions are returned under normal
+agent MCP server names.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -15,7 +14,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from aios.models.agents import McpChannelContext, McpServerSpec, ToolSpec
-from aios.models.connections import Connection
 
 
 @pytest.fixture(autouse=True)
@@ -26,21 +24,6 @@ def _mock_crypto_box() -> Any:
     with patch("aios.harness.loop.runtime.require_crypto_box") as m:
         m.return_value = object()
         yield m
-
-
-def _connection(
-    cid: str,
-    connector: str = "signal",
-) -> Connection:
-    now = datetime(2026, 4, 16)
-    return Connection(
-        id=cid,
-        connector=connector,
-        account="acct",
-        metadata={},
-        created_at=now,
-        updated_at=now,
-    )
 
 
 def _agent(
@@ -61,7 +44,6 @@ class TestDiscoverSessionMcpTools:
             pool=AsyncMock(),
             session_id="sess_x",
             agent=_agent(),
-            connections=[],
         )
         assert tools == []
         assert instructions == {}
@@ -97,43 +79,17 @@ class TestDiscoverSessionMcpTools:
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
-                connections=[],
             )
         names = {t["name"] for t in tools}
         assert names == {"mcp__gh__t"}
 
-    async def test_connections_do_not_project_mcp(self) -> None:
-        from aios.harness.loop import discover_session_mcp_tools
-
-        connections = [
-            _connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F"),
-            _connection("conn_01HQR2K7VXBZ9MNPL3WYCT8G"),
-        ]
-
-        with (
-            patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
-            patch("aios.mcp.client.discover_mcp_tools", new_callable=AsyncMock) as discover,
-        ):
-            tools, instructions = await discover_session_mcp_tools(
-                pool=AsyncMock(),
-                session_id="sess_x",
-                agent=_agent(),
-                connections=connections,
-            )
-
-        assert tools == []
-        assert instructions == {}
-        resolve.assert_not_called()
-        discover.assert_not_called()
-
-    async def test_agent_and_connections_discovers_only_agent_servers(self) -> None:
+    async def test_discovers_only_agent_servers(self) -> None:
         from aios.harness.loop import discover_session_mcp_tools
 
         agent = _agent(
             mcp_servers=[McpServerSpec(name="gh", url="https://mcp.github")],
             tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="gh")],
         )
-        connections = [_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F")]
 
         async def _discover(
             url: str, name: str, _headers: dict[str, str]
@@ -149,12 +105,11 @@ class TestDiscoverSessionMcpTools:
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
-                connections=connections,
             )
         urls = sorted(t["url"] for t in tools)
         assert urls == ["https://mcp.github"]
 
-    async def test_channel_only_connection_aliases_matching_focal_server_instructions(
+    async def test_focal_server_instructions_are_not_connection_aliased(
         self,
     ) -> None:
         from aios.harness.loop import discover_session_mcp_tools
@@ -170,7 +125,6 @@ class TestDiscoverSessionMcpTools:
                 )
             ],
         )
-        connections = [_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F")]
 
         async def _discover(
             url: str, name: str, _headers: dict[str, str]
@@ -186,14 +140,10 @@ class TestDiscoverSessionMcpTools:
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
-                connections=connections,
             )
 
         assert tools == [{"name": "mcp__signal__t", "url": "https://m1"}]
-        assert instructions == {
-            "signal": "send via focal",
-            "conn_01HQR2K7VXBZ9MNPL3WYCT8F": "send via focal",
-        }
+        assert instructions == {"signal": "send via focal"}
 
     async def test_auth_resolved_per_url(self) -> None:
         """Each URL resolves auth independently — goes through
@@ -230,7 +180,6 @@ class TestDiscoverSessionMcpTools:
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
-                connections=[],
             )
         assert seen == ["https://mcp.github"]
         assert {t["auth"] for t in tools} == {"Bearer token-for-https://mcp.github"}
@@ -239,7 +188,7 @@ class TestDiscoverSessionMcpTools:
         """Each server's ``InitializeResult.instructions`` flows into the
         returned dict under its server_name key.  Servers that supply no
         instructions are omitted — the harness uses dict membership as
-        the trigger for rendering a per-connector affordance block.
+        the trigger for rendering MCP server affordance prose.
         """
         from aios.harness.loop import discover_session_mcp_tools
 
@@ -254,7 +203,6 @@ class TestDiscoverSessionMcpTools:
                 )
             ],
         )
-        connections = [_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F")]
 
         async def _discover(
             url: str, name: str, _headers: dict[str, str]
@@ -270,12 +218,8 @@ class TestDiscoverSessionMcpTools:
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
-                connections=connections,
             )
-        assert instructions == {
-            "signal": "## signal\n\nbe nice",
-            "conn_01HQR2K7VXBZ9MNPL3WYCT8F": "## signal\n\nbe nice",
-        }
+        assert instructions == {"signal": "## signal\n\nbe nice"}
 
     async def test_empty_string_instructions_omitted(self) -> None:
         """An empty string is treated identically to ``None`` — no
@@ -303,6 +247,5 @@ class TestDiscoverSessionMcpTools:
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
-                connections=[_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F")],
             )
         assert instructions == {}

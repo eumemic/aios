@@ -173,8 +173,8 @@ class TestEntrySweepSpan:
                 AsyncMock(return_value=agent),
             ),
             patch(
-                "aios.harness.channels.list_bindings_and_connections",
-                AsyncMock(return_value=([], [])),
+                "aios.harness.channels.list_session_bindings",
+                AsyncMock(return_value=[]),
             ),
             patch(
                 "aios.harness.loop.sessions_service.read_windowed_events",

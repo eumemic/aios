@@ -36,7 +36,6 @@ if TYPE_CHECKING:
 
     from aios.models.agents import Agent, AgentVersion
     from aios.models.channel_bindings import ChannelBinding
-    from aios.models.connections import Connection
     from aios.models.events import Event
     from aios.models.sessions import Session
     from aios.models.skills import SkillVersion
@@ -60,19 +59,17 @@ async def compose_step_context(
     session: Session,
     agent: Agent | AgentVersion,
     bindings: list[ChannelBinding],
-    connections: list[Connection],
     events: list[Event],
 ) -> StepContext:
     """Compose the chat-completions payload for a step.
 
-    Callers must have already loaded ``session`` / ``agent`` / ``bindings``
-    / ``connections`` / ``events`` so the endpoint and the worker pay
-    the same I/O cost profile.  This function adds MCP discovery and
-    skill-ref resolution on top.
+    Callers must have already loaded ``session`` / ``agent`` / ``bindings`` /
+    ``events`` so the endpoint and the worker pay the same I/O cost profile.
+    This function adds MCP discovery and skill-ref resolution on top.
     """
     from aios.harness.channels import (
-        augment_with_connector_instructions,
         augment_with_focal_paradigm,
+        augment_with_mcp_instructions,
         build_channels_tail_block,
     )
     from aios.harness.loop import (
@@ -91,10 +88,8 @@ async def compose_step_context(
         tools.append(_switch_channel_tool_spec())
 
     mcp_instructions: dict[str, str] = {}
-    if agent.mcp_servers or connections:
-        mcp_tools, mcp_instructions = await discover_session_mcp_tools(
-            pool, session_id, agent, connections
-        )
+    if agent.mcp_servers:
+        mcp_tools, mcp_instructions = await discover_session_mcp_tools(pool, session_id, agent)
         # Hide focal-channel MCP tools when focal is NULL — can't type
         # into a chat you aren't attending to.
         channel_context_by_server = mcp_channel_context_by_server(agent.tools)
@@ -108,9 +103,7 @@ async def compose_step_context(
     )
     system_prompt = augment_system_prompt(agent.system, skill_versions)
     system_prompt = augment_with_focal_paradigm(system_prompt, bindings)
-    system_prompt = augment_with_connector_instructions(
-        system_prompt, mcp_instructions, connections
-    )
+    system_prompt = augment_with_mcp_instructions(system_prompt, mcp_instructions)
 
     ctx = build_messages(events, system_prompt=system_prompt)
 

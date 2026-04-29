@@ -1,5 +1,5 @@
-"""Channel helpers: prompt augmentation, monologue prefix, bindings →
-connections translation, and focal-channel unread derivation.
+"""Channel helpers: prompt augmentation, monologue prefix, binding lookup,
+and focal-channel unread derivation.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import asyncpg
 
 from aios.db import queries
 from aios.models.channel_bindings import ChannelBinding
-from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX, Connection
 from aios.models.events import Event
 
 MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
@@ -34,8 +33,8 @@ def focal_channel_path(focal: str | None) -> str | None:
     """Return the connector-specific suffix of a focal address.
 
     The ``<connector>/<account>`` prefix is information the MCP server
-    already has (it was invoked *by* that connection), so sending it
-    would be redundant; we strip it.  For a 3-segment address like
+    already has from its own service identity and session credential, so
+    sending it would be redundant; we strip it.  For a 3-segment address like
     ``signal/<bot>/<chat>`` the suffix is just ``<chat>``.  For
     ``telegram/<bot>/<chat>/<thread>`` it's ``<chat>/<thread>``.
 
@@ -51,21 +50,10 @@ def focal_channel_path(focal: str | None) -> str | None:
     return parts[2]
 
 
-def connection_server_name(c: Connection) -> str:
-    # Stable key for rendering connector instructions per bound connection.
-    assert c.id.startswith(CONNECTION_SERVER_NAME_PREFIX)
-    return c.id
-
-
-async def list_bindings_and_connections(
-    pool: asyncpg.Pool[Any], session_id: str
-) -> tuple[list[ChannelBinding], list[Connection]]:
-    """Load the session's bindings and the distinct connections they reference."""
+async def list_session_bindings(pool: asyncpg.Pool[Any], session_id: str) -> list[ChannelBinding]:
+    """Load the session's active channel bindings for context composition."""
     async with pool.acquire() as conn:
-        bindings = await queries.list_session_bindings(conn, session_id)
-        conn_ids = sorted({b.connection_id for b in bindings})
-        connections = await queries.list_connections_by_ids(conn, conn_ids) if conn_ids else []
-    return bindings, connections
+        return await queries.list_session_bindings(conn, session_id)
 
 
 def build_focal_paradigm_block(bindings: list[ChannelBinding]) -> str:
@@ -81,7 +69,7 @@ def build_focal_paradigm_block(bindings: list[ChannelBinding]) -> str:
     Per-platform specifics (Signal markdown subset, mention syntax,
     response idioms) live in each connector and travel through the MCP
     ``InitializeResult.instructions`` field — see
-    :func:`build_connector_instructions_block`.
+    :func:`build_mcp_instructions_block`.
     """
     if not bindings:
         return ""
@@ -204,37 +192,30 @@ def build_channels_tail_block(
     return {"role": "user", "content": "\n".join(lines)}
 
 
-def build_connector_instructions_block(
+def build_mcp_instructions_block(
     instructions_by_server: dict[str, str],
-    connections: list[Connection],
 ) -> str:
-    """Render per-connector affordance prose grouped by connection.
+    """Render MCP server affordance prose in discovery order.
 
     ``instructions_by_server`` maps server_name to the server's
-    ``InitializeResult.instructions`` string. For connection-scoped
-    rendering, discovery aliases the relevant MCP server instructions under
-    ``connection_server_name(c)``. Connections are iterated in the
-    caller-supplied order so the prompt is stable across steps.
+    ``InitializeResult.instructions`` string. Discovery builds the dict in
+    agent ``mcp_servers`` order so the prompt is stable across steps.
 
-    Connections without an entry in the dict are skipped — a connector
-    that supplies no instructions contributes no block.
+    Servers without instructions are omitted by discovery and skipped here.
     """
     sections: list[str] = []
-    for c in connections:
-        name = connection_server_name(c)
-        text = instructions_by_server.get(name)
+    for server_name, text in instructions_by_server.items():
         if not text:
             continue
-        sections.append(f"## Connector: {c.connector}/{c.account}\n\n{text}")
+        sections.append(f"## MCP server: {server_name}\n\n{text}")
     return "\n\n".join(sections)
 
 
-def augment_with_connector_instructions(
+def augment_with_mcp_instructions(
     base_system: str,
     instructions_by_server: dict[str, str],
-    connections: list[Connection],
 ) -> str:
-    block = build_connector_instructions_block(instructions_by_server, connections)
+    block = build_mcp_instructions_block(instructions_by_server)
     if not block:
         return base_system
     if base_system:

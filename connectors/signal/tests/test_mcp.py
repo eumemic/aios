@@ -362,7 +362,7 @@ def test_build_mcp_server_omits_profile_name_when_bot_not_in_contacts() -> None:
 
 def test_build_mcp_server_passes_signal_instructions() -> None:
     """The MCP server's ``instructions`` field is the transport for
-    Signal's per-connector affordance prose; aios reads it from the
+    Signal's per-server affordance prose; aios reads it from the
     ``InitializeResult`` returned by ``session.initialize()`` and
     composes it into the agent's system prompt.
     """

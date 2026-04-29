@@ -123,11 +123,11 @@ async def discover_mcp_tools(
       (``mcp__<server_name>__<tool_name>``).
     * ``instructions`` — the server's ``InitializeResult.instructions``
       string (per the MCP spec), or ``None`` if the server didn't supply
-      any. Used by the harness to compose per-connector affordance prose
+      any. Used by the harness to compose per-server affordance prose
       into the system prompt.
 
     On any error, logs a warning and returns ``([], None)`` — the model
-    simply doesn't see those tools (or that connector's instructions).
+    simply doesn't see those tools (or that server's instructions).
     """
     try:
         from aios.harness import runtime

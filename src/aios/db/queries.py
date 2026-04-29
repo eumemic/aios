@@ -2105,27 +2105,6 @@ async def update_connection(
     return _row_to_connection(row)
 
 
-async def list_connections_by_ids(
-    conn: asyncpg.Connection[Any],
-    ids: list[str],
-) -> list[Connection]:
-    """Active connections with the given ``ids``.  Empty input → no roundtrip.
-
-    Results are ordered by ``c.id`` so callers can feed them into the
-    system prompt in a stable order — prompt-cache stability depends
-    on it.  Used by :func:`aios.harness.channels.list_bindings_and_connections`
-    where the ``ids`` come from the distinct ``binding.connection_id``
-    values of a session's bindings.
-    """
-    if not ids:
-        return []
-    rows = await conn.fetch(
-        "SELECT * FROM connections WHERE id = ANY($1::text[]) AND archived_at IS NULL ORDER BY id",
-        ids,
-    )
-    return [_row_to_connection(r) for r in rows]
-
-
 async def get_connections_by_pairs(
     conn: asyncpg.Connection[Any],
     pairs: list[tuple[str, str]],
@@ -2315,8 +2294,7 @@ async def list_session_bindings(
 ) -> list[ChannelBinding]:
     """Every active binding for ``session_id``, unpaginated.
 
-    The step function consumes this in one shot (see
-    :func:`aios.harness.channels.list_bindings_and_connections`).
+    The step function consumes this in one shot when composing context.
     """
     rows = await conn.fetch(
         _BINDING_SELECT + " WHERE cb.session_id = $1 AND cb.archived_at IS NULL ORDER BY cb.id",

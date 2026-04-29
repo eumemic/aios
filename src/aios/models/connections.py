@@ -16,11 +16,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-# Connection ids use this prefix. The stable id is also used as the
-# per-connection instruction alias key when connector MCP instructions are
-# rendered into a session prompt.
-CONNECTION_SERVER_NAME_PREFIX = "conn_"
-
 
 class ConnectionCreate(BaseModel):
     """Request body for ``POST /v1/connections``.

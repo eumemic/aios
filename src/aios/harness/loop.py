@@ -178,9 +178,9 @@ async def _run_session_step_body(
     else:
         agent = await agents_service.get_agent(pool, session.agent_id)
 
-    from aios.harness.channels import list_bindings_and_connections
+    from aios.harness.channels import list_session_bindings
 
-    bindings, connections = await list_bindings_and_connections(pool, session_id)
+    bindings = await list_session_bindings(pool, session_id)
 
     mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
     channel_context_by_server = mcp_channel_context_by_server(agent.tools)
@@ -238,7 +238,6 @@ async def _run_session_step_body(
             session=session,
             agent=agent,
             bindings=bindings,
-            connections=connections,
             events=events,
         )
     except Exception:
@@ -647,7 +646,6 @@ async def discover_session_mcp_tools(
     pool: Any,
     session_id: str,
     agent: Any,
-    connections: list[Any],
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Discover MCP tools from agent-declared servers (filtered by enabled
     ``mcp_toolset`` entries).
@@ -656,35 +654,21 @@ async def discover_session_mcp_tools(
     maps ``server_name`` → the server's ``InitializeResult.instructions``
     string.  Servers that supplied no instructions (or ``""``) are
     omitted from the dict — the harness uses presence in the dict as
-    the trigger for rendering a per-connector affordance block.
-
-    ``connections`` is used only to alias connector-specific MCP
-    ``instructions`` back to bound channel accounts for prompt rendering.
-    Connections do not contribute MCP servers or credentials.
+    the trigger for rendering MCP server affordance prose.
     """
     import asyncio
 
-    from aios.harness.channels import connection_server_name
     from aios.mcp.client import discover_mcp_tools, resolve_auth_for_url
 
     servers: list[tuple[str, str]] = []
 
     enabled_server_names: set[str] = set()
-    focal_server_names: set[str] = set()
     for spec in agent.tools:
         if spec.type == "mcp_toolset" and spec.enabled and spec.mcp_server_name:
             enabled_server_names.add(spec.mcp_server_name)
-            if spec.channel_context is not None and spec.channel_context.type == "focal":
-                focal_server_names.add(spec.mcp_server_name)
     for s in agent.mcp_servers:
         if s.name in enabled_server_names:
             servers.append((s.name, s.url))
-
-    instruction_aliases: dict[str, str] = {}
-    for c in connections:
-        name = connection_server_name(c)
-        if c.connector in focal_server_names:
-            instruction_aliases[name] = c.connector
 
     if not servers:
         return [], {}
@@ -709,9 +693,6 @@ async def discover_session_mcp_tools(
         for (name, _url), (_tools, instructions) in zip(servers, results, strict=True)
         if instructions
     }
-    for alias_name, source_name in instruction_aliases.items():
-        if instructions := instructions_by_server.get(source_name):
-            instructions_by_server[alias_name] = instructions
     return tools, instructions_by_server
 
 
