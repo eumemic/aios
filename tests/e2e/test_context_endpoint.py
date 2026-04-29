@@ -185,3 +185,54 @@ class TestContextEndpoint:
             r = await http_client.get(f"/v1/sessions/{session.id}/context")
 
         assert r.status_code == 200, r.text
+
+    async def test_phone_down_context_keeps_discovered_mcp_tools(
+        self, http_client: httpx.AsyncClient, pool: Any
+    ) -> None:
+        """Phone-down suppresses focal metadata at call time, not MCP tool visibility."""
+        from aios.db import queries
+        from aios.models.agents import McpServerSpec, ToolSpec
+        from aios.services import agents as agents_svc
+        from aios.services import sessions as sessions_svc
+
+        async with pool.acquire() as conn:
+            env = await queries.insert_environment(conn, name=f"ctx-mcp-env-{_uniq()}")
+        agent = await agents_svc.create_agent(
+            pool,
+            name=f"ctx-mcp-agent-{_uniq()}",
+            model="openai/gpt-4o-mini",
+            system="",
+            tools=[ToolSpec(type="mcp_toolset", mcp_server_name="signal")],
+            mcp_servers=[McpServerSpec(name="signal", url="http://127.0.0.1:1/mcp")],
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+        session = await sessions_svc.create_session(
+            pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title=None,
+            metadata={},
+        )
+        discovered = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__signal__signal_send",
+                    "description": "Send a message",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+
+        with mock.patch(
+            "aios.harness.loop.discover_session_mcp_tools",
+            new=mock.AsyncMock(return_value=(discovered, {})),
+        ):
+            r = await http_client.get(f"/v1/sessions/{session.id}/context")
+
+        assert r.status_code == 200, r.text
+        names = [tool["function"]["name"] for tool in r.json()["tools"]]
+        assert "mcp__signal__signal_send" in names

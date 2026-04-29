@@ -21,11 +21,11 @@ MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
 # per-channel ``last_seen`` watermark off successful switches.
 SWITCH_CHANNEL_METADATA_KEY = "switch_channel"
 
-# Top-level key inside the ``_meta`` field sent on JSON-RPC tool-call requests
-# to focal-channel MCP toolsets. The value is the focal-channel suffix (the
-# focal channel address with its first two ``<connector>/<account>`` segments
-# stripped). The MCP server splits this on ``/`` to recover its own per-chat
-# identifiers.
+# Top-level key inside the ``_meta`` field sent on JSON-RPC MCP tool-call
+# requests when a focal channel is set. The value is the focal-channel suffix
+# (the focal channel address with its first two ``<connector>/<account>``
+# segments stripped). MCP servers that understand aios channels can split this
+# on ``/`` to recover their own per-chat identifiers; other servers ignore it.
 FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
 
 
@@ -101,16 +101,18 @@ def build_focal_paradigm_block(bindings: list[ChannelBinding]) -> str:
         "quoting recent messages on that channel so you can pick up "
         "the conversation in context.  Call "
         "`switch_channel(channel_id=null)` to put your phone down — "
-        "every inbound renders as a notification, connector response "
-        "tools disappear from your tool list.  Switching repeatedly "
-        "is cheap but not free: each switch's re-orient block appends "
-        "tokens to your context.\n"
+        "every inbound renders as a notification and MCP calls receive "
+        "no focal-channel metadata.  Switching repeatedly is cheap but "
+        "not free: each switch's re-orient block appends tokens to "
+        "your context.\n"
         "\n"
         "### Responding\n"
         "\n"
         "When focused on a channel, the connector's response tools "
         "(e.g. `signal_send`, `signal_react`) operate on your focal "
         "channel implicitly — no channel/chat-id argument required. "
+        "If your phone is down, switch to the intended channel before "
+        "using channel response tools. "
         "Bare assistant text is NOT delivered to any channel — it is "
         "private thinking no human sees. Prefix any such thinking with "
         f"{MONOLOGUE_PREFIX.strip()!r} so it is unambiguous in your "

@@ -33,8 +33,8 @@ log = structlog.get_logger(__name__)
 
 
 # Key under a JSON-RPC tool-call request's ``_meta`` populated by the aios
-# worker when dispatching a focal-channel MCP toolset. Its value is the
-# focal-channel path suffix — for Telegram's 3-segment address
+# worker when dispatching an MCP tool call while a focal channel is set. Its
+# value is the focal-channel path suffix — for Telegram's 3-segment address
 # ``telegram/<bot_id>/<chat_id>``, the suffix is just ``<chat_id>`` and can be
 # parsed as a signed integer.
 _FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
@@ -43,13 +43,12 @@ _FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
 def focal_chat_id_from_meta(meta: RequestParams.Meta | None) -> int:
     """Extract the Telegram ``chat_id`` from an MCP request's ``_meta``.
 
-    aios injects ``aios.focal_channel_path`` for focal-channel tool calls;
+    aios injects ``aios.focal_channel_path`` for MCP tool calls while focal
+    is set;
     its value is the full focal-channel suffix (stripped of
     ``<connector>/<account>``), which for a 3-segment Telegram address
-    is the decimal chat id. Missing / malformed meta raises — the agent
-    shouldn't be able to reach these tools without a focal channel set
-    (aios filters them out of the tool list when focal is NULL), so any
-    absence here is a real error to surface.
+    is the decimal chat id. Missing / malformed meta raises so the agent sees
+    that it must focus a channel before using Telegram response tools.
     """
     path: Any = None
     if meta is not None:

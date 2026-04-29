@@ -877,7 +877,6 @@ class TestMcpMetaInjection:
                     session_id,
                     tool_call_dict,
                     mcp_server_map,
-                    channel_context_by_server={"signal": "focal"},
                     focal_channel=address,  # focal=A → suffix=chat-1
                 )
 
@@ -889,17 +888,14 @@ class TestMcpMetaInjection:
         finally:
             runtime.crypto_box = prev_crypto
 
-    async def test_normal_mcp_tool_dispatch_no_meta_stamped(
+    async def test_normal_mcp_tool_dispatch_stamps_focal_meta(
         self,
         runtime_pool: Any,
         agent_id: str,
         env_id: str,
         vault_id: str,
     ) -> None:
-        """MCP servers without channel_context don't get focal meta — aios
-        has no business telling unrelated MCP servers about the session's
-        focal channel.
-        """
+        """All MCP calls receive focal metadata when the session has focus."""
         from unittest.mock import AsyncMock, patch
 
         from aios.crypto.vault import CryptoBox
@@ -938,11 +934,63 @@ class TestMcpMetaInjection:
                     session_id,
                     tool_call_dict,
                     mcp_server_map,
-                    focal_channel=address,  # non-null focal, but no channel_context
+                    focal_channel=address,
                 )
 
             _args, kwargs = mock_call.call_args
-            # No meta for ordinary MCP.
+            assert kwargs.get("meta") == {"aios.focal_channel_path": "chat-1"}
+        finally:
+            runtime.crypto_box = prev_crypto
+
+    async def test_mcp_tool_dispatch_omits_meta_when_phone_down(
+        self,
+        runtime_pool: Any,
+        agent_id: str,
+        env_id: str,
+        vault_id: str,
+    ) -> None:
+        """Phone-down sessions still call MCP tools, just without focal metadata."""
+        from unittest.mock import AsyncMock, patch
+
+        from aios.crypto.vault import CryptoBox
+        from aios.harness import runtime
+        from aios.harness.tool_dispatch import _execute_mcp_tool_async
+
+        prev_crypto = runtime.crypto_box
+        runtime.crypto_box = CryptoBox(__import__("os").urandom(32))
+        try:
+            connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+            session_id, _e, _address = await _post_inbound(runtime_pool, connection, "chat-1")
+
+            mcp_server_map = {"signal": "https://m"}
+            tool_call_dict = {
+                "id": "call_send_1",
+                "type": "function",
+                "function": {
+                    "name": "mcp__signal__signal_send",
+                    "arguments": json.dumps({"text": "hi there"}),
+                },
+            }
+
+            with (
+                patch(
+                    "aios.mcp.client.resolve_auth_for_url",
+                    new=AsyncMock(return_value={}),
+                ),
+                patch(
+                    "aios.mcp.client.call_mcp_tool",
+                    new=AsyncMock(return_value={"content": "ok"}),
+                ) as mock_call,
+            ):
+                await _execute_mcp_tool_async(
+                    runtime_pool,
+                    session_id,
+                    tool_call_dict,
+                    mcp_server_map,
+                    focal_channel=None,
+                )
+
+            _args, kwargs = mock_call.call_args
             assert kwargs.get("meta") is None
         finally:
             runtime.crypto_box = prev_crypto

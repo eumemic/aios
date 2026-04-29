@@ -48,8 +48,7 @@ curl -X POST :8090/v1/vaults/$VLT/credentials -d '{
 
 ### 3. Add the MCP server to your agent
 
-Add the Telegram MCP server as a normal agent MCP server, and mark its toolset
-as focal-channel aware:
+Add the Telegram MCP server as a normal agent MCP server:
 
 ```
 {
@@ -60,7 +59,9 @@ as focal-channel aware:
     {
       "type": "mcp_toolset",
       "mcp_server_name": "telegram",
-      "channel_context": {"type": "focal"}
+      "default_config": {
+        "permission_policy": {"type": "always_allow"}
+      }
     }
   ]
 }

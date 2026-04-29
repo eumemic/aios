@@ -84,11 +84,12 @@ class McpToolConfig(BaseModel):
 
 
 class McpChannelContext(BaseModel):
-    """Channel behavior for an MCP toolset.
+    """Deprecated channel-context marker for older agent configs.
 
-    ``type="focal"`` means tools from this server operate on the session's
-    current focal channel. The harness hides those tools when no focal channel
-    is set and injects the focal channel path into MCP request ``_meta``.
+    The runtime now injects focal-channel metadata into every MCP call when
+    the session has a focal channel, so this field is no longer used to gate
+    tool visibility, permissions, or dispatch behavior. It remains accepted on
+    ``mcp_toolset`` entries so existing stored agent JSON validates.
     """
 
     model_config = ConfigDict(extra="forbid")

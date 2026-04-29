@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from aios.models.agents import McpChannelContext, McpServerSpec, ToolSpec
+from aios.models.agents import McpServerSpec, ToolSpec
 
 
 @pytest.fixture(autouse=True)
@@ -121,7 +121,6 @@ class TestDiscoverSessionMcpTools:
                     type="mcp_toolset",
                     enabled=True,
                     mcp_server_name="signal",
-                    channel_context=McpChannelContext(type="focal"),
                 )
             ],
         )
@@ -199,7 +198,6 @@ class TestDiscoverSessionMcpTools:
                     type="mcp_toolset",
                     enabled=True,
                     mcp_server_name="signal",
-                    channel_context=McpChannelContext(type="focal"),
                 )
             ],
         )

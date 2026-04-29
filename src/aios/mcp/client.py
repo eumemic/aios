@@ -193,10 +193,10 @@ async def call_mcp_tool(
 
     ``tool_name`` is the raw MCP tool name (without the ``mcp__`` prefix).
     ``meta`` is an optional per-request metadata dict forwarded as the
-    JSON-RPC request's ``_meta`` field — used by the focal-channel
-    redesign to pass ``aios.focal_channel_path`` to channel-aware MCP
-    servers without stuffing it into arguments.  Returns a result
-    dict with either ``content`` (success) or ``error`` (failure).
+    JSON-RPC request's ``_meta`` field. The harness uses it to pass
+    ``aios.focal_channel_path`` whenever the session has a focal channel,
+    without stuffing channel context into model-supplied arguments. Returns a
+    result dict with either ``content`` (success) or ``error`` (failure).
     """
     try:
         from aios.harness import runtime

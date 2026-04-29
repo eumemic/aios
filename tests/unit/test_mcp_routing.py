@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from aios.harness.loop import (
-    _hide_focal_channel_tools_when_phone_down,
     _is_mcp_tool,
     _tc_name,
-    mcp_channel_context_by_server,
     resolve_mcp_permission,
 )
 from aios.models.agents import (
@@ -92,7 +90,7 @@ class TestResolveMcpPermission:
         ]
         assert resolve_mcp_permission("mcp__github__create_issue", tools) is None
 
-    def test_focal_channel_toolset_defaults_to_always_allow(self) -> None:
+    def test_channel_context_does_not_change_default_permission(self) -> None:
         tools = [
             ToolSpec(
                 type="mcp_toolset",
@@ -100,7 +98,7 @@ class TestResolveMcpPermission:
                 channel_context=McpChannelContext(type="focal"),
             ),
         ]
-        assert resolve_mcp_permission("mcp__signal__signal_send", tools) == "always_allow"
+        assert resolve_mcp_permission("mcp__signal__signal_send", tools) is None
 
     def test_explicit_permission_beats_focal_default(self) -> None:
         tools = [
@@ -166,57 +164,3 @@ class TestToOpenaiToolsSkipsMcpToolset:
         )
         assert len(result) == 1
         assert result[0]["function"]["name"] == "bash"
-
-
-def _tool(name: str) -> dict[str, object]:
-    return {"type": "function", "function": {"name": name}}
-
-
-class TestHideFocalChannelToolsWhenPhoneDown:
-    """Focal-channel MCP tools disappear from the model's tool list when
-    the session's focal_channel is NULL. Other MCP tools and built-ins stay
-    visible.
-    """
-
-    def test_focal_set_keeps_all_tools(self) -> None:
-        tools = [
-            _tool("mcp__signal__signal_send"),
-            _tool("mcp__github__create_issue"),
-            _tool("bash"),
-        ]
-        result = _hide_focal_channel_tools_when_phone_down(
-            tools, "signal/bot/alice", {"signal": "focal"}
-        )
-        assert result == tools
-
-    def test_focal_null_hides_channel_aware_tools(self) -> None:
-        tools = [
-            _tool("mcp__signal__signal_send"),
-            _tool("mcp__signal__signal_react"),
-            _tool("mcp__github__create_issue"),
-            _tool("bash"),
-        ]
-        result = _hide_focal_channel_tools_when_phone_down(tools, None, {"signal": "focal"})
-        names = [t["function"]["name"] for t in result]  # type: ignore[index]
-        assert "mcp__signal__signal_send" not in names
-        assert "mcp__signal__signal_react" not in names
-        # Agent-declared MCP and built-ins survive.
-        assert "mcp__github__create_issue" in names
-        assert "bash" in names
-
-    def test_empty_list(self) -> None:
-        assert _hide_focal_channel_tools_when_phone_down([], None, {}) == []
-        assert _hide_focal_channel_tools_when_phone_down([], "signal/bot/alice", {}) == []
-
-    def test_contexts_come_from_toolset_config(self) -> None:
-        contexts = mcp_channel_context_by_server(
-            [
-                ToolSpec(
-                    type="mcp_toolset",
-                    mcp_server_name="signal",
-                    channel_context=McpChannelContext(type="focal"),
-                ),
-                ToolSpec(type="mcp_toolset", mcp_server_name="github"),
-            ]
-        )
-        assert contexts == {"signal": "focal"}

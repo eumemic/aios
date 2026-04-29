@@ -172,7 +172,8 @@ async def test_signal_send_reads_focal_from_meta() -> None:
 async def test_signal_send_errors_without_meta() -> None:
     rpc = FakeRpc()
     mcp = build_mcp_server(rpc=rpc, bot_uuid="test-bot-uuid", phone="+15550000000")  # type: ignore[arg-type]
-    # No focal — aios should have filtered this tool out, but defend.
+    # No focal — aios omits focal metadata, and the connector surfaces the
+    # missing focus as a tool error.
     ctx_no_meta = _ctx_with_focal(None)
     with pytest.raises(Exception, match="focal channel"):
         await mcp._tool_manager.call_tool(

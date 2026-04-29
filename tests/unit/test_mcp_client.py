@@ -396,8 +396,8 @@ class TestCallMcpTool:
     async def test_meta_forwarded_to_session_call_tool(self) -> None:
         """The ``meta`` kwarg on call_mcp_tool reaches session.call_tool
         as its ``meta=`` kwarg so it lands in the JSON-RPC request's
-        ``_meta`` field (the transport for slice 6's focal-path
-        injection on channel-aware MCP servers).
+        ``_meta`` field, which is how the harness sends focal-channel
+        context to MCP servers.
         """
         mock_content = MagicMock()
         mock_content.text = "ok"
@@ -435,8 +435,7 @@ class TestCallMcpTool:
 
     async def test_meta_defaults_to_none(self) -> None:
         """When meta is omitted, session.call_tool is called with meta=None
-        — important for agent-declared MCP servers that should stay
-        unaware of aios internal context.
+        — this is the phone-down/no-context shape.
         """
         mock_content = MagicMock()
         mock_content.text = "ok"

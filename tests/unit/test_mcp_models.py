@@ -84,7 +84,7 @@ class TestMcpToolConfig:
         assert cfg.enabled is True
 
 
-class TestMcpChannelContext:
+class TestMcpChannelContextCompat:
     def test_focal_context_default(self) -> None:
         ctx = McpChannelContext()
         assert ctx.type == "focal"
@@ -131,7 +131,7 @@ class TestToolSpecMcpToolset:
         assert len(spec.configs) == 1
         assert spec.configs[0].name == "create_issue"
 
-    def test_mcp_toolset_with_channel_context(self) -> None:
+    def test_mcp_toolset_accepts_legacy_channel_context(self) -> None:
         spec = ToolSpec(
             type="mcp_toolset",
             mcp_server_name="signal",

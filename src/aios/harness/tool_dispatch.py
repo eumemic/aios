@@ -313,7 +313,6 @@ def launch_mcp_tool_calls(
     tool_calls: list[dict[str, Any]],
     mcp_server_map: dict[str, str],
     *,
-    channel_context_by_server: dict[str, str] | None = None,
     focal_channel: str | None = None,
 ) -> None:
     """Launch MCP tool calls as asyncio tasks. Returns immediately.
@@ -321,8 +320,8 @@ def launch_mcp_tool_calls(
     ``focal_channel`` is the session's focal at the moment these calls
     were emitted (captured at step top in ``run_session_step`` so a
     concurrent ``switch_channel`` in the same batch cannot race the
-    ``chat_id`` injection).  Passed through to each task so channel-aware
-    MCP toolsets can stamp ``_meta`` with the suffix.
+    ``chat_id`` injection).  Passed through to each task so MCP calls can
+    stamp ``_meta`` with the suffix when a focal channel is set.
     """
     _launch_tasks(
         session_id,
@@ -332,7 +331,6 @@ def launch_mcp_tool_calls(
             session_id,
             call,
             mcp_server_map,
-            channel_context_by_server=channel_context_by_server,
             focal_channel=focal_channel,
         ),
         prefix="mcp_tool",
@@ -356,17 +354,16 @@ async def _execute_mcp_tool_async(
     call: dict[str, Any],
     mcp_server_map: dict[str, str],
     *,
-    channel_context_by_server: dict[str, str] | None = None,
     focal_channel: str | None = None,
 ) -> None:
     """Execute one MCP tool call: connect, invoke, append result, defer wake.
 
-    For focal-channel MCP toolsets, the focal-channel suffix is stamped
-    into the JSON-RPC request's ``_meta`` so the server can resolve its
-    channel-specific identifiers without the model having to pass them
-    explicitly.  The ``focal_channel`` snapshot is emission-time — a
-    concurrent ``switch_channel`` in the same assistant batch does not
-    race this injection.
+    When a focal channel is set, its suffix is stamped into the JSON-RPC
+    request's ``_meta`` so servers that understand aios channel context can
+    resolve channel-specific identifiers without the model having to pass
+    them explicitly.  The ``focal_channel`` snapshot is emission-time — a
+    concurrent ``switch_channel`` in the same assistant batch does not race
+    this injection.
     """
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
@@ -410,27 +407,10 @@ async def _execute_mcp_tool_async(
         from aios.harness.channels import FOCAL_CHANNEL_META_KEY, focal_channel_path
         from aios.mcp.client import call_mcp_tool, resolve_auth_for_url
 
-        meta: dict[str, Any] | None = None
-        channel_context = (channel_context_by_server or {}).get(server_name)
-        if channel_context == "focal":
-            suffix = focal_channel_path(focal_channel)
-            if suffix is None:
-                # The model shouldn't be able to call a focal-channel tool
-                # while focal is NULL — loop.py filters them out of the tool
-                # list in that state — but defend in depth if it slips through
-                # (stale tool_calls, etc.).
-                is_error = True
-                await _append_tool_result(
-                    pool,
-                    session_id,
-                    call_id,
-                    name,
-                    error=(
-                        "channel-aware MCP tools require a focal channel; call switch_channel first"
-                    ),
-                )
-                return
-            meta = {FOCAL_CHANNEL_META_KEY: suffix}
+        suffix = focal_channel_path(focal_channel)
+        meta: dict[str, Any] | None = (
+            {FOCAL_CHANNEL_META_KEY: suffix} if suffix is not None else None
+        )
 
         crypto_box = runtime.require_crypto_box()
         headers = await resolve_auth_for_url(

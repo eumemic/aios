@@ -183,8 +183,6 @@ async def _run_session_step_body(
     bindings = await list_session_bindings(pool, session_id)
 
     mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
-    channel_context_by_server = mcp_channel_context_by_server(agent.tools)
-
     # Read windowed message events for this session.
     events = await sessions_service.read_windowed_events(
         pool,
@@ -208,7 +206,6 @@ async def _run_session_step_body(
                 session_id,
                 pending_mcp,
                 mcp_server_map,
-                channel_context_by_server=channel_context_by_server,
                 focal_channel=session.focal_channel,
             )
         log.info(
@@ -435,7 +432,6 @@ async def _run_session_step_body(
                 session_id,
                 mcp_immediate,
                 mcp_server_map,
-                channel_context_by_server=channel_context_by_server,
                 focal_channel=session.focal_channel,
             )
             log.info(
@@ -501,58 +497,6 @@ def _switch_channel_tool_spec() -> dict[str, Any]:
             "parameters": tool.parameters_schema,
         },
     }
-
-
-def _mcp_server_name_from_tool_name(name: str) -> str | None:
-    parts = name.split("__", 2)
-    if len(parts) < 3 or not parts[1] or not parts[2]:
-        return None
-    return parts[1]
-
-
-def mcp_channel_context_by_server(
-    agent_tools: list[ToolSpec],
-) -> dict[str, str]:
-    """Return server_name -> channel context type for MCP toolsets.
-
-    Channel-aware MCP behavior is declared on normal agent ``mcp_toolset``
-    entries; connections do not contribute MCP server context.
-    """
-    contexts: dict[str, str] = {}
-    for spec in agent_tools:
-        if (
-            spec.type != "mcp_toolset"
-            or not spec.enabled
-            or not spec.mcp_server_name
-            or spec.channel_context is None
-        ):
-            continue
-        contexts[spec.mcp_server_name] = spec.channel_context.type
-    return contexts
-
-
-def _hide_focal_channel_tools_when_phone_down(
-    mcp_tools: list[dict[str, Any]],
-    focal_channel: str | None,
-    channel_context_by_server: dict[str, str],
-) -> list[dict[str, Any]]:
-    """Filter focal-channel MCP tools out when focal is NULL.
-
-    Those tools resolve their channel path from focal (injected into
-    ``_meta`` at dispatch time); a "phone down" state has no focal to
-    inject, so the model shouldn't be offered them. Other MCP tools are
-    untouched.
-    """
-    if focal_channel is not None:
-        return mcp_tools
-    filtered: list[dict[str, Any]] = []
-    for tool in mcp_tools:
-        name = tool.get("function", {}).get("name", "")
-        server_name = _mcp_server_name_from_tool_name(name)
-        if server_name is not None and channel_context_by_server.get(server_name) == "focal":
-            continue
-        filtered.append(tool)
-    return filtered
 
 
 async def _dump_context_if_enabled(
@@ -625,8 +569,8 @@ def resolve_mcp_permission(
     tool name, then returns the ``default_config.permission_policy.type``
     or ``None`` (which callers treat as ``always_ask``).
 
-    Focal-channel MCP toolsets default to ``always_allow`` because declaring
-    channel context is already the operator's trust decision for that server.
+    MCP tools do not gain implicit permissions from channel/focal behavior;
+    operators grant execution policy through normal MCP toolset config.
     """
     server_name = name.split("__", 2)[1]
     for spec in agent_tools:
@@ -636,8 +580,6 @@ def resolve_mcp_permission(
                 return cfg.permission_policy.type
             if spec.permission:
                 return spec.permission
-            if spec.channel_context is not None and spec.channel_context.type == "focal":
-                return "always_allow"
             return None
     return None
 
