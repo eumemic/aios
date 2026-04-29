@@ -95,8 +95,6 @@ async def _setup_inbound(pool: Any, agent_id: str, env_id: str, vault_id: str) -
         pool,
         connector="signal",
         account=f"focal-{_uniq()}",
-        mcp_url="https://m",
-        vault_id=vault_id,
         metadata={},
     )
     await ch_svc.create_routing_rule(
@@ -1057,8 +1055,6 @@ class TestTailBlockInStep:
             runtime_pool,
             connector="signal",
             account=account,
-            mcp_url="https://m",
-            vault_id=vault_id,
             metadata={},
         )
         await ch_svc.create_routing_rule(
@@ -1114,8 +1110,6 @@ class TestTailBlockInStep:
             runtime_pool,
             connector="signal",
             account=account,
-            mcp_url="https://m",
-            vault_id=vault_id,
             metadata={},
         )
         await ch_svc.create_routing_rule(

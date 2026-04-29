@@ -2016,8 +2016,6 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         id=row["id"],
         connector=row["connector"],
         account=row["account"],
-        mcp_url=row["mcp_url"],
-        vault_id=row["vault_id"],
         metadata=metadata,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -2030,8 +2028,6 @@ async def insert_connection(
     *,
     connector: str,
     account: str,
-    mcp_url: str | None,
-    vault_id: str | None,
     metadata: dict[str, Any],
 ) -> Connection:
     new_id = make_id(CONNECTION)
@@ -2039,26 +2035,19 @@ async def insert_connection(
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO connections (id, connector, account, mcp_url, vault_id, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            INSERT INTO connections (id, connector, account, metadata)
+            VALUES ($1, $2, $3, $4::jsonb)
             RETURNING *
             """,
             new_id,
             connector,
             account,
-            mcp_url,
-            vault_id,
             metadata_json,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
             f"a connection for ({connector!r}, {account!r}) already exists",
             detail={"connector": connector, "account": account},
-        ) from exc
-    except asyncpg.ForeignKeyViolationError as exc:
-        raise NotFoundError(
-            f"vault {vault_id} not found",
-            detail={"vault_id": vault_id},
         ) from exc
     assert row is not None
     return _row_to_connection(row)
@@ -2096,18 +2085,10 @@ async def update_connection(
     conn: asyncpg.Connection[Any],
     connection_id: str,
     *,
-    mcp_url: str | None = _UNSET,
-    vault_id: str | None = _UNSET,
     metadata: dict[str, Any] | None = None,
 ) -> Connection:
     sets: list[str] = []
     args: list[Any] = [connection_id]
-    if mcp_url is not _UNSET:
-        args.append(mcp_url)
-        sets.append(f"mcp_url = ${len(args)}")
-    if vault_id is not _UNSET:
-        args.append(vault_id)
-        sets.append(f"vault_id = ${len(args)}")
     if metadata is not None:
         args.append(json.dumps(metadata))
         sets.append(f"metadata = ${len(args)}::jsonb")
@@ -2115,13 +2096,7 @@ async def update_connection(
         return await get_connection(conn, connection_id)
     sets.append("updated_at = now()")
     sql = f"UPDATE connections SET {', '.join(sets)} WHERE id = $1 RETURNING *"
-    try:
-        row = await conn.fetchrow(sql, *args)
-    except asyncpg.ForeignKeyViolationError as exc:
-        raise NotFoundError(
-            "vault not found",
-            detail={"vault_id": vault_id},
-        ) from exc
+    row = await conn.fetchrow(sql, *args)
     if row is None:
         raise NotFoundError(
             f"connection {connection_id} not found",

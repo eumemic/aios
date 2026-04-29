@@ -66,13 +66,6 @@ def create(
     account: Annotated[
         str | None, typer.Option("--account", help="Account identifier (e.g. bot uuid).")
     ] = None,
-    mcp_url: Annotated[
-        str | None,
-        typer.Option("--mcp-url", help="Legacy MCP URL field; not used for runtime discovery."),
-    ] = None,
-    vault_id: Annotated[
-        str | None, typer.Option("--vault-id", help="Legacy MCP credential vault id.")
-    ] = None,
     metadata_json: Annotated[
         str | None,
         typer.Option("--metadata-json", help="JSON object of connection metadata."),
@@ -83,7 +76,7 @@ def create(
 ) -> None:
     def _run() -> int | None:
         ergonomic: dict[str, Any] | None = None
-        if any(v is not None for v in (connector, account, mcp_url, vault_id, metadata_json)):
+        if any(v is not None for v in (connector, account, metadata_json)):
             missing = [
                 name
                 for name, v in (
@@ -99,10 +92,6 @@ def create(
                 "connector": connector,
                 "account": account,
             }
-            if mcp_url is not None:
-                ergonomic["mcp_url"] = mcp_url
-            if vault_id is not None:
-                ergonomic["vault_id"] = vault_id
             if metadata_json is not None:
                 try:
                     ergonomic["metadata"] = load_json_object(metadata_json, "--metadata-json")

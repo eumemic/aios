@@ -72,7 +72,7 @@ async def vault_id(pool: Any) -> str:
 
 
 @pytest.fixture
-async def connection(pool: Any, vault_id: str) -> Any:
+async def connection(pool: Any) -> Any:
     """Fresh signal connection per test.  Rules are scoped to this
     connection's id; addresses constructed against ``connection.connector``
     + ``connection.account``.
@@ -83,8 +83,6 @@ async def connection(pool: Any, vault_id: str) -> Any:
         pool,
         connector="signal",
         account=f"t-{_uniq()}",
-        mcp_url="https://mcp.example.com",
-        vault_id=vault_id,
         metadata={},
     )
 
@@ -104,25 +102,19 @@ class TestConnectionCRUD:
         )
         assert c.id.startswith("conn_")
         assert c.connector == "signal"
-        assert c.mcp_url is None
-        assert c.vault_id is None
         assert c.metadata == {"region": "us"}
         assert c.archived_at is None
 
         fetched = await svc.get_connection(pool, c.id)
         assert fetched.id == c.id
-        assert fetched.mcp_url is None
-        assert fetched.vault_id is None
 
-    async def test_create_and_get(self, pool: Any, vault_id: str) -> None:
+    async def test_create_and_get(self, pool: Any) -> None:
         from aios.services import connections as svc
 
         c = await svc.create_connection(
             pool,
             connector="signal",
             account=f"test-{_uniq()}",
-            mcp_url="https://mcp.example.com",
-            vault_id=vault_id,
             metadata={"region": "us"},
         )
         assert c.id.startswith("conn_")
@@ -133,7 +125,7 @@ class TestConnectionCRUD:
         fetched = await svc.get_connection(pool, c.id)
         assert fetched.id == c.id
 
-    async def test_unique_per_connector_account(self, pool: Any, vault_id: str) -> None:
+    async def test_unique_per_connector_account(self, pool: Any) -> None:
         from aios.services import connections as svc
 
         account = f"dup-{_uniq()}"
@@ -141,8 +133,6 @@ class TestConnectionCRUD:
             pool,
             connector="signal",
             account=account,
-            mcp_url="https://m1",
-            vault_id=vault_id,
             metadata={},
         )
         with pytest.raises(ConflictError):
@@ -150,41 +140,22 @@ class TestConnectionCRUD:
                 pool,
                 connector="signal",
                 account=account,
-                mcp_url="https://m2",
-                vault_id=vault_id,
                 metadata={},
             )
 
-    async def test_update_mcp_url(self, pool: Any, vault_id: str) -> None:
+    async def test_update_metadata(self, pool: Any) -> None:
         from aios.services import connections as svc
 
         c = await svc.create_connection(
             pool,
             connector="signal",
             account=f"upd-{_uniq()}",
-            mcp_url="https://old",
-            vault_id=vault_id,
             metadata={},
         )
-        updated = await svc.update_connection(pool, c.id, mcp_url="https://new")
-        assert updated.mcp_url == "https://new"
+        updated = await svc.update_connection(pool, c.id, metadata={"region": "us"})
+        assert updated.metadata == {"region": "us"}
 
-    async def test_clear_legacy_mcp_fields(self, pool: Any, vault_id: str) -> None:
-        from aios.services import connections as svc
-
-        c = await svc.create_connection(
-            pool,
-            connector="signal",
-            account=f"clear-{_uniq()}",
-            mcp_url="https://old",
-            vault_id=vault_id,
-            metadata={},
-        )
-        updated = await svc.update_connection(pool, c.id, mcp_url=None, vault_id=None)
-        assert updated.mcp_url is None
-        assert updated.vault_id is None
-
-    async def test_archive(self, pool: Any, vault_id: str) -> None:
+    async def test_archive(self, pool: Any) -> None:
         from aios.services import connections as svc
 
         account = f"arch-{_uniq()}"
@@ -192,8 +163,6 @@ class TestConnectionCRUD:
             pool,
             connector="signal",
             account=account,
-            mcp_url="https://m",
-            vault_id=vault_id,
             metadata={},
         )
         archived = await svc.archive_connection(pool, c.id)
@@ -203,8 +172,6 @@ class TestConnectionCRUD:
             pool,
             connector="signal",
             account=account,
-            mcp_url="https://m2",
-            vault_id=vault_id,
             metadata={},
         )
 
@@ -212,8 +179,8 @@ class TestConnectionCRUD:
         self, pool: Any, agent_id: str, env_id: str, connection: Any
     ) -> None:
         """A connection with an active binding can't be archived — doing so
-        would drop MCP tools from any live session bound to channels under
-        that connection.
+        would break inbound routing for any live session bound to channels
+        under that connection.
         """
         from aios.services import channels as ch_svc
         from aios.services import connections as svc
@@ -241,19 +208,6 @@ class TestConnectionCRUD:
         await ch_svc.archive_binding(pool, binding.id)
         archived = await svc.archive_connection(pool, connection.id)
         assert archived.archived_at is not None
-
-    async def test_unknown_vault(self, pool: Any) -> None:
-        from aios.services import connections as svc
-
-        with pytest.raises(NotFoundError):
-            await svc.create_connection(
-                pool,
-                connector="signal",
-                account=f"novault-{_uniq()}",
-                mcp_url="https://m",
-                vault_id="vlt_nonexistent",
-                metadata={},
-            )
 
 
 # ─── routing rule CRUD ──────────────────────────────────────────────────────
@@ -342,7 +296,7 @@ class TestRoutingRuleCRUD:
             )
 
     async def test_same_prefix_on_different_connections_allowed(
-        self, pool: Any, agent_id: str, env_id: str, vault_id: str
+        self, pool: Any, agent_id: str, env_id: str
     ) -> None:
         """Uniqueness is ``(connection_id, prefix)`` — not global."""
         from aios.services import channels as svc
@@ -352,16 +306,12 @@ class TestRoutingRuleCRUD:
             pool,
             connector="signal",
             account=f"crossA-{_uniq()}",
-            mcp_url="https://a",
-            vault_id=vault_id,
             metadata={},
         )
         c2 = await conn_svc.create_connection(
             pool,
             connector="signal",
             account=f"crossB-{_uniq()}",
-            mcp_url="https://b",
-            vault_id=vault_id,
             metadata={},
         )
         params = SessionParams(environment_id=env_id)
@@ -404,7 +354,7 @@ class TestRoutingRuleCRUD:
         assert archived.archived_at is not None
 
     async def test_wrong_connection_scope_404s(
-        self, pool: Any, agent_id: str, env_id: str, connection: Any, vault_id: str
+        self, pool: Any, agent_id: str, env_id: str, connection: Any
     ) -> None:
         """A rule on connection A isn't visible through connection B's scope."""
         from aios.services import channels as svc
@@ -421,8 +371,6 @@ class TestRoutingRuleCRUD:
             pool,
             connector="signal",
             account=f"other-{_uniq()}",
-            mcp_url="https://x",
-            vault_id=vault_id,
             metadata={},
         )
         with pytest.raises(NotFoundError):
@@ -532,7 +480,7 @@ class TestFindMatchingRule:
         assert yes_match is not None
 
     async def test_cross_connection_isolation(
-        self, pool: Any, agent_id: str, env_id: str, connection: Any, vault_id: str
+        self, pool: Any, agent_id: str, env_id: str, connection: Any
     ) -> None:
         """A rule on connection A must not match a path queried with connection B's id."""
         from aios.db import queries
@@ -550,8 +498,6 @@ class TestFindMatchingRule:
             pool,
             connector="signal",
             account=f"other-{_uniq()}",
-            mcp_url="https://x",
-            vault_id=vault_id,
             metadata={},
         )
         async with pool.acquire() as conn:
@@ -854,7 +800,7 @@ class TestNestedRoutingRulesEndpoint:
         assert r.status_code == 404
 
     async def test_rule_scoped_to_connection(
-        self, http_client: httpx.AsyncClient, agent_id: str, env_id: str, vault_id: str
+        self, http_client: httpx.AsyncClient, agent_id: str, env_id: str
     ) -> None:
         """A rule on connection A is invisible through connection B."""
         a = await http_client.post(
@@ -862,8 +808,6 @@ class TestNestedRoutingRulesEndpoint:
             json={
                 "connector": "signal",
                 "account": f"scopeA-{_uniq()}",
-                "mcp_url": "https://a",
-                "vault_id": vault_id,
             },
         )
         b = await http_client.post(
@@ -871,8 +815,6 @@ class TestNestedRoutingRulesEndpoint:
             json={
                 "connector": "signal",
                 "account": f"scopeB-{_uniq()}",
-                "mcp_url": "https://b",
-                "vault_id": vault_id,
             },
         )
         aid = a.json()["id"]
@@ -1074,7 +1016,7 @@ class TestGetConnectionsByPairs:
             rows = await queries.get_connections_by_pairs(conn, [])
         assert rows == []
 
-    async def test_returns_matching_connections(self, pool: Any, vault_id: str) -> None:
+    async def test_returns_matching_connections(self, pool: Any) -> None:
         from aios.db import queries
         from aios.services import connections as conn_svc
 
@@ -1084,16 +1026,12 @@ class TestGetConnectionsByPairs:
             pool,
             connector="signal",
             account=a,
-            mcp_url="https://m1",
-            vault_id=vault_id,
             metadata={},
         )
         c_b = await conn_svc.create_connection(
             pool,
             connector="slack",
             account=b,
-            mcp_url="https://m2",
-            vault_id=vault_id,
             metadata={},
         )
 

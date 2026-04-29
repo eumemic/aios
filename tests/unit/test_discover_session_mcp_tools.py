@@ -31,17 +31,12 @@ def _mock_crypto_box() -> Any:
 def _connection(
     cid: str,
     connector: str = "signal",
-    *,
-    mcp_url: str | None = None,
-    vault_id: str | None = None,
 ) -> Connection:
     now = datetime(2026, 4, 16)
     return Connection(
         id=cid,
         connector=connector,
         account="acct",
-        mcp_url=mcp_url,
-        vault_id=vault_id,
         metadata={},
         created_at=now,
         updated_at=now,
@@ -111,11 +106,7 @@ class TestDiscoverSessionMcpTools:
         from aios.harness.loop import discover_session_mcp_tools
 
         connections = [
-            _connection(
-                "conn_01HQR2K7VXBZ9MNPL3WYCT8F",
-                mcp_url="https://legacy-m1",
-                vault_id="vlt_x",
-            ),
+            _connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F"),
             _connection("conn_01HQR2K7VXBZ9MNPL3WYCT8G"),
         ]
 
@@ -142,13 +133,7 @@ class TestDiscoverSessionMcpTools:
             mcp_servers=[McpServerSpec(name="gh", url="https://mcp.github")],
             tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="gh")],
         )
-        connections = [
-            _connection(
-                "conn_01HQR2K7VXBZ9MNPL3WYCT8F",
-                mcp_url="https://legacy-m1",
-                vault_id="vlt_x",
-            )
-        ]
+        connections = [_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F")]
 
         async def _discover(
             url: str, name: str, _headers: dict[str, str]

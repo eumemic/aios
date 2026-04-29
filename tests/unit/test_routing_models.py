@@ -18,30 +18,7 @@ class TestConnectionCreate:
     def test_valid(self) -> None:
         c = ConnectionCreate(connector="signal", account="alice")
         assert c.connector == "signal"
-        assert c.mcp_url is None
-        assert c.vault_id is None
         assert c.metadata == {}
-
-    def test_valid_with_legacy_mcp_projection(self) -> None:
-        c = ConnectionCreate(
-            connector="signal",
-            account="alice",
-            mcp_url="https://mcp.example.com",
-            vault_id="vlt_abc",
-        )
-        assert c.connector == "signal"
-        assert c.metadata == {}
-
-    @pytest.mark.parametrize(
-        "kwargs",
-        [
-            {"mcp_url": "https://mcp.example.com"},
-            {"vault_id": "vlt_abc"},
-        ],
-    )
-    def test_legacy_mcp_fields_are_a_pair(self, kwargs: dict[str, str]) -> None:
-        with pytest.raises(ValidationError, match="mcp_url and vault_id"):
-            ConnectionCreate(connector="signal", account="alice", **kwargs)
 
     def test_with_metadata(self) -> None:
         c = ConnectionCreate(
@@ -80,8 +57,6 @@ class TestConnectionCreate:
 class TestConnectionUpdate:
     def test_all_optional(self) -> None:
         u = ConnectionUpdate()
-        assert u.mcp_url is None
-        assert u.vault_id is None
         assert u.metadata is None
 
     def test_rejects_connector_field(self) -> None:

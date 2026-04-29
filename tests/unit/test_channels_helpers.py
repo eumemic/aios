@@ -73,8 +73,6 @@ def _connection(cid: str, connector: str = "signal", account: str = "acct") -> C
         id=cid,
         connector=connector,
         account=account,
-        mcp_url="https://example.com",
-        vault_id="vlt_x",
         metadata={},
         created_at=now,
         updated_at=now,

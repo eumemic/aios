@@ -44,34 +44,6 @@ def test_create_ergonomic(mocked_cli):
     }
 
 
-def test_create_ergonomic_with_legacy_mcp_projection(mocked_cli):
-    mocked_cli.queue_response(httpx.Response(201, json={"id": "conn_new"}))
-    result = runner.invoke(
-        app,
-        [
-            "connections",
-            "create",
-            "--connector",
-            "signal",
-            "--account",
-            "acct-123",
-            "--mcp-url",
-            "http://mcp.example:9000",
-            "--vault-id",
-            "vlt_1",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert mocked_cli.captured.method == "POST"
-    assert mocked_cli.captured.path == "/v1/connections"
-    assert mocked_cli.captured.body == {
-        "connector": "signal",
-        "account": "acct-123",
-        "mcp_url": "http://mcp.example:9000",
-        "vault_id": "vlt_1",
-    }
-
-
 def test_create_ergonomic_with_metadata_json(mocked_cli):
     mocked_cli.queue_response(httpx.Response(201, json={"id": "conn_new"}))
     result = runner.invoke(

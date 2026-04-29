@@ -24,8 +24,6 @@ async def create_connection(
     *,
     connector: str,
     account: str,
-    mcp_url: str | None = None,
-    vault_id: str | None = None,
     metadata: dict[str, Any],
 ) -> Connection:
     async with pool.acquire() as conn:
@@ -33,8 +31,6 @@ async def create_connection(
             conn,
             connector=connector,
             account=account,
-            mcp_url=mcp_url,
-            vault_id=vault_id,
             metadata=metadata,
         )
 
@@ -55,16 +51,12 @@ async def update_connection(
     pool: asyncpg.Pool[Any],
     connection_id: str,
     *,
-    mcp_url: str | None = queries._UNSET,
-    vault_id: str | None = queries._UNSET,
     metadata: dict[str, Any] | None = None,
 ) -> Connection:
     async with pool.acquire() as conn:
         return await queries.update_connection(
             conn,
             connection_id,
-            mcp_url=mcp_url,
-            vault_id=vault_id,
             metadata=metadata,
         )
 

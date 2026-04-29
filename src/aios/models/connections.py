@@ -7,10 +7,6 @@ inbound channel router. The address scheme used by the routing layer is::
 
 where ``path`` is whatever sub-segments the connector emits for inbound
 messages (typically a chat or thread id).
-
-``mcp_url`` / ``vault_id`` are optional compatibility fields for older
-connection records. Runtime MCP discovery uses normal agent
-``mcp_servers`` and session vaults for credentials.
 """
 
 from __future__ import annotations
@@ -18,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # Connection ids use this prefix. The stable id is also used as the
 # per-connection instruction alias key when connector MCP instructions are
@@ -39,8 +35,6 @@ class ConnectionCreate(BaseModel):
 
     connector: str = Field(min_length=1, max_length=64)
     account: str = Field(min_length=1, max_length=256)
-    mcp_url: str | None = Field(default=None, min_length=1)
-    vault_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("connector", "account")
@@ -50,24 +44,15 @@ class ConnectionCreate(BaseModel):
             raise ValueError("must not contain '/'")
         return v
 
-    @model_validator(mode="after")
-    def _legacy_mcp_pair(self) -> ConnectionCreate:
-        if (self.mcp_url is None) != (self.vault_id is None):
-            raise ValueError("mcp_url and vault_id must be provided together")
-        return self
-
 
 class ConnectionUpdate(BaseModel):
     """Request body for ``PUT /v1/connections/{id}``.
 
-    ``connector`` and ``account`` are immutable after creation. Explicit
-    ``null`` for a legacy MCP field clears it; omitting the field preserves it.
+    ``connector`` and ``account`` are immutable after creation.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    mcp_url: str | None = Field(default=None, min_length=1)
-    vault_id: str | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -77,8 +62,6 @@ class Connection(BaseModel):
     id: str
     connector: str
     account: str
-    mcp_url: str | None = None
-    vault_id: str | None = None
     metadata: dict[str, Any]
     created_at: datetime
     updated_at: datetime
