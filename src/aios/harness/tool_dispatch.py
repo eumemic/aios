@@ -314,7 +314,6 @@ def launch_mcp_tool_calls(
     mcp_server_map: dict[str, str],
     *,
     channel_context_by_server: dict[str, str] | None = None,
-    connection_vault_by_server: dict[str, str] | None = None,
     focal_channel: str | None = None,
 ) -> None:
     """Launch MCP tool calls as asyncio tasks. Returns immediately.
@@ -334,7 +333,6 @@ def launch_mcp_tool_calls(
             call,
             mcp_server_map,
             channel_context_by_server=channel_context_by_server,
-            connection_vault_by_server=connection_vault_by_server,
             focal_channel=focal_channel,
         ),
         prefix="mcp_tool",
@@ -359,7 +357,6 @@ async def _execute_mcp_tool_async(
     mcp_server_map: dict[str, str],
     *,
     channel_context_by_server: dict[str, str] | None = None,
-    connection_vault_by_server: dict[str, str] | None = None,
     focal_channel: str | None = None,
 ) -> None:
     """Execute one MCP tool call: connect, invoke, append result, defer wake.
@@ -441,7 +438,6 @@ async def _execute_mcp_tool_async(
             crypto_box,
             session_id,
             url,
-            connection_vault_id=(connection_vault_by_server or {}).get(server_name),
         )
         result = await call_mcp_tool(url, headers, tool_name, arguments, meta=meta)
 

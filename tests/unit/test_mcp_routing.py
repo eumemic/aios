@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from aios.harness.loop import (
     _hide_focal_channel_tools_when_phone_down,
     _is_mcp_tool,
@@ -17,7 +15,6 @@ from aios.models.agents import (
     McpToolsetConfig,
     ToolSpec,
 )
-from aios.models.connections import Connection
 from aios.tools.registry import to_openai_tools
 
 
@@ -128,21 +125,7 @@ class TestResolveMcpPermission:
         ]
         assert resolve_mcp_permission("mcp__github__create_issue", tools) is None
 
-    def test_legacy_connection_projection_can_default_to_always_allow(self) -> None:
-        """Legacy connection-projected servers are authorized by the runtime
-        with an explicit server-name set, not by a magic name prefix.
-        """
-        assert (
-            resolve_mcp_permission(
-                "mcp__conn_01HQR2K7VXBZ9MNPL3WYCT8F__send",
-                [],
-                always_allow_server_names={"conn_01HQR2K7VXBZ9MNPL3WYCT8F"},
-            )
-            == "always_allow"
-        )
-
-    def test_normal_toolset_policy_beats_legacy_projection(self) -> None:
-        """If an agent declares a server/toolset, that normal MCP config wins."""
+    def test_conn_prefix_is_an_ordinary_server_name(self) -> None:
         tools = [
             ToolSpec(
                 type="mcp_toolset",
@@ -156,7 +139,6 @@ class TestResolveMcpPermission:
             resolve_mcp_permission(
                 "mcp__conn_foo__send",
                 tools,
-                always_allow_server_names={"conn_foo"},
             )
             == "always_ask"
         )
@@ -238,46 +220,3 @@ class TestHideFocalChannelToolsWhenPhoneDown:
             ]
         )
         assert contexts == {"signal": "focal"}
-
-    def test_agent_server_url_suppresses_legacy_connection_context(self) -> None:
-        now = datetime(2026, 4, 16)
-        connection = Connection(
-            id="conn_01HQR2K7VXBZ9MNPL3WYCT8F",
-            connector="signal",
-            account="acct",
-            mcp_url="https://m1",
-            vault_id="vlt_x",
-            metadata={},
-            created_at=now,
-            updated_at=now,
-        )
-
-        contexts = mcp_channel_context_by_server(
-            [
-                ToolSpec(
-                    type="mcp_toolset",
-                    mcp_server_name="signal",
-                    channel_context=McpChannelContext(type="focal"),
-                ),
-            ],
-            [connection],
-            agent_mcp_server_names={"signal"},
-            agent_mcp_server_urls={"https://m1"},
-        )
-        assert contexts == {"signal": "focal"}
-
-    def test_channel_only_connection_does_not_add_legacy_context(self) -> None:
-        now = datetime(2026, 4, 16)
-        connection = Connection(
-            id="conn_01HQR2K7VXBZ9MNPL3WYCT8F",
-            connector="signal",
-            account="acct",
-            mcp_url=None,
-            vault_id=None,
-            metadata={},
-            created_at=now,
-            updated_at=now,
-        )
-
-        contexts = mcp_channel_context_by_server([], [connection])
-        assert contexts == {}

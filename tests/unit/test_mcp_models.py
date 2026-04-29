@@ -53,9 +53,7 @@ class TestMcpServerSpec:
         assert restored.name == "slack"
 
     def test_conn_prefix_is_ordinary_name(self) -> None:
-        """Connection MCP servers are now a legacy projection, not a reserved
-        server-name namespace.
-        """
+        """The conn_ prefix is not a reserved server-name namespace."""
         assert McpServerSpec(name="conn_github", url="https://m").name == "conn_github"
         assert McpServerSpec(name="connector", url="https://m").name == "connector"
         assert McpServerSpec(name="my_conn", url="https://m").name == "my_conn"

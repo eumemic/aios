@@ -67,7 +67,8 @@ def create(
         str | None, typer.Option("--account", help="Account identifier (e.g. bot uuid).")
     ] = None,
     mcp_url: Annotated[
-        str | None, typer.Option("--mcp-url", help="Legacy connection-projected MCP URL.")
+        str | None,
+        typer.Option("--mcp-url", help="Legacy MCP URL field; not used for runtime discovery."),
     ] = None,
     vault_id: Annotated[
         str | None, typer.Option("--vault-id", help="Legacy MCP credential vault id.")

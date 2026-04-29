@@ -52,8 +52,7 @@ def focal_channel_path(focal: str | None) -> str | None:
 
 
 def connection_server_name(c: Connection) -> str:
-    # Legacy compatibility projection: connection rows can still be surfaced
-    # as MCP servers while integrations migrate to agent-declared MCP servers.
+    # Stable key for rendering connector instructions per bound connection.
     assert c.id.startswith(CONNECTION_SERVER_NAME_PREFIX)
     return c.id
 

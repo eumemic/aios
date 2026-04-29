@@ -85,9 +85,7 @@ def _connection(cid: str, connector: str = "signal", account: str = "acct") -> C
 
 
 class TestConnectionServerName:
-    """The legacy connection-to-MCP projection uses the connection id directly
-    as the server name: no stutter, still unambiguous by construction.
-    """
+    """Per-connection instruction aliases use the connection id directly."""
 
     def test_uses_id_directly(self) -> None:
         c = _connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F")
