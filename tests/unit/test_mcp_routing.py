@@ -9,6 +9,7 @@ from aios.harness.loop import (
 )
 from aios.models.agents import (
     McpPermissionPolicy,
+    McpToolConfig,
     McpToolsetConfig,
     ToolSpec,
 )
@@ -70,6 +71,55 @@ class TestResolveMcpPermission:
             ),
         ]
         assert resolve_mcp_permission("mcp__github__create_issue", tools) == "always_ask"
+
+    def test_per_tool_permission_overrides_default_config(self) -> None:
+        tools = [
+            ToolSpec(
+                type="mcp_toolset",
+                mcp_server_name="github",
+                default_config=McpToolsetConfig(
+                    permission_policy=McpPermissionPolicy(type="always_ask"),
+                ),
+                configs=[
+                    McpToolConfig(
+                        name="create_issue",
+                        permission_policy=McpPermissionPolicy(type="always_allow"),
+                    )
+                ],
+            ),
+        ]
+        assert resolve_mcp_permission("mcp__github__create_issue", tools) == "always_allow"
+
+    def test_unmatched_per_tool_permission_falls_back_to_default_config(self) -> None:
+        tools = [
+            ToolSpec(
+                type="mcp_toolset",
+                mcp_server_name="github",
+                default_config=McpToolsetConfig(
+                    permission_policy=McpPermissionPolicy(type="always_ask"),
+                ),
+                configs=[
+                    McpToolConfig(
+                        name="delete_repo",
+                        permission_policy=McpPermissionPolicy(type="always_allow"),
+                    )
+                ],
+            ),
+        ]
+        assert resolve_mcp_permission("mcp__github__create_issue", tools) == "always_ask"
+
+    def test_disabled_toolset_does_not_supply_permission(self) -> None:
+        tools = [
+            ToolSpec(
+                type="mcp_toolset",
+                enabled=False,
+                mcp_server_name="github",
+                default_config=McpToolsetConfig(
+                    permission_policy=McpPermissionPolicy(type="always_allow"),
+                ),
+            ),
+        ]
+        assert resolve_mcp_permission("mcp__github__create_issue", tools) is None
 
     def test_no_default_config_returns_flat_permission(self) -> None:
         """Falls back to ToolSpec.permission when no default_config."""

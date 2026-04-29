@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from aios.models.agents import McpServerSpec, ToolSpec
+from aios.models.agents import McpServerSpec, McpToolConfig, McpToolsetConfig, ToolSpec
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +82,141 @@ class TestDiscoverSessionMcpTools:
             )
         names = {t["name"] for t in tools}
         assert names == {"mcp__gh__t"}
+
+    async def test_default_config_can_disable_discovered_tools(self) -> None:
+        from aios.harness.loop import discover_session_mcp_tools
+
+        agent = _agent(
+            mcp_servers=[McpServerSpec(name="gh", url="https://mcp.github")],
+            tools=[
+                ToolSpec(
+                    type="mcp_toolset",
+                    enabled=True,
+                    mcp_server_name="gh",
+                    default_config=McpToolsetConfig(enabled=False),
+                )
+            ],
+        )
+
+        async def _discover(
+            _url: str, name: str, _headers: dict[str, str]
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [{"name": f"mcp__{name}__create_issue"}], None
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            resolve.return_value = {}
+            tools, _instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+            )
+
+        assert tools == []
+
+    async def test_per_tool_config_overrides_default_enabled(self) -> None:
+        from aios.harness.loop import discover_session_mcp_tools
+
+        agent = _agent(
+            mcp_servers=[McpServerSpec(name="gh", url="https://mcp.github")],
+            tools=[
+                ToolSpec(
+                    type="mcp_toolset",
+                    enabled=True,
+                    mcp_server_name="gh",
+                    default_config=McpToolsetConfig(enabled=False),
+                    configs=[McpToolConfig(name="create_issue", enabled=True)],
+                )
+            ],
+        )
+
+        async def _discover(
+            _url: str, name: str, _headers: dict[str, str]
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [
+                {"name": f"mcp__{name}__create_issue"},
+                {"name": f"mcp__{name}__delete_repo"},
+            ], None
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            resolve.return_value = {}
+            tools, _instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+            )
+
+        assert tools == [{"name": "mcp__gh__create_issue"}]
+
+    async def test_per_tool_config_can_disable_one_tool(self) -> None:
+        from aios.harness.loop import discover_session_mcp_tools
+
+        agent = _agent(
+            mcp_servers=[McpServerSpec(name="gh", url="https://mcp.github")],
+            tools=[
+                ToolSpec(
+                    type="mcp_toolset",
+                    enabled=True,
+                    mcp_server_name="gh",
+                    configs=[McpToolConfig(name="delete_repo", enabled=False)],
+                )
+            ],
+        )
+
+        async def _discover(
+            _url: str, name: str, _headers: dict[str, str]
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [
+                {"name": f"mcp__{name}__create_issue"},
+                {"name": f"mcp__{name}__delete_repo"},
+            ], None
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            resolve.return_value = {}
+            tools, _instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+            )
+
+        assert tools == [{"name": "mcp__gh__create_issue"}]
+
+    async def test_drops_tools_with_mismatched_server_namespace(self) -> None:
+        from aios.harness.loop import discover_session_mcp_tools
+
+        agent = _agent(
+            mcp_servers=[McpServerSpec(name="gh", url="https://mcp.github")],
+            tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="gh")],
+        )
+
+        async def _discover(
+            _url: str, _name: str, _headers: dict[str, str]
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [
+                {"name": "mcp__gh__create_issue"},
+                {"name": "mcp__slack__send_message"},
+            ], None
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            resolve.return_value = {}
+            tools, _instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+            )
+
+        assert tools == [{"name": "mcp__gh__create_issue"}]
 
     async def test_discovers_only_agent_servers(self) -> None:
         from aios.harness.loop import discover_session_mcp_tools
