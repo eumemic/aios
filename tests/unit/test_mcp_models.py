@@ -8,6 +8,7 @@ import pytest
 
 from aios.models.agents import (
     AgentCreate,
+    McpChannelContext,
     McpPermissionPolicy,
     McpServerSpec,
     McpToolConfig,
@@ -51,30 +52,11 @@ class TestMcpServerSpec:
         restored = McpServerSpec.model_validate_json(j)
         assert restored.name == "slack"
 
-    def test_conn_prefix_reserved(self) -> None:
-        """The ``conn_`` prefix is reserved for connection-derived MCP server
-        names — agent-declared names must not collide.
+    def test_conn_prefix_is_ordinary_name(self) -> None:
+        """Connection MCP servers are now a legacy projection, not a reserved
+        server-name namespace.
         """
-        with pytest.raises(ValueError, match="conn_"):
-            McpServerSpec(name="conn_github", url="https://mcp.github.com/")
-
-    def test_conn_prefix_reserved_in_agent_create(self) -> None:
-        """Same rejection at the AgentCreate boundary (the HTTP router
-        path — JSON body → ``model_validate`` runs the field validator
-        on every nested mcp_servers entry).
-        """
-        with pytest.raises(ValueError, match="conn_"):
-            AgentCreate.model_validate(
-                {
-                    "name": "bad",
-                    "model": "openai/gpt-4o-mini",
-                    "system": "",
-                    "mcp_servers": [{"type": "url", "name": "conn_foo", "url": "https://m"}],
-                }
-            )
-
-    def test_names_without_conn_prefix_accepted(self) -> None:
-        """Names containing ``conn`` but not starting with ``conn_`` are fine."""
+        assert McpServerSpec(name="conn_github", url="https://m").name == "conn_github"
         assert McpServerSpec(name="connector", url="https://m").name == "connector"
         assert McpServerSpec(name="my_conn", url="https://m").name == "my_conn"
         assert McpServerSpec(name="conn", url="https://m").name == "conn"
@@ -102,6 +84,16 @@ class TestMcpToolConfig:
         )
         assert cfg.name == "create_issue"
         assert cfg.enabled is True
+
+
+class TestMcpChannelContext:
+    def test_focal_context_default(self) -> None:
+        ctx = McpChannelContext()
+        assert ctx.type == "focal"
+
+    def test_extra_fields_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            McpChannelContext(type="focal", path="chat")  # type: ignore[call-arg]
 
 
 class TestToolSpecMcpToolset:
@@ -140,6 +132,19 @@ class TestToolSpecMcpToolset:
         assert spec.configs is not None
         assert len(spec.configs) == 1
         assert spec.configs[0].name == "create_issue"
+
+    def test_mcp_toolset_with_channel_context(self) -> None:
+        spec = ToolSpec(
+            type="mcp_toolset",
+            mcp_server_name="signal",
+            channel_context=McpChannelContext(type="focal"),
+        )
+        assert spec.channel_context is not None
+        assert spec.channel_context.type == "focal"
+
+    def test_channel_context_only_allowed_on_mcp_toolset(self) -> None:
+        with pytest.raises(ValueError, match="channel_context"):
+            ToolSpec(type="bash", channel_context=McpChannelContext(type="focal"))
 
     def test_mcp_toolset_round_trip(self) -> None:
         spec = ToolSpec(
@@ -193,3 +198,4 @@ class TestBackwardCompat:
         assert all(s.mcp_server_name is None for s in specs)
         assert all(s.default_config is None for s in specs)
         assert all(s.configs is None for s in specs)
+        assert all(s.channel_context is None for s in specs)

@@ -46,23 +46,47 @@ curl -X POST :8090/v1/vaults/$VLT/credentials -d '{
 }'
 ```
 
-### 3. Register the aios connection
+### 3. Add the MCP server to your agent
+
+Add the Telegram MCP server as a normal agent MCP server, and mark its toolset
+as focal-channel aware:
 
 ```
-curl -X POST :8090/v1/connections -d "{
+{
+  "mcp_servers": [
+    {"type": "url", "name": "telegram", "url": "http://localhost:9200/mcp"}
+  ],
+  "tools": [
+    {
+      "type": "mcp_toolset",
+      "mcp_server_name": "telegram",
+      "channel_context": {"type": "focal"}
+    }
+  ]
+}
+```
+
+### 4. Register the aios connection
+
+The connection is the inbound channel account. `mcp_url` and `vault_id` are
+still required by the current API for legacy compatibility; normal MCP
+discovery comes from the agent config above.
+
+```
+CONN=$(curl -X POST :8090/v1/connections -d "{
   \"connector\": \"telegram\",
   \"account\": \"<bot-numeric-id-from-step-1>\",
   \"mcp_url\": \"http://localhost:9200/mcp\",
   \"vault_id\": \"$VLT\"
-}"
+}" | jq -r .id)
 ```
 
-### 4. Start the connector
+### 5. Start the connector
 
 ```
 export AIOS_URL=http://localhost:8090
 export AIOS_API_KEY=...
-export AIOS_CONNECTION_ID=conn_...
+export AIOS_CONNECTION_ID=$CONN
 export AIOS_TELEGRAM_MCP_TOKEN=supersecret
 
 python -m aios_telegram start --bot-token 123456:AA...
@@ -71,17 +95,20 @@ python -m aios_telegram start --bot-token 123456:AA...
 All settings can also be passed via env vars. Full list via
 `python -m aios_telegram start --help`.
 
-### 5. Add a routing rule
+### 6. Add a routing rule
 
 ```
-curl -X POST :8090/v1/routing-rules -d '{
-  "prefix": "telegram/<bot-numeric-id>",
-  "target": "agent:<agent-id>",
-  "session_params": {"environment_id": "<env-id>"}
-}'
+curl -X POST :8090/v1/connections/$CONN/routing-rules -d "{
+  \"prefix\": \"\",
+  \"target\": \"agent:<agent-id>\",
+  \"session_params\": {\"environment_id\": \"<env-id>\", \"vault_ids\": [\"$VLT\"]}
+}"
 ```
 
-### 6. DM the bot — the agent replies
+The empty prefix is the per-connection catch-all. The session vault binding is
+what gives the agent-declared Telegram MCP server its bearer token.
+
+### 7. DM the bot — the agent replies
 
 DM the bot from a Telegram client. Watch the aios event log: the inbound
 message shows up with `metadata.channel` set, a session is created on

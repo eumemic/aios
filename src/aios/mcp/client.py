@@ -82,15 +82,17 @@ async def resolve_auth_for_url(
     crypto_box: CryptoBox,
     session_id: str,
     mcp_server_url: str,
+    *,
+    connection_vault_id: str | None = None,
 ) -> dict[str, str]:
     """Resolve MCP auth headers for ``mcp_server_url``.
 
-    Connection-owned URLs resolve through the connection's vault; other
-    URLs fall back to the session's bound vaults (``session_vaults``).
-    A connection that owns the URL but has no matching credential
-    returns ``{}`` rather than falling back — ownership decides the
-    source, not whether the lookup hits (prevents a misconfigured
-    connection from silently leaking a tenant-level credential).
+    Normal agent-declared MCP servers resolve through the session's bound
+    vaults (``session_vaults``). Legacy connection-projected MCP servers pass
+    ``connection_vault_id`` explicitly; that vault then owns auth resolution
+    for this call. A legacy connection vault with no matching credential
+    returns ``{}`` rather than falling back, preventing a misconfigured
+    connection from silently leaking a tenant-level credential.
 
     For ``mcp_oauth`` credentials whose ``expires_at`` falls within the
     refresh skew window, the access token is transparently refreshed
@@ -100,7 +102,6 @@ async def resolve_auth_for_url(
     to the stale token.
     """
     async with pool.acquire() as conn:
-        connection_vault_id = await queries.get_connection_vault_for_url(conn, mcp_server_url)
         if connection_vault_id is not None:
             vault_result = await queries.resolve_vault_credential(
                 conn, vault_id=connection_vault_id, mcp_server_url=mcp_server_url
@@ -222,8 +223,8 @@ async def call_mcp_tool(
     ``tool_name`` is the raw MCP tool name (without the ``mcp__`` prefix).
     ``meta`` is an optional per-request metadata dict forwarded as the
     JSON-RPC request's ``_meta`` field — used by the focal-channel
-    redesign to pass ``aios.focal_channel_path`` to connection-provided
-    MCP servers without stuffing it into arguments.  Returns a result
+    redesign to pass ``aios.focal_channel_path`` to channel-aware MCP
+    servers without stuffing it into arguments.  Returns a result
     dict with either ``content`` (success) or ``error`` (failure).
     """
     try:

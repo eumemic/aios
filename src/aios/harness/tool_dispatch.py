@@ -313,6 +313,8 @@ def launch_mcp_tool_calls(
     tool_calls: list[dict[str, Any]],
     mcp_server_map: dict[str, str],
     *,
+    channel_context_by_server: dict[str, str] | None = None,
+    connection_vault_by_server: dict[str, str] | None = None,
     focal_channel: str | None = None,
 ) -> None:
     """Launch MCP tool calls as asyncio tasks. Returns immediately.
@@ -320,14 +322,20 @@ def launch_mcp_tool_calls(
     ``focal_channel`` is the session's focal at the moment these calls
     were emitted (captured at step top in ``run_session_step`` so a
     concurrent ``switch_channel`` in the same batch cannot race the
-    ``chat_id`` injection).  Passed through to each task so
-    connection-provided tools can stamp ``_meta`` with the suffix.
+    ``chat_id`` injection).  Passed through to each task so channel-aware
+    MCP toolsets can stamp ``_meta`` with the suffix.
     """
     _launch_tasks(
         session_id,
         tool_calls,
         lambda call: _execute_mcp_tool_async(
-            pool, session_id, call, mcp_server_map, focal_channel=focal_channel
+            pool,
+            session_id,
+            call,
+            mcp_server_map,
+            channel_context_by_server=channel_context_by_server,
+            connection_vault_by_server=connection_vault_by_server,
+            focal_channel=focal_channel,
         ),
         prefix="mcp_tool",
     )
@@ -350,20 +358,19 @@ async def _execute_mcp_tool_async(
     call: dict[str, Any],
     mcp_server_map: dict[str, str],
     *,
+    channel_context_by_server: dict[str, str] | None = None,
+    connection_vault_by_server: dict[str, str] | None = None,
     focal_channel: str | None = None,
 ) -> None:
     """Execute one MCP tool call: connect, invoke, append result, defer wake.
 
-    For connection-provided servers (name in the reserved ``conn_``
-    namespace), the focal-channel suffix is stamped into the JSON-RPC
-    request's ``_meta`` so the connector can resolve its
-    connector-specific chat identifiers without the model having to
-    pass them explicitly.  The ``focal_channel`` snapshot is emission-
-    time — a concurrent ``switch_channel`` in the same assistant batch
-    does not race this injection.
+    For focal-channel MCP toolsets, the focal-channel suffix is stamped
+    into the JSON-RPC request's ``_meta`` so the server can resolve its
+    channel-specific identifiers without the model having to pass them
+    explicitly.  The ``focal_channel`` snapshot is emission-time — a
+    concurrent ``switch_channel`` in the same assistant batch does not
+    race this injection.
     """
-    from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
-
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
     name: str = function.get("name") or ""
@@ -407,13 +414,14 @@ async def _execute_mcp_tool_async(
         from aios.mcp.client import call_mcp_tool, resolve_auth_for_url
 
         meta: dict[str, Any] | None = None
-        if server_name.startswith(CONNECTION_SERVER_NAME_PREFIX):
+        channel_context = (channel_context_by_server or {}).get(server_name)
+        if channel_context == "focal":
             suffix = focal_channel_path(focal_channel)
             if suffix is None:
-                # The model shouldn't be able to call a conn_* tool while
-                # focal is NULL — loop.py filters them out of the tool
-                # list in that state — but defend in depth if it slips
-                # through (stale tool_calls, etc.).
+                # The model shouldn't be able to call a focal-channel tool
+                # while focal is NULL — loop.py filters them out of the tool
+                # list in that state — but defend in depth if it slips through
+                # (stale tool_calls, etc.).
                 is_error = True
                 await _append_tool_result(
                     pool,
@@ -421,15 +429,20 @@ async def _execute_mcp_tool_async(
                     call_id,
                     name,
                     error=(
-                        "connection-provided tools require a focal channel; "
-                        "call switch_channel first"
+                        "channel-aware MCP tools require a focal channel; call switch_channel first"
                     ),
                 )
                 return
             meta = {FOCAL_CHANNEL_META_KEY: suffix}
 
         crypto_box = runtime.require_crypto_box()
-        headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
+        headers = await resolve_auth_for_url(
+            pool,
+            crypto_box,
+            session_id,
+            url,
+            connection_vault_id=(connection_vault_by_server or {}).get(server_name),
+        )
         result = await call_mcp_tool(url, headers, tool_name, arguments, meta=meta)
 
         content_str = json.dumps(result, ensure_ascii=False)

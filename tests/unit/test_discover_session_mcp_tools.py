@@ -1,10 +1,9 @@
 """Unit tests for discover_session_mcp_tools.
 
 Covers the collect-URLs-then-discover shape: agent-declared MCP
-(filtered by enabled mcp_toolset entries) unioned with
-connection-provided MCP (derived from session bindings → connections).
-The MCP SDK and auth lookup are both mocked; only the orchestration
-is under test here.
+(filtered by enabled mcp_toolset entries), plus the legacy compatibility
+projection from session bindings → connections. The MCP SDK and auth lookup
+are both mocked; only the orchestration is under test here.
 """
 
 from __future__ import annotations
@@ -164,6 +163,54 @@ class TestDiscoverSessionMcpTools:
         urls = sorted(t["url"] for t in tools)
         assert urls == ["https://m1", "https://mcp.github"]
 
+    async def test_agent_server_url_suppresses_legacy_connection_projection(self) -> None:
+        """If the agent declares the same MCP URL as a connection, discover it
+        once through the normal agent server namespace.
+        """
+        from aios.harness.loop import discover_session_mcp_tools
+
+        agent = _agent(
+            mcp_servers=[McpServerSpec(name="signal", url="https://m1")],
+            tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="signal")],
+        )
+        connections = [_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F", "https://m1")]
+
+        seen: list[tuple[str, str | None]] = []
+
+        async def _fake_resolve(
+            _pool: Any,
+            _cb: Any,
+            _sid: str,
+            url: str,
+            *,
+            connection_vault_id: str | None = None,
+        ) -> dict[str, str]:
+            seen.append((url, connection_vault_id))
+            return {}
+
+        async def _discover(
+            url: str, name: str, _headers: dict[str, str]
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [{"name": f"mcp__{name}__t", "url": url}], "send via focal"
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_url", side_effect=_fake_resolve),
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            tools, instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+                connections=connections,
+            )
+
+        assert seen == [("https://m1", None)]
+        assert tools == [{"name": "mcp__signal__t", "url": "https://m1"}]
+        assert instructions == {
+            "signal": "send via focal",
+            "conn_01HQR2K7VXBZ9MNPL3WYCT8F": "send via focal",
+        }
+
     async def test_auth_resolved_per_url(self) -> None:
         """Each URL resolves auth independently — goes through
         resolve_auth_for_url once per server, not once per batch.
@@ -176,10 +223,17 @@ class TestDiscoverSessionMcpTools:
         )
         connections = [_connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F", "https://m1")]
 
-        seen_urls: list[str] = []
+        seen: list[tuple[str, str | None]] = []
 
-        async def _fake_resolve(_pool: Any, _cb: Any, _sid: str, url: str) -> dict[str, str]:
-            seen_urls.append(url)
+        async def _fake_resolve(
+            _pool: Any,
+            _cb: Any,
+            _sid: str,
+            url: str,
+            *,
+            connection_vault_id: str | None = None,
+        ) -> dict[str, str]:
+            seen.append((url, connection_vault_id))
             return {"Authorization": f"Bearer token-for-{url}"}
 
         async def _discover(
@@ -197,7 +251,7 @@ class TestDiscoverSessionMcpTools:
                 agent=agent,
                 connections=connections,
             )
-        assert sorted(seen_urls) == ["https://m1", "https://mcp.github"]
+        assert sorted(seen) == [("https://m1", "vlt_x"), ("https://mcp.github", None)]
         auths = {t["auth"] for t in tools}
         assert auths == {
             "Bearer token-for-https://mcp.github",

@@ -54,23 +54,47 @@ curl -X POST :8090/v1/vaults/$VLT/credentials -d '{
 }'
 ```
 
-### 3. Register the aios connection
+### 3. Add the MCP server to your agent
+
+Add the Signal MCP server as a normal agent MCP server, and mark its toolset
+as focal-channel aware:
 
 ```
-curl -X POST :8090/v1/connections -d "{
+{
+  "mcp_servers": [
+    {"type": "url", "name": "signal", "url": "http://localhost:9100/mcp"}
+  ],
+  "tools": [
+    {
+      "type": "mcp_toolset",
+      "mcp_server_name": "signal",
+      "channel_context": {"type": "focal"}
+    }
+  ]
+}
+```
+
+### 4. Register the aios connection
+
+The connection is the inbound channel account. `mcp_url` and `vault_id` are
+still required by the current API for legacy compatibility; normal MCP
+discovery comes from the agent config above.
+
+```
+CONN=$(curl -X POST :8090/v1/connections -d "{
   \"connector\": \"signal\",
   \"account\": \"<bot-aci-uuid-from-step-1>\",
   \"mcp_url\": \"http://localhost:9100/mcp\",
   \"vault_id\": \"$VLT\"
-}"
+}" | jq -r .id)
 ```
 
-### 4. Start the connector
+### 5. Start the connector
 
 ```
 export AIOS_URL=http://localhost:8090
 export AIOS_API_KEY=...
-export AIOS_CONNECTION_ID=conn_...
+export AIOS_CONNECTION_ID=$CONN
 export AIOS_SIGNAL_MCP_TOKEN=supersecret
 
 python -m aios_signal start \
@@ -80,29 +104,25 @@ python -m aios_signal start \
 
 All settings can also be passed via env vars. Full list via `python -m aios_signal start --help`.
 
-### 5. Add a routing rule
+### 6. Add a routing rule
 
 ```
-curl -X POST :8090/v1/routing-rules -d '{
-  "prefix": "signal/<bot-aci-uuid>",
-  "target": "agent:<agent-id>",
-  "session_params": {"environment_id": "<env-id>"}
-}'
+curl -X POST :8090/v1/connections/$CONN/routing-rules -d "{
+  \"prefix\": \"\",
+  \"target\": \"agent:<agent-id>\",
+  \"session_params\": {\"environment_id\": \"<env-id>\", \"vault_ids\": [\"$VLT\"]}
+}"
 ```
 
-The prefix uses the **bot's** ACI UUID (from step 1), not the counterparty's.
+The empty prefix is the per-connection catch-all. The session vault binding is
+what gives the agent-declared Signal MCP server its bearer token.
 
-### 6. DM your bot — the agent replies
+### 7. DM your bot — the agent replies
 
 DM the bot's phone number from another Signal client. Watch the aios event
 log: the inbound message shows up with `metadata.channel` set, a session is
 created on first inbound, and the agent's `signal_send` call delivers the
 reply back to Signal.
-
-**Phase-2 dependency:** step 6 works end-to-end only once Phase 2 (#31) has
-merged — Phase 2 wires connection-provided MCP servers into the worker's
-tool discovery. Until then the connector runs fine and ingests messages, but
-the agent can't see the `signal_send` tool.
 
 ## Configuration reference
 

@@ -3,8 +3,9 @@
 Thin wrapper over :mod:`aios.db.queries`. The only business rule lives
 in :func:`archive_connection`, which refuses to archive a connection
 while channel bindings under its ``(connector, account)`` prefix are
-still active — archiving would silently drop the connection-provided
-MCP tools from any live session bound to those channels.
+still active. Connection rows remain the source of inbound channel identity,
+so archiving one while bound channels are live would break routing and the
+legacy MCP projection for those sessions.
 """
 
 from __future__ import annotations

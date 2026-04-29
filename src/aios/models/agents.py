@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aios.models.skills import AgentSkillRef
 
@@ -52,17 +52,6 @@ class McpServerSpec(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     url: str = Field(min_length=1)
 
-    @field_validator("name")
-    @classmethod
-    def _reject_reserved_prefix(cls, v: str) -> str:
-        from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
-
-        if v.startswith(CONNECTION_SERVER_NAME_PREFIX):
-            raise ValueError(
-                f"mcp_server name prefix {CONNECTION_SERVER_NAME_PREFIX!r} is reserved"
-            )
-        return v
-
 
 # ── MCP toolset config (permission policies for discovered tools) ──────────
 
@@ -92,6 +81,19 @@ class McpToolConfig(BaseModel):
     name: str
     enabled: bool = True
     permission_policy: McpPermissionPolicy | None = None
+
+
+class McpChannelContext(BaseModel):
+    """Channel behavior for an MCP toolset.
+
+    ``type="focal"`` means tools from this server operate on the session's
+    current focal channel. The harness hides those tools when no focal channel
+    is set and injects the focal channel path into MCP request ``_meta``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["focal"] = "focal"
 
 
 # ── Tool declaration ──────────────────────────────────────────────────────────
@@ -128,6 +130,7 @@ class ToolSpec(BaseModel):
     mcp_server_name: str | None = None
     default_config: McpToolsetConfig | None = None
     configs: list[McpToolConfig] | None = None
+    channel_context: McpChannelContext | None = None
 
     @model_validator(mode="after")
     def _check_type_fields(self) -> ToolSpec:
@@ -140,6 +143,8 @@ class ToolSpec(BaseModel):
         elif self.type == "mcp_toolset":
             if self.mcp_server_name is None:
                 raise ValueError("mcp_toolset requires mcp_server_name")
+        elif self.channel_context is not None:
+            raise ValueError("channel_context is only supported for mcp_toolset")
         return self
 
 

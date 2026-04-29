@@ -828,12 +828,12 @@ class TestSwitchChannelAsEvent:
 
 
 class TestMcpMetaInjection:
-    """Slice 6: connection-provided MCP tools receive the focal channel
-    path via the JSON-RPC ``_meta`` field, without stuffing it into
-    arguments.  Agent-declared MCP servers don't get the meta stamp.
+    """Channel-aware MCP toolsets receive the focal channel path via the
+    JSON-RPC ``_meta`` field, without stuffing it into arguments. Normal MCP
+    servers don't get the meta stamp.
     """
 
-    async def test_conn_tool_dispatch_injects_focal_suffix_into_meta(
+    async def test_channel_aware_mcp_dispatch_injects_focal_suffix_into_meta(
         self,
         runtime_pool: Any,
         agent_id: str,
@@ -854,18 +854,12 @@ class TestMcpMetaInjection:
             connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
             session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
 
-            # The connection created by _setup_inbound has id prefix `conn_`.
-            from aios.services import connections as conn_svc
-
-            connections = await conn_svc.list_connections(runtime_pool)
-            conn = next(c for c in connections if c.connector == "signal")
-
-            mcp_server_map = {conn.id: conn.mcp_url}
+            mcp_server_map = {"signal": "https://m"}
             tool_call_dict = {
                 "id": "call_send_1",
                 "type": "function",
                 "function": {
-                    "name": f"mcp__{conn.id}__signal_send",
+                    "name": "mcp__signal__signal_send",
                     "arguments": json.dumps({"text": "hi there"}),
                 },
             }
@@ -885,6 +879,7 @@ class TestMcpMetaInjection:
                     session_id,
                     tool_call_dict,
                     mcp_server_map,
+                    channel_context_by_server={"signal": "focal"},
                     focal_channel=address,  # focal=A → suffix=chat-1
                 )
 
@@ -896,16 +891,16 @@ class TestMcpMetaInjection:
         finally:
             runtime.crypto_box = prev_crypto
 
-    async def test_agent_mcp_tool_dispatch_no_meta_stamped(
+    async def test_normal_mcp_tool_dispatch_no_meta_stamped(
         self,
         runtime_pool: Any,
         agent_id: str,
         env_id: str,
         vault_id: str,
     ) -> None:
-        """Agent-declared MCP servers (not under the conn_* prefix) don't
-        get focal meta — aios has no business telling an agent-declared
-        MCP server about the session's focal channel.
+        """MCP servers without channel_context don't get focal meta — aios
+        has no business telling unrelated MCP servers about the session's
+        focal channel.
         """
         from unittest.mock import AsyncMock, patch
 
@@ -919,7 +914,6 @@ class TestMcpMetaInjection:
             connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
             session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
 
-            # Agent-declared server: name does NOT start with conn_.
             agent_server_name = "github"
             mcp_server_map = {agent_server_name: "https://mcp.github.com"}
             tool_call_dict = {
@@ -946,11 +940,11 @@ class TestMcpMetaInjection:
                     session_id,
                     tool_call_dict,
                     mcp_server_map,
-                    focal_channel=address,  # non-null focal, but agent server
+                    focal_channel=address,  # non-null focal, but no channel_context
                 )
 
             _args, kwargs = mock_call.call_args
-            # No meta for agent-declared MCP.
+            # No meta for ordinary MCP.
             assert kwargs.get("meta") is None
         finally:
             runtime.crypto_box = prev_crypto
