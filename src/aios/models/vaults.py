@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 AuthType = Literal["mcp_oauth", "static_bearer"]
 
@@ -90,14 +90,16 @@ class VaultCredentialCreate(BaseModel):
     """Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
     All secret fields are write-only. The ``mcp_server_url`` is immutable
-    after creation. The service layer validates required fields per
-    ``auth_type``.
+    after creation. ``account_id`` is optional public metadata for connectors
+    that need a stable account segment in channel addresses. The service layer
+    validates required fields per ``auth_type``.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     display_name: str | None = Field(default=None, max_length=128)
     mcp_server_url: str = Field(min_length=1)
+    account_id: str | None = Field(default=None, min_length=1, max_length=256)
     auth_type: AuthType
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -114,17 +116,26 @@ class VaultCredentialCreate(BaseModel):
     # static_bearer fields
     token: SecretStr | None = None
 
+    @field_validator("account_id")
+    @classmethod
+    def _account_id_no_slash(cls, v: str | None) -> str | None:
+        if v is not None and "/" in v:
+            raise ValueError("must not contain '/'")
+        return v
+
 
 class VaultCredentialUpdate(BaseModel):
     """Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.
 
     ``mcp_server_url`` and ``auth_type`` are immutable — not accepted here.
-    Omitted secret fields are preserved (decrypt-merge-encrypt).
+    Omitted public metadata and secret fields are preserved
+    (decrypt-merge-encrypt).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     display_name: str | None = Field(default=None, max_length=128)
+    account_id: str | None = Field(default=None, min_length=1, max_length=256)
     metadata: dict[str, Any] | None = None
 
     # mcp_oauth fields (all optional — omitted = preserve)
@@ -140,6 +151,13 @@ class VaultCredentialUpdate(BaseModel):
     # static_bearer
     token: SecretStr | None = None
 
+    @field_validator("account_id")
+    @classmethod
+    def _account_id_no_slash(cls, v: str | None) -> str | None:
+        if v is not None and "/" in v:
+            raise ValueError("must not contain '/'")
+        return v
+
 
 class VaultCredential(BaseModel):
     """Read view of a vault credential. Secrets are never returned."""
@@ -148,6 +166,7 @@ class VaultCredential(BaseModel):
     vault_id: str
     display_name: str | None
     mcp_server_url: str
+    account_id: str | None = None
     auth_type: AuthType
     metadata: dict[str, Any]
     created_at: datetime

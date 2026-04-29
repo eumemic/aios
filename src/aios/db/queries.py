@@ -1442,6 +1442,7 @@ def _row_to_vault_credential(row: asyncpg.Record) -> VaultCredential:
         vault_id=row["vault_id"],
         display_name=row["display_name"],
         mcp_server_url=row["mcp_server_url"],
+        account_id=row["account_id"],
         auth_type=row["auth_type"],
         metadata=metadata,
         created_at=row["created_at"],
@@ -1456,6 +1457,7 @@ async def insert_vault_credential(
     vault_id: str,
     display_name: str | None,
     mcp_server_url: str,
+    account_id: str | None,
     auth_type: str,
     blob: EncryptedBlob,
     metadata: dict[str, Any],
@@ -1466,16 +1468,17 @@ async def insert_vault_credential(
         row = await conn.fetchrow(
             """
             INSERT INTO vault_credentials (
-                id, vault_id, display_name, mcp_server_url,
+                id, vault_id, display_name, mcp_server_url, account_id,
                 auth_type, ciphertext, nonce, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
             RETURNING *
             """,
             new_id,
             vault_id,
             display_name,
             mcp_server_url,
+            account_id,
             auth_type,
             blob.ciphertext,
             blob.nonce,
@@ -1589,6 +1592,7 @@ async def update_vault_credential(
     *,
     blob: EncryptedBlob | None = None,
     display_name: str | None | EllipsisType = ...,
+    account_id: str | None | EllipsisType = ...,
     metadata: dict[str, Any] | None | EllipsisType = ...,
 ) -> VaultCredential:
     sets: list[str] = []
@@ -1596,6 +1600,9 @@ async def update_vault_credential(
     if display_name is not ...:
         args.append(display_name)
         sets.append(f"display_name = ${len(args)}")
+    if account_id is not ...:
+        args.append(account_id)
+        sets.append(f"account_id = ${len(args)}")
     if blob is not None:
         args.append(blob.ciphertext)
         sets.append(f"ciphertext = ${len(args)}")
