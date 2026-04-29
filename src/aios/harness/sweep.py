@@ -432,6 +432,57 @@ def _group_tool_call_ids(rows: list[Any]) -> dict[str, set[str]]:
     return grouped
 
 
+# ─── procrastinate stalled-job recovery ──────────────────────────────────────
+
+
+async def reap_stalled_jobs(job_manager: Any) -> int:
+    """Mark stalled procrastinate jobs as failed.
+
+    Procrastinate runs a heartbeat lease: workers update
+    ``procrastinate_workers.last_heartbeat`` every
+    ``update_heartbeat_interval`` (default 10s).  A dead worker
+    (laptop sleep, OOM, ungraceful shutdown) stops heartbeating; its
+    row is pruned at any other worker's startup, leaving its
+    in-flight job at ``status='doing'`` with ``worker_id`` either
+    NULL (post-prune) or pointing at the missing row.  Either way the
+    job's ``lock`` (``"{session_id}"`` for aios) stays held — every
+    subsequent wake for that session sits behind it forever.
+
+    :meth:`procrastinate.manager.JobManager.get_stalled_jobs` is the
+    blessed query for this state.  Its SQL covers both shapes
+    (``worker_id IS NULL`` plus the membership join on
+    ``procrastinate_workers``), and the threshold is configurable per
+    call — we use 60s, comfortably above procrastinate's 10s
+    heartbeat interval and 30s default ``stalled_worker_timeout``.
+
+    Takes a ``job_manager`` rather than an ``App`` so tests can build
+    a fresh manager pointed at the testcontainer DB without depending
+    on the module-level ``procrastinate_app`` singleton (which fixes
+    its connector at import time).
+
+    Returns the number of jobs reaped.  Non-zero is a real signal
+    that a worker died.
+    """
+    from procrastinate.jobs import Status
+
+    stalled = list(await job_manager.get_stalled_jobs(seconds_since_heartbeat=60))
+    for job in stalled:
+        if job.id is None:
+            continue
+        await job_manager.finish_job_by_id_async(
+            job_id=job.id,
+            status=Status.FAILED,
+            delete_job=False,
+        )
+    if stalled:
+        log.warning(
+            "sweep.reaped_stalled_jobs",
+            count=len(stalled),
+            ids=[j.id for j in stalled],
+        )
+    return len(stalled)
+
+
 # ─── main entry point ────────────────────────────────────────────────────────
 
 
