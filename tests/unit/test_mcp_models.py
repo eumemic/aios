@@ -51,30 +51,9 @@ class TestMcpServerSpec:
         restored = McpServerSpec.model_validate_json(j)
         assert restored.name == "slack"
 
-    def test_conn_prefix_reserved(self) -> None:
-        """The ``conn_`` prefix is reserved for connection-derived MCP server
-        names — agent-declared names must not collide.
-        """
-        with pytest.raises(ValueError, match="conn_"):
-            McpServerSpec(name="conn_github", url="https://mcp.github.com/")
-
-    def test_conn_prefix_reserved_in_agent_create(self) -> None:
-        """Same rejection at the AgentCreate boundary (the HTTP router
-        path — JSON body → ``model_validate`` runs the field validator
-        on every nested mcp_servers entry).
-        """
-        with pytest.raises(ValueError, match="conn_"):
-            AgentCreate.model_validate(
-                {
-                    "name": "bad",
-                    "model": "openai/gpt-4o-mini",
-                    "system": "",
-                    "mcp_servers": [{"type": "url", "name": "conn_foo", "url": "https://m"}],
-                }
-            )
-
-    def test_names_without_conn_prefix_accepted(self) -> None:
-        """Names containing ``conn`` but not starting with ``conn_`` are fine."""
+    def test_conn_prefix_is_ordinary_name(self) -> None:
+        """The conn_ prefix is not a reserved server-name namespace."""
+        assert McpServerSpec(name="conn_github", url="https://m").name == "conn_github"
         assert McpServerSpec(name="connector", url="https://m").name == "connector"
         assert McpServerSpec(name="my_conn", url="https://m").name == "my_conn"
         assert McpServerSpec(name="conn", url="https://m").name == "conn"
@@ -140,6 +119,14 @@ class TestToolSpecMcpToolset:
         assert spec.configs is not None
         assert len(spec.configs) == 1
         assert spec.configs[0].name == "create_issue"
+
+    def test_channel_context_is_not_part_of_mcp_toolset_schema(self) -> None:
+        with pytest.raises(ValueError, match="channel_context"):
+            ToolSpec(
+                type="mcp_toolset",
+                mcp_server_name="signal",
+                channel_context={"type": "focal"},  # type: ignore[call-arg]
+            )
 
     def test_mcp_toolset_round_trip(self) -> None:
         spec = ToolSpec(

@@ -85,12 +85,9 @@ async def resolve_auth_for_url(
 ) -> dict[str, str]:
     """Resolve MCP auth headers for ``mcp_server_url``.
 
-    Connection-owned URLs resolve through the connection's vault; other
-    URLs fall back to the session's bound vaults (``session_vaults``).
-    A connection that owns the URL but has no matching credential
-    returns ``{}`` rather than falling back — ownership decides the
-    source, not whether the lookup hits (prevents a misconfigured
-    connection from silently leaking a tenant-level credential).
+    Agent-declared MCP servers resolve through the session's bound vaults
+    (``session_vaults``). The agent chooses a tool name; the worker resolves
+    the server URL from agent config and injects the matching vault credential.
 
     For ``mcp_oauth`` credentials whose ``expires_at`` falls within the
     refresh skew window, the access token is transparently refreshed
@@ -100,20 +97,10 @@ async def resolve_auth_for_url(
     to the stale token.
     """
     async with pool.acquire() as conn:
-        connection_vault_id = await queries.get_connection_vault_for_url(conn, mcp_server_url)
-        if connection_vault_id is not None:
-            vault_result = await queries.resolve_vault_credential(
-                conn, vault_id=connection_vault_id, mcp_server_url=mcp_server_url
-            )
-            if vault_result is None:
-                return {}
-            blob, auth_type = vault_result
-            vault_id = connection_vault_id
-        else:
-            session_result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
-            if session_result is None:
-                return {}
-            blob, auth_type, vault_id = session_result
+        session_result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
+        if session_result is None:
+            return {}
+        blob, auth_type, vault_id = session_result
 
         if auth_type == "mcp_oauth":
             payload = json.loads(crypto_box.decrypt(blob))
@@ -151,11 +138,11 @@ async def discover_mcp_tools(
       (``mcp__<server_name>__<tool_name>``).
     * ``instructions`` — the server's ``InitializeResult.instructions``
       string (per the MCP spec), or ``None`` if the server didn't supply
-      any. Used by the harness to compose per-connector affordance prose
+      any. Used by the harness to compose per-server affordance prose
       into the system prompt.
 
     On any error, logs a warning and returns ``([], None)`` — the model
-    simply doesn't see those tools (or that connector's instructions).
+    simply doesn't see those tools (or that server's instructions).
     """
     try:
         from aios.harness import runtime
@@ -221,9 +208,9 @@ async def call_mcp_tool(
 
     ``tool_name`` is the raw MCP tool name (without the ``mcp__`` prefix).
     ``meta`` is an optional per-request metadata dict forwarded as the
-    JSON-RPC request's ``_meta`` field — used by the focal-channel
-    redesign to pass ``aios.focal_channel_path`` to connection-provided
-    MCP servers without stuffing it into arguments.  Returns a result
+    JSON-RPC request's ``_meta`` field. The harness uses it to pass
+    ``aios.focal_channel`` whenever the session has a focal channel, without
+    stuffing channel context into model-supplied arguments. Returns a result
     dict with either ``content`` (success) or ``error`` (failure).
     """
     try:

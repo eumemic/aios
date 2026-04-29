@@ -2,8 +2,7 @@
 
 Returned in the ``InitializeResult.instructions`` field of the MCP
 ``initialize`` response; the aios harness concatenates it into the
-session's system prompt under a ``## Connector: telegram/<account>``
-heading.
+session's system prompt under the Telegram MCP server heading.
 
 Covers only the tool this server exposes — ``telegram_send``. Telling the
 model about tools that don't exist would be worse than silence.

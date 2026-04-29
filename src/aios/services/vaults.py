@@ -368,6 +368,7 @@ async def create_vault_credential(
             vault_id=vault_id,
             display_name=body.display_name,
             mcp_server_url=body.mcp_server_url,
+            account_id=body.account_id,
             auth_type=body.auth_type,
             blob=blob,
             metadata=body.metadata,
@@ -415,6 +416,7 @@ async def update_vault_credential(
             credential_id,
             blob=new_blob,
             display_name=(body.display_name if "display_name" in body.model_fields_set else ...),
+            account_id=body.account_id if "account_id" in body.model_fields_set else ...,
             metadata=body.metadata if "metadata" in body.model_fields_set else ...,
         )
 

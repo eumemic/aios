@@ -33,7 +33,7 @@ from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.harness.wake import defer_retry_wake
 from aios.logging import get_logger
-from aios.models.agents import ToolSpec
+from aios.models.agents import McpToolConfig, ToolSpec
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 
@@ -198,13 +198,11 @@ async def _run_session_step_body(
     else:
         agent = await agents_service.get_agent(pool, session.agent_id)
 
-    from aios.harness.channels import connection_server_name, list_bindings_and_connections
+    from aios.harness.channels import list_session_bindings
 
-    bindings, connections = await list_bindings_and_connections(pool, session_id)
+    bindings = await list_session_bindings(pool, session_id)
 
     mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
-    for c in connections:
-        mcp_server_map[connection_server_name(c)] = c.mcp_url
 
     # Memory store mounts: load echoes once per step. Used both for the
     # system-prompt block and (via runtime cache) by the tool intercept
@@ -225,7 +223,6 @@ async def _run_session_step_body(
         session=session,
         agent=agent,
         bindings=bindings,
-        connections=connections,
         memory_store_echoes=memory_echoes,
     )
     overhead_local = (
@@ -552,24 +549,6 @@ def _switch_channel_tool_spec() -> dict[str, Any]:
     }
 
 
-def _hide_conn_tools_when_phone_down(
-    mcp_tools: list[dict[str, Any]], focal_channel: str | None
-) -> list[dict[str, Any]]:
-    """Filter connection-provided MCP tools out when focal is NULL.
-
-    Those tools resolve their ``chat_id`` from focal (injected into
-    ``_meta`` at dispatch time); a "phone down" state has no focal to
-    inject, so the model shouldn't be offered them.  Agent-declared
-    MCP tools are untouched.
-    """
-    from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
-
-    if focal_channel is not None:
-        return mcp_tools
-    prefix = f"mcp__{CONNECTION_SERVER_NAME_PREFIX}"
-    return [t for t in mcp_tools if not t.get("function", {}).get("name", "").startswith(prefix)]
-
-
 async def _dump_context_if_enabled(
     session_id: str,
     model: str,
@@ -620,6 +599,14 @@ def _is_mcp_tool(name: str) -> bool:
     return name.startswith("mcp__")
 
 
+def _parse_mcp_tool_name(name: str) -> tuple[str, str] | None:
+    """Parse ``mcp__<server_name>__<tool_name>`` into its parts."""
+    parts = name.split("__", 2)
+    if len(parts) < 3 or not parts[1] or not parts[2]:
+        return None
+    return parts[1], parts[2]
+
+
 def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
     """Look up the permission policy for a built-in or custom tool by name."""
     for spec in agent_tools:
@@ -629,30 +616,86 @@ def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
     return None
 
 
-def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
+def _enabled_mcp_toolsets_by_server(agent_tools: list[ToolSpec]) -> dict[str, ToolSpec]:
+    """Return enabled MCP toolset specs keyed by server name."""
+    toolsets: dict[str, ToolSpec] = {}
+    for spec in agent_tools:
+        if (
+            spec.type == "mcp_toolset"
+            and spec.enabled
+            and spec.mcp_server_name
+            and spec.mcp_server_name not in toolsets
+        ):
+            toolsets[spec.mcp_server_name] = spec
+    return toolsets
+
+
+def _mcp_tool_config(spec: ToolSpec, tool_name: str) -> McpToolConfig | None:
+    for cfg in spec.configs or []:
+        if cfg.name == tool_name:
+            return cfg
+    return None
+
+
+def _is_mcp_tool_enabled(name: str, spec: ToolSpec) -> bool:
+    parsed = _parse_mcp_tool_name(name)
+    if parsed is None:
+        return False
+    server_name, tool_name = parsed
+    if server_name != spec.mcp_server_name:
+        return False
+    tool_cfg = _mcp_tool_config(spec, tool_name)
+    if tool_cfg is not None:
+        return tool_cfg.enabled
+    default_cfg = spec.default_config
+    if default_cfg is not None:
+        return default_cfg.enabled
+    return True
+
+
+def _filter_mcp_tools_for_toolset(
+    mcp_tools: list[dict[str, Any]],
+    spec: ToolSpec,
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for tool in mcp_tools:
+        name = tool.get("function", {}).get("name") or tool.get("name")
+        if isinstance(name, str) and _is_mcp_tool_enabled(name, spec):
+            filtered.append(tool)
+    return filtered
+
+
+def resolve_mcp_permission(
+    name: str,
+    agent_tools: list[ToolSpec],
+) -> str | None:
     """Look up the permission policy for an MCP tool.
 
-    Connection-provided tools (server name in the reserved ``conn_``
-    namespace) default to ``always_allow`` — the session's channel
-    binding is already explicit routing consent; gating every reply on
-    a confirmation prompt would defeat the connector autonomy story.
+    Finds the enabled ``mcp_toolset`` entry whose ``mcp_server_name`` matches
+    the server portion of the namespaced tool name. Per-tool config overrides
+    the toolset default, and ``None`` means callers treat the call as
+    ``always_ask``.
 
-    For agent-declared servers, finds the ``mcp_toolset`` entry whose
-    ``mcp_server_name`` matches the server portion of the namespaced
-    tool name, then returns the ``default_config.permission_policy.type``
-    or ``None`` (which callers treat as ``always_ask``).
+    MCP tools do not gain implicit permissions from channel/focal behavior;
+    operators grant execution policy through normal MCP toolset config.
     """
-    from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
+    parsed = _parse_mcp_tool_name(name)
+    if parsed is None:
+        return None
+    server_name, tool_name = parsed
+    spec = _enabled_mcp_toolsets_by_server(agent_tools).get(server_name)
+    if spec is None:
+        return None
 
-    server_name = name.split("__", 2)[1]
-    if server_name.startswith(CONNECTION_SERVER_NAME_PREFIX):
-        return "always_allow"
-    for spec in agent_tools:
-        if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
-            cfg = spec.default_config
-            if cfg and cfg.permission_policy:
-                return cfg.permission_policy.type
-            return spec.permission
+    tool_cfg = _mcp_tool_config(spec, tool_name)
+    if tool_cfg is not None and tool_cfg.permission_policy is not None:
+        return tool_cfg.permission_policy.type
+
+    cfg = spec.default_config
+    if cfg and cfg.permission_policy:
+        return cfg.permission_policy.type
+    if spec.permission:
+        return spec.permission
     return None
 
 
@@ -660,32 +703,27 @@ async def discover_session_mcp_tools(
     pool: Any,
     session_id: str,
     agent: Any,
-    connections: list[Any],
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Discover MCP tools from agent-declared servers (filtered by enabled
-    ``mcp_toolset`` entries) unioned with connection-provided servers.
+    ``mcp_toolset`` entries and their default/per-tool enabled settings).
 
     Returns ``(tools, instructions_by_server)`` where the second element
     maps ``server_name`` → the server's ``InitializeResult.instructions``
     string.  Servers that supplied no instructions (or ``""``) are
     omitted from the dict — the harness uses presence in the dict as
-    the trigger for rendering a per-connector affordance block.
+    the trigger for rendering MCP server affordance prose.
     """
-    from aios.harness.channels import connection_server_name
+    import asyncio
+
     from aios.mcp.client import discover_mcp_tools, resolve_auth_for_url
 
-    servers: list[tuple[str, str]] = []
+    servers: list[tuple[str, str, ToolSpec]] = []
 
-    enabled_server_names: set[str] = set()
-    for spec in agent.tools:
-        if spec.type == "mcp_toolset" and spec.enabled and spec.mcp_server_name:
-            enabled_server_names.add(spec.mcp_server_name)
+    toolsets_by_server = _enabled_mcp_toolsets_by_server(agent.tools)
     for s in agent.mcp_servers:
-        if s.name in enabled_server_names:
-            servers.append((s.name, s.url))
-
-    for c in connections:
-        servers.append((connection_server_name(c), c.mcp_url))
+        spec = toolsets_by_server.get(s.name)
+        if spec is not None:
+            servers.append((s.name, s.url, spec))
 
     if not servers:
         return [], {}
@@ -693,16 +731,23 @@ async def discover_session_mcp_tools(
     crypto_box = runtime.require_crypto_box()
 
     async def _discover_one(name: str, url: str) -> tuple[list[dict[str, Any]], str | None]:
-        headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
+        headers = await resolve_auth_for_url(
+            pool,
+            crypto_box,
+            session_id,
+            url,
+        )
         return await discover_mcp_tools(url, name, headers)
 
-    results = await asyncio.gather(*[_discover_one(n, u) for n, u in servers])
+    results = await asyncio.gather(*[_discover_one(n, u) for n, u, _spec in servers])
     tools: list[dict[str, Any]] = [
-        tool for (tool_list, _instructions) in results for tool in tool_list
+        tool
+        for (_name, _url, spec), (tool_list, _instructions) in zip(servers, results, strict=True)
+        for tool in _filter_mcp_tools_for_toolset(tool_list, spec)
     ]
     instructions_by_server: dict[str, str] = {
         name: instructions
-        for (name, _url), (_tools, instructions) in zip(servers, results, strict=True)
+        for (name, _url, _spec), (_tools, instructions) in zip(servers, results, strict=True)
         if instructions
     }
     return tools, instructions_by_server

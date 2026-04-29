@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from aios.harness.loop import (
-    _hide_conn_tools_when_phone_down,
     _is_mcp_tool,
     _tc_name,
     resolve_mcp_permission,
 )
 from aios.models.agents import (
     McpPermissionPolicy,
+    McpToolConfig,
     McpToolsetConfig,
     ToolSpec,
 )
@@ -72,6 +72,55 @@ class TestResolveMcpPermission:
         ]
         assert resolve_mcp_permission("mcp__github__create_issue", tools) == "always_ask"
 
+    def test_per_tool_permission_overrides_default_config(self) -> None:
+        tools = [
+            ToolSpec(
+                type="mcp_toolset",
+                mcp_server_name="github",
+                default_config=McpToolsetConfig(
+                    permission_policy=McpPermissionPolicy(type="always_ask"),
+                ),
+                configs=[
+                    McpToolConfig(
+                        name="create_issue",
+                        permission_policy=McpPermissionPolicy(type="always_allow"),
+                    )
+                ],
+            ),
+        ]
+        assert resolve_mcp_permission("mcp__github__create_issue", tools) == "always_allow"
+
+    def test_unmatched_per_tool_permission_falls_back_to_default_config(self) -> None:
+        tools = [
+            ToolSpec(
+                type="mcp_toolset",
+                mcp_server_name="github",
+                default_config=McpToolsetConfig(
+                    permission_policy=McpPermissionPolicy(type="always_ask"),
+                ),
+                configs=[
+                    McpToolConfig(
+                        name="delete_repo",
+                        permission_policy=McpPermissionPolicy(type="always_allow"),
+                    )
+                ],
+            ),
+        ]
+        assert resolve_mcp_permission("mcp__github__create_issue", tools) == "always_ask"
+
+    def test_disabled_toolset_does_not_supply_permission(self) -> None:
+        tools = [
+            ToolSpec(
+                type="mcp_toolset",
+                enabled=False,
+                mcp_server_name="github",
+                default_config=McpToolsetConfig(
+                    permission_policy=McpPermissionPolicy(type="always_allow"),
+                ),
+            ),
+        ]
+        assert resolve_mcp_permission("mcp__github__create_issue", tools) is None
+
     def test_no_default_config_returns_flat_permission(self) -> None:
         """Falls back to ToolSpec.permission when no default_config."""
         tools = [
@@ -90,6 +139,16 @@ class TestResolveMcpPermission:
         ]
         assert resolve_mcp_permission("mcp__github__create_issue", tools) is None
 
+    def test_flat_permission_applies_to_signal_server(self) -> None:
+        tools = [
+            ToolSpec(
+                type="mcp_toolset",
+                mcp_server_name="signal",
+                permission="always_ask",
+            ),
+        ]
+        assert resolve_mcp_permission("mcp__signal__signal_send", tools) == "always_ask"
+
     def test_wrong_server_not_matched(self) -> None:
         tools = [
             ToolSpec(
@@ -102,25 +161,7 @@ class TestResolveMcpPermission:
         ]
         assert resolve_mcp_permission("mcp__github__create_issue", tools) is None
 
-    def test_connection_provided_defaults_to_always_allow(self) -> None:
-        """Tools from connection-provided MCP servers (names with the
-        reserved ``conn_`` prefix) don't require per-call confirmation:
-        the session's channel binding is the explicit routing consent.
-        """
-        # No agent-declared mcp_toolset entry references the connection —
-        # the reserved-prefix validator forbids it — so normally we'd
-        # fall through to None (= always_ask).  Connection servers are
-        # the exception.
-        assert (
-            resolve_mcp_permission("mcp__conn_01HQR2K7VXBZ9MNPL3WYCT8F__send", []) == "always_allow"
-        )
-
-    def test_connection_provided_ignores_agent_overrides(self) -> None:
-        """Even if someone (somehow) had a matching mcp_toolset entry, the
-        connection branch wins — agent-declared tools can't target
-        connection-derived servers by name."""
-        # The validator prevents this from being constructible via API, but
-        # test behaviour directly in case of bypass (e.g., legacy DB rows).
+    def test_conn_prefix_is_an_ordinary_server_name(self) -> None:
         tools = [
             ToolSpec(
                 type="mcp_toolset",
@@ -130,7 +171,13 @@ class TestResolveMcpPermission:
                 ),
             ),
         ]
-        assert resolve_mcp_permission("mcp__conn_foo__send", tools) == "always_allow"
+        assert (
+            resolve_mcp_permission(
+                "mcp__conn_foo__send",
+                tools,
+            )
+            == "always_ask"
+        )
 
 
 class TestToOpenaiToolsSkipsMcpToolset:
@@ -155,42 +202,3 @@ class TestToOpenaiToolsSkipsMcpToolset:
         )
         assert len(result) == 1
         assert result[0]["function"]["name"] == "bash"
-
-
-def _tool(name: str) -> dict[str, object]:
-    return {"type": "function", "function": {"name": name}}
-
-
-class TestHideConnToolsWhenPhoneDown:
-    """Slice 6: connection-provided MCP tools disappear from the model's
-    tool list when the session's focal_channel is NULL.  Agent-declared
-    MCP tools and built-ins stay visible.
-    """
-
-    def test_focal_set_keeps_all_tools(self) -> None:
-        tools = [
-            _tool("mcp__conn_abc__signal_send"),
-            _tool("mcp__github__create_issue"),
-            _tool("bash"),
-        ]
-        result = _hide_conn_tools_when_phone_down(tools, "signal/bot/alice")
-        assert result == tools
-
-    def test_focal_null_hides_conn_tools(self) -> None:
-        tools = [
-            _tool("mcp__conn_abc__signal_send"),
-            _tool("mcp__conn_abc__signal_react"),
-            _tool("mcp__github__create_issue"),
-            _tool("bash"),
-        ]
-        result = _hide_conn_tools_when_phone_down(tools, None)
-        names = [t["function"]["name"] for t in result]  # type: ignore[index]
-        assert "mcp__conn_abc__signal_send" not in names
-        assert "mcp__conn_abc__signal_react" not in names
-        # Agent-declared MCP and built-ins survive.
-        assert "mcp__github__create_issue" in names
-        assert "bash" in names
-
-    def test_empty_list(self) -> None:
-        assert _hide_conn_tools_when_phone_down([], None) == []
-        assert _hide_conn_tools_when_phone_down([], "signal/bot/alice") == []

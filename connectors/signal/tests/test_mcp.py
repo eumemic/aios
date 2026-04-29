@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import httpx
@@ -26,9 +26,11 @@ from aios_signal.mcp import (
     parse_bind,
 )
 
+BOT_UUID = "test-bot-uuid"
+
 
 def _ctx_with_focal(chat_id: str | None) -> Context[Any, Any, Any]:
-    """Build a Context carrying an ``aios.focal_channel_path`` in ``_meta``.
+    """Build a Context carrying an account-relative focal channel in ``_meta``.
 
     The ToolManager.call_tool path accepts an explicit Context; this
     lets us simulate what aios sends without going through a full
@@ -38,7 +40,7 @@ def _ctx_with_focal(chat_id: str | None) -> Context[Any, Any, Any]:
     if chat_id is None:
         rc.meta = None
     else:
-        rc.meta = RequestParams.Meta.model_validate({"aios.focal_channel_path": chat_id})
+        rc.meta = RequestParams.Meta.model_validate({"aios.focal_channel": f"{BOT_UUID}/{chat_id}"})
     return Context(request_context=rc)
 
 
@@ -66,7 +68,7 @@ async def _call_tool(
     Goes through ``FastMCP.tool_manager.call_tool`` so the tool handler's
     ``ctx: Context`` dependency is filled in with the constructed meta.
     """
-    mcp = build_mcp_server(rpc=rpc, bot_uuid="test-bot-uuid", phone="+15550000000")  # type: ignore[arg-type]
+    mcp = build_mcp_server(rpc=cast(Any, rpc), bot_uuid=BOT_UUID, phone="+15550000000")
     result = await mcp._tool_manager.call_tool(
         name,
         args,
@@ -85,9 +87,9 @@ async def _call_tool(
 
 
 class TestFocalChatIdFromMeta:
-    def test_returns_path_when_present(self) -> None:
-        meta = RequestParams.Meta.model_validate({"aios.focal_channel_path": "chat-abc"})
-        assert focal_chat_id_from_meta(meta) == "chat-abc"
+    def test_returns_chat_id_when_present(self) -> None:
+        meta = RequestParams.Meta.model_validate({"aios.focal_channel": f"{BOT_UUID}/chat-abc"})
+        assert focal_chat_id_from_meta(meta, account_id=BOT_UUID) == "chat-abc"
 
     def test_none_meta_raises(self) -> None:
         with pytest.raises(ValueError, match="focal channel"):
@@ -99,9 +101,19 @@ class TestFocalChatIdFromMeta:
             focal_chat_id_from_meta(meta)
 
     def test_empty_string_raises(self) -> None:
-        meta = RequestParams.Meta.model_validate({"aios.focal_channel_path": ""})
+        meta = RequestParams.Meta.model_validate({"aios.focal_channel": ""})
         with pytest.raises(ValueError, match="focal channel"):
             focal_chat_id_from_meta(meta)
+
+    def test_malformed_account_relative_value_raises(self) -> None:
+        meta = RequestParams.Meta.model_validate({"aios.focal_channel": "chat-abc"})
+        with pytest.raises(ValueError, match="account-relative"):
+            focal_chat_id_from_meta(meta, account_id=BOT_UUID)
+
+    def test_wrong_account_raises(self) -> None:
+        meta = RequestParams.Meta.model_validate({"aios.focal_channel": "other/chat-abc"})
+        with pytest.raises(ValueError, match="different account"):
+            focal_chat_id_from_meta(meta, account_id=BOT_UUID)
 
 
 class TestBuildSendParams:
@@ -171,8 +183,9 @@ async def test_signal_send_reads_focal_from_meta() -> None:
 
 async def test_signal_send_errors_without_meta() -> None:
     rpc = FakeRpc()
-    mcp = build_mcp_server(rpc=rpc, bot_uuid="test-bot-uuid", phone="+15550000000")  # type: ignore[arg-type]
-    # No focal — aios should have filtered this tool out, but defend.
+    mcp = build_mcp_server(rpc=cast(Any, rpc), bot_uuid=BOT_UUID, phone="+15550000000")
+    # No focal — aios omits focal metadata, and the connector surfaces the
+    # missing focus as a tool error.
     ctx_no_meta = _ctx_with_focal(None)
     with pytest.raises(Exception, match="focal channel"):
         await mcp._tool_manager.call_tool(
@@ -322,7 +335,7 @@ async def test_bearer_auth_rejects_non_bearer_scheme() -> None:
 
 def test_build_mcp_app_returns_starlette() -> None:
     rpc = FakeRpc()
-    mcp = build_mcp_server(rpc=rpc, bot_uuid="test-bot-uuid", phone="+15550000000")  # type: ignore[arg-type]
+    mcp = build_mcp_server(rpc=cast(Any, rpc), bot_uuid=BOT_UUID, phone="+15550000000")
     app = build_mcp_app(mcp, token="t")
     assert isinstance(app, Starlette)
 
@@ -336,13 +349,15 @@ def test_build_mcp_server_surfaces_profile_name_from_contacts() -> None:
     """
     rpc = FakeRpc()
     mcp = build_mcp_server(
-        rpc=rpc,
-        bot_uuid="test-bot-uuid",
+        rpc=cast(Any, rpc),
+        bot_uuid=BOT_UUID,
         phone="+15550000000",
-        contact_names={"test-bot-uuid": "Bot McBotface", "other-uuid": "Alice"},
-    )  # type: ignore[arg-type]
-    assert "profile_name" in mcp.instructions
-    assert "Bot McBotface" in mcp.instructions
+        contact_names={BOT_UUID: "Bot McBotface", "other-uuid": "Alice"},
+    )
+    instructions = mcp.instructions
+    assert instructions is not None
+    assert "profile_name" in instructions
+    assert "Bot McBotface" in instructions
 
 
 def test_build_mcp_server_omits_profile_name_when_bot_not_in_contacts() -> None:
@@ -352,30 +367,34 @@ def test_build_mcp_server_omits_profile_name_when_bot_not_in_contacts() -> None:
     """
     rpc = FakeRpc()
     mcp = build_mcp_server(
-        rpc=rpc,
-        bot_uuid="test-bot-uuid",
+        rpc=cast(Any, rpc),
+        bot_uuid=BOT_UUID,
         phone="+15550000000",
         contact_names={"other-uuid": "Alice"},
-    )  # type: ignore[arg-type]
-    assert "profile_name" not in mcp.instructions
+    )
+    instructions = mcp.instructions
+    assert instructions is not None
+    assert "profile_name" not in instructions
 
 
 def test_build_mcp_server_passes_signal_instructions() -> None:
     """The MCP server's ``instructions`` field is the transport for
-    Signal's per-connector affordance prose; aios reads it from the
+    Signal's per-server affordance prose; aios reads it from the
     ``InitializeResult`` returned by ``session.initialize()`` and
     composes it into the agent's system prompt.
     """
     from aios_signal.prompts import SIGNAL_SERVER_INSTRUCTIONS
 
     rpc = FakeRpc()
-    mcp = build_mcp_server(rpc=rpc, bot_uuid="test-bot-uuid", phone="+15550000000")  # type: ignore[arg-type]
+    mcp = build_mcp_server(rpc=cast(Any, rpc), bot_uuid=BOT_UUID, phone="+15550000000")
     # The static tool prose comes through verbatim — ``build_instructions``
     # prepends an identity block but doesn't rewrite the body.
-    assert SIGNAL_SERVER_INSTRUCTIONS in mcp.instructions
-    assert "signal_send" in mcp.instructions
-    assert "signal_react" in mcp.instructions
-    assert "signal_read_receipt" in mcp.instructions
+    instructions = mcp.instructions
+    assert instructions is not None
+    assert SIGNAL_SERVER_INSTRUCTIONS in instructions
+    assert "signal_send" in instructions
+    assert "signal_react" in instructions
+    assert "signal_read_receipt" in instructions
     # Identity block is present and names this bot.
-    assert "test-bot-uuid" in mcp.instructions
-    assert "+15550000000" in mcp.instructions
+    assert BOT_UUID in instructions
+    assert "+15550000000" in instructions

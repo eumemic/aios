@@ -40,7 +40,6 @@ if TYPE_CHECKING:
 
     from aios.models.agents import Agent, AgentVersion
     from aios.models.channel_bindings import ChannelBinding
-    from aios.models.connections import Connection
     from aios.models.events import Event
     from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.models.sessions import Session
@@ -51,8 +50,8 @@ if TYPE_CHECKING:
 class StepPrelude:
     """Events-independent portion of a step's payload.
 
-    Everything here depends only on ``agent`` / ``bindings`` /
-    ``connections`` / ``session`` — not on which events windowing picks.
+    Everything here depends only on ``agent`` / ``bindings`` / ``session`` —
+    not on which events windowing picks.
     Computed before windowing so ``read_windowed_events`` can subtract
     the overhead from the budget (see ``overhead_local`` there).
 
@@ -88,7 +87,6 @@ async def compute_step_prelude(
     session: Session,
     agent: Agent | AgentVersion,
     bindings: list[ChannelBinding],
-    connections: list[Connection],
     memory_store_echoes: list[MemoryStoreResourceEcho],
 ) -> StepPrelude:
     """Build the events-independent parts of the step payload.
@@ -99,12 +97,11 @@ async def compute_step_prelude(
     byte-identical to what it was before the split.
     """
     from aios.harness.channels import (
-        augment_with_connector_instructions,
         augment_with_focal_paradigm,
+        augment_with_mcp_instructions,
         max_tail_block_local,
     )
     from aios.harness.loop import (
-        _hide_conn_tools_when_phone_down,
         _switch_channel_tool_spec,
         discover_session_mcp_tools,
     )
@@ -119,13 +116,8 @@ async def compute_step_prelude(
         tools.append(_switch_channel_tool_spec())
 
     mcp_instructions: dict[str, str] = {}
-    if agent.mcp_servers or connections:
-        mcp_tools, mcp_instructions = await discover_session_mcp_tools(
-            pool, session_id, agent, connections
-        )
-        # Hide connection-provided MCP tools when focal is NULL — can't
-        # type into a chat you aren't attending to.
-        mcp_tools = _hide_conn_tools_when_phone_down(mcp_tools, session.focal_channel)
+    if agent.mcp_servers:
+        mcp_tools, mcp_instructions = await discover_session_mcp_tools(pool, session_id, agent)
         tools.extend(mcp_tools)
 
     skill_versions = (
@@ -133,9 +125,7 @@ async def compute_step_prelude(
     )
     system_prompt = augment_system_prompt(agent.system, skill_versions)
     system_prompt = augment_with_focal_paradigm(system_prompt, bindings)
-    system_prompt = augment_with_connector_instructions(
-        system_prompt, mcp_instructions, connections
-    )
+    system_prompt = augment_with_mcp_instructions(system_prompt, mcp_instructions)
     system_prompt = augment_with_memory_stores(system_prompt, memory_store_echoes)
 
     return StepPrelude(

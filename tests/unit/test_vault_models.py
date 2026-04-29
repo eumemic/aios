@@ -116,6 +116,33 @@ class TestVaultCredentialCreate:
         assert c.token is not None
         assert c.token.get_secret_value() == "my-token"
 
+    def test_account_id_valid(self) -> None:
+        c = VaultCredentialCreate(
+            mcp_server_url="https://mcp.example.com",
+            account_id="signal-bot-1",
+            auth_type="static_bearer",
+            token=SecretStr("my-token"),
+        )
+        assert c.account_id == "signal-bot-1"
+
+    def test_account_id_rejects_slash(self) -> None:
+        with pytest.raises(ValidationError, match="must not contain"):
+            VaultCredentialCreate(
+                mcp_server_url="https://mcp.example.com",
+                account_id="signal/bot",
+                auth_type="static_bearer",
+                token=SecretStr("my-token"),
+            )
+
+    def test_account_id_rejects_empty_string(self) -> None:
+        with pytest.raises(ValidationError):
+            VaultCredentialCreate(
+                mcp_server_url="https://mcp.example.com",
+                account_id="",
+                auth_type="static_bearer",
+                token=SecretStr("my-token"),
+            )
+
     def test_mcp_oauth_valid(self) -> None:
         c = VaultCredentialCreate(
             mcp_server_url="https://mcp.example.com",
@@ -231,6 +258,19 @@ class TestVaultCredentialUpdate:
         assert u.token.get_secret_value() == "new-token"
         assert "token" in u.model_fields_set
         assert "access_token" not in u.model_fields_set
+
+    def test_account_id_update_can_set_or_clear(self) -> None:
+        u = VaultCredentialUpdate(account_id="signal-bot-1")
+        assert u.account_id == "signal-bot-1"
+        assert "account_id" in u.model_fields_set
+
+        clear = VaultCredentialUpdate(account_id=None)
+        assert clear.account_id is None
+        assert "account_id" in clear.model_fields_set
+
+    def test_account_id_update_rejects_slash(self) -> None:
+        with pytest.raises(ValidationError, match="must not contain"):
+            VaultCredentialUpdate(account_id="signal/bot")
 
     def test_partial_update_token_endpoint_auth(self) -> None:
         u = VaultCredentialUpdate(

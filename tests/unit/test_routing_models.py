@@ -16,12 +16,7 @@ from aios.models.routing_rules import (
 
 class TestConnectionCreate:
     def test_valid(self) -> None:
-        c = ConnectionCreate(
-            connector="signal",
-            account="alice",
-            mcp_url="https://mcp.example.com",
-            vault_id="vlt_abc",
-        )
+        c = ConnectionCreate(connector="signal", account="alice")
         assert c.connector == "signal"
         assert c.metadata == {}
 
@@ -29,8 +24,6 @@ class TestConnectionCreate:
         c = ConnectionCreate(
             connector="signal",
             account="alice",
-            mcp_url="https://mcp.example.com",
-            vault_id="vlt_abc",
             metadata={"source": "manual"},
         )
         assert c.metadata == {"source": "manual"}
@@ -40,19 +33,12 @@ class TestConnectionCreate:
             ConnectionCreate(
                 connector="signal",
                 account="alice",
-                mcp_url="https://m",
-                vault_id="vlt_abc",
                 bogus="x",  # type: ignore[call-arg]
             )
 
     def test_rejects_empty_connector(self) -> None:
         with pytest.raises(ValidationError):
-            ConnectionCreate(
-                connector="",
-                account="alice",
-                mcp_url="https://m",
-                vault_id="vlt_abc",
-            )
+            ConnectionCreate(connector="", account="alice")
 
     @pytest.mark.parametrize(
         ("field", "value"),
@@ -62,8 +48,6 @@ class TestConnectionCreate:
         kwargs: dict[str, str] = {
             "connector": "signal",
             "account": "alice",
-            "mcp_url": "https://m",
-            "vault_id": "vlt_abc",
         }
         kwargs[field] = value
         with pytest.raises(ValidationError, match="must not contain '/'"):
@@ -73,8 +57,6 @@ class TestConnectionCreate:
 class TestConnectionUpdate:
     def test_all_optional(self) -> None:
         u = ConnectionUpdate()
-        assert u.mcp_url is None
-        assert u.vault_id is None
         assert u.metadata is None
 
     def test_rejects_connector_field(self) -> None:

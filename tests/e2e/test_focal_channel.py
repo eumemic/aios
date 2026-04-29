@@ -95,8 +95,6 @@ async def _setup_inbound(pool: Any, agent_id: str, env_id: str, vault_id: str) -
         pool,
         connector="signal",
         account=f"focal-{_uniq()}",
-        mcp_url="https://m",
-        vault_id=vault_id,
         metadata={},
     )
     await ch_svc.create_routing_rule(
@@ -828,12 +826,11 @@ class TestSwitchChannelAsEvent:
 
 
 class TestMcpMetaInjection:
-    """Slice 6: connection-provided MCP tools receive the focal channel
-    path via the JSON-RPC ``_meta`` field, without stuffing it into
-    arguments.  Agent-declared MCP servers don't get the meta stamp.
+    """MCP tool calls receive account-relative focal-channel context via the
+    JSON-RPC ``_meta`` field, without stuffing it into arguments.
     """
 
-    async def test_conn_tool_dispatch_injects_focal_suffix_into_meta(
+    async def test_mcp_dispatch_injects_account_relative_focal_meta(
         self,
         runtime_pool: Any,
         agent_id: str,
@@ -854,18 +851,12 @@ class TestMcpMetaInjection:
             connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
             session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
 
-            # The connection created by _setup_inbound has id prefix `conn_`.
-            from aios.services import connections as conn_svc
-
-            connections = await conn_svc.list_connections(runtime_pool)
-            conn = next(c for c in connections if c.connector == "signal")
-
-            mcp_server_map = {conn.id: conn.mcp_url}
+            mcp_server_map = {"signal": "https://m"}
             tool_call_dict = {
                 "id": "call_send_1",
                 "type": "function",
                 "function": {
-                    "name": f"mcp__{conn.id}__signal_send",
+                    "name": "mcp__signal__signal_send",
                     "arguments": json.dumps({"text": "hi there"}),
                 },
             }
@@ -885,28 +876,25 @@ class TestMcpMetaInjection:
                     session_id,
                     tool_call_dict,
                     mcp_server_map,
-                    focal_channel=address,  # focal=A → suffix=chat-1
+                    focal_channel=address,
                 )
 
-            # Verify call_mcp_tool was invoked with the focal suffix meta.
+            # Verify call_mcp_tool was invoked with account-relative focal meta.
             _args, kwargs = mock_call.call_args
             meta = kwargs.get("meta")
             assert isinstance(meta, dict)
-            assert meta == {"aios.focal_channel_path": "chat-1"}
+            assert meta == {"aios.focal_channel": address.split("/", 1)[1]}
         finally:
             runtime.crypto_box = prev_crypto
 
-    async def test_agent_mcp_tool_dispatch_no_meta_stamped(
+    async def test_normal_mcp_tool_dispatch_stamps_focal_meta(
         self,
         runtime_pool: Any,
         agent_id: str,
         env_id: str,
         vault_id: str,
     ) -> None:
-        """Agent-declared MCP servers (not under the conn_* prefix) don't
-        get focal meta — aios has no business telling an agent-declared
-        MCP server about the session's focal channel.
-        """
+        """All MCP calls receive focal metadata when the session has focus."""
         from unittest.mock import AsyncMock, patch
 
         from aios.crypto.vault import CryptoBox
@@ -919,7 +907,6 @@ class TestMcpMetaInjection:
             connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
             session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
 
-            # Agent-declared server: name does NOT start with conn_.
             agent_server_name = "github"
             mcp_server_map = {agent_server_name: "https://mcp.github.com"}
             tool_call_dict = {
@@ -946,11 +933,63 @@ class TestMcpMetaInjection:
                     session_id,
                     tool_call_dict,
                     mcp_server_map,
-                    focal_channel=address,  # non-null focal, but agent server
+                    focal_channel=address,
                 )
 
             _args, kwargs = mock_call.call_args
-            # No meta for agent-declared MCP.
+            assert kwargs.get("meta") == {"aios.focal_channel": address.split("/", 1)[1]}
+        finally:
+            runtime.crypto_box = prev_crypto
+
+    async def test_mcp_tool_dispatch_omits_meta_when_phone_down(
+        self,
+        runtime_pool: Any,
+        agent_id: str,
+        env_id: str,
+        vault_id: str,
+    ) -> None:
+        """Phone-down sessions still call MCP tools, just without focal metadata."""
+        from unittest.mock import AsyncMock, patch
+
+        from aios.crypto.vault import CryptoBox
+        from aios.harness import runtime
+        from aios.harness.tool_dispatch import _execute_mcp_tool_async
+
+        prev_crypto = runtime.crypto_box
+        runtime.crypto_box = CryptoBox(__import__("os").urandom(32))
+        try:
+            connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
+            session_id, _e, _address = await _post_inbound(runtime_pool, connection, "chat-1")
+
+            mcp_server_map = {"signal": "https://m"}
+            tool_call_dict = {
+                "id": "call_send_1",
+                "type": "function",
+                "function": {
+                    "name": "mcp__signal__signal_send",
+                    "arguments": json.dumps({"text": "hi there"}),
+                },
+            }
+
+            with (
+                patch(
+                    "aios.mcp.client.resolve_auth_for_url",
+                    new=AsyncMock(return_value={}),
+                ),
+                patch(
+                    "aios.mcp.client.call_mcp_tool",
+                    new=AsyncMock(return_value={"content": "ok"}),
+                ) as mock_call,
+            ):
+                await _execute_mcp_tool_async(
+                    runtime_pool,
+                    session_id,
+                    tool_call_dict,
+                    mcp_server_map,
+                    focal_channel=None,
+                )
+
+            _args, kwargs = mock_call.call_args
             assert kwargs.get("meta") is None
         finally:
             runtime.crypto_box = prev_crypto
@@ -1063,8 +1102,6 @@ class TestTailBlockInStep:
             runtime_pool,
             connector="signal",
             account=account,
-            mcp_url="https://m",
-            vault_id=vault_id,
             metadata={},
         )
         await ch_svc.create_routing_rule(
@@ -1120,8 +1157,6 @@ class TestTailBlockInStep:
             runtime_pool,
             connector="signal",
             account=account,
-            mcp_url="https://m",
-            vault_id=vault_id,
             metadata={},
         )
         await ch_svc.create_routing_rule(

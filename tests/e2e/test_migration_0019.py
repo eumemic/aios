@@ -180,6 +180,19 @@ class TestSchemaShape:
             )
             assert col is None, "address column should be dropped"
 
+    async def test_connection_mcp_columns_dropped(self, pool: Any) -> None:
+        """Connections are channel-account identity only at head."""
+        async with pool.acquire() as conn:
+            cols = await conn.fetch(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'connections'
+                  AND column_name IN ('mcp_url', 'vault_id')
+                """
+            )
+            assert cols == []
+
     async def test_indexes_after_migration(self, pool: Any) -> None:
         """Old globally-unique indexes are gone; composite per-connection uniques exist."""
         async with pool.acquire() as conn:

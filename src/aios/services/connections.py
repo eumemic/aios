@@ -3,8 +3,9 @@
 Thin wrapper over :mod:`aios.db.queries`. The only business rule lives
 in :func:`archive_connection`, which refuses to archive a connection
 while channel bindings under its ``(connector, account)`` prefix are
-still active — archiving would silently drop the connection-provided
-MCP tools from any live session bound to those channels.
+still active. Connection rows remain the source of inbound channel identity,
+so archiving one while bound channels are live would break routing for those
+sessions.
 """
 
 from __future__ import annotations
@@ -23,8 +24,6 @@ async def create_connection(
     *,
     connector: str,
     account: str,
-    mcp_url: str,
-    vault_id: str,
     metadata: dict[str, Any],
 ) -> Connection:
     async with pool.acquire() as conn:
@@ -32,8 +31,6 @@ async def create_connection(
             conn,
             connector=connector,
             account=account,
-            mcp_url=mcp_url,
-            vault_id=vault_id,
             metadata=metadata,
         )
 
@@ -54,16 +51,12 @@ async def update_connection(
     pool: asyncpg.Pool[Any],
     connection_id: str,
     *,
-    mcp_url: str | None = None,
-    vault_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Connection:
     async with pool.acquire() as conn:
         return await queries.update_connection(
             conn,
             connection_id,
-            mcp_url=mcp_url,
-            vault_id=vault_id,
             metadata=metadata,
         )
 
@@ -80,7 +73,7 @@ async def archive_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Con
                 f"connection {connection_id} has {active} active channel binding"
                 f"{'s' if active != 1 else ''} under {connection.connector}/"
                 f"{connection.account}; archive the bindings first to avoid "
-                f"silently dropping MCP tools from live sessions",
+                f"breaking routing for live sessions",
                 detail={
                     "id": connection_id,
                     "active_bindings": active,

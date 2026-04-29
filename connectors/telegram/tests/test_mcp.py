@@ -22,13 +22,15 @@ from aios_telegram.mcp import (
     parse_bind,
 )
 
+BOT_ID = 1
+
 
 def _ctx_with_focal(chat_id: str | None) -> Context[Any, Any, Any]:
     rc = MagicMock(spec=RequestContext)
     if chat_id is None:
         rc.meta = None
     else:
-        rc.meta = RequestParams.Meta.model_validate({"aios.focal_channel_path": chat_id})
+        rc.meta = RequestParams.Meta.model_validate({"aios.focal_channel": f"{BOT_ID}/{chat_id}"})
     return Context(request_context=rc)
 
 
@@ -36,13 +38,13 @@ def _ctx_with_focal(chat_id: str | None) -> Context[Any, Any, Any]:
 
 
 def test_focal_meta_dm_id() -> None:
-    meta = RequestParams.Meta.model_validate({"aios.focal_channel_path": "123456789"})
-    assert focal_chat_id_from_meta(meta) == 123456789
+    meta = RequestParams.Meta.model_validate({"aios.focal_channel": f"{BOT_ID}/123456789"})
+    assert focal_chat_id_from_meta(meta, account_id=BOT_ID) == 123456789
 
 
 def test_focal_meta_group_negative_id() -> None:
-    meta = RequestParams.Meta.model_validate({"aios.focal_channel_path": "-1001234567890"})
-    assert focal_chat_id_from_meta(meta) == -1001234567890
+    meta = RequestParams.Meta.model_validate({"aios.focal_channel": f"{BOT_ID}/-1001234567890"})
+    assert focal_chat_id_from_meta(meta, account_id=BOT_ID) == -1001234567890
 
 
 def test_focal_meta_missing_raises() -> None:
@@ -51,9 +53,21 @@ def test_focal_meta_missing_raises() -> None:
 
 
 def test_focal_meta_not_integer_raises() -> None:
-    meta = RequestParams.Meta.model_validate({"aios.focal_channel_path": "abc"})
+    meta = RequestParams.Meta.model_validate({"aios.focal_channel": f"{BOT_ID}/abc"})
     with pytest.raises(ValueError, match="integer"):
-        focal_chat_id_from_meta(meta)
+        focal_chat_id_from_meta(meta, account_id=BOT_ID)
+
+
+def test_focal_meta_malformed_account_relative_value_raises() -> None:
+    meta = RequestParams.Meta.model_validate({"aios.focal_channel": "123456789"})
+    with pytest.raises(ValueError, match="account-relative"):
+        focal_chat_id_from_meta(meta, account_id=BOT_ID)
+
+
+def test_focal_meta_wrong_account_raises() -> None:
+    meta = RequestParams.Meta.model_validate({"aios.focal_channel": "2/123456789"})
+    with pytest.raises(ValueError, match="different account"):
+        focal_chat_id_from_meta(meta, account_id=BOT_ID)
 
 
 # ─── telegram_send tool ─────────────────────────────────────────────────────
@@ -62,7 +76,7 @@ def test_focal_meta_not_integer_raises() -> None:
 async def _call_send(bot: Bot, text: str, *, focal: str | None) -> dict[str, Any]:
     # Identity args are required by build_mcp_server but not exercised by
     # telegram_send — dummy values keep these tool tests focused.
-    mcp = build_mcp_server(bot=bot, bot_id=1, first_name="Test", username="test_bot")
+    mcp = build_mcp_server(bot=bot, bot_id=BOT_ID, first_name="Test", username="test_bot")
     result = await mcp._tool_manager.call_tool(
         "telegram_send",
         {"text": text},

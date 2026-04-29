@@ -1536,6 +1536,7 @@ def _row_to_vault_credential(row: asyncpg.Record) -> VaultCredential:
         vault_id=row["vault_id"],
         display_name=row["display_name"],
         mcp_server_url=row["mcp_server_url"],
+        account_id=row["account_id"],
         auth_type=row["auth_type"],
         metadata=metadata,
         created_at=row["created_at"],
@@ -1550,6 +1551,7 @@ async def insert_vault_credential(
     vault_id: str,
     display_name: str | None,
     mcp_server_url: str,
+    account_id: str | None,
     auth_type: str,
     blob: EncryptedBlob,
     metadata: dict[str, Any],
@@ -1560,16 +1562,17 @@ async def insert_vault_credential(
         row = await conn.fetchrow(
             """
             INSERT INTO vault_credentials (
-                id, vault_id, display_name, mcp_server_url,
+                id, vault_id, display_name, mcp_server_url, account_id,
                 auth_type, ciphertext, nonce, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
             RETURNING *
             """,
             new_id,
             vault_id,
             display_name,
             mcp_server_url,
+            account_id,
             auth_type,
             blob.ciphertext,
             blob.nonce,
@@ -1683,6 +1686,7 @@ async def update_vault_credential(
     *,
     blob: EncryptedBlob | None = None,
     display_name: str | None | EllipsisType = ...,
+    account_id: str | None | EllipsisType = ...,
     metadata: dict[str, Any] | None | EllipsisType = ...,
 ) -> VaultCredential:
     sets: list[str] = []
@@ -1690,6 +1694,9 @@ async def update_vault_credential(
     if display_name is not ...:
         args.append(display_name)
         sets.append(f"display_name = ${len(args)}")
+    if account_id is not ...:
+        args.append(account_id)
+        sets.append(f"account_id = ${len(args)}")
     if blob is not None:
         args.append(blob.ciphertext)
         sets.append(f"ciphertext = ${len(args)}")
@@ -2110,8 +2117,6 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         id=row["id"],
         connector=row["connector"],
         account=row["account"],
-        mcp_url=row["mcp_url"],
-        vault_id=row["vault_id"],
         metadata=metadata,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -2124,8 +2129,6 @@ async def insert_connection(
     *,
     connector: str,
     account: str,
-    mcp_url: str,
-    vault_id: str,
     metadata: dict[str, Any],
 ) -> Connection:
     new_id = make_id(CONNECTION)
@@ -2133,26 +2136,19 @@ async def insert_connection(
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO connections (id, connector, account, mcp_url, vault_id, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            INSERT INTO connections (id, connector, account, metadata)
+            VALUES ($1, $2, $3, $4::jsonb)
             RETURNING *
             """,
             new_id,
             connector,
             account,
-            mcp_url,
-            vault_id,
             metadata_json,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
             f"a connection for ({connector!r}, {account!r}) already exists",
             detail={"connector": connector, "account": account},
-        ) from exc
-    except asyncpg.ForeignKeyViolationError as exc:
-        raise NotFoundError(
-            f"vault {vault_id} not found",
-            detail={"vault_id": vault_id},
         ) from exc
     assert row is not None
     return _row_to_connection(row)
@@ -2190,18 +2186,10 @@ async def update_connection(
     conn: asyncpg.Connection[Any],
     connection_id: str,
     *,
-    mcp_url: str | None = None,
-    vault_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Connection:
     sets: list[str] = []
     args: list[Any] = [connection_id]
-    if mcp_url is not None:
-        args.append(mcp_url)
-        sets.append(f"mcp_url = ${len(args)}")
-    if vault_id is not None:
-        args.append(vault_id)
-        sets.append(f"vault_id = ${len(args)}")
     if metadata is not None:
         args.append(json.dumps(metadata))
         sets.append(f"metadata = ${len(args)}::jsonb")
@@ -2209,40 +2197,13 @@ async def update_connection(
         return await get_connection(conn, connection_id)
     sets.append("updated_at = now()")
     sql = f"UPDATE connections SET {', '.join(sets)} WHERE id = $1 RETURNING *"
-    try:
-        row = await conn.fetchrow(sql, *args)
-    except asyncpg.ForeignKeyViolationError as exc:
-        raise NotFoundError(
-            "vault not found",
-            detail={"vault_id": vault_id},
-        ) from exc
+    row = await conn.fetchrow(sql, *args)
     if row is None:
         raise NotFoundError(
             f"connection {connection_id} not found",
             detail={"id": connection_id},
         )
     return _row_to_connection(row)
-
-
-async def list_connections_by_ids(
-    conn: asyncpg.Connection[Any],
-    ids: list[str],
-) -> list[Connection]:
-    """Active connections with the given ``ids``.  Empty input → no roundtrip.
-
-    Results are ordered by ``c.id`` so callers can feed them into the
-    system prompt in a stable order — prompt-cache stability depends
-    on it.  Used by :func:`aios.harness.channels.list_bindings_and_connections`
-    where the ``ids`` come from the distinct ``binding.connection_id``
-    values of a session's bindings.
-    """
-    if not ids:
-        return []
-    rows = await conn.fetch(
-        "SELECT * FROM connections WHERE id = ANY($1::text[]) AND archived_at IS NULL ORDER BY id",
-        ids,
-    )
-    return [_row_to_connection(r) for r in rows]
 
 
 async def get_connections_by_pairs(
@@ -2275,17 +2236,6 @@ async def get_connections_by_pairs(
     return [_row_to_connection(r) for r in rows]
 
 
-async def get_connection_vault_for_url(
-    conn: asyncpg.Connection[Any], mcp_server_url: str
-) -> str | None:
-    """Vault id of the active connection owning ``mcp_server_url``, else ``None``."""
-    val: str | None = await conn.fetchval(
-        "SELECT vault_id FROM connections WHERE mcp_url = $1 AND archived_at IS NULL LIMIT 1",
-        mcp_server_url,
-    )
-    return val
-
-
 async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
     row = await conn.fetchrow(
         "UPDATE connections SET archived_at = now(), updated_at = now() "
@@ -2305,8 +2255,8 @@ async def count_active_bindings_for_connection(
 ) -> int:
     """Count active channel bindings owned by this connection.  Used to
     block connection archival while sessions are still reachable via
-    those bindings — archiving the connection would silently drop the
-    connection-provided MCP tools from any live session.
+    those bindings — archiving the connection would break inbound routing
+    for any live session.
     """
     val: int = await conn.fetchval(
         "SELECT COUNT(*) FROM channel_bindings WHERE connection_id = $1 AND archived_at IS NULL",
@@ -2445,8 +2395,7 @@ async def list_session_bindings(
 ) -> list[ChannelBinding]:
     """Every active binding for ``session_id``, unpaginated.
 
-    The step function consumes this in one shot (see
-    :func:`aios.harness.channels.list_bindings_and_connections`).
+    The step function consumes this in one shot when composing context.
     """
     rows = await conn.fetch(
         _BINDING_SELECT + " WHERE cb.session_id = $1 AND cb.archived_at IS NULL ORDER BY cb.id",

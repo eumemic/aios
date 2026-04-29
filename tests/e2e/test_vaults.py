@@ -95,6 +95,7 @@ class TestVaultCredentialCRUD:
         vault = await svc.create_vault(pool, display_name="cred-test", metadata={})
         body = VaultCredentialCreate(
             mcp_server_url="https://mcp.example.com/api",
+            account_id="signal-bot-1",
             auth_type="static_bearer",
             token=SecretStr("my-secret-token"),
         )
@@ -102,7 +103,11 @@ class TestVaultCredentialCRUD:
         assert cred.id.startswith("vcr_")
         assert cred.vault_id == vault.id
         assert cred.mcp_server_url == "https://mcp.example.com/api"
+        assert cred.account_id == "signal-bot-1"
         assert cred.auth_type == "static_bearer"
+
+        fetched = await svc.get_vault_credential(pool, vault.id, cred.id)
+        assert fetched.account_id == "signal-bot-1"
 
     async def test_secrets_not_returned(self, pool: Any, crypto_box: Any) -> None:
         """Verify that the read view never includes secret fields."""
@@ -205,13 +210,24 @@ class TestVaultCredentialCRUD:
 
         update = VaultCredentialUpdate(
             display_name="updated",
+            account_id="signal-bot-2",
             token=SecretStr("new-token"),
         )
         updated = await svc.update_vault_credential(
             pool, crypto_box, vault_id=vault.id, credential_id=cred.id, body=update
         )
         assert updated.display_name == "updated"
+        assert updated.account_id == "signal-bot-2"
         assert updated.updated_at > cred.updated_at
+
+        cleared = await svc.update_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=vault.id,
+            credential_id=cred.id,
+            body=VaultCredentialUpdate(account_id=None),
+        )
+        assert cleared.account_id is None
 
     async def test_credential_limit(self, pool: Any, crypto_box: Any) -> None:
         """Vault cannot have more than 20 active credentials."""

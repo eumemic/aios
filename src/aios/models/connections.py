@@ -1,8 +1,7 @@
 """Connection resource and inbound-message DTOs.
 
-A *connection* is a registered ``(connector, account)`` pair plus the
-MCP URL the connector exposes for the agent to send replies back through.
-The address scheme used by the routing layer is::
+A *connection* is a registered ``(connector, account)`` pair used by the
+inbound channel router. The address scheme used by the routing layer is::
 
     {connector}/{account}/{path}
 
@@ -16,11 +15,6 @@ from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-# Reserved prefix for MCP server names derived from a connection.  Keeps
-# connection-provided servers disjoint from agent-declared ones in the
-# shared mcp_server_map.
-CONNECTION_SERVER_NAME_PREFIX = "conn_"
 
 
 class ConnectionCreate(BaseModel):
@@ -36,8 +30,6 @@ class ConnectionCreate(BaseModel):
 
     connector: str = Field(min_length=1, max_length=64)
     account: str = Field(min_length=1, max_length=256)
-    mcp_url: str = Field(min_length=1)
-    vault_id: str
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("connector", "account")
@@ -56,8 +48,6 @@ class ConnectionUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mcp_url: str | None = Field(default=None, min_length=1)
-    vault_id: str | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -67,8 +57,6 @@ class Connection(BaseModel):
     id: str
     connector: str
     account: str
-    mcp_url: str
-    vault_id: str
     metadata: dict[str, Any]
     created_at: datetime
     updated_at: datetime

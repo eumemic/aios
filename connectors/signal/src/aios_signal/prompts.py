@@ -2,8 +2,7 @@
 
 Returned in the ``InitializeResult.instructions`` field of the MCP
 ``initialize`` response; the aios harness concatenates it into the
-session's system prompt under a ``## Connector: signal/<account>``
-heading.
+session's system prompt under the Signal MCP server heading.
 
 Covers only the tools this server actually exposes — ``signal_send``,
 ``signal_react``, ``signal_read_receipt``.  Telling the model about

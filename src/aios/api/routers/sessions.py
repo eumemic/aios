@@ -248,7 +248,7 @@ async def get_context(
     session-status bumps, event appends) are omitted; the endpoint is
     read-only.
     """
-    from aios.harness.channels import list_bindings_and_connections
+    from aios.harness.channels import list_session_bindings
     from aios.harness.step_context import compose_step_context, compute_step_prelude
     from aios.harness.tokens import approx_tokens
     from aios.models.agents import Agent, AgentVersion
@@ -264,7 +264,7 @@ async def get_context(
     else:
         agent = await agents_service.get_agent(pool, session.agent_id)
 
-    bindings, connections = await list_bindings_and_connections(pool, session_id)
+    bindings = await list_session_bindings(pool, session_id)
 
     from aios.db import queries as _queries
 
@@ -277,7 +277,6 @@ async def get_context(
         session=session,
         agent=agent,
         bindings=bindings,
-        connections=connections,
         memory_store_echoes=memory_echoes,
     )
     overhead_local = (

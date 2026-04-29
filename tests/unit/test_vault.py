@@ -288,6 +288,7 @@ class TestUpdateVaultCredentialCallSite:
         upd.assert_awaited_once()
         kwargs = upd.await_args.kwargs
         assert kwargs["display_name"] is ...
+        assert kwargs["account_id"] is ...
         assert kwargs["metadata"] is ...
         assert kwargs["blob"] is not None  # always re-encrypted
 
@@ -321,6 +322,37 @@ class TestUpdateVaultCredentialCallSite:
 
         kwargs = upd.await_args.kwargs
         assert kwargs["display_name"] is None  # not Ellipsis — explicitly passed
+
+    @pytest.mark.asyncio
+    async def test_passes_account_id_when_set_even_to_none(self, crypto_box: CryptoBox) -> None:
+        existing = _existing_credential()
+        existing_blob = crypto_box.encrypt(json.dumps({"access_token": "at"}))
+        conn = MagicMock()
+        pool = fake_pool_yielding_conn(conn)
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "get_vault_credential_with_blob",
+                AsyncMock(return_value=(existing, existing_blob)),
+            ),
+            patch.object(
+                vaults_service.queries,
+                "update_vault_credential",
+                AsyncMock(return_value=existing),
+            ) as upd,
+        ):
+            body = VaultCredentialUpdate(account_id=None)  # explicitly clear account identity
+            await vaults_service.update_vault_credential(
+                pool,
+                crypto_box,
+                vault_id="vlt_1",
+                credential_id="vc_1",
+                body=body,
+            )
+
+        kwargs = upd.await_args.kwargs
+        assert kwargs["account_id"] is None  # not Ellipsis — explicitly passed
 
 
 # ── OAuth refresh ────────────────────────────────────────────────────────────

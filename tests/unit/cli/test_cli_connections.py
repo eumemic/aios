@@ -33,10 +33,6 @@ def test_create_ergonomic(mocked_cli):
             "signal",
             "--account",
             "acct-123",
-            "--mcp-url",
-            "http://mcp.example:9000",
-            "--vault-id",
-            "vlt_1",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -45,8 +41,6 @@ def test_create_ergonomic(mocked_cli):
     assert mocked_cli.captured.body == {
         "connector": "signal",
         "account": "acct-123",
-        "mcp_url": "http://mcp.example:9000",
-        "vault_id": "vlt_1",
     }
 
 
@@ -61,10 +55,6 @@ def test_create_ergonomic_with_metadata_json(mocked_cli):
             "signal",
             "--account",
             "acct-123",
-            "--mcp-url",
-            "http://mcp/",
-            "--vault-id",
-            "vlt_1",
             "--metadata-json",
             '{"region": "us-east"}',
         ],
@@ -92,10 +82,6 @@ def test_create_rejects_mixed_sources(mocked_cli):
             "signal",
             "--account",
             "acct-1",
-            "--mcp-url",
-            "http://mcp/",
-            "--vault-id",
-            "vlt_1",
             "--data",
             "{}",
         ],

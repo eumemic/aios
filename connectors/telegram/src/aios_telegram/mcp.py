@@ -32,38 +32,48 @@ from .prompts import build_instructions
 log = structlog.get_logger(__name__)
 
 
-# Key under a JSON-RPC tool-call request's ``_meta`` populated by the
-# aios worker when dispatching a connection-provided tool.  Its value
-# is the focal-channel path suffix — for Telegram's 3-segment address
-# ``telegram/<bot_id>/<chat_id>``, the suffix is just ``<chat_id>`` and
-# can be parsed as a signed integer.
-_FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
+# Key under a JSON-RPC tool-call request's ``_meta`` populated by the aios
+# worker when dispatching an MCP tool call while a focal channel is set. Its
+# value is the account-relative focal channel: ``<bot_id>/<chat_id>``.
+_FOCAL_CHANNEL_META_KEY = "aios.focal_channel"
 
 
-def focal_chat_id_from_meta(meta: RequestParams.Meta | None) -> int:
+def focal_chat_id_from_meta(
+    meta: RequestParams.Meta | None,
+    *,
+    account_id: int | str | None = None,
+) -> int:
     """Extract the Telegram ``chat_id`` from an MCP request's ``_meta``.
 
-    aios injects ``aios.focal_channel_path`` for connection-provided tool
-    calls; its value is the full focal-channel suffix (stripped of
-    ``<connector>/<account>``), which for a 3-segment Telegram address
-    is the decimal chat id. Missing / malformed meta raises — the agent
-    shouldn't be able to reach these tools without a focal channel set
-    (aios filters them out of the tool list when focal is NULL), so any
-    absence here is a real error to surface.
+    aios injects ``aios.focal_channel`` for MCP tool calls while focal is set.
+    Its value is account-relative: ``<bot_id>/<chat_id>``. Missing, malformed,
+    wrong-account, or non-integer chat IDs raise so the agent sees that it must
+    focus a channel on this account before using Telegram response tools.
     """
-    path: Any = None
+    focal_channel: Any = None
     if meta is not None:
         extra = getattr(meta, "model_extra", None) or {}
-        path = extra.get(_FOCAL_CHANNEL_META_KEY)
-    if not isinstance(path, str) or not path:
+        focal_channel = extra.get(_FOCAL_CHANNEL_META_KEY)
+    if not isinstance(focal_channel, str) or not focal_channel:
         raise ValueError(
             "telegram tools require a focal channel — aios should inject "
             f"{_FOCAL_CHANNEL_META_KEY!r} in _meta when focal is set"
         )
+    account, sep, chat_id = focal_channel.partition("/")
+    if not sep or not account or not chat_id:
+        raise ValueError(
+            "telegram focal channel must be account-relative "
+            f"'<account>/<chat_id>'; got {focal_channel!r}"
+        )
+    if account_id is not None and account != str(account_id):
+        raise ValueError(
+            "telegram focal channel belongs to a different account "
+            f"({account!r}, expected {str(account_id)!r})"
+        )
     try:
-        return int(path)
+        return int(chat_id)
     except ValueError as e:
-        raise ValueError(f"telegram chat_id must be an integer; got {path!r}") from e
+        raise ValueError(f"telegram chat_id must be an integer; got {chat_id!r}") from e
 
 
 class BearerAuthMiddleware:
@@ -120,7 +130,7 @@ def build_mcp_server(
         Args:
             text: Message body. Plain text only — markdown is not rendered.
         """
-        chat_id = focal_chat_id_from_meta(ctx.request_context.meta)
+        chat_id = focal_chat_id_from_meta(ctx.request_context.meta, account_id=bot_id)
         sent = await bot.send_message(chat_id=chat_id, text=text)
         return {"message_id": sent.message_id}
 

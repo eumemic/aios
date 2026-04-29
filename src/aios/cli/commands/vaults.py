@@ -30,7 +30,7 @@ app.add_typer(credentials, name="credentials")
 # ── vaults CRUD ─────────────────────────────────────────────────────────────
 
 _VAULT_COLS = ("id", "display_name", "archived_at", "updated_at")
-_CRED_COLS = ("id", "display_name", "auth_type", "mcp_server_url", "updated_at")
+_CRED_COLS = ("id", "display_name", "auth_type", "mcp_server_url", "account_id", "updated_at")
 
 
 @app.command("list", help="List vaults.")

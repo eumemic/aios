@@ -41,37 +41,46 @@ from .rpc import RpcClient
 log = structlog.get_logger(__name__)
 
 
-# Key under a JSON-RPC tool-call request's ``_meta`` populated by the
-# aios worker when dispatching a connection-provided tool.  Its value
-# is the focal-channel path suffix — for Signal's 3-segment address
-# ``signal/<bot>/<chat>``, the suffix is just ``<chat>`` and can be
-# decoded directly as the Signal chat id.  See the aios focal-channel
-# plan + ``aios.harness.channels.FOCAL_CHANNEL_META_KEY`` for the
-# client-side contract.
-_FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
+# Key under a JSON-RPC tool-call request's ``_meta`` populated by the aios
+# worker when dispatching an MCP tool call while a focal channel is set. Its
+# value is the account-relative focal channel: ``<bot_uuid>/<chat_id>``.
+# See ``aios.harness.channels`` for the client-side contract.
+_FOCAL_CHANNEL_META_KEY = "aios.focal_channel"
 
 
-def focal_chat_id_from_meta(meta: RequestParams.Meta | None) -> str:
+def focal_chat_id_from_meta(
+    meta: RequestParams.Meta | None,
+    *,
+    account_id: str | None = None,
+) -> str:
     """Extract the Signal ``chat_id`` from an MCP request's ``_meta``.
 
-    aios injects ``aios.focal_channel_path`` for connection-provided
-    tool calls; its value is the full focal-channel suffix (stripped
-    of ``<connector>/<account>``), which for a 3-segment Signal
-    address equals the chat id verbatim.  Missing / malformed meta
-    raises — the agent shouldn't be able to reach these tools without
-    a focal channel set (aios filters them out of the tool list when
-    focal is NULL), so any absence here is a real error to surface.
+    aios injects ``aios.focal_channel`` for MCP tool calls while focal is set.
+    Its value is account-relative: ``<bot_uuid>/<chat_id>``. Missing,
+    malformed, or wrong-account meta raises so the agent sees that it must
+    focus a channel on this account before using Signal response tools.
     """
-    path: Any = None
+    focal_channel: Any = None
     if meta is not None:
         extra = getattr(meta, "model_extra", None) or {}
-        path = extra.get(_FOCAL_CHANNEL_META_KEY)
-    if not isinstance(path, str) or not path:
+        focal_channel = extra.get(_FOCAL_CHANNEL_META_KEY)
+    if not isinstance(focal_channel, str) or not focal_channel:
         raise ValueError(
             "signal tools require a focal channel — aios should inject "
             f"{_FOCAL_CHANNEL_META_KEY!r} in _meta when focal is set"
         )
-    return path
+    account, sep, chat_id = focal_channel.partition("/")
+    if not sep or not account or not chat_id:
+        raise ValueError(
+            "signal focal channel must be account-relative "
+            f"'<account>/<chat_id>'; got {focal_channel!r}"
+        )
+    if account_id is not None and account != account_id:
+        raise ValueError(
+            "signal focal channel belongs to a different account "
+            f"({account!r}, expected {account_id!r})"
+        )
+    return chat_id
 
 
 def build_send_params(chat_id: str, text: str) -> dict[str, Any]:
@@ -175,7 +184,7 @@ def build_mcp_server(
         Args:
             text: Message body. Markdown is converted to Signal text styles.
         """
-        chat_id = focal_chat_id_from_meta(ctx.request_context.meta)
+        chat_id = focal_chat_id_from_meta(ctx.request_context.meta, account_id=bot_uuid)
         params = build_send_params(chat_id, text)
         result = await rpc.call("send", params)
         ts = _extract_timestamp(result)
@@ -206,7 +215,7 @@ def build_mcp_server(
                 message you're reacting to.
             emoji: The reaction emoji.
         """
-        chat_id = focal_chat_id_from_meta(ctx.request_context.meta)
+        chat_id = focal_chat_id_from_meta(ctx.request_context.meta, account_id=bot_uuid)
         params = build_react_params(chat_id, target_author_uuid, target_timestamp_ms, emoji)
         await rpc.call("sendReaction", params)
         return {"status": "ok"}

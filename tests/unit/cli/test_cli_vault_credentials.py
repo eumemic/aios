@@ -31,7 +31,7 @@ def test_create_via_body_file(mocked_cli, tmp_path):
     body = tmp_path / "cred.json"
     body.write_text(
         '{"display_name": "my-creds", "mcp_server_url": "http://x",'
-        ' "auth_type": "static_bearer", "token": "t"}'
+        ' "account_id": "acct-1", "auth_type": "static_bearer", "token": "t"}'
     )
     mocked_cli.queue_response(httpx.Response(201, json={"id": "cred_new"}))
     result = runner.invoke(
@@ -49,6 +49,7 @@ def test_create_via_body_file(mocked_cli, tmp_path):
     assert mocked_cli.captured.method == "POST"
     assert mocked_cli.captured.path == "/v1/vaults/vlt_1/credentials"
     assert mocked_cli.captured.body["display_name"] == "my-creds"
+    assert mocked_cli.captured.body["account_id"] == "acct-1"
     assert mocked_cli.captured.body["token"] == "t"
 
 

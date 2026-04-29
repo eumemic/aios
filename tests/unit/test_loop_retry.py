@@ -147,11 +147,11 @@ def mock_step_dependencies() -> Any:
         # Channels helpers are imported lazily inside run_session_step —
         # patch them at their source module rather than on loop.
         patch(
-            "aios.harness.channels.list_bindings_and_connections",
-            AsyncMock(return_value=([], [])),
+            "aios.harness.channels.list_session_bindings",
+            AsyncMock(return_value=[]),
         ),
         patch(
-            "aios.harness.channels.augment_with_connector_instructions",
+            "aios.harness.channels.augment_with_mcp_instructions",
             return_value="sys",
         ),
         patch(

@@ -36,8 +36,6 @@ async def create(body: ConnectionCreate, pool: PoolDep, _auth: AuthDep) -> Conne
         pool,
         connector=body.connector,
         account=body.account,
-        mcp_url=body.mcp_url,
-        vault_id=body.vault_id,
         metadata=body.metadata,
     )
 
@@ -69,8 +67,6 @@ async def update(
     return await service.update_connection(
         pool,
         connection_id,
-        mcp_url=body.mcp_url,
-        vault_id=body.vault_id,
         metadata=body.metadata,
     )
 

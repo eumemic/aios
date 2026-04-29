@@ -11,15 +11,13 @@ from typing import Any
 
 from aios.harness.channels import (
     apply_monologue_prefix,
-    augment_with_connector_instructions,
     augment_with_focal_paradigm,
+    augment_with_mcp_instructions,
     build_channels_tail_block,
-    build_connector_instructions_block,
     build_focal_paradigm_block,
-    connection_server_name,
+    build_mcp_instructions_block,
 )
 from aios.models.channel_bindings import ChannelBinding, NotificationMode
-from aios.models.connections import Connection
 from aios.models.events import Event
 
 
@@ -65,43 +63,6 @@ def _user_event(
         orig_channel=orig,
         focal_channel_at_arrival=focal_at,
     )
-
-
-def _connection(cid: str, connector: str = "signal", account: str = "acct") -> Connection:
-    now = datetime(2026, 4, 16)
-    return Connection(
-        id=cid,
-        connector=connector,
-        account=account,
-        mcp_url="https://example.com",
-        vault_id="vlt_x",
-        metadata={},
-        created_at=now,
-        updated_at=now,
-    )
-
-
-# ── connection_server_name ─────────────────────────────────────────────────
-
-
-class TestConnectionServerName:
-    """The connection id already starts with the reserved ``conn_``
-    prefix (via ``ids.CONNECTION``), so it doubles as the server name
-    directly — no stutter, still unambiguous by construction.
-    """
-
-    def test_uses_id_directly(self) -> None:
-        c = _connection("conn_01HQR2K7VXBZ9MNPL3WYCT8F")
-        assert connection_server_name(c) == "conn_01HQR2K7VXBZ9MNPL3WYCT8F"
-
-    def test_distinct_connections_produce_distinct_names(self) -> None:
-        c1 = _connection("conn_aaa", connector="signal", account="abc_def")
-        c2 = _connection("conn_bbb", connector="signal_abc", account="def")
-        assert connection_server_name(c1) != connection_server_name(c2)
-
-    def test_is_stable_for_same_connection(self) -> None:
-        c = _connection("conn_stable")
-        assert connection_server_name(c) == connection_server_name(c)
 
 
 # ── build_focal_paradigm_block / augment_with_focal_paradigm ───────────────
@@ -150,73 +111,44 @@ class TestBuildFocalParadigmBlock:
         assert "phone down" in block.lower() or "target=null" in block
 
 
-# ── build_connector_instructions_block / augment_with_connector_instructions ──
+# ── build_mcp_instructions_block / augment_with_mcp_instructions ───────────
 
 
-class TestBuildConnectorInstructionsBlock:
+class TestBuildMcpInstructionsBlock:
     def test_empty_dict_returns_empty(self) -> None:
-        assert build_connector_instructions_block({}, []) == ""
+        assert build_mcp_instructions_block({}) == ""
 
-    def test_no_matching_connection_returns_empty(self) -> None:
-        """Instructions keyed under a server name that no connection
-        matches must NOT be rendered — we only describe the connectors
-        the session is actually bound to.
-        """
-        c = _connection("conn_aaa", connector="signal", account="alice")
-        block = build_connector_instructions_block({"conn_unknown": "stray prose"}, [c])
-        assert block == ""
-
-    def test_single_connection_renders_heading_and_body(self) -> None:
-        c = _connection("conn_aaa", connector="signal", account="alice")
-        block = build_connector_instructions_block({connection_server_name(c): "be brief"}, [c])
-        assert "## Connector: signal/alice" in block
+    def test_single_server_renders_heading_and_body(self) -> None:
+        block = build_mcp_instructions_block({"signal": "be brief"})
+        assert "## MCP server: signal" in block
         assert "be brief" in block
 
-    def test_multiple_connections_rendered_in_input_order(self) -> None:
-        """Ordering is caller-controlled — important for prompt-cache
-        stability across steps.  Test by passing two connections and
-        asserting the output order matches.
+    def test_multiple_servers_rendered_in_dict_order(self) -> None:
+        """Discovery inserts instructions in agent MCP server order, so
+        renderer order must preserve dict insertion order.
         """
-        c1 = _connection("conn_aaa", connector="signal", account="alice")
-        c2 = _connection("conn_bbb", connector="signal", account="bob")
-        instructions = {
-            connection_server_name(c1): "alice prose",
-            connection_server_name(c2): "bob prose",
-        }
-        block = build_connector_instructions_block(instructions, [c1, c2])
-        assert block.index("alice prose") < block.index("bob prose")
-        # Reverse the connections list — output order flips.
-        block_rev = build_connector_instructions_block(instructions, [c2, c1])
-        assert block_rev.index("bob prose") < block_rev.index("alice prose")
+        block = build_mcp_instructions_block({"signal": "signal prose", "github": "github prose"})
+        assert block.index("signal prose") < block.index("github prose")
 
-    def test_connection_without_instructions_skipped(self) -> None:
-        c1 = _connection("conn_aaa", connector="signal", account="alice")
-        c2 = _connection("conn_bbb", connector="signal", account="bob")
-        block = build_connector_instructions_block(
-            {connection_server_name(c2): "bob prose"}, [c1, c2]
-        )
-        assert "alice" not in block
-        assert "bob prose" in block
+    def test_empty_instruction_text_skipped(self) -> None:
+        block = build_mcp_instructions_block({"signal": "", "github": "github prose"})
+        assert "signal" not in block
+        assert "github prose" in block
 
 
-class TestAugmentWithConnectorInstructions:
+class TestAugmentWithMcpInstructions:
     def test_no_instructions_returns_base_unchanged(self) -> None:
-        c = _connection("conn_aaa")
-        assert augment_with_connector_instructions("base", {}, [c]) == "base"
+        assert augment_with_mcp_instructions("base", {}) == "base"
 
     def test_appends_block_after_base(self) -> None:
-        c = _connection("conn_aaa", connector="signal", account="alice")
-        out = augment_with_connector_instructions(
-            "base system", {connection_server_name(c): "prose"}, [c]
-        )
+        out = augment_with_mcp_instructions("base system", {"signal": "prose"})
         assert out.startswith("base system")
-        assert "## Connector: signal/alice" in out
+        assert "## MCP server: signal" in out
         assert "\n\n" in out
 
     def test_empty_base_yields_block_only(self) -> None:
-        c = _connection("conn_aaa", connector="signal", account="alice")
-        out = augment_with_connector_instructions("", {connection_server_name(c): "prose"}, [c])
-        assert out.startswith("## Connector:")
+        out = augment_with_mcp_instructions("", {"signal": "prose"})
+        assert out.startswith("## MCP server:")
         assert not out.startswith("\n")
 
 
