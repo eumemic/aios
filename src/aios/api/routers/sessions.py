@@ -34,6 +34,7 @@ from aios.models.sessions import (
     ContextResponse,
     Session,
     SessionCreate,
+    SessionForkRequest,
     SessionInterruptRequest,
     SessionStatus,
     SessionUpdate,
@@ -119,6 +120,24 @@ async def update(session_id: str, body: SessionUpdate, pool: PoolDep, _auth: Aut
 @router.post("/{session_id}/archive")
 async def archive(session_id: str, pool: PoolDep, _auth: AuthDep) -> Session:
     return await service.archive_session(pool, session_id)
+
+
+@router.post("/{session_id}/fork", status_code=status.HTTP_201_CREATED)
+async def fork(
+    session_id: str,
+    body: SessionForkRequest,
+    pool: PoolDep,
+    _auth: AuthDep,
+) -> Session:
+    """Clone a session at its current state into a new session.
+
+    The fork inherits everything that defines the parent's next-step context
+    (events, agent binding, vaults, focal channel, status, stop_reason) but
+    has its own session_id and a fresh workspace volume by default.
+
+    Refuses if the parent isn't ``idle`` or ``terminated``.
+    """
+    return await service.fork_session(pool, session_id, workspace_path=body.workspace_path)
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

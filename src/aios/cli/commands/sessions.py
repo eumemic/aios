@@ -145,6 +145,52 @@ def archive(ctx: typer.Context, session_id: str) -> None:
 
 
 @app.command(
+    "fork",
+    help="Fork a session — copy its event log into a new session id.",
+)
+def fork(
+    ctx: typer.Context,
+    session_id: str,
+    count: Annotated[
+        int,
+        typer.Option("--count", min=1, max=100, help="Create N forks; print each new session."),
+    ] = 1,
+    workspace_path: Annotated[
+        str | None,
+        typer.Option(
+            "--workspace-path",
+            help="Override the fork's workspace volume path (must already exist). "
+            "Mutually exclusive with --count > 1.",
+        ),
+    ] = None,
+) -> None:
+    def _run() -> int | None:
+        if count > 1 and workspace_path is not None:
+            print_error("--workspace-path cannot be combined with --count > 1")
+            return 64
+        body: dict[str, Any] = {}
+        if workspace_path is not None:
+            body["workspace_path"] = workspace_path
+        client = just_client(ctx)
+        results: list[dict[str, Any]] = []
+        with client:
+            for _ in range(count):
+                obj = client.request("POST", f"/v1/sessions/{session_id}/fork", json_body=body)
+                results.append(obj)
+        if count == 1:
+            render_single(results[0])
+        else:
+            envelope = {"data": results, "has_more": False, "next_after": None}
+            state = get_state(ctx)
+            render_list(
+                state.output_format, envelope, columns=_SESSION_COLS, max_widths=_SESSION_MAXW
+            )
+        return None
+
+    run_or_die(_run)
+
+
+@app.command(
     "delete",
     help="Hard-delete a session (irreversible; prefer `archive` instead).",
 )

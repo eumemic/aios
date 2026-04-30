@@ -224,6 +224,19 @@ async def archive_session(pool: asyncpg.Pool[Any], session_id: str) -> Session:
         return await queries.archive_session(conn, session_id)
 
 
+async def fork_session(
+    pool: asyncpg.Pool[Any],
+    parent_session_id: str,
+    *,
+    workspace_path: str | None = None,
+) -> Session:
+    """Fork a session — see :func:`queries.fork_session`."""
+    async with pool.acquire() as conn:
+        session = await queries.fork_session(conn, parent_session_id, workspace_path=workspace_path)
+        vault_ids = await queries.get_session_vault_ids(conn, session.id)
+        return session.model_copy(update={"vault_ids": vault_ids})
+
+
 async def delete_session(pool: asyncpg.Pool[Any], session_id: str) -> None:
     async with pool.acquire() as conn:
         await queries.delete_session(conn, session_id)
