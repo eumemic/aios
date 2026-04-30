@@ -4,8 +4,8 @@ Connections are the inbound channel-account identity. ``mcp_url`` and
 ``vault_id`` are optional compatibility fields for older connection-projected
 MCP setups; normal connector MCP servers are declared on agents.
 
-Revision ID: 0025
-Revises: 0024
+Revision ID: 0026
+Revises: 0025
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0025"
-down_revision: str = "0024"
+revision: str = "0026"
+down_revision: str = "0025"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

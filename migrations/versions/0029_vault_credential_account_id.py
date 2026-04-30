@@ -1,7 +1,7 @@
 """Add optional account identity to vault credentials.
 
-Revision ID: 0028
-Revises: 0027
+Revision ID: 0029
+Revises: 0028
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0028"
-down_revision: str = "0027"
+revision: str = "0029"
+down_revision: str = "0028"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -4,8 +4,8 @@ The runtime injects focal-channel metadata into normal MCP calls based on
 session state, not agent toolset config. Strip the old inert field from stored
 agent JSON before the Pydantic model stops accepting it.
 
-Revision ID: 0027
-Revises: 0026
+Revision ID: 0028
+Revises: 0027
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0027"
-down_revision: str = "0026"
+revision: str = "0028"
+down_revision: str = "0027"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
