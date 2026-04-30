@@ -8,7 +8,7 @@ Three responsibilities:
    in the MCP init instructions (issue #55).  The numeric id doubles as
    the ``<account>`` segment of channel addresses.
 3. Register a single message handler that parses each incoming text
-   message and POSTs it to aios via :class:`aios_telegram.ingest.IngestClient`.
+   message and publishes it to the connector-local MCP inbound broker.
 
 Long-polling is driven by PTB's own ``Updater``; :func:`run_application`
 starts it, blocks until cancelled, then shuts down cleanly.
@@ -24,7 +24,7 @@ import structlog
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
-from .ingest import IngestClient, build_metadata
+from .ingest import InboundSink, build_metadata
 from .parse import parse_message
 
 log = structlog.get_logger(__name__)
@@ -76,7 +76,7 @@ def install_handler(
     application: Application,  # type: ignore[type-arg]
     *,
     bot_id: int,
-    ingest: IngestClient,
+    ingest: InboundSink,
 ) -> None:
     """Wire the parse → build_metadata → post_message pipeline onto PTB.
 

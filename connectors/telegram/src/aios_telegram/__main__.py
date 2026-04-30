@@ -22,9 +22,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     start = sub.add_parser("start", help="start the telegram connector")
     start.add_argument("--bot-token", help="Telegram bot token (AIOS_TELEGRAM_BOT_TOKEN)")
-    start.add_argument("--aios-url", help="aios base URL (AIOS_URL)")
-    start.add_argument("--aios-api-key", help="aios bearer token (AIOS_API_KEY)")
-    start.add_argument("--aios-connection-id", help="aios connection id (AIOS_CONNECTION_ID)")
     start.add_argument("--mcp-bind", help="MCP host:port (AIOS_TELEGRAM_MCP_BIND)")
     start.add_argument("--mcp-token", help="MCP bearer token (AIOS_TELEGRAM_MCP_TOKEN)")
     return parser
@@ -33,9 +30,6 @@ def _build_parser() -> argparse.ArgumentParser:
 def _apply_cli_overrides(args: argparse.Namespace) -> None:
     mapping = {
         "bot_token": "AIOS_TELEGRAM_BOT_TOKEN",
-        "aios_url": "AIOS_URL",
-        "aios_api_key": "AIOS_API_KEY",
-        "aios_connection_id": "AIOS_CONNECTION_ID",
         "mcp_bind": "AIOS_TELEGRAM_MCP_BIND",
         "mcp_token": "AIOS_TELEGRAM_MCP_TOKEN",
     }

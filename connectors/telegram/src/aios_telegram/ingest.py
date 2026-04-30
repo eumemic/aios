@@ -1,18 +1,15 @@
-"""aios ingest client.
+"""Legacy aios HTTP ingest client and inbound metadata helpers.
 
-POSTs inbound Telegram messages to ``/v1/connections/{id}/messages``. Retries
-transient failures (network, 5xx) with exponential backoff; 4xx and
-retry-exhaustion both log and drop. Missing messages are unrecoverable
-(Telegram does not redeliver long-polling updates we've already acked by
-advancing ``offset``), but the connector advances ``offset`` only after the
-handler returns — so a crash mid-handler causes redelivery on the next run.
+Runtime inbound now publishes to the connector-local MCP broker. ``IngestClient``
+remains for coexistence tests until the legacy connection ingest path is
+removed.
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Self
+from typing import Any, Protocol, Self
 
 import httpx
 import structlog
@@ -22,6 +19,16 @@ from .parse import InboundMessage
 log = structlog.get_logger(__name__)
 
 RETRY_DELAYS_SECONDS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0)
+
+
+class InboundSink(Protocol):
+    async def post_message(
+        self,
+        *,
+        path: str,
+        content: str,
+        metadata: dict[str, Any],
+    ) -> None: ...
 
 
 @dataclass(slots=True)

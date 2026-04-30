@@ -1,15 +1,14 @@
 # aios-telegram
 
 Telegram connector for [aios](../../README.md). One long-running process per
-Telegram bot — ingests inbound messages into aios via
-`POST /v1/connections/{id}/messages`, and serves an MCP server exposing a
-`telegram_send` tool that the aios worker calls back into.
+Telegram bot serves a stateful MCP server. aios uses the same MCP server for
+outbound tools (`telegram_send`) and inbound message subscriptions.
 
 ## Prerequisites
 
-- Python ≥ 3.13
+- Python >= 3.13
 - A Telegram bot token (talk to [@BotFather](https://t.me/BotFather))
-- A running aios instance with the connector/channel routing infra
+- A running aios API, worker, and inbound process.
 
 ## Install
 
@@ -31,8 +30,8 @@ uv sync --all-packages --dev
 
 Message [@BotFather](https://t.me/BotFather) on Telegram: `/newbot`. Copy
 the token. Learn the bot's numeric id by running a throwaway script
-(`curl https://api.telegram.org/bot<TOKEN>/getMe`) — you'll need it for
-the routing rule.
+(`curl https://api.telegram.org/bot<TOKEN>/getMe`). Use that numeric id as
+the vault credential `account_id`.
 
 ### 2. Create an aios vault + credential for the MCP token
 
@@ -41,6 +40,7 @@ VLT=$(curl -X POST :8090/v1/vaults -d '{"display_name": "Telegram personal"}' | 
 
 curl -X POST :8090/v1/vaults/$VLT/credentials -d '{
   "mcp_server_url": "http://localhost:9200/mcp",
+  "account_id": "<bot-numeric-id-from-step-1>",
   "auth_type": "static_bearer",
   "token": "supersecret"
 }'
@@ -67,25 +67,15 @@ Add the Telegram MCP server as a normal agent MCP server:
 }
 ```
 
-### 4. Register the aios connection
+### 4. Create a session with the Telegram vault
 
-The connection is the inbound channel account. Normal MCP discovery comes from
-the agent config above; the vault is supplied through the routing rule's
-session params.
-
-```
-CONN=$(curl -X POST :8090/v1/connections -d "{
-  \"connector\": \"telegram\",
-  \"account\": \"<bot-numeric-id-from-step-1>\"
-}" | jq -r .id)
-```
+Inbound subscriptions are session-scoped. Create or update a session for the
+agent above with `vault_ids: ["$VLT"]`. The `aios inbound` process will
+subscribe that session to the Telegram MCP server using the vault credential.
 
 ### 5. Start the connector
 
 ```
-export AIOS_URL=http://localhost:8090
-export AIOS_API_KEY=...
-export AIOS_CONNECTION_ID=$CONN
 export AIOS_TELEGRAM_MCP_TOKEN=supersecret
 
 python -m aios_telegram start --bot-token 123456:AA...
@@ -94,34 +84,24 @@ python -m aios_telegram start --bot-token 123456:AA...
 All settings can also be passed via env vars. Full list via
 `python -m aios_telegram start --help`.
 
-### 6. Add a routing rule
+### 6. Start aios inbound
 
 ```
-curl -X POST :8090/v1/connections/$CONN/routing-rules -d "{
-  \"prefix\": \"\",
-  \"target\": \"agent:<agent-id>\",
-  \"session_params\": {\"environment_id\": \"<env-id>\", \"vault_ids\": [\"$VLT\"]}
-}"
+aios inbound
 ```
-
-The empty prefix is the per-connection catch-all. The session vault binding is
-what gives the agent-declared Telegram MCP server its bearer token.
 
 ### 7. DM the bot — the agent replies
 
 DM the bot from a Telegram client. Watch the aios event log: the inbound
-message shows up with `metadata.channel` set, a session is created on
-first inbound, and the agent's `telegram_send` call delivers the reply
-back to Telegram.
+message shows up with `metadata.channel` set to
+`telegram/<bot-numeric-id>/<chat-id>`. The agent can focus that channel with
+`switch_channel`; `telegram_send` uses the focused channel via MCP `_meta`.
 
 ## Configuration reference
 
 | Flag | Env var | Default | Description |
 |---|---|---|---|
 | `--bot-token` | `AIOS_TELEGRAM_BOT_TOKEN` | required | Bot token from BotFather |
-| `--aios-url` | `AIOS_URL` | required | Base URL of aios API |
-| `--aios-api-key` | `AIOS_API_KEY` | required | Bearer token for aios API |
-| `--aios-connection-id` | `AIOS_CONNECTION_ID` | required | ID of the pre-registered connection |
 | `--mcp-bind` | `AIOS_TELEGRAM_MCP_BIND` | `127.0.0.1:9200` | Host:port for MCP server |
 | `--mcp-token` | `AIOS_TELEGRAM_MCP_TOKEN` | required | Token MCP clients must present |
 
@@ -129,13 +109,13 @@ back to Telegram.
 
 `app.run()` wires two tasks under a single `asyncio.TaskGroup`:
 
-1. **PTB `Application`** — python-telegram-bot's asyncio Application drives
+1. **PTB `Application`** - python-telegram-bot's asyncio Application drives
    the update loop (long polling). Discovers the bot's numeric id via
    `getMe` on startup. Every incoming message is parsed into an
-   `InboundMessage` and posted to aios via
-   `POST /v1/connections/{id}/messages`.
-2. **MCP server** — FastMCP on uvicorn, bearer-auth-gated, exposing
-   `telegram_send`.
+   `InboundMessage` and published to the connector-local MCP inbound broker.
+2. **MCP server** - stateful FastMCP on uvicorn, bearer-auth-gated, exposing
+   `telegram_send` and the hidden `aios_inbound_subscribe` hook used by
+   `aios inbound`.
 
 **Crash-is-fatal.** Any task failure propagates through the TaskGroup and
 exits the process non-zero. There is no auto-reconnect. Run under systemd
@@ -155,18 +135,17 @@ exits the process non-zero. There is no auto-reconnect. Run under systemd
   literally until a v2 adds MarkdownV2 escaping.
 - Message splitting — Telegram's 4096-char limit surfaces as a Bad Request
   the model must handle by retrying shorter.
-- User allowlist — routing rules gate access server-side.
+- User allowlist - session and vault selection gate which agents subscribe.
 - Auto-reconnect on Telegram outage.
 
 ## Troubleshooting
 
 - **MCP calls returning 401**: the `--mcp-token` on the connector doesn't
   match the `token` stored in the aios vault's credential for this
-  connection.
-- **Inbound messages never appear in aios**: check the connector logs for
-  `ingest.client_error` (malformed payload — likely a connector bug) or
-  `ingest.retries_exhausted` (aios was unreachable long enough to exhaust
-  the 1/2/4/8s backoff).
+  MCP server.
+- **Inbound messages never appear in aios**: check that `aios inbound` is
+  running, the session has the vault attached, and the vault credential has
+  `account_id` set to the bot numeric id.
 - **`Unauthorized` from Telegram on startup**: the bot token is wrong or
   revoked. Re-check with BotFather.
 

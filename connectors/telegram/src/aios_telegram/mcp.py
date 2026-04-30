@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import hmac
 import urllib.parse
+from types import MethodType
 from typing import Any
 
 import structlog
@@ -27,6 +28,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 from telegram import Bot
 
+from .inbound import TelegramInboundBroker
 from .prompts import build_instructions
 
 log = structlog.get_logger(__name__)
@@ -108,6 +110,7 @@ def build_mcp_server(
     bot_id: int,
     first_name: str,
     username: str | None = None,
+    inbound_broker: TelegramInboundBroker | None = None,
 ) -> FastMCP:
     mcp = FastMCP(
         "aios-telegram",
@@ -116,8 +119,27 @@ def build_mcp_server(
             first_name=first_name,
             username=username,
         ),
-        stateless_http=True,
+        stateless_http=False,
     )
+
+    if inbound_broker is not None:
+        _install_aios_inbound_capability(mcp)
+
+        @mcp.tool(
+            name="aios_inbound_subscribe",
+            description="Internal aios inbound subscription hook.",
+            meta={"aios.internal": True},
+        )
+        async def aios_inbound_subscribe(
+            account_id: str,
+            ctx: Context[Any, Any, Any],
+            since_event_id: str | None = None,
+        ) -> dict[str, Any]:
+            return await inbound_broker.subscribe(
+                account_id=account_id,
+                since_event_id=since_event_id,
+                session=ctx.session,
+            )
 
     @mcp.tool()
     async def telegram_send(text: str, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
@@ -135,6 +157,26 @@ def build_mcp_server(
         return {"message_id": sent.message_id}
 
     return mcp
+
+
+def _install_aios_inbound_capability(mcp: FastMCP) -> None:
+    """Advertise the aios inbound extension in MCP initialize."""
+    server = mcp._mcp_server  # FastMCP exposes no public hook for this yet.
+    base = server.create_initialization_options
+
+    def create_initialization_options(
+        self: Any,
+        notification_options: Any | None = None,
+        experimental_capabilities: dict[str, dict[str, Any]] | None = None,
+    ) -> Any:
+        experimental = dict(experimental_capabilities or {})
+        experimental["aiosInbound"] = {
+            "version": 1,
+            "connectorId": "telegram",
+        }
+        return base(notification_options, experimental)
+
+    server.create_initialization_options = MethodType(create_initialization_options, server)  # type: ignore[method-assign]
 
 
 def build_mcp_app(mcp: FastMCP, *, token: str) -> Starlette:

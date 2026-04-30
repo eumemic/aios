@@ -15,6 +15,7 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 from telegram import Bot, Message
 
+from aios_telegram.inbound import TelegramInboundBroker
 from aios_telegram.mcp import (
     BearerAuthMiddleware,
     build_mcp_server,
@@ -136,6 +137,50 @@ def test_build_mcp_server_omits_username_when_absent() -> None:
     assert "42" in mcp.instructions
     assert "Example" in mcp.instructions
     assert "username" not in mcp.instructions
+
+
+class TestAiosInboundExtension:
+    def test_capability_is_advertised(self) -> None:
+        bot = MagicMock(spec=Bot)
+        mcp = build_mcp_server(
+            bot=bot,
+            bot_id=BOT_ID,
+            first_name="Test",
+            username="test_bot",
+            inbound_broker=TelegramInboundBroker(bot_id=BOT_ID),
+        )
+
+        opts = mcp._mcp_server.create_initialization_options()
+
+        assert opts.capabilities.experimental == {
+            "aiosInbound": {"version": 1, "connectorId": "telegram"}
+        }
+
+    async def test_hidden_subscribe_tool_registers_session(self) -> None:
+        bot = MagicMock(spec=Bot)
+        broker = TelegramInboundBroker(bot_id=BOT_ID)
+        mcp = build_mcp_server(
+            bot=bot,
+            bot_id=BOT_ID,
+            first_name="Test",
+            username="test_bot",
+            inbound_broker=broker,
+        )
+        session = MagicMock()
+        session.send_message = AsyncMock()
+        rc = MagicMock(spec=RequestContext)
+        rc.session = session
+        ctx: Context[Any, Any, Any] = Context(request_context=rc)
+
+        result = await mcp._tool_manager.call_tool(
+            "aios_inbound_subscribe",
+            {"account_id": str(BOT_ID)},
+            ctx,
+            convert_result=True,
+        )
+
+        assert isinstance(result, tuple)
+        assert result[1]["status"] == "subscribed"
 
 
 # ─── bearer auth middleware ─────────────────────────────────────────────────
