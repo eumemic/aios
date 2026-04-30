@@ -12,7 +12,6 @@ import json
 import secrets
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest import mock
 
 import pytest
 
@@ -113,20 +112,19 @@ async def _post_inbound(
     """Resolve + append a user inbound message.
 
     Returns ``(session_id, event_id, address)``. Bypasses the HTTP layer
-    and defer_wake so the test is DB-focused.
+    and uses the service layer directly so the test is DB-focused.
     """
     from aios.services import channels as ch_svc
     from aios.services import sessions as sess_svc
 
     address = f"{connection.connector}/{connection.account}/{path}"
-    with mock.patch("aios.harness.wake.defer_wake"):
-        resolution = await ch_svc.resolve_channel(pool, connection, path)
-        event = await sess_svc.append_user_message(
-            pool,
-            resolution.session_id,
-            content,
-            metadata={"channel": address},
-        )
+    resolution = await ch_svc.resolve_channel(pool, connection, path)
+    event = await sess_svc.append_user_message(
+        pool,
+        resolution.session_id,
+        content,
+        metadata={"channel": address},
+    )
     return resolution.session_id, event.id, address
 
 
@@ -1112,16 +1110,15 @@ class TestTailBlockInStep:
             session_params=SessionParams(environment_id=env_id),
         )
         address = f"signal/{account}/chat-1"
-        with mock.patch("aios.harness.wake.defer_wake"):
-            resolution = await ch_svc.resolve_channel(runtime_pool, connection, "chat-1")
-            from aios.services import sessions as sess_svc
+        resolution = await ch_svc.resolve_channel(runtime_pool, connection, "chat-1")
+        from aios.services import sessions as sess_svc
 
-            await sess_svc.append_user_message(
-                runtime_pool,
-                resolution.session_id,
-                "hi",
-                metadata={"channel": address},
-            )
+        await sess_svc.append_user_message(
+            runtime_pool,
+            resolution.session_id,
+            "hi",
+            metadata={"channel": address},
+        )
         session_id = resolution.session_id
         # Ignore the connection — the channel listing pulls from bindings.
         assert connection.id.startswith("conn_")
@@ -1168,33 +1165,32 @@ class TestTailBlockInStep:
         )
         address_a = f"signal/{account}/chat-A"
         address_b = f"signal/{account}/chat-B"
-        with mock.patch("aios.harness.wake.defer_wake"):
-            resolution_a = await ch_svc.resolve_channel(runtime_pool, connection, "chat-A")
-            session_id = resolution_a.session_id
-            await ch_svc.create_binding(runtime_pool, address=address_b, session_id=session_id)
-            # Focus on A and let one message land in A.
-            from aios.services import sessions as sess_svc
+        resolution_a = await ch_svc.resolve_channel(runtime_pool, connection, "chat-A")
+        session_id = resolution_a.session_id
+        await ch_svc.create_binding(runtime_pool, address=address_b, session_id=session_id)
+        # Focus on A and let one message land in A.
+        from aios.services import sessions as sess_svc
 
-            await _set_focal(runtime_pool, session_id, address_a)
-            await sess_svc.append_user_message(
-                runtime_pool,
-                session_id,
-                "hi from A",
-                metadata={"channel": address_a},
-            )
-            # Then two messages on B while focal is A → unread in B.
-            await sess_svc.append_user_message(
-                runtime_pool,
-                session_id,
-                "msg-b1",
-                metadata={"channel": address_b},
-            )
-            await sess_svc.append_user_message(
-                runtime_pool,
-                session_id,
-                "msg-b2",
-                metadata={"channel": address_b},
-            )
+        await _set_focal(runtime_pool, session_id, address_a)
+        await sess_svc.append_user_message(
+            runtime_pool,
+            session_id,
+            "hi from A",
+            metadata={"channel": address_a},
+        )
+        # Then two messages on B while focal is A → unread in B.
+        await sess_svc.append_user_message(
+            runtime_pool,
+            session_id,
+            "msg-b1",
+            metadata={"channel": address_b},
+        )
+        await sess_svc.append_user_message(
+            runtime_pool,
+            session_id,
+            "msg-b2",
+            metadata={"channel": address_b},
+        )
 
         # Step 1: focal=A.  Tail block should mark A as focal, show 2 unread on B.
         harness.script_model([assistant("processing")])
