@@ -20,7 +20,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-MEMORY_PATH_RE = re.compile(r"^(/[^/\x00]+)+$")
+_MEMORY_PATH_PATTERN = r"^(/[^/\x00]+)+$"
+MEMORY_PATH_RE = re.compile(_MEMORY_PATH_PATTERN)
 MAX_CONTENT_BYTES = 102400
 MAX_STORES_PER_SESSION = 8
 MAX_INSTRUCTIONS_CHARS = 4096
@@ -74,10 +75,21 @@ MemoryPath = Annotated[
     Field(
         min_length=2,
         max_length=4096,
-        pattern=r"^(/[^/\x00]+)+$",
-        description="Absolute, slash-separated path. Segments may not contain / or NUL.",
+        pattern=_MEMORY_PATH_PATTERN,
+        description=(
+            "Absolute, slash-separated path. Segments may not contain / or NUL, "
+            "and `.` and `..` are not allowed as segments."
+        ),
     ),
 ]
+
+
+def _check_memory_path(path: str) -> None:
+    """Reject `.` and `..` segments. Path-traversal guard at the input boundary —
+    without this, ``host_dir / path.lstrip("/")`` could escape the per-store dir."""
+    for segment in path.lstrip("/").split("/"):
+        if segment in (".", ".."):
+            raise ValueError(f"path segment {segment!r} is not allowed (would enable traversal)")
 
 
 class MemoryCreate(BaseModel):
@@ -89,7 +101,8 @@ class MemoryCreate(BaseModel):
     content: str
 
     @model_validator(mode="after")
-    def _check_content_size(self) -> MemoryCreate:
+    def _check(self) -> MemoryCreate:
+        _check_memory_path(self.path)
         if len(self.content.encode("utf-8")) > MAX_CONTENT_BYTES:
             raise ValueError(f"content exceeds {MAX_CONTENT_BYTES}-byte cap")
         return self
@@ -119,11 +132,13 @@ class MemoryUpdate(BaseModel):
     precondition: MemoryUpdatePrecondition | None = None
 
     @model_validator(mode="after")
-    def _at_least_one_field(self) -> MemoryUpdate:
+    def _check(self) -> MemoryUpdate:
         if self.content is None and self.path is None:
             raise ValueError("must set at least one of content / path")
         if self.content is not None and len(self.content.encode("utf-8")) > MAX_CONTENT_BYTES:
             raise ValueError(f"content exceeds {MAX_CONTENT_BYTES}-byte cap")
+        if self.path is not None:
+            _check_memory_path(self.path)
         return self
 
 

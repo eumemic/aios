@@ -59,6 +59,9 @@ def upgrade() -> None:
             updated_at          timestamptz NOT NULL DEFAULT now(),
             deleted_at          timestamptz,
             CHECK (path ~ '^(/[^/\x00]+)+$'),
+            -- Reject `.` and `..` segments to block path traversal when the
+            -- path is later joined to a host directory (host_dir / path.lstrip('/')).
+            CHECK (path !~ '(^|/)\.{1,2}(/|$)'),
             CHECK (content_size_bytes <= 102400),
             CHECK (content_size_bytes = octet_length(content))
         )

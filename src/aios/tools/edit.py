@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import difflib
+import hashlib
 import shlex
 from typing import Any
 
@@ -214,6 +215,15 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
             return {"error": exc.message, "path": path, "detail": exc.detail}
         except MemoryStoreArchivedError as exc:
             return {"error": exc.message, "path": path}
+        # Refresh the read-sha cache so a subsequent write tool call against
+        # this same path doesn't fail its precondition with the now-stale
+        # pre-edit sha.
+        runtime.set_read_sha(
+            session_id,
+            target.store_id,
+            target.store_path,
+            hashlib.sha256(modified.encode("utf-8")).hexdigest(),
+        )
 
     # Step 2b: write the modified content back via the same base64
     # stdin mechanism the write tool uses.

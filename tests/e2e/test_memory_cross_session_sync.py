@@ -14,6 +14,7 @@ from aios.harness import runtime
 from aios.models.memory_stores import MemoryStoreResource
 from aios.services import memory_stores as memory_service
 from aios.services import sessions as sessions_service
+from aios.tools.edit import edit_handler
 from aios.tools.read import read_handler
 from aios.tools.write import write_handler
 from tests.conftest import needs_docker
@@ -147,6 +148,43 @@ class TestCrossSessionSync:
             {"path": "/mnt/memory/xsync-race/seed.md", "content": "from-B\n"},
         )
         assert "error" not in b_retry, b_retry
+
+    async def test_edit_refreshes_read_sha_for_subsequent_write(
+        self, docker_harness: Harness
+    ) -> None:
+        """After read -> edit, a subsequent write tool call against the same
+        path must succeed: the edit should have refreshed the cached read-sha
+        so the write's precondition matches the post-edit DB state."""
+        store_id = await _attach_store(docker_harness, "xsync-edit-refresh")
+        a = await _start_session_with_store(docker_harness, store_id, "xsync-edit-refresh")
+
+        sandbox = runtime.require_sandbox_registry()
+        await sandbox.get_or_provision(a.id, pool=docker_harness._pool)
+
+        # Read primes the cache with the seed sha.
+        r = await read_handler(a.id, {"path": "/mnt/memory/xsync-edit-refresh/seed.md"})
+        assert "error" not in r, r
+
+        # Edit changes the DB content; without the cache refresh fix the next
+        # write would 409 with a stale precondition.
+        e = await edit_handler(
+            a.id,
+            {
+                "path": "/mnt/memory/xsync-edit-refresh/seed.md",
+                "old_string": "seed",
+                "new_string": "edited",
+            },
+        )
+        assert "error" not in e, e
+
+        w = await write_handler(
+            a.id,
+            {
+                "path": "/mnt/memory/xsync-edit-refresh/seed.md",
+                "content": "rewritten\n",
+            },
+        )
+        assert "error" not in w, w
 
     async def test_fresh_write_no_precondition(self, docker_harness: Harness) -> None:
         """Writing to a path the model never read — no precondition; succeeds."""

@@ -51,6 +51,32 @@ class TestMemoryCreatePath:
         with pytest.raises(ValidationError):
             MemoryCreate(path="/foo\x00bar", content="x")
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/..",
+            "/../foo",
+            "/foo/..",
+            "/foo/../bar",
+            "/.",
+            "/./foo",
+            "/foo/.",
+            "/foo/./bar",
+            "/a/b/../c",
+        ],
+    )
+    def test_rejects_traversal_segments(self, path: str) -> None:
+        with pytest.raises(ValidationError):
+            MemoryCreate(path=path, content="x")
+
+    def test_accepts_dotted_filenames(self) -> None:
+        # `.foo`, `..foo`, `...` are valid filenames — only `.` and `..` as
+        # full segments are forbidden.
+        MemoryCreate(path="/.hidden", content="x")
+        MemoryCreate(path="/..foo", content="x")
+        MemoryCreate(path="/...", content="x")
+        MemoryCreate(path="/a/.b/c..d", content="x")
+
 
 class TestMemoryCreateContent:
     def test_at_cap_is_ok(self) -> None:
