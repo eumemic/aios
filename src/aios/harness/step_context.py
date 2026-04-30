@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from aios.models.channel_bindings import ChannelBinding
     from aios.models.connections import Connection
     from aios.models.events import Event
+    from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.models.sessions import Session
     from aios.models.skills import SkillVersion
 
@@ -88,6 +89,7 @@ async def compute_step_prelude(
     agent: Agent | AgentVersion,
     bindings: list[ChannelBinding],
     connections: list[Connection],
+    memory_store_echoes: list[MemoryStoreResourceEcho],
 ) -> StepPrelude:
     """Build the events-independent parts of the step payload.
 
@@ -106,6 +108,7 @@ async def compute_step_prelude(
         _switch_channel_tool_spec,
         discover_session_mcp_tools,
     )
+    from aios.harness.memory_stores import augment_with_memory_stores
     from aios.harness.skills import augment_system_prompt
     from aios.services import skills as skills_service
 
@@ -133,6 +136,7 @@ async def compute_step_prelude(
     system_prompt = augment_with_connector_instructions(
         system_prompt, mcp_instructions, connections
     )
+    system_prompt = augment_with_memory_stores(system_prompt, memory_store_echoes)
 
     return StepPrelude(
         system_prompt=system_prompt,

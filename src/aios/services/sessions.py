@@ -16,7 +16,9 @@ import asyncpg
 from aios.db import queries
 from aios.errors import PayloadTooLargeError
 from aios.models.events import Event, EventKind
+from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS, Session, SessionStatus
+from aios.services import memory_stores as memory_service
 
 
 async def create_session(
@@ -28,15 +30,19 @@ async def create_session(
     title: str | None,
     metadata: dict[str, Any],
     vault_ids: list[str] | None = None,
+    resources: list[MemoryStoreResource] | None = None,
     workspace_path: str | None = None,
     env: dict[str, str] | None = None,
 ) -> Session:
     """Create a session row and return it.
 
     ``agent_version=None`` means "latest" — the session will always use
-    whatever version of the agent is current at step time.
+    whatever version of the agent is current at step time. Resource
+    attachment runs in the same transaction as the session insert so a
+    failed attach (e.g. archived store, name collision) leaves no
+    orphaned session.
     """
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         session = await queries.insert_session(
             conn,
             agent_id=agent_id,
@@ -50,6 +56,10 @@ async def create_session(
         if vault_ids:
             await queries.set_session_vaults(conn, session.id, vault_ids)
             session = session.model_copy(update={"vault_ids": vault_ids})
+        if resources:
+            await memory_service.attach_to_session(conn, session.id, resources)
+            echoes = await queries.list_session_memory_store_echoes(conn, session.id)
+            session = session.model_copy(update={"resources": echoes})
         return session
 
 
@@ -57,7 +67,8 @@ async def get_session(pool: asyncpg.Pool[Any], session_id: str) -> Session:
     async with pool.acquire() as conn:
         session = await queries.get_session(conn, session_id)
         vault_ids = await queries.get_session_vault_ids(conn, session_id)
-        return session.model_copy(update={"vault_ids": vault_ids})
+        echoes = await queries.list_session_memory_store_echoes(conn, session_id)
+        return session.model_copy(update={"vault_ids": vault_ids, "resources": echoes})
 
 
 async def list_sessions(
@@ -74,9 +85,18 @@ async def list_sessions(
         )
         if sessions:
             vault_map = await queries.batch_get_session_vault_ids(conn, [s.id for s in sessions])
-            sessions = [
-                s.model_copy(update={"vault_ids": vault_map.get(s.id, [])}) for s in sessions
-            ]
+            enriched: list[Session] = []
+            for s in sessions:
+                echoes = await queries.list_session_memory_store_echoes(conn, s.id)
+                enriched.append(
+                    s.model_copy(
+                        update={
+                            "vault_ids": vault_map.get(s.id, []),
+                            "resources": echoes,
+                        }
+                    )
+                )
+            sessions = enriched
         return sessions
 
 

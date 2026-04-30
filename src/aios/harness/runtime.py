@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from aios.crypto.vault import CryptoBox
     from aios.harness.task_registry import TaskRegistry
     from aios.mcp.pool import McpSessionPool
+    from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.sandbox.registry import SandboxRegistry
 
 
@@ -34,6 +35,59 @@ worker_id: str | None = None
 sandbox_registry: SandboxRegistry | None = None
 task_registry: TaskRegistry | None = None
 mcp_session_pool: McpSessionPool | None = None
+
+# Per-session memory-mount cache. Populated at the top of every step (in
+# ``loop._run_session_step_body``) and consumed by ``tools.memory_intercept``
+# when a file tool resolves a path under ``/mnt/memory/``. The cache is
+# purely a performance optimization — without it, every tool call would
+# re-query the same row set.
+_session_memory_mounts: dict[str, list[MemoryStoreResourceEcho]] = {}
+
+
+def set_session_memory_mounts(session_id: str, echoes: list[MemoryStoreResourceEcho]) -> None:
+    """Record the attached memory stores for ``session_id``."""
+    _session_memory_mounts[session_id] = list(echoes)
+
+
+def get_session_memory_mounts(session_id: str) -> list[MemoryStoreResourceEcho]:
+    """Return the attached memory stores for ``session_id``, or an empty list.
+
+    Empty list (rather than ``None``) means "no memory stores attached" —
+    the absence of an entry is observationally equivalent to an empty list,
+    which is what callers want.
+    """
+    return _session_memory_mounts.get(session_id, [])
+
+
+def clear_session_memory_mounts(session_id: str) -> None:
+    """Drop the cached mounts for ``session_id`` (e.g. after session unload)."""
+    _session_memory_mounts.pop(session_id, None)
+
+
+# Per-session "last sha read by tool" cache: read tool stamps; write tool
+# gates updates on it. Mismatch surfaces as a typed precondition error so
+# the model re-reads and retries — the optimistic-locking analog of an
+# ESTALE error from a kernel-level shared filesystem.
+_session_read_shas: dict[str, dict[tuple[str, str], str]] = {}
+
+
+def set_read_sha(session_id: str, store_id: str, store_path: str, sha: str) -> None:
+    """Stamp the sha the read tool just observed for ``(store_id, store_path)``."""
+    _session_read_shas.setdefault(session_id, {})[(store_id, store_path)] = sha
+
+
+def get_read_sha(session_id: str, store_id: str, store_path: str) -> str | None:
+    """Return the cached read sha for ``(store_id, store_path)``, or ``None``.
+
+    A miss means the model never read this path in this session — so the
+    write tool treats it as a fresh write (no precondition).
+    """
+    return _session_read_shas.get(session_id, {}).get((store_id, store_path))
+
+
+def clear_session_read_shas(session_id: str) -> None:
+    """Drop the cached read shas for ``session_id`` (e.g. after session unload)."""
+    _session_read_shas.pop(session_id, None)
 
 
 def require_pool() -> asyncpg.Pool[Any]:

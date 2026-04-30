@@ -206,6 +206,15 @@ async def _run_session_step_body(
     for c in connections:
         mcp_server_map[connection_server_name(c)] = c.mcp_url
 
+    # Memory store mounts: load echoes once per step. Used both for the
+    # system-prompt block and (via runtime cache) by the tool intercept
+    # in write/edit, which needs a path → store mapping.
+    from aios.db import queries as _queries
+
+    async with pool.acquire() as _conn:
+        memory_echoes = await _queries.list_session_memory_store_echoes(_conn, session_id)
+    runtime.set_session_memory_mounts(session_id, memory_echoes)
+
     # Build the events-independent prelude (system prompt + tools)
     # before windowing so its overhead can be subtracted from the
     # window budget — otherwise the sent prompt can exceed window_max
@@ -217,6 +226,7 @@ async def _run_session_step_body(
         agent=agent,
         bindings=bindings,
         connections=connections,
+        memory_store_echoes=memory_echoes,
     )
     overhead_local = (
         approx_tokens(

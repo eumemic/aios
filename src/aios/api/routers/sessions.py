@@ -62,6 +62,7 @@ async def create(
         title=body.title,
         metadata=body.metadata,
         vault_ids=body.vault_ids or None,
+        resources=body.resources or None,
         workspace_path=body.workspace_path,
         env=body.env or None,
     )
@@ -265,6 +266,11 @@ async def get_context(
 
     bindings, connections = await list_bindings_and_connections(pool, session_id)
 
+    from aios.db import queries as _queries
+
+    async with pool.acquire() as _conn:
+        memory_echoes = await _queries.list_session_memory_store_echoes(_conn, session_id)
+
     prelude = await compute_step_prelude(
         pool,
         session_id,
@@ -272,6 +278,7 @@ async def get_context(
         agent=agent,
         bindings=bindings,
         connections=connections,
+        memory_store_echoes=memory_echoes,
     )
     overhead_local = (
         approx_tokens(

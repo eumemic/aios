@@ -22,13 +22,22 @@ from typing import Any
 import asyncpg
 
 from aios.crypto.vault import EncryptedBlob
-from aios.errors import ConflictError, NotFoundError
+from aios.errors import (
+    ConflictError,
+    MemoryPathConflictError,
+    MemoryPreconditionFailedError,
+    MemoryStoreArchivedError,
+    NotFoundError,
+)
 from aios.ids import (
     AGENT,
     CHANNEL_BINDING,
     CONNECTION,
     ENVIRONMENT,
     EVENT,
+    MEMORY,
+    MEMORY_STORE,
+    MEMORY_VERSION,
     ROUTING_RULE,
     SESSION,
     SKILL,
@@ -41,6 +50,15 @@ from aios.models.channel_bindings import ChannelBinding
 from aios.models.connections import Connection
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
+from aios.models.memory_stores import (
+    Actor,
+    Memory,
+    MemoryPrefix,
+    MemoryStore,
+    MemoryStoreResource,
+    MemoryStoreResourceEcho,
+    MemoryVersion,
+)
 from aios.models.routing_rules import RoutingRule, SessionParams
 from aios.models.sessions import Session, SessionStatus, SessionUsage
 from aios.models.skills import AgentSkillRef, Skill, SkillVersion
@@ -2646,3 +2664,700 @@ async def find_matching_rule(
     if row is None:
         return None
     return _row_to_routing_rule(row)
+
+
+# ─── memory stores ──────────────────────────────────────────────────────────
+
+
+def _row_to_memory_store(row: asyncpg.Record) -> MemoryStore:
+    raw_metadata = row["metadata"]
+    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    return MemoryStore(
+        id=row["id"],
+        name=row["name"],
+        description=row["description"],
+        metadata=metadata,
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        archived_at=row["archived_at"],
+    )
+
+
+def _row_to_memory(row: asyncpg.Record, *, include_content: bool) -> Memory:
+    return Memory(
+        id=row["id"],
+        memory_store_id=row["memory_store_id"],
+        memory_version_id=row["current_version_id"],
+        path=row["path"],
+        content=row["content"] if include_content else None,
+        content_sha256=row["content_sha256"],
+        content_size_bytes=row["content_size_bytes"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_memory_version(row: asyncpg.Record, *, include_content: bool) -> MemoryVersion:
+    redacted = row["redacted_at"] is not None
+    redacted_by: Actor | None = None
+    if redacted and row["redacted_by_type"] is not None:
+        redacted_by = _build_actor(row["redacted_by_type"], row["redacted_by_ref"])
+    return MemoryVersion(
+        id=row["id"],
+        memory_store_id=row["memory_store_id"],
+        memory_id=row["memory_id"],
+        operation=row["operation"],
+        path=row["path"],
+        content=row["content"] if include_content and not redacted else None,
+        content_sha256=row["content_sha256"],
+        content_size_bytes=row["content_size_bytes"],
+        created_by=_build_actor(row["created_by_type"], row["created_by_ref"]),
+        created_at=row["created_at"],
+        redacted_at=row["redacted_at"],
+        redacted_by=redacted_by,
+    )
+
+
+def _build_actor(actor_type: str, actor_ref: str) -> Actor:
+    if actor_type == "session_actor":
+        return Actor(type="session_actor", session_id=actor_ref)
+    return Actor(type="api_actor", api_key_id=actor_ref)
+
+
+# Stores ───────────────────────────────────────────────────────────────────
+
+
+async def insert_memory_store(
+    conn: asyncpg.Connection[Any],
+    *,
+    name: str,
+    description: str,
+    metadata: dict[str, Any],
+) -> MemoryStore:
+    row = await conn.fetchrow(
+        """
+        INSERT INTO memory_stores (id, name, description, metadata)
+        VALUES ($1, $2, $3, $4::jsonb)
+        RETURNING *
+        """,
+        make_id(MEMORY_STORE),
+        name,
+        description,
+        json.dumps(metadata),
+    )
+    assert row is not None
+    return _row_to_memory_store(row)
+
+
+async def get_memory_store(
+    conn: asyncpg.Connection[Any], store_id: str, *, allow_archived: bool = True
+) -> MemoryStore:
+    row = await conn.fetchrow("SELECT * FROM memory_stores WHERE id = $1", store_id)
+    if row is None:
+        raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
+    store = _row_to_memory_store(row)
+    if not allow_archived and store.archived_at is not None:
+        raise MemoryStoreArchivedError(
+            f"memory store {store_id} is archived",
+            detail={"id": store_id},
+        )
+    return store
+
+
+async def list_memory_stores(
+    conn: asyncpg.Connection[Any], *, include_archived: bool = False, limit: int = 100
+) -> list[MemoryStore]:
+    if include_archived:
+        rows = await conn.fetch("SELECT * FROM memory_stores ORDER BY id DESC LIMIT $1", limit)
+    else:
+        rows = await conn.fetch(
+            "SELECT * FROM memory_stores WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            limit,
+        )
+    return [_row_to_memory_store(r) for r in rows]
+
+
+async def update_memory_store(
+    conn: asyncpg.Connection[Any],
+    store_id: str,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> MemoryStore:
+    sets: list[str] = []
+    args: list[Any] = [store_id]
+    if name is not None:
+        args.append(name)
+        sets.append(f"name = ${len(args)}")
+    if description is not None:
+        args.append(description)
+        sets.append(f"description = ${len(args)}")
+    if metadata is not None:
+        args.append(json.dumps(metadata))
+        sets.append(f"metadata = ${len(args)}::jsonb")
+    if not sets:
+        return await get_memory_store(conn, store_id)
+    sets.append("updated_at = now()")
+    sql = f"UPDATE memory_stores SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    row = await conn.fetchrow(sql, *args)
+    if row is None:
+        raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
+    return _row_to_memory_store(row)
+
+
+async def archive_memory_store(conn: asyncpg.Connection[Any], store_id: str) -> MemoryStore:
+    row = await conn.fetchrow(
+        "UPDATE memory_stores SET archived_at = now(), updated_at = now() "
+        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        store_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"memory store {store_id} not found or already archived",
+            detail={"id": store_id},
+        )
+    return _row_to_memory_store(row)
+
+
+async def delete_memory_store(conn: asyncpg.Connection[Any], store_id: str) -> None:
+    result = await conn.execute("DELETE FROM memory_stores WHERE id = $1", store_id)
+    if result == "DELETE 0":
+        raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
+
+
+# Memory + version (single-txn helpers) ────────────────────────────────────
+
+
+async def _allocate_version_seq(conn: asyncpg.Connection[Any], store_id: str) -> int:
+    """Bump ``last_version_seq`` on the store row and return the allocated seq.
+
+    Mirror of the events seq allocation at append_event: row-lock the parent,
+    increment, return. Caller must be inside a transaction so the seq is
+    bound to the version insert that follows.
+    """
+    row = await conn.fetchrow(
+        "UPDATE memory_stores SET last_version_seq = last_version_seq + 1, "
+        "updated_at = now() WHERE id = $1 AND archived_at IS NULL "
+        "RETURNING last_version_seq",
+        store_id,
+    )
+    if row is None:
+        existing = await conn.fetchrow(
+            "SELECT archived_at FROM memory_stores WHERE id = $1", store_id
+        )
+        if existing is None:
+            raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
+        raise MemoryStoreArchivedError(
+            f"memory store {store_id} is archived",
+            detail={"id": store_id},
+        )
+    seq: int = row["last_version_seq"]
+    return seq
+
+
+async def insert_memory_with_version(
+    conn: asyncpg.Connection[Any],
+    *,
+    store_id: str,
+    path: str,
+    content: str,
+    content_sha256: str,
+    actor_type: str,
+    actor_ref: str,
+) -> Memory:
+    """Insert a new memory + its initial ``created`` version in one txn.
+
+    On path collision raises :class:`MemoryPathConflictError` carrying the
+    existing memory id. The caller can decide between updating that memory
+    and surfacing the error.
+    """
+    size_bytes = len(content.encode("utf-8"))
+    memory_id = make_id(MEMORY)
+    version_id = make_id(MEMORY_VERSION)
+
+    try:
+        async with conn.transaction():
+            seq = await _allocate_version_seq(conn, store_id)
+
+            # Version first — its `memory_id` column is non-FK, so the
+            # not-yet-inserted memory row doesn't block this. Memory row
+            # references back via current_version_id.
+            await conn.execute(
+                """
+                INSERT INTO memory_versions
+                    (id, memory_store_id, memory_id, seq, operation, path,
+                     content, content_sha256, content_size_bytes,
+                     created_by_type, created_by_ref)
+                VALUES ($1, $2, $3, $4, 'created', $5, $6, $7, $8, $9, $10)
+                """,
+                version_id,
+                store_id,
+                memory_id,
+                seq,
+                path,
+                content,
+                content_sha256,
+                size_bytes,
+                actor_type,
+                actor_ref,
+            )
+
+            row = await conn.fetchrow(
+                """
+                INSERT INTO memories
+                    (id, memory_store_id, path, content, content_sha256,
+                     content_size_bytes, current_version_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                RETURNING *
+                """,
+                memory_id,
+                store_id,
+                path,
+                content,
+                content_sha256,
+                size_bytes,
+                version_id,
+            )
+    except asyncpg.UniqueViolationError as exc:
+        # Re-issue the lookup outside the rolled-back transaction so the
+        # error envelope can carry the existing memory id.
+        existing = await conn.fetchrow(
+            "SELECT id FROM memories WHERE memory_store_id = $1 AND path = $2 "
+            "AND deleted_at IS NULL",
+            store_id,
+            path,
+        )
+        conflicting_id = existing["id"] if existing is not None else None
+        raise MemoryPathConflictError(
+            f"path {path!r} is already used by {conflicting_id!r}; use update to modify it",
+            detail={
+                "conflicting_memory_id": conflicting_id,
+                "conflicting_path": path,
+            },
+        ) from exc
+    assert row is not None
+    return _row_to_memory(row, include_content=False)
+
+
+async def get_memory(
+    conn: asyncpg.Connection[Any],
+    store_id: str,
+    memory_id: str,
+    *,
+    include_content: bool = True,
+) -> Memory:
+    row = await conn.fetchrow(
+        "SELECT * FROM memories WHERE memory_store_id = $1 AND id = $2 AND deleted_at IS NULL",
+        store_id,
+        memory_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"memory {memory_id} not found in store {store_id}",
+            detail={"id": memory_id, "memory_store_id": store_id},
+        )
+    return _row_to_memory(row, include_content=include_content)
+
+
+async def get_memory_by_path(
+    conn: asyncpg.Connection[Any],
+    store_id: str,
+    path: str,
+    *,
+    include_content: bool = True,
+) -> Memory | None:
+    row = await conn.fetchrow(
+        "SELECT * FROM memories WHERE memory_store_id = $1 AND path = $2 AND deleted_at IS NULL",
+        store_id,
+        path,
+    )
+    if row is None:
+        return None
+    return _row_to_memory(row, include_content=include_content)
+
+
+async def list_active_memory_paths_and_content(
+    conn: asyncpg.Connection[Any], store_id: str
+) -> list[tuple[str, str]]:
+    """Bulk-fetch ``(path, content)`` for every non-deleted memory in the store.
+
+    Used by sandbox materialization, which needs all live memories in one
+    DB roundtrip rather than ``list_memories`` (metadata only) followed by
+    a per-memory ``get_memory(include_content=True)`` fan-out.
+    """
+    rows = await conn.fetch(
+        "SELECT path, content FROM memories WHERE memory_store_id = $1 AND deleted_at IS NULL",
+        store_id,
+    )
+    return [(r["path"], r["content"]) for r in rows]
+
+
+async def list_memories(
+    conn: asyncpg.Connection[Any],
+    store_id: str,
+    *,
+    path_prefix: str | None = None,
+    order_by: str = "created_at",
+    depth: int | None = None,
+) -> list[Memory | MemoryPrefix]:
+    """List memories, optionally filtered by ``path_prefix`` and depth-clipped.
+
+    ``depth`` requires ``order_by='path'`` (matches Anthropic's wire validation).
+    With depth set, paths whose component count under the prefix exceeds
+    ``depth`` are collapsed into ``memory_prefix`` synthetic entries.
+    """
+    if depth is not None and order_by != "path":
+        raise ConflictError(
+            "depth requires order_by=path",
+            detail={"order_by": order_by, "depth": depth},
+        )
+
+    where = "memory_store_id = $1 AND deleted_at IS NULL"
+    args: list[Any] = [store_id]
+    if path_prefix:
+        args.append(path_prefix)
+        where += f" AND (path = ${len(args)} OR path LIKE ${len(args)} || '%')"
+    order_sql = "path ASC" if order_by == "path" else "created_at DESC"
+    rows = await conn.fetch(f"SELECT * FROM memories WHERE {where} ORDER BY {order_sql}", *args)
+
+    memories = [_row_to_memory(r, include_content=False) for r in rows]
+    if depth is None:
+        return list(memories)
+
+    base = path_prefix.rstrip("/") if path_prefix else ""
+    out: list[Memory | MemoryPrefix] = []
+    seen_prefixes: set[str] = set()
+    for memory in memories:
+        rest = memory.path[len(base) :] if memory.path.startswith(base) else memory.path
+        # rest looks like "/segment/segment/file"; strip the leading "/" and split
+        parts = rest.lstrip("/").split("/")
+        if len(parts) <= depth:
+            out.append(memory)
+            continue
+        prefix_path = base + "/" + "/".join(parts[:depth]) + "/"
+        if prefix_path in seen_prefixes:
+            continue
+        seen_prefixes.add(prefix_path)
+        out.append(MemoryPrefix(path=prefix_path))
+    return out
+
+
+async def update_memory_with_version(
+    conn: asyncpg.Connection[Any],
+    *,
+    store_id: str,
+    memory_id: str,
+    new_content: str | None,
+    new_content_sha256: str | None,
+    new_path: str | None,
+    precondition_sha256: str | None,
+    actor_type: str,
+    actor_ref: str,
+) -> Memory:
+    """Update content and/or path; record a ``modified`` version.
+
+    Precondition (when set) is content-only — renames are unconditional,
+    matching Anthropic's wire semantics. If both content and path are None
+    the call is a no-op and returns the current row.
+    """
+    if new_content is None and new_path is None:
+        return await get_memory(conn, store_id, memory_id, include_content=False)
+
+    next_path_for_conflict: str | None = None
+    try:
+        async with conn.transaction():
+            cur = await conn.fetchrow(
+                "SELECT * FROM memories WHERE memory_store_id = $1 AND id = $2 "
+                "AND deleted_at IS NULL FOR UPDATE",
+                store_id,
+                memory_id,
+            )
+            if cur is None:
+                raise NotFoundError(
+                    f"memory {memory_id} not found in store {store_id}",
+                    detail={"id": memory_id, "memory_store_id": store_id},
+                )
+
+            if (
+                precondition_sha256 is not None
+                and new_content is not None
+                and cur["content_sha256"] != precondition_sha256
+            ):
+                raise MemoryPreconditionFailedError(
+                    "precondition content_sha256 failed: content has changed",
+                    detail={
+                        "expected": precondition_sha256,
+                        "actual": cur["content_sha256"],
+                    },
+                )
+
+            next_content: str = new_content if new_content is not None else cur["content"]
+            next_sha: str = (
+                new_content_sha256 if new_content_sha256 is not None else cur["content_sha256"]
+            )
+            next_size: int = len(next_content.encode("utf-8"))
+            next_path: str = new_path if new_path is not None else cur["path"]
+            next_path_for_conflict = next_path
+
+            seq = await _allocate_version_seq(conn, store_id)
+            version_id = make_id(MEMORY_VERSION)
+            await conn.execute(
+                """
+                INSERT INTO memory_versions
+                    (id, memory_store_id, memory_id, seq, operation, path,
+                     content, content_sha256, content_size_bytes,
+                     created_by_type, created_by_ref)
+                VALUES ($1, $2, $3, $4, 'modified', $5, $6, $7, $8, $9, $10)
+                """,
+                version_id,
+                store_id,
+                memory_id,
+                seq,
+                next_path,
+                next_content,
+                next_sha,
+                next_size,
+                actor_type,
+                actor_ref,
+            )
+
+            row = await conn.fetchrow(
+                "UPDATE memories SET content = $1, content_sha256 = $2, "
+                "content_size_bytes = $3, path = $4, current_version_id = $5, "
+                "updated_at = now() "
+                "WHERE memory_store_id = $6 AND id = $7 RETURNING *",
+                next_content,
+                next_sha,
+                next_size,
+                next_path,
+                version_id,
+                store_id,
+                memory_id,
+            )
+    except asyncpg.UniqueViolationError as exc:
+        assert next_path_for_conflict is not None
+        existing = await conn.fetchrow(
+            "SELECT id FROM memories WHERE memory_store_id = $1 AND path = $2 "
+            "AND id != $3 AND deleted_at IS NULL",
+            store_id,
+            next_path_for_conflict,
+            memory_id,
+        )
+        conflicting_id = existing["id"] if existing is not None else None
+        raise MemoryPathConflictError(
+            f"path {next_path_for_conflict!r} is already used by {conflicting_id!r}",
+            detail={
+                "conflicting_memory_id": conflicting_id,
+                "conflicting_path": next_path_for_conflict,
+            },
+        ) from exc
+    assert row is not None
+    return _row_to_memory(row, include_content=False)
+
+
+async def delete_memory_with_version(
+    conn: asyncpg.Connection[Any],
+    *,
+    store_id: str,
+    memory_id: str,
+    actor_type: str,
+    actor_ref: str,
+) -> None:
+    """Soft-delete: tombstone version row + ``deleted_at`` on the memory."""
+    async with conn.transaction():
+        cur = await conn.fetchrow(
+            "SELECT path FROM memories WHERE memory_store_id = $1 AND id = $2 "
+            "AND deleted_at IS NULL FOR UPDATE",
+            store_id,
+            memory_id,
+        )
+        if cur is None:
+            raise NotFoundError(
+                f"memory {memory_id} not found in store {store_id}",
+                detail={"id": memory_id, "memory_store_id": store_id},
+            )
+
+        seq = await _allocate_version_seq(conn, store_id)
+        version_id = make_id(MEMORY_VERSION)
+        await conn.execute(
+            """
+            INSERT INTO memory_versions
+                (id, memory_store_id, memory_id, seq, operation, path,
+                 created_by_type, created_by_ref)
+            VALUES ($1, $2, $3, $4, 'deleted', $5, $6, $7)
+            """,
+            version_id,
+            store_id,
+            memory_id,
+            seq,
+            cur["path"],
+            actor_type,
+            actor_ref,
+        )
+
+        await conn.execute(
+            "UPDATE memories SET deleted_at = now(), updated_at = now() "
+            "WHERE memory_store_id = $1 AND id = $2",
+            store_id,
+            memory_id,
+        )
+
+
+# Versions ─────────────────────────────────────────────────────────────────
+
+
+async def list_memory_versions(
+    conn: asyncpg.Connection[Any],
+    store_id: str,
+    *,
+    memory_id: str | None = None,
+    limit: int = 100,
+) -> list[MemoryVersion]:
+    where = "memory_store_id = $1"
+    args: list[Any] = [store_id]
+    if memory_id is not None:
+        args.append(memory_id)
+        where += f" AND memory_id = ${len(args)}"
+    args.append(limit)
+    rows = await conn.fetch(
+        f"SELECT * FROM memory_versions WHERE {where} ORDER BY created_at DESC LIMIT ${len(args)}",
+        *args,
+    )
+    return [_row_to_memory_version(r, include_content=False) for r in rows]
+
+
+async def get_memory_version(
+    conn: asyncpg.Connection[Any], store_id: str, version_id: str
+) -> MemoryVersion:
+    row = await conn.fetchrow(
+        "SELECT * FROM memory_versions WHERE memory_store_id = $1 AND id = $2",
+        store_id,
+        version_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"memory version {version_id} not found",
+            detail={"id": version_id, "memory_store_id": store_id},
+        )
+    return _row_to_memory_version(row, include_content=True)
+
+
+async def redact_memory_version(
+    conn: asyncpg.Connection[Any],
+    *,
+    store_id: str,
+    version_id: str,
+    actor_type: str,
+    actor_ref: str,
+) -> MemoryVersion:
+    """Strip content fields from a version while keeping the audit trail.
+
+    Rejects redacting the current head of a live (non-deleted) memory:
+    write a new version first, or delete the parent memory.
+    """
+    async with conn.transaction():
+        ver = await conn.fetchrow(
+            "SELECT * FROM memory_versions WHERE memory_store_id = $1 AND id = $2 FOR UPDATE",
+            store_id,
+            version_id,
+        )
+        if ver is None:
+            raise NotFoundError(
+                f"memory version {version_id} not found",
+                detail={"id": version_id, "memory_store_id": store_id},
+            )
+
+        head_check = await conn.fetchrow(
+            "SELECT 1 FROM memories WHERE memory_store_id = $1 AND id = $2 "
+            "AND current_version_id = $3 AND deleted_at IS NULL",
+            store_id,
+            ver["memory_id"],
+            version_id,
+        )
+        if head_check is not None:
+            raise ConflictError(
+                "this version is the live head; write a new version first, "
+                "or delete the memory to make all versions redactable",
+                detail={"id": version_id, "memory_id": ver["memory_id"]},
+            )
+
+        if ver["redacted_at"] is not None:
+            return _row_to_memory_version(ver, include_content=False)
+
+        row = await conn.fetchrow(
+            "UPDATE memory_versions SET path = NULL, content = NULL, "
+            "content_sha256 = NULL, content_size_bytes = NULL, "
+            "redacted_at = now(), redacted_by_type = $1, redacted_by_ref = $2 "
+            "WHERE memory_store_id = $3 AND id = $4 RETURNING *",
+            actor_type,
+            actor_ref,
+            store_id,
+            version_id,
+        )
+    assert row is not None
+    return _row_to_memory_version(row, include_content=False)
+
+
+# Session attachment ───────────────────────────────────────────────────────
+
+
+async def attach_memory_stores_to_session(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    resources: list[MemoryStoreResource],
+) -> None:
+    """Insert ``session_memory_stores`` rows for each resource, snapshotting
+    name + description from the parent store at attach time. Validates that
+    every referenced store exists and is non-archived; rejects duplicate
+    snapshotted names (mount-path collision)."""
+    if not resources:
+        return
+    seen_names: set[str] = set()
+    for rank, res in enumerate(resources):
+        store = await get_memory_store(conn, res.memory_store_id, allow_archived=False)
+        if store.name in seen_names:
+            raise ConflictError(
+                f"two attached memory stores share the name {store.name!r}; "
+                "rename one before attaching",
+                detail={
+                    "memory_store_id": res.memory_store_id,
+                    "conflicting_name": store.name,
+                },
+            )
+        seen_names.add(store.name)
+        await conn.execute(
+            """
+            INSERT INTO session_memory_stores
+                (session_id, memory_store_id, rank, access, instructions,
+                 name_at_attach, description_at_attach)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """,
+            session_id,
+            res.memory_store_id,
+            rank,
+            res.access,
+            res.instructions,
+            store.name,
+            store.description,
+        )
+
+
+async def list_session_memory_store_echoes(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> list[MemoryStoreResourceEcho]:
+    rows = await conn.fetch(
+        "SELECT * FROM session_memory_stores WHERE session_id = $1 ORDER BY rank",
+        session_id,
+    )
+    return [
+        MemoryStoreResourceEcho(
+            memory_store_id=r["memory_store_id"],
+            access=r["access"],
+            instructions=r["instructions"],
+            name=r["name_at_attach"],
+            description=r["description_at_attach"],
+            mount_path=f"/mnt/memory/{r['name_at_attach']}",
+        )
+        for r in rows
+    ]
