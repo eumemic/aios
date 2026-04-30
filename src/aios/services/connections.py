@@ -25,7 +25,10 @@ async def create_connection(
     connector: str,
     account: str,
     metadata: dict[str, Any],
+    mcp_url: str | None = None,
+    vault_id: str | None = None,
 ) -> Connection:
+    _ = (mcp_url, vault_id)  # Accepted for legacy call sites during MCP-vault coexistence.
     async with pool.acquire() as conn:
         return await queries.insert_connection(
             conn,
