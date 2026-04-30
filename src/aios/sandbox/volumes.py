@@ -51,17 +51,38 @@ def ensure_workspace_path(raw_path: str) -> Path:
     return path
 
 
-def memory_root_for(session_id: str) -> Path:
-    """Return ``<workspace_root>/<session_id>/memory`` — the parent of all
-    per-session memory-store mount source directories.
+_MEMORY_STORES_ROOT = "_memory_stores"
 
-    Each attached memory store gets a sibling subdirectory named after its
-    ``name_at_attach`` snapshot, mounted into the container at
-    ``/mnt/memory/<store_name>/``.
+
+def memory_stores_root() -> Path:
+    """Return ``<workspace_root>/_memory_stores`` — the parent of all
+    shared memory-store host directories.
+
+    Per-store host dirs (one per ``memory_store.id``) live as siblings in
+    here and are bind-mounted into every attached session's container at
+    ``/mnt/memory/<store_name>/``. Sharing the source dir across attached
+    sessions is what makes cross-session reads live: a tool write from
+    session A appears in session B's mount immediately.
     """
-    return (get_settings().workspace_root / session_id / "memory").resolve()
+    return (get_settings().workspace_root / _MEMORY_STORES_ROOT).resolve()
 
 
-def memory_dir_for(session_id: str, store_name: str) -> Path:
-    """Return the host-side directory backing ``/mnt/memory/<store_name>/``."""
-    return memory_root_for(session_id) / store_name
+def memory_store_host_dir(store_id: str) -> Path:
+    """Return the shared host-side directory backing memory store ``store_id``.
+
+    Pure — does not create the directory. Materialization is handled by
+    :mod:`aios.sandbox.memory_mounts`, which acquires the matching lock
+    file (see :func:`memory_store_lock_path`) before populating from DB.
+    """
+    return memory_stores_root() / store_id
+
+
+def memory_store_lock_path(store_id: str) -> Path:
+    """Return the file-lock path used to serialize first-attach materialization
+    of ``store_id``.
+
+    Two sessions provisioning concurrently for the same store both call
+    :func:`materialize_store_to_host`; the lock ensures only one of them
+    writes the initial DB snapshot to the host dir. The loser observes
+    the ``.materialized`` marker and skips."""
+    return memory_stores_root() / f"{store_id}.lock"

@@ -33,7 +33,12 @@ import shlex
 from typing import Any
 
 from aios.config import get_settings
-from aios.errors import AiosError, MemoryPathConflictError, MemoryStoreArchivedError
+from aios.errors import (
+    AiosError,
+    MemoryPathConflictError,
+    MemoryPreconditionFailedError,
+    MemoryStoreArchivedError,
+)
 from aios.harness import runtime
 from aios.models.memory_stores import MAX_CONTENT_BYTES
 from aios.services import memory_stores as memory_service
@@ -108,6 +113,11 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
         # Durable write first. Surface DB errors to the model verbatim
         # so it can decide whether to retry, choose another path, etc.
         pool = runtime.require_pool()
+        # CMA's ESTALE-equivalent: if the model just read this path in this
+        # session, gate the write on that read's sha. A mismatch means
+        # someone else (or bash) modified the file in between — return a
+        # typed error so the model re-reads and retries.
+        precondition_sha = runtime.get_read_sha(session_id, target.store_id, target.store_path)
         try:
             existing = await memory_service.get_memory_by_path(
                 pool, target.store_id, target.store_path, include_content=False
@@ -126,10 +136,20 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
                     store_id=target.store_id,
                     memory_id=existing.id,
                     new_content=content,
+                    precondition_sha256=precondition_sha,
                     actor=memory_service.SessionActor(session_id=session_id),
                 )
         except MemoryPathConflictError as exc:
             return {"error": exc.message, "path": path, "detail": exc.detail}
+        except MemoryPreconditionFailedError as exc:
+            return {
+                "error": (
+                    f"the file at {path} changed since your last read; "
+                    "re-read it and retry the write"
+                ),
+                "path": path,
+                "detail": exc.detail,
+            }
         except MemoryStoreArchivedError as exc:
             return {"error": exc.message, "path": path}
 

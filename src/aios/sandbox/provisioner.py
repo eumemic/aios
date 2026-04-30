@@ -131,12 +131,7 @@ async def _materialize_memory_mounts(
     async with pool.acquire() as conn:
         echoes = await queries.list_session_memory_store_echoes(conn, session_id)
         for echo in echoes:
-            await materialize_store_to_host(
-                conn,
-                session_id=session_id,
-                store_id=echo.memory_store_id,
-                store_name=echo.name,
-            )
+            await materialize_store_to_host(conn, store_id=echo.memory_store_id)
     return list(echoes)
 
 
@@ -151,7 +146,7 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
     Raises :class:`ContainerError` if ``docker run`` fails for any reason
     (image missing, daemon unreachable, resource limits, ...).
     """
-    from aios.sandbox.volumes import ensure_workspace_path, memory_dir_for
+    from aios.sandbox.volumes import ensure_workspace_path, memory_store_host_dir
 
     settings = get_settings()
     raw_path, session_env = await _load_session_provisioning(session_id)
@@ -192,9 +187,10 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
 
     # Bind-mount each attached memory store. ``:ro`` for read_only attaches
     # ensures the kernel rejects writes (bash + tools alike); ``:rw`` is the
-    # read_write default. Mount path follows the snapshotted name.
+    # read_write default. The host source is shared across all attached
+    # sessions, so a tool/API write in one session is visible to all.
     for echo in memory_echoes:
-        host_dir = memory_dir_for(session_id, echo.name)
+        host_dir = memory_store_host_dir(echo.memory_store_id)
         mode = "ro" if echo.access == "read_only" else "rw"
         argv.extend(["--volume", f"{host_dir}:/mnt/memory/{echo.name}:{mode}"])
 

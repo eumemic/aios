@@ -22,12 +22,14 @@ On failure (nonzero exit from ``cat``), returns ``{"error": "..."}``.
 
 from __future__ import annotations
 
+import hashlib
 import shlex
 from typing import Any
 
 from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
+from aios.tools.memory_intercept import resolve_memory_target
 from aios.tools.registry import registry
 
 
@@ -108,6 +110,22 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
             "error": result.stderr.strip() or f"read failed with exit code {result.exit_code}",
             "path": path,
         }
+
+    # On memory-mount targets, stamp the raw-file sha into the per-session
+    # cache so the next write tool call against this path can use it as a
+    # precondition. The cached sha is from the FS (post-bash if applicable)
+    # — a divergence with DB surfaces as a precondition_failed error on
+    # write, which is what we want.
+    target = resolve_memory_target(session_id, path)
+    if target is not None:
+        raw = await handle.run_command(
+            f"cat -- {shlex.quote(path)}",
+            timeout_seconds=settings.bash_default_timeout_seconds,
+            max_output_bytes=settings.bash_max_output_bytes,
+        )
+        if raw.exit_code == 0:
+            sha = hashlib.sha256(raw.stdout.encode("utf-8")).hexdigest()
+            runtime.set_read_sha(session_id, target.store_id, target.store_path, sha)
 
     return {"path": path, "content": result.stdout}
 

@@ -11,6 +11,12 @@ from __future__ import annotations
 
 from aios.models.memory_stores import MemoryStoreResourceEcho
 
+_BASH_GUIDANCE = (
+    "Use the `read`, `write`, and `edit` tools for memory store operations. "
+    "Bash writes to memory mount paths are not durably persisted in the "
+    "memory version log and may diverge from the cross-session view."
+)
+
 
 def build_memory_stores_block(echoes: list[MemoryStoreResourceEcho]) -> str:
     """Render the system-prompt section for attached memory stores.
@@ -32,6 +38,7 @@ def build_memory_stores_block(echoes: list[MemoryStoreResourceEcho]) -> str:
         if echo.instructions:
             lines.append(f"- instructions: {echo.instructions}")
         sections.append("\n".join(lines))
+    sections.append(_BASH_GUIDANCE)
     return "\n\n".join(sections)
 
 

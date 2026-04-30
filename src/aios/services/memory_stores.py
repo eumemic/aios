@@ -4,11 +4,17 @@ Thin orchestration over :mod:`aios.db.queries`. Hashes and validates content,
 dispatches actor-typed writes, and enforces archived-store rejection at the
 write surface (the DB-level row lock in ``_allocate_version_seq`` is the
 serialization point that catches racing writes after archive).
+
+After the durable DB write commits, mirrors the change to the shared host
+directory (see :mod:`aios.sandbox.atomic_mirror`). Mirroring is best-effort:
+if no session has provisioned for the store yet, the host dir doesn't exist
+and we skip — the next provisioning materializes from DB anyway.
 """
 
 from __future__ import annotations
 
 import hashlib
+import shutil
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +30,8 @@ from aios.models.memory_stores import (
     MemoryStoreResourceEcho,
     MemoryVersion,
 )
+from aios.sandbox.atomic_mirror import atomic_delete, atomic_write
+from aios.sandbox.volumes import memory_store_host_dir
 
 
 @dataclass(frozen=True)
@@ -49,6 +57,27 @@ def _actor_columns(actor: Actor) -> tuple[str, str]:
 
 def _sha256_hex(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _mirror_to_host(store_id: str, path: str, content: str) -> None:
+    """Mirror a memory write to the shared host dir, if it exists.
+
+    No-op when the host dir hasn't been materialized yet (no session has
+    provisioned with this store attached). The next provisioning will
+    materialize from DB and pick up the latest content there.
+    """
+    host_dir = memory_store_host_dir(store_id)
+    if not host_dir.exists():
+        return
+    atomic_write(host_dir / path.lstrip("/"), content)
+
+
+def _mirror_delete_from_host(store_id: str, path: str) -> None:
+    """Symmetric counterpart for soft-deletes."""
+    host_dir = memory_store_host_dir(store_id)
+    if not host_dir.exists():
+        return
+    atomic_delete(host_dir / path.lstrip("/"))
 
 
 # ── stores ──────────────────────────────────────────────────────────────────
@@ -113,6 +142,10 @@ async def archive_store(pool: asyncpg.Pool[Any], store_id: str) -> MemoryStore:
 async def delete_store(pool: asyncpg.Pool[Any], store_id: str) -> None:
     async with pool.acquire() as conn:
         await queries.delete_memory_store(conn, store_id)
+    # Drop the shared host dir after the DB cascade. ignore_errors=True
+    # because it's a best-effort cleanup — a missing dir means no session
+    # ever provisioned for this store, which is fine.
+    shutil.rmtree(memory_store_host_dir(store_id), ignore_errors=True)
 
 
 # ── memories ───────────────────────────────────────────────────────────────
@@ -129,7 +162,7 @@ async def create_memory(
     sha = _sha256_hex(content)
     actor_type, actor_ref = _actor_columns(actor)
     async with pool.acquire() as conn:
-        return await queries.insert_memory_with_version(
+        memory = await queries.insert_memory_with_version(
             conn,
             store_id=store_id,
             path=path,
@@ -138,6 +171,8 @@ async def create_memory(
             actor_type=actor_type,
             actor_ref=actor_ref,
         )
+    _mirror_to_host(store_id, path, content)
+    return memory
 
 
 async def get_memory(
@@ -195,7 +230,9 @@ async def update_memory(
     actor_type, actor_ref = _actor_columns(actor)
     new_sha = _sha256_hex(new_content) if new_content is not None else None
     async with pool.acquire() as conn:
-        return await queries.update_memory_with_version(
+        prior = await queries.get_memory(conn, store_id, memory_id, include_content=False)
+        prior_path = prior.path
+        memory = await queries.update_memory_with_version(
             conn,
             store_id=store_id,
             memory_id=memory_id,
@@ -206,6 +243,20 @@ async def update_memory(
             actor_type=actor_type,
             actor_ref=actor_ref,
         )
+    # Mirror after commit. Rename moves the FS entry; content updates
+    # rewrite atomically. Either way the latest DB content lands at the
+    # final path.
+    if memory.path != prior_path:
+        _mirror_delete_from_host(store_id, prior_path)
+    if new_content is not None:
+        _mirror_to_host(store_id, memory.path, new_content)
+    elif memory.path != prior_path:
+        # Rename without content change: re-fetch content for the mirror
+        # so the renamed file has correct bytes.
+        async with pool.acquire() as conn:
+            full = await queries.get_memory(conn, store_id, memory_id, include_content=True)
+        _mirror_to_host(store_id, memory.path, full.content or "")
+    return memory
 
 
 async def delete_memory(
@@ -217,6 +268,7 @@ async def delete_memory(
 ) -> None:
     actor_type, actor_ref = _actor_columns(actor)
     async with pool.acquire() as conn:
+        prior = await queries.get_memory(conn, store_id, memory_id, include_content=False)
         await queries.delete_memory_with_version(
             conn,
             store_id=store_id,
@@ -224,6 +276,7 @@ async def delete_memory(
             actor_type=actor_type,
             actor_ref=actor_ref,
         )
+    _mirror_delete_from_host(store_id, prior.path)
 
 
 # ── versions ────────────────────────────────────────────────────────────────
