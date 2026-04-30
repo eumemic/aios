@@ -22,7 +22,6 @@ On failure (nonzero exit from ``cat``), returns ``{"error": "..."}``.
 
 from __future__ import annotations
 
-import hashlib
 import shlex
 from typing import Any
 
@@ -91,13 +90,25 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     settings = get_settings()
     sandbox = runtime.require_sandbox_registry()
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
+    target = resolve_memory_target(session_id, path)
 
-    # cat -n numbers lines (1-indexed) with the format `   N\tCONTENT`.
-    # sed -n 'START,ENDp' slices by line number. Using cat first means
-    # sed sees the already-numbered lines, so the visible numbers are
-    # the file's actual line numbers (not relative to the slice).
     end = offset + limit - 1
-    cmd = f"cat -n -- {shlex.quote(path)} | sed -n {shlex.quote(f'{offset},{end}p')}"
+    quoted_path = shlex.quote(path)
+    sed_arg = shlex.quote(f"{offset},{end}p")
+    # cat -n numbers lines (1-indexed) with the format `   N\tCONTENT`;
+    # sed -n 'START,ENDp' slices by line number against the already-
+    # numbered output so the visible numbers are the file's actual line
+    # numbers, not relative to the slice.
+    if target is None:
+        cmd = f"cat -n -- {quoted_path} | sed -n {sed_arg}"
+    else:
+        # Memory mounts: prepend the raw-file sha (one line, 64 hex chars)
+        # so the write-tool precondition can be gated against the FS state
+        # the model just observed. One docker-exec round-trip total.
+        cmd = (
+            f"sha256sum -- {quoted_path} | cut -d' ' -f1 && "
+            f"cat -n -- {quoted_path} | sed -n {sed_arg}"
+        )
 
     result = await handle.run_command(
         cmd,
@@ -111,23 +122,12 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
             "path": path,
         }
 
-    # On memory-mount targets, stamp the raw-file sha into the per-session
-    # cache so the next write tool call against this path can use it as a
-    # precondition. The cached sha is from the FS (post-bash if applicable)
-    # — a divergence with DB surfaces as a precondition_failed error on
-    # write, which is what we want.
-    target = resolve_memory_target(session_id, path)
-    if target is not None:
-        raw = await handle.run_command(
-            f"cat -- {shlex.quote(path)}",
-            timeout_seconds=settings.bash_default_timeout_seconds,
-            max_output_bytes=settings.bash_max_output_bytes,
-        )
-        if raw.exit_code == 0:
-            sha = hashlib.sha256(raw.stdout.encode("utf-8")).hexdigest()
-            runtime.set_read_sha(session_id, target.store_id, target.store_path, sha)
+    if target is None:
+        return {"path": path, "content": result.stdout}
 
-    return {"path": path, "content": result.stdout}
+    sha_line, _, content = result.stdout.partition("\n")
+    runtime.set_read_sha(session_id, target.store_id, target.store_path, sha_line.strip())
+    return {"path": path, "content": content}
 
 
 def _register() -> None:

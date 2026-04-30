@@ -64,11 +64,10 @@ def clear_session_memory_mounts(session_id: str) -> None:
     _session_memory_mounts.pop(session_id, None)
 
 
-# Per-session "last sha read by tool" cache. Populated by the read tool on
-# memory-mount paths; consumed by the write tool to gate updates with a
-# sha-precondition. Equivalent in spirit to CMA's NFS-style ESTALE — "your
-# write is rejected because the file changed since you read it" — without
-# requiring a FUSE filesystem.
+# Per-session "last sha read by tool" cache: read tool stamps; write tool
+# gates updates on it. Mismatch surfaces as a typed precondition error so
+# the model re-reads and retries — the optimistic-locking analog of an
+# ESTALE error from a kernel-level shared filesystem.
 _session_read_shas: dict[str, dict[tuple[str, str], str]] = {}
 
 

@@ -26,7 +26,6 @@ import asyncpg
 
 from aios.db import queries
 from aios.logging import get_logger
-from aios.models.memory_stores import Memory
 from aios.sandbox.atomic_mirror import atomic_write
 from aios.sandbox.volumes import memory_store_host_dir, memory_store_lock_path
 
@@ -62,13 +61,10 @@ async def materialize_store_to_host(
                 return  # another waiter materialized while we blocked
             host_dir.mkdir(parents=True, exist_ok=True)
 
-            memories = [
-                m for m in await queries.list_memories(conn, store_id) if isinstance(m, Memory)
-            ]
-            for memory in memories:
-                full = await queries.get_memory(conn, store_id, memory.id, include_content=True)
+            entries = await queries.list_active_memory_paths_and_content(conn, store_id)
+            for path, content in entries:
                 # Memory paths are guaranteed to start with "/" by the SQL CHECK.
-                atomic_write(host_dir / full.path.lstrip("/"), full.content or "")
+                atomic_write(host_dir / path.lstrip("/"), content or "")
 
             # Marker last so a crash mid-materialization leaves an unmarked
             # dir that the next attempt will redo.
@@ -76,7 +72,7 @@ async def materialize_store_to_host(
             log.info(
                 "memory.materialized",
                 store_id=store_id,
-                count=len(memories),
+                count=len(entries),
             )
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

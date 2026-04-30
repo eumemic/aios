@@ -2977,6 +2977,22 @@ async def get_memory_by_path(
     return _row_to_memory(row, include_content=include_content)
 
 
+async def list_active_memory_paths_and_content(
+    conn: asyncpg.Connection[Any], store_id: str
+) -> list[tuple[str, str]]:
+    """Bulk-fetch ``(path, content)`` for every non-deleted memory in the store.
+
+    Used by sandbox materialization, which needs all live memories in one
+    DB roundtrip rather than ``list_memories`` (metadata only) followed by
+    a per-memory ``get_memory(include_content=True)`` fan-out.
+    """
+    rows = await conn.fetch(
+        "SELECT path, content FROM memories WHERE memory_store_id = $1 AND deleted_at IS NULL",
+        store_id,
+    )
+    return [(r["path"], r["content"]) for r in rows]
+
+
 async def list_memories(
     conn: asyncpg.Connection[Any],
     store_id: str,

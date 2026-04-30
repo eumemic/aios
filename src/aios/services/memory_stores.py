@@ -229,8 +229,13 @@ async def update_memory(
 ) -> Memory:
     actor_type, actor_ref = _actor_columns(actor)
     new_sha = _sha256_hex(new_content) if new_content is not None else None
+    # Pre-fetch content if we'll need it for the mirror after a rename
+    # without content change — folds the second pool.acquire() into one.
+    need_prior_content = new_content is None and new_path is not None
     async with pool.acquire() as conn:
-        prior = await queries.get_memory(conn, store_id, memory_id, include_content=False)
+        prior = await queries.get_memory(
+            conn, store_id, memory_id, include_content=need_prior_content
+        )
         prior_path = prior.path
         memory = await queries.update_memory_with_version(
             conn,
@@ -243,19 +248,12 @@ async def update_memory(
             actor_type=actor_type,
             actor_ref=actor_ref,
         )
-    # Mirror after commit. Rename moves the FS entry; content updates
-    # rewrite atomically. Either way the latest DB content lands at the
-    # final path.
     if memory.path != prior_path:
         _mirror_delete_from_host(store_id, prior_path)
     if new_content is not None:
         _mirror_to_host(store_id, memory.path, new_content)
     elif memory.path != prior_path:
-        # Rename without content change: re-fetch content for the mirror
-        # so the renamed file has correct bytes.
-        async with pool.acquire() as conn:
-            full = await queries.get_memory(conn, store_id, memory_id, include_content=True)
-        _mirror_to_host(store_id, memory.path, full.content or "")
+        _mirror_to_host(store_id, memory.path, prior.content or "")
     return memory
 
 

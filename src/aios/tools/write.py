@@ -110,13 +110,10 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
     if target is not None:
-        # Durable write first. Surface DB errors to the model verbatim
-        # so it can decide whether to retry, choose another path, etc.
+        # Durable DB write first; the FS mirror below is for in-container
+        # visibility. The cached read sha gates the update so concurrent
+        # modifications surface as a typed precondition error.
         pool = runtime.require_pool()
-        # CMA's ESTALE-equivalent: if the model just read this path in this
-        # session, gate the write on that read's sha. A mismatch means
-        # someone else (or bash) modified the file in between — return a
-        # typed error so the model re-reads and retries.
         precondition_sha = runtime.get_read_sha(session_id, target.store_id, target.store_path)
         try:
             existing = await memory_service.get_memory_by_path(
