@@ -1,7 +1,7 @@
 """Top-level orchestration.
 
 ``run(cfg)`` supervises three tasks under one ``asyncio.TaskGroup``: the
-signal-cli subprocess, the inbound pump (listener → parse → POST aios), and
+signal-cli subprocess, the inbound pump (listener → parse → MCP broker), and
 the MCP server. Any task failure propagates through the group and exits the
 process non-zero — operator systemd/Docker restarts.
 """
@@ -15,7 +15,8 @@ import structlog
 
 from .config import Settings
 from .daemon import SignalDaemon
-from .ingest import InboundPump, IngestClient
+from .inbound import SignalInboundBroker, initial_signal_channels
+from .ingest import InboundPump
 from .mcp import build_mcp_app, build_mcp_server, parse_bind, serve_mcp
 
 log = structlog.get_logger(__name__)
@@ -40,38 +41,42 @@ async def run(cfg: Settings) -> None:
             groups=len(groups),
         )
 
-        async with IngestClient(
-            base_url=cfg.aios_url,
-            api_key=cfg.aios_api_key,
-            connection_id=cfg.aios_connection_id,
-        ) as ingest:
-            pump = InboundPump(
+        broker = SignalInboundBroker(
+            bot_uuid=bot_uuid,
+            initial_channels=initial_signal_channels(
                 bot_uuid=bot_uuid,
-                ingest=ingest,
-                messages=daemon.listener.messages(),
+                groups=groups,
                 contact_names=contact_names,
-            )
-            mcp_app = build_mcp_app(
-                build_mcp_server(
-                    rpc=daemon.rpc,
-                    bot_uuid=bot_uuid,
-                    phone=cfg.phone,
-                    groups=groups,
-                    contact_names=contact_names,
-                ),
-                token=cfg.mcp_token,
-            )
-            host, port = parse_bind(cfg.mcp_bind)
+            ),
+        )
+        pump = InboundPump(
+            bot_uuid=bot_uuid,
+            ingest=broker,
+            messages=daemon.listener.messages(),
+            contact_names=contact_names,
+        )
+        mcp_app = build_mcp_app(
+            build_mcp_server(
+                rpc=daemon.rpc,
+                bot_uuid=bot_uuid,
+                phone=cfg.phone,
+                groups=groups,
+                contact_names=contact_names,
+                inbound_broker=broker,
+            ),
+            token=cfg.mcp_token,
+        )
+        host, port = parse_bind(cfg.mcp_bind)
 
-            try:
-                async with asyncio.TaskGroup() as tg:
-                    tg.create_task(pump.run(), name="signal-pump")
-                    tg.create_task(serve_mcp(mcp_app, host=host, port=port), name="signal-mcp")
-                    tg.create_task(_await_crash(daemon), name="signal-crash-watch")
-            except* Exception as eg:
-                # Surface the first real exception so operators see a conventional
-                # traceback rather than ExceptionGroup noise.
-                raise eg.exceptions[0] from None
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(pump.run(), name="signal-pump")
+                tg.create_task(serve_mcp(mcp_app, host=host, port=port), name="signal-mcp")
+                tg.create_task(_await_crash(daemon), name="signal-crash-watch")
+        except* Exception as eg:
+            # Surface the first real exception so operators see a conventional
+            # traceback rather than ExceptionGroup noise.
+            raise eg.exceptions[0] from None
 
 
 async def _await_crash(daemon: SignalDaemon) -> None:

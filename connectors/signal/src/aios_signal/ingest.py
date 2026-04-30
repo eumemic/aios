@@ -1,9 +1,8 @@
-"""aios ingest client + InboundPump.
+"""Legacy aios HTTP ingest client + InboundPump.
 
-POSTs inbound Signal messages to ``/v1/connections/{id}/messages``. Retries
-transient failures (network, 5xx) with exponential backoff; 4xx and
-retry-exhaustion both log and drop, and we let Signal's own redelivery on
-reconnect recover anything not acked by the daemon.
+``InboundPump`` is transport-agnostic: in the MCP inbound runtime it publishes
+to the local broker, while ``IngestClient`` remains for legacy tests and
+coexistence.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
-from typing import Any, Self
+from typing import Any, Protocol, Self
 
 import httpx
 import structlog
@@ -22,6 +21,16 @@ from .parse import InboundMessage, build_content_text, parse_envelope
 log = structlog.get_logger(__name__)
 
 RETRY_DELAYS_SECONDS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0)
+
+
+class InboundSink(Protocol):
+    async def post_message(
+        self,
+        *,
+        path: str,
+        content: str,
+        metadata: dict[str, Any],
+    ) -> None: ...
 
 
 @dataclass(slots=True)
@@ -122,7 +131,7 @@ def build_metadata(
 @dataclass(slots=True)
 class InboundPump:
     bot_uuid: str
-    ingest: IngestClient
+    ingest: InboundSink
     messages: AsyncIterator[dict[str, Any]]
     contact_names: dict[str, str] = field(default_factory=dict)
 

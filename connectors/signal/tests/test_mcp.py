@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -15,6 +15,7 @@ from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
+from aios_signal.inbound import SignalInboundBroker
 from aios_signal.mcp import (
     BearerAuthMiddleware,
     _extract_timestamp,
@@ -81,6 +82,46 @@ async def _call_tool(
     structured: Any = result[1]
     assert isinstance(structured, dict)
     return structured
+
+
+class TestAiosInboundExtension:
+    def test_capability_is_advertised(self) -> None:
+        mcp = build_mcp_server(
+            rpc=cast(Any, FakeRpc()),
+            bot_uuid=BOT_UUID,
+            phone="+15550000000",
+            inbound_broker=SignalInboundBroker(bot_uuid=BOT_UUID),
+        )
+
+        opts = mcp._mcp_server.create_initialization_options()
+
+        assert opts.capabilities.experimental == {
+            "aiosInbound": {"version": 1, "connectorId": "signal"}
+        }
+
+    async def test_hidden_subscribe_tool_registers_session(self) -> None:
+        broker = SignalInboundBroker(bot_uuid=BOT_UUID)
+        mcp = build_mcp_server(
+            rpc=cast(Any, FakeRpc()),
+            bot_uuid=BOT_UUID,
+            phone="+15550000000",
+            inbound_broker=broker,
+        )
+        session = MagicMock()
+        session.send_message = AsyncMock()
+        rc = MagicMock(spec=RequestContext)
+        rc.session = session
+        ctx = Context(request_context=rc)
+
+        result = await mcp._tool_manager.call_tool(
+            "aios_inbound_subscribe",
+            {"account_id": BOT_UUID},
+            ctx,
+            convert_result=True,
+        )
+
+        assert isinstance(result, tuple)
+        assert result[1]["status"] == "subscribed"
 
 
 # ─── unit: pure helpers ─────────────────────────────────────────────────────

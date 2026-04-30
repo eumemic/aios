@@ -40,6 +40,7 @@ from aios.ids import (
     MEMORY_VERSION,
     ROUTING_RULE,
     SESSION,
+    SESSION_CHANNEL,
     SKILL,
     VAULT,
     VAULT_CREDENTIAL,
@@ -50,6 +51,7 @@ from aios.models.channel_bindings import ChannelBinding
 from aios.models.connections import Connection
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
+from aios.models.inbound import InboundSubscriptionSpec
 from aios.models.memory_stores import (
     Actor,
     Memory,
@@ -60,6 +62,7 @@ from aios.models.memory_stores import (
     MemoryVersion,
 )
 from aios.models.routing_rules import RoutingRule, SessionParams
+from aios.models.session_channels import SessionChannel
 from aios.models.sessions import Session, SessionStatus, SessionUsage
 from aios.models.skills import AgentSkillRef, Skill, SkillVersion
 from aios.models.vaults import Vault, VaultCredential
@@ -1882,6 +1885,322 @@ async def resolve_mcp_credential(
         str(row["auth_type"]),
         str(row["vault_id"]),
     )
+
+
+# ─── MCP inbound subscriptions and session channels ─────────────────────────
+
+
+def _row_to_session_channel(row: asyncpg.Record) -> SessionChannel:
+    metadata = _parse_jsonb(row["metadata"])
+    return SessionChannel(
+        id=row["id"],
+        session_id=row["session_id"],
+        mcp_server_name=row["mcp_server_name"],
+        mcp_server_url=row["mcp_server_url"],
+        account_id=row["account_id"],
+        path=row["path"],
+        address=row["address"],
+        display_name=row["display_name"],
+        notification_mode=row["notification_mode"],
+        metadata=metadata,
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        last_seen_at=row["last_seen_at"],
+        archived_at=row["archived_at"],
+    )
+
+
+async def upsert_session_channel(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    mcp_server_name: str,
+    mcp_server_url: str,
+    account_id: str,
+    path: str,
+    display_name: str | None = None,
+    notification_mode: str = "focal_candidate",
+    metadata: dict[str, Any] | None = None,
+) -> SessionChannel:
+    """Create or refresh a materialized channel for a session."""
+    new_id = make_id(SESSION_CHANNEL)
+    address = f"{mcp_server_name}/{account_id}/{path}"
+    metadata_json = json.dumps(metadata or {})
+    row = await conn.fetchrow(
+        """
+        INSERT INTO session_channels (
+            id, session_id, mcp_server_name, mcp_server_url, account_id, path,
+            address, display_name, notification_mode, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+        ON CONFLICT (session_id, mcp_server_name, account_id, path)
+            WHERE archived_at IS NULL
+        DO UPDATE SET
+            mcp_server_url = EXCLUDED.mcp_server_url,
+            address = EXCLUDED.address,
+            display_name = COALESCE(EXCLUDED.display_name, session_channels.display_name),
+            notification_mode = EXCLUDED.notification_mode,
+            metadata = session_channels.metadata || EXCLUDED.metadata,
+            last_seen_at = now(),
+            updated_at = now()
+        RETURNING *
+        """,
+        new_id,
+        session_id,
+        mcp_server_name,
+        mcp_server_url,
+        account_id,
+        path,
+        address,
+        display_name,
+        notification_mode,
+        metadata_json,
+    )
+    assert row is not None
+    return _row_to_session_channel(row)
+
+
+async def archive_session_channel(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    mcp_server_name: str,
+    account_id: str,
+    path: str,
+) -> SessionChannel | None:
+    row = await conn.fetchrow(
+        """
+        UPDATE session_channels
+           SET archived_at = now(), updated_at = now()
+         WHERE session_id = $1
+           AND mcp_server_name = $2
+           AND account_id = $3
+           AND path = $4
+           AND archived_at IS NULL
+        RETURNING *
+        """,
+        session_id,
+        mcp_server_name,
+        account_id,
+        path,
+    )
+    return _row_to_session_channel(row) if row is not None else None
+
+
+async def list_session_channels(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> list[SessionChannel]:
+    rows = await conn.fetch(
+        """
+        SELECT *
+          FROM session_channels
+         WHERE session_id = $1
+           AND archived_at IS NULL
+         ORDER BY id
+        """,
+        session_id,
+    )
+    return [_row_to_session_channel(r) for r in rows]
+
+
+async def list_session_channels_and_bindings(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> list[SessionChannel | ChannelBinding]:
+    """Return MCP session channels plus legacy bindings for coexistence.
+
+    If the same address appears in both places, the MCP session channel wins.
+    """
+    session_channels = await list_session_channels(conn, session_id)
+    by_address: dict[str, SessionChannel | ChannelBinding] = {
+        c.address: c for c in session_channels
+    }
+    legacy_bindings = await list_session_bindings(conn, session_id)
+    for binding in legacy_bindings:
+        by_address.setdefault(binding.address, binding)
+    return list(by_address.values())
+
+
+async def get_inbound_cursor(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    mcp_server_name: str,
+    vault_credential_id: str,
+    account_id: str,
+) -> str | None:
+    value: str | None = await conn.fetchval(
+        """
+        SELECT last_event_id
+          FROM inbound_mcp_cursors
+         WHERE session_id = $1
+           AND mcp_server_name = $2
+           AND vault_credential_id = $3
+           AND account_id = $4
+        """,
+        session_id,
+        mcp_server_name,
+        vault_credential_id,
+        account_id,
+    )
+    return value
+
+
+async def set_inbound_cursor(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    mcp_server_name: str,
+    mcp_server_url: str,
+    vault_credential_id: str,
+    account_id: str,
+    last_event_id: str | None,
+) -> None:
+    await conn.execute(
+        """
+        INSERT INTO inbound_mcp_cursors (
+            session_id, mcp_server_name, mcp_server_url, vault_credential_id,
+            account_id, last_event_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (session_id, mcp_server_name, vault_credential_id, account_id)
+        DO UPDATE SET
+            mcp_server_url = EXCLUDED.mcp_server_url,
+            last_event_id = EXCLUDED.last_event_id,
+            updated_at = now()
+        """,
+        session_id,
+        mcp_server_name,
+        mcp_server_url,
+        vault_credential_id,
+        account_id,
+        last_event_id,
+    )
+
+
+async def insert_inbound_receipt(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    mcp_server_name: str,
+    account_id: str,
+    event_id: str,
+) -> bool:
+    row = await conn.fetchrow(
+        """
+        INSERT INTO inbound_mcp_receipts (
+            session_id, mcp_server_name, account_id, event_id
+        )
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT DO NOTHING
+        RETURNING event_id
+        """,
+        session_id,
+        mcp_server_name,
+        account_id,
+        event_id,
+    )
+    return row is not None
+
+
+async def set_inbound_receipt_event(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    mcp_server_name: str,
+    account_id: str,
+    event_id: str,
+    event_row_id: str,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE inbound_mcp_receipts
+           SET event_row_id = $5
+         WHERE session_id = $1
+           AND mcp_server_name = $2
+           AND account_id = $3
+           AND event_id = $4
+        """,
+        session_id,
+        mcp_server_name,
+        account_id,
+        event_id,
+        event_row_id,
+    )
+
+
+async def list_inbound_subscription_specs(
+    conn: asyncpg.Connection[Any],
+) -> list[InboundSubscriptionSpec]:
+    """Return every MCP inbound subscription desired by active sessions."""
+    rows = await conn.fetch(
+        """
+        SELECT s.id AS session_id,
+               COALESCE(av.mcp_servers, a.mcp_servers) AS mcp_servers,
+               vc.id AS vault_credential_id,
+               vc.vault_id,
+               vc.mcp_server_url,
+               vc.account_id,
+               vc.auth_type,
+               vc.ciphertext,
+               vc.nonce,
+               vc.updated_at AS credential_updated_at
+          FROM sessions s
+          JOIN agents a ON a.id = s.agent_id
+          LEFT JOIN agent_versions av
+            ON av.agent_id = s.agent_id
+           AND av.version = s.agent_version
+          JOIN session_vaults sv ON sv.session_id = s.id
+          JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
+         WHERE s.archived_at IS NULL
+           AND s.status <> 'terminated'
+           AND vc.archived_at IS NULL
+           AND vc.account_id IS NOT NULL
+         ORDER BY s.id, sv.rank, vc.id
+        """
+    )
+    specs: list[InboundSubscriptionSpec] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for row in rows:
+        mcp_servers_raw = _parse_jsonb(row["mcp_servers"]) or []
+        if not isinstance(mcp_servers_raw, list):
+            continue
+        for server in mcp_servers_raw:
+            if not isinstance(server, dict):
+                continue
+            name = server.get("name")
+            url = server.get("url")
+            if not isinstance(name, str) or not isinstance(url, str):
+                continue
+            if url != row["mcp_server_url"]:
+                continue
+            account_id = str(row["account_id"])
+            key = (
+                str(row["session_id"]),
+                name,
+                url,
+                str(row["vault_credential_id"]),
+                account_id,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            specs.append(
+                InboundSubscriptionSpec(
+                    session_id=str(row["session_id"]),
+                    mcp_server_name=name,
+                    mcp_server_url=url,
+                    vault_id=str(row["vault_id"]),
+                    vault_credential_id=str(row["vault_credential_id"]),
+                    account_id=account_id,
+                    auth_type=str(row["auth_type"]),
+                    blob=EncryptedBlob(
+                        ciphertext=bytes(row["ciphertext"]),
+                        nonce=bytes(row["nonce"]),
+                    ),
+                    credential_updated_at=row["credential_updated_at"],
+                )
+            )
+    return specs
 
 
 # ─── skills ──────────────────────────────────────────────────────────────────

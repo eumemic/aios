@@ -1,4 +1,4 @@
-"""Operator subcommands: ``api``, ``worker``, ``migrate``.
+"""Operator subcommands: ``api``, ``worker``, ``inbound``, ``migrate``.
 
 These are lifted almost verbatim from the old ``__main__.py`` implementation.
 They start long-running processes (uvicorn, procrastinate worker) or run
@@ -35,6 +35,14 @@ def _run_worker() -> int:
 
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(worker_main())
+    return 0
+
+
+def _run_inbound() -> int:
+    from aios.inbound.runtime import inbound_main
+
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(inbound_main())
     return 0
 
 
@@ -89,6 +97,10 @@ def register(app: typer.Typer) -> None:
     @app.command("worker", help="Run the aios worker (procrastinate).")
     def worker() -> None:
         raise typer.Exit(_run_worker())
+
+    @app.command("inbound", help="Run the aios MCP inbound supervisor.")
+    def inbound() -> None:
+        raise typer.Exit(_run_inbound())
 
     @app.command(
         "migrate",

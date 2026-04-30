@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import hmac
 import urllib.parse
+from types import MethodType
 from typing import Any
 
 import structlog
@@ -34,6 +35,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .addressing import decode_chat_id
+from .inbound import SignalInboundBroker
 from .markdown import convert_markdown_to_signal_styles
 from .prompts import build_instructions
 from .rpc import RpcClient
@@ -155,6 +157,7 @@ def build_mcp_server(
     phone: str,
     groups: list[Any] | None = None,
     contact_names: dict[str, str] | None = None,
+    inbound_broker: SignalInboundBroker | None = None,
 ) -> FastMCP:
     # If `listContacts` included the bot's own entry, use its display
     # name as the profile_name for the identity block.  Absent when the
@@ -170,8 +173,27 @@ def build_mcp_server(
             groups=groups,
             contact_names=contact_names,
         ),
-        stateless_http=True,
+        stateless_http=False,
     )
+
+    if inbound_broker is not None:
+        _install_aios_inbound_capability(mcp)
+
+        @mcp.tool(
+            name="aios_inbound_subscribe",
+            description="Internal aios inbound subscription hook.",
+            meta={"aios.internal": True},
+        )
+        async def aios_inbound_subscribe(
+            account_id: str,
+            ctx: Context[Any, Any, Any],
+            since_event_id: str | None = None,
+        ) -> dict[str, Any]:
+            return await inbound_broker.subscribe(
+                account_id=account_id,
+                since_event_id=since_event_id,
+                session=ctx.session,
+            )
 
     @mcp.tool()
     async def signal_send(text: str, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
@@ -221,6 +243,26 @@ def build_mcp_server(
         return {"status": "ok"}
 
     return mcp
+
+
+def _install_aios_inbound_capability(mcp: FastMCP) -> None:
+    """Advertise the aios inbound extension in MCP initialize."""
+    server = mcp._mcp_server  # FastMCP exposes no public hook for this yet.
+    base = server.create_initialization_options
+
+    def create_initialization_options(
+        self: Any,
+        notification_options: Any | None = None,
+        experimental_capabilities: dict[str, dict[str, Any]] | None = None,
+    ) -> Any:
+        experimental = dict(experimental_capabilities or {})
+        experimental["aiosInbound"] = {
+            "version": 1,
+            "connectorId": "signal",
+        }
+        return base(notification_options, experimental)
+
+    server.create_initialization_options = MethodType(create_initialization_options, server)  # type: ignore[method-assign]
 
 
 def build_mcp_app(mcp: FastMCP, *, token: str) -> Starlette:

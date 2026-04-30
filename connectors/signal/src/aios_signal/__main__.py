@@ -28,9 +28,6 @@ def _build_parser() -> argparse.ArgumentParser:
     start.add_argument(
         "--daemon-port", type=int, help="TCP port for signal-cli daemon (AIOS_SIGNAL_DAEMON_PORT)"
     )
-    start.add_argument("--aios-url", help="aios base URL (AIOS_URL)")
-    start.add_argument("--aios-api-key", help="aios bearer token (AIOS_API_KEY)")
-    start.add_argument("--aios-connection-id", help="aios connection id (AIOS_CONNECTION_ID)")
     start.add_argument("--mcp-bind", help="MCP host:port (AIOS_SIGNAL_MCP_BIND)")
     start.add_argument("--mcp-token", help="MCP bearer token (AIOS_SIGNAL_MCP_TOKEN)")
     return parser
@@ -42,9 +39,6 @@ def _apply_cli_overrides(args: argparse.Namespace) -> None:
         "config_dir": "AIOS_SIGNAL_CONFIG_DIR",
         "signal_cli_bin": "AIOS_SIGNAL_CLI_BIN",
         "daemon_port": "AIOS_SIGNAL_DAEMON_PORT",
-        "aios_url": "AIOS_URL",
-        "aios_api_key": "AIOS_API_KEY",
-        "aios_connection_id": "AIOS_CONNECTION_ID",
         "mcp_bind": "AIOS_SIGNAL_MCP_BIND",
         "mcp_token": "AIOS_SIGNAL_MCP_TOKEN",
     }

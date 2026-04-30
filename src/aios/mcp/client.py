@@ -164,16 +164,25 @@ async def discover_mcp_tools(
                 session, init_result = await _open_session(url, headers, stack)
                 result = await session.list_tools()
 
-        if len(result.tools) > MAX_TOOLS_PER_SERVER:
+        visible_tools = [
+            tool
+            for tool in result.tools
+            if not (
+                isinstance(getattr(tool, "meta", None), dict)
+                and getattr(tool, "meta", {}).get("aios.internal") is True
+            )
+        ]
+
+        if len(visible_tools) > MAX_TOOLS_PER_SERVER:
             log.warning(
                 "mcp.tools_truncated",
                 server_name=server_name,
-                total=len(result.tools),
+                total=len(visible_tools),
                 limit=MAX_TOOLS_PER_SERVER,
             )
 
         tools: list[dict[str, Any]] = []
-        for tool in result.tools[:MAX_TOOLS_PER_SERVER]:
+        for tool in visible_tools[:MAX_TOOLS_PER_SERVER]:
             tools.append(
                 {
                     "type": "function",

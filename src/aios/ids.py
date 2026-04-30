@@ -34,6 +34,7 @@ ROUTING_RULE: Final = "rrul"
 MEMORY_STORE: Final = "memstore"
 MEMORY: Final = "mem"
 MEMORY_VERSION: Final = "memver"
+SESSION_CHANNEL: Final = "sch"
 
 _PREFIXES: Final = frozenset(
     {
@@ -52,6 +53,7 @@ _PREFIXES: Final = frozenset(
         MEMORY_STORE,
         MEMORY,
         MEMORY_VERSION,
+        SESSION_CHANNEL,
     }
 )
 

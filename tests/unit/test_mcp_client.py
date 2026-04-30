@@ -276,6 +276,32 @@ class TestDiscoverMcpTools:
         assert tools[0]["function"]["name"] == "mcp__myserver__tool_a"
         assert tools[1]["function"]["name"] == "mcp__myserver__tool_b"
 
+    async def test_discovery_filters_internal_aios_tools(self) -> None:
+        public_tool = _make_mock_tool("signal_send", "Send", {"type": "object"})
+        hidden_tool = _make_mock_tool("aios_inbound_subscribe", "Subscribe", {"type": "object"})
+        hidden_tool.meta = {"aios.internal": True}
+        mock_result = MagicMock()
+        mock_result.tools = [hidden_tool, public_tool]
+
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock(return_value=_mock_init_result())
+        mock_session.list_tools = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("aios.mcp.client.streamable_http_client") as mock_transport,
+            patch("aios.mcp.client.ClientSession") as mock_session_cls,
+        ):
+            mock_transport.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock(), MagicMock())
+            )
+            mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            tools, _instructions = await discover_mcp_tools("https://mcp.signal/", "signal", {})
+
+        assert [t["function"]["name"] for t in tools] == ["mcp__signal__signal_send"]
+
     async def test_discovery_failure_returns_empty(self) -> None:
         with patch("aios.mcp.client.streamable_http_client") as mock_transport:
             mock_transport.return_value.__aenter__ = AsyncMock(side_effect=ConnectionError("down"))

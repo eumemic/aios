@@ -1,4 +1,4 @@
-"""End-to-end integration: stubbed signal-cli + stubbed aios + real app.run.
+"""End-to-end integration: stubbed signal-cli + stubbed MCP broker + real app.run.
 
 We stub:
 
@@ -8,13 +8,13 @@ We stub:
   ``receive`` notifications on the persistent listener connection).
 - **signal-cli subprocess** — we patch :func:`_spawn_subprocess` to return a
   :class:`FakeProcess` that does nothing (the stub TCP server is all we need).
-- **aios HTTP** — we patch :class:`IngestClient` in ``app.py`` to inject an
-  :class:`httpx.MockTransport` that records every POST.
+- **MCP inbound broker** — we patch :class:`SignalInboundBroker` in ``app.py``
+  to record messages that the pump publishes.
 
 Assertions:
 
-1. An inbound envelope emitted by the stub daemon → POST observed to aios
-   with the expected shape (path, content, ``metadata.channel``).
+1. An inbound envelope emitted by the stub daemon → broker publish observed
+   with the expected shape (path, content, metadata).
 2. A ``signal_send`` tool call over real MCP streamable HTTP → stub daemon
    records a ``send`` RPC with the expected params.
 3. Closing the listener socket triggers a fatal crash → ``app.run`` raises.
@@ -30,13 +30,11 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 
 from aios_signal import app as app_module
 from aios_signal import daemon as daemon_module
 from aios_signal.config import Settings
-from aios_signal.ingest import IngestClient
 
 BOT_UUID = "99999999-8888-7777-6666-555555555555"
 BOT_PHONE = "+15550000000"
@@ -192,30 +190,41 @@ class StubDaemon:
             self._listener_writer = None
 
 
-# ─── Stub aios ingest ───────────────────────────────────────────────────────
+# ─── Stub MCP inbound broker ────────────────────────────────────────────────
 
 
-class IngestRecorder:
+class BrokerRecorder:
     def __init__(self) -> None:
-        self.requests: list[httpx.Request] = []
-
-    async def handle(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        return httpx.Response(201, json={"session_id": "ses_x", "event_id": "evt_x"})
+        self.messages: list[dict[str, Any]] = []
 
 
-def _make_ingest_factory(recorder: IngestRecorder):  # type: ignore[no-untyped-def]
-    class _PatchedIngest(IngestClient):
-        async def __aenter__(self) -> _PatchedIngest:
-            transport = httpx.MockTransport(recorder.handle)
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url,
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                transport=transport,
+def _make_broker_factory(recorder: BrokerRecorder):  # type: ignore[no-untyped-def]
+    class _PatchedBroker:
+        def __init__(self, *, bot_uuid: str, initial_channels: list[dict[str, Any]]) -> None:
+            self.bot_uuid = bot_uuid
+            self.initial_channels = initial_channels
+
+        async def post_message(
+            self,
+            *,
+            path: str,
+            content: str,
+            metadata: dict[str, Any],
+        ) -> None:
+            recorder.messages.append(
+                {"path": path, "content": content, "metadata": metadata}
             )
-            return self
 
-    return _PatchedIngest
+        async def subscribe(
+            self,
+            *,
+            account_id: str,
+            since_event_id: str | None,
+            session: Any,
+        ) -> dict[str, Any]:
+            return {"status": "subscribed", "replayed": 0}
+
+    return _PatchedBroker
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -237,9 +246,6 @@ def settings(tmp_path: Path, stub_daemon: StubDaemon) -> Settings:
     for k in list(os.environ):
         if k.startswith(("AIOS_", "AIOS_SIGNAL_")):
             os.environ.pop(k)
-    os.environ["AIOS_URL"] = "http://aios.stub"
-    os.environ["AIOS_API_KEY"] = "stub-key"
-    os.environ["AIOS_CONNECTION_ID"] = "conn_stub"
     os.environ["AIOS_SIGNAL_MCP_TOKEN"] = "stub-token"
 
     # Write a minimal signal-cli accounts.json so discover_bot_uuid can
@@ -287,8 +293,8 @@ async def test_end_to_end_inbound_and_crash(
     per test, and uvicorn's in-process server state doesn't always tear down
     cleanly across loops — keeping the whole flow on one loop sidesteps that.
     """
-    recorder = IngestRecorder()
-    monkeypatch.setattr(app_module, "IngestClient", _make_ingest_factory(recorder))
+    recorder = BrokerRecorder()
+    monkeypatch.setattr(app_module, "SignalInboundBroker", _make_broker_factory(recorder))
 
     envelope = {
         "sourceUuid": "11111111-2222-3333-4444-555555555555",
@@ -299,17 +305,16 @@ async def test_end_to_end_inbound_and_crash(
 
     run_task = asyncio.create_task(app_module.run(settings))
     try:
-        # Phase 1: inbound envelope arrives and is POSTed to aios.
+        # Phase 1: inbound envelope arrives and is published to the MCP broker.
         await asyncio.sleep(0.3)  # allow setup
         await stub_daemon.push_envelope(envelope)
         for _ in range(50):
-            if recorder.requests:
+            if recorder.messages:
                 break
             await asyncio.sleep(0.05)
 
-        assert len(recorder.requests) == 1
-        request = recorder.requests[0]
-        body = json.loads(request.read())
+        assert len(recorder.messages) == 1
+        body = recorder.messages[0]
         assert body["path"] == "11111111-2222-3333-4444-555555555555"
         assert body["content"] == "hello from alice"
         assert body["metadata"]["channel"] == (

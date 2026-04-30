@@ -38,8 +38,8 @@ from aios.tools.registry import to_openai_tools
 if TYPE_CHECKING:
     import asyncpg
 
+    from aios.harness.channels import ChannelState
     from aios.models.agents import Agent, AgentVersion
-    from aios.models.channel_bindings import ChannelBinding
     from aios.models.events import Event
     from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.models.sessions import Session
@@ -86,7 +86,7 @@ async def compute_step_prelude(
     *,
     session: Session,
     agent: Agent | AgentVersion,
-    bindings: list[ChannelBinding],
+    bindings: list[ChannelState],
     memory_store_echoes: list[MemoryStoreResourceEcho],
 ) -> StepPrelude:
     """Build the events-independent parts of the step payload.
@@ -140,7 +140,7 @@ async def compose_step_context(
     *,
     session: Session,
     agent: Agent | AgentVersion,
-    bindings: list[ChannelBinding],
+    bindings: list[ChannelState],
     prelude: StepPrelude,
     events: list[Event],
 ) -> StepContext:

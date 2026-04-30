@@ -4,7 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from aios.ids import AGENT, CREDENTIAL, ENVIRONMENT, EVENT, SESSION, make_id, split_id
+from aios.ids import (
+    AGENT,
+    CREDENTIAL,
+    ENVIRONMENT,
+    EVENT,
+    SESSION,
+    SESSION_CHANNEL,
+    make_id,
+    split_id,
+)
 
 
 class TestMakeId:
@@ -20,7 +29,7 @@ class TestMakeId:
 
     @pytest.mark.parametrize(
         "prefix",
-        [AGENT, ENVIRONMENT, SESSION, EVENT, CREDENTIAL],
+        [AGENT, ENVIRONMENT, SESSION, EVENT, CREDENTIAL, SESSION_CHANNEL],
     )
     def test_all_canonical_prefixes_accepted(self, prefix: str) -> None:
         result = make_id(prefix)

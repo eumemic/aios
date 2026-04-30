@@ -128,7 +128,7 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
                 },
             )
 
-        bindings = await queries.list_session_bindings(conn, session_id)
+        bindings = await queries.list_session_channels_and_bindings(conn, session_id)
         valid_targets = {b.address for b in bindings if b.archived_at is None}
         if target not in valid_targets:
             return ToolResult(

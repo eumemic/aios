@@ -12,6 +12,7 @@ import asyncpg
 from aios.db import queries
 from aios.models.channel_bindings import ChannelBinding
 from aios.models.events import Event
+from aios.models.session_channels import SessionChannel
 
 MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
 
@@ -51,13 +52,16 @@ def focal_channel_meta_value(focal: str | None) -> str | None:
     return f"{parts[1]}/{parts[2]}"
 
 
-async def list_session_bindings(pool: asyncpg.Pool[Any], session_id: str) -> list[ChannelBinding]:
-    """Load the session's active channel bindings for context composition."""
+type ChannelState = ChannelBinding | SessionChannel
+
+
+async def list_session_bindings(pool: asyncpg.Pool[Any], session_id: str) -> list[ChannelState]:
+    """Load active MCP session channels plus legacy bindings for context composition."""
     async with pool.acquire() as conn:
-        return await queries.list_session_bindings(conn, session_id)
+        return await queries.list_session_channels_and_bindings(conn, session_id)
 
 
-def build_focal_paradigm_block(bindings: list[ChannelBinding]) -> str:
+def build_focal_paradigm_block(bindings: list[ChannelState]) -> str:
     """Generic, connector-agnostic prose introducing the focal-channel paradigm.
 
     Cache-stable: the block's text does not vary across steps, so the
@@ -128,7 +132,7 @@ def build_focal_paradigm_block(bindings: list[ChannelBinding]) -> str:
     )
 
 
-def augment_with_focal_paradigm(base_system: str, bindings: list[ChannelBinding]) -> str:
+def augment_with_focal_paradigm(base_system: str, bindings: list[ChannelState]) -> str:
     block = build_focal_paradigm_block(bindings)
     if not block:
         return base_system
@@ -137,7 +141,7 @@ def augment_with_focal_paradigm(base_system: str, bindings: list[ChannelBinding]
     return block
 
 
-def max_tail_block_local(bindings: list[ChannelBinding]) -> int:
+def max_tail_block_local(bindings: list[ChannelState]) -> int:
     """Worst-case local-token cost of :func:`build_channels_tail_block`.
 
     Called at windowing time when the *actual* tail block isn't yet
@@ -164,7 +168,7 @@ def max_tail_block_local(bindings: list[ChannelBinding]) -> int:
 
 
 def build_channels_tail_block(
-    bindings: list[ChannelBinding],
+    bindings: list[ChannelState],
     events: list[Event],
     focal_channel: str | None,
 ) -> dict[str, Any] | None:
