@@ -33,8 +33,11 @@ import shlex
 from typing import Any
 
 from aios.config import get_settings
-from aios.errors import AiosError
+from aios.errors import AiosError, MemoryPathConflictError, MemoryStoreArchivedError
 from aios.harness import runtime
+from aios.models.memory_stores import MAX_CONTENT_BYTES
+from aios.services import memory_stores as memory_service
+from aios.tools.memory_intercept import resolve_memory_target
 from aios.tools.registry import registry
 
 
@@ -81,9 +84,54 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
     if not isinstance(content, str):
         raise WriteArgumentError("write tool requires a 'content' string")
 
+    target = resolve_memory_target(session_id, path)
+    if target is not None:
+        if target.access == "read_only":
+            return {
+                "error": (f"memory store {target.store_name!r} is mounted read_only; cannot write"),
+                "path": path,
+            }
+        if len(content.encode("utf-8")) > MAX_CONTENT_BYTES:
+            return {
+                "error": (
+                    f"content exceeds memory store cap of {MAX_CONTENT_BYTES} "
+                    f"bytes (got {len(content.encode('utf-8'))})"
+                ),
+                "path": path,
+            }
+
     settings = get_settings()
     sandbox = runtime.require_sandbox_registry()
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
+
+    if target is not None:
+        # Durable write first. Surface DB errors to the model verbatim
+        # so it can decide whether to retry, choose another path, etc.
+        pool = runtime.require_pool()
+        try:
+            existing = await memory_service.get_memory_by_path(
+                pool, target.store_id, target.store_path, include_content=False
+            )
+            if existing is None:
+                await memory_service.create_memory(
+                    pool,
+                    store_id=target.store_id,
+                    path=target.store_path,
+                    content=content,
+                    actor=memory_service.SessionActor(session_id=session_id),
+                )
+            else:
+                await memory_service.update_memory(
+                    pool,
+                    store_id=target.store_id,
+                    memory_id=existing.id,
+                    new_content=content,
+                    actor=memory_service.SessionActor(session_id=session_id),
+                )
+        except MemoryPathConflictError as exc:
+            return {"error": exc.message, "path": path, "detail": exc.detail}
+        except MemoryStoreArchivedError as exc:
+            return {"error": exc.message, "path": path}
 
     content_bytes = content.encode("utf-8")
     b64 = base64.b64encode(content_bytes).decode("ascii")
@@ -101,6 +149,19 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
     )
 
     if result.exit_code != 0:
+        # FS mirror failed AFTER the durable DB write committed. Tell the
+        # model exactly that — the bytes are persisted, but the in-container
+        # view of the file won't reflect them until the session restarts.
+        if target is not None:
+            return {
+                "error": (
+                    "durable write succeeded but the in-container mirror "
+                    f"failed: {result.stderr.strip() or f'exit {result.exit_code}'}. "
+                    "Subsequent reads in this session may return stale "
+                    "content until the session restarts."
+                ),
+                "path": path,
+            }
         return {
             "error": result.stderr.strip() or f"write failed with exit code {result.exit_code}",
             "path": path,

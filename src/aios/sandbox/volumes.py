@@ -49,3 +49,19 @@ def ensure_workspace_path(raw_path: str) -> Path:
     path = Path(raw_path).resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def memory_root_for(session_id: str) -> Path:
+    """Return ``<workspace_root>/<session_id>/memory`` — the parent of all
+    per-session memory-store mount source directories.
+
+    Each attached memory store gets a sibling subdirectory named after its
+    ``name_at_attach`` snapshot, mounted into the container at
+    ``/mnt/memory/<store_name>/``.
+    """
+    return (get_settings().workspace_root / session_id / "memory").resolve()
+
+
+def memory_dir_for(session_id: str, store_name: str) -> Path:
+    """Return the host-side directory backing ``/mnt/memory/<store_name>/``."""
+    return memory_root_for(session_id) / store_name

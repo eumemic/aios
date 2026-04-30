@@ -102,6 +102,33 @@ class CryptoDecryptError(AiosError):
     status_code = 500
 
 
+class MemoryPathConflictError(ConflictError):
+    """Memory create at a path already used by another memory in the store.
+
+    Detail carries ``conflicting_memory_id`` and ``conflicting_path`` so the
+    caller can decide between updating the existing memory and choosing a
+    different path.
+    """
+
+    error_type = "memory_path_conflict_error"
+
+
+class MemoryPreconditionFailedError(ConflictError):
+    """``content_sha256`` precondition didn't match the stored head.
+
+    Caller should re-fetch the memory and retry against the fresh state.
+    """
+
+    error_type = "memory_precondition_failed_error"
+
+
+class MemoryStoreArchivedError(AiosError):
+    """Write to (or new attach of) an archived memory store."""
+
+    error_type = "memory_store_archived_error"
+    status_code = 400
+
+
 class OAuthRefreshError(AiosError):
     """Raised when refreshing an MCP OAuth access token fails.
 

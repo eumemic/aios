@@ -13,9 +13,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aios.models.events import Event
+from aios.models.memory_stores import (
+    MAX_STORES_PER_SESSION,
+    MemoryStoreResource,
+    MemoryStoreResourceEcho,
+    validate_resources,
+)
 
 SessionStatus = Literal["pending", "running", "idle", "rescheduling", "terminated"]
 
@@ -73,6 +79,17 @@ class SessionCreate(BaseModel):
             "enqueues a wake job. Equivalent to a follow-up POST /messages."
         ),
     )
+    resources: list[MemoryStoreResource] = Field(
+        default_factory=list,
+        max_length=MAX_STORES_PER_SESSION,
+        description=(
+            "Memory store resources to attach. Up to "
+            f"{MAX_STORES_PER_SESSION} per session, no duplicate "
+            "memory_store_id. Mounted under /mnt/memory/<store_name>/ in "
+            "the sandbox; cannot be added or removed once the session is "
+            "created."
+        ),
+    )
 
     @field_validator("workspace_path")
     @classmethod
@@ -85,6 +102,11 @@ class SessionCreate(BaseModel):
         if not p.is_dir():
             raise ValueError(f"workspace_path directory does not exist: {v}")
         return v
+
+    @model_validator(mode="after")
+    def _validate_resources(self) -> SessionCreate:
+        validate_resources(self.resources)
+        return self
 
 
 class SessionUpdate(BaseModel):
@@ -118,6 +140,7 @@ class Session(BaseModel):
     vault_ids: list[str] = Field(default_factory=list)
     last_event_seq: int
     usage: SessionUsage = Field(default_factory=SessionUsage)
+    resources: list[MemoryStoreResourceEcho] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

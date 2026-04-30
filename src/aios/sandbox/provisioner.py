@@ -27,6 +27,7 @@ from aios.config import get_settings
 from aios.db import queries
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
+from aios.models.memory_stores import MemoryStoreResourceEcho
 from aios.sandbox.container import ContainerError, ContainerHandle
 
 log = get_logger("aios.sandbox.provisioner")
@@ -113,6 +114,32 @@ async def _load_session_provisioning(session_id: str) -> tuple[str, dict[str, st
         return await queries.get_session_provisioning(conn, session_id)
 
 
+async def _materialize_memory_mounts(
+    session_id: str,
+) -> list[MemoryStoreResourceEcho]:
+    """Materialize each attached memory store and return the echo list.
+
+    Returns the per-store metadata used to assemble ``--volume`` flags
+    after this call returns. A separate helper (vs inline in
+    ``provision_for_session``) keeps the unit-test mocking surface tight —
+    tests mock this single function and don't need a live pool.
+    """
+    from aios.harness import runtime
+    from aios.sandbox.memory_mounts import materialize_store_to_host
+
+    pool = runtime.require_pool()
+    async with pool.acquire() as conn:
+        echoes = await queries.list_session_memory_store_echoes(conn, session_id)
+        for echo in echoes:
+            await materialize_store_to_host(
+                conn,
+                session_id=session_id,
+                store_id=echo.memory_store_id,
+                store_name=echo.name,
+            )
+    return list(echoes)
+
+
 async def provision_for_session(session_id: str) -> ContainerHandle:
     """Create a fresh container for ``session_id`` and return a handle.
 
@@ -124,12 +151,13 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
     Raises :class:`ContainerError` if ``docker run`` fails for any reason
     (image missing, daemon unreachable, resource limits, ...).
     """
-    from aios.sandbox.volumes import ensure_workspace_path
+    from aios.sandbox.volumes import ensure_workspace_path, memory_dir_for
 
     settings = get_settings()
     raw_path, session_env = await _load_session_provisioning(session_id)
     workspace_path = ensure_workspace_path(raw_path)
     env_config = await _load_environment_config(session_id)
+    memory_echoes = await _materialize_memory_mounts(session_id)
 
     # Merge environment-level and session-level env vars (session wins).
     merged_env: dict[str, str] = {
@@ -161,6 +189,14 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         # Keep stdin open so the container doesn't exit on empty stdin.
         "--interactive",
     ]
+
+    # Bind-mount each attached memory store. ``:ro`` for read_only attaches
+    # ensures the kernel rejects writes (bash + tools alike); ``:rw`` is the
+    # read_write default. Mount path follows the snapshotted name.
+    for echo in memory_echoes:
+        host_dir = memory_dir_for(session_id, echo.name)
+        mode = "ro" if echo.access == "read_only" else "rw"
+        argv.extend(["--volume", f"{host_dir}:/mnt/memory/{echo.name}:{mode}"])
 
     for key, value in merged_env.items():
         argv.extend(["--env", f"{key}={value}"])

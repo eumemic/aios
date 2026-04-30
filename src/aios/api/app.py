@@ -19,6 +19,7 @@ from aios.api.routers import (
     connections,
     environments,
     health,
+    memory_stores,
     sessions,
     skills,
     vaults,
@@ -77,6 +78,7 @@ def create_app() -> FastAPI:
     app.include_router(sessions.router)
     app.include_router(skills.router)
     app.include_router(vaults.router)
+    app.include_router(memory_stores.router)
     app.include_router(connections.router)
     app.include_router(channel_bindings.router)
     app.include_router(connection_routing_rules.router)

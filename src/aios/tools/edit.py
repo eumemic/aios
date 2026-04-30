@@ -30,8 +30,16 @@ import shlex
 from typing import Any
 
 from aios.config import get_settings
-from aios.errors import AiosError
+from aios.errors import (
+    AiosError,
+    MemoryPathConflictError,
+    MemoryPreconditionFailedError,
+    MemoryStoreArchivedError,
+)
 from aios.harness import runtime
+from aios.models.memory_stores import MAX_CONTENT_BYTES
+from aios.services import memory_stores as memory_service
+from aios.tools.memory_intercept import resolve_memory_target
 from aios.tools.registry import registry
 
 
@@ -108,25 +116,50 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
             "path": path,
         }
 
+    target = resolve_memory_target(session_id, path)
+    if target is not None and target.access == "read_only":
+        return {
+            "error": (f"memory store {target.store_name!r} is mounted read_only; cannot edit"),
+            "path": path,
+        }
+
     settings = get_settings()
     sandbox = runtime.require_sandbox_registry()
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
     quoted_path = shlex.quote(path)
 
-    # Step 1: read the current content.
-    read_result = await handle.run_command(
-        f"cat -- {quoted_path}",
-        timeout_seconds=settings.bash_default_timeout_seconds,
-        max_output_bytes=settings.bash_max_output_bytes,
-    )
-    if read_result.exit_code != 0:
-        return {
-            "error": read_result.stderr.strip() or f"could not read {path}",
-            "path": path,
-        }
+    # Step 1: read the current content. For memory mounts, read from DB to
+    # capture the current sha (precondition gate), avoiding a race with
+    # other in-session writes.
+    pool = runtime.require_pool()
+    if target is not None:
+        existing = await memory_service.get_memory_by_path(
+            pool, target.store_id, target.store_path, include_content=True
+        )
+        if existing is None:
+            return {
+                "error": (f"no memory at {path}; use the write tool to create it"),
+                "path": path,
+            }
+        original = existing.content or ""
+        precondition_sha: str | None = existing.content_sha256
+        memory_id = existing.id
+    else:
+        read_result = await handle.run_command(
+            f"cat -- {quoted_path}",
+            timeout_seconds=settings.bash_default_timeout_seconds,
+            max_output_bytes=settings.bash_max_output_bytes,
+        )
+        if read_result.exit_code != 0:
+            return {
+                "error": read_result.stderr.strip() or f"could not read {path}",
+                "path": path,
+            }
+        original = read_result.stdout
+        precondition_sha = None
+        memory_id = ""
 
-    original = read_result.stdout
     match_count = original.count(old_string)
 
     if match_count == 0:
@@ -154,7 +187,35 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     else:
         modified = original.replace(old_string, new_string, 1)
 
-    # Step 2: write the modified content back via the same base64
+    if target is not None and len(modified.encode("utf-8")) > MAX_CONTENT_BYTES:
+        return {
+            "error": (
+                f"edited content exceeds memory store cap of {MAX_CONTENT_BYTES} "
+                f"bytes (got {len(modified.encode('utf-8'))})"
+            ),
+            "path": path,
+        }
+
+    # Step 2a: durable write for memory targets. Precondition gates against
+    # a concurrent in-session edit racing past us.
+    if target is not None:
+        try:
+            await memory_service.update_memory(
+                pool,
+                store_id=target.store_id,
+                memory_id=memory_id,
+                new_content=modified,
+                precondition_sha256=precondition_sha,
+                actor=memory_service.SessionActor(session_id=session_id),
+            )
+        except MemoryPreconditionFailedError as exc:
+            return {"error": exc.message, "path": path}
+        except MemoryPathConflictError as exc:
+            return {"error": exc.message, "path": path, "detail": exc.detail}
+        except MemoryStoreArchivedError as exc:
+            return {"error": exc.message, "path": path}
+
+    # Step 2b: write the modified content back via the same base64
     # stdin mechanism the write tool uses.
     modified_bytes = modified.encode("utf-8")
     b64 = base64.b64encode(modified_bytes).decode("ascii")
@@ -166,6 +227,16 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
         max_output_bytes=settings.bash_max_output_bytes,
     )
     if write_result.exit_code != 0:
+        if target is not None:
+            return {
+                "error": (
+                    "durable edit succeeded but the in-container mirror "
+                    f"failed: {write_result.stderr.strip() or f'exit {write_result.exit_code}'}. "
+                    "Subsequent reads in this session may return stale "
+                    "content until the session restarts."
+                ),
+                "path": path,
+            }
         return {
             "error": (
                 write_result.stderr.strip()

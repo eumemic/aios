@@ -193,6 +193,10 @@ class TestProvisionerDockerArgs:
                 "aios.sandbox.provisioner._load_session_provisioning",
                 AsyncMock(return_value=("/tmp/ws", {})),
             ),
+            patch(
+                "aios.sandbox.provisioner._materialize_memory_mounts",
+                AsyncMock(return_value=[]),
+            ),
             patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
             patch(
                 "aios.sandbox.provisioner._install_packages",
@@ -236,6 +240,10 @@ class TestProvisionerDockerArgs:
                 "aios.sandbox.provisioner._load_session_provisioning",
                 AsyncMock(return_value=("/tmp/ws", {})),
             ),
+            patch(
+                "aios.sandbox.provisioner._materialize_memory_mounts",
+                AsyncMock(return_value=[]),
+            ),
             patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
             patch("aios.sandbox.provisioner._install_packages", AsyncMock()),
             patch(
@@ -269,6 +277,10 @@ class TestProvisionerDockerArgs:
             patch(
                 "aios.sandbox.provisioner._load_session_provisioning",
                 AsyncMock(return_value=("/tmp/ws", {})),
+            ),
+            patch(
+                "aios.sandbox.provisioner._materialize_memory_mounts",
+                AsyncMock(return_value=[]),
             ),
             patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
             patch("aios.sandbox.provisioner._install_packages", AsyncMock()),

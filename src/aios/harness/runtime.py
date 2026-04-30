@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from aios.crypto.vault import CryptoBox
     from aios.harness.task_registry import TaskRegistry
     from aios.mcp.pool import McpSessionPool
+    from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.sandbox.registry import SandboxRegistry
 
 
@@ -34,6 +35,33 @@ worker_id: str | None = None
 sandbox_registry: SandboxRegistry | None = None
 task_registry: TaskRegistry | None = None
 mcp_session_pool: McpSessionPool | None = None
+
+# Per-session memory-mount cache. Populated at the top of every step (in
+# ``loop._run_session_step_body``) and consumed by ``tools.memory_intercept``
+# when a file tool resolves a path under ``/mnt/memory/``. The cache is
+# purely a performance optimization — without it, every tool call would
+# re-query the same row set.
+_session_memory_mounts: dict[str, list[MemoryStoreResourceEcho]] = {}
+
+
+def set_session_memory_mounts(session_id: str, echoes: list[MemoryStoreResourceEcho]) -> None:
+    """Record the attached memory stores for ``session_id``."""
+    _session_memory_mounts[session_id] = list(echoes)
+
+
+def get_session_memory_mounts(session_id: str) -> list[MemoryStoreResourceEcho]:
+    """Return the attached memory stores for ``session_id``, or an empty list.
+
+    Empty list (rather than ``None``) means "no memory stores attached" —
+    the absence of an entry is observationally equivalent to an empty list,
+    which is what callers want.
+    """
+    return _session_memory_mounts.get(session_id, [])
+
+
+def clear_session_memory_mounts(session_id: str) -> None:
+    """Drop the cached mounts for ``session_id`` (e.g. after session unload)."""
+    _session_memory_mounts.pop(session_id, None)
 
 
 def require_pool() -> asyncpg.Pool[Any]:
