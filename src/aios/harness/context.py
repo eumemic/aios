@@ -34,6 +34,10 @@ from aios.models.events import Event
 # Chat-completions spec fields per role.  Only these are emitted in the
 # context; provider-specific extensions (reasoning_content, etc.) stay
 # in the event log but are excluded from the message list.
+#
+# `thinking_blocks` and `reasoning_content` are intentionally stripped even
+# on same-provider replays — see #196 for cost/benefit and the OpenRouter
+# transport gaps before re-litigating.
 _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
     "assistant": frozenset({"role", "content", "tool_calls"}),
     "tool": frozenset({"role", "tool_call_id", "content", "name"}),
