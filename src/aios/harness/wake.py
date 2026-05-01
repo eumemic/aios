@@ -59,10 +59,16 @@ async def defer_wake(
     if delay_seconds is not None:
         deferrer = app.configure_task(
             "harness.wake_session",
+            lock=session_id,
+            queueing_lock=session_id,
             schedule_in={"seconds": delay_seconds},
         )
     else:
-        deferrer = app.configure_task("harness.wake_session")
+        deferrer = app.configure_task(
+            "harness.wake_session",
+            lock=session_id,
+            queueing_lock=session_id,
+        )
 
     try:
         await deferrer.defer_async(**task_kwargs)
@@ -101,6 +107,8 @@ async def defer_retry_wake(
     try:
         await app.configure_task(
             "harness.wake_session",
+            lock=session_id,
+            queueing_lock=session_id,
             schedule_in={"seconds": delay_seconds},
         ).defer_async(
             session_id=session_id,

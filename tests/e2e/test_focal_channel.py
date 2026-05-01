@@ -114,21 +114,24 @@ async def _post_inbound(
 ) -> tuple[str, str, str]:
     """Resolve + append a user inbound message.
 
-    Returns ``(session_id, event_id, address)``. Bypasses the HTTP layer
-    and defer_wake so the test is DB-focused.
+    Returns ``(session_id, event_id, address)``. Bypasses the HTTP
+    layer so the test is DB-focused. Neither ``resolve_channel`` nor
+    ``append_user_message`` calls ``defer_wake``, so no mock is
+    needed — and using ``mock.patch`` here is unsafe under
+    ``asyncio.gather`` (concurrent enter/exit corrupts the saved
+    original and leaks the mock to later tests).
     """
     from aios.services import channels as ch_svc
     from aios.services import sessions as sess_svc
 
     address = f"{connection.connector}/{connection.account}/{path}"
-    with mock.patch("aios.harness.wake.defer_wake"):
-        resolution = await ch_svc.resolve_channel(pool, connection, path)
-        event = await sess_svc.append_user_message(
-            pool,
-            resolution.session_id,
-            content,
-            metadata={"channel": address},
-        )
+    resolution = await ch_svc.resolve_channel(pool, connection, path)
+    event = await sess_svc.append_user_message(
+        pool,
+        resolution.session_id,
+        content,
+        metadata={"channel": address},
+    )
     return resolution.session_id, event.id, address
 
 
