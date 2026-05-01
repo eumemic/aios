@@ -258,8 +258,11 @@ async def update_session(
     title: str | None = queries._UNSET,
     metadata: dict[str, Any] | None = None,
     vault_ids: list[str] | None = None,
+    resources: list[MemoryStoreResource] | None = None,
 ) -> Session:
-    async with pool.acquire() as conn:
+    # One transaction so a 4xx from resource attach (e.g. name collision)
+    # rolls back the earlier title/agent/vault writes.
+    async with pool.acquire() as conn, conn.transaction():
         session = await queries.update_session(
             conn,
             session_id,
@@ -270,8 +273,11 @@ async def update_session(
         )
         if vault_ids is not None:
             await queries.set_session_vaults(conn, session_id, vault_ids)
+        if resources is not None:
+            await memory_service.set_session_resources(conn, session_id, resources)
         vids = await queries.get_session_vault_ids(conn, session_id)
-        return session.model_copy(update={"vault_ids": vids})
+        echoes = await queries.list_session_memory_store_echoes(conn, session_id)
+        return session.model_copy(update={"vault_ids": vids, "resources": echoes})
 
 
 # ─── tool confirmations ────────────────────────────────────────────────────

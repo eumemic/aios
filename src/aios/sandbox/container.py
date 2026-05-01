@@ -33,8 +33,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from aios.models.memory_stores import MemoryStoreResourceEcho
+
+
+def mount_snapshot_from_echoes(
+    echoes: Iterable[MemoryStoreResourceEcho],
+) -> frozenset[tuple[str, str, str]]:
+    """The set of inputs that determines the docker ``--volume`` argv.
+
+    Order-independent so rank reorders don't trigger spurious recycles.
+    Both the provisioner (snapshot-at-provision) and the registry
+    (snapshot-at-compare) call this so the tuple shape stays in lockstep.
+    """
+    return frozenset((e.memory_store_id, e.name, e.access) for e in echoes)
 
 
 @dataclass(slots=True, frozen=True)
@@ -55,6 +72,48 @@ class ContainerError(Exception):
     """
 
 
+# Bound on the post-kill drain so a docker CLI stuck in an uninterruptible
+# state can't hold the worker indefinitely past the wait_for timeout.
+_DRAIN_AFTER_KILL_TIMEOUT_S = 2.0
+
+
+async def run_subprocess_with_timeout(
+    argv: list[str], *, timeout_s: float
+) -> tuple[int, bytes, bytes, bool]:
+    """Launch ``argv``, return ``(returncode, stdout, stderr, timed_out)``.
+
+    On timeout, sends SIGKILL and drains the pipes with a secondary 2s
+    bound. Returns ``-1`` for ``returncode`` if the process was never
+    reaped. Raises :class:`ContainerError` only on launch failure.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (OSError, FileNotFoundError) as host_err:
+        raise ContainerError(f"failed to launch subprocess: {host_err}") from host_err
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        return (
+            proc.returncode if proc.returncode is not None else -1,
+            stdout_bytes,
+            stderr_bytes,
+            False,
+        )
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=_DRAIN_AFTER_KILL_TIMEOUT_S
+            )
+        except (TimeoutError, OSError):
+            stdout_bytes, stderr_bytes = b"", b""
+        return -1, stdout_bytes, stderr_bytes, True
+
+
 class ContainerHandle:
     """A handle to one running sandbox container.
 
@@ -70,10 +129,12 @@ class ContainerHandle:
         session_id: str,
         container_id: str,
         workspace_path: Path,
+        mount_snapshot: frozenset[tuple[str, str, str]] = frozenset(),
     ) -> None:
         self.session_id = session_id
         self.container_id = container_id
         self.workspace_path = workspace_path
+        self.mount_snapshot = mount_snapshot
 
     async def run_command(
         self,
@@ -106,31 +167,9 @@ class ContainerHandle:
             command,
         ]
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except (OSError, FileNotFoundError) as host_err:
-            raise ContainerError(f"failed to launch docker cli: {host_err}") from host_err
-
-        timed_out = False
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds
-            )
-        except TimeoutError:
-            timed_out = True
-            # Kill the host-side docker process. The container keeps running.
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            try:
-                stdout_bytes, stderr_bytes = await proc.communicate()
-            except Exception:
-                stdout_bytes, stderr_bytes = b"", b""
-
-        exit_code = proc.returncode if proc.returncode is not None else -1
+        exit_code, stdout_bytes, stderr_bytes, timed_out = await run_subprocess_with_timeout(
+            argv, timeout_s=float(timeout_seconds)
+        )
 
         stdout_str, out_truncated = _decode_and_truncate(stdout_bytes, max_output_bytes)
         stderr_str, err_truncated = _decode_and_truncate(stderr_bytes, max_output_bytes)

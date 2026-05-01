@@ -257,3 +257,204 @@ class TestArchivedStoreRejectsWrites:
         )
         assert r.status_code == 400, r.text
         assert r.json()["error"]["type"] == "memory_store_archived_error"
+
+
+async def _create_session_for_resources_test(
+    pool: Any,
+    *,
+    initial_resources: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Spin up an agent + environment + session via service layer.
+
+    Uses the service layer directly (not HTTP) for setup boilerplate to
+    keep the resource-update tests below focused on the new code path.
+    Returns the session as a serializable dict so call-sites can read .id
+    without importing the model.
+    """
+    from aios.models.memory_stores import MemoryStoreResource
+    from aios.services import agents as agents_svc
+    from aios.services import environments as env_svc
+    from aios.services import sessions as sess_svc
+
+    env = await env_svc.create_environment(pool, name=f"resources-update-{_uniq()}")
+    agent = await agents_svc.create_agent(
+        pool,
+        name=f"resources-update-agent-{_uniq()}",
+        model="fake/test",
+        system="",
+        tools=[],
+        description=None,
+        metadata={},
+        window_min=50_000,
+        window_max=150_000,
+    )
+    resources = (
+        None
+        if initial_resources is None
+        else [MemoryStoreResource.model_validate(r) for r in initial_resources]
+    )
+    session = await sess_svc.create_session(
+        pool,
+        agent_id=agent.id,
+        environment_id=env.id,
+        title="resources-update",
+        metadata={},
+        resources=resources,
+    )
+    return {"id": session.id, "agent_id": agent.id, "env_id": env.id}
+
+
+class TestSessionResourcesUpdate:
+    """``PUT /v1/sessions/{id}`` with ``resources`` attaches/detaches memory
+    stores on a running session (issue #198)."""
+
+    async def test_attach_via_update(self, http_client: httpx.AsyncClient, pool: Any) -> None:
+        store = await _create_store(http_client, name=f"attach-{_uniq()}")
+        session = await _create_session_for_resources_test(pool)
+
+        r = await http_client.put(
+            f"/v1/sessions/{session['id']}",
+            json={
+                "resources": [
+                    {"type": "memory_store", "memory_store_id": store["id"]},
+                ],
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert len(body["resources"]) == 1
+        echo = body["resources"][0]
+        assert echo["memory_store_id"] == store["id"]
+        assert echo["name"] == store["name"]
+        assert echo["mount_path"] == f"/mnt/memory/{store['name']}"
+        assert echo["access"] == "read_write"
+
+        # GET round-trips the same set.
+        r = await http_client.get(f"/v1/sessions/{session['id']}")
+        assert r.status_code == 200, r.text
+        assert len(r.json()["resources"]) == 1
+
+    async def test_detach_via_empty_list(self, http_client: httpx.AsyncClient, pool: Any) -> None:
+        store = await _create_store(http_client, name=f"detach-{_uniq()}")
+        session = await _create_session_for_resources_test(
+            pool,
+            initial_resources=[{"type": "memory_store", "memory_store_id": store["id"]}],
+        )
+
+        r = await http_client.put(f"/v1/sessions/{session['id']}", json={"resources": []})
+        assert r.status_code == 200, r.text
+        assert r.json()["resources"] == []
+
+    async def test_omitted_resources_preserves_existing(
+        self, http_client: httpx.AsyncClient, pool: Any
+    ) -> None:
+        store = await _create_store(http_client, name=f"preserve-{_uniq()}")
+        session = await _create_session_for_resources_test(
+            pool,
+            initial_resources=[{"type": "memory_store", "memory_store_id": store["id"]}],
+        )
+
+        # Update unrelated field; resources field omitted entirely.
+        r = await http_client.put(f"/v1/sessions/{session['id']}", json={"title": "new"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["title"] == "new"
+        assert len(body["resources"]) == 1
+        assert body["resources"][0]["memory_store_id"] == store["id"]
+
+    async def test_replace_swaps_attached_set(
+        self, http_client: httpx.AsyncClient, pool: Any
+    ) -> None:
+        s1 = await _create_store(http_client, name=f"swap-a-{_uniq()}")
+        s2 = await _create_store(http_client, name=f"swap-b-{_uniq()}")
+        session = await _create_session_for_resources_test(
+            pool,
+            initial_resources=[{"type": "memory_store", "memory_store_id": s1["id"]}],
+        )
+
+        r = await http_client.put(
+            f"/v1/sessions/{session['id']}",
+            json={
+                "resources": [
+                    {"type": "memory_store", "memory_store_id": s2["id"]},
+                ],
+            },
+        )
+        assert r.status_code == 200, r.text
+        ids = [e["memory_store_id"] for e in r.json()["resources"]]
+        assert ids == [s2["id"]]
+
+    async def test_dup_id_rejected(self, http_client: httpx.AsyncClient, pool: Any) -> None:
+        store = await _create_store(http_client, name=f"dup-{_uniq()}")
+        session = await _create_session_for_resources_test(pool)
+
+        r = await http_client.put(
+            f"/v1/sessions/{session['id']}",
+            json={
+                "resources": [
+                    {"type": "memory_store", "memory_store_id": store["id"]},
+                    {"type": "memory_store", "memory_store_id": store["id"]},
+                ],
+            },
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_name_conflict_rolls_back(
+        self, http_client: httpx.AsyncClient, pool: Any
+    ) -> None:
+        """Two stores resolving to the same mount path must reject and
+        leave the prior set intact."""
+        prior = await _create_store(http_client, name=f"prior-{_uniq()}")
+        clash_name = f"clash-{_uniq()}"
+        s1 = await _create_store(http_client, name=clash_name)
+        s2 = await _create_store(http_client, name=clash_name + "-x")
+        # Rename s2 to clash with s1 so two distinct ids share the same name.
+        r = await http_client.post(f"/v1/memory-stores/{s2['id']}", json={"name": clash_name})
+        assert r.status_code == 200, r.text
+
+        session = await _create_session_for_resources_test(
+            pool,
+            initial_resources=[{"type": "memory_store", "memory_store_id": prior["id"]}],
+        )
+
+        r = await http_client.put(
+            f"/v1/sessions/{session['id']}",
+            json={
+                "resources": [
+                    {"type": "memory_store", "memory_store_id": s1["id"]},
+                    {"type": "memory_store", "memory_store_id": s2["id"]},
+                ],
+            },
+        )
+        assert r.status_code == 409, r.text
+
+        # Prior attachment survives the rollback.
+        r = await http_client.get(f"/v1/sessions/{session['id']}")
+        assert r.status_code == 200, r.text
+        ids = [e["memory_store_id"] for e in r.json()["resources"]]
+        assert ids == [prior["id"]]
+
+    async def test_unknown_store_rejected_and_rolls_back(
+        self, http_client: httpx.AsyncClient, pool: Any
+    ) -> None:
+        prior = await _create_store(http_client, name=f"prior-{_uniq()}")
+        session = await _create_session_for_resources_test(
+            pool,
+            initial_resources=[{"type": "memory_store", "memory_store_id": prior["id"]}],
+        )
+
+        r = await http_client.put(
+            f"/v1/sessions/{session['id']}",
+            json={
+                "resources": [
+                    {"type": "memory_store", "memory_store_id": "memstore_doesnotexist"},
+                ],
+            },
+        )
+        assert r.status_code == 404, r.text
+
+        # Prior attachment survives the rollback.
+        r = await http_client.get(f"/v1/sessions/{session['id']}")
+        assert r.status_code == 200, r.text
+        ids = [e["memory_store_id"] for e in r.json()["resources"]]
+        assert ids == [prior["id"]]

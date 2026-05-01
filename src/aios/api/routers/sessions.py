@@ -114,6 +114,7 @@ async def update(session_id: str, body: SessionUpdate, pool: PoolDep, _auth: Aut
         title=body.title if "title" in body.model_fields_set else _UNSET,
         metadata=body.metadata,
         vault_ids=body.vault_ids,
+        resources=body.resources,
     )
 
 

@@ -335,3 +335,14 @@ async def attach_to_session(
     attaches commit atomically.
     """
     await queries.attach_memory_stores_to_session(conn, session_id, resources)
+
+
+async def set_session_resources(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    resources: list[MemoryStoreResource],
+) -> None:
+    """Replace attached stores atomically. A failed attach rolls back the delete."""
+    async with conn.transaction():
+        await conn.execute("DELETE FROM session_memory_stores WHERE session_id = $1", session_id)
+        await queries.attach_memory_stores_to_session(conn, session_id, resources)

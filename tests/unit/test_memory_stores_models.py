@@ -18,6 +18,7 @@ from aios.models.memory_stores import (
     MemoryUpdatePrecondition,
     validate_resources,
 )
+from aios.models.sessions import SessionUpdate
 
 
 class TestMemoryCreatePath:
@@ -140,3 +141,42 @@ class TestSessionResourceCap:
                 memory_store_id="memstore_x",
                 instructions="x" * (MAX_INSTRUCTIONS_CHARS + 1),
             )
+
+
+class TestSessionUpdateResources:
+    """Validation for the optional ``resources`` field on ``SessionUpdate``.
+
+    ``None`` (the default) means "leave the bound set alone"; ``[]`` means
+    "detach everything"; a non-empty list replaces the bound set entirely
+    and must satisfy the same cap / dup-id rules as ``SessionCreate.resources``.
+    """
+
+    def _resource(self, suffix: str) -> MemoryStoreResource:
+        return MemoryStoreResource(type="memory_store", memory_store_id=f"memstore_{suffix}")
+
+    def test_omitted_is_none(self) -> None:
+        u = SessionUpdate()
+        assert u.resources is None
+
+    def test_explicit_none_accepted(self) -> None:
+        u = SessionUpdate(resources=None)
+        assert u.resources is None
+
+    def test_empty_list_accepted(self) -> None:
+        u = SessionUpdate(resources=[])
+        assert u.resources == []
+
+    def test_at_cap_is_ok(self) -> None:
+        resources = [self._resource(f"{i:024d}") for i in range(MAX_STORES_PER_SESSION)]
+        u = SessionUpdate(resources=resources)
+        assert u.resources is not None
+        assert len(u.resources) == MAX_STORES_PER_SESSION
+
+    def test_above_cap_rejected(self) -> None:
+        resources = [self._resource(f"{i:024d}") for i in range(MAX_STORES_PER_SESSION + 1)]
+        with pytest.raises(ValidationError):
+            SessionUpdate(resources=resources)
+
+    def test_duplicate_id_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SessionUpdate(resources=[self._resource("a" * 24), self._resource("a" * 24)])

@@ -21,14 +21,17 @@ CLI.
 
 from __future__ import annotations
 
-import asyncio
-
 from aios.config import get_settings
 from aios.db import queries
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.models.memory_stores import MemoryStoreResourceEcho
-from aios.sandbox.container import ContainerError, ContainerHandle
+from aios.sandbox.container import (
+    ContainerError,
+    ContainerHandle,
+    mount_snapshot_from_echoes,
+    run_subprocess_with_timeout,
+)
 
 log = get_logger("aios.sandbox.provisioner")
 
@@ -72,24 +75,27 @@ PACKAGE_REGISTRY_HOSTS: frozenset[str] = frozenset(
 )
 
 
-async def _run_docker(argv: list[str]) -> tuple[int, bytes, bytes]:
+# Bound every ``docker`` management call so a stalled daemon can't wedge
+# the worker step path (per issue #179 / commit e675ed2).
+_DOCKER_CLI_TIMEOUT_S = 30.0
+
+
+async def _run_docker(
+    argv: list[str], *, timeout_s: float = _DOCKER_CLI_TIMEOUT_S
+) -> tuple[int, bytes, bytes]:
     """Run a ``docker`` CLI invocation and return (exit_code, stdout, stderr).
 
     Raises :class:`ContainerError` if the subprocess cannot be launched
-    at all (missing docker binary, OS error). A nonzero exit from docker
-    itself is returned as a regular tuple — callers decide whether it's
-    fatal.
+    (missing binary, OS error) or if it runs longer than ``timeout_s``
+    (stalled daemon). A nonzero exit from docker itself is returned as a
+    regular tuple — callers decide whether it's fatal.
     """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except (OSError, FileNotFoundError) as host_err:
-        raise ContainerError(f"failed to launch docker cli: {host_err}") from host_err
-    stdout_bytes, stderr_bytes = await proc.communicate()
-    return proc.returncode or 0, stdout_bytes, stderr_bytes
+    rc, stdout_bytes, stderr_bytes, timed_out = await run_subprocess_with_timeout(
+        argv, timeout_s=timeout_s
+    )
+    if timed_out:
+        raise ContainerError(f"docker cli timed out after {timeout_s}s: {' '.join(argv)}")
+    return rc, stdout_bytes, stderr_bytes
 
 
 async def _load_environment_config(session_id: str) -> EnvironmentConfig | None:
@@ -218,6 +224,7 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         session_id=session_id,
         container_id=container_id,
         workspace_path=workspace_path,
+        mount_snapshot=mount_snapshot_from_echoes(memory_echoes),
     )
 
     # Install packages while the network is still open.
