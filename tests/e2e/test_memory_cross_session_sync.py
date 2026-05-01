@@ -36,10 +36,17 @@ async def _attach_store(harness: Harness, store_name: str) -> str:
     return store.id
 
 
-async def _start_session_with_store(harness: Harness, store_id: str, store_name: str) -> Any:
-    """Create a session attached read_write to ``store_id`` and prime the
-    runtime mount cache (which is normally populated at the top of each
-    harness step). Returns the session row."""
+async def _start_session(
+    harness: Harness,
+    *,
+    resources: list[MemoryStoreResource] | None = None,
+    tools: tuple[str, ...] = ("read", "write", "bash"),
+) -> Any:
+    """Create env+agent+session; prime the runtime mount cache via the
+    same helper the worker step body uses, so tests follow the production
+    path for mount visibility.
+    """
+    from aios.harness.loop import refresh_session_mount_state
     from aios.ids import make_id
     from aios.models.agents import ToolSpec
     from aios.services import agents as agents_service
@@ -56,7 +63,7 @@ async def _start_session_with_store(harness: Harness, store_id: str, store_name:
         name=f"test-agent-{make_id('agent')[-8:]}",
         model="fake/test",
         system="memory test",
-        tools=[ToolSpec(type="read"), ToolSpec(type="write"), ToolSpec(type="bash")],
+        tools=[ToolSpec(type=t) for t in tools],  # type: ignore[arg-type]
         description=None,
         metadata={},
         window_min=50_000,
@@ -66,21 +73,22 @@ async def _start_session_with_store(harness: Harness, store_id: str, store_name:
         harness._pool,
         agent_id=agent.id,
         environment_id=harness._env_id,
-        title="x-session test",
+        title="memory test",
         metadata={},
+        resources=resources or None,
+    )
+    await refresh_session_mount_state(harness._pool, session.id)
+    return session
+
+
+async def _start_session_with_store(harness: Harness, store_id: str, store_name: str) -> Any:
+    """Backwards-compatible wrapper for the cross-session sync tests."""
+    return await _start_session(
+        harness,
         resources=[
-            MemoryStoreResource(type="memory_store", memory_store_id=store_id, access="read_write")
+            MemoryStoreResource(type="memory_store", memory_store_id=store_id, access="read_write"),
         ],
     )
-    # Mirror what loop._run_session_step_body does: load echoes, install
-    # the runtime cache so memory_intercept.resolve_memory_target finds the
-    # mount.
-    from aios.db import queries
-
-    async with harness._pool.acquire() as conn:
-        echoes = await queries.list_session_memory_store_echoes(conn, session.id)
-    runtime.set_session_memory_mounts(session.id, echoes)
-    return session
 
 
 @needs_docker
@@ -253,3 +261,104 @@ class TestCrossSessionSync:
             versions = await queries.list_memory_versions(conn, store_id)
         paths = [v.path for v in versions]
         assert "/from_bash.md" not in paths
+
+
+@needs_docker
+class TestMountUpdateRecyclesContainer:
+    """Issue #198: ``update_session(resources=...)`` on a session whose
+    container is already up triggers a recycle on the next step so the
+    new mount set takes effect."""
+
+    async def test_attach_via_update_makes_mount_visible(self, docker_harness: Harness) -> None:
+        from aios.harness.loop import refresh_session_mount_state
+        from aios.tools.bash import bash_handler
+
+        session = await _start_session(docker_harness, tools=("bash",))
+
+        # Provision the container BEFORE attaching the store — this is the
+        # critical case the recycle logic exists for.
+        sandbox = runtime.require_sandbox_registry()
+        await sandbox.get_or_provision(session.id, pool=docker_harness._pool)
+
+        before = await bash_handler(session.id, {"command": "ls /mnt/memory 2>&1; true"})
+        assert "attach-mount" not in before["stdout"]
+
+        store = await memory_service.create_store(
+            docker_harness._pool,
+            name="attach-mount",
+            description="attach probe",
+            metadata={},
+        )
+        await sessions_service.update_session(
+            docker_harness._pool,
+            session.id,
+            resources=[
+                MemoryStoreResource(
+                    type="memory_store", memory_store_id=store.id, access="read_write"
+                ),
+            ],
+        )
+        await refresh_session_mount_state(docker_harness._pool, session.id)
+
+        after = await bash_handler(
+            session.id, {"command": "ls -d /mnt/memory/attach-mount && echo OK"}
+        )
+        assert after.get("exit_code") == 0, after
+        assert "OK" in after["stdout"]
+
+    async def test_detach_via_update_drops_mount(self, docker_harness: Harness) -> None:
+        from aios.harness.loop import refresh_session_mount_state
+        from aios.tools.bash import bash_handler
+
+        store_id = await _attach_store(docker_harness, "detach-mount")
+        session = await _start_session(
+            docker_harness,
+            resources=[
+                MemoryStoreResource(
+                    type="memory_store", memory_store_id=store_id, access="read_write"
+                ),
+            ],
+            tools=("bash",),
+        )
+        sandbox = runtime.require_sandbox_registry()
+        await sandbox.get_or_provision(session.id, pool=docker_harness._pool)
+        before = await bash_handler(
+            session.id, {"command": "ls -d /mnt/memory/detach-mount && echo OK"}
+        )
+        assert "OK" in before["stdout"], before
+
+        await sessions_service.update_session(docker_harness._pool, session.id, resources=[])
+        await refresh_session_mount_state(docker_harness._pool, session.id)
+
+        after = await bash_handler(session.id, {"command": "ls /mnt/memory 2>&1; true"})
+        assert "detach-mount" not in after["stdout"]
+
+    async def test_idempotent_update_does_not_recycle(self, docker_harness: Harness) -> None:
+        from aios.harness.loop import refresh_session_mount_state
+        from aios.tools.bash import bash_handler
+
+        store_id = await _attach_store(docker_harness, "idem-mount")
+        session = await _start_session_with_store(docker_harness, store_id, "idem-mount")
+        sandbox = runtime.require_sandbox_registry()
+        await sandbox.get_or_provision(session.id, pool=docker_harness._pool)
+        original_container_id = sandbox.peek(session.id).container_id  # type: ignore[union-attr]
+
+        await sessions_service.update_session(
+            docker_harness._pool,
+            session.id,
+            resources=[
+                MemoryStoreResource(
+                    type="memory_store", memory_store_id=store_id, access="read_write"
+                ),
+            ],
+        )
+        await refresh_session_mount_state(docker_harness._pool, session.id)
+
+        cached = sandbox.peek(session.id)
+        assert cached is not None
+        assert cached.container_id == original_container_id
+
+        result = await bash_handler(
+            session.id, {"command": "ls -d /mnt/memory/idem-mount && echo OK"}
+        )
+        assert "OK" in result["stdout"], result

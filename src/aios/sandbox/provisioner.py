@@ -28,7 +28,7 @@ from aios.db import queries
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.models.memory_stores import MemoryStoreResourceEcho
-from aios.sandbox.container import ContainerError, ContainerHandle
+from aios.sandbox.container import ContainerError, ContainerHandle, mount_snapshot_from_echoes
 
 log = get_logger("aios.sandbox.provisioner")
 
@@ -218,6 +218,7 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         session_id=session_id,
         container_id=container_id,
         workspace_path=workspace_path,
+        mount_snapshot=mount_snapshot_from_echoes(memory_echoes),
     )
 
     # Install packages while the network is still open.

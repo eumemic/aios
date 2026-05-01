@@ -86,8 +86,8 @@ class SessionCreate(BaseModel):
             "Memory store resources to attach. Up to "
             f"{MAX_STORES_PER_SESSION} per session, no duplicate "
             "memory_store_id. Mounted under /mnt/memory/<store_name>/ in "
-            "the sandbox; cannot be added or removed once the session is "
-            "created."
+            "the sandbox. Use ``PUT /v1/sessions/{id}`` with ``resources`` "
+            "to attach or detach stores after creation."
         ),
     )
 
@@ -114,7 +114,10 @@ class SessionUpdate(BaseModel):
 
     All fields are optional; omitted fields are preserved. Changing
     ``agent_id`` resets ``agent_version`` to null (latest) unless
-    ``agent_version`` is also provided.
+    ``agent_version`` is also provided. ``resources`` and ``vault_ids``
+    use full-list-replacement semantics: ``None`` (the default) leaves
+    the current set alone, ``[]`` detaches everything, and a non-empty
+    list replaces the bound set entirely.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -124,6 +127,13 @@ class SessionUpdate(BaseModel):
     title: str | None = None
     metadata: dict[str, Any] | None = None
     vault_ids: list[str] | None = None
+    resources: list[MemoryStoreResource] | None = None
+
+    @model_validator(mode="after")
+    def _validate_resources(self) -> SessionUpdate:
+        if self.resources is not None:
+            validate_resources(self.resources)
+        return self
 
 
 class Session(BaseModel):

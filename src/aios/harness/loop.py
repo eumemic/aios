@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from aios.harness.task_registry import TaskRegistry
+    from aios.models.memory_stores import MemoryStoreResourceEcho
 
 log = get_logger("aios.harness.loop")
 
@@ -62,6 +63,25 @@ def _retry_delay_for_attempt(attempt: int) -> float | None:
     if attempt >= len(_RETRY_BACKOFF_SECONDS):
         return None
     return _RETRY_BACKOFF_SECONDS[attempt]
+
+
+async def refresh_session_mount_state(
+    pool: asyncpg.Pool[Any], session_id: str
+) -> list[MemoryStoreResourceEcho]:
+    """Re-load attached memory stores; refresh worker caches; recycle the
+    container if its mount snapshot has drifted.
+
+    Returns the freshly-loaded echoes so callers (the step body) can avoid
+    a second DB query. Tests run this to mirror the step preamble.
+    """
+    from aios.db import queries
+
+    async with pool.acquire() as conn:
+        echoes = await queries.list_session_memory_store_echoes(conn, session_id)
+    runtime.set_session_memory_mounts(session_id, echoes)
+    if runtime.sandbox_registry is not None:
+        await runtime.sandbox_registry.release_if_mounts_changed(session_id, echoes)
+    return echoes
 
 
 async def run_session_step(
@@ -209,11 +229,7 @@ async def _run_session_step_body(
     # Memory store mounts: load echoes once per step. Used both for the
     # system-prompt block and (via runtime cache) by the tool intercept
     # in write/edit, which needs a path → store mapping.
-    from aios.db import queries as _queries
-
-    async with pool.acquire() as _conn:
-        memory_echoes = await _queries.list_session_memory_store_echoes(_conn, session_id)
-    runtime.set_session_memory_mounts(session_id, memory_echoes)
+    memory_echoes = await refresh_session_mount_state(pool, session_id)
 
     # Build the events-independent prelude (system prompt + tools)
     # before windowing so its overhead can be subtracted from the

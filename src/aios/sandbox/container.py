@@ -33,8 +33,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from aios.models.memory_stores import MemoryStoreResourceEcho
+
+
+def mount_snapshot_from_echoes(
+    echoes: Iterable[MemoryStoreResourceEcho],
+) -> frozenset[tuple[str, str, str]]:
+    """The set of inputs that determines the docker ``--volume`` argv.
+
+    Order-independent so rank reorders don't trigger spurious recycles.
+    Both the provisioner (snapshot-at-provision) and the registry
+    (snapshot-at-compare) call this so the tuple shape stays in lockstep.
+    """
+    return frozenset((e.memory_store_id, e.name, e.access) for e in echoes)
 
 
 @dataclass(slots=True, frozen=True)
@@ -70,10 +87,12 @@ class ContainerHandle:
         session_id: str,
         container_id: str,
         workspace_path: Path,
+        mount_snapshot: frozenset[tuple[str, str, str]] = frozenset(),
     ) -> None:
         self.session_id = session_id
         self.container_id = container_id
         self.workspace_path = workspace_path
+        self.mount_snapshot = mount_snapshot
 
     async def run_command(
         self,

@@ -24,12 +24,14 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from aios.logging import get_logger
-from aios.sandbox.container import ContainerHandle
+from aios.sandbox.container import ContainerHandle, mount_snapshot_from_echoes
 from aios.sandbox.provisioner import force_remove, list_managed_containers, provision_for_session
 from aios.sandbox.provisioner import release as provisioner_release
 
 if TYPE_CHECKING:
     import asyncpg
+
+    from aios.models.memory_stores import MemoryStoreResourceEcho
 
 log = get_logger("aios.sandbox.registry")
 
@@ -113,6 +115,35 @@ class SandboxRegistry:
         if handle is None:
             return
         await provisioner_release(handle)
+
+    async def release_if_mounts_changed(
+        self,
+        session_id: str,
+        current_echoes: list[MemoryStoreResourceEcho],
+    ) -> None:
+        """Release the cached container if its mount snapshot has drifted.
+
+        Acquires the per-session lock so a tool task from a prior step
+        can't race with the release via ``get_or_provision``.
+        """
+        async with self._lock_for(session_id):
+            handle = self._handles.get(session_id)
+            if handle is None:
+                return
+            if handle.mount_snapshot == mount_snapshot_from_echoes(current_echoes):
+                return
+            log.info(
+                "sandbox.released_for_mount_change",
+                session_id=session_id,
+                container_id=handle.container_id[:12],
+            )
+            self._handles.pop(session_id, None)
+            self._last_used.pop(session_id, None)
+            await provisioner_release(handle)
+
+    def peek(self, session_id: str) -> ContainerHandle | None:
+        """Return the cached handle without provisioning. ``None`` if not cached."""
+        return self._handles.get(session_id)
 
     def evict(self, session_id: str) -> None:
         """Drop the cache entry without docker teardown (container is dead)."""
