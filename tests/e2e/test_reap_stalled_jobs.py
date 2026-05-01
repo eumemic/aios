@@ -26,30 +26,12 @@ from tests.conftest import needs_docker
 
 @pytest.fixture
 async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
-    from procrastinate import App
-
     from aios.config import get_settings
     from aios.db.pool import create_pool
+    from tests.e2e.conftest import ensure_procrastinate_schema
 
-    settings = get_settings()
-    # Ensure procrastinate's tables exist on the testcontainer DB. The
-    # shared ``migrated_db_url`` only runs aios's alembic migrations;
-    # the reaper exercises procrastinate's schema directly. We build
-    # a temporary ``App`` here rather than reuse the module-level
-    # singleton because the singleton's connector is fixed at import
-    # time against whatever settings were active then — usually wrong
-    # in tests.
-    p = await create_pool(settings.db_url, min_size=1, max_size=4)
-    async with p.acquire() as conn:
-        present = await conn.fetchval("SELECT to_regclass('procrastinate_jobs')")
-    if present is None:
-        conninfo = aios_env["AIOS_DB_URL"].replace("postgresql+psycopg://", "postgresql://")
-        tmp_app = App(connector=PsycopgConnector(conninfo=conninfo))
-        await tmp_app.open_async()
-        try:
-            await tmp_app.schema_manager.apply_schema_async()
-        finally:
-            await tmp_app.close_async()
+    await ensure_procrastinate_schema(aios_env["AIOS_DB_URL"])
+    p = await create_pool(get_settings().db_url, min_size=1, max_size=4)
     yield p
     await p.close()
 

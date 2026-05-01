@@ -10,21 +10,12 @@ Covers:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from procrastinate import App
-from procrastinate.testing import InMemoryConnector
-
-
-@pytest.fixture
-async def in_memory_app() -> AsyncIterator[App]:
-    from aios.harness.procrastinate_app import app
-
-    with app.replace_connector(InMemoryConnector()) as patched:
-        yield patched
 
 
 class TestE2EConftestMockSignatures:

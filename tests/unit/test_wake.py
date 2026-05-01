@@ -8,17 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from procrastinate import App
-from procrastinate.testing import InMemoryConnector
 
 from aios.harness.wake import defer_retry_wake
-
-
-@pytest.fixture
-async def in_memory_app() -> AsyncIterator[App]:
-    from aios.harness.procrastinate_app import app
-
-    with app.replace_connector(InMemoryConnector()) as patched:
-        yield patched
 
 
 @pytest.fixture(autouse=True)
