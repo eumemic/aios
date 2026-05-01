@@ -38,6 +38,40 @@ async def _noop_defer_retry_wake(pool: Any, session_id: str, *, delay_seconds: f
     pass
 
 
+async def ensure_procrastinate_schema(aios_db_url: str) -> None:
+    """Apply procrastinate's schema to the testcontainer DB if missing.
+
+    The shared ``migrated_db_url`` only runs aios's alembic migrations;
+    tests that touch ``procrastinate_jobs`` directly (or run a worker
+    against the testcontainer) need procrastinate's tables too. The
+    module-level :mod:`aios.harness.procrastinate_app` singleton's
+    connector is fixed at import time against whatever settings were
+    active then (usually wrong in tests), so we build a temporary
+    ``App`` here.
+    """
+    import asyncpg
+    from procrastinate import App, PsycopgConnector
+
+    from aios.config import get_settings
+
+    settings = get_settings()
+    conn = await asyncpg.connect(settings.db_url)
+    try:
+        present = await conn.fetchval("SELECT to_regclass('procrastinate_jobs')")
+    finally:
+        await conn.close()
+    if present is not None:
+        return
+
+    conninfo = aios_db_url.replace("postgresql+psycopg://", "postgresql://")
+    tmp_app = App(connector=PsycopgConnector(conninfo=conninfo))
+    await tmp_app.open_async()
+    try:
+        await tmp_app.schema_manager.apply_schema_async()
+    finally:
+        await tmp_app.close_async()
+
+
 @pytest.fixture
 async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     """Function-scoped harness: real Postgres, scripted model, no Docker."""

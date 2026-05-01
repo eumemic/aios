@@ -10,12 +10,14 @@ from __future__ import annotations
 import base64
 import os
 import secrets
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from procrastinate import App
+from procrastinate.testing import InMemoryConnector
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -32,6 +34,19 @@ def _unit_env() -> Iterator[None]:
         get_settings.cache_clear()
         yield
         get_settings.cache_clear()
+
+
+@pytest.fixture
+async def in_memory_app() -> AsyncIterator[App]:
+    """Patch the aios procrastinate app to use an in-memory connector.
+
+    Tests can read ``app.connector.jobs`` directly to inspect deferred
+    job rows (lock, queueing_lock, schedule, args).
+    """
+    from aios.harness.procrastinate_app import app
+
+    with app.replace_connector(InMemoryConnector()) as patched:
+        yield patched
 
 
 def fake_pool_yielding_conn(conn: Any) -> Any:
