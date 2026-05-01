@@ -260,9 +260,8 @@ async def update_session(
     vault_ids: list[str] | None = None,
     resources: list[MemoryStoreResource] | None = None,
 ) -> Session:
-    # All sub-updates run in one transaction so a user-visible 4xx from a
-    # later step (e.g. resource attach hits a name collision) rolls back
-    # the earlier title/agent/vault writes — no half-applied state.
+    # One transaction so a 4xx from resource attach (e.g. name collision)
+    # rolls back the earlier title/agent/vault writes.
     async with pool.acquire() as conn, conn.transaction():
         session = await queries.update_session(
             conn,

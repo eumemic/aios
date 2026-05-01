@@ -21,15 +21,17 @@ CLI.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-
 from aios.config import get_settings
 from aios.db import queries
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.models.memory_stores import MemoryStoreResourceEcho
-from aios.sandbox.container import ContainerError, ContainerHandle, mount_snapshot_from_echoes
+from aios.sandbox.container import (
+    ContainerError,
+    ContainerHandle,
+    mount_snapshot_from_echoes,
+    run_subprocess_with_timeout,
+)
 
 log = get_logger("aios.sandbox.provisioner")
 
@@ -74,8 +76,7 @@ PACKAGE_REGISTRY_HOSTS: frozenset[str] = frozenset(
 
 
 # Bound every ``docker`` management call so a stalled daemon can't wedge
-# the worker step path (per issue #179 / commit e675ed2). 30s is generous
-# for run/rm/ps/inspect, all of which normally complete in seconds.
+# the worker step path (per issue #179 / commit e675ed2).
 _DOCKER_CLI_TIMEOUT_S = 30.0
 
 
@@ -89,25 +90,12 @@ async def _run_docker(
     (stalled daemon). A nonzero exit from docker itself is returned as a
     regular tuple — callers decide whether it's fatal.
     """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except (OSError, FileNotFoundError) as host_err:
-        raise ContainerError(f"failed to launch docker cli: {host_err}") from host_err
-    try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-    except TimeoutError as err:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        with contextlib.suppress(Exception):
-            await proc.communicate()
-        raise ContainerError(
-            f"docker cli timed out after {timeout_s}s: {' '.join(argv[:3])}"
-        ) from err
-    return proc.returncode or 0, stdout_bytes, stderr_bytes
+    rc, stdout_bytes, stderr_bytes, timed_out = await run_subprocess_with_timeout(
+        argv, timeout_s=timeout_s
+    )
+    if timed_out:
+        raise ContainerError(f"docker cli timed out after {timeout_s}s: {' '.join(argv)}")
+    return rc, stdout_bytes, stderr_bytes
 
 
 async def _load_environment_config(session_id: str) -> EnvironmentConfig | None:

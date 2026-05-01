@@ -289,9 +289,9 @@ async def _create_session_for_resources_test(
         window_max=150_000,
     )
     resources = (
-        [MemoryStoreResource.model_validate(r) for r in initial_resources]
-        if initial_resources is not None
-        else None
+        None
+        if initial_resources is None
+        else [MemoryStoreResource.model_validate(r) for r in initial_resources]
     )
     session = await sess_svc.create_session(
         pool,

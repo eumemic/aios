@@ -68,9 +68,7 @@ def _retry_delay_for_attempt(attempt: int) -> float | None:
 async def refresh_session_mount_state(
     pool: asyncpg.Pool[Any], session_id: str
 ) -> list[MemoryStoreResourceEcho]:
-    """Returns the freshly-loaded echoes so callers (the step body) avoid
-    a second DB query. Tests use this to mirror the step preamble.
-    """
+    """Return the freshly-loaded echoes so the step body can skip a second DB query."""
     from aios.db import queries
 
     async with pool.acquire() as conn:
