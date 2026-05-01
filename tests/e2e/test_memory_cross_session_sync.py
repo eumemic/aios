@@ -75,14 +75,14 @@ async def _start_session(
         environment_id=harness._env_id,
         title="memory test",
         metadata={},
-        resources=resources or None,
+        resources=resources,
     )
     await refresh_session_mount_state(harness._pool, session.id)
     return session
 
 
-async def _start_session_with_store(harness: Harness, store_id: str, store_name: str) -> Any:
-    """Backwards-compatible wrapper for the cross-session sync tests."""
+async def _start_session_with_store(harness: Harness, store_id: str) -> Any:
+    """Convenience: ``_start_session`` attached read_write to one store."""
     return await _start_session(
         harness,
         resources=[
@@ -96,8 +96,8 @@ class TestCrossSessionSync:
     async def test_write_in_a_visible_to_b_via_read(self, docker_harness: Harness) -> None:
         """A's write tool propagates to B's read tool through the shared FS."""
         store_id = await _attach_store(docker_harness, "xsync-read")
-        a = await _start_session_with_store(docker_harness, store_id, "xsync-read")
-        b = await _start_session_with_store(docker_harness, store_id, "xsync-read")
+        a = await _start_session_with_store(docker_harness, store_id)
+        b = await _start_session_with_store(docker_harness, store_id)
 
         # Provisioning both containers materializes the shared dir once.
         sandbox = runtime.require_sandbox_registry()
@@ -121,8 +121,8 @@ class TestCrossSessionSync:
         commits with the cached sha. B writes → DB sha has moved on, B's
         write fails with the typed precondition error."""
         store_id = await _attach_store(docker_harness, "xsync-race")
-        a = await _start_session_with_store(docker_harness, store_id, "xsync-race")
-        b = await _start_session_with_store(docker_harness, store_id, "xsync-race")
+        a = await _start_session_with_store(docker_harness, store_id)
+        b = await _start_session_with_store(docker_harness, store_id)
 
         sandbox = runtime.require_sandbox_registry()
         await sandbox.get_or_provision(a.id, pool=docker_harness._pool)
@@ -164,7 +164,7 @@ class TestCrossSessionSync:
         path must succeed: the edit should have refreshed the cached read-sha
         so the write's precondition matches the post-edit DB state."""
         store_id = await _attach_store(docker_harness, "xsync-edit-refresh")
-        a = await _start_session_with_store(docker_harness, store_id, "xsync-edit-refresh")
+        a = await _start_session_with_store(docker_harness, store_id)
 
         sandbox = runtime.require_sandbox_registry()
         await sandbox.get_or_provision(a.id, pool=docker_harness._pool)
@@ -197,7 +197,7 @@ class TestCrossSessionSync:
     async def test_fresh_write_no_precondition(self, docker_harness: Harness) -> None:
         """Writing to a path the model never read — no precondition; succeeds."""
         store_id = await _attach_store(docker_harness, "xsync-fresh")
-        a = await _start_session_with_store(docker_harness, store_id, "xsync-fresh")
+        a = await _start_session_with_store(docker_harness, store_id)
 
         sandbox = runtime.require_sandbox_registry()
         await sandbox.get_or_provision(a.id, pool=docker_harness._pool)
@@ -212,7 +212,7 @@ class TestCrossSessionSync:
         """API-driven create_memory mirrors to host dir; attached session's
         read tool sees the new content."""
         store_id = await _attach_store(docker_harness, "xsync-api")
-        a = await _start_session_with_store(docker_harness, store_id, "xsync-api")
+        a = await _start_session_with_store(docker_harness, store_id)
 
         sandbox = runtime.require_sandbox_registry()
         await sandbox.get_or_provision(a.id, pool=docker_harness._pool)
@@ -238,8 +238,8 @@ class TestCrossSessionSync:
         from aios.tools.bash import bash_handler
 
         store_id = await _attach_store(docker_harness, "xsync-bash")
-        a = await _start_session_with_store(docker_harness, store_id, "xsync-bash")
-        b = await _start_session_with_store(docker_harness, store_id, "xsync-bash")
+        a = await _start_session_with_store(docker_harness, store_id)
+        b = await _start_session_with_store(docker_harness, store_id)
 
         sandbox = runtime.require_sandbox_registry()
         await sandbox.get_or_provision(a.id, pool=docker_harness._pool)
@@ -338,7 +338,7 @@ class TestMountUpdateRecyclesContainer:
         from aios.tools.bash import bash_handler
 
         store_id = await _attach_store(docker_harness, "idem-mount")
-        session = await _start_session_with_store(docker_harness, store_id, "idem-mount")
+        session = await _start_session_with_store(docker_harness, store_id)
         sandbox = runtime.require_sandbox_registry()
         await sandbox.get_or_provision(session.id, pool=docker_harness._pool)
         original_container_id = sandbox.peek(session.id).container_id  # type: ignore[union-attr]

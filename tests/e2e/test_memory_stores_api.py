@@ -288,14 +288,18 @@ async def _create_session_for_resources_test(
         window_min=50_000,
         window_max=150_000,
     )
-    resources = [MemoryStoreResource.model_validate(r) for r in (initial_resources or [])]
+    resources = (
+        [MemoryStoreResource.model_validate(r) for r in initial_resources]
+        if initial_resources is not None
+        else None
+    )
     session = await sess_svc.create_session(
         pool,
         agent_id=agent.id,
         environment_id=env.id,
         title="resources-update",
         metadata={},
-        resources=resources or None,
+        resources=resources,
     )
     return {"id": session.id, "agent_id": agent.id, "env_id": env.id}
 

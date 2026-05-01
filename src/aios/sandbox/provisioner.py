@@ -22,6 +22,7 @@ CLI.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from aios.config import get_settings
 from aios.db import queries
@@ -72,13 +73,21 @@ PACKAGE_REGISTRY_HOSTS: frozenset[str] = frozenset(
 )
 
 
-async def _run_docker(argv: list[str]) -> tuple[int, bytes, bytes]:
+# Bound every ``docker`` management call so a stalled daemon can't wedge
+# the worker step path (per issue #179 / commit e675ed2). 30s is generous
+# for run/rm/ps/inspect, all of which normally complete in seconds.
+_DOCKER_CLI_TIMEOUT_S = 30.0
+
+
+async def _run_docker(
+    argv: list[str], *, timeout_s: float = _DOCKER_CLI_TIMEOUT_S
+) -> tuple[int, bytes, bytes]:
     """Run a ``docker`` CLI invocation and return (exit_code, stdout, stderr).
 
     Raises :class:`ContainerError` if the subprocess cannot be launched
-    at all (missing docker binary, OS error). A nonzero exit from docker
-    itself is returned as a regular tuple — callers decide whether it's
-    fatal.
+    (missing binary, OS error) or if it runs longer than ``timeout_s``
+    (stalled daemon). A nonzero exit from docker itself is returned as a
+    regular tuple — callers decide whether it's fatal.
     """
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -88,7 +97,16 @@ async def _run_docker(argv: list[str]) -> tuple[int, bytes, bytes]:
         )
     except (OSError, FileNotFoundError) as host_err:
         raise ContainerError(f"failed to launch docker cli: {host_err}") from host_err
-    stdout_bytes, stderr_bytes = await proc.communicate()
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except TimeoutError as err:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.communicate()
+        raise ContainerError(
+            f"docker cli timed out after {timeout_s}s: {' '.join(argv[:3])}"
+        ) from err
     return proc.returncode or 0, stdout_bytes, stderr_bytes
 
 
