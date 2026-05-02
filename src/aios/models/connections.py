@@ -20,9 +20,11 @@ double-bind a phone number to two sessions.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+ConnectionMode = Literal["detached", "single_session", "per_chat"]
 
 
 class ConnectionCreate(BaseModel):

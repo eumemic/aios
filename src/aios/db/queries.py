@@ -2260,16 +2260,25 @@ async def _raise_for_failed_mode_transition(
     )
 
 
+_MODE_PREDICATES: dict[str, str] = {
+    "detached": "session_id IS NULL AND session_template_id IS NULL",
+    "single_session": "session_id IS NOT NULL",
+    "per_chat": "session_template_id IS NOT NULL",
+}
+
+
 async def list_connections(
     conn: asyncpg.Connection[Any],
     *,
     connector: str | None = None,
     session_id: str | None = None,
+    mode: str | None = None,
     limit: int = 50,
     after: str | None = None,
 ) -> list[Connection]:
-    """List active connections.  Optional filters narrow by connector type
-    or by attached session.
+    """List active connections.  Optional filters narrow by connector type,
+    attached session id, or routing mode (``detached`` / ``single_session``
+    / ``per_chat``).
     """
     clauses: list[str] = ["archived_at IS NULL"]
     args: list[Any] = []
@@ -2279,6 +2288,8 @@ async def list_connections(
     if session_id is not None:
         args.append(session_id)
         clauses.append(f"session_id = ${len(args)}")
+    if mode is not None:
+        clauses.append(_MODE_PREDICATES[mode])
     if after is not None:
         args.append(after)
         clauses.append(f"id < ${len(args)}")
@@ -2496,7 +2507,13 @@ async def insert_chat_session(
     if row is not None:
         return str(row["session_id"])
     existing = await lookup_chat_session(conn, connection_id, chat_id)
-    assert existing is not None  # CONFLICT means the row exists
+    if existing is None:
+        # CONFLICT means the row existed at INSERT time; if it's gone now
+        # the chat session was hard-deleted between the two queries.
+        raise NotFoundError(
+            f"chat session for ({connection_id}, {chat_id}) vanished after CONFLICT",
+            detail={"connection_id": connection_id, "chat_id": chat_id},
+        )
     return existing
 
 

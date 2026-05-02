@@ -17,7 +17,7 @@ import asyncpg
 
 from aios.db import queries
 from aios.errors import ConflictError
-from aios.models.connections import Connection
+from aios.models.connections import Connection, ConnectionMode
 
 
 async def create_connection(
@@ -46,6 +46,7 @@ async def list_connections(
     *,
     connector: str | None = None,
     session_id: str | None = None,
+    mode: ConnectionMode | None = None,
     limit: int = 50,
     after: str | None = None,
 ) -> list[Connection]:
@@ -54,6 +55,7 @@ async def list_connections(
             conn,
             connector=connector,
             session_id=session_id,
+            mode=mode,
             limit=limit,
             after=after,
         )

@@ -35,13 +35,21 @@ def list_(
     ctx: typer.Context,
     connector: Annotated[str | None, typer.Option("--connector")] = None,
     session_id: Annotated[str | None, typer.Option("--session-id")] = None,
+    mode: Annotated[
+        str | None,
+        typer.Option("--mode", help="Filter by routing mode: detached, single_session, per_chat."),
+    ] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
     after: Annotated[str | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
         state, client = with_client(ctx)
-        params: dict[str, Any] = {"connector": connector, "session_id": session_id}
+        params: dict[str, Any] = {
+            "connector": connector,
+            "session_id": session_id,
+            "mode": mode,
+        }
         with client:
             envelope = (
                 fetch_all(client, "/v1/connections", params=params)

@@ -19,6 +19,7 @@ from aios.models.connections import (
     ConnectionAttach,
     ConnectionConfigurePerChat,
     ConnectionCreate,
+    ConnectionMode,
 )
 from aios.services import connections as service
 
@@ -41,6 +42,7 @@ async def list_(
     _auth: AuthDep,
     connector: str | None = None,
     session_id: str | None = None,
+    mode: ConnectionMode | None = None,
     limit: int = 50,
     after: str | None = None,
 ) -> ListResponse[Connection]:
@@ -48,6 +50,7 @@ async def list_(
         pool,
         connector=connector,
         session_id=session_id,
+        mode=mode,
         limit=limit,
         after=after,
     )

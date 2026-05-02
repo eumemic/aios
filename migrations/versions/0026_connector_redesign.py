@@ -91,10 +91,13 @@ def upgrade() -> None:
     )
 
     # Per-chat session ledger.  The PK doubles as the race-safe insert
-    # target for ``INSERT ... ON CONFLICT DO NOTHING RETURNING``.
+    # target for ``INSERT ... ON CONFLICT DO NOTHING RETURNING``.  Both
+    # FKs use the default NO ACTION: connections soft-delete via
+    # ``archived_at`` so CASCADE on ``connection_id`` would never fire,
+    # and per-chat sessions outlive their spawning connection by design.
     op.execute("""
         CREATE TABLE connection_chat_sessions (
-            connection_id  text NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+            connection_id  text NOT NULL REFERENCES connections(id),
             chat_id        text NOT NULL,
             session_id     text NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             created_at     timestamptz NOT NULL DEFAULT now(),
