@@ -21,7 +21,14 @@ CLI.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 from aios.config import get_settings
+
+if TYPE_CHECKING:
+    from aios.config import Settings
 from aios.db import queries
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
@@ -33,6 +40,7 @@ from aios.sandbox.container import (
     mount_snapshot_from_echoes,
     run_subprocess_with_timeout,
 )
+from aios.sandbox.git_proxy import GitProxy
 from aios.sandbox.github_clone import (
     GithubCloneError,
     ensure_cache_clone,
@@ -147,47 +155,67 @@ async def _materialize_memory_mounts(
     return list(echoes)
 
 
+_PROXY_HOST_ALIAS = "host.docker.internal"
+
+
 async def _materialize_github_clones(
     session_id: str,
-) -> list[GithubRepositoryResourceEcho]:
-    """Run host-side ``git clone`` for each attached github_repository
-    and return the echo list.
+) -> tuple[list[GithubRepositoryResourceEcho], GitProxy | None]:
+    """Decrypt tokens, start a per-session :class:`GitProxy`, then run
+    the host-side clone for each attached github_repository — rewriting
+    each working tree's ``origin`` to the proxy URL so the bind-mounted
+    ``.git/config`` inside the sandbox carries no credential.
 
-    Two-step per repo: ensure the bare cache (shared across sessions)
-    exists, then ``git clone --reference`` a per-session working tree
-    that the container will bind-mount. Token decryption uses the
-    worker-scoped CryptoBox.
+    Returns the materialized echo list and the proxy (or ``None`` when
+    the session has no github_repository attachments).
 
-    Failures are non-fatal: a bad token or unreachable repo logs an
-    error and appends a lifecycle event so the agent can react, but
-    does not block container provisioning.
+    Per-repo clone failures are non-fatal — they log + append a
+    lifecycle event and drop the repo from the materialized list (its
+    working tree won't be bind-mounted). The proxy stays alive for
+    sibling repos.
     """
     from aios.harness import runtime
+    from aios.sandbox.git_proxy import GitProxy, repo_key
     from aios.services import github_repositories as github_repo_service
 
     pool = runtime.require_pool()
     crypto_box = runtime.require_crypto_box()
-    materialized: list[GithubRepositoryResourceEcho] = []
-    failures: list[tuple[GithubRepositoryResourceEcho, GithubCloneError]] = []
+
+    # Load echoes and decrypt all tokens up front so the proxy can be
+    # initialized with the full token map before any clone runs.
     async with pool.acquire() as conn:
         echoes = await queries.list_session_github_repo_echoes(conn, session_id)
+        if not echoes:
+            return [], None
+        echo_tokens: list[tuple[GithubRepositoryResourceEcho, str]] = []
+        repos_map: dict[str, str] = {}
         for echo in echoes:
-            try:
-                token = await github_repo_service.get_session_token(
-                    conn, crypto_box, session_id, echo.id
-                )
-                cache_dir = await ensure_cache_clone(echo.url, token)
-                await ensure_session_working_tree(
-                    session_id=session_id,
-                    resource_id=echo.id,
-                    repo_url=echo.url,
-                    token=token,
-                    cache_dir=cache_dir,
-                )
-            except GithubCloneError as err:
-                failures.append((echo, err))
-                continue
-            materialized.append(echo)
+            token = await github_repo_service.get_session_token(
+                conn, crypto_box, session_id, echo.id
+            )
+            echo_tokens.append((echo, token))
+            repos_map[repo_key(echo.url)] = token
+
+    proxy = GitProxy(repos_map)
+    await proxy.start()
+
+    materialized: list[GithubRepositoryResourceEcho] = []
+    failures: list[tuple[GithubRepositoryResourceEcho, GithubCloneError]] = []
+    for echo, token in echo_tokens:
+        try:
+            cache_dir = await ensure_cache_clone(echo.url, token)
+            await ensure_session_working_tree(
+                session_id=session_id,
+                resource_id=echo.id,
+                repo_url=echo.url,
+                token=token,
+                cache_dir=cache_dir,
+                proxy_url=proxy.proxy_url(echo.url, host=_PROXY_HOST_ALIAS),
+            )
+        except GithubCloneError as err:
+            failures.append((echo, err))
+            continue
+        materialized.append(echo)
 
     # Log + append failure events outside the conn block so we don't
     # hold one connection while acquiring a second from the same pool.
@@ -213,7 +241,7 @@ async def _materialize_github_clones(
                     "message": str(failure),
                 },
             )
-    return materialized
+    return materialized, proxy
 
 
 async def provision_for_session(session_id: str) -> ContainerHandle:
@@ -227,26 +255,64 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
     Raises :class:`ContainerError` if ``docker run`` fails for any reason
     (image missing, daemon unreachable, resource limits, ...).
     """
-    from aios.sandbox.volumes import (
-        ensure_workspace_path,
-        memory_store_host_dir,
-        session_repo_working_tree_dir,
-    )
+    from aios.sandbox.volumes import ensure_workspace_path
 
     settings = get_settings()
     raw_path, session_env = await _load_session_provisioning(session_id)
     workspace_path = ensure_workspace_path(raw_path)
     env_config = await _load_environment_config(session_id)
     memory_echoes = await _materialize_memory_mounts(session_id)
-    github_echoes = await _materialize_github_clones(session_id)
+    github_echoes, git_proxy = await _materialize_github_clones(session_id)
 
-    # Merge environment-level and session-level env vars (session wins).
+    # Once the proxy is running its serve task holds an open port +
+    # in-memory token map. Anything that raises before we hand the
+    # caller a ContainerHandle (which carries the proxy and would be
+    # cleaned up by ``release``) must stop the proxy on the way out,
+    # otherwise the port and tokens leak for the worker's lifetime.
+    try:
+        return await _provision_for_session_inner(
+            session_id=session_id,
+            settings=settings,
+            workspace_path=workspace_path,
+            env_config=env_config,
+            session_env=session_env,
+            memory_echoes=memory_echoes,
+            github_echoes=github_echoes,
+            git_proxy=git_proxy,
+        )
+    except BaseException:
+        if git_proxy is not None:
+            try:
+                await git_proxy.stop()
+            except Exception as cleanup_err:
+                log.warning(
+                    "sandbox.git_proxy_cleanup_after_provision_failure",
+                    session_id=session_id,
+                    error=str(cleanup_err),
+                )
+        raise
+
+
+async def _provision_for_session_inner(
+    *,
+    session_id: str,
+    settings: Settings,
+    workspace_path: Path,
+    env_config: EnvironmentConfig | None,
+    session_env: dict[str, str],
+    memory_echoes: list[MemoryStoreResourceEcho],
+    github_echoes: list[GithubRepositoryResourceEcho],
+    git_proxy: GitProxy | None,
+) -> ContainerHandle:
+    """The body of ``provision_for_session``. Split out so the caller's
+    try/except cleanly wraps everything that might leak the proxy."""
+    from aios.sandbox.volumes import memory_store_host_dir, session_repo_working_tree_dir
+
     merged_env: dict[str, str] = {
         **(env_config.env if env_config and env_config.env else {}),
         **session_env,
     }
 
-    # Determine if the environment uses limited networking.
     networking = env_config.networking if env_config else None
     needs_lockdown = isinstance(networking, LimitedNetworking)
 
@@ -271,6 +337,13 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         "--interactive",
     ]
 
+    # When a github_repository is attached, the container must be able to
+    # reach the host-side credential proxy via host.docker.internal.
+    # The explicit alias is required on Linux; on Docker Desktop the
+    # name auto-resolves but `--add-host` is harmless.
+    if git_proxy is not None:
+        argv.extend(["--add-host", f"{_PROXY_HOST_ALIAS}:host-gateway"])
+
     # Bind-mount each attached memory store. ``:ro`` for read_only attaches
     # ensures the kernel rejects writes (bash + tools alike); ``:rw`` is the
     # read_write default. The host source is shared across all attached
@@ -280,9 +353,6 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         mode = "ro" if memory_echo.access == "read_only" else "rw"
         argv.extend(["--volume", f"{host_dir}:/mnt/memory/{memory_echo.name}:{mode}"])
 
-    # Bind-mount each successfully-cloned github repo. The per-session
-    # working tree (already populated by ``_materialize_github_clones``)
-    # is mounted at the user-supplied ``mount_path``.
     for github_echo in github_echoes:
         repo_host_dir = session_repo_working_tree_dir(session_id, github_echo.id)
         argv.extend(["--volume", f"{repo_host_dir}:{github_echo.mount_path}:rw"])
@@ -312,14 +382,23 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         container_id=container_id,
         workspace_path=workspace_path,
         mount_snapshot=mount_snapshot_from_echoes(memory_echoes, github_echoes),
+        git_proxy=git_proxy,
     )
 
-    # Install packages while the network is still open.
-    await _install_packages(handle, env_config, session_id)
-
-    # Apply iptables lockdown after packages are installed.
-    if needs_lockdown and isinstance(networking, LimitedNetworking):
-        await _apply_network_lockdown(handle, networking, session_id)
+    try:
+        await _install_packages(handle, env_config, session_id)
+        if needs_lockdown and isinstance(networking, LimitedNetworking):
+            extra_host_ports: list[tuple[str, int]] = (
+                [(_PROXY_HOST_ALIAS, git_proxy.port)] if git_proxy is not None else []
+            )
+            await _apply_network_lockdown(
+                handle, networking, session_id, extra_host_ports=extra_host_ports
+            )
+    except BaseException:
+        # Container is up but we failed to set it up. Tear it down so
+        # we don't leak a docker container alongside the proxy.
+        await release(handle)
+        raise
 
     log.info(
         "sandbox.provisioned",
@@ -378,12 +457,20 @@ async def _install_packages(
 # ── network lockdown ──────────────────────────────────────────────────────────
 
 
-def build_iptables_script(allowed_hosts: set[str]) -> str:
+def build_iptables_script(
+    allowed_hosts: set[str],
+    extra_host_ports: Sequence[tuple[str, int]] = (),
+) -> str:
     """Build a shell script that restricts outbound traffic via iptables.
 
     The script allows: loopback, established connections, DNS (port 53),
-    and HTTP/HTTPS (ports 80/443) to the resolved IPs of each allowed
-    host. Everything else is dropped.
+    HTTP/HTTPS (ports 80/443) to the resolved IPs of each allowed host,
+    and any additional ``(host, port)`` pairs in ``extra_host_ports``.
+    Everything else is dropped.
+
+    The extra-host-ports surface exists because the credential proxy
+    binds to a non-standard ephemeral port; without it, in-container
+    git traffic to the proxy would be dropped by the default policy.
 
     Hostnames are validated at the model layer (alphanumerics, dots, hyphens
     only) so embedding them in the script is safe.
@@ -415,6 +502,15 @@ def build_iptables_script(allowed_hosts: set[str]) -> str:
         lines.append('  iptables -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT')
         lines.append("done")
 
+    for host, port in extra_host_ports:
+        lines.append("")
+        lines.append(f"# Allow {host}:{port}")
+        lines.append(
+            f"for ip in $(getent ahosts {host} 2>/dev/null | awk '{{print $1}}' | sort -u); do"
+        )
+        lines.append(f'  iptables -A OUTPUT -d "$ip" -p tcp --dport {port} -j ACCEPT')
+        lines.append("done")
+
     lines.append("")
     lines.append("# Drop everything else")
     lines.append("iptables -P OUTPUT DROP")
@@ -426,6 +522,8 @@ async def _apply_network_lockdown(
     handle: ContainerHandle,
     networking: LimitedNetworking,
     session_id: str,
+    *,
+    extra_host_ports: Sequence[tuple[str, int]] = (),
 ) -> None:
     """Apply iptables rules to restrict outbound traffic.
 
@@ -438,7 +536,7 @@ async def _apply_network_lockdown(
     if networking.allow_package_managers:
         allowed |= PACKAGE_REGISTRY_HOSTS
 
-    script = build_iptables_script(allowed)
+    script = build_iptables_script(allowed, extra_host_ports=extra_host_ports)
     settings = get_settings()
     result = await handle.run_command(
         script, timeout_seconds=30, max_output_bytes=settings.bash_max_output_bytes
@@ -456,6 +554,7 @@ async def _apply_network_lockdown(
             "sandbox.network_lockdown_applied",
             session_id=session_id,
             allowed_host_count=len(allowed),
+            extra_host_port_count=len(extra_host_ports),
         )
 
 
@@ -466,7 +565,23 @@ async def release(handle: ContainerHandle) -> None:
     container in one step. If the container is already gone (daemon
     forgot it, user removed it manually), this is a no-op — we log but
     don't raise. The workspace directory on the host is NOT deleted.
+
+    The per-session credential proxy (if any) is stopped before docker
+    rm so its in-memory tokens are released as soon as the session is
+    no longer using them.
     """
+    if handle.git_proxy is not None:
+        try:
+            await handle.git_proxy.stop()
+        except Exception as err:
+            # Best-effort cleanup — never let a stuck proxy block container
+            # teardown. The server task is killed regardless on cancel.
+            log.warning(
+                "sandbox.git_proxy_stop_failed",
+                session_id=handle.session_id,
+                error=str(err),
+            )
+
     argv = ["docker", "rm", "--force", handle.container_id]
     try:
         rc, _, stderr_bytes = await _run_docker(argv)

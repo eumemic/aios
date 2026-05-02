@@ -12,10 +12,15 @@ Two host directories per attached repo:
    Stored at ``<session_workspace>/_repos/<repo_id>/`` and bind-mounted
    into the container at the user-supplied ``mount_path``.
 
-The auth token is embedded in the cloned ``origin`` URL
-(``https://x-access-token:$TOKEN@github.com/owner/repo.git``). The token
-sits in ``.git/config`` inside the per-session working tree, which is
-ephemeral and per-session.
+The auth token is used only on the host-side ``git clone`` invocation;
+we then ``git remote set-url origin`` the working tree to a per-session
+:class:`aios.sandbox.git_proxy.GitProxy` URL so the bind-mounted
+``.git/config`` inside the sandbox carries no credential. The proxy
+holds the token in worker-process memory and forwards smart-HTTP traffic
+to ``github.com`` with ``Authorization`` injected — the agent inside
+the container can ``git fetch`` / ``push`` as normal but the PAT itself
+is not readable from inside the container. Cache refreshes happen on
+the host outside the container.
 
 The host process running this module needs ``git`` on PATH.
 """
@@ -200,9 +205,12 @@ async def ensure_session_working_tree(
     repo_url: str,
     token: str,
     cache_dir: Path,
+    proxy_url: str,
 ) -> Path:
-    """Create a per-session working tree from the cache, with the auth
-    token embedded in the ``origin`` URL.
+    """Create a per-session working tree from the cache, then rewrite
+    ``origin`` to point at the per-session ``GitProxy`` URL so the
+    bind-mounted ``.git/config`` inside the sandbox carries no
+    credential.
 
     Always recreates the working tree on call: that way token rotation
     (which bumps ``updated_at`` on the resource and hence the mount
@@ -235,6 +243,23 @@ async def ensure_session_working_tree(
             shutil.rmtree(work_dir, ignore_errors=True)
         raise GithubCloneError(
             f"git clone --reference failed for session {session_id} repo {resource_id}: "
+            f"{_redact_token_from_message(stderr.decode('utf-8', errors='replace'), token)}"
+        )
+
+    # Replace the auth-embedded origin URL with the proxy URL. The bind
+    # mount is about to expose this .git/config inside the sandbox; if we
+    # left the auth URL in place, the agent could read the PAT via
+    # `cat .git/config` or `git remote -v`.
+    rc, _stdout, stderr = await _run_git(
+        ["remote", "set-url", "origin", proxy_url],
+        cwd=work_dir,
+        op="remote set-url",
+    )
+    if rc != 0:
+        if work_dir.exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
+        raise GithubCloneError(
+            f"failed to scrub origin URL for session {session_id} repo {resource_id}: "
             f"{_redact_token_from_message(stderr.decode('utf-8', errors='replace'), token)}"
         )
 

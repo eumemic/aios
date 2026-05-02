@@ -199,7 +199,7 @@ class TestProvisionerDockerArgs:
             ),
             patch(
                 "aios.sandbox.provisioner._materialize_github_clones",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=([], None)),
             ),
             patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
             patch(
@@ -250,7 +250,7 @@ class TestProvisionerDockerArgs:
             ),
             patch(
                 "aios.sandbox.provisioner._materialize_github_clones",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=([], None)),
             ),
             patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
             patch("aios.sandbox.provisioner._install_packages", AsyncMock()),
@@ -292,7 +292,7 @@ class TestProvisionerDockerArgs:
             ),
             patch(
                 "aios.sandbox.provisioner._materialize_github_clones",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=([], None)),
             ),
             patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
             patch("aios.sandbox.provisioner._install_packages", AsyncMock()),
