@@ -116,12 +116,18 @@ def github_repo_cache_lock_path(url_hash: str) -> Path:
     return github_repos_cache_root() / f"{url_hash}.lock"
 
 
+_SESSION_REPOS_ROOT = "_session_repos"
+
+
 def session_repos_root(session_id: str) -> Path:
-    """Per-session sibling of ``/workspace`` that holds working trees
-    cloned from the cache. Lives under the session's own workspace dir
-    so it goes away when the workspace is cleaned up.
+    """Per-session host dir for github_repository working trees.
+
+    Rooted at ``<workspace_root>/_session_repos/<session_id>`` so the
+    location is independent of any user-supplied ``workspace_path``
+    override on the session — those overrides are user-managed and we
+    don't want plaintext-token ``.git/config`` files leaking into them.
     """
-    return (workspace_dir_for(session_id) / "_repos").resolve()
+    return (get_settings().workspace_root / _SESSION_REPOS_ROOT / session_id).resolve()
 
 
 def session_repo_working_tree_dir(session_id: str, repo_id: str) -> Path:

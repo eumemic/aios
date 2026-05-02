@@ -167,9 +167,10 @@ async def _materialize_github_clones(
 
     pool = runtime.require_pool()
     crypto_box = runtime.require_crypto_box()
+    materialized: list[GithubRepositoryResourceEcho] = []
+    failures: list[tuple[GithubRepositoryResourceEcho, GithubCloneError]] = []
     async with pool.acquire() as conn:
         echoes = await queries.list_session_github_repo_echoes(conn, session_id)
-        materialized: list[GithubRepositoryResourceEcho] = []
         for echo in echoes:
             try:
                 token = await github_repo_service.get_session_token(
@@ -184,32 +185,34 @@ async def _materialize_github_clones(
                     cache_dir=cache_dir,
                 )
             except GithubCloneError as err:
-                # Append a session.error event so the agent's next step
-                # sees the failure context. Skip the working-tree mount
-                # for this repo — bind-mounting a missing dir would fail
-                # at docker run.
-                log.warning(
-                    "sandbox.github_clone_failed",
-                    session_id=session_id,
-                    resource_id=echo.id,
-                    repo_url=echo.url,
-                    error=str(err),
-                )
-                from aios.services import sessions as sessions_service
-
-                await sessions_service.append_event(
-                    pool,
-                    session_id,
-                    "lifecycle",
-                    {
-                        "event": "github_clone_failed",
-                        "resource_id": echo.id,
-                        "repo_url": echo.url,
-                        "message": str(err),
-                    },
-                )
+                failures.append((echo, err))
                 continue
             materialized.append(echo)
+
+    # Log + append failure events outside the conn block so we don't
+    # hold one connection while acquiring a second from the same pool.
+    if failures:
+        from aios.services import sessions as sessions_service
+
+        for failed_echo, failure in failures:
+            log.warning(
+                "sandbox.github_clone_failed",
+                session_id=session_id,
+                resource_id=failed_echo.id,
+                repo_url=failed_echo.url,
+                error=str(failure),
+            )
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "lifecycle",
+                {
+                    "event": "github_clone_failed",
+                    "resource_id": failed_echo.id,
+                    "repo_url": failed_echo.url,
+                    "message": str(failure),
+                },
+            )
     return materialized
 
 

@@ -71,8 +71,3 @@ class TestRedactToken:
     def test_no_redaction_if_token_absent(self) -> None:
         msg = "fatal: not a git repository"
         assert _redact_token_from_message(msg, "ghp_secret") == msg
-
-    def test_empty_token_passthrough(self) -> None:
-        # Belt-and-suspenders: empty token should never reach this path,
-        # but if it does, don't naive-replace into mush.
-        assert _redact_token_from_message("hello world", "") == "hello world"

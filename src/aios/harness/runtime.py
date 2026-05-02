@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from aios.crypto.vault import CryptoBox
     from aios.harness.task_registry import TaskRegistry
     from aios.mcp.pool import McpSessionPool
-    from aios.models.github_repositories import GithubRepositoryResourceEcho
     from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.sandbox.registry import SandboxRegistry
 
@@ -63,30 +62,6 @@ def get_session_memory_mounts(session_id: str) -> list[MemoryStoreResourceEcho]:
 def clear_session_memory_mounts(session_id: str) -> None:
     """Drop the cached mounts for ``session_id`` (e.g. after session unload)."""
     _session_memory_mounts.pop(session_id, None)
-
-
-# Per-session github_repository echo cache. Symmetric with the memory mount
-# cache above. Populated at the top of every step in
-# ``loop.refresh_session_mount_state`` so the sandbox registry's drift check
-# and any future github-aware tools can read the current attachment set
-# without an extra DB hit.
-_session_github_repos: dict[str, list[GithubRepositoryResourceEcho]] = {}
-
-
-def set_session_github_repos(session_id: str, echoes: list[GithubRepositoryResourceEcho]) -> None:
-    """Record the attached github repositories for ``session_id``."""
-    _session_github_repos[session_id] = list(echoes)
-
-
-def get_session_github_repos(session_id: str) -> list[GithubRepositoryResourceEcho]:
-    """Return the attached github repositories for ``session_id``, or an
-    empty list."""
-    return _session_github_repos.get(session_id, [])
-
-
-def clear_session_github_repos(session_id: str) -> None:
-    """Drop the cached github repos for ``session_id`` (e.g. after unload)."""
-    _session_github_repos.pop(session_id, None)
 
 
 # Per-session "last sha read by tool" cache: read tool stamps; write tool

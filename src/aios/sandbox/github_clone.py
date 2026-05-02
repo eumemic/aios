@@ -79,12 +79,14 @@ def _build_auth_url(repo_url: str, token: str) -> str:
     return f"{scheme}://x-access-token:{token}@{rest}"
 
 
-async def _run_git(argv: list[str], *, cwd: Path | None = None) -> tuple[int, bytes, bytes]:
+async def _run_git(
+    argv: list[str], *, cwd: Path | None = None, op: str = "git"
+) -> tuple[int, bytes, bytes]:
     """Launch ``git`` with the timeout and error semantics we rely on.
 
-    The launch itself can raise :class:`ContainerError` if the binary is
-    missing on the host. Nonzero exits are returned to the caller for
-    classification.
+    ``op`` is a short label used in the timeout error message — never
+    the raw argv, which carries the auth-embedded URL on clone/fetch
+    paths and would leak the token into logs and the session event log.
     """
     full_argv = ["git", *argv]
     if cwd is not None:
@@ -93,7 +95,7 @@ async def _run_git(argv: list[str], *, cwd: Path | None = None) -> tuple[int, by
         full_argv, timeout_s=_GIT_TIMEOUT_S
     )
     if timed_out:
-        raise GithubCloneError(f"git timed out after {_GIT_TIMEOUT_S}s: {' '.join(argv)}")
+        raise GithubCloneError(f"git {op} timed out after {_GIT_TIMEOUT_S}s")
     return rc, stdout, stderr
 
 
@@ -139,6 +141,7 @@ async def ensure_cache_clone(repo_url: str, token: str) -> Path:
             cache_dir.parent.mkdir(parents=True, exist_ok=True)
             rc, _stdout, stderr = await _run_git(
                 ["clone", "--bare", auth_url, str(cache_dir)],
+                op="clone --bare",
             )
             if rc != 0:
                 # Drop any partial dir so the next attempt re-clones from scratch.
@@ -150,7 +153,7 @@ async def ensure_cache_clone(repo_url: str, token: str) -> Path:
                 )
             # Disable gc on the bare cache so it can't reap objects that
             # per-session working trees alternate against.
-            await _run_git(["config", "gc.auto", "0"], cwd=cache_dir)
+            await _run_git(["config", "gc.auto", "0"], cwd=cache_dir, op="config gc.auto")
             log.info(
                 "github_clone.cache_created",
                 repo_url=repo_url,
@@ -180,6 +183,7 @@ async def _fetch_cache(cache_dir: Path, auth_url: str, repo_url: str) -> None:
             "origin",
         ],
         cwd=cache_dir,
+        op="fetch",
     )
     if rc != 0:
         log.warning(
@@ -213,20 +217,19 @@ async def ensure_session_working_tree(
         shutil.rmtree(work_dir)
 
     auth_url = _build_auth_url(repo_url, token)
+    # `--dissociate` copies needed objects into the working clone so cache
+    # GC can't break it later. We trade disk for safety.
     rc, _stdout, stderr = await _run_git(
         [
             "clone",
             "--reference",
             str(cache_dir),
-            "--dissociate",  # copy needed objects into the working clone so
-            # cache GC (if it ever runs) can't break the working tree
+            "--dissociate",
             auth_url,
             str(work_dir),
         ],
+        op="clone --reference",
     )
-    # Note: --dissociate copies; for max sharing we'd drop it, but then
-    # the cache must never gc and per-session deletes leak alternates.
-    # Trade some disk for safety.
     if rc != 0:
         if work_dir.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -259,8 +262,6 @@ def _redact_token_from_message(msg: str, token: str) -> str:
     a log or session event. Tokens are unique enough that simple
     substitution is reliable.
     """
-    if not token:
-        return msg
     return msg.replace(token, "<redacted>")
 
 

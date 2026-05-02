@@ -84,6 +84,14 @@ class TestGithubRepositoryResourceCreate:
         with pytest.raises(ValidationError, match="/mnt/memory"):
             _resource(mount_path="/mnt/memory")
 
+    def test_mount_path_exact_workspace_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="/workspace"):
+            _resource(mount_path="/workspace")
+
+    def test_mount_path_workspace_subdir_allowed(self) -> None:
+        r = _resource(mount_path="/workspace/repo")
+        assert r.mount_path == "/workspace/repo"
+
     def test_mount_path_with_special_chars_allowed(self) -> None:
         # Anything not /, NUL, '.', '..' is fine.
         r = _resource(mount_path="/workspace/My Repo (cloned)/v1")

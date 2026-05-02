@@ -41,22 +41,6 @@ async def _list_all_echoes(
     return out
 
 
-def _require_crypto_box(
-    crypto_box: CryptoBox | None,
-    github_resources: list[Any],
-) -> CryptoBox | None:
-    """Guard against attaching github_repository without a CryptoBox.
-
-    Returns the (non-None) crypto_box when github resources are present so
-    callers don't need a separate narrowing assertion.
-    """
-    if not github_resources:
-        return crypto_box
-    if crypto_box is None:
-        raise ValueError("crypto_box is required when attaching github_repository resources")
-    return crypto_box
-
-
 async def create_session(
     pool: asyncpg.Pool[Any],
     *,
@@ -99,13 +83,14 @@ async def create_session(
             session = session.model_copy(update={"vault_ids": vault_ids})
         if resources:
             memory_resources, github_resources = split_resources_by_type(resources)
-            cbox = _require_crypto_box(crypto_box, github_resources)
             if memory_resources:
                 await memory_service.attach_to_session(conn, session.id, memory_resources)
             if github_resources:
-                assert cbox is not None  # narrowed by _require_crypto_box
+                assert crypto_box is not None, (
+                    "API surface requires CryptoBox when attaching github_repository"
+                )
                 await github_repo_service.attach_to_session(
-                    conn, session.id, github_resources, cbox
+                    conn, session.id, github_resources, crypto_box
                 )
             echoes = await _list_all_echoes(conn, session.id)
             session = session.model_copy(update={"resources": echoes})
@@ -328,15 +313,16 @@ async def update_session(
             # resource types, so an incoming list that omits a type
             # detaches every existing attachment of that type.
             memory_resources, github_resources = split_resources_by_type(resources)
-            cbox = _require_crypto_box(crypto_box, github_resources)
             await memory_service.set_session_resources(conn, session_id, memory_resources)
             if github_resources:
-                assert cbox is not None
+                assert crypto_box is not None, (
+                    "API surface requires CryptoBox when attaching github_repository"
+                )
                 await github_repo_service.set_session_resources(
-                    conn, session_id, github_resources, cbox
+                    conn, session_id, github_resources, crypto_box
                 )
             else:
-                await queries.delete_session_github_repos(conn, session_id)
+                await github_repo_service.detach_all_from_session(conn, session_id)
         vids = await queries.get_session_vault_ids(conn, session_id)
         echoes = await _list_all_echoes(conn, session_id)
         return session.model_copy(update={"vault_ids": vids, "resources": echoes})

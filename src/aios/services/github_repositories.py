@@ -25,11 +25,27 @@ from aios.models.github_repositories import (
     GithubRepositoryResource,
     GithubRepositoryResourceEcho,
 )
+from aios.sandbox.github_clone import remove_session_working_tree
 
 
 def _encrypt_token(crypto_box: CryptoBox, token: str) -> Any:
     """Encrypt a github auth token. Returns an :class:`EncryptedBlob`."""
     return crypto_box.encrypt(token)
+
+
+async def _list_attached_resource_ids(conn: asyncpg.Connection[Any], session_id: str) -> list[str]:
+    """Return the resource_ids currently attached so we can clean up
+    their on-disk working trees after the DB rows go away."""
+    echoes = await queries.list_session_github_repo_echoes(conn, session_id)
+    return [e.id for e in echoes]
+
+
+def _purge_working_trees(session_id: str, resource_ids: list[str]) -> None:
+    """Best-effort filesystem cleanup. Each detached resource's working
+    tree contains the embedded-token ``.git/config``; leaving it on disk
+    after the DB row goes away would be a slow plaintext-token leak."""
+    for rid in resource_ids:
+        remove_session_working_tree(session_id, rid)
 
 
 async def attach_to_session(
@@ -53,12 +69,11 @@ async def attach_to_session(
     try:
         await queries.attach_github_repos_to_session(conn, session_id, entries)
     except asyncpg.UniqueViolationError as exc:
-        # Hits the (session_id, mount_path) partial unique index. Models
-        # validate this in-payload, so a hit here means the new payload
-        # collides with an EXISTING attachment in the DB. The full-list-
-        # replace path on update issues a DELETE first so this is only
-        # reachable on initial create with a programmatic bug — surface it
-        # as a 4xx rather than a 500.
+        # The unique index hit means the new payload collides with an
+        # already-attached row. The model validator catches duplicates
+        # within one request, so reaching this means we're racing another
+        # writer or there's a programmatic bug somewhere upstream — a 4xx
+        # is the right surface either way.
         raise ConflictError(
             "duplicate mount_path among github_repository attachments",
             detail={"session_id": session_id},
@@ -74,13 +89,27 @@ async def set_session_resources(
     """Replace attached repositories atomically.
 
     A failed attach rolls back the delete (parent transaction is the
-    caller's). Matches the memory-store full-list-replace semantics; the
-    aios-vs-CMA difference is documented in
-    :doc:`docs/github_repository`.
+    caller's). Matches the memory-store full-list-replace semantics.
+    Working trees of detached attachments are removed from the host
+    after the DB swap commits — the per-session ``.git/config`` carries
+    the embedded auth token, so leaving them on disk after detach would
+    be a slow plaintext-token leak.
     """
     async with conn.transaction():
+        old_ids = await _list_attached_resource_ids(conn, session_id)
         await queries.delete_session_github_repos(conn, session_id)
         await attach_to_session(conn, session_id, resources, crypto_box)
+    _purge_working_trees(session_id, old_ids)
+
+
+async def detach_all_from_session(conn: asyncpg.Connection[Any], session_id: str) -> None:
+    """Detach every github_repository from a session and clean up the
+    working trees. Used by the full-list-replace path when the new
+    resource list contains no github entries."""
+    async with conn.transaction():
+        old_ids = await _list_attached_resource_ids(conn, session_id)
+        await queries.delete_session_github_repos(conn, session_id)
+    _purge_working_trees(session_id, old_ids)
 
 
 async def list_session_echoes(

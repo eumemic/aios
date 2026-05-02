@@ -30,20 +30,16 @@ _MOUNT_PATH_PATTERN = r"^(/[^/\x00]+)+$"
 
 
 def _check_mount_path(path: str) -> None:
-    """Reject `.` and `..` segments and overlap with the memory mount root.
-
-    Path traversal is already blocked by the regex (the segment-pattern bans
-    NUL and slashes-within-segments), but `.` and `..` segments are still
-    syntactically valid under that regex and would let a clone escape the
-    intended host directory once the path is joined to a parent. The
-    ``/mnt/memory`` overlap check stops a github repo from shadowing or
-    being shadowed by a memory store mount in the same container.
-    """
+    """Block path-traversal segments and reserved-mount overlaps."""
     for segment in path.lstrip("/").split("/"):
         if segment in (".", ".."):
             raise ValueError(f"path segment {segment!r} is not allowed (would enable traversal)")
     if path == "/mnt/memory" or path.startswith("/mnt/memory/"):
         raise ValueError("mount_path may not overlap with the /mnt/memory tree (memory stores)")
+    if path == "/workspace":
+        raise ValueError(
+            "mount_path may not be /workspace exactly (it shadows the session workspace mount)"
+        )
 
 
 class GithubRepositoryResource(BaseModel):

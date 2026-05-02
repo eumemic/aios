@@ -80,7 +80,6 @@ async def refresh_session_mount_state(
         memory_echoes = await queries.list_session_memory_store_echoes(conn, session_id)
         github_echoes = await queries.list_session_github_repo_echoes(conn, session_id)
     runtime.set_session_memory_mounts(session_id, memory_echoes)
-    runtime.set_session_github_repos(session_id, github_echoes)
     if runtime.sandbox_registry is not None:
         await runtime.sandbox_registry.release_if_mounts_changed(
             session_id, memory_echoes, github_echoes
