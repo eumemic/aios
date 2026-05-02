@@ -86,3 +86,47 @@ def memory_store_lock_path(store_id: str) -> Path:
     writes the initial DB snapshot to the host dir. The loser observes
     the ``.materialized`` marker and skips."""
     return memory_stores_root() / f"{store_id}.lock"
+
+
+_GITHUB_REPOS_ROOT = "_github_repos"
+
+
+def github_repos_cache_root() -> Path:
+    """Return ``<workspace_root>/_github_repos`` — the parent of all
+    cache-bare-clone host directories.
+
+    Each cache dir is keyed by ``sha256(repo_url)`` so two sessions that
+    reference the same upstream repo share the object database, regardless
+    of ``mount_path``. Per-session working trees ``--reference`` this cache
+    via :func:`session_repo_working_tree_dir`.
+    """
+    return (get_settings().workspace_root / _GITHUB_REPOS_ROOT).resolve()
+
+
+def github_repo_cache_dir(url_hash: str) -> Path:
+    """Bare-clone host dir for a given repo-url hash. Pure — see
+    :mod:`aios.sandbox.github_clone` for materialization."""
+    return github_repos_cache_root() / url_hash
+
+
+def github_repo_cache_lock_path(url_hash: str) -> Path:
+    """Per-cache file lock path. Two sessions racing on first-clone of the
+    same url need to serialize so we don't run two ``git clone --bare``
+    side by side and corrupt the cache dir."""
+    return github_repos_cache_root() / f"{url_hash}.lock"
+
+
+def session_repos_root(session_id: str) -> Path:
+    """Per-session sibling of ``/workspace`` that holds working trees
+    cloned from the cache. Lives under the session's own workspace dir
+    so it goes away when the workspace is cleaned up.
+    """
+    return (workspace_dir_for(session_id) / "_repos").resolve()
+
+
+def session_repo_working_tree_dir(session_id: str, repo_id: str) -> Path:
+    """Per-session working tree for a single ``github_repository``
+    attachment. Bind-mounted into the container at the user-supplied
+    ``mount_path``.
+    """
+    return session_repos_root(session_id) / repo_id

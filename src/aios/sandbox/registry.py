@@ -31,6 +31,7 @@ from aios.sandbox.provisioner import release as provisioner_release
 if TYPE_CHECKING:
     import asyncpg
 
+    from aios.models.github_repositories import GithubRepositoryResourceEcho
     from aios.models.memory_stores import MemoryStoreResourceEcho
 
 log = get_logger("aios.sandbox.registry")
@@ -119,18 +120,24 @@ class SandboxRegistry:
     async def release_if_mounts_changed(
         self,
         session_id: str,
-        current_echoes: list[MemoryStoreResourceEcho],
+        memory_echoes: list[MemoryStoreResourceEcho],
+        github_echoes: list[GithubRepositoryResourceEcho],
     ) -> None:
         """Release the cached container if its mount snapshot has drifted.
 
         Acquires the per-session lock so a tool task from a prior step
         can't race with the release via ``get_or_provision``.
+
+        Drift includes: memory store attachments added/removed, github
+        repos added/removed, github token rotated (the ``updated_at``
+        timestamp on the github echo is part of the snapshot key, see
+        :func:`mount_snapshot_from_echoes`).
         """
         async with self._lock_for(session_id):
             handle = self._handles.get(session_id)
             if handle is None:
                 return
-            if handle.mount_snapshot == mount_snapshot_from_echoes(current_echoes):
+            if handle.mount_snapshot == mount_snapshot_from_echoes(memory_echoes, github_echoes):
                 return
             log.info(
                 "sandbox.released_for_mount_change",
