@@ -1,0 +1,276 @@
+"""Host-side ``git`` operations for ``github_repository`` session resources.
+
+Two host directories per attached repo:
+
+1. **Cache dir** — a bare clone shared across all sessions referencing
+   the same upstream URL, stored at
+   ``<workspace_root>/_github_repos/<sha256(repo_url)>/``. Created on
+   first use, fetched on subsequent uses (best-effort).
+
+2. **Per-session working tree** — a full checkout cloned with
+   ``--reference <cache_dir>`` so object data is shared with the cache.
+   Stored at ``<session_workspace>/_repos/<repo_id>/`` and bind-mounted
+   into the container at the user-supplied ``mount_path``.
+
+The auth token is embedded in the cloned ``origin`` URL
+(``https://x-access-token:$TOKEN@github.com/owner/repo.git``). The token
+sits in ``.git/config`` inside the per-session working tree, which is
+ephemeral and per-session.
+
+The host process running this module needs ``git`` on PATH.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import fcntl
+import hashlib
+import shutil
+from pathlib import Path
+
+from aios.logging import get_logger
+from aios.sandbox.container import ContainerError, run_subprocess_with_timeout
+from aios.sandbox.volumes import (
+    github_repo_cache_dir,
+    github_repo_cache_lock_path,
+    github_repos_cache_root,
+    session_repo_working_tree_dir,
+    session_repos_root,
+)
+
+log = get_logger("aios.sandbox.github_clone")
+
+# Bound on each ``git`` invocation. Generous because clone over a slow
+# link can legitimately take a while; tighter values cause spurious
+# failures on CI runners.
+_GIT_TIMEOUT_S = 300.0
+
+
+class GithubCloneError(Exception):
+    """Raised when a clone or fetch fails in a way the agent can't recover
+    from (e.g. invalid token, repo missing). The provisioner catches this,
+    logs a lifecycle event, and continues so the agent sees the failure
+    context without the session halting.
+    """
+
+
+def url_hash(repo_url: str) -> str:
+    """Stable cache key for a repo URL. SHA-256 over the raw URL string —
+    different mount paths share the same cache dir, since cache content
+    is just objects (which only depend on the upstream)."""
+    return hashlib.sha256(repo_url.encode("utf-8")).hexdigest()
+
+
+def _build_auth_url(repo_url: str, token: str) -> str:
+    """Embed the token in the clone URL.
+
+    Accepts ``https://github.com/owner/repo`` or
+    ``https://github.com/owner/repo.git``. Anything else is left to git
+    to reject. Format is ``https://x-access-token:$TOKEN@github.com/...``
+    which is what GitHub expects for PAT-authenticated HTTPS clones.
+    """
+    if not repo_url.startswith(("https://", "http://")):
+        raise GithubCloneError(
+            f"only https:// and http:// repo URLs are supported (got {repo_url!r})"
+        )
+    # Split on `://` once.
+    scheme, rest = repo_url.split("://", 1)
+    return f"{scheme}://x-access-token:{token}@{rest}"
+
+
+async def _run_git(
+    argv: list[str], *, cwd: Path | None = None, op: str = "git"
+) -> tuple[int, bytes, bytes]:
+    """Launch ``git`` with the timeout and error semantics we rely on.
+
+    ``op`` is a short label used in the timeout error message — never
+    the raw argv, which carries the auth-embedded URL on clone/fetch
+    paths and would leak the token into logs and the session event log.
+    """
+    full_argv = ["git", *argv]
+    if cwd is not None:
+        full_argv = ["git", "-C", str(cwd), *argv]
+    rc, stdout, stderr, timed_out = await run_subprocess_with_timeout(
+        full_argv, timeout_s=_GIT_TIMEOUT_S
+    )
+    if timed_out:
+        raise GithubCloneError(f"git {op} timed out after {_GIT_TIMEOUT_S}s")
+    return rc, stdout, stderr
+
+
+async def ensure_cache_clone(repo_url: str, token: str) -> Path:
+    """Ensure ``<cache_root>/<url_hash>`` is a populated bare clone.
+
+    Holds a per-cache file lock so two sessions racing on first-clone
+    serialize. The loser sees the existing dir on its second check and
+    falls through to fetch.
+
+    Returns the cache dir path. Raises :class:`GithubCloneError` if the
+    initial clone fails — the caller (provisioner) logs a session.error
+    and continues.
+    """
+    github_repos_cache_root().mkdir(parents=True, exist_ok=True)
+    url_key = url_hash(repo_url)
+    cache_dir = github_repo_cache_dir(url_key)
+    lock_path = github_repo_cache_lock_path(url_key)
+
+    auth_url = _build_auth_url(repo_url, token)
+
+    def _exists() -> bool:
+        # Bare clone has HEAD at the root, not under .git/.
+        return cache_dir.exists() and (cache_dir / "HEAD").exists()
+
+    # Fast path: cache exists, just fetch (best-effort) and return.
+    if _exists():
+        await _fetch_cache(cache_dir, auth_url, repo_url)
+        return cache_dir
+
+    # Slow path: clone under a file lock so we don't race.
+    with lock_path.open("w") as lock_file:
+        await asyncio.get_event_loop().run_in_executor(
+            None, fcntl.flock, lock_file.fileno(), fcntl.LOCK_EX
+        )
+        try:
+            if _exists():
+                await _fetch_cache(cache_dir, auth_url, repo_url)
+                return cache_dir
+            # Clean any partial dir left by a crashed prior attempt.
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir)
+            cache_dir.parent.mkdir(parents=True, exist_ok=True)
+            rc, _stdout, stderr = await _run_git(
+                ["clone", "--bare", auth_url, str(cache_dir)],
+                op="clone --bare",
+            )
+            if rc != 0:
+                # Drop any partial dir so the next attempt re-clones from scratch.
+                if cache_dir.exists():
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                raise GithubCloneError(
+                    f"git clone --bare failed for {repo_url!r}: "
+                    f"{_redact_token_from_message(stderr.decode('utf-8', errors='replace'), token)}"
+                )
+            # Disable gc on the bare cache so it can't reap objects that
+            # per-session working trees alternate against.
+            await _run_git(["config", "gc.auto", "0"], cwd=cache_dir, op="config gc.auto")
+            log.info(
+                "github_clone.cache_created",
+                repo_url=repo_url,
+                url_hash=url_hash(repo_url),
+            )
+            return cache_dir
+        finally:
+            await asyncio.get_event_loop().run_in_executor(
+                None, fcntl.flock, lock_file.fileno(), fcntl.LOCK_UN
+            )
+
+
+async def _fetch_cache(cache_dir: Path, auth_url: str, repo_url: str) -> None:
+    """Best-effort ``git fetch`` of the cache. Failures are logged and
+    swallowed — a stale cache still works for read; the cost of a fresh
+    push from the per-session clone is the same either way.
+    """
+    # Use --quiet and a one-shot URL override (-c remote.origin.url=...)
+    # so we don't have to mutate the cache's stored config.
+    rc, _stdout, stderr = await _run_git(
+        [
+            "-c",
+            f"remote.origin.url={auth_url}",
+            "fetch",
+            "--quiet",
+            "--prune",
+            "origin",
+        ],
+        cwd=cache_dir,
+        op="fetch",
+    )
+    if rc != 0:
+        log.warning(
+            "github_clone.cache_fetch_failed",
+            repo_url=repo_url,
+            stderr=stderr.decode("utf-8", errors="replace")[:500],
+        )
+
+
+async def ensure_session_working_tree(
+    *,
+    session_id: str,
+    resource_id: str,
+    repo_url: str,
+    token: str,
+    cache_dir: Path,
+) -> Path:
+    """Create a per-session working tree from the cache, with the auth
+    token embedded in the ``origin`` URL.
+
+    Always recreates the working tree on call: that way token rotation
+    (which bumps ``updated_at`` on the resource and hence the mount
+    snapshot) takes effect on the next provision without any "is this
+    stale?" detection logic. The ``--reference`` clone is fast because
+    object data is reused from the cache.
+    """
+    work_dir = session_repo_working_tree_dir(session_id, resource_id)
+    session_repos_root(session_id).mkdir(parents=True, exist_ok=True)
+
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+
+    auth_url = _build_auth_url(repo_url, token)
+    # `--dissociate` copies needed objects into the working clone so cache
+    # GC can't break it later. We trade disk for safety.
+    rc, _stdout, stderr = await _run_git(
+        [
+            "clone",
+            "--reference",
+            str(cache_dir),
+            "--dissociate",
+            auth_url,
+            str(work_dir),
+        ],
+        op="clone --reference",
+    )
+    if rc != 0:
+        if work_dir.exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
+        raise GithubCloneError(
+            f"git clone --reference failed for session {session_id} repo {resource_id}: "
+            f"{_redact_token_from_message(stderr.decode('utf-8', errors='replace'), token)}"
+        )
+
+    log.info(
+        "github_clone.session_clone_created",
+        session_id=session_id,
+        resource_id=resource_id,
+        repo_url=repo_url,
+    )
+    return work_dir
+
+
+def remove_session_working_tree(session_id: str, resource_id: str) -> None:
+    """Best-effort delete of a per-session working tree. Used by the
+    full-list-replace path on session update — when a repo is detached,
+    its host dir should disappear so subsequent provisioning doesn't see
+    a stale mount."""
+    work_dir = session_repo_working_tree_dir(session_id, resource_id)
+    with contextlib.suppress(FileNotFoundError):
+        shutil.rmtree(work_dir)
+
+
+def _redact_token_from_message(msg: str, token: str) -> str:
+    """Strip the auth token from any error message before it lands in
+    a log or session event. Tokens are unique enough that simple
+    substitution is reliable.
+    """
+    return msg.replace(token, "<redacted>")
+
+
+# Re-export for callers that catch container/git errors uniformly.
+__all__ = [
+    "ContainerError",
+    "GithubCloneError",
+    "ensure_cache_clone",
+    "ensure_session_working_tree",
+    "remove_session_working_tree",
+    "url_hash",
+]

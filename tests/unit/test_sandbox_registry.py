@@ -47,25 +47,30 @@ class TestReleaseIfMountsChanged:
         registry = SandboxRegistry()
         provisioner_release = AsyncMock()
         with patch("aios.sandbox.registry.provisioner_release", provisioner_release):
-            await registry.release_if_mounts_changed("sess_NONE", [_echo("memstore_a", "a")])
+            await registry.release_if_mounts_changed("sess_NONE", [_echo("memstore_a", "a")], [])
         provisioner_release.assert_not_awaited()
 
     async def test_identical_snapshot_does_not_release(self) -> None:
         registry = SandboxRegistry()
-        snapshot = frozenset([("memstore_a", "a", "read_write")])
+        snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
         registry._handles["sess_X"] = _handle("sess_X", snapshot)
         registry._last_used["sess_X"] = 0.0
 
         provisioner_release = AsyncMock()
         with patch("aios.sandbox.registry.provisioner_release", provisioner_release):
-            await registry.release_if_mounts_changed("sess_X", [_echo("memstore_a", "a")])
+            await registry.release_if_mounts_changed("sess_X", [_echo("memstore_a", "a")], [])
 
         provisioner_release.assert_not_awaited()
         assert registry.peek("sess_X") is not None
 
     async def test_reorder_does_not_release(self) -> None:
         registry = SandboxRegistry()
-        snapshot = frozenset([("memstore_a", "a", "read_write"), ("memstore_b", "b", "read_only")])
+        snapshot = frozenset(
+            [
+                ("memstore", "memstore_a", "a", "read_write"),
+                ("memstore", "memstore_b", "b", "read_only"),
+            ]
+        )
         registry._handles["sess_X"] = _handle("sess_X", snapshot)
         registry._last_used["sess_X"] = 0.0
 
@@ -74,6 +79,7 @@ class TestReleaseIfMountsChanged:
             await registry.release_if_mounts_changed(
                 "sess_X",
                 [_echo("memstore_b", "b", "read_only"), _echo("memstore_a", "a")],
+                [],
             )
 
         provisioner_release.assert_not_awaited()
@@ -93,14 +99,14 @@ class TestReleaseIfMountsChanged:
         self, current_echoes: list[MemoryStoreResourceEcho], description: str
     ) -> None:
         registry = SandboxRegistry()
-        snapshot = frozenset([("memstore_a", "a", "read_write")])
+        snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
         handle = _handle("sess_X", snapshot)
         registry._handles["sess_X"] = handle
         registry._last_used["sess_X"] = 0.0
 
         provisioner_release = AsyncMock()
         with patch("aios.sandbox.registry.provisioner_release", provisioner_release):
-            await registry.release_if_mounts_changed("sess_X", current_echoes)
+            await registry.release_if_mounts_changed("sess_X", current_echoes, [])
 
         provisioner_release.assert_awaited_once_with(handle)
         assert registry.peek("sess_X") is None
@@ -113,7 +119,7 @@ class TestReleaseIfMountsChanged:
         import asyncio
 
         registry = SandboxRegistry()
-        old_snapshot = frozenset([("memstore_a", "a", "read_write")])
+        old_snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
         old_handle = _handle("sess_X", old_snapshot)
         registry._handles["sess_X"] = old_handle
         registry._last_used["sess_X"] = 0.0
@@ -124,7 +130,7 @@ class TestReleaseIfMountsChanged:
         async def slow_provision(_session_id: str) -> ContainerHandle:
             provision_started.set()
             await let_provision_continue.wait()
-            return _handle("sess_X", frozenset([("memstore_b", "b", "read_write")]))
+            return _handle("sess_X", frozenset([("memstore", "memstore_b", "b", "read_write")]))
 
         # Force a cache miss so get_or_provision contends for the lock.
         registry._handles.pop("sess_X")
@@ -141,7 +147,7 @@ class TestReleaseIfMountsChanged:
             # gets the lock — this models a real cycle: provision finishes,
             # then drift is detected, then release fires.
             release_task = asyncio.create_task(
-                registry.release_if_mounts_changed("sess_X", [_echo("memstore_b", "b")])
+                registry.release_if_mounts_changed("sess_X", [_echo("memstore_b", "b")], [])
             )
             # release_task is blocked on the lock provision_task is holding.
             await asyncio.sleep(0)

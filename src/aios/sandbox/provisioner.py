@@ -25,12 +25,18 @@ from aios.config import get_settings
 from aios.db import queries
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
+from aios.models.github_repositories import GithubRepositoryResourceEcho
 from aios.models.memory_stores import MemoryStoreResourceEcho
 from aios.sandbox.container import (
     ContainerError,
     ContainerHandle,
     mount_snapshot_from_echoes,
     run_subprocess_with_timeout,
+)
+from aios.sandbox.github_clone import (
+    GithubCloneError,
+    ensure_cache_clone,
+    ensure_session_working_tree,
 )
 
 log = get_logger("aios.sandbox.provisioner")
@@ -141,6 +147,75 @@ async def _materialize_memory_mounts(
     return list(echoes)
 
 
+async def _materialize_github_clones(
+    session_id: str,
+) -> list[GithubRepositoryResourceEcho]:
+    """Run host-side ``git clone`` for each attached github_repository
+    and return the echo list.
+
+    Two-step per repo: ensure the bare cache (shared across sessions)
+    exists, then ``git clone --reference`` a per-session working tree
+    that the container will bind-mount. Token decryption uses the
+    worker-scoped CryptoBox.
+
+    Failures are non-fatal: a bad token or unreachable repo logs an
+    error and appends a lifecycle event so the agent can react, but
+    does not block container provisioning.
+    """
+    from aios.harness import runtime
+    from aios.services import github_repositories as github_repo_service
+
+    pool = runtime.require_pool()
+    crypto_box = runtime.require_crypto_box()
+    materialized: list[GithubRepositoryResourceEcho] = []
+    failures: list[tuple[GithubRepositoryResourceEcho, GithubCloneError]] = []
+    async with pool.acquire() as conn:
+        echoes = await queries.list_session_github_repo_echoes(conn, session_id)
+        for echo in echoes:
+            try:
+                token = await github_repo_service.get_session_token(
+                    conn, crypto_box, session_id, echo.id
+                )
+                cache_dir = await ensure_cache_clone(echo.url, token)
+                await ensure_session_working_tree(
+                    session_id=session_id,
+                    resource_id=echo.id,
+                    repo_url=echo.url,
+                    token=token,
+                    cache_dir=cache_dir,
+                )
+            except GithubCloneError as err:
+                failures.append((echo, err))
+                continue
+            materialized.append(echo)
+
+    # Log + append failure events outside the conn block so we don't
+    # hold one connection while acquiring a second from the same pool.
+    if failures:
+        from aios.services import sessions as sessions_service
+
+        for failed_echo, failure in failures:
+            log.warning(
+                "sandbox.github_clone_failed",
+                session_id=session_id,
+                resource_id=failed_echo.id,
+                repo_url=failed_echo.url,
+                error=str(failure),
+            )
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "lifecycle",
+                {
+                    "event": "github_clone_failed",
+                    "resource_id": failed_echo.id,
+                    "repo_url": failed_echo.url,
+                    "message": str(failure),
+                },
+            )
+    return materialized
+
+
 async def provision_for_session(session_id: str) -> ContainerHandle:
     """Create a fresh container for ``session_id`` and return a handle.
 
@@ -152,13 +227,18 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
     Raises :class:`ContainerError` if ``docker run`` fails for any reason
     (image missing, daemon unreachable, resource limits, ...).
     """
-    from aios.sandbox.volumes import ensure_workspace_path, memory_store_host_dir
+    from aios.sandbox.volumes import (
+        ensure_workspace_path,
+        memory_store_host_dir,
+        session_repo_working_tree_dir,
+    )
 
     settings = get_settings()
     raw_path, session_env = await _load_session_provisioning(session_id)
     workspace_path = ensure_workspace_path(raw_path)
     env_config = await _load_environment_config(session_id)
     memory_echoes = await _materialize_memory_mounts(session_id)
+    github_echoes = await _materialize_github_clones(session_id)
 
     # Merge environment-level and session-level env vars (session wins).
     merged_env: dict[str, str] = {
@@ -195,10 +275,17 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
     # ensures the kernel rejects writes (bash + tools alike); ``:rw`` is the
     # read_write default. The host source is shared across all attached
     # sessions, so a tool/API write in one session is visible to all.
-    for echo in memory_echoes:
-        host_dir = memory_store_host_dir(echo.memory_store_id)
-        mode = "ro" if echo.access == "read_only" else "rw"
-        argv.extend(["--volume", f"{host_dir}:/mnt/memory/{echo.name}:{mode}"])
+    for memory_echo in memory_echoes:
+        host_dir = memory_store_host_dir(memory_echo.memory_store_id)
+        mode = "ro" if memory_echo.access == "read_only" else "rw"
+        argv.extend(["--volume", f"{host_dir}:/mnt/memory/{memory_echo.name}:{mode}"])
+
+    # Bind-mount each successfully-cloned github repo. The per-session
+    # working tree (already populated by ``_materialize_github_clones``)
+    # is mounted at the user-supplied ``mount_path``.
+    for github_echo in github_echoes:
+        repo_host_dir = session_repo_working_tree_dir(session_id, github_echo.id)
+        argv.extend(["--volume", f"{repo_host_dir}:{github_echo.mount_path}:rw"])
 
     for key, value in merged_env.items():
         argv.extend(["--env", f"{key}={value}"])
@@ -224,7 +311,7 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
         session_id=session_id,
         container_id=container_id,
         workspace_path=workspace_path,
-        mount_snapshot=mount_snapshot_from_echoes(memory_echoes),
+        mount_snapshot=mount_snapshot_from_echoes(memory_echoes, github_echoes),
     )
 
     # Install packages while the network is still open.

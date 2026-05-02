@@ -35,6 +35,7 @@ from aios.ids import (
     CONNECTION,
     ENVIRONMENT,
     EVENT,
+    GITHUB_REPOSITORY,
     MEMORY,
     MEMORY_STORE,
     MEMORY_VERSION,
@@ -50,6 +51,7 @@ from aios.models.channel_bindings import ChannelBinding
 from aios.models.connections import Connection
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
+from aios.models.github_repositories import GithubRepositoryResourceEcho
 from aios.models.memory_stores import (
     Actor,
     Memory,
@@ -3361,3 +3363,139 @@ async def list_session_memory_store_echoes(
         )
         for r in rows
     ]
+
+
+# GitHub repository attachments ────────────────────────────────────────────
+
+
+def _row_to_github_repo_echo(row: asyncpg.Record) -> GithubRepositoryResourceEcho:
+    return GithubRepositoryResourceEcho(
+        id=row["id"],
+        url=row["repo_url"],
+        mount_path=row["mount_path"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+async def attach_github_repos_to_session(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    entries: list[tuple[str, str, EncryptedBlob]],
+) -> None:
+    """Insert pre-encrypted github_repository attachments for a session.
+
+    ``entries`` is ``(repo_url, mount_path, encrypted_token)`` tuples in
+    rank order. Encryption is the caller's responsibility (service layer
+    holds the CryptoBox). Uniqueness on (session_id, mount_path) is
+    enforced by the partial unique index — a duplicate raises asyncpg's
+    ``UniqueViolationError`` which the service layer maps to a 4xx.
+    """
+    for rank, (repo_url, mount_path, blob) in enumerate(entries):
+        rid = make_id(GITHUB_REPOSITORY)
+        await conn.execute(
+            """
+            INSERT INTO session_github_repositories
+                (id, session_id, rank, repo_url, mount_path, ciphertext, nonce)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """,
+            rid,
+            session_id,
+            rank,
+            repo_url,
+            mount_path,
+            blob.ciphertext,
+            blob.nonce,
+        )
+
+
+async def list_session_github_repo_echoes(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> list[GithubRepositoryResourceEcho]:
+    rows = await conn.fetch(
+        "SELECT * FROM session_github_repositories WHERE session_id = $1 ORDER BY rank",
+        session_id,
+    )
+    return [_row_to_github_repo_echo(r) for r in rows]
+
+
+async def get_session_github_repo(
+    conn: asyncpg.Connection[Any], session_id: str, resource_id: str
+) -> GithubRepositoryResourceEcho:
+    row = await conn.fetchrow(
+        "SELECT * FROM session_github_repositories WHERE session_id = $1 AND id = $2",
+        session_id,
+        resource_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"github_repository resource {resource_id} not found on session {session_id}",
+            detail={"session_id": session_id, "resource_id": resource_id},
+        )
+    return _row_to_github_repo_echo(row)
+
+
+async def get_session_github_repo_with_blob(
+    conn: asyncpg.Connection[Any], session_id: str, resource_id: str
+) -> tuple[GithubRepositoryResourceEcho, EncryptedBlob]:
+    """Read view + encrypted token blob, for the rotation path which needs
+    both."""
+    row = await conn.fetchrow(
+        "SELECT * FROM session_github_repositories WHERE session_id = $1 AND id = $2",
+        session_id,
+        resource_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"github_repository resource {resource_id} not found on session {session_id}",
+            detail={"session_id": session_id, "resource_id": resource_id},
+        )
+    return _row_to_github_repo_echo(row), EncryptedBlob(
+        ciphertext=row["ciphertext"], nonce=row["nonce"]
+    )
+
+
+async def update_session_github_repo_blob(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    resource_id: str,
+    blob: EncryptedBlob,
+) -> GithubRepositoryResourceEcho:
+    """Replace the encrypted token blob and bump ``updated_at``.
+
+    Only the secret rotates; ``url`` and ``mount_path`` are immutable to
+    match CMA's behavior (verified by API probe — PUT returns 405,
+    DELETE returns 400, only POST with ``{authorization_token}`` is
+    accepted).
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE session_github_repositories
+        SET ciphertext = $1, nonce = $2, updated_at = now()
+        WHERE session_id = $3 AND id = $4
+        RETURNING *
+        """,
+        blob.ciphertext,
+        blob.nonce,
+        session_id,
+        resource_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"github_repository resource {resource_id} not found on session {session_id}",
+            detail={"session_id": session_id, "resource_id": resource_id},
+        )
+    return _row_to_github_repo_echo(row)
+
+
+async def delete_session_github_repos(conn: asyncpg.Connection[Any], session_id: str) -> None:
+    """Delete all github_repository attachments for a session.
+
+    Used by the full-list-replace path on session update — paired with
+    a re-insert via :func:`attach_github_repos_to_session` inside the
+    same transaction.
+    """
+    await conn.execute(
+        "DELETE FROM session_github_repositories WHERE session_id = $1",
+        session_id,
+    )

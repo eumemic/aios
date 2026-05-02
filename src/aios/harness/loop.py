@@ -68,15 +68,23 @@ def _retry_delay_for_attempt(attempt: int) -> float | None:
 async def refresh_session_mount_state(
     pool: asyncpg.Pool[Any], session_id: str
 ) -> list[MemoryStoreResourceEcho]:
-    """Return the freshly-loaded echoes so the step body can skip a second DB query."""
+    """Refresh the cached resource echoes and the sandbox drift check.
+
+    Returns the memory echoes (used downstream for prompt augmentation).
+    Github echoes are cached and fed into the registry's drift check but
+    not returned — no current caller in the step body needs them.
+    """
     from aios.db import queries
 
     async with pool.acquire() as conn:
-        echoes = await queries.list_session_memory_store_echoes(conn, session_id)
-    runtime.set_session_memory_mounts(session_id, echoes)
+        memory_echoes = await queries.list_session_memory_store_echoes(conn, session_id)
+        github_echoes = await queries.list_session_github_repo_echoes(conn, session_id)
+    runtime.set_session_memory_mounts(session_id, memory_echoes)
     if runtime.sandbox_registry is not None:
-        await runtime.sandbox_registry.release_if_mounts_changed(session_id, echoes)
-    return echoes
+        await runtime.sandbox_registry.release_if_mounts_changed(
+            session_id, memory_echoes, github_echoes
+        )
+    return memory_echoes
 
 
 async def run_session_step(
