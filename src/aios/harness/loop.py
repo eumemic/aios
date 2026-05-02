@@ -202,27 +202,23 @@ async def _run_session_step_body(
 
     session = await sessions_service.get_session(pool, session_id)
 
-    # Load agent config — pinned version or latest.
     from aios.models.agents import Agent, AgentVersion
-
-    agent: Agent | AgentVersion
-    if session.agent_version is not None:
-        agent = await agents_service.get_agent_version(
-            pool, session.agent_id, session.agent_version
-        )
-    else:
-        agent = await agents_service.get_agent(pool, session.agent_id)
-
     from aios.services.channels import list_session_channels
 
-    channels = await list_session_channels(pool, session_id)
+    agent_task: asyncio.Future[Agent | AgentVersion]
+    if session.agent_version is not None:
+        agent_task = asyncio.ensure_future(
+            agents_service.get_agent_version(pool, session.agent_id, session.agent_version)
+        )
+    else:
+        agent_task = asyncio.ensure_future(agents_service.get_agent(pool, session.agent_id))
+    agent, channels, memory_echoes = await asyncio.gather(
+        agent_task,
+        list_session_channels(pool, session_id),
+        refresh_session_mount_state(pool, session_id),
+    )
 
     mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
-
-    # Memory store mounts: load echoes once per step. Used both for the
-    # system-prompt block and (via runtime cache) by the tool intercept
-    # in write/edit, which needs a path → store mapping.
-    memory_echoes = await refresh_session_mount_state(pool, session_id)
 
     # Build the events-independent prelude (system prompt + tools)
     # before windowing so its overhead can be subtracted from the
@@ -626,11 +622,6 @@ def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None
     the server portion of the namespaced tool name, then returns the
     ``default_config.permission_policy.type`` or ``None`` (which callers
     treat as ``always_ask``).
-
-    The connector redesign (#200) collapsed the old ``conn_*`` server
-    namespace: connector-mounted tools live in the same agent-declared
-    namespace as everything else, with permission policy controlled the
-    same way per resolved decision #18.
     """
     server_name = name.split("__", 2)[1]
     for spec in agent_tools:
@@ -654,9 +645,6 @@ async def discover_session_mcp_tools(
     maps ``server_name`` → the server's ``InitializeResult.instructions``
     string.  Servers that supplied no instructions (or ``""``) are
     omitted from the dict.
-
-    Connector subprocesses (PR2/PR3) will plug into a parallel registry —
-    in PR1 there are no connector tools, only agent-declared HTTP servers.
     """
     from aios.mcp.client import discover_mcp_tools, resolve_auth_for_url
 

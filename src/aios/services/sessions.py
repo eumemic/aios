@@ -45,10 +45,9 @@ async def create_session(
     orphaned session.
 
     ``spawned_from_connection_id`` and ``focal_channel`` are set
-    together by PR3's per_chat inbound handler when auto-spawning a
-    session for a new chat partner — the focal-locked invariant
-    enforced by ``switch_channel`` depends on the pair being applied
-    atomically with the row insert.
+    together by the per_chat inbound flow — ``switch_channel``'s
+    focal-locked invariant depends on the pair being written atomically
+    with the row insert.
     """
     async with pool.acquire() as conn, conn.transaction():
         session = await queries.insert_session(

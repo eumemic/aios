@@ -2,23 +2,21 @@
 
 Replaces ``connections`` + ``channel_bindings`` + ``connection_routing_rules``
 with a single ``connections`` table whose unique
-``(connector, account) WHERE archived_at IS NULL`` enforces "one session per
-account" by schema, plus two routing modes:
+``(connector, account) WHERE archived_at IS NULL`` enforces "one session
+per account" by schema, plus two routing modes:
 
 * ``single_session`` — ``session_id`` populated; one attached session.
-* ``per_chat`` — ``session_template_id`` populated; sessions auto-spawn per
-  chat partner via ``connection_chat_sessions``.
+* ``per_chat`` — ``session_template_id`` populated; sessions auto-spawn
+  per chat partner via ``connection_chat_sessions``.
 
 Adds ``session_templates`` (frozen recipe for per_chat spawn),
-``connection_chat_sessions`` (chat → session map, PK ``(connection_id,
-chat_id)``), ``connector_inbound_acks`` (dedup ledger written in the same
-txn as ``append_event`` — at-most-once event append), and
-``sessions.spawned_from_connection_id`` (per_chat origin pointer, also the
-outbound-permission grant for that session).
+``connection_chat_sessions`` (chat → session map),
+``connector_inbound_acks`` (dedup ledger written in the same txn as
+``append_event`` for at-most-once event append), and
+``sessions.spawned_from_connection_id`` (per_chat origin pointer +
+outbound-permission grant).
 
-Pre-1.0: dev/prod rows in the deleted tables are dropped with no migration
-path.  See plan §"PR1: Schema cutover" + resolved decision #1 (no
-``vault_credentials.account_id`` to drop — that column never existed).
+Existing rows in the deleted tables are dropped; the migration is one-way.
 
 Revision ID: 0026
 Revises: 0025
@@ -93,10 +91,8 @@ def upgrade() -> None:
         "ON connections (connector, account) WHERE archived_at IS NULL"
     )
 
-    # Per-chat session ledger.  PK ``(connection_id, chat_id)`` doubles as
-    # the race-safe insert target — the inbound handler does
-    # ``INSERT ... ON CONFLICT DO NOTHING RETURNING session_id`` and on
-    # empty RETURNING re-reads the existing row.
+    # Per-chat session ledger.  The PK doubles as the race-safe insert
+    # target for ``INSERT ... ON CONFLICT DO NOTHING RETURNING``.
     op.execute("""
         CREATE TABLE connection_chat_sessions (
             connection_id  text NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
@@ -123,9 +119,7 @@ def upgrade() -> None:
     # Inbound dedup ledger.  Written in the same txn as ``append_event`` —
     # ``ON CONFLICT DO NOTHING`` is the dedup mechanism, giving at-most-once
     # event append.  Spool-side ack still runs after commit (different
-    # purpose: spool pruning, not dedup).  See PR3 for the inbound handler;
-    # the table ships in PR1 so the schema is final before PR2 builds
-    # against it.
+    # purpose: spool pruning, not dedup).
     op.execute("""
         CREATE TABLE connector_inbound_acks (
             connector      text NOT NULL,
@@ -140,9 +134,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Data-lossy: dropping the new tables doesn't reconstitute the old
-    # routing schema, and pre-1.0 rows in the old tables were dropped on
-    # upgrade.  Provided so alembic ``downgrade`` doesn't error, not as a
-    # rollback path.
+    # routing schema, and rows in the old tables were dropped on upgrade.
+    # Provided so ``alembic downgrade`` doesn't error, not as a rollback path.
     op.execute("DROP TABLE IF EXISTS connector_inbound_acks")
     op.execute("ALTER TABLE sessions DROP COLUMN IF EXISTS spawned_from_connection_id")
     op.execute("DROP TABLE IF EXISTS connection_chat_sessions")

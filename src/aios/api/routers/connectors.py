@@ -1,9 +1,8 @@
-"""Connector admin endpoints — stubbed in PR1, wired in PR2/PR3.
+"""Connector admin endpoints — stubbed.
 
-PR2 adds the supervisor that spawns connector subprocesses and the
-procrastinate ``connector_call`` task.  PR3 wires inbound handling.
-Until then every endpoint returns 503 so callers (the operator CLI in
-particular) see an explicit "not yet" rather than a confusing 404.
+The connector subprocess supervisor and inbound handling aren't wired
+yet; every endpoint returns 503 so operator tooling gets an explicit
+"not implemented" rather than a confusing 404.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from aios.api.deps import AuthDep, PoolDep
 
 router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
 
-_NOT_READY = "connector subprocess machinery ships in PR2/PR3"
+_NOT_READY = "connectors not yet implemented"
 
 
 @router.get("")

@@ -114,8 +114,7 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
         # Per_chat sessions are bound to a single chat by construction —
         # focal is set at session-spawn time and switching it would
         # contradict the "one session per chat partner" invariant.
-        session = await queries.get_session(conn, session_id)
-        if session.spawned_from_connection_id is not None:
+        if await queries.get_session_spawn_origin(conn, session_id) is not None:
             return ToolResult(
                 content=(
                     "switch_channel is unavailable on this session: it was "

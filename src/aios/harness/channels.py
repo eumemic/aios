@@ -2,10 +2,9 @@
 unread derivation, and the ``_meta.aios.focal_channel_path`` injection
 helper for outbound MCP requests.
 
-After the connector redesign (#200) the explicit ``channel_bindings``
-table is gone — a "binding" is derived from the event log (any
-distinct ``channel`` address the session has interacted with).  This
-module operates on plain ``list[str]`` channel addresses; the
+The "set of channels a session is bound to" is derived from the event
+log: any distinct ``channel`` address the session has interacted with.
+This module operates on plain ``list[str]`` channel addresses; the
 event-log lookup lives in :func:`aios.services.channels.list_session_channels`.
 """
 
@@ -28,10 +27,8 @@ SWITCH_CHANNEL_METADATA_KEY = "switch_channel"
 # requests to MCP servers.  The value is the focal-channel suffix (the
 # focal channel address with its first two ``<connector>/<account>``
 # segments stripped, since the connector already knows its own identity).
-# Universal injection: stamped on every outbound MCP request regardless of
-# server, per #200 §3.4 / resolved decision #18 — receiving servers ignore
-# unknown ``_meta`` keys per MCP spec, and not branching on "is this a
-# connector?" eliminates the discriminator that paid for the redesign.
+# Stamped on every outbound MCP request — receivers that don't care
+# ignore unknown ``_meta`` keys per MCP spec.
 FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
 
 
@@ -67,9 +64,8 @@ def build_focal_paradigm_block(channels: list[str]) -> str:
     prefix cache.
 
     Per-platform specifics (Signal markdown subset, mention syntax,
-    response idioms) are rendered separately from each MCP server's
-    ``InitializeResult.instructions`` (universal across all MCP servers
-    per #200 §3.4).
+    response idioms) live in each MCP server's
+    ``InitializeResult.instructions`` and are rendered separately.
     """
     if not channels:
         return ""

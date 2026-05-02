@@ -15,12 +15,6 @@ via :sql:`connections_one_mode_ck`:
 The active-row uniqueness on ``(connector, account)`` enforces
 "one session per account" by schema — operators can't accidentally
 double-bind a phone number to two sessions.
-
-Connection-mounted MCP servers (the connector subprocess) are addressed
-by connector ``name`` directly (no reserved prefix); the universal
-``_meta.aios.focal_channel_path`` injection at the dispatch boundary
-replaced the ``conn_*`` discriminator that shipped in the previous
-design.
 """
 
 from __future__ import annotations
@@ -58,12 +52,7 @@ class ConnectionCreate(BaseModel):
 
 
 class ConnectionAttach(BaseModel):
-    """Request body for ``POST /v1/connections/{id}/attach``.
-
-    Binds the connection to a single session.  Errors if the connection
-    is already attached or configured per_chat — call ``detach`` /
-    ``unconfigure`` first.
-    """
+    """Request body for ``POST /v1/connections/{id}/attach``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -71,13 +60,7 @@ class ConnectionAttach(BaseModel):
 
 
 class ConnectionConfigurePerChat(BaseModel):
-    """Request body for ``POST /v1/connections/{id}/configure-per-chat``.
-
-    Switches the connection into per_chat mode — each new chat partner
-    will auto-spawn a fresh session built from the named template on
-    first inbound.  Errors if the connection is already attached or
-    configured per_chat.
-    """
+    """Request body for ``POST /v1/connections/{id}/configure-per-chat``."""
 
     model_config = ConfigDict(extra="forbid")
 

@@ -1,9 +1,7 @@
 """Business logic for session templates.
 
 Thin wrapper over :mod:`aios.db.queries` — no business rules beyond
-what the schema enforces.  Used by the per_chat connector flow to
-spawn fresh sessions per chat partner; see PR3's inbound handler for
-the spawn path.
+what the schema enforces.
 """
 
 from __future__ import annotations
@@ -13,6 +11,7 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
+from aios.db.queries import _UNSET
 from aios.models.session_templates import SessionTemplate
 
 
@@ -58,7 +57,7 @@ async def update_session_template(
     *,
     name: str | None = None,
     agent_id: str | None = None,
-    agent_version: int | None | type(...) = ...,  # type: ignore[valid-type]
+    agent_version: int | None = _UNSET,
     environment_id: str | None = None,
     vault_ids: list[str] | None = None,
     memory_store_ids: list[str] | None = None,

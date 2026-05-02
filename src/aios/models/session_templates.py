@@ -2,16 +2,14 @@
 
 A *session template* captures the agent + environment + bound vaults +
 attached memory stores that a per_chat connection should use when
-spawning a new session for an unseen chat partner.  Per resolved decision
-#9, ``agent_version`` is captured at spawn time from the live template;
-later template edits do not retroactively migrate already-spawned
-sessions.
+spawning a new session for an unseen chat partner.  ``agent_version``
+is captured at spawn time from the live template; later template edits
+do not retroactively migrate already-spawned sessions.
 
 Templates can be soft-deleted (``archived_at``) even when referenced —
 existing per_chat connections keep working with their already-spawned
 sessions; new chat sessions for those connections start failing the
-inbound-handler lookup until the connection is reconfigured.  See
-resolved decision #7.
+inbound-handler lookup until the connection is reconfigured.
 """
 
 from __future__ import annotations

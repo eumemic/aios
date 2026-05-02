@@ -355,13 +355,11 @@ async def _execute_mcp_tool_async(
     """Execute one MCP tool call: connect, invoke, append result, defer wake.
 
     The focal-channel suffix is stamped into the JSON-RPC request's
-    ``_meta`` for *every* outbound MCP request (universal injection per
-    #200 §3.4 / resolved decision #18) — connectors that need it pull
-    the chat-id without the model having to pass it; HTTP MCP servers
-    that don't ignore the unknown ``_meta`` key per spec.  The
-    ``focal_channel`` snapshot is emission-time — a concurrent
-    ``switch_channel`` in the same assistant batch does not race this
-    injection.
+    ``_meta`` so connectors that need it can pull the chat-id without
+    the model having to pass it; servers that don't care ignore unknown
+    ``_meta`` keys per the MCP spec.  The ``focal_channel`` snapshot is
+    emission-time — a concurrent ``switch_channel`` in the same
+    assistant batch does not race this injection.
     """
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}

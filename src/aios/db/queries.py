@@ -546,7 +546,6 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
         focal_channel=row["focal_channel"],
-        spawned_from_connection_id=row["spawned_from_connection_id"],
     )
 
 
@@ -570,11 +569,10 @@ async def insert_session(
     Raises :class:`NotFoundError` if either the agent or environment FK
     is unsatisfied.
 
-    ``spawned_from_connection_id`` and ``focal_channel`` are populated
-    by the per_chat inbound flow (PR3) when auto-spawning a session for
-    a new chat partner.  The pair is set atomically with the row insert
-    so the focal-locked invariant — see ``switch_channel``'s rejection
-    of mutations on per_chat sessions — holds from creation.
+    ``spawned_from_connection_id`` + ``focal_channel`` are written
+    atomically with the row insert so the focal-locked invariant (see
+    ``switch_channel``'s rejection of mutations on per_chat sessions)
+    holds from creation.
     """
     from aios.config import get_settings
 
@@ -640,6 +638,20 @@ async def get_session_focal_channel(conn: asyncpg.Connection[Any], session_id: s
         session_id,
     )
     return focal
+
+
+async def get_session_spawn_origin(conn: asyncpg.Connection[Any], session_id: str) -> str | None:
+    """Return the session's ``spawned_from_connection_id`` (or NULL).
+
+    A non-null value indicates a per_chat-spawned session whose focal
+    channel is locked at creation; ``switch_channel`` rejects mutations
+    on those sessions.
+    """
+    val: str | None = await conn.fetchval(
+        "SELECT spawned_from_connection_id FROM sessions WHERE id = $1",
+        session_id,
+    )
+    return val
 
 
 async def set_session_focal_channel(
@@ -1311,18 +1323,10 @@ async def read_message_events(conn: asyncpg.Connection[Any], session_id: str) ->
 
 
 async def list_session_channels(conn: asyncpg.Connection[Any], session_id: str) -> list[str]:
-    """Distinct channel addresses bound to ``session_id``, sorted.
+    """Distinct channel addresses the session has interacted with, sorted.
 
-    The set of channels a session has interacted with is derived from
-    the event log's ``channel`` column (stamped at append time per
-    :func:`_derive_event_channel`).  For per_chat sessions the union with
-    the spawned focal channel keeps the bound list non-empty before the
-    first inbound; for single_session it grows as new chat partners
-    appear in inbound.
-
-    The connector redesign (#200) replaces the old explicit
-    ``channel_bindings`` table with this derived view: a "binding" is
-    just "this session has seen events on this channel."
+    Derived from the event log's ``channel`` column (stamped at append
+    time per :func:`_derive_event_channel`).
     """
     rows = await conn.fetch(
         """
@@ -2144,16 +2148,11 @@ async def resolve_skill_refs(
 
 # ─── connections ────────────────────────────────────────────────────────────
 #
-# Three valid shapes per ``connections_one_mode_ck`` (migration 0026):
+# Three valid shapes per ``connections_one_mode_ck``:
 #
 #   detached       — session_id NULL,  session_template_id NULL
 #   single_session — session_id SET,   session_template_id NULL
 #   per_chat       — session_id NULL,  session_template_id SET
-#
-# The ``UNIQUE (connector, account) WHERE archived_at IS NULL`` partial
-# index gives "one active connection per account" by schema; the inbound
-# handler relies on that uniqueness for the auto-create race
-# (``INSERT ... ON CONFLICT DO NOTHING RETURNING id``, then re-read).
 
 
 def _row_to_connection(row: asyncpg.Record) -> Connection:
@@ -2220,12 +2219,7 @@ async def get_connection(conn: asyncpg.Connection[Any], connection_id: str) -> C
 async def get_connection_for_account(
     conn: asyncpg.Connection[Any], connector: str, account: str
 ) -> Connection | None:
-    """Active connection for ``(connector, account)``, or ``None``.
-
-    Used by the inbound notification handler in PR3 to look up the target
-    of a delivery.  Matches the partial unique index, so at most one row
-    can come back.
-    """
+    """Active connection for ``(connector, account)``, or ``None``."""
     row = await conn.fetchrow(
         "SELECT * FROM connections WHERE connector = $1 AND account = $2 AND archived_at IS NULL",
         connector,
@@ -2234,6 +2228,36 @@ async def get_connection_for_account(
     if row is None:
         return None
     return _row_to_connection(row)
+
+
+async def _raise_for_failed_mode_transition(
+    conn: asyncpg.Connection[Any], connection_id: str
+) -> None:
+    """Diagnose why a guarded mode-transition UPDATE returned no row.
+
+    Called from ``attach_connection``/``configure_per_chat_connection``
+    when the WHERE clause didn't match any row.  Picks the most specific
+    error to raise: NotFound > archived > already-bound.  Always raises.
+    """
+    existing = await conn.fetchrow(
+        "SELECT archived_at FROM connections WHERE id = $1",
+        connection_id,
+    )
+    if existing is None:
+        raise NotFoundError(
+            f"connection {connection_id} not found",
+            detail={"id": connection_id},
+        )
+    if existing["archived_at"] is not None:
+        raise ConflictError(
+            f"connection {connection_id} is archived",
+            detail={"id": connection_id},
+        )
+    raise ConflictError(
+        f"connection {connection_id} is already attached or configured per_chat; "
+        "detach or unconfigure first",
+        detail={"id": connection_id},
+    )
 
 
 async def list_connections(
@@ -2273,10 +2297,7 @@ async def attach_connection(
     *,
     session_id: str,
 ) -> Connection:
-    """Bind a detached connection to a session (single_session mode).
-
-    Errors if the connection is already attached or per_chat-configured.
-    """
+    """Bind a detached connection to a session (single_session mode)."""
     try:
         row = await conn.fetchrow(
             """
@@ -2299,32 +2320,17 @@ async def attach_connection(
             detail={"session_id": session_id},
         ) from exc
     if row is None:
-        existing = await conn.fetchrow(
-            "SELECT session_id, session_template_id, archived_at FROM connections WHERE id = $1",
-            connection_id,
-        )
-        if existing is None:
-            raise NotFoundError(
-                f"connection {connection_id} not found",
-                detail={"id": connection_id},
-            )
-        if existing["archived_at"] is not None:
-            raise ConflictError(
-                f"connection {connection_id} is archived",
-                detail={"id": connection_id},
-            )
-        raise ConflictError(
-            f"connection {connection_id} is already attached or configured per_chat; "
-            "detach or unconfigure first",
-            detail={"id": connection_id},
-        )
+        await _raise_for_failed_mode_transition(conn, connection_id)
+    assert row is not None
     return _row_to_connection(row)
 
 
 async def detach_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
     """Drop the single_session binding, leaving the connection detached.
 
-    No-op (returns the current row) if already detached.
+    Already-spawned per_chat sessions on this connection (if any) are
+    not cascaded — they remain alive with ``spawned_from_connection_id``
+    still pointing at this row.
     """
     row = await conn.fetchrow(
         """
@@ -2340,7 +2346,24 @@ async def detach_connection(conn: asyncpg.Connection[Any], connection_id: str) -
         connection_id,
     )
     if row is None:
-        return await get_connection(conn, connection_id)
+        existing = await conn.fetchrow(
+            "SELECT archived_at, session_id FROM connections WHERE id = $1",
+            connection_id,
+        )
+        if existing is None:
+            raise NotFoundError(
+                f"connection {connection_id} not found",
+                detail={"id": connection_id},
+            )
+        if existing["archived_at"] is not None:
+            raise ConflictError(
+                f"connection {connection_id} is archived",
+                detail={"id": connection_id},
+            )
+        raise ConflictError(
+            f"connection {connection_id} is not in single_session mode",
+            detail={"id": connection_id},
+        )
     return _row_to_connection(row)
 
 
@@ -2350,10 +2373,7 @@ async def configure_per_chat_connection(
     *,
     session_template_id: str,
 ) -> Connection:
-    """Switch the connection into per_chat mode.
-
-    Errors if the connection is already attached or per_chat-configured.
-    """
+    """Switch the connection into per_chat mode."""
     try:
         row = await conn.fetchrow(
             """
@@ -2376,34 +2396,16 @@ async def configure_per_chat_connection(
             detail={"session_template_id": session_template_id},
         ) from exc
     if row is None:
-        existing = await conn.fetchrow(
-            "SELECT session_id, session_template_id, archived_at FROM connections WHERE id = $1",
-            connection_id,
-        )
-        if existing is None:
-            raise NotFoundError(
-                f"connection {connection_id} not found",
-                detail={"id": connection_id},
-            )
-        if existing["archived_at"] is not None:
-            raise ConflictError(
-                f"connection {connection_id} is archived",
-                detail={"id": connection_id},
-            )
-        raise ConflictError(
-            f"connection {connection_id} is already attached or configured per_chat; "
-            "detach or unconfigure first",
-            detail={"id": connection_id},
-        )
+        await _raise_for_failed_mode_transition(conn, connection_id)
+    assert row is not None
     return _row_to_connection(row)
 
 
 async def unconfigure_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
     """Drop the per_chat configuration, leaving the connection detached.
 
-    Already-spawned per_chat sessions are NOT cascaded — they remain alive
-    with ``spawned_from_connection_id`` still pointing at this connection
-    (resolved decision #6).  No-op if already unconfigured.
+    Already-spawned per_chat sessions are not cascaded — they remain
+    alive with ``spawned_from_connection_id`` still pointing at this row.
     """
     row = await conn.fetchrow(
         """
@@ -2419,7 +2421,24 @@ async def unconfigure_connection(conn: asyncpg.Connection[Any], connection_id: s
         connection_id,
     )
     if row is None:
-        return await get_connection(conn, connection_id)
+        existing = await conn.fetchrow(
+            "SELECT archived_at, session_template_id FROM connections WHERE id = $1",
+            connection_id,
+        )
+        if existing is None:
+            raise NotFoundError(
+                f"connection {connection_id} not found",
+                detail={"id": connection_id},
+            )
+        if existing["archived_at"] is not None:
+            raise ConflictError(
+                f"connection {connection_id} is archived",
+                detail={"id": connection_id},
+            )
+        raise ConflictError(
+            f"connection {connection_id} is not in per_chat mode",
+            detail={"id": connection_id},
+        )
     return _row_to_connection(row)
 
 
@@ -2443,12 +2462,7 @@ async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) 
 async def lookup_chat_session(
     conn: asyncpg.Connection[Any], connection_id: str, chat_id: str
 ) -> str | None:
-    """Existing session_id for ``(connection_id, chat_id)``, else ``None``.
-
-    Read side of the per_chat lookup.  The write side
-    (:func:`insert_chat_session`) inserts with ``ON CONFLICT DO NOTHING``;
-    on a race, the loser re-runs this lookup.
-    """
+    """Existing session_id for ``(connection_id, chat_id)``, else ``None``."""
     val: str | None = await conn.fetchval(
         "SELECT session_id FROM connection_chat_sessions WHERE connection_id = $1 AND chat_id = $2",
         connection_id,
@@ -2467,8 +2481,8 @@ async def insert_chat_session(
     """Race-safe insert: returns the session_id stored after the call.
 
     On conflict (a concurrent inbound for the same chat already wrote the
-    row) returns the existing session_id, signalling to the caller that
-    the just-created session is an orphan that should be discarded.
+    row) returns the *existing* session_id; the caller is then on the
+    hook to discard the just-created session as an orphan.
     """
     row = await conn.fetchrow(
         """
@@ -2587,7 +2601,7 @@ async def update_session_template(
     *,
     name: str | None = None,
     agent_id: str | None = None,
-    agent_version: int | None | EllipsisType = ...,
+    agent_version: int | None = _UNSET,
     environment_id: str | None = None,
     vault_ids: list[str] | None = None,
     memory_store_ids: list[str] | None = None,
@@ -2601,7 +2615,7 @@ async def update_session_template(
     if agent_id is not None:
         args.append(agent_id)
         sets.append(f"agent_id = ${len(args)}")
-    if agent_version is not ...:
+    if agent_version is not _UNSET:
         args.append(agent_version)
         sets.append(f"agent_version = ${len(args)}")
     if environment_id is not None:

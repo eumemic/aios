@@ -38,7 +38,7 @@ from aios.tools.registry import to_openai_tools
 if TYPE_CHECKING:
     import asyncpg
 
-    from aios.models.agents import Agent, AgentVersion
+    from aios.models.agents import Agent, AgentVersion, McpServerSpec
     from aios.models.events import Event
     from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.models.sessions import Session
@@ -108,19 +108,16 @@ async def compute_step_prelude(
     from aios.services import skills as skills_service
 
     tools = to_openai_tools(agent.tools)
-    # Inject the built-in switch_channel tool when the session has any
-    # bound channels — the only way the agent can mutate focal attention.
+    # The switch_channel built-in is the agent's only path to mutate
+    # focal attention; inject it whenever the session has bound channels.
     if channels:
         tools.append(_switch_channel_tool_spec())
 
-    # ``include_instructions`` map — applied by the renderer below per
-    # resolved decision #4 (universal rendering, opt-out per server).
-    include_map: dict[str, bool] = {s.name: s.include_instructions for s in agent.mcp_servers}
     instructions_block = ""
     if agent.mcp_servers:
         mcp_tools, mcp_instructions = await discover_session_mcp_tools(pool, session_id, agent)
         tools.extend(mcp_tools)
-        instructions_block = _build_instructions_block(mcp_instructions, include_map)
+        instructions_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
 
     skill_versions = (
         await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
@@ -143,24 +140,21 @@ async def compute_step_prelude(
 
 
 def _build_instructions_block(
-    instructions_by_server: dict[str, str], include_map: dict[str, bool]
+    mcp_servers: list[McpServerSpec], instructions_by_server: dict[str, str]
 ) -> str:
     """Render per-server affordance prose, respecting ``include_instructions``.
 
-    Universal rendering across all MCP servers (resolved decision #4):
-    every server with non-null ``InitializeResult.instructions`` and
-    ``include_instructions=true`` (the default) contributes a section.
-    Section ordering matches ``include_map``'s declaration order so
-    prompt-cache stability holds across steps.
+    Servers iterate in ``agent.mcp_servers`` declaration order, which is
+    fixed across steps — keeping the rendered block prefix-cache-stable.
     """
     sections: list[str] = []
-    for name in include_map:
-        if not include_map.get(name, True):
+    for s in mcp_servers:
+        if not s.include_instructions:
             continue
-        text = instructions_by_server.get(name)
+        text = instructions_by_server.get(s.name)
         if not text:
             continue
-        sections.append(f"## MCP server: {name}\n\n{text}")
+        sections.append(f"## MCP server: {s.name}\n\n{text}")
     return "\n\n".join(sections)
 
 

@@ -86,12 +86,6 @@ async def resolve_auth_for_url(
     """Resolve MCP auth headers for ``mcp_server_url`` via the session's
     bound vaults.
 
-    The connector redesign (#200) removes connection-owned MCP URLs:
-    connectors are now stdio MCP subprocesses owned by the worker (PR2),
-    so there is no remote URL whose auth would be sourced from a
-    connection's vault.  All HTTP MCP auth resolves through
-    ``session_vaults`` (Linear, GitHub, etc.).
-
     For ``mcp_oauth`` credentials whose ``expires_at`` falls within the
     refresh skew window, the access token is transparently refreshed
     (row-locked via ``refresh_credential`` to serialize concurrent
