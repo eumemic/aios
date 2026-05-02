@@ -1,8 +1,7 @@
 """``aios connections ...`` — connector-instance CRUD plus mode-binding helpers.
 
-The connector redesign (#200) unified routing into the ``connections``
-table.  Connections are created in detached mode; switch to single_session
-via ``attach`` or per_chat via ``configure-per-chat``.  ``archive`` works
+Connections are created in detached mode; switch to single_session via
+``attach`` or per_chat via ``configure-per-chat``.  ``archive`` works
 only on detached connections — operators must ``detach`` /
 ``unconfigure`` first.
 """

@@ -1,8 +1,7 @@
-"""``aios connectors ...`` — connector subprocess admin (stubbed in PR1).
+"""``aios connectors ...`` — connector subprocess admin.
 
-PR2 adds the supervisor + procrastinate ``connector_call`` task; PR3
-wires inbound handling.  Until then every subcommand passes through to
-the API which returns 503.
+The connector subprocess supervisor isn't wired yet; every subcommand
+passes through to the API, which currently returns 503.
 """
 
 from __future__ import annotations

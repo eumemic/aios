@@ -17,7 +17,7 @@ import json
 import math
 import time
 from types import EllipsisType
-from typing import Any
+from typing import Any, NoReturn
 
 import asyncpg
 
@@ -2232,12 +2232,12 @@ async def get_connection_for_account(
 
 async def _raise_for_failed_mode_transition(
     conn: asyncpg.Connection[Any], connection_id: str
-) -> None:
+) -> NoReturn:
     """Diagnose why a guarded mode-transition UPDATE returned no row.
 
     Called from ``attach_connection``/``configure_per_chat_connection``
     when the WHERE clause didn't match any row.  Picks the most specific
-    error to raise: NotFound > archived > already-bound.  Always raises.
+    error to raise: NotFound > archived > already-bound.
     """
     existing = await conn.fetchrow(
         "SELECT archived_at FROM connections WHERE id = $1",
@@ -2321,7 +2321,6 @@ async def attach_connection(
         ) from exc
     if row is None:
         await _raise_for_failed_mode_transition(conn, connection_id)
-    assert row is not None
     return _row_to_connection(row)
 
 
@@ -2397,7 +2396,6 @@ async def configure_per_chat_connection(
         ) from exc
     if row is None:
         await _raise_for_failed_mode_transition(conn, connection_id)
-    assert row is not None
     return _row_to_connection(row)
 
 
@@ -2659,7 +2657,7 @@ async def archive_session_template(
 ) -> SessionTemplate:
     """Soft-delete the template.  Already-spawned per_chat sessions keep
     working; new chat sessions on connections referencing this template
-    will fail at the inbound handler (see PR3).
+    will fail at the inbound handler.
     """
     row = await conn.fetchrow(
         "UPDATE session_templates SET archived_at = now(), updated_at = now() "

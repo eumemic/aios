@@ -205,13 +205,13 @@ async def _run_session_step_body(
     from aios.models.agents import Agent, AgentVersion
     from aios.services.channels import list_session_channels
 
-    agent_task: asyncio.Future[Agent | AgentVersion]
+    agent_task: asyncio.Task[Agent | AgentVersion]
     if session.agent_version is not None:
-        agent_task = asyncio.ensure_future(
+        agent_task = asyncio.create_task(
             agents_service.get_agent_version(pool, session.agent_id, session.agent_version)
         )
     else:
-        agent_task = asyncio.ensure_future(agents_service.get_agent(pool, session.agent_id))
+        agent_task = asyncio.create_task(agents_service.get_agent(pool, session.agent_id))
     agent, channels, memory_echoes = await asyncio.gather(
         agent_task,
         list_session_channels(pool, session_id),

@@ -27,8 +27,9 @@ SWITCH_CHANNEL_METADATA_KEY = "switch_channel"
 # requests to MCP servers.  The value is the focal-channel suffix (the
 # focal channel address with its first two ``<connector>/<account>``
 # segments stripped, since the connector already knows its own identity).
-# Stamped on every outbound MCP request — receivers that don't care
-# ignore unknown ``_meta`` keys per MCP spec.
+# Stamped on outbound MCP requests whenever the calling session has a
+# focal channel set; servers that don't care ignore unknown ``_meta``
+# keys per the MCP spec.
 FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
 
 

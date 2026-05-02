@@ -1,11 +1,8 @@
 """Channel-state queries for the harness.
 
-In the connector redesign (#200) the explicit ``channel_bindings`` table
-is gone — a "binding" is now derived from the event log: a session is
-"bound to a channel" if it has any message events stamped with that
-channel address.  This module exposes the small surface the harness
-needs: list channel addresses for a session, plus a constant for the
-focal-channel ``_meta`` key carried on outbound MCP requests.
+A session is "bound to a channel" if it has any message events stamped
+with that channel address; the binding is derived from the event log
+rather than stored explicitly.
 """
 
 from __future__ import annotations

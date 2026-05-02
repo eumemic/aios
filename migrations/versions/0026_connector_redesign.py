@@ -35,9 +35,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # Drop old routing tables in dependency order.  ``connection_id`` FKs
-    # on bindings/rules cascade-delete when the parent connection is dropped,
-    # but we drop them explicitly first to keep the order obvious.
+    # Drop in dependency order: bindings/rules reference the old connections
+    # table, so they must go first.
     op.execute("DROP TABLE IF EXISTS routing_rules")
     op.execute("DROP TABLE IF EXISTS channel_bindings")
     op.execute("DROP TABLE IF EXISTS connections")
