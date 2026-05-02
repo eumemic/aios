@@ -2,7 +2,7 @@
 
 The connector subprocesses live on the worker process; the API process
 talks to them indirectly via procrastinate jobs that NOTIFY back when
-done (resolved decision #19).  Each handler:
+done.  Each handler:
 
 1. Mints a ``call_id`` ULID and ``LISTEN``s on the result channel
    first, before enqueuing — the LISTEN-before-action invariant from

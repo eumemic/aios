@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING
 
 import asyncpg
 
+from aios.db.pool import normalize_dsn
 from aios.db.sse_lock import acquire_subscriber_lock
 from aios.logging import get_logger
 
@@ -69,14 +70,6 @@ if TYPE_CHECKING:
 log = get_logger("aios.db.listen")
 
 
-def _normalize_dsn(db_url: str) -> str:
-    """Strip driver-suffix prefixes; asyncpg.connect wants bare postgresql://."""
-    for prefix in ("postgresql+asyncpg://", "postgresql+psycopg://"):
-        if db_url.startswith(prefix):
-            return "postgresql://" + db_url[len(prefix) :]
-    return db_url
-
-
 @asynccontextmanager
 async def listen_for_connector_result(
     db_url: str,
@@ -84,10 +77,9 @@ async def listen_for_connector_result(
 ) -> AsyncIterator[asyncio.Queue[str]]:
     """Open a dedicated asyncpg connection LISTENing on ``connector_result_<call_id>``.
 
-    The API process uses this for the ``/v1/connectors/...`` endpoints
-    (procrastinate-RPC pattern from resolved decision #19): LISTEN
-    first, enqueue the procrastinate task, await the single NOTIFY
-    payload, return the parsed result.
+    The API process uses this for the ``/v1/connectors/...`` endpoints:
+    LISTEN first, enqueue the procrastinate task, await the single
+    NOTIFY payload, return the parsed result.
 
     The yielded queue carries one entry per NOTIFY — for the connector
     RPC plane that's exactly one entry per call.  ``queue_max=8``
@@ -96,7 +88,7 @@ async def listen_for_connector_result(
     Mirrors :func:`listen_for_events` but with a per-call (not
     per-session) channel and a tighter queue bound.
     """
-    conn = await asyncpg.connect(_normalize_dsn(db_url))
+    conn = await asyncpg.connect(normalize_dsn(db_url))
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
     channel = f"connector_result_{call_id}"
 
@@ -148,7 +140,7 @@ async def listen_for_events(
         Bound on the in-memory queue. Defaults to 1000 — generous enough
         that a slow consumer can fall behind by ~1000 events before drops.
     """
-    conn = await asyncpg.connect(_normalize_dsn(db_url))
+    conn = await asyncpg.connect(normalize_dsn(db_url))
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
     channel = f"events_{session_id}"
 

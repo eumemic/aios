@@ -48,7 +48,6 @@ _BACKOFF_CAP_S = 300.0
 _CIRCUIT_THRESHOLD = 10
 _CIRCUIT_WINDOW_S = 3600.0
 _DISPATCH_TIMEOUT_S = 120.0
-_INIT_TIMEOUT_S = 30.0
 
 
 class ConnectorNotEnabled(Exception):
@@ -138,7 +137,6 @@ class ConnectorSubprocessRegistry:
     """
 
     def __init__(self, specs: list[ConnectorSpec]) -> None:
-        self._specs = {s.name: s for s in specs}
         self._states: dict[str, ConnectorState] = {
             s.name: ConnectorState(name=s.name, spec=s) for s in specs
         }
@@ -148,16 +146,11 @@ class ConnectorSubprocessRegistry:
 
     @property
     def names(self) -> list[str]:
-        return list(self._specs.keys())
+        return list(self._states.keys())
 
     async def start(self) -> None:
-        """Spawn one supervisor task per connector. Returns immediately.
-
-        Tasks run until :meth:`shutdown`; ``aios connector list`` shows
-        ``status="starting"`` until the first successful ``initialize()``
-        flips it to ``"running"``.
-        """
-        for name in self._specs:
+        """Spawn one supervisor task per connector. Returns immediately."""
+        for name in self._states:
             self._tasks[name] = asyncio.create_task(
                 self._supervisor_loop(name),
                 name=f"connector_supervisor:{name}",
@@ -199,9 +192,9 @@ class ConnectorSubprocessRegistry:
         the call in :func:`asyncio.wait_for` if you need a deadline
         (the dispatch path here does so via :data:`_DISPATCH_TIMEOUT_S`).
         """
-        if name not in self._specs:
+        state = self._states.get(name)
+        if state is None:
             raise ConnectorNotEnabled(name)
-        state = self._states[name]
         if state.status == "circuit_open":
             raise CircuitOpen(name)
         await self._ready[name].wait()
@@ -251,16 +244,9 @@ class ConnectorSubprocessRegistry:
             )
             return {"error": f"connector transport error: {type(err).__name__}: {err}"}
 
-        parts: list[str] = []
-        for item in result.content:
-            if hasattr(item, "text"):
-                parts.append(item.text)
-            else:
-                parts.append(f"[{item.type} content]")
-        content = "\n".join(parts) if parts else ""
-        if result.isError:
-            return {"error": content}
-        return {"content": content}
+        from aios.mcp.client import shape_call_result
+
+        return shape_call_result(result)
 
     # ── notifications ─────────────────────────────────────────────────
 
@@ -309,7 +295,7 @@ class ConnectorSubprocessRegistry:
         call right after sees the right thing.
         """
         state = self._states[name]
-        spec = self._specs[name]
+        spec = state.spec
 
         async def handler(method: str, params: dict[str, Any] | None) -> None:
             await self._on_aios_notification(name, method, params)
@@ -335,15 +321,11 @@ class ConnectorSubprocessRegistry:
                         connector=name,
                         server_name=init_result.serverInfo.name,
                     )
-                    # Wait until either shutdown OR subprocess close.
-                    # ``closed_event`` fires when the splitter sees EOF
-                    # on its upstream — both clean exits and crashes
-                    # surface that way.  Without this race, a dead
-                    # subprocess would leave the body parked on
-                    # ``_shutdown.wait()`` forever, the supervisor
-                    # would hold a stale ``state.session`` reference,
-                    # and ``dispatch_call`` would error with
-                    # ``ClosedResourceError``.
+                    # Park until shutdown OR the subprocess closes its
+                    # stdout (closed_event fires on EOF).  Racing the
+                    # two is what lets a dead subprocess wake the loop
+                    # for respawn — anyio's cancel-propagation alone
+                    # leaves this body parked.
                     shutdown_task = asyncio.create_task(self._shutdown.wait())
                     closed_task = asyncio.create_task(closed_event.wait())
                     try:

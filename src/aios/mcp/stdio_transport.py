@@ -61,8 +61,8 @@ class ConnectorSpec:
     The ``aios.connectors`` entry-point group resolves to a callable
     that returns a :class:`ConnectorSpec` — that's the integration
     point for connector packages (signal-cli, telegram, the reference
-    SDK in PR3).  Exposing the spec as data lets the supervisor log,
-    diff, and re-spawn without owning entry-point loading.
+    SDK).  Exposing the spec as data lets the supervisor log, diff,
+    and re-spawn without owning entry-point loading.
     """
 
     name: str

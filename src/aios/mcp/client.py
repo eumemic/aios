@@ -193,6 +193,25 @@ async def discover_mcp_tools(
         return [], None
 
 
+def shape_call_result(result: Any) -> dict[str, Any]:
+    """Project an MCP ``CallToolResult`` onto aios's ``{"content"|"error": str}`` envelope.
+
+    Shared by the HTTP-transport path here and the stdio-transport path
+    in :class:`~aios.harness.connector_supervisor.ConnectorSubprocessRegistry`
+    so both surfaces stay byte-identical.
+    """
+    parts: list[str] = []
+    for item in result.content:
+        if hasattr(item, "text"):
+            parts.append(item.text)
+        else:
+            parts.append(f"[{item.type} content]")
+    content = "\n".join(parts) if parts else ""
+    if result.isError:
+        return {"error": content}
+    return {"content": content}
+
+
 async def call_mcp_tool(
     url: str,
     headers: dict[str, str],
@@ -237,19 +256,7 @@ async def call_mcp_tool(
                     timeout=_TOOL_CALL_TIMEOUT_S,
                 )
 
-        # Concatenate text content from the result.
-        parts: list[str] = []
-        for item in result.content:
-            if hasattr(item, "text"):
-                parts.append(item.text)
-            else:
-                parts.append(f"[{item.type} content]")
-
-        content = "\n".join(parts) if parts else ""
-
-        if result.isError:
-            return {"error": content}
-        return {"content": content}
+        return shape_call_result(result)
 
     except Exception as err:
         log.warning(

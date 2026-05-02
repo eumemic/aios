@@ -149,14 +149,7 @@ async def connector_call(
     arguments: dict[str, Any],
     meta: dict[str, Any] | None = None,
 ) -> None:
-    """Dispatch a tool call into the connector subprocess and notify the API.
-
-    Lock arguments are set at defer time by :func:`defer_connector_call`,
-    not on the decorator — procrastinate stores decorator values
-    verbatim, so a decorator-level ``lock="connector:{name}"`` would
-    serialize *all* connectors through the literal lock value.  See
-    :mod:`aios.harness.tasks` for the same pattern on ``wake_session``.
-    """
+    """Dispatch a tool call into the connector subprocess and notify the API."""
     pool = runtime.require_pool()
     registry = runtime.connector_subprocess_registry
     if registry is None:

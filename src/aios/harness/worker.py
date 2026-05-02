@@ -37,8 +37,7 @@ if TYPE_CHECKING:
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.db.listen import _normalize_dsn
-from aios.db.pool import create_pool
+from aios.db.pool import create_pool, normalize_dsn
 from aios.harness import runtime
 from aios.harness.connector_supervisor import (
     ConnectorSubprocessRegistry,
@@ -181,7 +180,7 @@ async def _acquire_worker_lock(db_url: str, log: Any) -> asyncpg.Connection[Any]
     pool reset would issue ``DISCARD ALL``, which releases advisory
     locks and silently drops the guarantee.
     """
-    dsn = _normalize_dsn(db_url)
+    dsn = normalize_dsn(db_url)
     conn = await asyncpg.connect(dsn)
     try:
         held: bool = await conn.fetchval(
