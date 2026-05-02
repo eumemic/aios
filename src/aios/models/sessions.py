@@ -155,6 +155,7 @@ class Session(BaseModel):
     updated_at: datetime
     archived_at: datetime | None = None
     focal_channel: str | None = None
+    spawned_from_connection_id: str | None = Field(default=None, exclude=True)
 
 
 class SessionUserMessage(BaseModel):

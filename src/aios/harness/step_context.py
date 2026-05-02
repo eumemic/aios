@@ -39,8 +39,6 @@ if TYPE_CHECKING:
     import asyncpg
 
     from aios.models.agents import Agent, AgentVersion
-    from aios.models.channel_bindings import ChannelBinding
-    from aios.models.connections import Connection
     from aios.models.events import Event
     from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.models.sessions import Session
@@ -51,14 +49,14 @@ if TYPE_CHECKING:
 class StepPrelude:
     """Events-independent portion of a step's payload.
 
-    Everything here depends only on ``agent`` / ``bindings`` /
-    ``connections`` / ``session`` — not on which events windowing picks.
-    Computed before windowing so ``read_windowed_events`` can subtract
-    the overhead from the budget (see ``overhead_local`` there).
+    Everything here depends only on ``agent`` / ``channels`` / ``session``
+    — not on which events windowing picks.  Computed before windowing so
+    ``read_windowed_events`` can subtract the overhead from the budget
+    (see ``overhead_local`` there).
 
     ``tail_block_upper_bound_local`` is the worst-case size of the
     channels tail block the composer will append after windowing — a
-    conservative bound computed from ``bindings`` alone (no events, no
+    conservative bound computed from ``channels`` alone (no events, no
     unread counts).  Reserving this ahead of time keeps the send-time
     payload under ``window_max`` even when the tail renders at its
     fattest (every channel at 9999 unread with a maxed-out preview).
@@ -87,8 +85,7 @@ async def compute_step_prelude(
     *,
     session: Session,
     agent: Agent | AgentVersion,
-    bindings: list[ChannelBinding],
-    connections: list[Connection],
+    channels: list[str],
     memory_store_echoes: list[MemoryStoreResourceEcho],
 ) -> StepPrelude:
     """Build the events-independent parts of the step payload.
@@ -99,12 +96,10 @@ async def compute_step_prelude(
     byte-identical to what it was before the split.
     """
     from aios.harness.channels import (
-        augment_with_connector_instructions,
         augment_with_focal_paradigm,
         max_tail_block_local,
     )
     from aios.harness.loop import (
-        _hide_conn_tools_when_phone_down,
         _switch_channel_tool_spec,
         discover_session_mcp_tools,
     )
@@ -114,43 +109,66 @@ async def compute_step_prelude(
 
     tools = to_openai_tools(agent.tools)
     # Inject the built-in switch_channel tool when the session has any
-    # active bindings — the only way the agent can mutate focal attention.
-    if bindings:
+    # bound channels — the only way the agent can mutate focal attention.
+    if channels:
         tools.append(_switch_channel_tool_spec())
 
-    mcp_instructions: dict[str, str] = {}
-    if agent.mcp_servers or connections:
-        mcp_tools, mcp_instructions = await discover_session_mcp_tools(
-            pool, session_id, agent, connections
-        )
-        # Hide connection-provided MCP tools when focal is NULL — can't
-        # type into a chat you aren't attending to.
-        mcp_tools = _hide_conn_tools_when_phone_down(mcp_tools, session.focal_channel)
+    # ``include_instructions`` map — applied by the renderer below per
+    # resolved decision #4 (universal rendering, opt-out per server).
+    include_map: dict[str, bool] = {s.name: s.include_instructions for s in agent.mcp_servers}
+    instructions_block = ""
+    if agent.mcp_servers:
+        mcp_tools, mcp_instructions = await discover_session_mcp_tools(pool, session_id, agent)
         tools.extend(mcp_tools)
+        instructions_block = _build_instructions_block(mcp_instructions, include_map)
 
     skill_versions = (
         await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
     )
     system_prompt = augment_system_prompt(agent.system, skill_versions)
-    system_prompt = augment_with_focal_paradigm(system_prompt, bindings)
-    system_prompt = augment_with_connector_instructions(
-        system_prompt, mcp_instructions, connections
-    )
+    system_prompt = augment_with_focal_paradigm(system_prompt, channels)
+    if instructions_block:
+        if system_prompt:
+            system_prompt = system_prompt + "\n\n" + instructions_block
+        else:
+            system_prompt = instructions_block
     system_prompt = augment_with_memory_stores(system_prompt, memory_store_echoes)
 
     return StepPrelude(
         system_prompt=system_prompt,
         tools=tools,
         skill_versions=skill_versions,
-        tail_block_upper_bound_local=max_tail_block_local(bindings),
+        tail_block_upper_bound_local=max_tail_block_local(channels),
     )
+
+
+def _build_instructions_block(
+    instructions_by_server: dict[str, str], include_map: dict[str, bool]
+) -> str:
+    """Render per-server affordance prose, respecting ``include_instructions``.
+
+    Universal rendering across all MCP servers (resolved decision #4):
+    every server with non-null ``InitializeResult.instructions`` and
+    ``include_instructions=true`` (the default) contributes a section.
+    Section ordering matches ``include_map``'s declaration order so
+    prompt-cache stability holds across steps.
+    """
+    sections: list[str] = []
+    for name in include_map:
+        if not include_map.get(name, True):
+            continue
+        text = instructions_by_server.get(name)
+        if not text:
+            continue
+        sections.append(f"## MCP server: {name}\n\n{text}")
+    return "\n\n".join(sections)
 
 
 async def compose_step_context(
     *,
     session: Session,
     agent: Agent | AgentVersion,
-    bindings: list[ChannelBinding],
+    channels: list[str],
     prelude: StepPrelude,
     events: list[Event],
 ) -> StepContext:
@@ -166,7 +184,7 @@ async def compose_step_context(
     # Tail block lives *after* build_messages so its per-step mutations
     # (unread counts, previews) don't bust the prefix cache.  Paradigm
     # prose stays in the cache-stable system prompt above.
-    tail = build_channels_tail_block(bindings, events, session.focal_channel)
+    tail = build_channels_tail_block(channels, events, session.focal_channel)
     if tail is not None:
         ctx.messages.append(tail)
 

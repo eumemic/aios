@@ -1,10 +1,12 @@
 """Business logic for connection resources.
 
-Thin wrapper over :mod:`aios.db.queries`. The only business rule lives
-in :func:`archive_connection`, which refuses to archive a connection
-while channel bindings under its ``(connector, account)`` prefix are
-still active — archiving would silently drop the connection-provided
-MCP tools from any live session bound to those channels.
+Thin wrapper over :mod:`aios.db.queries`.  The single business rule
+lives in :func:`archive_connection`: refuse to archive while the
+connection is in single_session or per_chat mode.  Operators must
+``detach`` (or ``unconfigure``) first — silently dropping the routing
+binding on archive would orphan the spawned-from-connection_id pointers
+on per_chat sessions and would interrupt outbound delivery for
+single_session.
 """
 
 from __future__ import annotations
@@ -23,8 +25,6 @@ async def create_connection(
     *,
     connector: str,
     account: str,
-    mcp_url: str,
-    vault_id: str,
     metadata: dict[str, Any],
 ) -> Connection:
     async with pool.acquire() as conn:
@@ -32,8 +32,6 @@ async def create_connection(
             conn,
             connector=connector,
             account=account,
-            mcp_url=mcp_url,
-            vault_id=vault_id,
             metadata=metadata,
         )
 
@@ -44,48 +42,67 @@ async def get_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Connect
 
 
 async def list_connections(
-    pool: asyncpg.Pool[Any], *, limit: int = 50, after: str | None = None
+    pool: asyncpg.Pool[Any],
+    *,
+    connector: str | None = None,
+    session_id: str | None = None,
+    limit: int = 50,
+    after: str | None = None,
 ) -> list[Connection]:
     async with pool.acquire() as conn:
-        return await queries.list_connections(conn, limit=limit, after=after)
-
-
-async def update_connection(
-    pool: asyncpg.Pool[Any],
-    connection_id: str,
-    *,
-    mcp_url: str | None = None,
-    vault_id: str | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> Connection:
-    async with pool.acquire() as conn:
-        return await queries.update_connection(
+        return await queries.list_connections(
             conn,
-            connection_id,
-            mcp_url=mcp_url,
-            vault_id=vault_id,
-            metadata=metadata,
+            connector=connector,
+            session_id=session_id,
+            limit=limit,
+            after=after,
         )
 
 
+async def attach_connection(
+    pool: asyncpg.Pool[Any], connection_id: str, *, session_id: str
+) -> Connection:
+    async with pool.acquire() as conn:
+        return await queries.attach_connection(conn, connection_id, session_id=session_id)
+
+
+async def detach_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Connection:
+    async with pool.acquire() as conn:
+        return await queries.detach_connection(conn, connection_id)
+
+
+async def configure_per_chat(
+    pool: asyncpg.Pool[Any], connection_id: str, *, session_template_id: str
+) -> Connection:
+    async with pool.acquire() as conn:
+        return await queries.configure_per_chat_connection(
+            conn, connection_id, session_template_id=session_template_id
+        )
+
+
+async def unconfigure_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Connection:
+    async with pool.acquire() as conn:
+        return await queries.unconfigure_connection(conn, connection_id)
+
+
 async def archive_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Connection:
+    """Archive a connection, refusing while it's still bound to a session
+    or template.
+
+    Operators must ``detach`` / ``unconfigure`` first — this prevents an
+    archive from silently dropping the inbound delivery target for a
+    live single_session, or orphaning the ``spawned_from_connection_id``
+    pointer on per_chat-spawned sessions.
+    """
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, connection_id)
         if connection.archived_at is not None:
-            # Let the query raise its canonical "already archived" error.
             return await queries.archive_connection(conn, connection_id)
-        active = await queries.count_active_bindings_for_connection(conn, connection_id)
-        if active > 0:
+        if connection.session_id is not None or connection.session_template_id is not None:
+            mode = "single_session" if connection.session_id is not None else "per_chat"
             raise ConflictError(
-                f"connection {connection_id} has {active} active channel binding"
-                f"{'s' if active != 1 else ''} under {connection.connector}/"
-                f"{connection.account}; archive the bindings first to avoid "
-                f"silently dropping MCP tools from live sessions",
-                detail={
-                    "id": connection_id,
-                    "active_bindings": active,
-                    "connector": connection.connector,
-                    "account": connection.account,
-                },
+                f"connection {connection_id} is in {mode} mode; "
+                f"detach or unconfigure before archiving",
+                detail={"id": connection_id, "mode": mode},
             )
         return await queries.archive_connection(conn, connection_id)

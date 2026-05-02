@@ -26,11 +26,11 @@ def test_root_help_lists_all_subcommands():
         "chat",
         "agents",
         "sessions",
+        "session-templates",
         "skills",
         "vaults",
         "connections",
-        "bindings",
-        "rules",
+        "connectors",
         "envs",
     ]:
         assert name in result.stdout, f"missing subcommand {name} in help"

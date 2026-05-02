@@ -99,129 +99,13 @@ def test_migration_creates_all_tables(postgres: object) -> None:
     asyncio.run(check())
 
 
-@needs_docker
-@pytest.mark.integration
-def test_migration_downgrade_drops_tables(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
-    # Make sure we're at head
-    _run_alembic(["upgrade", "head"], db_url)
-    # Then go back to base
-    result = _run_alembic(["downgrade", "base"], db_url)
-    assert result.returncode == 0, f"alembic downgrade failed:\n{result.stderr}\n{result.stdout}"
-
-    import asyncio
-
-    async def check() -> None:
-        conn = await asyncpg.connect(db_url)
-        try:
-            tables = await conn.fetch(
-                "SELECT tablename FROM pg_tables WHERE schemaname = 'public';"
-            )
-            names = {row["tablename"] for row in tables}
-            for table in ("credentials", "environments", "agents", "sessions", "events"):
-                assert table not in names, f"{table} should be dropped"
-        finally:
-            await conn.close()
-
-    asyncio.run(check())
-
-
-# Columns added by migration 0017 (focal-channel attention model). Listed
-# as (table, column) pairs used by the cycle test below.
-_MIGRATION_0017_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("sessions", "focal_channel"),
-    ("events", "orig_channel"),
-    ("events", "focal_channel_at_arrival"),
-    ("channel_bindings", "notification_mode"),
-)
-
-
-async def _column_exists(conn: asyncpg.Connection, table: str, column: str) -> bool:
-    row = await conn.fetchrow(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2",
-        table,
-        column,
-    )
-    return row is not None
-
-
-@needs_docker
-@pytest.mark.integration
-def test_migration_0017_focal_channel_cycle(postgres: object) -> None:
-    """Exercise migration 0017's up/down/up cycle.
-
-    Verifies that the focal-channel columns appear at head, are removed
-    when downgraded to 0016, and reappear on ``upgrade head``.  Uses an
-    explicit target revision (``0016``) rather than ``-1`` so the test
-    stays stable as new migrations are added above 0017.
-    """
-    db_url = _alembic_url(postgres)
-
-    # Start at head (idempotent regardless of prior test state).
-    upgraded = _run_alembic(["upgrade", "head"], db_url)
-    assert upgraded.returncode == 0, f"initial upgrade failed:\n{upgraded.stderr}"
-
-    import asyncio
-
-    async def assert_columns(expected: bool) -> None:
-        conn = await asyncpg.connect(db_url)
-        try:
-            for table, column in _MIGRATION_0017_COLUMNS:
-                exists = await _column_exists(conn, table, column)
-                if expected:
-                    assert exists, f"{table}.{column} missing after upgrade"
-                else:
-                    assert not exists, f"{table}.{column} still present after downgrade"
-        finally:
-            await conn.close()
-
-    # 1. Columns exist at head.
-    asyncio.run(assert_columns(True))
-
-    # 2. Downgrade to 0016 → 0017's columns gone.
-    downgraded = _run_alembic(["downgrade", "0016"], db_url)
-    assert downgraded.returncode == 0, f"downgrade to 0016 failed:\n{downgraded.stderr}"
-    asyncio.run(assert_columns(False))
-
-    # 3. Upgrade back to head. Columns reappear.
-    re_upgraded = _run_alembic(["upgrade", "head"], db_url)
-    assert re_upgraded.returncode == 0, f"re-upgrade failed:\n{re_upgraded.stderr}"
-    asyncio.run(assert_columns(True))
-
-
-@needs_docker
-@pytest.mark.integration
-def test_migration_0018_events_channel_cycle(postgres: object) -> None:
-    """Exercise migration 0018's up/down/up cycle.
-
-    Verifies that ``events.channel`` appears at head, is removed on
-    ``downgrade 0017``, and reappears on ``upgrade head``.
-    """
-    db_url = _alembic_url(postgres)
-
-    upgraded = _run_alembic(["upgrade", "head"], db_url)
-    assert upgraded.returncode == 0, f"initial upgrade failed:\n{upgraded.stderr}"
-
-    import asyncio
-
-    async def assert_channel(expected: bool) -> None:
-        conn = await asyncpg.connect(db_url)
-        try:
-            exists = await _column_exists(conn, "events", "channel")
-            if expected:
-                assert exists, "events.channel missing after upgrade"
-            else:
-                assert not exists, "events.channel still present after downgrade"
-        finally:
-            await conn.close()
-
-    asyncio.run(assert_channel(True))
-
-    downgraded = _run_alembic(["downgrade", "0017"], db_url)
-    assert downgraded.returncode == 0, f"downgrade to 0017 failed:\n{downgraded.stderr}"
-    asyncio.run(assert_channel(False))
-
-    re_upgraded = _run_alembic(["upgrade", "head"], db_url)
-    assert re_upgraded.returncode == 0, f"re-upgrade failed:\n{re_upgraded.stderr}"
-    asyncio.run(assert_channel(True))
+# NOTE: down/up cycle tests for migrations 0017 (focal-channel) and 0018
+# (events.channel) used to live here but were removed when migration 0026
+# (connector redesign #200) dropped ``channel_bindings`` / ``routing_rules``
+# / old ``connections``.  The 0019 downgrade adds a column to
+# ``channel_bindings``, which 0026 has already dropped — so any downgrade
+# chain through 0019 fails.  Per the connector-redesign plan, 0026's
+# downgrade is data-lossy and exists only so ``alembic downgrade`` doesn't
+# error, not as a rollback path.  Cycle tests for those earlier columns no
+# longer make sense; the upgrade-to-head test below is what verifies the
+# migration ladder actually applies cleanly.

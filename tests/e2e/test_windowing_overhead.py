@@ -20,11 +20,8 @@ import uuid
 from aios.harness.tokens import approx_tokens
 from aios.models.agents import ToolSpec
 from aios.services import agents as agents_service
-from aios.services import channels as channels_service
-from aios.services import connections as connections_service
 from aios.services import environments as environments_service
 from aios.services import sessions as sessions_service
-from aios.services import vaults as vaults_service
 from tests.e2e.harness import Harness, assistant
 
 
@@ -123,31 +120,18 @@ class TestWindowingOverhead:
             metadata={},
         )
 
-        # Register a connector + connection so bindings resolve.  The MCP
-        # URL isn't actually dialed in this test path — bindings are
-        # purely a routing-metadata construct for the tail block.
-        vault = await vaults_service.create_vault(harness._pool, display_name="tb", metadata={})
-        await connections_service.create_connection(
-            harness._pool,
-            connector="signal",
-            account="test",
-            mcp_url="https://nope",
-            vault_id=vault.id,
-            metadata={},
-        )
-        # Six bindings with Signal-realistic address widths (UUID + base64
+        # Six channels with Signal-realistic address widths (UUID + base64
         # group id) — the on-wire size of JN's fan-out.  Short stub
         # addresses undercount the tail block by ~3x and hide the bug.
+        # Bound channels are now derived from the event log's ``channel``
+        # column (connector redesign #200 replaced the explicit
+        # ``channel_bindings`` table with this derived view).  An inbound
+        # stamped with ``metadata.channel`` lights up the channel for
+        # the tail block.
         addresses = [
             f"signal/test/{uuid}/base64groupid-{i:02d}-{'x' * 30}="
             for i, uuid in enumerate(f"{i:08d}-{i:04d}-{i:04d}-{i:04d}-{i:012d}" for i in range(6))
         ]
-        for addr in addresses:
-            await channels_service.create_binding(
-                harness._pool,
-                address=addr,
-                session_id=session.id,
-            )
 
         # Direct (non-channel) user messages so windowing is forced to
         # drop events.  Appended FIRST so the per-channel messages below

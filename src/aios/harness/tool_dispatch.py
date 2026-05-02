@@ -354,16 +354,15 @@ async def _execute_mcp_tool_async(
 ) -> None:
     """Execute one MCP tool call: connect, invoke, append result, defer wake.
 
-    For connection-provided servers (name in the reserved ``conn_``
-    namespace), the focal-channel suffix is stamped into the JSON-RPC
-    request's ``_meta`` so the connector can resolve its
-    connector-specific chat identifiers without the model having to
-    pass them explicitly.  The ``focal_channel`` snapshot is emission-
-    time — a concurrent ``switch_channel`` in the same assistant batch
-    does not race this injection.
+    The focal-channel suffix is stamped into the JSON-RPC request's
+    ``_meta`` for *every* outbound MCP request (universal injection per
+    #200 §3.4 / resolved decision #18) — connectors that need it pull
+    the chat-id without the model having to pass it; HTTP MCP servers
+    that don't ignore the unknown ``_meta`` key per spec.  The
+    ``focal_channel`` snapshot is emission-time — a concurrent
+    ``switch_channel`` in the same assistant batch does not race this
+    injection.
     """
-    from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
-
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
     name: str = function.get("name") or ""
@@ -407,25 +406,8 @@ async def _execute_mcp_tool_async(
         from aios.mcp.client import call_mcp_tool, resolve_auth_for_url
 
         meta: dict[str, Any] | None = None
-        if server_name.startswith(CONNECTION_SERVER_NAME_PREFIX):
-            suffix = focal_channel_path(focal_channel)
-            if suffix is None:
-                # The model shouldn't be able to call a conn_* tool while
-                # focal is NULL — loop.py filters them out of the tool
-                # list in that state — but defend in depth if it slips
-                # through (stale tool_calls, etc.).
-                is_error = True
-                await _append_tool_result(
-                    pool,
-                    session_id,
-                    call_id,
-                    name,
-                    error=(
-                        "connection-provided tools require a focal channel; "
-                        "call switch_channel first"
-                    ),
-                )
-                return
+        suffix = focal_channel_path(focal_channel)
+        if suffix is not None:
             meta = {FOCAL_CHANNEL_META_KEY: suffix}
 
         crypto_box = runtime.require_crypto_box()

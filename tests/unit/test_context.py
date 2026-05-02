@@ -16,37 +16,19 @@ from aios.harness.context import (
     should_call_model,
     stub_missing_reasoning_content,
 )
-from aios.models.channel_bindings import ChannelBinding
 from aios.models.events import Event
-
-
-def _binding(address: str, session_id: str = "sess_01TEST") -> ChannelBinding:
-    """Minimal ChannelBinding for tail-block construction."""
-    now = datetime(2026, 4, 17, tzinfo=UTC)
-    parts = address.split("/", 2)
-    connector, account, path = parts[0], parts[1], parts[2] if len(parts) > 2 else ""
-    return ChannelBinding(
-        id=f"cbnd_{abs(hash(address)) & 0xFFFF:04x}",
-        connection_id=f"conn_{abs(hash((connector, account))) & 0xFFFF:04x}",
-        path=path,
-        address=address,
-        session_id=session_id,
-        created_at=now,
-        updated_at=now,
-        notification_mode="focal_candidate",
-    )
 
 
 def _full_pipeline(
     events: list[Event],
-    bindings: list[ChannelBinding],
+    channels: list[str],
     focal_channel: str | None = None,
 ) -> list[dict[str, Any]]:
     """Compose ``build_messages`` → tail-block append → separator — the
     same sequence ``loop.py:run_session_step`` runs before handing the
     message list to LiteLLM."""
     ctx = build_messages(events, system_prompt=None)
-    tail = build_channels_tail_block(bindings, events, focal_channel)
+    tail = build_channels_tail_block(channels, events, focal_channel)
     if tail is not None:
         ctx.messages.append(tail)
     return separate_adjacent_user_messages(ctx.messages)
@@ -587,7 +569,7 @@ class TestMonotonicity:
         output(L2) when L1 ⊂ L2.  Pins the "insertions only at the
         volatile suffix" claim — a refactor that inserted separators
         into the cache-stable prefix would fail this."""
-        bindings = [_binding("signal/test/1")]
+        bindings = ["signal/test/1"]
 
         l1 = [
             _evt(1, "user", content="do A"),
@@ -1156,7 +1138,7 @@ class TestSeparateAdjacentUserMessagesPipeline:
 
     def test_inbound_then_tail_block_gets_separator(self) -> None:
         events = [_evt(1, "user", content="hello")]
-        msgs = _full_pipeline(events, [_binding("signal/test/1")])
+        msgs = _full_pipeline(events, ["signal/test/1"])
 
         assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
         assert msgs[1] == {"role": "assistant", "content": ""}
@@ -1179,7 +1161,7 @@ class TestSeparateAdjacentUserMessagesPipeline:
         events[3].data["reacting_to"] = 1  # blind to tool at seq=3
         events[5].data["reacting_to"] = 5
 
-        msgs = _full_pipeline(events, bindings=[])
+        msgs = _full_pipeline(events, channels=[])
 
         injection_idx = next(
             i
@@ -1199,7 +1181,7 @@ class TestSeparateAdjacentUserMessagesPipeline:
             _evt(3, "user", content="bye"),
             _evt(4, "assistant", content="later"),
         ]
-        msgs = _full_pipeline(events, bindings=[])
+        msgs = _full_pipeline(events, channels=[])
 
         assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
         assert not any(m == {"role": "assistant", "content": ""} for m in msgs)

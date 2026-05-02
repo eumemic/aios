@@ -1,31 +1,26 @@
-"""Connection endpoints + the inbound-message endpoint.
+"""Connection endpoints — CRUD plus mode-binding transitions.
 
-Inbound flow: a connector posts a message for some ``path`` (chat id);
-we build the channel ``address`` from ``connector/account/path``, run
-the resolver, append a user-message event with ``metadata.channel``
-stamped, and defer a wake job.  ``DELETE`` soft-archives — hard-delete
-would orphan ``metadata.channel`` references in the event log.
+Created in detached mode; switch to single_session via ``attach`` or
+per_chat via ``configure-per-chat``.  ``DELETE`` soft-archives — but
+only on detached connections (the service layer enforces this so
+operators can't silently break inbound delivery for live single_session
+connections or orphan ``spawned_from_connection_id`` pointers on
+per_chat-spawned sessions).
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, status
 
-from aios.api.deps import AuthDep, ConnectionDep, PoolDep
-from aios.errors import ValidationError
-from aios.harness.wake import defer_wake
-from aios.models._paths import validate_path_segments
+from aios.api.deps import AuthDep, PoolDep
 from aios.models.common import ListResponse
 from aios.models.connections import (
     Connection,
+    ConnectionAttach,
+    ConnectionConfigurePerChat,
     ConnectionCreate,
-    ConnectionUpdate,
-    InboundMessage,
-    InboundMessageResponse,
 )
-from aios.services import channels as channels_service
 from aios.services import connections as service
-from aios.services import sessions as sessions_service
 
 router = APIRouter(prefix="/v1/connections", tags=["connections"])
 
@@ -36,8 +31,6 @@ async def create(body: ConnectionCreate, pool: PoolDep, _auth: AuthDep) -> Conne
         pool,
         connector=body.connector,
         account=body.account,
-        mcp_url=body.mcp_url,
-        vault_id=body.vault_id,
         metadata=body.metadata,
     )
 
@@ -46,10 +39,18 @@ async def create(body: ConnectionCreate, pool: PoolDep, _auth: AuthDep) -> Conne
 async def list_(
     pool: PoolDep,
     _auth: AuthDep,
+    connector: str | None = None,
+    session_id: str | None = None,
     limit: int = 50,
     after: str | None = None,
 ) -> ListResponse[Connection]:
-    items = await service.list_connections(pool, limit=limit, after=after)
+    items = await service.list_connections(
+        pool,
+        connector=connector,
+        session_id=session_id,
+        limit=limit,
+        after=after,
+    )
     return ListResponse[Connection](
         data=items,
         has_more=len(items) == limit,
@@ -62,50 +63,32 @@ async def get(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connection:
     return await service.get_connection(pool, connection_id)
 
 
-@router.put("/{connection_id}")
-async def update(
-    connection_id: str, body: ConnectionUpdate, pool: PoolDep, _auth: AuthDep
-) -> Connection:
-    return await service.update_connection(
-        pool,
-        connection_id,
-        mcp_url=body.mcp_url,
-        vault_id=body.vault_id,
-        metadata=body.metadata,
-    )
-
-
 @router.delete("/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete(connection_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     await service.archive_connection(pool, connection_id)
 
 
-# ─── inbound message ────────────────────────────────────────────────────────
+@router.post("/{connection_id}/attach")
+async def attach(
+    connection_id: str, body: ConnectionAttach, pool: PoolDep, _auth: AuthDep
+) -> Connection:
+    return await service.attach_connection(pool, connection_id, session_id=body.session_id)
 
 
-@router.post("/{connection_id}/messages", status_code=status.HTTP_201_CREATED)
-async def post_message(
-    connection: ConnectionDep,
-    body: InboundMessage,
-    pool: PoolDep,
-    _auth: AuthDep,
-) -> InboundMessageResponse:
-    try:
-        validate_path_segments(body.path, allow_empty=False)
-    except ValueError as exc:
-        raise ValidationError(f"path {exc}", detail={"path": body.path}) from exc
+@router.post("/{connection_id}/detach")
+async def detach(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connection:
+    return await service.detach_connection(pool, connection_id)
 
-    resolution = await channels_service.resolve_channel(pool, connection, body.path)
 
-    address = f"{connection.connector}/{connection.account}/{body.path}"
-    metadata = {**body.metadata, "channel": address}
-    event = await sessions_service.append_user_message(
-        pool, resolution.session_id, body.content, metadata=metadata
+@router.post("/{connection_id}/configure-per-chat")
+async def configure_per_chat(
+    connection_id: str, body: ConnectionConfigurePerChat, pool: PoolDep, _auth: AuthDep
+) -> Connection:
+    return await service.configure_per_chat(
+        pool, connection_id, session_template_id=body.session_template_id
     )
-    await defer_wake(pool, resolution.session_id, cause="inbound_message")
 
-    return InboundMessageResponse(
-        session_id=resolution.session_id,
-        event_id=event.id,
-        created_session=resolution.created_session,
-    )
+
+@router.post("/{connection_id}/unconfigure")
+async def unconfigure(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connection:
+    return await service.unconfigure_connection(pool, connection_id)

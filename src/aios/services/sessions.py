@@ -33,6 +33,8 @@ async def create_session(
     resources: list[MemoryStoreResource] | None = None,
     workspace_path: str | None = None,
     env: dict[str, str] | None = None,
+    spawned_from_connection_id: str | None = None,
+    focal_channel: str | None = None,
 ) -> Session:
     """Create a session row and return it.
 
@@ -41,6 +43,12 @@ async def create_session(
     attachment runs in the same transaction as the session insert so a
     failed attach (e.g. archived store, name collision) leaves no
     orphaned session.
+
+    ``spawned_from_connection_id`` and ``focal_channel`` are set
+    together by PR3's per_chat inbound handler when auto-spawning a
+    session for a new chat partner — the focal-locked invariant
+    enforced by ``switch_channel`` depends on the pair being applied
+    atomically with the row insert.
     """
     async with pool.acquire() as conn, conn.transaction():
         session = await queries.insert_session(
@@ -52,6 +60,8 @@ async def create_session(
             metadata=metadata,
             workspace_path=workspace_path,
             env=env,
+            spawned_from_connection_id=spawned_from_connection_id,
+            focal_channel=focal_channel,
         )
         if vault_ids:
             await queries.set_session_vaults(conn, session.id, vault_ids)

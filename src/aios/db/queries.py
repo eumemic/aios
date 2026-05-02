@@ -31,22 +31,20 @@ from aios.errors import (
 )
 from aios.ids import (
     AGENT,
-    CHANNEL_BINDING,
     CONNECTION,
     ENVIRONMENT,
     EVENT,
     MEMORY,
     MEMORY_STORE,
     MEMORY_VERSION,
-    ROUTING_RULE,
     SESSION,
+    SESSION_TEMPLATE,
     SKILL,
     VAULT,
     VAULT_CREDENTIAL,
     make_id,
 )
 from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
-from aios.models.channel_bindings import ChannelBinding
 from aios.models.connections import Connection
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
@@ -59,7 +57,7 @@ from aios.models.memory_stores import (
     MemoryStoreResourceEcho,
     MemoryVersion,
 )
-from aios.models.routing_rules import RoutingRule, SessionParams
+from aios.models.session_templates import SessionTemplate
 from aios.models.sessions import Session, SessionStatus, SessionUsage
 from aios.models.skills import AgentSkillRef, Skill, SkillVersion
 from aios.models.vaults import Vault, VaultCredential
@@ -548,6 +546,7 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
         focal_channel=row["focal_channel"],
+        spawned_from_connection_id=row["spawned_from_connection_id"],
     )
 
 
@@ -561,6 +560,8 @@ async def insert_session(
     metadata: dict[str, Any],
     workspace_path: str | None = None,
     env: dict[str, str] | None = None,
+    spawned_from_connection_id: str | None = None,
+    focal_channel: str | None = None,
 ) -> Session:
     """Insert a fresh session row.
 
@@ -568,6 +569,12 @@ async def insert_session(
     Caller sets up vault bindings via :func:`set_session_vaults` after.
     Raises :class:`NotFoundError` if either the agent or environment FK
     is unsatisfied.
+
+    ``spawned_from_connection_id`` and ``focal_channel`` are populated
+    by the per_chat inbound flow (PR3) when auto-spawning a session for
+    a new chat partner.  The pair is set atomically with the row insert
+    so the focal-locked invariant — see ``switch_channel``'s rejection
+    of mutations on per_chat sessions — holds from creation.
     """
     from aios.config import get_settings
 
@@ -579,9 +586,10 @@ async def insert_session(
             """
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
-                status, workspace_volume_path, env
+                status, workspace_volume_path, env,
+                spawned_from_connection_id, focal_channel
             )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10)
             RETURNING *
             """,
             new_id,
@@ -592,11 +600,17 @@ async def insert_session(
             json.dumps(metadata),
             workspace_path,
             json.dumps(env or {}),
+            spawned_from_connection_id,
+            focal_channel,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
-            "agent or environment not found",
-            detail={"agent_id": agent_id, "environment_id": environment_id},
+            "agent, environment, or connection not found",
+            detail={
+                "agent_id": agent_id,
+                "environment_id": environment_id,
+                "spawned_from_connection_id": spawned_from_connection_id,
+            },
         ) from exc
     assert row is not None
     return _row_to_session(row)
@@ -1294,6 +1308,34 @@ async def read_message_events(conn: asyncpg.Connection[Any], session_id: str) ->
         session_id,
     )
     return [_row_to_event(r) for r in rows]
+
+
+async def list_session_channels(conn: asyncpg.Connection[Any], session_id: str) -> list[str]:
+    """Distinct channel addresses bound to ``session_id``, sorted.
+
+    The set of channels a session has interacted with is derived from
+    the event log's ``channel`` column (stamped at append time per
+    :func:`_derive_event_channel`).  For per_chat sessions the union with
+    the spawned focal channel keeps the bound list non-empty before the
+    first inbound; for single_session it grows as new chat partners
+    appear in inbound.
+
+    The connector redesign (#200) replaces the old explicit
+    ``channel_bindings`` table with this derived view: a "binding" is
+    just "this session has seen events on this channel."
+    """
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT channel
+          FROM events
+         WHERE session_id = $1
+           AND kind = 'message'
+           AND channel IS NOT NULL
+         ORDER BY channel
+        """,
+        session_id,
+    )
+    return [str(r["channel"]) for r in rows]
 
 
 async def read_windowed_events(
@@ -2101,6 +2143,17 @@ async def resolve_skill_refs(
 
 
 # ─── connections ────────────────────────────────────────────────────────────
+#
+# Three valid shapes per ``connections_one_mode_ck`` (migration 0026):
+#
+#   detached       — session_id NULL,  session_template_id NULL
+#   single_session — session_id SET,   session_template_id NULL
+#   per_chat       — session_id NULL,  session_template_id SET
+#
+# The ``UNIQUE (connector, account) WHERE archived_at IS NULL`` partial
+# index gives "one active connection per account" by schema; the inbound
+# handler relies on that uniqueness for the auto-create race
+# (``INSERT ... ON CONFLICT DO NOTHING RETURNING id``, then re-read).
 
 
 def _row_to_connection(row: asyncpg.Record) -> Connection:
@@ -2110,10 +2163,11 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         id=row["id"],
         connector=row["connector"],
         account=row["account"],
-        mcp_url=row["mcp_url"],
-        vault_id=row["vault_id"],
+        session_id=row["session_id"],
+        session_template_id=row["session_template_id"],
         metadata=metadata,
         created_at=row["created_at"],
+        attached_at=row["attached_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
     )
@@ -2124,35 +2178,30 @@ async def insert_connection(
     *,
     connector: str,
     account: str,
-    mcp_url: str,
-    vault_id: str,
     metadata: dict[str, Any],
 ) -> Connection:
+    """Insert a detached connection (no session, no template).
+
+    Use ``attach_connection`` or ``configure_per_chat_connection`` to bind
+    a routing mode after creation.
+    """
     new_id = make_id(CONNECTION)
-    metadata_json = json.dumps(metadata)
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO connections (id, connector, account, mcp_url, vault_id, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            INSERT INTO connections (id, connector, account, metadata)
+            VALUES ($1, $2, $3, $4::jsonb)
             RETURNING *
             """,
             new_id,
             connector,
             account,
-            mcp_url,
-            vault_id,
-            metadata_json,
+            json.dumps(metadata),
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
-            f"a connection for ({connector!r}, {account!r}) already exists",
+            f"an active connection for ({connector!r}, {account!r}) already exists",
             detail={"connector": connector, "account": account},
-        ) from exc
-    except asyncpg.ForeignKeyViolationError as exc:
-        raise NotFoundError(
-            f"vault {vault_id} not found",
-            detail={"vault_id": vault_id},
         ) from exc
     assert row is not None
     return _row_to_connection(row)
@@ -2168,122 +2217,210 @@ async def get_connection(conn: asyncpg.Connection[Any], connection_id: str) -> C
     return _row_to_connection(row)
 
 
+async def get_connection_for_account(
+    conn: asyncpg.Connection[Any], connector: str, account: str
+) -> Connection | None:
+    """Active connection for ``(connector, account)``, or ``None``.
+
+    Used by the inbound notification handler in PR3 to look up the target
+    of a delivery.  Matches the partial unique index, so at most one row
+    can come back.
+    """
+    row = await conn.fetchrow(
+        "SELECT * FROM connections WHERE connector = $1 AND account = $2 AND archived_at IS NULL",
+        connector,
+        account,
+    )
+    if row is None:
+        return None
+    return _row_to_connection(row)
+
+
 async def list_connections(
-    conn: asyncpg.Connection[Any], *, limit: int = 50, after: str | None = None
+    conn: asyncpg.Connection[Any],
+    *,
+    connector: str | None = None,
+    session_id: str | None = None,
+    limit: int = 50,
+    after: str | None = None,
 ) -> list[Connection]:
-    if after is None:
-        rows = await conn.fetch(
-            "SELECT * FROM connections WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
-            limit,
-        )
-    else:
-        rows = await conn.fetch(
-            "SELECT * FROM connections WHERE archived_at IS NULL AND id < $1 "
-            "ORDER BY id DESC LIMIT $2",
-            after,
-            limit,
-        )
+    """List active connections.  Optional filters narrow by connector type
+    or by attached session.
+    """
+    clauses: list[str] = ["archived_at IS NULL"]
+    args: list[Any] = []
+    if connector is not None:
+        args.append(connector)
+        clauses.append(f"connector = ${len(args)}")
+    if session_id is not None:
+        args.append(session_id)
+        clauses.append(f"session_id = ${len(args)}")
+    if after is not None:
+        args.append(after)
+        clauses.append(f"id < ${len(args)}")
+    args.append(limit)
+    sql = (
+        f"SELECT * FROM connections WHERE {' AND '.join(clauses)} "
+        f"ORDER BY id DESC LIMIT ${len(args)}"
+    )
+    rows = await conn.fetch(sql, *args)
     return [_row_to_connection(r) for r in rows]
 
 
-async def update_connection(
+async def attach_connection(
     conn: asyncpg.Connection[Any],
     connection_id: str,
     *,
-    mcp_url: str | None = None,
-    vault_id: str | None = None,
-    metadata: dict[str, Any] | None = None,
+    session_id: str,
 ) -> Connection:
-    sets: list[str] = []
-    args: list[Any] = [connection_id]
-    if mcp_url is not None:
-        args.append(mcp_url)
-        sets.append(f"mcp_url = ${len(args)}")
-    if vault_id is not None:
-        args.append(vault_id)
-        sets.append(f"vault_id = ${len(args)}")
-    if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
-    if not sets:
-        return await get_connection(conn, connection_id)
-    sets.append("updated_at = now()")
-    sql = f"UPDATE connections SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    """Bind a detached connection to a session (single_session mode).
+
+    Errors if the connection is already attached or per_chat-configured.
+    """
     try:
-        row = await conn.fetchrow(sql, *args)
+        row = await conn.fetchrow(
+            """
+            UPDATE connections
+               SET session_id = $2,
+                   attached_at = now(),
+                   updated_at = now()
+             WHERE id = $1
+               AND archived_at IS NULL
+               AND session_id IS NULL
+               AND session_template_id IS NULL
+            RETURNING *
+            """,
+            connection_id,
+            session_id,
+        )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
-            "vault not found",
-            detail={"vault_id": vault_id},
+            f"session {session_id} not found",
+            detail={"session_id": session_id},
         ) from exc
     if row is None:
-        raise NotFoundError(
-            f"connection {connection_id} not found",
+        existing = await conn.fetchrow(
+            "SELECT session_id, session_template_id, archived_at FROM connections WHERE id = $1",
+            connection_id,
+        )
+        if existing is None:
+            raise NotFoundError(
+                f"connection {connection_id} not found",
+                detail={"id": connection_id},
+            )
+        if existing["archived_at"] is not None:
+            raise ConflictError(
+                f"connection {connection_id} is archived",
+                detail={"id": connection_id},
+            )
+        raise ConflictError(
+            f"connection {connection_id} is already attached or configured per_chat; "
+            "detach or unconfigure first",
             detail={"id": connection_id},
         )
     return _row_to_connection(row)
 
 
-async def list_connections_by_ids(
-    conn: asyncpg.Connection[Any],
-    ids: list[str],
-) -> list[Connection]:
-    """Active connections with the given ``ids``.  Empty input → no roundtrip.
+async def detach_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
+    """Drop the single_session binding, leaving the connection detached.
 
-    Results are ordered by ``c.id`` so callers can feed them into the
-    system prompt in a stable order — prompt-cache stability depends
-    on it.  Used by :func:`aios.harness.channels.list_bindings_and_connections`
-    where the ``ids`` come from the distinct ``binding.connection_id``
-    values of a session's bindings.
+    No-op (returns the current row) if already detached.
     """
-    if not ids:
-        return []
-    rows = await conn.fetch(
-        "SELECT * FROM connections WHERE id = ANY($1::text[]) AND archived_at IS NULL ORDER BY id",
-        ids,
-    )
-    return [_row_to_connection(r) for r in rows]
-
-
-async def get_connections_by_pairs(
-    conn: asyncpg.Connection[Any],
-    pairs: list[tuple[str, str]],
-) -> list[Connection]:
-    """Active connections where ``(connector, account)`` is in ``pairs``.
-
-    Empty input → no roundtrip.  Results are ordered by ``c.id`` so the
-    caller can feed them into the system prompt in a stable order — a
-    prerequisite for prompt-cache stability across steps, since the
-    caller-side ``pairs`` are typically built from a set.
-    """
-    if not pairs:
-        return []
-    connectors = [p[0] for p in pairs]
-    accounts = [p[1] for p in pairs]
-    rows = await conn.fetch(
+    row = await conn.fetchrow(
         """
-        SELECT c.*
-          FROM connections c
-          JOIN unnest($1::text[], $2::text[]) AS p(connector, account)
-            ON c.connector = p.connector AND c.account = p.account
-         WHERE c.archived_at IS NULL
-         ORDER BY c.id
+        UPDATE connections
+           SET session_id = NULL,
+               attached_at = NULL,
+               updated_at = now()
+         WHERE id = $1
+           AND archived_at IS NULL
+           AND session_id IS NOT NULL
+        RETURNING *
         """,
-        connectors,
-        accounts,
+        connection_id,
     )
-    return [_row_to_connection(r) for r in rows]
+    if row is None:
+        return await get_connection(conn, connection_id)
+    return _row_to_connection(row)
 
 
-async def get_connection_vault_for_url(
-    conn: asyncpg.Connection[Any], mcp_server_url: str
-) -> str | None:
-    """Vault id of the active connection owning ``mcp_server_url``, else ``None``."""
-    val: str | None = await conn.fetchval(
-        "SELECT vault_id FROM connections WHERE mcp_url = $1 AND archived_at IS NULL LIMIT 1",
-        mcp_server_url,
+async def configure_per_chat_connection(
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    session_template_id: str,
+) -> Connection:
+    """Switch the connection into per_chat mode.
+
+    Errors if the connection is already attached or per_chat-configured.
+    """
+    try:
+        row = await conn.fetchrow(
+            """
+            UPDATE connections
+               SET session_template_id = $2,
+                   attached_at = now(),
+                   updated_at = now()
+             WHERE id = $1
+               AND archived_at IS NULL
+               AND session_id IS NULL
+               AND session_template_id IS NULL
+            RETURNING *
+            """,
+            connection_id,
+            session_template_id,
+        )
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise NotFoundError(
+            f"session template {session_template_id} not found",
+            detail={"session_template_id": session_template_id},
+        ) from exc
+    if row is None:
+        existing = await conn.fetchrow(
+            "SELECT session_id, session_template_id, archived_at FROM connections WHERE id = $1",
+            connection_id,
+        )
+        if existing is None:
+            raise NotFoundError(
+                f"connection {connection_id} not found",
+                detail={"id": connection_id},
+            )
+        if existing["archived_at"] is not None:
+            raise ConflictError(
+                f"connection {connection_id} is archived",
+                detail={"id": connection_id},
+            )
+        raise ConflictError(
+            f"connection {connection_id} is already attached or configured per_chat; "
+            "detach or unconfigure first",
+            detail={"id": connection_id},
+        )
+    return _row_to_connection(row)
+
+
+async def unconfigure_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
+    """Drop the per_chat configuration, leaving the connection detached.
+
+    Already-spawned per_chat sessions are NOT cascaded — they remain alive
+    with ``spawned_from_connection_id`` still pointing at this connection
+    (resolved decision #6).  No-op if already unconfigured.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE connections
+           SET session_template_id = NULL,
+               attached_at = NULL,
+               updated_at = now()
+         WHERE id = $1
+           AND archived_at IS NULL
+           AND session_template_id IS NOT NULL
+        RETURNING *
+        """,
+        connection_id,
     )
-    return val
+    if row is None:
+        return await get_connection(conn, connection_id)
+    return _row_to_connection(row)
 
 
 async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
@@ -2300,370 +2437,227 @@ async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) 
     return _row_to_connection(row)
 
 
-async def count_active_bindings_for_connection(
-    conn: asyncpg.Connection[Any], connection_id: str
-) -> int:
-    """Count active channel bindings owned by this connection.  Used to
-    block connection archival while sessions are still reachable via
-    those bindings — archiving the connection would silently drop the
-    connection-provided MCP tools from any live session.
+# ─── connection_chat_sessions (per_chat ledger) ─────────────────────────────
+
+
+async def lookup_chat_session(
+    conn: asyncpg.Connection[Any], connection_id: str, chat_id: str
+) -> str | None:
+    """Existing session_id for ``(connection_id, chat_id)``, else ``None``.
+
+    Read side of the per_chat lookup.  The write side
+    (:func:`insert_chat_session`) inserts with ``ON CONFLICT DO NOTHING``;
+    on a race, the loser re-runs this lookup.
     """
-    val: int = await conn.fetchval(
-        "SELECT COUNT(*) FROM channel_bindings WHERE connection_id = $1 AND archived_at IS NULL",
+    val: str | None = await conn.fetchval(
+        "SELECT session_id FROM connection_chat_sessions WHERE connection_id = $1 AND chat_id = $2",
         connection_id,
+        chat_id,
     )
     return val
 
 
-# ─── channel bindings ───────────────────────────────────────────────────────
-#
-# The display ``address`` is computed on read by joining connections —
-# storage is normalized as ``(connection_id, path)``.  All selects go
-# through ``_BINDING_SELECT`` which tacks the connector/account columns
-# onto the row, consumed by ``_row_to_channel_binding`` to rebuild
-# ``address`` for the API response.
-
-_BINDING_SELECT = """
-    SELECT cb.*, c.connector, c.account
-      FROM channel_bindings cb
-      JOIN connections c ON c.id = cb.connection_id
-"""
-
-
-def _row_to_channel_binding(row: asyncpg.Record) -> ChannelBinding:
-    address = f"{row['connector']}/{row['account']}/{row['path']}"
-    return ChannelBinding(
-        id=row["id"],
-        connection_id=row["connection_id"],
-        path=row["path"],
-        address=address,
-        session_id=row["session_id"],
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-        archived_at=row["archived_at"],
-        notification_mode=row["notification_mode"],
-    )
-
-
-async def insert_binding(
+async def insert_chat_session(
     conn: asyncpg.Connection[Any],
     *,
     connection_id: str,
-    path: str,
+    chat_id: str,
     session_id: str,
-) -> ChannelBinding:
-    """Insert a ``(connection_id, path) → session_id`` binding.
+) -> str:
+    """Race-safe insert: returns the session_id stored after the call.
 
-    Returns the fully-populated read view (address reconstructed from the
-    owning connection).  A CTE does the insert + connection join in one
-    roundtrip.
+    On conflict (a concurrent inbound for the same chat already wrote the
+    row) returns the existing session_id, signalling to the caller that
+    the just-created session is an orphan that should be discarded.
     """
-    new_id = make_id(CHANNEL_BINDING)
-    try:
-        row = await conn.fetchrow(
-            """
-            WITH inserted AS (
-                INSERT INTO channel_bindings (id, connection_id, path, session_id)
-                VALUES ($1, $2, $3, $4)
-                RETURNING *
-            )
-            SELECT i.*, c.connector, c.account
-              FROM inserted i
-              JOIN connections c ON c.id = i.connection_id
-            """,
-            new_id,
-            connection_id,
-            path,
-            session_id,
-        )
-    except asyncpg.UniqueViolationError as exc:
-        raise ConflictError(
-            f"an active binding for path {path!r} on connection {connection_id} already exists",
-            detail={"connection_id": connection_id, "path": path},
-        ) from exc
-    except asyncpg.ForeignKeyViolationError as exc:
-        # Could be either the session FK or the connection FK — look up to
-        # produce the correct message.  (The common case is a bad
-        # ``session_id``; ``connection_id`` is resolved by the service layer
-        # before the insert.)
-        raise NotFoundError(
-            "session or connection not found for binding",
-            detail={"connection_id": connection_id, "session_id": session_id},
-        ) from exc
-    assert row is not None
-    return _row_to_channel_binding(row)
-
-
-async def get_binding(conn: asyncpg.Connection[Any], binding_id: str) -> ChannelBinding:
-    row = await conn.fetchrow(_BINDING_SELECT + " WHERE cb.id = $1", binding_id)
-    if row is None:
-        raise NotFoundError(
-            f"channel binding {binding_id} not found",
-            detail={"id": binding_id},
-        )
-    return _row_to_channel_binding(row)
-
-
-async def get_binding_by_connection_and_path(
-    conn: asyncpg.Connection[Any], connection_id: str, path: str
-) -> ChannelBinding | None:
-    """Fast-path lookup used by the channel resolver (binding hit tier)."""
     row = await conn.fetchrow(
-        _BINDING_SELECT
-        + " WHERE cb.connection_id = $1 AND cb.path = $2 AND cb.archived_at IS NULL",
+        """
+        INSERT INTO connection_chat_sessions (connection_id, chat_id, session_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (connection_id, chat_id) DO NOTHING
+        RETURNING session_id
+        """,
         connection_id,
-        path,
-    )
-    if row is None:
-        return None
-    return _row_to_channel_binding(row)
-
-
-async def list_bindings(
-    conn: asyncpg.Connection[Any],
-    *,
-    session_id: str | None = None,
-    limit: int = 50,
-    after: str | None = None,
-) -> list[ChannelBinding]:
-    clauses: list[str] = ["cb.archived_at IS NULL"]
-    args: list[Any] = []
-    if session_id is not None:
-        args.append(session_id)
-        clauses.append(f"cb.session_id = ${len(args)}")
-    if after is not None:
-        args.append(after)
-        clauses.append(f"cb.id < ${len(args)}")
-    args.append(limit)
-    sql = _BINDING_SELECT + f" WHERE {' AND '.join(clauses)} ORDER BY cb.id DESC LIMIT ${len(args)}"
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_channel_binding(r) for r in rows]
-
-
-async def list_session_bindings(
-    conn: asyncpg.Connection[Any], session_id: str
-) -> list[ChannelBinding]:
-    """Every active binding for ``session_id``, unpaginated.
-
-    The step function consumes this in one shot (see
-    :func:`aios.harness.channels.list_bindings_and_connections`).
-    """
-    rows = await conn.fetch(
-        _BINDING_SELECT + " WHERE cb.session_id = $1 AND cb.archived_at IS NULL ORDER BY cb.id",
+        chat_id,
         session_id,
     )
-    return [_row_to_channel_binding(r) for r in rows]
+    if row is not None:
+        return str(row["session_id"])
+    existing = await lookup_chat_session(conn, connection_id, chat_id)
+    assert existing is not None  # CONFLICT means the row exists
+    return existing
 
 
-async def archive_binding(conn: asyncpg.Connection[Any], binding_id: str) -> ChannelBinding:
-    row = await conn.fetchrow(
-        """
-        WITH updated AS (
-            UPDATE channel_bindings
-               SET archived_at = now(), updated_at = now()
-             WHERE id = $1 AND archived_at IS NULL
-            RETURNING *
-        )
-        SELECT u.*, c.connector, c.account
-          FROM updated u
-          JOIN connections c ON c.id = u.connection_id
-        """,
-        binding_id,
-    )
-    if row is None:
-        raise NotFoundError(
-            f"channel binding {binding_id} not found or already archived",
-            detail={"id": binding_id},
-        )
-    return _row_to_channel_binding(row)
+# ─── session_templates ──────────────────────────────────────────────────────
 
 
-# ─── routing rules ──────────────────────────────────────────────────────────
-
-
-def _row_to_routing_rule(row: asyncpg.Record) -> RoutingRule:
-    raw_params = row["session_params"]
-    params_data = json.loads(raw_params) if isinstance(raw_params, str) else raw_params
-    return RoutingRule(
+def _row_to_session_template(row: asyncpg.Record) -> SessionTemplate:
+    raw_metadata = row["metadata"]
+    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    return SessionTemplate(
         id=row["id"],
-        connection_id=row["connection_id"],
-        prefix=row["prefix"],
-        target=row["target"],
-        session_params=SessionParams.model_validate(params_data),
+        name=row["name"],
+        agent_id=row["agent_id"],
+        agent_version=row["agent_version"],
+        environment_id=row["environment_id"],
+        vault_ids=list(row["vault_ids"] or []),
+        memory_store_ids=list(row["memory_store_ids"] or []),
+        metadata=metadata,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
     )
 
 
-async def insert_routing_rule(
+async def insert_session_template(
     conn: asyncpg.Connection[Any],
     *,
-    connection_id: str,
-    prefix: str,
-    target: str,
-    session_params: SessionParams,
-) -> RoutingRule:
-    new_id = make_id(ROUTING_RULE)
-    params_json = json.dumps(session_params.model_dump())
+    name: str,
+    agent_id: str,
+    environment_id: str,
+    agent_version: int | None,
+    vault_ids: list[str],
+    memory_store_ids: list[str],
+    metadata: dict[str, Any],
+) -> SessionTemplate:
+    new_id = make_id(SESSION_TEMPLATE)
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO routing_rules (id, connection_id, prefix, target, session_params)
-            VALUES ($1, $2, $3, $4, $5::jsonb)
+            INSERT INTO session_templates
+                (id, name, agent_id, agent_version, environment_id,
+                 vault_ids, memory_store_ids, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6::text[], $7::text[], $8::jsonb)
             RETURNING *
             """,
             new_id,
-            connection_id,
-            prefix,
-            target,
-            params_json,
+            name,
+            agent_id,
+            agent_version,
+            environment_id,
+            vault_ids,
+            memory_store_ids,
+            json.dumps(metadata),
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
-            f"an active routing rule for prefix {prefix!r} on connection "
-            f"{connection_id} already exists",
-            detail={"connection_id": connection_id, "prefix": prefix},
+            f"a session template named {name!r} already exists",
+            detail={"name": name},
         ) from exc
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
-            f"connection {connection_id} not found",
-            detail={"connection_id": connection_id},
+            "agent or environment not found",
+            detail={"agent_id": agent_id, "environment_id": environment_id},
         ) from exc
     assert row is not None
-    return _row_to_routing_rule(row)
+    return _row_to_session_template(row)
 
 
-async def get_routing_rule(
-    conn: asyncpg.Connection[Any], connection_id: str, rule_id: str
-) -> RoutingRule:
-    """Get a rule scoped to the given connection.
-
-    The connection scope in the URL is load-bearing: a 404 on
-    ``connections/A/routing-rules/<rid-belonging-to-B>`` is correct
-    behavior (rather than leaking connection A's knowledge of rule B).
-    """
-    row = await conn.fetchrow(
-        "SELECT * FROM routing_rules WHERE id = $1 AND connection_id = $2",
-        rule_id,
-        connection_id,
-    )
+async def get_session_template(conn: asyncpg.Connection[Any], template_id: str) -> SessionTemplate:
+    row = await conn.fetchrow("SELECT * FROM session_templates WHERE id = $1", template_id)
     if row is None:
         raise NotFoundError(
-            f"routing rule {rule_id} not found on connection {connection_id}",
-            detail={"id": rule_id, "connection_id": connection_id},
+            f"session template {template_id} not found",
+            detail={"id": template_id},
         )
-    return _row_to_routing_rule(row)
+    return _row_to_session_template(row)
 
 
-async def list_routing_rules(
+async def list_session_templates(
+    conn: asyncpg.Connection[Any], *, limit: int = 50, after: str | None = None
+) -> list[SessionTemplate]:
+    if after is None:
+        rows = await conn.fetch(
+            "SELECT * FROM session_templates WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            limit,
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT * FROM session_templates WHERE archived_at IS NULL AND id < $1 "
+            "ORDER BY id DESC LIMIT $2",
+            after,
+            limit,
+        )
+    return [_row_to_session_template(r) for r in rows]
+
+
+async def update_session_template(
     conn: asyncpg.Connection[Any],
-    connection_id: str,
+    template_id: str,
     *,
-    limit: int = 50,
-    after: str | None = None,
-) -> list[RoutingRule]:
-    clauses: list[str] = ["connection_id = $1", "archived_at IS NULL"]
-    args: list[Any] = [connection_id]
-    if after is not None:
-        args.append(after)
-        clauses.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = (
-        f"SELECT * FROM routing_rules WHERE {' AND '.join(clauses)} "
-        f"ORDER BY id DESC LIMIT ${len(args)}"
-    )
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_routing_rule(r) for r in rows]
-
-
-async def update_routing_rule(
-    conn: asyncpg.Connection[Any],
-    connection_id: str,
-    rule_id: str,
-    *,
-    target: str | None = None,
-    session_params: SessionParams | None = None,
-) -> RoutingRule:
+    name: str | None = None,
+    agent_id: str | None = None,
+    agent_version: int | None | EllipsisType = ...,
+    environment_id: str | None = None,
+    vault_ids: list[str] | None = None,
+    memory_store_ids: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> SessionTemplate:
     sets: list[str] = []
-    args: list[Any] = [rule_id, connection_id]
-    if target is not None:
-        args.append(target)
-        sets.append(f"target = ${len(args)}")
-    if session_params is not None:
-        args.append(json.dumps(session_params.model_dump()))
-        sets.append(f"session_params = ${len(args)}::jsonb")
+    args: list[Any] = [template_id]
+    if name is not None:
+        args.append(name)
+        sets.append(f"name = ${len(args)}")
+    if agent_id is not None:
+        args.append(agent_id)
+        sets.append(f"agent_id = ${len(args)}")
+    if agent_version is not ...:
+        args.append(agent_version)
+        sets.append(f"agent_version = ${len(args)}")
+    if environment_id is not None:
+        args.append(environment_id)
+        sets.append(f"environment_id = ${len(args)}")
+    if vault_ids is not None:
+        args.append(vault_ids)
+        sets.append(f"vault_ids = ${len(args)}::text[]")
+    if memory_store_ids is not None:
+        args.append(memory_store_ids)
+        sets.append(f"memory_store_ids = ${len(args)}::text[]")
+    if metadata is not None:
+        args.append(json.dumps(metadata))
+        sets.append(f"metadata = ${len(args)}::jsonb")
     if not sets:
-        return await get_routing_rule(conn, connection_id, rule_id)
+        return await get_session_template(conn, template_id)
     sets.append("updated_at = now()")
-    sql = (
-        f"UPDATE routing_rules SET {', '.join(sets)} "
-        "WHERE id = $1 AND connection_id = $2 RETURNING *"
-    )
-    row = await conn.fetchrow(sql, *args)
+    sql = f"UPDATE session_templates SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    try:
+        row = await conn.fetchrow(sql, *args)
+    except asyncpg.UniqueViolationError as exc:
+        raise ConflictError(
+            f"a session template named {name!r} already exists",
+            detail={"name": name},
+        ) from exc
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise NotFoundError(
+            "agent or environment not found",
+            detail={"agent_id": agent_id, "environment_id": environment_id},
+        ) from exc
     if row is None:
         raise NotFoundError(
-            f"routing rule {rule_id} not found on connection {connection_id}",
-            detail={"id": rule_id, "connection_id": connection_id},
+            f"session template {template_id} not found",
+            detail={"id": template_id},
         )
-    return _row_to_routing_rule(row)
+    return _row_to_session_template(row)
 
 
-async def archive_routing_rule(
-    conn: asyncpg.Connection[Any], connection_id: str, rule_id: str
-) -> RoutingRule:
-    row = await conn.fetchrow(
-        "UPDATE routing_rules SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND connection_id = $2 AND archived_at IS NULL RETURNING *",
-        rule_id,
-        connection_id,
-    )
-    if row is None:
-        raise NotFoundError(
-            f"routing rule {rule_id} not found on connection {connection_id} or already archived",
-            detail={"id": rule_id, "connection_id": connection_id},
-        )
-    return _row_to_routing_rule(row)
-
-
-async def find_matching_rule(
-    conn: asyncpg.Connection[Any], connection_id: str, path: str
-) -> RoutingRule | None:
-    """Longest-matching segment-aware prefix lookup within a connection.
-
-    Three disjuncts:
-
-    * ``prefix = ''`` is the per-connection catch-all and sorts last
-      under ``ORDER BY length DESC``.
-    * ``path = prefix`` for exact-match rules (e.g. rule prefix ``chat-a``
-      and inbound path ``chat-a``).
-    * Segment-aware extension: the path begins with ``prefix || '/'``, so
-      ``group/thread-1`` matches a rule of ``group`` but not ``grou``.
-      Substring equality (not ``LIKE``) keeps ``%``/``_`` in prefixes
-      literal.
+async def archive_session_template(
+    conn: asyncpg.Connection[Any], template_id: str
+) -> SessionTemplate:
+    """Soft-delete the template.  Already-spawned per_chat sessions keep
+    working; new chat sessions on connections referencing this template
+    will fail at the inbound handler (see PR3).
     """
     row = await conn.fetchrow(
-        """
-        SELECT * FROM routing_rules
-        WHERE archived_at IS NULL
-          AND connection_id = $1
-          AND (
-              prefix = ''
-              OR $2 = prefix
-              OR (
-                  length($2) > length(prefix)
-                  AND substring($2, 1, length(prefix) + 1) = prefix || '/'
-              )
-          )
-        ORDER BY length(prefix) DESC
-        LIMIT 1
-        """,
-        connection_id,
-        path,
+        "UPDATE session_templates SET archived_at = now(), updated_at = now() "
+        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        template_id,
     )
     if row is None:
-        return None
-    return _row_to_routing_rule(row)
+        raise NotFoundError(
+            f"session template {template_id} not found or already archived",
+            detail={"id": template_id},
+        )
+    return _row_to_session_template(row)
 
 
 # ─── memory stores ──────────────────────────────────────────────────────────

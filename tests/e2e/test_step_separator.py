@@ -11,28 +11,29 @@ _TAIL_HEADER = "━━━ Channels ━━━"
 @needs_docker
 class TestSeparatorAtLiteLLMBoundary:
     async def test_adjacent_user_messages_reach_litellm_separated(self, harness: Harness) -> None:
-        """When a session has channel bindings, ``build_channels_tail_block``
+        """When a session has interacted with a channel, ``build_channels_tail_block``
         appends a user-role message.  Paired with the user's inbound, this
         is the exact adjacency PR #69 targets.  Assert that by the time
         the message list reaches ``litellm.acompletion``, the separator is
-        in place immediately before the tail block."""
-        from aios.services import channels as ch_svc
-        from aios.services import connections as conn_svc
-        from aios.services import vaults as vault_svc
+        in place immediately before the tail block.
 
-        v = await vault_svc.create_vault(harness._pool, display_name="sep-v", metadata={})
-        await conn_svc.create_connection(
-            harness._pool,
-            connector="signal",
-            account="test",
-            mcp_url="https://m",
-            vault_id=v.id,
-            metadata={},
-        )
+        Channels are now derived from event-log ``channel`` stamps (the
+        connector redesign #200 replaced the explicit ``channel_bindings``
+        table with this view).  An inbound with ``metadata.channel`` set
+        gives the session its single bound channel.
+        """
+        from aios.services import sessions as sess_svc
 
         harness.script_model([assistant("ok")])
         session = await harness.start("hello")
-        await ch_svc.create_binding(harness._pool, address="signal/test/1", session_id=session.id)
+        # Append an inbound stamped with channel metadata — this populates
+        # ``events.channel`` and feeds the new derived bound-channels path.
+        await sess_svc.append_user_message(
+            harness._pool,
+            session.id,
+            "channel inbound",
+            metadata={"channel": "signal/test/1"},
+        )
         await harness.run_until_idle(session.id)
 
         assert len(harness.model_calls) == 1, (

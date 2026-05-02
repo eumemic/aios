@@ -83,14 +83,14 @@ async def resolve_auth_for_url(
     session_id: str,
     mcp_server_url: str,
 ) -> dict[str, str]:
-    """Resolve MCP auth headers for ``mcp_server_url``.
+    """Resolve MCP auth headers for ``mcp_server_url`` via the session's
+    bound vaults.
 
-    Connection-owned URLs resolve through the connection's vault; other
-    URLs fall back to the session's bound vaults (``session_vaults``).
-    A connection that owns the URL but has no matching credential
-    returns ``{}`` rather than falling back — ownership decides the
-    source, not whether the lookup hits (prevents a misconfigured
-    connection from silently leaking a tenant-level credential).
+    The connector redesign (#200) removes connection-owned MCP URLs:
+    connectors are now stdio MCP subprocesses owned by the worker (PR2),
+    so there is no remote URL whose auth would be sourced from a
+    connection's vault.  All HTTP MCP auth resolves through
+    ``session_vaults`` (Linear, GitHub, etc.).
 
     For ``mcp_oauth`` credentials whose ``expires_at`` falls within the
     refresh skew window, the access token is transparently refreshed
@@ -100,20 +100,10 @@ async def resolve_auth_for_url(
     to the stale token.
     """
     async with pool.acquire() as conn:
-        connection_vault_id = await queries.get_connection_vault_for_url(conn, mcp_server_url)
-        if connection_vault_id is not None:
-            vault_result = await queries.resolve_vault_credential(
-                conn, vault_id=connection_vault_id, mcp_server_url=mcp_server_url
-            )
-            if vault_result is None:
-                return {}
-            blob, auth_type = vault_result
-            vault_id = connection_vault_id
-        else:
-            session_result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
-            if session_result is None:
-                return {}
-            blob, auth_type, vault_id = session_result
+        session_result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
+        if session_result is None:
+            return {}
+        blob, auth_type, vault_id = session_result
 
         if auth_type == "mcp_oauth":
             payload = json.loads(crypto_box.decrypt(blob))

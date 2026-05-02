@@ -1,4 +1,4 @@
-"""``aios rules ...`` — routing-rules CRUD, scoped to a connection."""
+"""``aios session-templates ...`` — frozen recipes for per_chat session spawn."""
 
 from __future__ import annotations
 
@@ -19,31 +19,33 @@ from aios.cli.output import print_error, print_success
 from aios.cli.runtime import run_or_die
 
 app = typer.Typer(
-    name="rules",
-    help="Manage connection routing rules.",
+    name="session-templates",
+    help="Manage session templates (per_chat session recipes).",
     no_args_is_help=True,
 )
 
-_COLS = ("id", "prefix", "target", "created_at")
-_MAXW = {"prefix": 40, "target": 60}
+_COLS = ("id", "name", "agent_id", "environment_id", "updated_at")
+_MAXW = {"name": 30, "agent_id": 24, "environment_id": 24}
 
 
 @app.command("list")
 def list_(
     ctx: typer.Context,
-    connection_id: str,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
     after: Annotated[str | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
         state, client = with_client(ctx)
-        path = f"/v1/connections/{connection_id}/routing-rules"
         with client:
             envelope = (
-                fetch_all(client, path)
+                fetch_all(client, "/v1/session-templates")
                 if all_
-                else client.request("GET", path, params={"limit": limit, "after": after})
+                else client.request(
+                    "GET",
+                    "/v1/session-templates",
+                    params={"limit": limit, "after": after},
+                )
             )
         render_list(state.output_format, envelope, columns=_COLS, max_widths=_MAXW)
 
@@ -51,37 +53,26 @@ def list_(
 
 
 @app.command("get")
-def get(ctx: typer.Context, connection_id: str, rule_id: str) -> None:
+def get(ctx: typer.Context, template_id: str) -> None:
     def _run() -> None:
         client = just_client(ctx)
         with client:
-            obj = client.request("GET", f"/v1/connections/{connection_id}/routing-rules/{rule_id}")
+            obj = client.request("GET", f"/v1/session-templates/{template_id}")
         render_single(obj)
 
     run_or_die(_run)
 
 
-@app.command("create", help="Create a routing rule.")
+@app.command("create", help="Create a session template.")
 def create(
     ctx: typer.Context,
-    connection_id: str,
-    prefix: Annotated[
+    name: Annotated[str | None, typer.Option("--name")] = None,
+    agent_id: Annotated[str | None, typer.Option("--agent-id")] = None,
+    environment_id: Annotated[str | None, typer.Option("--environment-id")] = None,
+    agent_version: Annotated[int | None, typer.Option("--agent-version")] = None,
+    metadata_json: Annotated[
         str | None,
-        typer.Option("--prefix", help='Channel-path prefix ("" = per-connection catch-all).'),
-    ] = None,
-    target: Annotated[
-        str | None,
-        typer.Option(
-            "--target",
-            help='Route target, e.g. "agent:claude-sonnet-4" or "session:sess_01".',
-        ),
-    ] = None,
-    session_params_json: Annotated[
-        str | None,
-        typer.Option(
-            "--session-params-json",
-            help="JSON object for nested SessionParams (default: empty object).",
-        ),
+        typer.Option("--metadata-json", help="JSON object of template metadata."),
     ] = None,
     file: Annotated[Path | None, typer.Option("--file")] = None,
     stdin: Annotated[bool, typer.Option("--stdin")] = False,
@@ -89,16 +80,29 @@ def create(
 ) -> None:
     def _run() -> int | None:
         ergonomic: dict[str, Any] | None = None
-        if prefix is not None or target is not None:
-            if prefix is None or target is None:
-                print_error("--prefix and --target are both required")
+        if any(v is not None for v in (name, agent_id, environment_id)):
+            missing = [
+                flag
+                for flag, v in (
+                    ("--name", name),
+                    ("--agent-id", agent_id),
+                    ("--environment-id", environment_id),
+                )
+                if v is None
+            ]
+            if missing:
+                print_error(f"missing required flag(s): {', '.join(missing)}")
                 return 64
-            ergonomic = {"prefix": prefix, "target": target, "session_params": {}}
-            if session_params_json is not None:
+            ergonomic = {
+                "name": name,
+                "agent_id": agent_id,
+                "environment_id": environment_id,
+            }
+            if agent_version is not None:
+                ergonomic["agent_version"] = agent_version
+            if metadata_json is not None:
                 try:
-                    ergonomic["session_params"] = load_json_object(
-                        session_params_json, "--session-params-json"
-                    )
+                    ergonomic["metadata"] = load_json_object(metadata_json, "--metadata-json")
                 except PayloadError as exc:
                     print_error(str(exc))
                     return 64
@@ -109,20 +113,17 @@ def create(
             return 64
         client = just_client(ctx)
         with client:
-            obj = client.request(
-                "POST", f"/v1/connections/{connection_id}/routing-rules", json_body=payload
-            )
+            obj = client.request("POST", "/v1/session-templates", json_body=payload)
         render_single(obj)
         return None
 
     run_or_die(_run)
 
 
-@app.command("update", help="Update a routing rule (RoutingRuleUpdate shape).")
+@app.command("update", help="Update a session template (SessionTemplateUpdate shape).")
 def update(
     ctx: typer.Context,
-    connection_id: str,
-    rule_id: str,
+    template_id: str,
     file: Annotated[Path | None, typer.Option("--file")] = None,
     stdin: Annotated[bool, typer.Option("--stdin")] = False,
     data: Annotated[str | None, typer.Option("--data")] = None,
@@ -135,23 +136,19 @@ def update(
             return 64
         client = just_client(ctx)
         with client:
-            obj = client.request(
-                "PUT",
-                f"/v1/connections/{connection_id}/routing-rules/{rule_id}",
-                json_body=payload,
-            )
+            obj = client.request("PUT", f"/v1/session-templates/{template_id}", json_body=payload)
         render_single(obj)
         return None
 
     run_or_die(_run)
 
 
-@app.command("archive", help="Archive a routing rule (soft-delete, retained for audit).")
-def archive(ctx: typer.Context, connection_id: str, rule_id: str) -> None:
+@app.command("archive", help="Archive a session template (soft-delete, retained for audit).")
+def archive(ctx: typer.Context, template_id: str) -> None:
     def _run() -> None:
         client = just_client(ctx)
         with client:
-            client.request("DELETE", f"/v1/connections/{connection_id}/routing-rules/{rule_id}")
-        print_success("archived", rule_id)
+            client.request("DELETE", f"/v1/session-templates/{template_id}")
+        print_success("archived", template_id)
 
     run_or_die(_run)

@@ -1,13 +1,26 @@
-"""Connection resource and inbound-message DTOs.
+"""Connection resource — the unified routing primitive.
 
-A *connection* is a registered ``(connector, account)`` pair plus the
-MCP URL the connector exposes for the agent to send replies back through.
-The address scheme used by the routing layer is::
+A *connection* is a registered ``(connector, account)`` pair plus an
+optional routing-mode binding.  The schema enforces three valid shapes
+via :sql:`connections_one_mode_ck`:
 
-    {connector}/{account}/{path}
+* **detached** — ``session_id`` and ``session_template_id`` are both
+  NULL.  Inbound messages drop with a counter increment.
+* **single_session** — ``session_id`` populated.  Every inbound for this
+  account appends to that one session.
+* **per_chat** — ``session_template_id`` populated.  Each new chat
+  partner spawns a fresh session via the template; the ``chat_id`` →
+  ``session_id`` map lives in ``connection_chat_sessions``.
 
-where ``path`` is whatever sub-segments the connector emits for inbound
-messages (typically a chat or thread id).
+The active-row uniqueness on ``(connector, account)`` enforces
+"one session per account" by schema — operators can't accidentally
+double-bind a phone number to two sessions.
+
+Connection-mounted MCP servers (the connector subprocess) are addressed
+by connector ``name`` directly (no reserved prefix); the universal
+``_meta.aios.focal_channel_path`` injection at the dispatch boundary
+replaced the ``conn_*`` discriminator that shipped in the previous
+design.
 """
 
 from __future__ import annotations
@@ -17,27 +30,23 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-# Reserved prefix for MCP server names derived from a connection.  Keeps
-# connection-provided servers disjoint from agent-declared ones in the
-# shared mcp_server_map.
-CONNECTION_SERVER_NAME_PREFIX = "conn_"
-
 
 class ConnectionCreate(BaseModel):
     """Request body for ``POST /v1/connections``.
 
-    ``connector`` and ``account`` may not contain ``/`` — they form the
-    leading two segments of channel addresses (``{connector}/{account}/{path}``)
-    and a ``/`` would create ambiguous segment boundaries that confuse
-    routing-rule prefix matching.
+    Created in detached mode — neither ``session_id`` nor
+    ``session_template_id`` is set.  Use ``POST .../attach`` or
+    ``POST .../configure-per-chat`` afterward to bind a routing mode.
+
+    ``connector`` and ``account`` may not contain ``/`` — they're used
+    in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
+    and a ``/`` would create ambiguous segment boundaries.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     connector: str = Field(min_length=1, max_length=64)
     account: str = Field(min_length=1, max_length=256)
-    mcp_url: str = Field(min_length=1)
-    vault_id: str
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("connector", "account")
@@ -48,51 +57,50 @@ class ConnectionCreate(BaseModel):
         return v
 
 
-class ConnectionUpdate(BaseModel):
-    """Request body for ``PUT /v1/connections/{id}``.
+class ConnectionAttach(BaseModel):
+    """Request body for ``POST /v1/connections/{id}/attach``.
 
-    ``connector`` and ``account`` are immutable after creation.
+    Binds the connection to a single session.  Errors if the connection
+    is already attached or configured per_chat — call ``detach`` /
+    ``unconfigure`` first.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    mcp_url: str | None = Field(default=None, min_length=1)
-    vault_id: str | None = None
-    metadata: dict[str, Any] | None = None
+    session_id: str
+
+
+class ConnectionConfigurePerChat(BaseModel):
+    """Request body for ``POST /v1/connections/{id}/configure-per-chat``.
+
+    Switches the connection into per_chat mode — each new chat partner
+    will auto-spawn a fresh session built from the named template on
+    first inbound.  Errors if the connection is already attached or
+    configured per_chat.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_template_id: str
 
 
 class Connection(BaseModel):
-    """Read view of a connection."""
+    """Read view of a connection.
+
+    Mode is implicit in the populated field:
+
+    * ``session_id`` set → single_session
+    * ``session_template_id`` set → per_chat
+    * neither → detached
+    """
 
     id: str
     connector: str
     account: str
-    mcp_url: str
-    vault_id: str
+    session_id: str | None = None
+    session_template_id: str | None = None
     metadata: dict[str, Any]
     created_at: datetime
+    attached_at: datetime | None = None
     updated_at: datetime
     archived_at: datetime | None = None
-
-
-class InboundMessage(BaseModel):
-    """Request body for ``POST /v1/connections/{id}/messages``.
-
-    ``path`` carries the chat id (and any connector-defined sub-segments)
-    that, combined with the connection's ``connector`` and ``account``,
-    forms the channel address used for routing.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    path: str
-    content: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class InboundMessageResponse(BaseModel):
-    """Response from ``POST /v1/connections/{id}/messages``."""
-
-    session_id: str
-    event_id: str
-    created_session: bool
