@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from aios.models.github_repositories import GithubRepositoryResourceEcho
     from aios.models.memory_stores import MemoryStoreResourceEcho
+    from aios.sandbox.git_proxy import GitProxy
 
 
 def mount_snapshot_from_echoes(
@@ -140,11 +141,16 @@ class ContainerHandle:
         container_id: str,
         workspace_path: Path,
         mount_snapshot: frozenset[tuple[str, ...]] = frozenset(),
+        git_proxy: GitProxy | None = None,
     ) -> None:
         self.session_id = session_id
         self.container_id = container_id
         self.workspace_path = workspace_path
         self.mount_snapshot = mount_snapshot
+        # Per-session credential broker for github_repository attachments.
+        # Lifetime tied to this handle; release() in the provisioner stops
+        # it before tearing down the docker container.
+        self.git_proxy = git_proxy
 
     async def run_command(
         self,

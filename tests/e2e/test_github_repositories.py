@@ -550,29 +550,27 @@ needs_real_clone = pytest.mark.skipif(
 
 @needs_real_clone
 class TestRealClone:
-    async def test_cache_clone_then_session_clone(
+    async def test_cache_clone_then_session_clone_origin_scrubbed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """End-to-end clone of a tiny public repo through the actual
-        ``ensure_cache_clone`` + ``ensure_session_working_tree`` helpers.
+        """End-to-end clone of a tiny public repo. After
+        ``ensure_session_working_tree``, ``.git/config`` must hold the
+        proxy URL — never the auth-embedded one. This regression-tests
+        issue #208.
 
         The PAT for octocat/Hello-World needs only ``public_repo`` — but
         for unauthenticated cloning of a public repo, GitHub rejects
-        bogus PATs. We sidestep that by patching ``_build_auth_url``
-        to omit the credential entirely; the helpers don't care about
-        the URL shape, only that ``git clone`` succeeds.
+        bogus PATs. We patch ``_build_auth_url`` to a no-op so the
+        clone is anonymous, then verify the post-clone scrub still
+        replaces ``origin`` with the proxy URL.
         """
-        # Point all sandbox host dirs at a tmp path so we don't pollute
-        # the real workspace_root.
         from aios.config import get_settings
 
         s = get_settings()
-        # Settings is cached; mutate the cached instance.
         monkeypatch.setattr(s, "workspace_root", tmp_path)
 
         from aios.sandbox import github_clone
 
-        # Pretend the user's token is irrelevant for a public unauth clone.
         monkeypatch.setattr(github_clone, "_build_auth_url", lambda url, _tok: url)
 
         cache_dir = await github_clone.ensure_cache_clone(_OCTOCAT_REPO, "ignored")
@@ -580,22 +578,25 @@ class TestRealClone:
         assert (cache_dir / "HEAD").exists()
         assert (cache_dir / "objects").is_dir()
 
+        proxy_url = "http://aios.test:9999/git/SECRET/octocat/Hello-World"
         work_dir = await github_clone.ensure_session_working_tree(
             session_id="sess_test",
             resource_id="ghrepo_test",
             repo_url=_OCTOCAT_REPO,
-            token="ignored",
+            token="REAL_TOKEN_ghp_xxxx",
             cache_dir=cache_dir,
+            proxy_url=proxy_url,
         )
         assert work_dir.exists()
-        # Working tree has README.
         assert (work_dir / "README").exists()
-        # .git exists with config + HEAD.
         assert (work_dir / ".git" / "config").exists()
-        # The remote URL in the per-session config should match what we
-        # built — no embedded token in this patched form.
+
         config_text = (work_dir / ".git" / "config").read_text()
-        assert _OCTOCAT_REPO in config_text
+        # Critical: the .git/config must NOT carry the token in any form.
+        assert "REAL_TOKEN_ghp_xxxx" not in config_text
+        assert "x-access-token" not in config_text
+        # And it MUST carry the proxy URL.
+        assert proxy_url in config_text
 
     async def test_per_session_clone_recreated_on_call(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -613,6 +614,7 @@ class TestRealClone:
         monkeypatch.setattr(github_clone, "_build_auth_url", lambda url, _tok: url)
 
         cache_dir = await github_clone.ensure_cache_clone(_OCTOCAT_REPO, "ignored")
+        proxy_url = "http://aios.test:9999/git/SECRET/octocat/Hello-World"
 
         work_dir = await github_clone.ensure_session_working_tree(
             session_id="sess_a",
@@ -620,6 +622,7 @@ class TestRealClone:
             repo_url=_OCTOCAT_REPO,
             token="t1",
             cache_dir=cache_dir,
+            proxy_url=proxy_url,
         )
         # Drop a sentinel that recreate must clobber.
         (work_dir / "SENTINEL").write_text("sentinel\n")
@@ -631,6 +634,7 @@ class TestRealClone:
             repo_url=_OCTOCAT_REPO,
             token="t2",
             cache_dir=cache_dir,
+            proxy_url=proxy_url,
         )
         assert not (work_dir / "SENTINEL").exists()
         # Working tree is fresh (README still present, sentinel gone).
