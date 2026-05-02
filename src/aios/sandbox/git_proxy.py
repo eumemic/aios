@@ -5,14 +5,13 @@ The token never enters the container. The container's working tree has
 ``origin = http://host.docker.internal:<port>/git/<secret>/<owner>/<repo>``;
 git speaks smart-HTTP to that URL; the proxy forwards each request to
 ``https://github.com/<owner>/<repo>/...`` with the ``Authorization``
-header injected from the in-memory token map.
+header injected from the precomputed per-repo basic-auth map.
 
 Per session lifecycle: started by the provisioner alongside the
 container, torn down by the registry's ``release`` path. Token rotation
-is an atomic swap of the in-memory map; the existing mount-snapshot
-drift check (``updated_at`` is part of the snapshot key) also forces a
-container recycle which restarts the proxy with a fresh map, so
-correctness doesn't depend on ``update_repos``.
+runs through the same path as add/remove — the existing mount-snapshot
+drift check (``updated_at`` is part of the snapshot key) recycles the
+container, which restarts the proxy with a fresh map.
 
 The per-session secret in the URL path is a sanity check, not a true
 isolation primitive — the agent can read the secret from
@@ -94,6 +93,20 @@ def repo_key(repo_url: str) -> str:
     return path
 
 
+def build_basic_auth_header(token: str) -> str:
+    """The ``Authorization`` value the proxy injects on forwarded
+    requests.
+
+    Form is ``Basic base64(x-access-token:<pat>)`` — what
+    ``https://x-access-token:$TOKEN@github.com/...`` produces when git
+    parses URL userinfo. Accepted by both classic and fine-grained
+    PATs; ``Authorization: token <pat>`` works for classic but is
+    rejected by newer fine-grained tokens.
+    """
+    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return f"Basic {encoded}"
+
+
 class GitProxy:
     """One per session; holds tokens in memory, accepts git smart-HTTP
     requests on a random port, forwards to github.com with
@@ -105,8 +118,11 @@ class GitProxy:
     """
 
     def __init__(self, repos: dict[str, str]) -> None:
-        # Copy so callers can't mutate the live map under us.
-        self._repos: dict[str, str] = dict(repos)
+        # Precompute Basic-auth headers so each request is just a dict
+        # lookup. The raw tokens go out of scope after this constructor.
+        self._auth_headers: dict[str, str] = {
+            key: build_basic_auth_header(token) for key, token in repos.items()
+        }
         self._secret = secrets.token_urlsafe(32)
         self._client = httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT_S, follow_redirects=False)
         self._server: uvicorn.Server | None = None
@@ -129,14 +145,6 @@ class GitProxy:
         won't send a Basic-auth Authorization header that we'd have to
         strip on every request."""
         return f"http://{host}:{self.port}/git/{self._secret}/{repo_key(repo_url)}"
-
-    def update_repos(self, repos: dict[str, str]) -> None:
-        """Atomic replacement of the token map. Called on rotation /
-        mount-set change so the proxy starts honoring the new tokens
-        immediately. The container-recycle path also handles this case
-        by restarting the proxy entirely; this method is a faster path
-        when we want to skip the recycle."""
-        self._repos = dict(repos)
 
     async def start(self) -> None:
         """Bind ``0.0.0.0:0`` (ephemeral port, all interfaces) and begin
@@ -199,8 +207,8 @@ class GitProxy:
         owner, repo = parts[1], parts[2]
         upstream_path = parts[3] if len(parts) > 3 else ""
         repo_no_git = repo.removesuffix(".git")
-        token = self._repos.get(f"{owner}/{repo_no_git}")
-        if token is None:
+        auth_header = self._auth_headers.get(f"{owner}/{repo_no_git}")
+        if auth_header is None:
             return Response(status_code=404, content=b"unknown repo for this proxy")
 
         upstream_url = f"https://github.com/{owner}/{repo}"
@@ -214,13 +222,7 @@ class GitProxy:
             if name.lower() in _HOP_BY_HOP_REQUEST_HEADERS:
                 continue
             fwd_headers[name] = value
-        # Use Basic auth with the standard "x-access-token:<pat>" form —
-        # this mirrors what `https://x-access-token:$TOKEN@github.com/...`
-        # produces and is accepted by both classic PATs and fine-grained
-        # tokens. The plain "Authorization: token <pat>" header works for
-        # classic PATs but is rejected by newer fine-grained tokens.
-        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-        fwd_headers["Authorization"] = f"Basic {basic}"
+        fwd_headers["Authorization"] = auth_header
 
         try:
             upstream_req = self._client.build_request(

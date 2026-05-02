@@ -9,7 +9,6 @@ leave the test process. Verifies:
 - the upstream request gets the expected ``Authorization: Basic <...>``
 - hop-by-hop request and response headers are stripped
 - streamed response bodies make it back unchanged
-- ``update_repos`` swap takes effect on the next request
 - ``proxy_url`` formats correctly and ``repo_key`` normalizes ``.git``
 
 No docker, no real github, no PAT.
@@ -186,33 +185,6 @@ class TestForwarding:
                 f"http://127.0.0.1:{proxy.port}/git/{proxy.secret}/acme/foo/info/refs"
             )
             assert r.content == b"upstream-body"
-
-
-class TestUpdateRepos:
-    async def test_atomic_swap(
-        self, proxy_with_mock_upstream: tuple[GitProxy, list[httpx.Request]]
-    ) -> None:
-        proxy, captured = proxy_with_mock_upstream
-        async with httpx.AsyncClient() as client:
-            r1 = await client.get(
-                f"http://127.0.0.1:{proxy.port}/git/{proxy.secret}/acme/foo/info/refs"
-            )
-            assert r1.status_code == 200
-            assert captured[-1].headers["authorization"] == _basic_auth("ghp_TEST")
-
-            proxy.update_repos({"acme/foo": "ghp_ROTATED", "other/repo": "ghp_OTHER"})
-
-            r2 = await client.get(
-                f"http://127.0.0.1:{proxy.port}/git/{proxy.secret}/acme/foo/info/refs"
-            )
-            assert r2.status_code == 200
-            assert captured[-1].headers["authorization"] == _basic_auth("ghp_ROTATED")
-
-            r3 = await client.get(
-                f"http://127.0.0.1:{proxy.port}/git/{proxy.secret}/other/repo/info/refs"
-            )
-            assert r3.status_code == 200
-            assert captured[-1].headers["authorization"] == _basic_auth("ghp_OTHER")
 
 
 class TestUpstreamFailure:

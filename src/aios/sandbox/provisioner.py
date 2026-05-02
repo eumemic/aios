@@ -21,6 +21,8 @@ CLI.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from aios.config import get_settings
 from aios.db import queries
 from aios.logging import get_logger
@@ -349,9 +351,9 @@ async def provision_for_session(session_id: str) -> ContainerHandle:
     # credential proxy is running, allow outbound to its host:port too,
     # otherwise the lockdown would block all in-container git traffic.
     if needs_lockdown and isinstance(networking, LimitedNetworking):
-        extra_host_ports: list[tuple[str, int]] = []
-        if git_proxy is not None:
-            extra_host_ports.append((_PROXY_HOST_ALIAS, git_proxy.port))
+        extra_host_ports: list[tuple[str, int]] = (
+            [(_PROXY_HOST_ALIAS, git_proxy.port)] if git_proxy is not None else []
+        )
         await _apply_network_lockdown(
             handle, networking, session_id, extra_host_ports=extra_host_ports
         )
@@ -415,7 +417,7 @@ async def _install_packages(
 
 def build_iptables_script(
     allowed_hosts: set[str],
-    extra_host_ports: list[tuple[str, int]] | None = None,
+    extra_host_ports: Sequence[tuple[str, int]] = (),
 ) -> str:
     """Build a shell script that restricts outbound traffic via iptables.
 
@@ -458,7 +460,7 @@ def build_iptables_script(
         lines.append('  iptables -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT')
         lines.append("done")
 
-    for host, port in extra_host_ports or []:
+    for host, port in extra_host_ports:
         lines.append("")
         lines.append(f"# Allow {host}:{port}")
         lines.append(
@@ -479,7 +481,7 @@ async def _apply_network_lockdown(
     networking: LimitedNetworking,
     session_id: str,
     *,
-    extra_host_ports: list[tuple[str, int]] | None = None,
+    extra_host_ports: Sequence[tuple[str, int]] = (),
 ) -> None:
     """Apply iptables rules to restrict outbound traffic.
 
@@ -510,7 +512,7 @@ async def _apply_network_lockdown(
             "sandbox.network_lockdown_applied",
             session_id=session_id,
             allowed_host_count=len(allowed),
-            extra_host_port_count=len(extra_host_ports or []),
+            extra_host_port_count=len(extra_host_ports),
         )
 
 
