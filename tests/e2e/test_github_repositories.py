@@ -592,11 +592,26 @@ class TestRealClone:
         assert (work_dir / ".git" / "config").exists()
 
         config_text = (work_dir / ".git" / "config").read_text()
-        # Critical: the .git/config must NOT carry the token in any form.
-        assert "REAL_TOKEN_ghp_xxxx" not in config_text
-        assert "x-access-token" not in config_text
         # And it MUST carry the proxy URL.
         assert proxy_url in config_text
+
+        # Scan the entire .git tree (config, refs, logs/HEAD reflog,
+        # FETCH_HEAD, ORIG_HEAD, packed-refs, etc.) to catch any path
+        # where the token might leak — issue #208 was an instance of
+        # exactly this kind of "we only checked the obvious file" bug.
+        for path in (work_dir / ".git").rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                contents = path.read_bytes()
+            except OSError:
+                continue
+            assert b"REAL_TOKEN_ghp_xxxx" not in contents, (
+                f"token leaked into {path.relative_to(work_dir)}"
+            )
+            assert b"x-access-token" not in contents, (
+                f"x-access-token URL form leaked into {path.relative_to(work_dir)}"
+            )
 
     async def test_per_session_clone_recreated_on_call(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

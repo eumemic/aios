@@ -17,9 +17,10 @@ we then ``git remote set-url origin`` the working tree to a per-session
 :class:`aios.sandbox.git_proxy.GitProxy` URL so the bind-mounted
 ``.git/config`` inside the sandbox carries no credential. The proxy
 holds the token in worker-process memory and forwards smart-HTTP traffic
-to ``api.github.com`` with ``Authorization`` injected — the agent inside
-the container can ``git fetch`` / ``push`` as normal but cannot read
-the token. Cache refreshes happen on the host outside the container.
+to ``github.com`` with ``Authorization`` injected — the agent inside
+the container can ``git fetch`` / ``push`` as normal but the PAT itself
+is not readable from inside the container. Cache refreshes happen on
+the host outside the container.
 
 The host process running this module needs ``git`` on PATH.
 """

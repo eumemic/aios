@@ -148,8 +148,7 @@ class ContainerHandle:
         self.workspace_path = workspace_path
         self.mount_snapshot = mount_snapshot
         # Per-session credential broker for github_repository attachments.
-        # Lifetime tied to this handle; release() in the provisioner stops
-        # it before tearing down the docker container.
+        # Held here so the handle's release path can stop it.
         self.git_proxy = git_proxy
 
     async def run_command(

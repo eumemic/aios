@@ -173,8 +173,9 @@ class GitProxy:
         self._serve_task = asyncio.create_task(self._server.serve(), name="git-proxy-serve")
 
         # Wait for the bind to complete and grab the port.
-        deadline = asyncio.get_event_loop().time() + _BIND_TIMEOUT_S
-        while asyncio.get_event_loop().time() < deadline:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _BIND_TIMEOUT_S
+        while loop.time() < deadline:
             await asyncio.sleep(0.01)
             if self._server.started and self._server.servers:
                 sockets = self._server.servers[0].sockets
@@ -188,14 +189,19 @@ class GitProxy:
         """Gracefully stop the server and close the httpx client."""
         if self._server is not None:
             self._server.should_exit = True
-        if self._serve_task is not None:
-            try:
-                await asyncio.wait_for(self._serve_task, timeout=5.0)
-            except TimeoutError:
+        try:
+            if self._serve_task is not None:
+                with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                    await asyncio.wait_for(self._serve_task, timeout=5.0)
+        finally:
+            # Always cancel the serve task and close the httpx client.
+            # Skipping either on a non-timeout exception leaks the
+            # bound port and the in-memory token map.
+            if self._serve_task is not None and not self._serve_task.done():
                 self._serve_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._serve_task
-        await self._client.aclose()
+            await self._client.aclose()
         log.info("git_proxy.stopped", port=self._port)
 
     async def _handle(self, request: Request) -> Response:
