@@ -391,26 +391,69 @@ async def _execute_mcp_tool_async(
             return
 
         server_name, tool_name = _parse_mcp_tool_name(name)
-        url = mcp_server_map.get(server_name)
-        if url is None:
-            bound_log.warning("mcp_tool.server_not_found", server_name=server_name)
-            is_error = True
-            await _append_tool_result(
-                pool, session_id, call_id, name, error=f"MCP server {server_name!r} not found"
-            )
-            return
 
         from aios.harness.channels import FOCAL_CHANNEL_META_KEY, focal_channel_path
-        from aios.mcp.client import call_mcp_tool, resolve_auth_for_url
 
         meta: dict[str, Any] | None = None
         suffix = focal_channel_path(focal_channel)
         if suffix is not None:
             meta = {FOCAL_CHANNEL_META_KEY: suffix}
 
-        crypto_box = runtime.require_crypto_box()
-        headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
-        result = await call_mcp_tool(url, headers, tool_name, arguments, meta=meta)
+        # Connector subprocesses (stdio MCP children of the worker) take
+        # precedence over agent-declared HTTP MCP servers: the model
+        # sees both as ``mcp__<name>__<tool>`` so a name collision with
+        # an agent's ``mcp_servers`` entry would be ambiguous.  We
+        # resolve in favor of the connector — connectors are first-class
+        # in the redesign (#200), HTTP MCP servers are agent-scoped.
+        connector_registry = runtime.connector_subprocess_registry
+        if connector_registry is not None and connector_registry.state(server_name) is not None:
+            account_arg = arguments.get("account")
+            if isinstance(account_arg, str):
+                from aios.services import connections as connections_service
+
+                authorized = await connections_service.validate_account_for_session(
+                    pool, session_id, connector=server_name, account=account_arg
+                )
+                if not authorized:
+                    bound_log.warning(
+                        "mcp_tool.account_not_authorized",
+                        server_name=server_name,
+                        account=account_arg,
+                    )
+                    is_error = True
+                    await _append_tool_result(
+                        pool,
+                        session_id,
+                        call_id,
+                        name,
+                        error=(
+                            f"account {account_arg!r} on connector {server_name!r} is not "
+                            "attached to this session or one that spawned it"
+                        ),
+                    )
+                    return
+            result = await connector_registry.dispatch_call(
+                server_name, tool_name, arguments, meta=meta
+            )
+        else:
+            url = mcp_server_map.get(server_name)
+            if url is None:
+                bound_log.warning("mcp_tool.server_not_found", server_name=server_name)
+                is_error = True
+                await _append_tool_result(
+                    pool,
+                    session_id,
+                    call_id,
+                    name,
+                    error=f"MCP server {server_name!r} not found",
+                )
+                return
+
+            from aios.mcp.client import call_mcp_tool, resolve_auth_for_url
+
+            crypto_box = runtime.require_crypto_box()
+            headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
+            result = await call_mcp_tool(url, headers, tool_name, arguments, meta=meta)
 
         content_str = json.dumps(result, ensure_ascii=False)
         mcp_is_error = "error" in result

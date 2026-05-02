@@ -1,7 +1,10 @@
 """``aios connectors ...`` — connector subprocess admin.
 
-The connector subprocess supervisor isn't wired yet; every subcommand
-passes through to the API, which currently returns 503.
+Thin client over ``GET /v1/connectors`` and friends.  All commands
+flow through the API process, which procrastinate-RPCs into the
+worker (see :mod:`aios.api.routers.connectors`).  The ``call``
+subcommand expects a JSON payload of shape ``{"tool": str,
+"arguments": dict, "meta": dict | null}``.
 """
 
 from __future__ import annotations

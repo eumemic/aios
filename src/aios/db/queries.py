@@ -2216,6 +2216,40 @@ async def get_connection(conn: asyncpg.Connection[Any], connection_id: str) -> C
     return _row_to_connection(row)
 
 
+async def session_authorizes_connector_account(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    connector: str,
+    account: str,
+) -> bool:
+    """Permission check for outbound connector tool calls.
+
+    True iff there's an active connection whose ``(connector, account)``
+    matches AND whose ``session_id`` is this session OR whose ``id`` is
+    the session's ``spawned_from_connection_id``.  Used by the
+    outbound MCP dispatch to gate tool calls that take an explicit
+    ``account`` argument — the supervisor will happily forward to the
+    connector regardless, but the model shouldn't be able to reach
+    accounts the operator hasn't bound to this session.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT 1
+          FROM connections c
+          LEFT JOIN sessions s ON s.id = $1
+         WHERE c.connector = $2
+           AND c.account = $3
+           AND c.archived_at IS NULL
+           AND (c.session_id = $1 OR c.id = s.spawned_from_connection_id)
+         LIMIT 1
+        """,
+        session_id,
+        connector,
+        account,
+    )
+    return row is not None
+
+
 async def get_connection_for_account(
     conn: asyncpg.Connection[Any], connector: str, account: str
 ) -> Connection | None:

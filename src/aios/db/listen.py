@@ -78,6 +78,51 @@ def _normalize_dsn(db_url: str) -> str:
 
 
 @asynccontextmanager
+async def listen_for_connector_result(
+    db_url: str,
+    call_id: str,
+) -> AsyncIterator[asyncio.Queue[str]]:
+    """Open a dedicated asyncpg connection LISTENing on ``connector_result_<call_id>``.
+
+    The API process uses this for the ``/v1/connectors/...`` endpoints
+    (procrastinate-RPC pattern from resolved decision #19): LISTEN
+    first, enqueue the procrastinate task, await the single NOTIFY
+    payload, return the parsed result.
+
+    The yielded queue carries one entry per NOTIFY — for the connector
+    RPC plane that's exactly one entry per call.  ``queue_max=8``
+    leaves headroom for retries without blowing the queue.
+
+    Mirrors :func:`listen_for_events` but with a per-call (not
+    per-session) channel and a tighter queue bound.
+    """
+    conn = await asyncpg.connect(_normalize_dsn(db_url))
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
+    channel = f"connector_result_{call_id}"
+
+    def _callback(
+        _conn: asyncpg.Connection[object],
+        _pid: int,
+        _channel: str,
+        payload: str,
+    ) -> None:
+        # See ``listen_for_events`` for why this MUST be synchronous.
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            log.warning("listen.connector_result_queue_full", call_id=call_id)
+
+    await conn.add_listener(channel, _callback)
+    try:
+        yield queue
+    finally:
+        with contextlib.suppress(Exception):
+            await conn.remove_listener(channel, _callback)
+        with contextlib.suppress(Exception):
+            await conn.close()
+
+
+@asynccontextmanager
 async def listen_for_events(
     db_url: str,
     session_id: str,

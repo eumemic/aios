@@ -47,5 +47,6 @@ def _build_connector() -> PsycopgConnector:
 app: App = App(connector=_build_connector())
 
 # Register tasks. This MUST come after `app` is assigned so that
-# `from aios.harness.procrastinate_app import app` inside tasks.py resolves.
-from aios.harness import tasks  # noqa: E402, F401  -- side-effecting registration
+# `from aios.harness.procrastinate_app import app` inside the task modules
+# resolves.  Both modules side-effect-register against ``app`` at import.
+from aios.harness import connector_tasks, tasks  # noqa: E402, F401

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from aios.crypto.vault import CryptoBox
+    from aios.harness.connector_supervisor import ConnectorSubprocessRegistry
     from aios.harness.task_registry import TaskRegistry
     from aios.mcp.pool import McpSessionPool
     from aios.models.memory_stores import MemoryStoreResourceEcho
@@ -35,6 +36,7 @@ worker_id: str | None = None
 sandbox_registry: SandboxRegistry | None = None
 task_registry: TaskRegistry | None = None
 mcp_session_pool: McpSessionPool | None = None
+connector_subprocess_registry: ConnectorSubprocessRegistry | None = None
 
 # Per-session memory-mount cache. Populated at the top of every step (in
 # ``loop._run_session_step_body``) and consumed by ``tools.memory_intercept``
@@ -142,3 +144,12 @@ def require_mcp_session_pool() -> McpSessionPool:
             "this code is running outside a worker_main context"
         )
     return mcp_session_pool
+
+
+def require_connector_subprocess_registry() -> ConnectorSubprocessRegistry:
+    if connector_subprocess_registry is None:
+        raise RuntimeError(
+            "aios.harness.runtime.connector_subprocess_registry is not initialized; "
+            "this code is running outside a worker_main context"
+        )
+    return connector_subprocess_registry

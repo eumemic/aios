@@ -129,6 +129,23 @@ class Settings(BaseSettings):
         description="Tavily API key for web_fetch and web_search tools.",
     )
 
+    # ── connectors ─────────────────────────────────────────────────────────
+    connectors_enabled: list[str] = Field(
+        default_factory=list,
+        description="Connector names the worker should spawn at startup. Each "
+        "name is resolved against the ``aios.connectors`` Python entry-point "
+        "group; the resolved spec describes how to launch the subprocess. "
+        "Empty (the default) means the worker boots no connector children — "
+        "operator opts in explicitly.",
+    )
+    connectors_dir: Path = Field(
+        default=Path.home() / ".aios" / "connectors",
+        description="Per-connector working-directory root. The supervisor cd's "
+        "into ``<connectors_dir>/<name>/`` before spawning the subprocess so "
+        "spool databases and other state files live next to the connector "
+        "rather than in the worker's CWD.",
+    )
+
     # ── observability ──────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")
 
