@@ -74,7 +74,9 @@ async def connector_status(call_id: str, name: str | None = None) -> None:
     pool = runtime.require_pool()
     registry = runtime.connector_subprocess_registry
     if registry is None:
-        await _notify_result(pool, call_id, {"error": "worker not initialized"})
+        await _notify_result(
+            pool, call_id, {"error": "worker not initialized", "code": "not_ready"}
+        )
         return
     if name is None:
         snapshot = registry.snapshot_all()
@@ -82,7 +84,11 @@ async def connector_status(call_id: str, name: str | None = None) -> None:
         return
     state = registry.state(name)
     if state is None:
-        await _notify_result(pool, call_id, {"error": f"connector {name!r} not enabled"})
+        await _notify_result(
+            pool,
+            call_id,
+            {"error": f"connector {name!r} not enabled", "code": "not_enabled"},
+        )
         return
     await _notify_result(pool, call_id, {"connector": state.snapshot()})
 
@@ -92,15 +98,15 @@ async def connector_tools(call_id: str, name: str) -> None:
     """List the named connector's tools and notify the API.
 
     Round-trips to the subprocess (``session.list_tools()``) so a
-    crashed connector surfaces as ``error`` rather than a stale cache.
-    The worker's supervisor handles the not-ready / circuit-open
-    cases, mapping each to a distinct error string the operator can
-    read.
+    crashed connector surfaces as a fresh transport error rather than
+    a stale cache.
     """
     pool = runtime.require_pool()
     registry = runtime.connector_subprocess_registry
     if registry is None:
-        await _notify_result(pool, call_id, {"error": "worker not initialized"})
+        await _notify_result(
+            pool, call_id, {"error": "worker not initialized", "code": "not_ready"}
+        )
         return
 
     from aios.harness.connector_supervisor import (
@@ -112,13 +118,25 @@ async def connector_tools(call_id: str, name: str) -> None:
     try:
         session = await asyncio.wait_for(registry.get_session(name), timeout=_TOOLS_TIMEOUT_S)
     except ConnectorNotEnabled:
-        await _notify_result(pool, call_id, {"error": f"connector {name!r} not enabled"})
+        await _notify_result(
+            pool,
+            call_id,
+            {"error": f"connector {name!r} not enabled", "code": "not_enabled"},
+        )
         return
     except CircuitOpen:
-        await _notify_result(pool, call_id, {"error": f"connector {name!r} circuit open"})
+        await _notify_result(
+            pool,
+            call_id,
+            {"error": f"connector {name!r} circuit open", "code": "circuit_open"},
+        )
         return
     except (ConnectorNotReady, TimeoutError):
-        await _notify_result(pool, call_id, {"error": f"connector {name!r} not ready"})
+        await _notify_result(
+            pool,
+            call_id,
+            {"error": f"connector {name!r} not ready", "code": "not_ready"},
+        )
         return
 
     try:
@@ -126,7 +144,12 @@ async def connector_tools(call_id: str, name: str) -> None:
     except Exception as err:
         log.warning("connector_tools.list_failed", connector=name, exc_info=True)
         await _notify_result(
-            pool, call_id, {"error": f"connector transport error: {type(err).__name__}: {err}"}
+            pool,
+            call_id,
+            {
+                "error": f"connector transport error: {type(err).__name__}: {err}",
+                "code": "transport_error",
+            },
         )
         return
 
@@ -153,7 +176,9 @@ async def connector_call(
     pool = runtime.require_pool()
     registry = runtime.connector_subprocess_registry
     if registry is None:
-        await _notify_result(pool, call_id, {"error": "worker not initialized"})
+        await _notify_result(
+            pool, call_id, {"error": "worker not initialized", "code": "not_ready"}
+        )
         return
     result = await registry.dispatch_call(name, tool, arguments, meta=meta)
     await _notify_result(pool, call_id, result)

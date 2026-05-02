@@ -375,7 +375,7 @@ class TestCallMcpTool:
 
             result = await call_mcp_tool("https://mcp.github.com/", {}, "create_issue", {})
 
-        assert result == {"error": "Permission denied"}
+        assert result == {"error": "Permission denied", "code": "tool_error"}
 
     async def test_connection_failure(self) -> None:
         with patch("aios.mcp.client.streamable_http_client") as mock_transport:
@@ -388,6 +388,7 @@ class TestCallMcpTool:
 
         assert "error" in result
         assert "MCP server error" in result["error"]
+        assert result["code"] == "transport_error"
 
     async def test_meta_forwarded_to_session_call_tool(self) -> None:
         """The ``meta`` kwarg on call_mcp_tool reaches session.call_tool

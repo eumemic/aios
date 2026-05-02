@@ -75,22 +75,32 @@ async def _rpc(db_url: str, defer: Callable[[str], Awaitable[None]]) -> dict[str
     return envelope
 
 
-def _raise_for_error(envelope: dict[str, Any]) -> None:
-    """Map the worker's ``error`` shape onto the right HTTP status.
+_CODE_TO_STATUS: dict[str, int] = {
+    "not_enabled": status.HTTP_404_NOT_FOUND,
+    "not_ready": status.HTTP_503_SERVICE_UNAVAILABLE,
+    "circuit_open": status.HTTP_503_SERVICE_UNAVAILABLE,
+    "transport_error": status.HTTP_503_SERVICE_UNAVAILABLE,
+    "tool_error": status.HTTP_502_BAD_GATEWAY,
+}
 
-    The supervisor returns specific strings for the not-enabled,
-    not-ready, and circuit-open states; we surface those as 404 / 503
-    so operator tools (and ``aios connector list``) can render them
-    distinctly.  Any other error shape becomes a generic 502.
+
+def _raise_for_error(envelope: dict[str, Any]) -> None:
+    """Map the worker's error envelope onto the right HTTP status.
+
+    Producer-side codes are the contract; the human-readable
+    ``error`` string is for the operator's eyes.  An unknown / missing
+    code falls through to 502 so a future code addition that we don't
+    yet recognize doesn't masquerade as success.
     """
     err = envelope.get("error")
     if not err:
         return
-    if "not enabled" in err:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err)
-    if "not ready" in err or "circuit open" in err or "transport error" in err:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=err)
-    raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=err)
+    raw_code = envelope.get("code")
+    code = raw_code if isinstance(raw_code, str) else ""
+    raise HTTPException(
+        status_code=_CODE_TO_STATUS.get(code, status.HTTP_502_BAD_GATEWAY),
+        detail=err,
+    )
 
 
 @router.get("")

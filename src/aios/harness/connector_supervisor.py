@@ -85,6 +85,9 @@ class ConnectorState:
     backoff: float = _BACKOFF_INITIAL_S
     session: ClientSession | None = None
     init_result: InitializeResult | None = None
+    # ``session is not None`` is the data form of "ready"; ``ready``
+    # is the awaitable handle for first-init wait.
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -141,7 +144,6 @@ class ConnectorSubprocessRegistry:
             s.name: ConnectorState(name=s.name, spec=s) for s in specs
         }
         self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._ready: dict[str, asyncio.Event] = {s.name: asyncio.Event() for s in specs}
         self._shutdown = asyncio.Event()
 
     @property
@@ -197,7 +199,7 @@ class ConnectorSubprocessRegistry:
             raise ConnectorNotEnabled(name)
         if state.status == "circuit_open":
             raise CircuitOpen(name)
-        await self._ready[name].wait()
+        await state.ready.wait()
         if state.session is None:
             raise ConnectorNotReady(name)
         return state.session
@@ -224,11 +226,14 @@ class ConnectorSubprocessRegistry:
         try:
             session = await asyncio.wait_for(self.get_session(name), timeout=_DISPATCH_TIMEOUT_S)
         except ConnectorNotEnabled:
-            return {"error": f"connector {name!r} not enabled"}
+            return {"error": f"connector {name!r} not enabled", "code": "not_enabled"}
         except CircuitOpen:
-            return {"error": f"connector {name!r} circuit open after repeated failures"}
+            return {
+                "error": f"connector {name!r} circuit open after repeated failures",
+                "code": "circuit_open",
+            }
         except (ConnectorNotReady, TimeoutError):
-            return {"error": f"connector {name!r} not ready"}
+            return {"error": f"connector {name!r} not ready", "code": "not_ready"}
 
         try:
             result = await asyncio.wait_for(
@@ -242,7 +247,10 @@ class ConnectorSubprocessRegistry:
                 tool=tool,
                 exc_info=True,
             )
-            return {"error": f"connector transport error: {type(err).__name__}: {err}"}
+            return {
+                "error": f"connector transport error: {type(err).__name__}: {err}",
+                "code": "transport_error",
+            }
 
         from aios.mcp.client import shape_call_result
 
@@ -315,7 +323,7 @@ class ConnectorSubprocessRegistry:
                     state.instructions = init_result.instructions
                     state.status = "running"
                     state.backoff = _BACKOFF_INITIAL_S
-                    self._ready[name].set()
+                    state.ready.set()
                     log.info(
                         "connector.running",
                         connector=name,
@@ -363,7 +371,7 @@ class ConnectorSubprocessRegistry:
             finally:
                 state.session = None
                 state.init_result = None
-                self._ready[name].clear()
+                state.ready.clear()
 
             # Crash bookkeeping + circuit breaker.
             now = time.monotonic()

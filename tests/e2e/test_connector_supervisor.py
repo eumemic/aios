@@ -92,13 +92,14 @@ class TestConnectorSupervisor:
             await registry.shutdown()
 
     async def test_unknown_connector_returns_error_envelope(self) -> None:
-        """Calls against an un-enabled connector surface as ``{"error": ...}``."""
+        """Calls against an un-enabled connector surface as a coded envelope."""
         registry = ConnectorSubprocessRegistry([_echo_spec()])
         await registry.start()
         try:
             await asyncio.wait_for(registry.get_session("echo"), timeout=10.0)
             result = await registry.dispatch_call("nonexistent", "ping", {})
             assert "not enabled" in result["error"]
+            assert result["code"] == "not_enabled"
         finally:
             await registry.shutdown()
 
@@ -126,6 +127,7 @@ class TestConnectorSupervisor:
             # surfaces the closed transport as a transport error envelope.
             crash_result = await registry.dispatch_call("echo", "crash", {})
             assert "error" in crash_result
+            assert crash_result["code"] == "transport_error"
 
             # Wait for the supervisor to spawn a *different* session and
             # flip back to ``running``.
