@@ -102,7 +102,7 @@ async def worker_main() -> None:
         task_registry = TaskRegistry()
         mcp_session_pool = McpSessionPool()
         connector_specs = resolve_connector_specs(settings)
-        connector_registry = ConnectorSubprocessRegistry(connector_specs)
+        connector_registry = ConnectorSubprocessRegistry(connector_specs, settings=settings)
 
         runtime.pool = pool
         runtime.crypto_box = crypto_box

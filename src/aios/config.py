@@ -145,6 +145,15 @@ class Settings(BaseSettings):
         "spool databases and other state files live next to the connector "
         "rather than in the worker's CWD.",
     )
+    connectors_auto_create: dict[str, bool] = Field(
+        default_factory=dict,
+        description="Per-connector ``auto_create_connections`` knob (plan §13). "
+        "Inbound for an unknown ``(connector, account)`` pair auto-creates a "
+        "detached connection row by default; setting ``{name: false}`` disables "
+        "that for ``name``, dropping such inbounds with a ``no_connection`` "
+        "counter increment instead.  Names not present in the dict default to "
+        "``True``.",
+    )
 
     # ── observability ──────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")

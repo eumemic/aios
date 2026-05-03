@@ -41,7 +41,9 @@ class TestValidateCapability:
     """
 
     def _registry(self) -> ConnectorSubprocessRegistry:
-        return ConnectorSubprocessRegistry([])
+        from aios.config import Settings
+
+        return ConnectorSubprocessRegistry([], settings=Settings())
 
     def test_passes_when_aios_connector_key_present(self) -> None:
         registry = self._registry()

@@ -2551,6 +2551,45 @@ async def insert_chat_session(
     return existing
 
 
+# ─── connector_inbound_acks (dedup ledger) ──────────────────────────────────
+
+
+async def try_record_inbound_ack(
+    conn: asyncpg.Connection[Any],
+    *,
+    connector: str,
+    account: str,
+    event_id: str,
+    appended_seq: int,
+) -> bool:
+    """Insert a dedup-ledger row, returning ``True`` iff it actually inserted.
+
+    Called from the worker's inbound handler in the same transaction as
+    :func:`append_event`.  The PK ``(connector, account, event_id)``
+    enforces at-most-once event append: a duplicate inbound (same ULID
+    re-emitted on connector reconnect because the previous worker
+    crashed before acking) hits ``ON CONFLICT DO NOTHING`` and the
+    caller rolls back the txn so no second event lands.
+
+    The ``appended_seq`` is the gapless seq the in-flight ``append_event``
+    just allocated; it makes the ledger row queryable for the operator
+    debugging "did this message land?".
+    """
+    row = await conn.fetchrow(
+        """
+        INSERT INTO connector_inbound_acks (connector, account, event_id, appended_seq)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT DO NOTHING
+        RETURNING 1
+        """,
+        connector,
+        account,
+        event_id,
+        appended_seq,
+    )
+    return row is not None
+
+
 # ─── session_templates ──────────────────────────────────────────────────────
 
 

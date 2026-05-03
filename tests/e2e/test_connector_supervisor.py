@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from aios.config import Settings
 from aios.harness import connector_supervisor as supervisor_mod
 from aios.harness.connector_supervisor import ConnectorSubprocessRegistry
 from aios.mcp.stdio_transport import ConnectorSpec
@@ -59,7 +60,7 @@ async def _wait_for(predicate: Any, *, max_wait_s: float = 10.0) -> None:
 class TestConnectorSupervisor:
     async def test_starts_initializes_and_emits_accounts(self) -> None:
         """Happy path: spawn, init, capability check, account snapshot, shutdown."""
-        registry = ConnectorSubprocessRegistry([_echo_spec()])
+        registry = ConnectorSubprocessRegistry([_echo_spec()], settings=Settings())
         await registry.start()
         try:
             session = await asyncio.wait_for(registry.get_session("echo"), timeout=10.0)
@@ -80,7 +81,7 @@ class TestConnectorSupervisor:
 
     async def test_dispatch_call_round_trip(self) -> None:
         """``dispatch_call`` returns the connector's tool result envelope."""
-        registry = ConnectorSubprocessRegistry([_echo_spec()])
+        registry = ConnectorSubprocessRegistry([_echo_spec()], settings=Settings())
         await registry.start()
         try:
             await asyncio.wait_for(registry.get_session("echo"), timeout=10.0)
@@ -93,7 +94,7 @@ class TestConnectorSupervisor:
 
     async def test_unknown_connector_returns_error_envelope(self) -> None:
         """Calls against an un-enabled connector surface as a coded envelope."""
-        registry = ConnectorSubprocessRegistry([_echo_spec()])
+        registry = ConnectorSubprocessRegistry([_echo_spec()], settings=Settings())
         await registry.start()
         try:
             await asyncio.wait_for(registry.get_session("echo"), timeout=10.0)
@@ -114,7 +115,7 @@ class TestConnectorSupervisor:
         session reference is still in place for a beat.
         """
         monkeypatch.setattr(supervisor_mod, "_BACKOFF_INITIAL_S", 0.5)
-        registry = ConnectorSubprocessRegistry([_echo_spec()])
+        registry = ConnectorSubprocessRegistry([_echo_spec()], settings=Settings())
         await registry.start()
         try:
             await asyncio.wait_for(registry.get_session("echo"), timeout=10.0)
