@@ -532,14 +532,7 @@ class Connector:
     # ── Internal: aios_inbound_ack tool ───────────────────────────────
 
     async def _handle_aios_inbound_ack(self, arguments: dict[str, Any]) -> list[TextContent]:
-        """Delete a spool entry by ``event_id``.
-
-        Idempotent: an already-removed entry returns the same shape
-        with ``"removed": false``.  The worker's call site doesn't
-        consult the result — it's fire-and-forget after commit — but
-        connector authors auditing the wire format see something
-        useful.
-        """
+        """Delete a spool entry by ``event_id``. Idempotent."""
         event_id = arguments.get("event_id")
         if not isinstance(event_id, str) or not event_id:
             raise ValueError("aios_inbound_ack requires a string event_id argument")
@@ -556,9 +549,13 @@ class Connector:
         methods raise pydantic validation errors.  The supervisor's
         splitter task picks these off the stream before the SDK's
         receive validation sees them.
+
+        Callers MUST ensure ``self._write_stream`` is non-None
+        (``emit_inbound`` raises pre-init; ``update_accounts`` and
+        ``_emit_initial_state`` gate on the readiness event) — no
+        defensive guard here, an AttributeError is the right failure
+        mode for a code path that escaped the gates.
         """
-        if self._write_stream is None:
-            return
         message = JSONRPCMessage(
             JSONRPCNotification(
                 jsonrpc="2.0",
@@ -566,6 +563,7 @@ class Connector:
                 params=dict(params),
             )
         )
+        assert self._write_stream is not None
         await self._write_stream.send(SessionMessage(message=message))
 
     async def _emit_initial_state(self) -> None:

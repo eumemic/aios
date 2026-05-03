@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib.metadata import entry_points
 from typing import Any, Literal
 
@@ -37,10 +37,14 @@ from mcp.client.session import ClientSession
 from mcp.types import InitializeResult
 
 from aios.config import Settings
+from aios.db import queries
+from aios.errors import ConflictError, NotFoundError
 from aios.harness import runtime
 from aios.harness.wake import defer_wake
 from aios.logging import get_logger
+from aios.mcp.client import shape_call_result
 from aios.mcp.stdio_transport import ConnectorSpec, open_connector_session
+from aios.services import sessions as sessions_service
 
 log = get_logger("aios.harness.connector_supervisor")
 
@@ -153,8 +157,6 @@ def resolve_connector_specs(settings: Settings) -> list[ConnectorSpec]:
                 f"expected ConnectorSpec"
             )
         if spec.cwd is None:
-            from dataclasses import replace
-
             spec = replace(spec, cwd=settings.connectors_dir / name)
         specs.append(spec)
     return specs
@@ -298,8 +300,6 @@ class ConnectorSubprocessRegistry:
                 "code": "transport_error",
             }
 
-        from aios.mcp.client import shape_call_result
-
         return shape_call_result(result)
 
     # ── notifications ─────────────────────────────────────────────────
@@ -361,7 +361,6 @@ class ConnectorSubprocessRegistry:
         inbound surfaces in ``recent_drops`` and operator logs without
         stalling the connector pipeline.
         """
-        from aios.db import queries
 
         state = self._states[name]
         event_id = params.get("event_id")
@@ -469,8 +468,6 @@ class ConnectorSubprocessRegistry:
         the surface (auto-creating a row doesn't deliver the message
         that prompted it).
         """
-        from aios.db import queries
-        from aios.errors import ConflictError
 
         self._record_drop(state, "no_connection")
         if self._settings.connectors_auto_create.get(name, True):
@@ -514,16 +511,12 @@ class ConnectorSubprocessRegistry:
         on archived), create a session via :func:`services.sessions.create_session`,
         race-safely register it in ``connection_chat_sessions``.
         """
-        from aios.db import queries
-        from aios.services import sessions as sessions_service
 
         pool = runtime.require_pool()
         async with pool.acquire() as conn:
             existing = await queries.lookup_chat_session(conn, connection_id, chat_id)
-        if existing is not None:
-            return existing
-
-        async with pool.acquire() as conn:
+            if existing is not None:
+                return existing
             template = await queries.get_session_template(conn, template_id)
         if template.archived_at is not None:
             self._record_drop(state, "archived_template")
@@ -583,12 +576,10 @@ class ConnectorSubprocessRegistry:
         second event row, no second seq increment, but the caller
         still sends the ack so the connector clears its spool.
         """
-        from aios.db import queries
-        from aios.errors import NotFoundError
 
         pool = runtime.require_pool()
         channel = f"{connector_name}/{account}/{chat_id}"
-        sender_name = sender.get("display_name") if isinstance(sender, dict) else None
+        sender_name = sender.get("display_name")
         metadata: dict[str, Any] = {"channel": channel}
         if isinstance(sender_name, str):
             metadata["sender"] = sender_name

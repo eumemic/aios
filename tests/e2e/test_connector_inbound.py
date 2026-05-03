@@ -33,14 +33,9 @@ from collections.abc import Callable
 from typing import Any
 from unittest import mock
 
-import pytest
-
 from aios.config import Settings
 from aios.db import queries
-from aios.harness.connector_supervisor import (
-    ConnectorState,
-    ConnectorSubprocessRegistry,
-)
+from aios.harness.connector_supervisor import ConnectorSubprocessRegistry
 from aios.ids import make_id
 from aios.mcp.stdio_transport import ConnectorSpec
 from aios.models.agents import ToolSpec
@@ -470,6 +465,3 @@ class TestRegistryIsolation:
                 "recent_drops": {},
             }
         ]
-
-
-_unused: tuple[Any, ...] = (ConnectorState, pytest)
