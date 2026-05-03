@@ -74,16 +74,17 @@ class CircuitOpen(Exception):
 
 
 class _DedupRollback(Exception):
-    """Internal-only: raised inside the inbound transaction to undo a duplicate.
-
-    Caught by the same method that raised it.  Existing as a typed
-    exception keeps the rollback intent legible — ``raise Exception``
-    in the same code path would invite a maintainer to add error
-    handling that masks the deliberate rollback.
-    """
+    """Raised inside the inbound transaction to trigger rollback on duplicate."""
 
 
 ConnectorStatus = Literal["starting", "running", "restarting", "circuit_open"]
+DropReason = Literal[
+    "no_connection",
+    "detached",
+    "archived_template",
+    "session_missing",
+    "malformed",
+]
 
 
 @dataclass
@@ -109,7 +110,7 @@ class ConnectorState:
     backoff: float = _BACKOFF_INITIAL_S
     session: ClientSession | None = None
     init_result: InitializeResult | None = None
-    drops: Counter[str] = field(default_factory=Counter)
+    drops: Counter[DropReason] = field(default_factory=Counter)
     # ``session is not None`` is the data form of "ready"; ``ready``
     # is the awaitable handle for first-init wait.
     ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -378,8 +379,8 @@ class ConnectorSubprocessRegistry:
                 "connector.inbound_malformed",
                 connector=name,
                 missing=[
-                    field
-                    for field, value in (
+                    key
+                    for key, value in (
                         ("event_id", event_id),
                         ("account", account),
                         ("chat_id", chat_id),
@@ -652,7 +653,7 @@ class ConnectorSubprocessRegistry:
                 error=result["error"],
             )
 
-    def _record_drop(self, state: ConnectorState, reason: str) -> None:
+    def _record_drop(self, state: ConnectorState, reason: DropReason) -> None:
         """Bump the per-reason drop counter, log, and let snapshots reflect it."""
         state.drops[reason] += 1
         log.info(

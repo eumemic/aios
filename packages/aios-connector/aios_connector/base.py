@@ -280,6 +280,8 @@ class Connector:
         self._accounts_payload: dict[str, Any] = {"accounts": []}
         self._write_stream: anyio.abc.ObjectSendStream[SessionMessage] | None = None
         self._client_initialized: anyio.Event = anyio.Event()
+        self._emit_count: int = 0
+        self._warned: bool = False
 
     # ── Subclass hooks ────────────────────────────────────────────────
 
@@ -368,19 +370,6 @@ class Connector:
 
         await self._send_aios_notification(_INBOUND_METHOD, params)
         return event_id
-
-    async def update_accounts(self, accounts: list[dict[str, Any]]) -> None:
-        """Replace the snapshot and push the new payload to aios.
-
-        Pre-init updates are absorbed: the snapshot is stamped now and
-        sent once :meth:`_emit_initial_state` runs after the client
-        sends ``notifications/initialized``.  Post-init updates fire
-        ``notifications/aios/accounts`` immediately so the supervisor's
-        in-memory snapshot stays current.
-        """
-        self._accounts_payload = {"accounts": list(accounts)}
-        if self._write_stream is not None and self._client_initialized.is_set():
-            await self._send_aios_notification(_ACCOUNTS_METHOD, self._accounts_payload)
 
     # ── Run loop ──────────────────────────────────────────────────────
 
@@ -586,19 +575,30 @@ class Connector:
             await self._send_aios_notification(_INBOUND_METHOD, params)
 
     def _maybe_warn_spool_growth(self) -> None:
-        """Log once per emit when the spool exceeds the soft size threshold."""
-        size = self._spool.size_bytes()
-        if size > SOFT_WARN_BYTES:
-            # Keep this dependency-light: structlog is optional in the
-            # SDK, so write a stderr line the supervisor's pump picks up.
-            import sys
+        """Stat the spool every Nth emit; warn-once when it exceeds the soft threshold.
 
-            print(
-                f"aios-connector: spool {self._spool.path} is {size} bytes "
-                f"(>{SOFT_WARN_BYTES}); aios is likely down — operator action recommended",
-                file=sys.stderr,
-                flush=True,
-            )
+        ``size_bytes`` stats main-DB + WAL — a syscall pair we don't
+        need on every inbound message.  Sampling every 64 emits trades
+        a bounded delay (a runaway connector might emit ~64 messages
+        past the threshold before warning) for skipping ~98% of stats
+        on the hot path.  ``_warned`` latches so one outage doesn't
+        flood stderr.
+        """
+        self._emit_count += 1
+        if self._warned or self._emit_count & 63 != 0:
+            return
+        size = self._spool.size_bytes()
+        if size <= SOFT_WARN_BYTES:
+            return
+        self._warned = True
+        import sys
+
+        print(
+            f"aios-connector: spool {self._spool.path} is {size} bytes "
+            f"(>{SOFT_WARN_BYTES}); aios is likely down — operator action recommended",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _aios_inbound_ack_descriptor() -> Tool:
