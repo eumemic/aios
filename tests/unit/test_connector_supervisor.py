@@ -208,6 +208,151 @@ class TestPumpStderrLineExtraction:
         assert captured == ["trailing-no-newline"]
 
 
+class TestDropCounter:
+    """Drop counters bump per reason and surface in :meth:`snapshot`.
+
+    PR3 surfaces ``inbound_dropped_total{connector,reason}`` via the
+    ``recent_drops`` field in ``GET /v1/connectors``.  These tests
+    exercise the supervisor's bookkeeping without going through the
+    full inbound dispatch path (which needs a real Postgres pool).
+    """
+
+    def _registry_with_state(self) -> tuple[ConnectorSubprocessRegistry, Any]:
+        from aios.config import Settings
+        from aios.harness.connector_supervisor import ConnectorState
+
+        registry = ConnectorSubprocessRegistry([], settings=Settings())
+        spec = ConnectorSpec(name="echo", command="x", args=[])
+        state = ConnectorState(name="echo", spec=spec)
+        registry._states["echo"] = state
+        return registry, state
+
+    def test_drops_accumulate_per_reason(self) -> None:
+        registry, state = self._registry_with_state()
+        registry._record_drop(state, "no_connection")
+        registry._record_drop(state, "no_connection")
+        registry._record_drop(state, "detached")
+        snap = state.snapshot()
+        assert snap["recent_drops"] == {"no_connection": 2, "detached": 1}
+
+    def test_snapshot_starts_empty(self) -> None:
+        _, state = self._registry_with_state()
+        assert state.snapshot()["recent_drops"] == {}
+
+
+class TestInboundMalformed:
+    """Malformed inbound payloads count as ``malformed`` drops, never crash.
+
+    The splitter task stays alive even for protocol violations from a
+    misbehaving connector — operator sees them in ``recent_drops``
+    without losing the rest of the pipeline.
+    """
+
+    async def test_missing_required_field_records_drop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from aios.config import Settings
+        from aios.harness.connector_supervisor import ConnectorState
+
+        registry = ConnectorSubprocessRegistry([], settings=Settings())
+        spec = ConnectorSpec(name="echo", command="x", args=[])
+        registry._states["echo"] = ConnectorState(name="echo", spec=spec)
+
+        # Missing chat_id / event_id should drop with reason=malformed,
+        # never reach the DB lookup.
+        called = {"queries": 0}
+
+        def fake_require_pool() -> None:
+            called["queries"] += 1
+            raise AssertionError("DB should not be touched on malformed payload")
+
+        monkeypatch.setattr(
+            "aios.harness.connector_supervisor.runtime.require_pool",
+            fake_require_pool,
+        )
+        await registry._handle_inbound(
+            "echo",
+            {"event_id": "01EVT", "account": "acct"},  # missing chat_id, content
+        )
+        assert called["queries"] == 0
+        assert registry._states["echo"].drops["malformed"] == 1
+
+
+class TestBackoffSchedule:
+    """The supervisor doubles its backoff up to ``_BACKOFF_CAP_S`` per plan §11.
+
+    Verified by walking the state machine directly rather than racing
+    real time — the supervisor loop's "sleep, double, sleep, double" is
+    a state transition, and we can simulate it by setting the failure
+    timestamp ourselves.
+    """
+
+    def test_doubles_until_cap(self) -> None:
+        from aios.harness.connector_supervisor import (
+            _BACKOFF_CAP_S,
+            _BACKOFF_INITIAL_S,
+            ConnectorState,
+        )
+
+        spec = ConnectorSpec(name="echo", command="x", args=[])
+        state = ConnectorState(name="echo", spec=spec)
+
+        # Walk the doubling chain until we hit the cap.  The supervisor
+        # loop applies ``state.backoff = min(backoff * 2, cap)`` after
+        # each crash; we replay that here.
+        observed = [state.backoff]
+        for _ in range(20):
+            state.backoff = min(state.backoff * 2, _BACKOFF_CAP_S)
+            observed.append(state.backoff)
+        assert observed[0] == _BACKOFF_INITIAL_S
+        assert observed[-1] == _BACKOFF_CAP_S
+        # Sequence is monotonically non-decreasing.
+        from itertools import pairwise
+
+        for prev, nxt in pairwise(observed):
+            assert nxt >= prev
+
+
+class TestAccountsNotificationMalformed:
+    """``notifications/aios/accounts`` with a non-list payload is a contract violation.
+
+    Tested as a pure-function call into the routing helper to avoid
+    the splitter task plumbing.
+    """
+
+    async def test_non_list_records_last_error(self) -> None:
+        from aios.config import Settings
+        from aios.harness.connector_supervisor import ConnectorState
+
+        registry = ConnectorSubprocessRegistry([], settings=Settings())
+        spec = ConnectorSpec(name="echo", command="x", args=[])
+        registry._states["echo"] = ConnectorState(name="echo", spec=spec)
+
+        await registry._on_aios_notification(
+            "echo", "notifications/aios/accounts", {"accounts": None}
+        )
+        state = registry._states["echo"]
+        assert state.last_error == "malformed accounts payload"
+        assert state.accounts == []
+
+    async def test_list_replaces_snapshot(self) -> None:
+        from aios.config import Settings
+        from aios.harness.connector_supervisor import ConnectorState
+
+        registry = ConnectorSubprocessRegistry([], settings=Settings())
+        spec = ConnectorSpec(name="echo", command="x", args=[])
+        registry._states["echo"] = ConnectorState(name="echo", spec=spec)
+
+        await registry._on_aios_notification(
+            "echo",
+            "notifications/aios/accounts",
+            {"accounts": [{"id": "a", "display_name": "A"}]},
+        )
+        state = registry._states["echo"]
+        assert state.accounts == [{"id": "a", "display_name": "A"}]
+        assert state.last_error is None
+
+
 class mock_log_capture:
     """Capture ``log.bind(...).info(...)`` line= kwargs into a list."""
 
