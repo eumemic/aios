@@ -308,6 +308,18 @@ class Connector:
         normal exit, exception, cancellation.
         """
 
+    async def serve(self) -> None:
+        """Long-running task siblinged with the MCP server.
+
+        Override to drive an inbound pump or other background work
+        (e.g. signal-cli's listener loop).  Cancelled when the MCP
+        server exits.  Default implementation parks forever — most
+        connectors don't need this hook because their inbound source
+        is event-driven from a daemon callback.
+        """
+        forever: anyio.Event = anyio.Event()
+        await forever.wait()
+
     # ── Public API ────────────────────────────────────────────────────
 
     async def emit_inbound(
@@ -393,6 +405,7 @@ class Connector:
             ):
                 self._write_stream = write_stream
                 tg.start_soon(self._emit_initial_state)
+                tg.start_soon(self.serve)
                 await server.run(read_stream, write_stream, init_opts)
                 tg.cancel_scope.cancel()
         finally:

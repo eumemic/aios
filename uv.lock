@@ -242,12 +242,11 @@ name = "aios-signal"
 version = "0.1.0"
 source = { editable = "connectors/signal" }
 dependencies = [
-    { name = "httpx" },
+    { name = "aios-connector" },
     { name = "mcp" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "structlog" },
-    { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.dev-dependencies]
@@ -261,12 +260,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx", specifier = ">=0.27" },
+    { name = "aios-connector", editable = "packages/aios-connector" },
     { name = "mcp", specifier = ">=1.20,<2.0" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "structlog", specifier = ">=24.4" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
 [package.metadata.requires-dev]
@@ -283,13 +281,12 @@ name = "aios-telegram"
 version = "0.1.0"
 source = { editable = "connectors/telegram" }
 dependencies = [
-    { name = "httpx" },
+    { name = "aios-connector" },
     { name = "mcp" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-telegram-bot" },
     { name = "structlog" },
-    { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.dev-dependencies]
@@ -303,13 +300,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx", specifier = ">=0.27" },
+    { name = "aios-connector", editable = "packages/aios-connector" },
     { name = "mcp", specifier = ">=1.20,<2.0" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "python-telegram-bot", specifier = ">=22.6,<23" },
     { name = "structlog", specifier = ">=24.4" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
 [package.metadata.requires-dev]
