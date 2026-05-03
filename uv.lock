@@ -9,6 +9,8 @@ resolution-markers = [
 [manifest]
 members = [
     "aios",
+    "aios-connector",
+    "aios-echo",
     "aios-signal",
     "aios-telegram",
 ]
@@ -129,6 +131,8 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "aios-connector" },
+    { name = "aios-echo" },
     { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
@@ -162,6 +166,8 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "aios-connector", editable = "packages/aios-connector" },
+    { name = "aios-echo", editable = "packages/aios-echo" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "pytest", specifier = ">=8.3" },
@@ -169,6 +175,66 @@ dev = [
     { name = "pytest-mock", specifier = ">=3.14" },
     { name = "ruff", specifier = ">=0.8" },
     { name = "testcontainers", extras = ["postgres"], specifier = ">=4.8" },
+]
+
+[[package]]
+name = "aios-connector"
+version = "0.1.0"
+source = { editable = "packages/aios-connector" }
+dependencies = [
+    { name = "anyio" },
+    { name = "mcp" },
+    { name = "python-ulid" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anyio", specifier = ">=4.6" },
+    { name = "mcp", specifier = ">=1.20,<2.0" },
+    { name = "python-ulid", specifier = ">=3.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.13" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.8" },
+]
+
+[[package]]
+name = "aios-echo"
+version = "0.1.0"
+source = { editable = "packages/aios-echo" }
+dependencies = [
+    { name = "aios-connector" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "aios-connector", editable = "packages/aios-connector" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.13" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.8" },
 ]
 
 [[package]]
