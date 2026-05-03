@@ -19,26 +19,22 @@ Lock semantics:
   at defer time, not on the decorator: procrastinate stores decorator
   lock arguments verbatim with no template substitution (same reason
   ``harness.wake_session`` configures its lock per-call).
-* ``harness.connector_status`` / ``harness.connector_tools`` —
-  ``queueing_lock`` only (call_id-scoped, dedupes API retries).  No
-  mutual-exclusion lock; reads are cheap and don't conflict.
+* ``harness.connector_status`` / ``harness.connector_tools`` — no
+  procrastinate locks.  Reads are cheap, don't conflict, and the
+  per-call NOTIFY channel routes results back to the right LISTENer.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import asyncpg
 
 from aios.harness import runtime
 from aios.harness.procrastinate_app import app
 from aios.logging import get_logger
-
-if TYPE_CHECKING:
-    pass
-
 
 log = get_logger("aios.harness.connector_tasks")
 
@@ -192,11 +188,17 @@ async def defer_connector_call(
     arguments: dict[str, Any],
     meta: dict[str, Any] | None = None,
 ) -> None:
-    """Enqueue a ``connector_call`` job with per-connector + per-call locking."""
+    """Enqueue a ``connector_call`` job with per-connector mutual exclusion.
+
+    Only ``lock`` is set — ``queueing_lock`` would dedup pending jobs
+    sharing a value, but every API request mints a fresh ``call_id``
+    ULID so the per-call queueing_lock would never fire.  The
+    correctness story is the per-call NOTIFY channel: each result
+    routes back to exactly the LISTENer that minted its ``call_id``.
+    """
     deferrer = app.configure_task(
         "harness.connector_call",
         lock=f"connector:{name}",
-        queueing_lock=f"connector:call:{call_id}",
     )
     await deferrer.defer_async(
         call_id=call_id,
@@ -209,17 +211,11 @@ async def defer_connector_call(
 
 async def defer_connector_status(*, call_id: str, name: str | None = None) -> None:
     """Enqueue a ``connector_status`` snapshot job."""
-    deferrer = app.configure_task(
-        "harness.connector_status",
-        queueing_lock=f"connector:status:{call_id}",
-    )
+    deferrer = app.configure_task("harness.connector_status")
     await deferrer.defer_async(call_id=call_id, name=name)
 
 
 async def defer_connector_tools(*, call_id: str, name: str) -> None:
     """Enqueue a ``connector_tools`` round-trip job."""
-    deferrer = app.configure_task(
-        "harness.connector_tools",
-        queueing_lock=f"connector:tools:{call_id}",
-    )
+    deferrer = app.configure_task("harness.connector_tools")
     await deferrer.defer_async(call_id=call_id, name=name)

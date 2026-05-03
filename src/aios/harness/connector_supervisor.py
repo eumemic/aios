@@ -47,7 +47,12 @@ _BACKOFF_INITIAL_S = 5.0
 _BACKOFF_CAP_S = 300.0
 _CIRCUIT_THRESHOLD = 10
 _CIRCUIT_WINDOW_S = 3600.0
-_DISPATCH_TIMEOUT_S = 120.0
+# Per-call ceiling for ``dispatch_call`` (and the wait for first init).
+# Matches the API router's ``_RESULT_TIMEOUT_S`` so a slow tool surfaces
+# as a 408 to the operator at the same moment the worker would give up,
+# rather than the worker continuing to execute past the API's deadline
+# and dropping its NOTIFY into a closed channel.  Per plan decision #4.
+_DISPATCH_TIMEOUT_S = 60.0
 
 
 class ConnectorNotEnabled(Exception):
@@ -107,6 +112,12 @@ def resolve_connector_specs(settings: Settings) -> list[ConnectorSpec]:
     Unknown names raise — the operator listed something that isn't
     installed, which should fail loudly at boot rather than silently
     skip.
+
+    Defaults the spec's cwd to ``settings.connectors_dir / name`` when
+    the factory leaves it unset, so connectors land their state files
+    (PR3's spool, signal-cli's data dir) under the operator-controlled
+    root by default per plan decision #11.  Factories that need a
+    different layout can override by setting ``cwd`` themselves.
     """
     available = {ep.name: ep for ep in entry_points(group="aios.connectors")}
     specs: list[ConnectorSpec] = []
@@ -124,6 +135,10 @@ def resolve_connector_specs(settings: Settings) -> list[ConnectorSpec]:
                 f"entry point aios.connectors:{name} returned {type(spec).__name__!r}, "
                 f"expected ConnectorSpec"
             )
+        if spec.cwd is None:
+            from dataclasses import replace
+
+            spec = replace(spec, cwd=settings.connectors_dir / name)
         specs.append(spec)
     return specs
 
@@ -264,9 +279,9 @@ class ConnectorSubprocessRegistry:
         """Route a ``notifications/aios/<...>`` payload from connector ``name``."""
         state = self._states[name]
         if method == "notifications/aios/accounts":
-            accounts = (params or {}).get("accounts") or []
-            if isinstance(accounts, list):
-                state.accounts = list(accounts)
+            raw_accounts = (params or {}).get("accounts")
+            if isinstance(raw_accounts, list):
+                state.accounts = list(raw_accounts)
                 log.info(
                     "connector.accounts_updated",
                     connector=name,
@@ -274,12 +289,15 @@ class ConnectorSubprocessRegistry:
                 )
             else:
                 # Surface contract violations on ``aios connector list`` so
-                # the operator notices without having to grep logs.
+                # the operator notices without having to grep logs.  An
+                # empty list is fine ("zero accounts available"); any
+                # other shape (null, missing key, wrong type) is a bug
+                # in the connector, not a recovery signal.
                 state.last_error = "malformed accounts payload"
                 log.warning(
                     "connector.accounts_malformed",
                     connector=name,
-                    payload_type=type(accounts).__name__,
+                    payload_type=type(raw_accounts).__name__,
                 )
         elif method == "notifications/aios/inbound":
             # No-op until inbound dispatch lands (lookup connection,

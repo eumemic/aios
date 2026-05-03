@@ -53,6 +53,25 @@ log = get_logger("aios.mcp.stdio_transport")
 
 AIOS_NOTIFICATION_PREFIX = "notifications/aios/"
 
+# Initialize handshake ceiling.  A connector that opens stdio but
+# stalls on ``notifications/initialized`` would otherwise park the
+# supervisor in ``starting`` forever; this bound makes the timeout
+# look like any other crash and trip restart-with-backoff.  Generous
+# because real connectors may load credentials / open daemons during
+# their initialize().
+_INIT_TIMEOUT_S = 30.0
+
+
+def _safe_close_fd(fd: int) -> None:
+    """Close an OS fd, ignoring EBADF if it's already closed.
+
+    Used as a defense-in-depth cleanup callback on the spawn path: the
+    pump task closes the read-end on EOF, but if spawn fails before
+    the pump starts, this callback closes it instead.
+    """
+    with contextlib.suppress(OSError):
+        os.close(fd)
+
 
 @dataclass(frozen=True)
 class ConnectorSpec:
@@ -214,9 +233,13 @@ async def open_connector_session(
     stderr_r, stderr_w = os.pipe()
     errfile = os.fdopen(stderr_w, "w", buffering=1, encoding="utf-8", errors="replace")
     async with AsyncExitStack() as stack:
-        # Closing the write-end after the SDK closes its dup is what
-        # makes the read-end EOF (the pump task exits cleanly).
+        # Register both pipe ends with the stack BEFORE the spawn so a
+        # ``stdio_client`` failure (missing binary, bad cwd, ENOMEM)
+        # doesn't leak the read-end.  The pump task takes ownership of
+        # ``stderr_r`` once it starts and closes it in its own finally;
+        # the duplicate ``os.close`` here is suppressed by ``EBADF``.
         stack.callback(errfile.close)
+        stack.callback(_safe_close_fd, stderr_r)
 
         upstream_read, write_stream = await stack.enter_async_context(
             stdio_client(server_params, errlog=cast(TextIO, errfile))
@@ -244,6 +267,11 @@ async def open_connector_session(
         session = await stack.enter_async_context(
             ClientSession(downstream_recv, write_stream, message_handler=message_handler)
         )
-        init_result = await session.initialize()
+        # Bounded handshake: a connector that opens stdio but never
+        # answers ``initialize`` would otherwise pin the supervisor in
+        # ``starting`` forever — no exception means no respawn and no
+        # circuit-breaker progress.  The bound mirrors the per-call
+        # ceiling in :class:`~aios.harness.connector_supervisor`.
+        init_result = await asyncio.wait_for(session.initialize(), timeout=_INIT_TIMEOUT_S)
         yield session, init_result, closed_event
         tg.cancel_scope.cancel()

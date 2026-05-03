@@ -81,35 +81,48 @@ async def worker_main() -> None:
     if lock_conn is None:
         sys.exit(1)
 
-    pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
-    crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    sandbox_registry = SandboxRegistry()
-    task_registry = TaskRegistry()
-    mcp_session_pool = McpSessionPool()
-    connector_specs = resolve_connector_specs(settings)
-    connector_registry = ConnectorSubprocessRegistry(connector_specs)
-
-    runtime.pool = pool
-    runtime.crypto_box = crypto_box
-    runtime.worker_id = _make_worker_id()
-    runtime.sandbox_registry = sandbox_registry
-    runtime.task_registry = task_registry
-    runtime.mcp_session_pool = mcp_session_pool
-    runtime.connector_subprocess_registry = connector_registry
-
-    await procrastinate_app.open_async()
-    await connector_registry.start()
-
-    log.info(
-        "worker.startup",
-        worker_id=runtime.worker_id,
-        concurrency=settings.worker_concurrency,
-        connectors=connector_registry.names,
-    )
-
+    # Everything below holds resources that need ordered teardown; the
+    # try/finally wraps the entire construction so a partial-startup
+    # failure (e.g. ``resolve_connector_specs`` rejecting a bad entry
+    # in ``connectors_enabled``, ``create_pool`` racing a temporarily
+    # unreachable DB) still releases the advisory lock and any
+    # already-built resource.
+    pool: asyncpg.Pool[Any] | None = None
+    sandbox_registry: SandboxRegistry | None = None
+    task_registry: TaskRegistry | None = None
+    mcp_session_pool: McpSessionPool | None = None
+    connector_registry: ConnectorSubprocessRegistry | None = None
+    procrastinate_opened = False
     sweep_task: asyncio.Task[None] | None = None
 
     try:
+        pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
+        crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
+        sandbox_registry = SandboxRegistry()
+        task_registry = TaskRegistry()
+        mcp_session_pool = McpSessionPool()
+        connector_specs = resolve_connector_specs(settings)
+        connector_registry = ConnectorSubprocessRegistry(connector_specs)
+
+        runtime.pool = pool
+        runtime.crypto_box = crypto_box
+        runtime.worker_id = _make_worker_id()
+        runtime.sandbox_registry = sandbox_registry
+        runtime.task_registry = task_registry
+        runtime.mcp_session_pool = mcp_session_pool
+        runtime.connector_subprocess_registry = connector_registry
+
+        await procrastinate_app.open_async()
+        procrastinate_opened = True
+        await connector_registry.start()
+
+        log.info(
+            "worker.startup",
+            worker_id=runtime.worker_id,
+            concurrency=settings.worker_concurrency,
+            connectors=connector_registry.names,
+        )
+
         # Startup sweep:
         #   1. Reap stalled procrastinate jobs (workers that died without
         #      releasing their session lock — laptop sleep, OOM, crash).
@@ -153,13 +166,20 @@ async def worker_main() -> None:
             sweep_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await sweep_task
-        sandbox_registry.stop_reaper()
-        await task_registry.shutdown()
-        await sandbox_registry.release_all()
-        await mcp_session_pool.close_all()
-        await connector_registry.shutdown()
-        await procrastinate_app.close_async()
-        await pool.close()
+        if sandbox_registry is not None:
+            sandbox_registry.stop_reaper()
+        if task_registry is not None:
+            await task_registry.shutdown()
+        if sandbox_registry is not None:
+            await sandbox_registry.release_all()
+        if mcp_session_pool is not None:
+            await mcp_session_pool.close_all()
+        if connector_registry is not None:
+            await connector_registry.shutdown()
+        if procrastinate_opened:
+            await procrastinate_app.close_async()
+        if pool is not None:
+            await pool.close()
         # Lock conn drops last so single-instance enforcement holds for
         # the entire shutdown sequence (a parallel `aios worker` mid-startup
         # would still get refused while we tear down).
