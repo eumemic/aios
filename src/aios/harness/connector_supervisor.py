@@ -173,16 +173,6 @@ class ConnectorState:
         }
 
 
-def _sibling_instances(parsed: list[ConnectorInstance], connector: str, instance: str) -> set[str]:
-    """Return instance names of OTHER instances of the same connector type.
-
-    Used to filter sibling-scoped env vars out of each subprocess's env
-    so a wedged connector that iterates ``os.environ`` can't expose
-    sibling tokens.
-    """
-    return {ci.instance for ci in parsed if ci.connector == connector and ci.instance != instance}
-
-
 def resolve_connector_specs(settings: Settings) -> list[tuple[ConnectorInstance, ConnectorSpec]]:
     """Resolve ``connectors_enabled`` into ``(instance, spec)`` pairs.
 
@@ -199,9 +189,9 @@ def resolve_connector_specs(settings: Settings) -> list[tuple[ConnectorInstance,
     silently skip.
     """
     available = {ep.name: ep for ep in entry_points(group="aios.connectors")}
-    parsed = [parse_connector_entry(raw) for raw in settings.connectors_enabled]
     out: list[tuple[ConnectorInstance, ConnectorSpec]] = []
-    for raw, ci in zip(settings.connectors_enabled, parsed, strict=True):
+    for raw in settings.connectors_enabled:
+        ci = parse_connector_entry(raw)
         ep = available.get(ci.connector)
         if ep is None:
             raise RuntimeError(
@@ -216,18 +206,13 @@ def resolve_connector_specs(settings: Settings) -> list[tuple[ConnectorInstance,
                 f"entry point aios.connectors:{ci.connector} returned "
                 f"{type(spec).__name__!r}, expected ConnectorSpec"
             )
-        siblings = _sibling_instances(parsed, ci.connector, ci.instance)
-        spec = _apply_instance_overlay(spec, ci, settings, siblings=siblings)
+        spec = _apply_instance_overlay(spec, ci, settings)
         out.append((ci, spec))
     return out
 
 
 def _apply_instance_overlay(
-    spec: ConnectorSpec,
-    ci: ConnectorInstance,
-    settings: Settings,
-    *,
-    siblings: set[str],
+    spec: ConnectorSpec, ci: ConnectorInstance, settings: Settings
 ) -> ConnectorSpec:
     """Layer per-instance cwd + env on top of a factory-returned spec.
 
@@ -243,26 +228,17 @@ def _apply_instance_overlay(
     connector subprocess code stays instance-naive — it just reads
     config under the standard prefix.  Single-instance deployments use
     the unscoped vars directly with no transform.
-
-    ``siblings`` is the set of other instance names for the same
-    connector type; their scoped env vars are stripped so each
-    subprocess sees only its own credentials.
     """
     cwd = spec.cwd
     if cwd is None:
         cwd = settings.connectors_dir / ci.connector
         if ci.instance != ci.connector:
             cwd = cwd / ci.instance
-    env = _build_instance_env(ci, base=spec.env, siblings=siblings)
+    env = _build_instance_env(ci, base=spec.env)
     return replace(spec, cwd=cwd, env=env)
 
 
-def _build_instance_env(
-    ci: ConnectorInstance,
-    *,
-    base: dict[str, str] | None,
-    siblings: set[str],
-) -> dict[str, str]:
+def _build_instance_env(ci: ConnectorInstance, *, base: dict[str, str] | None) -> dict[str, str]:
     """Construct the env dict for a connector subprocess.
 
     Starts from ``os.environ`` (so the subprocess inherits operator-set
@@ -271,7 +247,7 @@ def _build_instance_env(
     non-default instances — re-exports
     ``AIOS_<CONN_UPPER>_<INST_UPPER>_<FIELD>`` as
     ``AIOS_<CONN_UPPER>_<FIELD>`` so the connector reads its config
-    under the standard prefix.  ``siblings``-scoped vars are stripped
+    under the standard prefix.
     from the resulting env so each subprocess sees only its own
     credentials (a wedged or chatty connector that iterates
     ``os.environ`` won't surface sibling tokens).
@@ -288,22 +264,11 @@ def _build_instance_env(
         env.update(base)
     if ci.instance == ci.connector:
         return env
-    connector_prefix = f"AIOS_{ci.connector.upper()}_"
-    scope_prefix = f"{connector_prefix}{ci.instance.upper()}_"
-    # Re-export our own scoped vars under the standard prefix.
+    scope_prefix = f"AIOS_{ci.connector.upper()}_{ci.instance.upper()}_"
+    target_prefix = f"AIOS_{ci.connector.upper()}_"
     for key, value in list(env.items()):
         if key.startswith(scope_prefix):
-            env[connector_prefix + key[len(scope_prefix) :]] = value
-    # Strip sibling-scoped vars so credentials don't leak across
-    # subprocesses.  We only remove vars whose leading segment matches
-    # a known sibling instance name from ``connectors_enabled`` —
-    # plain connector-scoped fields like ``AIOS_TELEGRAM_BOT_TOKEN`` (no
-    # instance segment) are kept as the legacy fallback.
-    if siblings:
-        sibling_prefixes = tuple(f"{connector_prefix}{s.upper()}_" for s in siblings)
-        for key in list(env.keys()):
-            if key.startswith(sibling_prefixes):
-                env.pop(key, None)
+            env[target_prefix + key[len(scope_prefix) :]] = value
     return env
 
 
