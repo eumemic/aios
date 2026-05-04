@@ -311,6 +311,14 @@ def _render_recap_event(event: Event) -> dict[str, Any] | None:
     role = event.data.get("role") if event.kind == "message" else None
 
     if role == "user":
+        # Recap rendering is intentionally text-only: ``model``/``session_id``
+        # are not threaded through, so :func:`render_user_event` short-circuits
+        # any image inlining and emits text markers for every attachment.
+        # The recap body is consumed inside a ``switch_channel`` tool result
+        # (string content), where ``image_url`` parts wouldn't survive the
+        # tool-message envelope; degrading attachments to markers keeps the
+        # recap a single text blob that the agent can read or follow up on
+        # via the in-sandbox path.
         rendered = render_user_event(event.data, event.orig_channel, event.orig_channel)
         content = rendered.get("content")
         if not isinstance(content, str) or not content:
