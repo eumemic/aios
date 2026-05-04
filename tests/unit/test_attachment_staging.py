@@ -38,6 +38,7 @@ def temp_workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 
 def _make_temp_attachment(tmp_path: Path, name: str, payload: bytes) -> dict[str, Any]:
     """Build a wire-shaped attachment record pointing at a real file."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     src = tmp_path / name
     src.write_bytes(payload)
     return {
@@ -72,24 +73,18 @@ class TestSafeFilename:
 
 class TestStaging:
     def test_empty_returns_empty(self, temp_workspace_root: Path) -> None:
-        assert (
-            stage_inbound_attachments(
-                session_id="sess-1",
-                connector_name="echo",
-                event_id="evt-1",
-                raw_attachments=None,
-            )
-            == []
-        )
-        assert (
-            stage_inbound_attachments(
-                session_id="sess-1",
-                connector_name="echo",
-                event_id="evt-1",
-                raw_attachments=[],
-            )
-            == []
-        )
+        assert stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            raw_attachments=None,
+        ) == ([], [])
+        assert stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            raw_attachments=[],
+        ) == ([], [])
 
     def test_happy_path_renames_file_and_returns_record(
         self, tmp_path: Path, temp_workspace_root: Path
@@ -98,7 +93,7 @@ class TestStaging:
         connector_temp.mkdir()
         att = _make_temp_attachment(connector_temp, "photo.jpg", b"jpegbytes")
 
-        records = stage_inbound_attachments(
+        records, staged_paths = stage_inbound_attachments(
             session_id="sess-1",
             connector_name="echo",
             event_id="evt-1",
@@ -119,6 +114,9 @@ class TestStaging:
         assert staged.exists()
         assert staged.read_bytes() == b"jpegbytes"
         assert not Path(att["host_path"]).exists()
+        # The newly-staged path list lets the supervisor unlink on
+        # post-staging dedup failure.
+        assert staged_paths == [staged]
 
     def test_multiple_attachments_all_staged(
         self, tmp_path: Path, temp_workspace_root: Path
@@ -127,7 +125,7 @@ class TestStaging:
         b = _make_temp_attachment(tmp_path, "b.png", b"BBBB")
         b["content_type"] = "image/png"
 
-        records = stage_inbound_attachments(
+        records, staged_paths = stage_inbound_attachments(
             session_id="sess-1",
             connector_name="echo",
             event_id="evt-1",
@@ -137,6 +135,7 @@ class TestStaging:
         assert len(records) == 2
         assert records[0]["filename"] == "a.jpg"
         assert records[1]["filename"] == "b.png"
+        assert len(staged_paths) == 2
 
     def test_unsafe_filename_sanitized_in_staged_path(
         self, tmp_path: Path, temp_workspace_root: Path
@@ -151,7 +150,7 @@ class TestStaging:
             "content_type": "image/jpeg",
             "size": 1,
         }
-        records = stage_inbound_attachments(
+        records, _ = stage_inbound_attachments(
             session_id="sess-1",
             connector_name="echo",
             event_id="evt-1",
@@ -167,7 +166,7 @@ class TestStaging:
     ) -> None:
         """Idempotent replay: same event_id delivered twice doesn't double-stage."""
         a = _make_temp_attachment(tmp_path, "photo.jpg", b"first")
-        first = stage_inbound_attachments(
+        first_records, first_paths = stage_inbound_attachments(
             session_id="sess-1",
             connector_name="echo",
             event_id="evt-1",
@@ -177,13 +176,20 @@ class TestStaging:
         # would re-supply the spool entry but its temp file is gone. The
         # function must still succeed (target already at the staged path).
         a2 = dict(a)  # same params dict the SDK would re-emit from spool
-        second = stage_inbound_attachments(
+        second_records, second_paths = stage_inbound_attachments(
             session_id="sess-1",
             connector_name="echo",
             event_id="evt-1",
             raw_attachments=[a2],
         )
-        assert first == second
+        # Records match (same event_id → same in_sandbox_path).
+        assert first_records == second_records
+        # First call materialized one path; replay materialized none —
+        # critical so the supervisor's NotFoundError compensating
+        # unlink doesn't blow away bytes already referenced by the
+        # previously committed event.
+        assert len(first_paths) == 1
+        assert second_paths == []
 
     def test_missing_temp_path_raises_and_cleans_up(
         self, tmp_path: Path, temp_workspace_root: Path
@@ -249,7 +255,7 @@ class TestStaging:
 
         monkeypatch.setattr(os, "rename", fake_rename)
         try:
-            records = stage_inbound_attachments(
+            records, _ = stage_inbound_attachments(
                 session_id="sess-1",
                 connector_name="echo",
                 event_id="evt-1",
@@ -263,3 +269,92 @@ class TestStaging:
         # Source temp deleted by the unlink-after-copy step.
         assert not Path(a["host_path"]).exists()
         assert records[0]["in_sandbox_path"] == "/mnt/attachments/echo/evt-1-photo.jpg"
+
+    def test_exdev_partial_copy_is_cleaned_up(
+        self,
+        tmp_path: Path,
+        temp_workspace_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If shutil.copy2 fails mid-write under the EXDEV branch, the
+        partial target file must still be unlinked by the compensating
+        action.  Regression test for the orphan path that survived the
+        original implementation (target appended to the cleanup list
+        only after a successful copy).
+        """
+        a = _make_temp_attachment(tmp_path, "photo.jpg", b"crossfs-partial")
+
+        def fake_rename(src: Any, dst: Any) -> None:
+            err = OSError("simulated cross-fs")
+            err.errno = errno.EXDEV
+            raise err
+
+        def fake_copy2(src: Any, dst: Any) -> None:
+            # Simulate a partial write: drop some bytes at the target
+            # and then fail.  Without the early append-to-cleanup-list,
+            # this file would be orphaned.
+            Path(dst).write_bytes(b"PART")
+            raise OSError("simulated mid-copy failure")
+
+        import shutil as _shutil
+
+        monkeypatch.setattr(os, "rename", fake_rename)
+        monkeypatch.setattr(_shutil, "copy2", fake_copy2)
+
+        with pytest.raises(AttachmentStagingError, match="across filesystems"):
+            stage_inbound_attachments(
+                session_id="sess-1",
+                connector_name="echo",
+                event_id="evt-1",
+                raw_attachments=[a],
+            )
+
+        partial = temp_workspace_root / "_attachments" / "sess-1" / "echo" / "evt-1-photo.jpg"
+        assert not partial.exists(), "EXDEV partial-copy file leaked past cleanup"
+
+    def test_same_inbound_filename_collision_fails_hard(
+        self, tmp_path: Path, temp_workspace_root: Path
+    ) -> None:
+        """Two attachments in the same inbound that sanitize to the
+        same target name must fail loudly — silently appending a
+        second record pointing at the first attachment's bytes would
+        corrupt ``metadata.attachments``.
+
+        Realistic trigger: a Telegram album where two photos arrive
+        as ``image.jpg`` from different devices.
+        """
+        a = _make_temp_attachment(tmp_path / "from-device-1", "image.jpg", b"AAA")
+        b = _make_temp_attachment(tmp_path / "from-device-2", "image.jpg", b"BBB")
+
+        with pytest.raises(AttachmentStagingError, match="sanitize to the same"):
+            stage_inbound_attachments(
+                session_id="sess-1",
+                connector_name="echo",
+                event_id="evt-1",
+                raw_attachments=[a, b],
+            )
+
+        # Compensating action: the first iteration's staged file is
+        # rolled back so the orphan GC has nothing to clean up.
+        sess_dir = temp_workspace_root / "_attachments" / "sess-1" / "echo"
+        if sess_dir.exists():
+            assert list(sess_dir.iterdir()) == []
+
+    def test_collision_via_sanitization_fails_hard(
+        self, tmp_path: Path, temp_workspace_root: Path
+    ) -> None:
+        """Two distinct filenames that sanitize to identical names
+        (``image.jpg`` vs ``image .jpg`` → both end up
+        ``evt-1-image_.jpg`` after the space → ``_`` mapping)
+        also collide.
+        """
+        a = _make_temp_attachment(tmp_path / "a", "image_.jpg", b"AAA")
+        b = _make_temp_attachment(tmp_path / "b", "image .jpg", b"BBB")
+
+        with pytest.raises(AttachmentStagingError, match="sanitize to the same"):
+            stage_inbound_attachments(
+                session_id="sess-1",
+                connector_name="echo",
+                event_id="evt-1",
+                raw_attachments=[a, b],
+            )

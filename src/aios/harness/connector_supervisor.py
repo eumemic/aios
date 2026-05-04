@@ -84,6 +84,7 @@ to migrate the day the supervisor splits out.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 from collections import Counter, deque
@@ -788,7 +789,7 @@ class ConnectorSubprocessRegistry:
         # acks the spool because the connector's temp file is gone and
         # endless replay would only re-fail.
         try:
-            staged_attachments = stage_inbound_attachments(
+            staged_attachments, newly_staged_paths = stage_inbound_attachments(
                 session_id=target_session_id,
                 connector_name=connector,
                 event_id=event_id,
@@ -822,7 +823,16 @@ class ConnectorSubprocessRegistry:
                 platform_timestamp=platform_timestamp,
             )
         except NotFoundError:
-            # The session vanished between resolution and append.
+            # The session vanished between resolution and append.  Per
+            # design #216 §5, an append failure triggers the synchronous
+            # compensating action (the orphan GC sweep at startup is
+            # the catch-all for crashes, not an excuse to leak files
+            # we already know are unreferenced).  Replay-skipped paths
+            # are excluded by ``stage_inbound_attachments`` so this
+            # only unlinks bytes this call materialized.
+            for path in newly_staged_paths:
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
             self._record_drop(state, "session_missing")
             await self._send_ack(state, event_id)
             return

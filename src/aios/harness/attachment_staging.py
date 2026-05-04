@@ -46,6 +46,11 @@ def _safe_filename(name: str) -> str:
     empty or all-dot inputs, and caps length so a pathological
     filename combined with the ULID prefix can't exhaust the host
     FS's per-component limit.
+
+    Unicode-aware: Python's ``\\w`` matches the full Unicode word class
+    by default, so non-ASCII letters are preserved (e.g.
+    ``café.jpg`` → ``café.jpg``). Only structurally unsafe punctuation
+    and whitespace get rewritten.
     """
     base = os.path.basename(name)
     cleaned = _UNSAFE_FILENAME_CHARS.sub("_", base)
@@ -60,10 +65,11 @@ def stage_inbound_attachments(
     connector_name: str,
     event_id: str,
     raw_attachments: Any,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[Path]]:
     """Move connector-owned temp paths into per-session staging and
-    return the structured records that get stamped onto the inbound
-    event's ``metadata.attachments``.
+    return the structured records (for ``metadata.attachments``) plus
+    the host paths newly created by this call (for the caller's
+    compensating action when the dedup transaction fails downstream).
 
     Input record shape (from the SDK over JSON-RPC)::
 
@@ -73,23 +79,41 @@ def stage_inbound_attachments(
 
         {filename, content_type, size, in_sandbox_path}
 
+    Returns ``(records, newly_staged_paths)``. ``records`` always
+    matches ``raw_attachments`` 1:1; ``newly_staged_paths`` lists only
+    the paths this call materialized — replayed entries whose target
+    already existed are not included, so the caller's compensating
+    unlink doesn't delete bytes referenced by a previously committed
+    event.
+
     On any per-attachment failure: any files newly staged for this
     same inbound are removed and :class:`AttachmentStagingError` is
     raised so the caller drops the inbound atomically.
 
     Replay-safe: if the target path already exists (from a prior
-    delivery of the same ``event_id``), the rename is skipped and the
-    record is rebuilt from the input fields.  Orphan GC handles
-    files stranded by events that never made it past dedup.
+    delivery of the same ``event_id``), the rename is skipped, the
+    record is rebuilt from the input fields, and the path is omitted
+    from ``newly_staged_paths``. Orphan GC handles files stranded by
+    events that never made it past dedup.
+
+    Same-inbound collisions fail hard. If two attachments sanitize to
+    the same ``<event_id>-<safe_name>``, we cannot satisfy both records
+    with distinct bytes; silently appending a record pointing at the
+    other attachment's bytes corrupts ``metadata.attachments``. The
+    realistic trigger (e.g. Telegram album with two ``image.jpg``
+    files) is the platform's responsibility to disambiguate via the
+    SDK; the supervisor drops the inbound and the operator sees the
+    canonical ``attachment_staging_failed`` reason.
     """
     if not isinstance(raw_attachments, list) or not raw_attachments:
-        return []
+        return [], []
 
     connector_dir = ensure_session_attachments_dir(session_id) / connector_name
     connector_dir.mkdir(parents=True, exist_ok=True)
 
     staged_records: list[dict[str, Any]] = []
     newly_staged_paths: list[Path] = []
+    target_names_seen: set[str] = set()
 
     try:
         for raw in raw_attachments:
@@ -111,9 +135,24 @@ def stage_inbound_attachments(
                 )
 
             target_name = f"{event_id}-{_safe_filename(filename)}"
+            if target_name in target_names_seen:
+                raise AttachmentStagingError(
+                    f"two attachments in inbound {event_id!r} sanitize to the "
+                    f"same staged name {target_name!r} ({filename!r}); the "
+                    f"connector must disambiguate before delivery"
+                )
+            target_names_seen.add(target_name)
             target = connector_dir / target_name
 
             if not target.exists():
+                # Register the destination path with the cleanup list
+                # *before* we touch the disk so a partial copy (EXDEV
+                # branch can fail mid-write) is still reachable for
+                # the compensating unlink. ``unlink(missing_ok=True)``
+                # makes early registration safe on the rename branch
+                # too, where the target either exists fully or not at
+                # all.
+                newly_staged_paths.append(target)
                 try:
                     os.rename(host_path, target)
                 except FileNotFoundError as err:
@@ -133,7 +172,6 @@ def stage_inbound_attachments(
                         ) from copy_err
                     with contextlib.suppress(FileNotFoundError):
                         os.unlink(host_path)
-                newly_staged_paths.append(target)
 
             staged_records.append(
                 {
@@ -144,7 +182,7 @@ def stage_inbound_attachments(
                 }
             )
 
-        return staged_records
+        return staged_records, newly_staged_paths
     except Exception:
         for path in newly_staged_paths:
             with contextlib.suppress(OSError):
