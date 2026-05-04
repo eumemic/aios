@@ -320,8 +320,12 @@ async def _provision_for_session_inner(
     networking = env_config.networking if env_config else None
     needs_lockdown = isinstance(networking, LimitedNetworking)
 
-    # Add the bind unconditionally so a fresh inbound landing during a
-    # running step is visible inside the live container without restart.
+    # Bind the per-session attachments dir at every provision so an
+    # inbound landing during a running step is visible to the live
+    # container.  Docker doesn't update binds in place; this works
+    # because the bind exposes the *directory* (not a file snapshot),
+    # and any new file the supervisor stages into it appears through
+    # the existing kernel namespace bind without re-mounting.
     attachments_path = ensure_session_attachments_dir(session_id)
 
     argv = [
