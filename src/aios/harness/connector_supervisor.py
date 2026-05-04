@@ -40,6 +40,45 @@ re-spawn.  After ``_CIRCUIT_THRESHOLD`` failures within
 ``_CIRCUIT_WINDOW``, the loop stops respawning and the connector
 reports ``circuit_open`` until the worker is restarted — operator can
 fix the connector or its config and restart the worker.
+
+Architectural constraint
+------------------------
+
+This module currently lives in the ``aios worker`` process and bakes in
+the single-worker invariant: the worker's ``pg_try_advisory_lock``
+refuses a second concurrent ``aios worker`` so the connector supervisor
+has exclusive ownership of stdio handles, restart bookkeeping, and the
+in-memory account map.  That's fine today (one worker comfortably
+multiplexes hundreds of in-flight session-step coroutines on the
+asyncio loop), but it's a real architectural ceiling for horizontal
+scaling — any future need for multiple workers would force connector
+supervision into a separate ``aios connectors`` process.
+
+To preserve that option without committing to it, this module's public
+surface is intentionally narrow:
+
+* :class:`ConnectorSubprocessRegistry` — entry-point lookup, lifecycle
+  bookkeeping, and the ``account → instance`` routing map.  External
+  consumers should reach for ``state``, ``states_for_connector``,
+  ``snapshot_all``, ``get_session``, ``dispatch_call``, and
+  ``dispatch_call_for_account`` only.
+
+* The procrastinate ``connector_call`` task in
+  :mod:`aios.harness.connector_tasks` is the canonical IPC primitive
+  for cross-process calls into the supervisor.  When the API process
+  needs supervisor data it goes through that task, not by importing
+  the registry.
+
+* The one in-process call site that bypasses the procrastinate IPC is
+  the outbound MCP dispatcher in :mod:`aios.harness.tool_dispatch`,
+  justified there as the per-tool-call hot path where ~50-200ms of
+  procrastinate round-trip would dominate the latency budget.
+
+If new functionality on the supervisor is tempted to add another
+in-process consumer that imports the registry directly, prefer
+defining a procrastinate task in ``connector_tasks.py`` and routing
+new callers through it.  Same end behaviour today; one less call site
+to migrate the day the supervisor splits out.
 """
 
 from __future__ import annotations

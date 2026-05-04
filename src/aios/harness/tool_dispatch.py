@@ -405,6 +405,18 @@ async def _execute_mcp_tool_async(
         # an agent's ``mcp_servers`` entry would be ambiguous.  We
         # resolve in favor of the connector — connectors are first-class
         # in the redesign (#200), HTTP MCP servers are agent-scoped.
+        #
+        # This is the one in-process call site that imports the
+        # supervisor registry directly (rather than going through a
+        # procrastinate task in ``aios.harness.connector_tasks``).
+        # Justified because every outbound MCP tool call is hot-path:
+        # the procrastinate round-trip would add ~50-200ms per call.
+        # New supervisor consumers should NOT add direct-import call
+        # sites here — define a task in ``connector_tasks.py`` and
+        # dispatch through it.  Same behaviour today, one less site
+        # to migrate the day the supervisor splits into a separate
+        # ``aios connectors`` process (see ``connector_supervisor``
+        # module docstring's "Architectural constraint" section).
         connector_registry = runtime.connector_subprocess_registry
         connector_instances = (
             connector_registry.states_for_connector(server_name)
