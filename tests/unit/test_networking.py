@@ -203,6 +203,10 @@ class TestProvisionerDockerArgs:
             ),
             patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
             patch(
+                "aios.sandbox.volumes.ensure_session_attachments_dir",
+                return_value=Path("/tmp/attachments"),
+            ),
+            patch(
                 "aios.sandbox.provisioner._install_packages",
                 AsyncMock(),
             ) as mock_install,
@@ -253,6 +257,10 @@ class TestProvisionerDockerArgs:
                 AsyncMock(return_value=([], None)),
             ),
             patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
+            patch(
+                "aios.sandbox.volumes.ensure_session_attachments_dir",
+                return_value=Path("/tmp/attachments"),
+            ),
             patch("aios.sandbox.provisioner._install_packages", AsyncMock()),
             patch(
                 "aios.sandbox.provisioner._apply_network_lockdown",
@@ -295,6 +303,10 @@ class TestProvisionerDockerArgs:
                 AsyncMock(return_value=([], None)),
             ),
             patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
+            patch(
+                "aios.sandbox.volumes.ensure_session_attachments_dir",
+                return_value=Path("/tmp/attachments"),
+            ),
             patch("aios.sandbox.provisioner._install_packages", AsyncMock()),
             patch(
                 "aios.sandbox.provisioner._apply_network_lockdown",

@@ -306,7 +306,11 @@ async def _provision_for_session_inner(
 ) -> ContainerHandle:
     """The body of ``provision_for_session``. Split out so the caller's
     try/except cleanly wraps everything that might leak the proxy."""
-    from aios.sandbox.volumes import memory_store_host_dir, session_repo_working_tree_dir
+    from aios.sandbox.volumes import (
+        ensure_session_attachments_dir,
+        memory_store_host_dir,
+        session_repo_working_tree_dir,
+    )
 
     merged_env: dict[str, str] = {
         **(env_config.env if env_config and env_config.env else {}),
@@ -315,6 +319,10 @@ async def _provision_for_session_inner(
 
     networking = env_config.networking if env_config else None
     needs_lockdown = isinstance(networking, LimitedNetworking)
+
+    # Add the bind unconditionally so a fresh inbound landing during a
+    # running step is visible inside the live container without restart.
+    attachments_path = ensure_session_attachments_dir(session_id)
 
     argv = [
         "docker",
@@ -325,6 +333,8 @@ async def _provision_for_session_inner(
         # container. Must be an absolute path on the host.
         "--volume",
         f"{workspace_path}:/workspace",
+        "--volume",
+        f"{attachments_path}:/mnt/attachments:ro",
         "--label",
         f"{MANAGED_LABEL_KEY}={MANAGED_LABEL_VALUE}",
         "--label",

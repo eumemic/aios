@@ -39,6 +39,7 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.pool import create_pool, normalize_dsn
 from aios.harness import runtime
+from aios.harness.attachment_gc import sweep_orphan_attachments
 from aios.harness.connector_supervisor import (
     ConnectorSubprocessRegistry,
     instance_label,
@@ -145,6 +146,10 @@ async def worker_main() -> None:
         reaped = await sandbox_registry.reap_orphans(active_session_ids)
         if reaped:
             log.info("worker.reaped_orphan_containers", count=reaped)
+
+        deleted_attachments = await sweep_orphan_attachments(pool)
+        if deleted_attachments:
+            log.info("worker.reaped_orphan_attachments", count=deleted_attachments)
 
         # Start container idle-TTL reaper.
         sandbox_registry.start_reaper(idle_timeout=settings.container_idle_timeout_seconds)

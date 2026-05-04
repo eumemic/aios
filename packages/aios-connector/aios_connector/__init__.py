@@ -23,15 +23,27 @@ Public API:
   ``_meta.aios.focal_channel_path`` into the ``focal`` kwarg.
 * :func:`make_account` — convenience builder for account snapshot
   entries.
+* :class:`Attachment` / :class:`AttachmentError` — inbound binary blobs
+  (photos, voice notes, documents) and the SDK-boundary validation
+  failure connectors catch.
 """
 
 from __future__ import annotations
 
 from aios_connector.base import (
+    Attachment,
+    AttachmentError,
     Connector,
     focal_required,
     make_account,
     tool,
 )
 
-__all__ = ["Connector", "focal_required", "make_account", "tool"]
+__all__ = [
+    "Attachment",
+    "AttachmentError",
+    "Connector",
+    "focal_required",
+    "make_account",
+    "tool",
+]

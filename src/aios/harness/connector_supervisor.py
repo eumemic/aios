@@ -98,6 +98,10 @@ from aios.config import ConnectorInstance, Settings, parse_connector_entry
 from aios.db import queries
 from aios.errors import NotFoundError
 from aios.harness import runtime
+from aios.harness.attachment_staging import (
+    AttachmentStagingError,
+    stage_inbound_attachments,
+)
 from aios.harness.wake import defer_wake
 from aios.logging import get_logger
 from aios.mcp.client import shape_call_result
@@ -145,6 +149,7 @@ DropReason = Literal[
     "malformed",
     "payload_too_large",
     "account_drift",
+    "attachment_staging_failed",
 ]
 
 
@@ -778,7 +783,31 @@ class ConnectorSubprocessRegistry:
             await self._send_ack(state, event_id)
             return
 
-        # 3. Append event + ledger row in the same transaction.
+        # 3. Stage attachments before the dedup transaction.  Renames
+        # are idempotent on the replayed-event_id path; a failure here
+        # acks the spool because the connector's temp file is gone and
+        # endless replay would only re-fail.
+        try:
+            staged_attachments = stage_inbound_attachments(
+                session_id=target_session_id,
+                connector_name=connector,
+                event_id=event_id,
+                raw_attachments=params.get("attachments"),
+            )
+        except AttachmentStagingError as err:
+            log.warning(
+                "connector.attachment_staging_failed",
+                connector=connector,
+                instance=instance,
+                event_id=event_id,
+                session_id=target_session_id,
+                error=str(err),
+            )
+            self._record_drop(state, "attachment_staging_failed")
+            await self._send_ack(state, event_id)
+            return
+
+        # 4. Append event + ledger row in the same transaction.
         try:
             await self._append_with_dedup(
                 connector_name=connector,
@@ -788,7 +817,7 @@ class ConnectorSubprocessRegistry:
                 chat_id=chat_id,
                 sender=sender if isinstance(sender, dict) else {},
                 content=content,
-                attachments=params.get("attachments"),
+                attachments=staged_attachments,
                 connector_metadata=connector_metadata,
                 platform_timestamp=platform_timestamp,
             )
@@ -798,7 +827,7 @@ class ConnectorSubprocessRegistry:
             await self._send_ack(state, event_id)
             return
 
-        # 4. Outside the transaction: defer wake unconditionally.
+        # 5. Outside the transaction: defer wake unconditionally.
         # ``defer_wake`` is idempotent (procrastinate's queueing_lock
         # coalesces duplicates), so we call it on both first-append and
         # dedup paths — the dedup path heals the case where the prior

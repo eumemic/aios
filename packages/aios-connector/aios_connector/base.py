@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
+import stat
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -288,6 +290,61 @@ def make_account(
     return _Account(id=id, display_name=display_name, metadata=metadata or {}).as_dict()
 
 
+_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+
+
+class AttachmentError(ValueError):
+    """Raised by :meth:`Attachment.as_params` when the host path is unreadable
+    or exceeds the 5 MiB SDK boundary cap.
+
+    Connector code that catches this can decide whether to skip the
+    attachment, send a placeholder text message, or fail loudly.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class Attachment:
+    """An inbound binary blob (photo, voice note, document) carried on a
+    chat message.
+
+    The connector hands aios a *host path* — bytes never traverse stdio.
+    The supervisor stages the file into the session's read-only
+    ``/mnt/attachments`` bind mount before appending the inbound event.
+    """
+
+    host_path: str
+    filename: str
+    content_type: str
+
+    def as_params(self) -> dict[str, Any]:
+        """Validate the host path and return the JSON-RPC wire dict.
+
+        Raises :class:`AttachmentError` when the file is missing or
+        exceeds the 5 MiB cap.  Stat'ing here rather than at
+        construction lets callers build :class:`Attachment` instances
+        before their backing files are fully written.
+        """
+        try:
+            st = os.stat(self.host_path)
+        except FileNotFoundError as err:
+            raise AttachmentError(
+                f"attachment host_path does not exist: {self.host_path!r}"
+            ) from err
+        if not stat.S_ISREG(st.st_mode):
+            raise AttachmentError(f"attachment host_path is not a regular file: {self.host_path!r}")
+        if st.st_size > _MAX_ATTACHMENT_BYTES:
+            raise AttachmentError(
+                f"attachment {self.filename!r} is {st.st_size} bytes; "
+                f"SDK cap is {_MAX_ATTACHMENT_BYTES} bytes (5 MiB)."
+            )
+        return {
+            "host_path": self.host_path,
+            "filename": self.filename,
+            "content_type": self.content_type,
+            "size": st.st_size,
+        }
+
+
 class Connector:
     """Base class connector authors subclass.
 
@@ -421,7 +478,7 @@ class Connector:
         chat_id: str,
         sender: dict[str, Any],
         content: str,
-        attachments: list[dict[str, Any]] | None = None,
+        attachments: list[Attachment] | None = None,
         metadata: dict[str, Any] | None = None,
         timestamp: str | None = None,
     ) -> str:
@@ -435,6 +492,15 @@ class Connector:
         return value.  ``chat_id`` is the connector-specific identifier
         the model addresses via focal channel; the harness builds the
         full channel address as ``<connector>/<account>/<chat_id>``.
+
+        ``attachments`` is an optional list of :class:`Attachment`
+        records carrying binary blobs (photos, voice notes, documents).
+        Each attachment's ``host_path`` is validated (readable, ≤5 MiB)
+        before the notification is pushed — invalid attachments raise
+        :class:`AttachmentError` and the connector decides whether to
+        skip, fall back to a text placeholder, or refuse the inbound.
+        Bytes never traverse stdio; the supervisor stages the host path
+        into the session's ``/mnt/attachments`` bind mount.
 
         ``timestamp`` is an optional ISO-8601 string carrying the
         platform's actual delivery time (Signal envelope timestamp,
@@ -465,7 +531,7 @@ class Connector:
             "content": content,
         }
         if attachments:
-            params["attachments"] = list(attachments)
+            params["attachments"] = [att.as_params() for att in attachments]
         if metadata:
             params["metadata"] = dict(metadata)
         if timestamp is not None:

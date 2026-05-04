@@ -770,6 +770,37 @@ async def list_running_session_ids(conn: asyncpg.Connection[Any]) -> list[str]:
     return [str(r["id"]) for r in rows]
 
 
+async def list_attachment_paths_for_sessions(
+    conn: asyncpg.Connection[Any], session_ids: list[str]
+) -> dict[str, set[str]]:
+    """Return ``in_sandbox_path`` values referenced by each session's events.
+
+    Returns a map keyed by session_id; sessions with no attachment
+    references appear with an empty set so callers can distinguish
+    "no events with attachments" from "session unknown".
+    """
+    result: dict[str, set[str]] = {sid: set() for sid in session_ids}
+    if not session_ids:
+        return result
+    rows = await conn.fetch(
+        """
+        SELECT session_id,
+               jsonb_array_elements(data->'metadata'->'attachments')->>'in_sandbox_path'
+                 AS path
+          FROM events
+         WHERE session_id = ANY($1::text[])
+           AND data->'metadata' ? 'attachments'
+           AND jsonb_typeof(data->'metadata'->'attachments') = 'array'
+        """,
+        session_ids,
+    )
+    for row in rows:
+        path = row["path"]
+        if path is not None:
+            result[row["session_id"]].add(path)
+    return result
+
+
 _UNSET: Any = object()
 
 
