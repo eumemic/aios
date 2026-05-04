@@ -22,6 +22,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # ``AIOS_SIGNAL__BOT_TOKEN`` if leading underscores were allowed.
 _INSTANCE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
+# Sentinel ``instance`` value the CLI / API passes when the operator
+# omits the instance segment.  The worker resolves it to the sole
+# enabled instance of that connector type, or returns an
+# ``ambiguous_instance`` error envelope.  Distinct from any valid
+# instance name (which must match :data:`_INSTANCE_NAME_RE`).  Lives
+# here rather than in ``aios.harness.connector_tasks`` so the CLI can
+# import it without triggering the harness's procrastinate-app load
+# (which requires ``db_url`` and other worker-only settings).
+DEFAULT_INSTANCE_SENTINEL = "_"
+
 
 class ConnectorInstance(NamedTuple):
     """Parsed ``connectors_enabled`` entry.

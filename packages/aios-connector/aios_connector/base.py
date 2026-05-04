@@ -59,7 +59,11 @@ _INBOUND_METHOD = f"{_AIOS_NOTIFICATION_PREFIX}inbound"
 
 # MCP ``_meta`` key the harness stamps for outbound tool calls when
 # the calling session has a focal channel set.  Value is the channel
-# address with its ``<connector>/<account>`` prefix stripped.
+# address with only its leading ``<connector>/`` segment stripped, so
+# the connector receives ``<account>/<chat_id>`` (or
+# ``<account>/<chat_id>/<thread>`` for nested forms).  The base class
+# splits on the first ``/`` to expose ``account`` and ``chat_id`` to
+# focal-required tool methods.
 _FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
 
 ToolFn = Callable[..., Awaitable[Any]]

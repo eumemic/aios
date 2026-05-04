@@ -46,12 +46,11 @@ log = get_logger("aios.harness.connector_tasks")
 CONNECTOR_QUEUE = "connectors"
 _TOOLS_TIMEOUT_S = 30.0
 
-# Sentinel ``instance`` value the CLI / API passes when the operator
-# omits the instance segment.  The supervisor resolves it to the sole
-# enabled instance of that connector type, or returns an ``ambiguous``
-# error envelope.  Distinct from any valid instance name (which must
-# match ``^[a-z][a-z0-9_]*$``).
-DEFAULT_INSTANCE_SENTINEL = "_"
+# Re-export so worker-side callers (e.g. tests) that already import
+# from this module don't need to switch to ``aios.config``.  The
+# canonical home is ``aios.config`` because the CLI imports it without
+# triggering this module's procrastinate-app load.
+from aios.config import DEFAULT_INSTANCE_SENTINEL  # noqa: E402  (re-export)
 
 
 def _result_channel(call_id: str) -> str:
@@ -220,7 +219,7 @@ async def connector_tools(call_id: str, connector: str, instance: str) -> None:
         log.warning(
             "connector_tools.list_failed",
             connector=connector,
-            instance=instance,
+            instance=resolved,
             exc_info=True,
         )
         await _notify_result(

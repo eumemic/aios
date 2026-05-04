@@ -173,6 +173,16 @@ class ConnectorState:
         }
 
 
+def _sibling_instances(parsed: list[ConnectorInstance], connector: str, instance: str) -> set[str]:
+    """Return instance names of OTHER instances of the same connector type.
+
+    Used to filter sibling-scoped env vars out of each subprocess's env
+    so a wedged connector that iterates ``os.environ`` can't expose
+    sibling tokens.
+    """
+    return {ci.instance for ci in parsed if ci.connector == connector and ci.instance != instance}
+
+
 def resolve_connector_specs(settings: Settings) -> list[tuple[ConnectorInstance, ConnectorSpec]]:
     """Resolve ``connectors_enabled`` into ``(instance, spec)`` pairs.
 
@@ -189,9 +199,9 @@ def resolve_connector_specs(settings: Settings) -> list[tuple[ConnectorInstance,
     silently skip.
     """
     available = {ep.name: ep for ep in entry_points(group="aios.connectors")}
+    parsed = [parse_connector_entry(raw) for raw in settings.connectors_enabled]
     out: list[tuple[ConnectorInstance, ConnectorSpec]] = []
-    for raw in settings.connectors_enabled:
-        ci = parse_connector_entry(raw)
+    for raw, ci in zip(settings.connectors_enabled, parsed, strict=True):
         ep = available.get(ci.connector)
         if ep is None:
             raise RuntimeError(
@@ -206,13 +216,18 @@ def resolve_connector_specs(settings: Settings) -> list[tuple[ConnectorInstance,
                 f"entry point aios.connectors:{ci.connector} returned "
                 f"{type(spec).__name__!r}, expected ConnectorSpec"
             )
-        spec = _apply_instance_overlay(spec, ci, settings)
+        siblings = _sibling_instances(parsed, ci.connector, ci.instance)
+        spec = _apply_instance_overlay(spec, ci, settings, siblings=siblings)
         out.append((ci, spec))
     return out
 
 
 def _apply_instance_overlay(
-    spec: ConnectorSpec, ci: ConnectorInstance, settings: Settings
+    spec: ConnectorSpec,
+    ci: ConnectorInstance,
+    settings: Settings,
+    *,
+    siblings: set[str],
 ) -> ConnectorSpec:
     """Layer per-instance cwd + env on top of a factory-returned spec.
 
@@ -228,17 +243,26 @@ def _apply_instance_overlay(
     connector subprocess code stays instance-naive — it just reads
     config under the standard prefix.  Single-instance deployments use
     the unscoped vars directly with no transform.
+
+    ``siblings`` is the set of other instance names for the same
+    connector type; their scoped env vars are stripped so each
+    subprocess sees only its own credentials.
     """
     cwd = spec.cwd
     if cwd is None:
         cwd = settings.connectors_dir / ci.connector
         if ci.instance != ci.connector:
             cwd = cwd / ci.instance
-    env = _build_instance_env(ci, base=spec.env)
+    env = _build_instance_env(ci, base=spec.env, siblings=siblings)
     return replace(spec, cwd=cwd, env=env)
 
 
-def _build_instance_env(ci: ConnectorInstance, *, base: dict[str, str] | None) -> dict[str, str]:
+def _build_instance_env(
+    ci: ConnectorInstance,
+    *,
+    base: dict[str, str] | None,
+    siblings: set[str],
+) -> dict[str, str]:
     """Construct the env dict for a connector subprocess.
 
     Starts from ``os.environ`` (so the subprocess inherits operator-set
@@ -247,7 +271,10 @@ def _build_instance_env(ci: ConnectorInstance, *, base: dict[str, str] | None) -
     non-default instances — re-exports
     ``AIOS_<CONN_UPPER>_<INST_UPPER>_<FIELD>`` as
     ``AIOS_<CONN_UPPER>_<FIELD>`` so the connector reads its config
-    under the standard prefix.
+    under the standard prefix.  ``siblings``-scoped vars are stripped
+    from the resulting env so each subprocess sees only its own
+    credentials (a wedged or chatty connector that iterates
+    ``os.environ`` won't surface sibling tokens).
 
     The re-export overrides any unscoped value: an operator running
     ``connectors_enabled=telegram:bot1,telegram:bot2`` with both
@@ -261,11 +288,22 @@ def _build_instance_env(ci: ConnectorInstance, *, base: dict[str, str] | None) -
         env.update(base)
     if ci.instance == ci.connector:
         return env
-    scope_prefix = f"AIOS_{ci.connector.upper()}_{ci.instance.upper()}_"
-    target_prefix = f"AIOS_{ci.connector.upper()}_"
+    connector_prefix = f"AIOS_{ci.connector.upper()}_"
+    scope_prefix = f"{connector_prefix}{ci.instance.upper()}_"
+    # Re-export our own scoped vars under the standard prefix.
     for key, value in list(env.items()):
         if key.startswith(scope_prefix):
-            env[target_prefix + key[len(scope_prefix) :]] = value
+            env[connector_prefix + key[len(scope_prefix) :]] = value
+    # Strip sibling-scoped vars so credentials don't leak across
+    # subprocesses.  We only remove vars whose leading segment matches
+    # a known sibling instance name from ``connectors_enabled`` —
+    # plain connector-scoped fields like ``AIOS_TELEGRAM_BOT_TOKEN`` (no
+    # instance segment) are kept as the legacy fallback.
+    if siblings:
+        sibling_prefixes = tuple(f"{connector_prefix}{s.upper()}_" for s in siblings)
+        for key in list(env.keys()):
+            if key.startswith(sibling_prefixes):
+                env.pop(key, None)
     return env
 
 
@@ -590,7 +628,9 @@ class ConnectorSubprocessRegistry:
         INSERT runs in the same transaction as ``append_event`` so a
         replayed inbound (same ULID after worker SIGKILL) hits
         ``ON CONFLICT DO NOTHING`` and the txn rolls back without a
-        second event row.  Ack runs after commit, fire-and-forget — a
+        second event row.  Ack runs after commit and is awaited inline
+        (see :meth:`_send_ack` — bounded by ``_DISPATCH_TIMEOUT_S`` so
+        a wedged connector pins the inbound task for at most 60 s); a
         failed ack just means the connector replays again on its next
         reconnect, where the ledger conflict path takes over.
 
@@ -834,13 +874,15 @@ class ConnectorSubprocessRegistry:
         content: str,
         attachments: Any,
         connector_metadata: dict[str, Any] | None,
-    ) -> bool:
+    ) -> None:
         """Append a user-message event AND record the dedup-ledger row.
 
-        Both writes run in one transaction.  Returns ``True`` if the
-        event was appended, ``False`` on dedup (already-processed
-        inbound replayed by the connector).  Raises :class:`NotFoundError`
-        if the target session vanished between resolution and append.
+        Both writes run in one transaction.  Silently returns on dedup
+        (already-processed inbound replayed by the connector) — the
+        ``_DedupRollback`` path logs at INFO and the caller proceeds to
+        defer a wake regardless (idempotent via procrastinate's
+        queueing_lock).  Raises :class:`NotFoundError` if the target
+        session vanished between resolution and append.
 
         Connector-supplied metadata (signal's ``sender_uuid``,
         ``timestamp_ms``, ``reply_to``, ``reaction``; telegram's
@@ -894,8 +936,6 @@ class ConnectorSubprocessRegistry:
                 connector=connector_name,
                 event_id=event_id,
             )
-            return False
-        return True
 
     async def _send_ack(self, state: ConnectorState, event_id: str) -> None:
         """Send ``aios_inbound_ack`` to clear the spool of the originating instance.

@@ -206,6 +206,35 @@ class TestResolveConnectorSpecs:
         assert spec.env is not None
         assert spec.env["AIOS_TELEGRAM_BOT_TOKEN"] == "the-only-token"
 
+    def test_env_strips_sibling_scoped_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Each subprocess sees only its own scoped vars; sibling tokens stay out.
+
+        A wedged or chatty connector that iterates ``os.environ`` for
+        debugging would otherwise expose sibling instances' credentials.
+        """
+        ep = MagicMock()
+        ep.name = "telegram"
+        ep.load.return_value = lambda name, settings: ConnectorSpec(name=name, command="/bin/echo")
+        monkeypatch.setattr(
+            "aios.harness.connector_supervisor.entry_points",
+            lambda group: [ep],
+        )
+        monkeypatch.setenv("AIOS_TELEGRAM_BOT1_BOT_TOKEN", "scoped-bot1")
+        monkeypatch.setenv("AIOS_TELEGRAM_BOT2_BOT_TOKEN", "scoped-bot2")
+        # Plain connector-prefix var (no instance segment) should
+        # survive — operator may rely on it as a default fallback.
+        monkeypatch.setenv("AIOS_TELEGRAM_BOT_TOKEN", "fallback")
+        specs = resolve_connector_specs(self._settings(enabled=["telegram:bot1", "telegram:bot2"]))
+        bot1_env = specs[0][1].env
+        bot2_env = specs[1][1].env
+        assert bot1_env is not None and bot2_env is not None
+        # bot1 sees its own re-export, NOT bot2's scoped var.
+        assert bot1_env["AIOS_TELEGRAM_BOT_TOKEN"] == "scoped-bot1"
+        assert "AIOS_TELEGRAM_BOT2_BOT_TOKEN" not in bot1_env
+        # And the reverse for bot2.
+        assert bot2_env["AIOS_TELEGRAM_BOT_TOKEN"] == "scoped-bot2"
+        assert "AIOS_TELEGRAM_BOT1_BOT_TOKEN" not in bot2_env
+
 
 class TestPumpStderrLineExtraction:
     """The stderr pump must split lines O(n) across chunk boundaries.

@@ -24,17 +24,13 @@ from aios.cli.commands._shared import just_client, render_single
 from aios.cli.files import PayloadError, load_payload
 from aios.cli.output import print_error
 from aios.cli.runtime import run_or_die
+from aios.config import DEFAULT_INSTANCE_SENTINEL
 
 app = typer.Typer(
     name="connectors",
     help="Inspect connector subprocesses (admin).",
     no_args_is_help=True,
 )
-
-# Mirrors ``aios.harness.connector_tasks.DEFAULT_INSTANCE_SENTINEL`` —
-# the CLI doesn't import from the worker module directly because the
-# CLI ships in environments without the harness installed.
-_DEFAULT_INSTANCE = "_"
 
 
 @app.command("list")
@@ -78,7 +74,8 @@ def accounts(
         client = just_client(ctx)
         with client:
             obj = client.request(
-                "GET", f"/v1/connectors/{connector}/{instance or _DEFAULT_INSTANCE}/accounts"
+                "GET",
+                f"/v1/connectors/{connector}/{instance or DEFAULT_INSTANCE_SENTINEL}/accounts",
             )
         render_single(obj)
 
@@ -95,7 +92,7 @@ def tools(
         client = just_client(ctx)
         with client:
             obj = client.request(
-                "GET", f"/v1/connectors/{connector}/{instance or _DEFAULT_INSTANCE}/tools"
+                "GET", f"/v1/connectors/{connector}/{instance or DEFAULT_INSTANCE_SENTINEL}/tools"
             )
         render_single(obj)
 
@@ -121,7 +118,7 @@ def call(
         with client:
             obj = client.request(
                 "POST",
-                f"/v1/connectors/{connector}/{instance or _DEFAULT_INSTANCE}/call",
+                f"/v1/connectors/{connector}/{instance or DEFAULT_INSTANCE_SENTINEL}/call",
                 json_body=payload,
             )
         render_single(obj)
