@@ -97,17 +97,6 @@ That env var is removed cleanly — set `AIOS_SIGNAL_PHONES=+1...` (a
 one-element CSV) for an equivalent single-phone deployment.  Multi-
 phone setups become `AIOS_SIGNAL_PHONES=+1...,+2...`.
 
-## Multi-phone scaling note
-
-The connector publishes one `## Your identity on this Signal account`
-+ groups roster section per registered phone in the
-`InitializeResult.instructions` block.  That block is part of every
-session step's system prompt, so prompt size grows linearly with the
-number of phones — at 5-10 phones with rich group rosters the
-inflation is visible in inference cost.  For high-fanout deployments,
-consider splitting into multiple `signal:<instance>` instances each
-serving a small phone set rather than one instance with all phones.
-
 ## Out of scope for v1
 
 - Attachments (inbound messages with attachments are posted text-only with `[attachment: <name> (<mime>)]` markers; `signal_send` has no attachment parameter).
