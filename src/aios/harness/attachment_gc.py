@@ -18,18 +18,38 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
-from aios.logging import get_logger
 from aios.sandbox.volumes import attachments_root
 
-log = get_logger("aios.harness.attachment_gc")
+
+class AttachmentGcError(RuntimeError):
+    """Raised when the orphan sweep failed to delete one or more
+    unreferenced files (perm drift, FS gone read-only, etc.).
+
+    Worker startup deliberately surfaces this rather than silently
+    accumulating un-collectable orphans across boots.  The exception
+    message lists every failed path so the operator can act on the
+    real cause.
+    """
 
 
 async def sweep_orphan_attachments(pool: asyncpg.Pool[Any]) -> int:
     """Delete files in ``_attachments/`` that no event row references.
 
-    Returns the number of files deleted. Per-file unlink errors are
-    logged and skipped so one bad permission bit doesn't strand the
-    rest of startup.
+    Returns the number of files deleted. Raises
+    :class:`AttachmentGcError` if any file we identified as orphaned
+    could not be unlinked — those failures (permission drift, FS gone
+    read-only, root squash on the bind) are real signals about
+    worker provisioning and silently swallowing them lets orphans
+    accumulate forever across reboots.
+
+    Note on session dirs without referencing events: if a session row
+    or its events were purged but the on-disk
+    ``_attachments/<session_id>/`` dir survived, this sweep will
+    delete every file in that dir (the events query returns 0 rows
+    → 0 referenced paths → all on-disk files look orphaned). That is
+    the intended behavior given the design splits cleanup of stranded
+    files from cleanup of empty dirs (the latter is a future polish
+    item alongside session deletion).
     """
     root = attachments_root()
     if not root.exists():
@@ -60,6 +80,7 @@ async def sweep_orphan_attachments(pool: asyncpg.Pool[Any]) -> int:
         )
 
     deleted = 0
+    failures: list[tuple[Path, OSError]] = []
     for session_id, session_files in on_disk_by_session.items():
         referenced = referenced_by_session.get(session_id, set())
         for sandbox_path, file_path in session_files.items():
@@ -69,10 +90,12 @@ async def sweep_orphan_attachments(pool: asyncpg.Pool[Any]) -> int:
                 file_path.unlink()
                 deleted += 1
             except OSError as err:
-                log.warning(
-                    "attachment_gc.unlink_failed",
-                    path=str(file_path),
-                    error=str(err),
-                )
+                failures.append((file_path, err))
+
+    if failures:
+        rendered = ", ".join(f"{p}: {e}" for p, e in failures)
+        raise AttachmentGcError(
+            f"failed to unlink {len(failures)} orphan attachment(s): {rendered}"
+        )
 
     return deleted

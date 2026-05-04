@@ -778,6 +778,14 @@ async def list_attachment_paths_for_sessions(
     Returns a map keyed by session_id; sessions with no attachment
     references appear with an empty set so callers can distinguish
     "no events with attachments" from "session unknown".
+
+    Note: this query infers reference state purely from event rows, so
+    a ``session_id`` whose row was deleted (or whose events were
+    purged) returns an empty set indistinguishable from "session
+    exists but has no attachments". The orphan GC sweep relies on
+    this and will treat every on-disk file under such a session's
+    ``_attachments/<session_id>/`` dir as orphaned — which is the
+    intended behavior, but worth being explicit about.
     """
     result: dict[str, set[str]] = {sid: set() for sid in session_ids}
     if not session_ids:
