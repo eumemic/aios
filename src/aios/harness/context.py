@@ -535,15 +535,47 @@ def build_messages(
             # (preserves prefix monotonicity — see docstring).
             for inj_tcid, inj_data in inject_after.pop(e.seq, []):
                 name = inj_data.get("name", "tool")
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"[Tool result: {name} (call {inj_tcid}) completed]\n"
-                            f"{inj_data.get('content', '')}"
-                        ),
-                    }
-                )
+                header = f"[Tool result: {name} (call {inj_tcid}) completed]"
+                inj_content = inj_data.get("content", "")
+                if isinstance(inj_content, list):
+                    # Multimodal tool result (e.g. image-aware read returning a
+                    # text + image_url part list).  F-stringing would emit the
+                    # Python repr of the list, losing the pixels — splice the
+                    # parts into the synthetic user message instead so the model
+                    # sees the image in the blind-spot signal too.  Spec'd text
+                    # parts are concatenated under the header; non-text parts
+                    # (image_url, etc.) follow as siblings.
+                    text_chunks: list[str] = [header]
+                    other_parts: list[dict[str, Any]] = []
+                    for part in inj_content:
+                        if not isinstance(part, dict):
+                            continue
+                        if part.get("type") == "text":
+                            txt = part.get("text")
+                            if isinstance(txt, str) and txt:
+                                text_chunks.append(txt)
+                        else:
+                            other_parts.append(part)
+                    combined_text = "\n".join(text_chunks)
+                    if other_parts:
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": combined_text},
+                                    *other_parts,
+                                ],
+                            }
+                        )
+                    else:
+                        messages.append({"role": "user", "content": combined_text})
+                else:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": f"{header}\n{inj_content}",
+                        }
+                    )
                 max_stimulus_seq = max(max_stimulus_seq, real_result_seqs[inj_tcid])
 
         elif role == "tool":

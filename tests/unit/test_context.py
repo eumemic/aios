@@ -614,6 +614,94 @@ class TestMonotonicity:
         ctx = build_messages(events, system_prompt=None)
         assert ctx.reacting_to >= 3
 
+    def test_blind_spot_injection_multimodal_list_content(self) -> None:
+        """When a tool returns ``list[dict]`` content (image-aware read,
+        multi-part output) AND the result lands during inference, the
+        synthetic user-message injection must splice the parts in
+        properly — NOT f-string the list (which would emit Python repr
+        and lose the image).  Regression test for PR #218."""
+        image_part = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/jpeg;base64,AAAA"},
+        }
+        tool_content = [
+            {"type": "text", "text": "screenshot below"},
+            image_part,
+        ]
+        events = [
+            _evt(1, "user", content="show me the screen"),
+            _evt(2, "assistant", tool_calls=[_tc("read_1")]),
+            _evt(3, "tool", tool_call_id="read_1", content=""),  # placeholder; overridden below
+            _evt(4, "assistant", content="working on it"),
+        ]
+        # Set the tool result content to a list[dict] (the new shape PR2 added).
+        events[2].data["content"] = tool_content
+        events[2].data["name"] = "read"
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 1  # blind to tool at seq=3
+
+        msgs = self._build(events)
+        # Locate the injected user message — it follows the horizon-setter
+        # assistant ("working on it") and carries the completion header.
+        injected = next(
+            (
+                m
+                for m in msgs
+                if m["role"] == "user"
+                and (
+                    (isinstance(m.get("content"), str) and "completed]" in m["content"])
+                    or (
+                        isinstance(m.get("content"), list)
+                        and any(
+                            isinstance(p, dict)
+                            and p.get("type") == "text"
+                            and "completed]" in (p.get("text") or "")
+                            for p in m["content"]
+                        )
+                    )
+                )
+            ),
+            None,
+        )
+        assert injected is not None, "blind-spot injection must be emitted"
+        # The injection MUST carry an image_url part — not the Python repr
+        # of the list.
+        content = injected["content"]
+        assert isinstance(content, list), (
+            f"multimodal injection must be content-parts, got {type(content).__name__}"
+        )
+        assert any(p.get("type") == "image_url" for p in content), (
+            "image_url part must survive the injection"
+        )
+        # And no part should contain the literal repr fragment that the bug
+        # would have produced.
+        for p in content:
+            text = p.get("text") if isinstance(p, dict) else None
+            if isinstance(text, str):
+                assert "image_url" not in text or text.startswith("[Tool result"), (
+                    "f-stringed list repr leaked into the injection text"
+                )
+
+    def test_blind_spot_injection_string_content_unchanged(self) -> None:
+        """Plain string tool results still produce a string-content injection
+        (back-compat: PR #218's multimodal branch must not regress the
+        common path)."""
+        events = [
+            _evt(1, "user", content="run it"),
+            _evt(2, "assistant", tool_calls=[_tc("bash_1")]),
+            _evt(3, "tool", tool_call_id="bash_1", content="DONE"),
+            _evt(4, "assistant", content="still going"),
+        ]
+        events[2].data["name"] = "bash"
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 1
+
+        msgs = self._build(events)
+        injected = next(m for m in msgs if m["role"] == "user" and m != msgs[0])
+        assert isinstance(injected["content"], str)
+        assert "completed]" in injected["content"]
+        assert "DONE" in injected["content"]
+
 
 # ─── field stripping ────────────────────────────────────────────────────────
 
