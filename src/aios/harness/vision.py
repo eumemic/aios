@@ -1,0 +1,88 @@
+"""Vision-policy helper: single source of truth for image-into-vision decisions.
+
+LiteLLM's :func:`token_counter` returns a flat ~85 tokens per
+``image_url`` part regardless of provider; under-counting only
+matters near the window boundary and provider rejection there is
+recoverable.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import litellm
+
+INLINE_SIZE_CAP_BYTES = 2 * 1024 * 1024
+
+_VISION_OVERRIDES: dict[str, bool] = {}
+
+
+def supports_vision(model: str) -> bool:
+    """True when ``model`` accepts ``image_url`` content parts.
+
+    Consults :data:`_VISION_OVERRIDES` first for cases LiteLLM is wrong
+    or behind on (empty initially; populated as we hit them), then
+    falls back to ``litellm.get_model_info``.
+    """
+    if model in _VISION_OVERRIDES:
+        return _VISION_OVERRIDES[model]
+    try:
+        info = litellm.get_model_info(model)
+    except Exception:
+        return False
+    return bool(info.get("supports_vision"))
+
+
+def can_inline_image(*, model: str, content_type: str, size_bytes: int) -> bool:
+    """True when ``model`` can see image bytes inlined as ``image_url``.
+
+    Returns ``False`` for non-image content_types, oversize files
+    (over :data:`INLINE_SIZE_CAP_BYTES`), and minds without vision
+    support.  Callers fall back to a text marker referencing the
+    in-sandbox path so the model can still ``read`` the file later.
+    """
+    if not content_type.startswith("image/"):
+        return False
+    if size_bytes > INLINE_SIZE_CAP_BYTES:
+        return False
+    return supports_vision(model)
+
+
+def make_image_url_part(*, content_type: str, data_b64: str) -> dict[str, Any]:
+    """Build a chat-completions ``image_url`` content part."""
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{content_type};base64,{data_b64}"},
+    }
+
+
+def text_marker(record: dict[str, Any]) -> str:
+    """Inert text marker for an attachment that won't be inlined.
+
+    Used when the model can't see the pixels (non-vision mind, oversize
+    image, non-image attachment, legacy stub without ``in_sandbox_path``).
+    The marker carries enough info for the model to ``read`` the path
+    if the file is in fact reachable.
+    """
+    filename = record.get("filename") or "unnamed"
+    content_type = record.get("content_type") or "application/octet-stream"
+    size = record.get("size")
+    path = record.get("in_sandbox_path")
+
+    size_str = human_size(size) if isinstance(size, int) else "unknown size"
+    kind = (
+        "image"
+        if isinstance(content_type, str) and content_type.startswith("image/")
+        else "attachment"
+    )
+    if path:
+        return f"[{kind}: {filename} ({content_type}, {size_str}) at {path}]"
+    return f"[{kind}: {filename} ({content_type}, {size_str})]"
+
+
+def human_size(n: int) -> str:
+    if n < 1024:
+        return f"{n}B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f}KB"
+    return f"{n / (1024 * 1024):.1f}MB"

@@ -146,7 +146,7 @@ async def _execute_tool_async(
             "name": name,
         }
         if isinstance(result, ToolResult):
-            if isinstance(result.content, str):
+            if isinstance(result.content, (str, list)):
                 event_data["content"] = result.content
             else:
                 event_data["content"] = json.dumps(result.content, ensure_ascii=False)

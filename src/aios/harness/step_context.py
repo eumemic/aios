@@ -173,7 +173,12 @@ async def compose_step_context(
     """
     from aios.harness.channels import build_channels_tail_block
 
-    ctx = build_messages(events, system_prompt=prelude.system_prompt)
+    ctx = build_messages(
+        events,
+        system_prompt=prelude.system_prompt,
+        model=agent.model,
+        session_id=session.id,
+    )
 
     # Tail block lives *after* build_messages so its per-step mutations
     # (unread counts, previews) don't bust the prefix cache.  Paradigm
