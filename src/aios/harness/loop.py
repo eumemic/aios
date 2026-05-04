@@ -667,6 +667,15 @@ def _classify_tool_call(
         if not server_name or not _is_known_mcp_server(server_name, mcp_server_map):
             return "unknown_mcp"
         perm = resolve_mcp_permission(name, agent.tools)
+        if perm is None:
+            # Fallback to the operator-configured default for unmounted
+            # toolsets (``AIOS_DEFAULT_MCP_PERMISSION_POLICY``).  Unset
+            # → ``always_ask`` (safe default); explicit per-toolset
+            # policies on ``agent.tools`` always win and are returned
+            # above without reaching this branch.
+            from aios.config import get_settings
+
+            perm = get_settings().default_mcp_permission_policy
         if perm == "always_allow":
             return "mcp_immediate"
         return "needs_confirm"

@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, NamedTuple
+from typing import Annotated, Literal, NamedTuple
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -273,6 +273,21 @@ class Settings(BaseSettings):
         "doesn't compose well with that shape under the ``AIOS_`` env prefix; "
         "a flat ``AIOS_CONNECTORS_AUTO_CREATE='{\"signal\":false}'`` is "
         "operationally equivalent and easier to override from systemd / env.",
+    )
+
+    default_mcp_permission_policy: Literal["always_allow", "always_ask"] | None = Field(
+        default=None,
+        description="Fallback permission policy for MCP tools whose server "
+        "has no matching ``mcp_toolset`` entry on the calling agent. "
+        "When unset (the default), unmounted MCP toolsets gate on "
+        "``always_ask`` confirmation — the safe default that protects "
+        "against connector-mounted tools the agent never opted into. "
+        "Operators in trusted environments can set this to "
+        "``always_allow`` so connector tools dispatch immediately on any "
+        "session that has the connection attached, without per-agent "
+        "``mcp_toolset`` declarations.  Explicit per-toolset policies on "
+        "``agent.tools`` always win — this only changes the fallback "
+        "for unmounted servers.",
     )
 
     # ── observability ──────────────────────────────────────────────────────
