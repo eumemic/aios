@@ -15,10 +15,11 @@ from typing import NamedTuple
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Instance names match the same shape as Postgres identifiers so the
-# AIOS_<CONNECTOR_UPPER>_<INSTANCE_UPPER>_* env-var re-export the
-# supervisor performs for non-default instances stays POSIX-valid.
-# Letters/digits/underscore only; lowercase enforced; must start with a letter.
+# Instance names: stricter than ``Settings.instance_id`` (which allows a
+# leading underscore for Postgres identifier compatibility) because the
+# supervisor's AIOS_<CONNECTOR_UPPER>_<INSTANCE_UPPER>_* env-var
+# re-export would produce double-underscore POSIX env names like
+# ``AIOS_SIGNAL__BOT_TOKEN`` if leading underscores were allowed.
 _INSTANCE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 

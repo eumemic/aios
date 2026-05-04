@@ -341,7 +341,7 @@ class TestInboundMalformed:
 
         acked: list[str] = []
 
-        async def fake_ack(_self: object, _connector: str, _instance: str, event_id: str) -> None:
+        async def fake_ack(_self: object, _state: object, event_id: str) -> None:
             acked.append(event_id)
 
         monkeypatch.setattr(

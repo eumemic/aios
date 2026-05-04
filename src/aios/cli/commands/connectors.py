@@ -7,17 +7,16 @@ subcommand expects a JSON payload of shape ``{"tool": str,
 "arguments": dict, "meta": dict | null}``.
 
 Multi-instance: most commands take ``<connector> [<instance>]``
-positional args.  When the operator omits ``<instance>`` and the
-connector type has exactly one configured instance, that instance is
-used; if multiple are configured the CLI errors out with a list and
-the operator must specify.  This sugar lives in the CLI only — the
-API + procrastinate task layer always require explicit pairs.
+positional args.  When the operator omits ``<instance>``, the CLI
+passes the ``_`` sentinel to the API; the worker auto-resolves it to
+the sole enabled instance, or returns 409 with the list if multiple
+are configured.  One round-trip either way.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import typer
 
@@ -32,31 +31,10 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-
-def _resolve_instance(ctx: typer.Context, connector: str, instance: str | None) -> str:
-    """Auto-resolve instance when only one of this connector type is configured.
-
-    Lists the connector's instances via ``GET /v1/connectors/<connector>``.
-    If exactly one, return its instance name.  If multiple, raise typer
-    Exit with a list so the operator picks explicitly.  If none, the
-    enclosing API call will surface the not-enabled error itself.
-    """
-    if instance is not None:
-        return instance
-    client = just_client(ctx)
-    with client:
-        obj = client.request("GET", f"/v1/connectors/{connector}")
-    instances: list[dict[str, Any]] = obj.get("connectors", []) if isinstance(obj, dict) else []
-    names = [entry.get("instance") for entry in instances if isinstance(entry, dict)]
-    if len(names) == 1 and isinstance(names[0], str):
-        return names[0]
-    if not names:
-        raise typer.Exit(code=1)
-    print_error(
-        f"connector {connector!r} has multiple instances ({', '.join(str(n) for n in names)}); "
-        "specify one explicitly"
-    )
-    raise typer.Exit(code=2)
+# Mirrors ``aios.harness.connector_tasks.DEFAULT_INSTANCE_SENTINEL`` —
+# the CLI doesn't import from the worker module directly because the
+# CLI ships in environments without the harness installed.
+_DEFAULT_INSTANCE = "_"
 
 
 @app.command("list")
@@ -97,10 +75,11 @@ def accounts(
     instance: Annotated[str | None, typer.Argument()] = None,
 ) -> None:
     def _run() -> None:
-        resolved = _resolve_instance(ctx, connector, instance)
         client = just_client(ctx)
         with client:
-            obj = client.request("GET", f"/v1/connectors/{connector}/{resolved}/accounts")
+            obj = client.request(
+                "GET", f"/v1/connectors/{connector}/{instance or _DEFAULT_INSTANCE}/accounts"
+            )
         render_single(obj)
 
     run_or_die(_run)
@@ -113,10 +92,11 @@ def tools(
     instance: Annotated[str | None, typer.Argument()] = None,
 ) -> None:
     def _run() -> None:
-        resolved = _resolve_instance(ctx, connector, instance)
         client = just_client(ctx)
         with client:
-            obj = client.request("GET", f"/v1/connectors/{connector}/{resolved}/tools")
+            obj = client.request(
+                "GET", f"/v1/connectors/{connector}/{instance or _DEFAULT_INSTANCE}/tools"
+            )
         render_single(obj)
 
     run_or_die(_run)
@@ -137,11 +117,12 @@ def call(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        resolved = _resolve_instance(ctx, connector, instance)
         client = just_client(ctx)
         with client:
             obj = client.request(
-                "POST", f"/v1/connectors/{connector}/{resolved}/call", json_body=payload
+                "POST",
+                f"/v1/connectors/{connector}/{instance or _DEFAULT_INSTANCE}/call",
+                json_body=payload,
             )
         render_single(obj)
         return None

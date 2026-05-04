@@ -25,6 +25,7 @@ The class wires three bits the lowlevel MCP SDK leaves to integrators:
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable
@@ -179,21 +180,10 @@ def focal_required(fn: ToolFn) -> ToolFn:
 def _detect_focal_kwargs(fn: ToolFn) -> frozenset[str]:
     """Return the subset of :data:`_FOCAL_INJECTED_KWARGS` ``fn`` declares.
 
-    Looks at named parameters (positional-or-keyword, keyword-only).
-    ``**kwargs`` catches don't count — the SDK injects only what the
-    signature explicitly names so connector authors who type-check their
-    tools see missing parameters at static-analysis time.
+    `account` and `chat_id` can't appear as ``**kwargs`` catches — the
+    intersection naturally only matches named parameters.
     """
-    import inspect
-
-    sig = inspect.signature(fn)
-    found: set[str] = set()
-    for param_name, param in sig.parameters.items():
-        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-            continue
-        if param_name in _FOCAL_INJECTED_KWARGS:
-            found.add(param_name)
-    return frozenset(found)
+    return frozenset(inspect.signature(fn).parameters) & _FOCAL_INJECTED_KWARGS
 
 
 def _build_input_schema(fn: ToolFn, *, focal_required: bool) -> dict[str, Any]:
@@ -210,8 +200,6 @@ def _build_input_schema(fn: ToolFn, *, focal_required: bool) -> dict[str, Any]:
     ``list_chats(account: str)`` per design §3.4) keep it as a
     model-visible argument.
     """
-    import inspect
-
     sig = inspect.signature(fn)
     # Fail loudly here: an unresolvable hint at decoration time means
     # the connector author has a forward-reference / circular-import

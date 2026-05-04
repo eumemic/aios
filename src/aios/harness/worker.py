@@ -41,6 +41,7 @@ from aios.db.pool import create_pool, normalize_dsn
 from aios.harness import runtime
 from aios.harness.connector_supervisor import (
     ConnectorSubprocessRegistry,
+    instance_label,
     resolve_connector_specs,
 )
 from aios.harness.procrastinate_app import app as procrastinate_app
@@ -120,7 +121,7 @@ async def worker_main() -> None:
             "worker.startup",
             worker_id=runtime.worker_id,
             concurrency=settings.worker_concurrency,
-            connector_instances=[f"{c}:{i}" if c != i else c for c, i in connector_registry.keys],
+            connector_instances=[instance_label(c, i) for c, i in connector_registry.keys],
         )
 
         # Startup sweep:

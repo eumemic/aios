@@ -412,19 +412,7 @@ async def _execute_mcp_tool_async(
             else []
         )
         if connector_registry is not None and connector_instances:
-            # Resolve which instance of this connector type handles the call.
-            # Three sources of routing info, in order:
-            #   1. explicit ``account`` arg (cross-chat / setup tools)
-            #   2. focal-channel meta — the ``<account>/<chat>`` suffix
-            #      we just stamped above; account is the part before the
-            #      first ``/``
-            #   3. single-instance shortcut for tools without account
-            #      context (e.g. ``ping``); ambiguous if more than one
-            #      instance is enabled
             account_arg = arguments.get("account")
-            account_for_routing: str | None = account_arg if isinstance(account_arg, str) else None
-            if account_for_routing is None and suffix is not None:
-                account_for_routing = suffix.partition("/")[0] or None
             if isinstance(account_arg, str):
                 from aios.services import connections as connections_service
 
@@ -449,14 +437,18 @@ async def _execute_mcp_tool_async(
                         ),
                     )
                     return
+                account_for_routing: str | None = account_arg
+            elif suffix is not None:
+                account_for_routing = suffix.partition("/")[0] or None
+            else:
+                account_for_routing = None
             if account_for_routing is not None:
                 result = await connector_registry.dispatch_call_for_account(
                     server_name, account_for_routing, tool_name, arguments, meta=meta
                 )
             elif len(connector_instances) == 1:
-                instance = connector_instances[0].instance
                 result = await connector_registry.dispatch_call(
-                    server_name, instance, tool_name, arguments, meta=meta
+                    server_name, connector_instances[0].instance, tool_name, arguments, meta=meta
                 )
             else:
                 bound_log.warning(

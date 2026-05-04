@@ -106,7 +106,7 @@ def _patch_send_ack(registry: ConnectorSubprocessRegistry) -> Callable[[], list[
     """
     recorded: list[str] = []
 
-    async def fake_ack(self: Any, connector: str, instance: str, event_id: str) -> None:
+    async def fake_ack(self: Any, state: Any, event_id: str) -> None:
         recorded.append(event_id)
 
     registry._send_ack = fake_ack.__get__(registry, type(registry))  # type: ignore[method-assign]

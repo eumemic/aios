@@ -108,6 +108,16 @@ DropReason = Literal[
 ]
 
 
+def instance_label(connector: str, instance: str) -> str:
+    """Human-readable identifier for ``(connector, instance)``.
+
+    Collapses ``signal:signal`` to ``signal`` for default-instance
+    setups so single-instance deployments don't get a confusing
+    redundant suffix in logs, snapshots, and error envelopes.
+    """
+    return connector if connector == instance else f"{connector}:{instance}"
+
+
 @dataclass
 class ConnectorState:
     """Live state for one connector subprocess instance.
@@ -149,15 +159,7 @@ class ConnectorState:
 
     @property
     def label(self) -> str:
-        """Human-readable identifier for logs and snapshots.
-
-        ``signal:main`` for explicit instances; ``signal`` (no suffix)
-        for default-instance setups so single-instance deployments don't
-        get a confusing redundant ``signal:signal`` everywhere.
-        """
-        if self.instance == self.connector:
-            return self.connector
-        return f"{self.connector}:{self.instance}"
+        return instance_label(self.connector, self.instance)
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -355,6 +357,18 @@ class ConnectorSubprocessRegistry:
         """All ``ConnectorState``s for instances of one connector type."""
         return [s for (c, _i), s in self._states.items() if c == connector]
 
+    def resolve_default_instance(self, connector: str) -> str | None:
+        """Return the sole instance name for ``connector``, or ``None``.
+
+        Used by the procrastinate tasks to auto-resolve the ``_`` sentinel
+        that the CLI passes when the operator omits ``<instance>``.
+        Returns ``None`` for both "no instances enabled" and "multiple
+        instances enabled" — callers distinguish via
+        :meth:`states_for_connector`.
+        """
+        states = self.states_for_connector(connector)
+        return states[0].instance if len(states) == 1 else None
+
     def snapshot_all(self) -> list[dict[str, Any]]:
         return [s.snapshot() for s in self._states.values()]
 
@@ -401,7 +415,7 @@ class ConnectorSubprocessRegistry:
         instance stuck in ``starting`` doesn't pin the worker
         indefinitely; downstream the call itself shares the same bound.
         """
-        label = f"{connector}:{instance}"
+        label = instance_label(connector, instance)
         try:
             session = await asyncio.wait_for(
                 self.get_session(connector, instance), timeout=_DISPATCH_TIMEOUT_S
@@ -475,6 +489,12 @@ class ConnectorSubprocessRegistry:
         connector, instance = key
         state = self._states[key]
         if method == "notifications/aios/accounts":
+            # Each fresh accounts payload is the connector's authoritative
+            # statement of its account set; clear any prior accounts-payload-
+            # derived ``last_error`` (malformed payload, account conflict)
+            # before re-evaluating.  Subprocess-state errors (crashes) are
+            # set in ``_supervisor_loop`` and not affected here.
+            state.last_error = None
             raw_accounts = (params or {}).get("accounts")
             if isinstance(raw_accounts, list):
                 state.accounts = list(raw_accounts)
@@ -617,7 +637,7 @@ class ConnectorSubprocessRegistry:
                 ],
             )
             self._record_drop(state, "malformed")
-            await self._send_ack(connector, instance, event_id)
+            await self._send_ack(state, event_id)
             return
 
         if len(content) > MAX_USER_MESSAGE_CHARS:
@@ -630,7 +650,7 @@ class ConnectorSubprocessRegistry:
                 limit=MAX_USER_MESSAGE_CHARS,
             )
             self._record_drop(state, "payload_too_large")
-            await self._send_ack(connector, instance, event_id)
+            await self._send_ack(state, event_id)
             return
 
         pool = runtime.require_pool()
@@ -646,7 +666,7 @@ class ConnectorSubprocessRegistry:
             # Even if auto-create succeeds, this inbound is dropped:
             # the freshly-detached connection has no session to deliver
             # to.  Operator must explicitly attach / configure-per-chat.
-            await self._send_ack(connector, instance, event_id)
+            await self._send_ack(state, event_id)
             return
 
         # 2. Branch on routing mode.
@@ -664,12 +684,12 @@ class ConnectorSubprocessRegistry:
             )
         else:
             self._record_drop(state, "detached")
-            await self._send_ack(connector, instance, event_id)
+            await self._send_ack(state, event_id)
             return
 
         if target_session_id is None:
             # Per-chat resolution already recorded the drop reason.
-            await self._send_ack(connector, instance, event_id)
+            await self._send_ack(state, event_id)
             return
 
         # 3. Append event + ledger row in the same transaction.
@@ -688,7 +708,7 @@ class ConnectorSubprocessRegistry:
         except NotFoundError:
             # The session vanished between resolution and append.
             self._record_drop(state, "session_missing")
-            await self._send_ack(connector, instance, event_id)
+            await self._send_ack(state, event_id)
             return
 
         # 4. Outside the transaction: defer wake unconditionally.
@@ -699,7 +719,7 @@ class ConnectorSubprocessRegistry:
         # Failures propagate so the inbound task fails and the connector
         # replays on reconnect, where this same path can re-run.
         await defer_wake(pool, target_session_id, cause="inbound")
-        await self._send_ack(connector, instance, event_id)
+        await self._send_ack(state, event_id)
 
     async def _auto_create_or_drop(self, state: ConnectorState, *, account: str) -> None:
         """Insert a detached connection if ``auto_create_connections`` is on.
@@ -877,7 +897,7 @@ class ConnectorSubprocessRegistry:
             return False
         return True
 
-    async def _send_ack(self, connector: str, instance: str, event_id: str) -> None:
+    async def _send_ack(self, state: ConnectorState, event_id: str) -> None:
         """Send ``aios_inbound_ack`` to clear the spool of the originating instance.
 
         Awaited inline so :meth:`shutdown` waits for in-flight acks
@@ -887,13 +907,13 @@ class ConnectorSubprocessRegistry:
         we log but don't retry to avoid pinning a wedged connector.
         """
         result = await self.dispatch_call(
-            connector, instance, "aios_inbound_ack", {"event_id": event_id}
+            state.connector, state.instance, "aios_inbound_ack", {"event_id": event_id}
         )
         if "error" in result:
             log.info(
                 "connector.inbound_ack_failed",
-                connector=connector,
-                instance=instance,
+                connector=state.connector,
+                instance=state.instance,
                 event_id=event_id,
                 error=result["error"],
             )

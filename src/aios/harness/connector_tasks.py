@@ -12,11 +12,9 @@ The ``/v1/connectors/...`` admin endpoints flow through procrastinate:
   ``pg_notify``'s the result envelope on the same channel.
 * The router awaits NOTIFY (60s ceiling) and returns.
 
-Multi-instance: every task takes ``(connector, instance)`` as a
-required pair.  No fallback at the task layer — auto-resolve sugar
-(single-instance case → infer instance) lives in the CLI/API layer
-only, where the user-facing ergonomics matter; tasks themselves
-require explicit pairs to keep the internal contract crisp.
+The ``_`` instance sentinel (:data:`DEFAULT_INSTANCE_SENTINEL`) lets
+the CLI omit ``<instance>`` without a separate resolve round-trip; the
+worker resolves it via :meth:`ConnectorSubprocessRegistry.resolve_default_instance`.
 
 Lock semantics:
 
@@ -48,9 +46,46 @@ log = get_logger("aios.harness.connector_tasks")
 CONNECTOR_QUEUE = "connectors"
 _TOOLS_TIMEOUT_S = 30.0
 
+# Sentinel ``instance`` value the CLI / API passes when the operator
+# omits the instance segment.  The supervisor resolves it to the sole
+# enabled instance of that connector type, or returns an ``ambiguous``
+# error envelope.  Distinct from any valid instance name (which must
+# match ``^[a-z][a-z0-9_]*$``).
+DEFAULT_INSTANCE_SENTINEL = "_"
+
 
 def _result_channel(call_id: str) -> str:
     return f"connector_result_{call_id}"
+
+
+def _resolve_instance_or_error(
+    registry: Any, connector: str, instance: str
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Translate the ``_`` sentinel to a concrete instance name.
+
+    Returns ``(resolved_instance, None)`` on success, or
+    ``(None, error_envelope)`` if the sentinel can't be resolved
+    (no instances enabled, or multiple instances and operator must
+    pick one explicitly).
+    """
+    if instance != DEFAULT_INSTANCE_SENTINEL:
+        return instance, None
+    resolved = registry.resolve_default_instance(connector)
+    if resolved is not None:
+        return resolved, None
+    states = registry.states_for_connector(connector)
+    if not states:
+        return None, {
+            "error": f"connector {connector!r} not enabled",
+            "code": "not_enabled",
+        }
+    return None, {
+        "error": (
+            f"connector {connector!r} has multiple instances "
+            f"({', '.join(s.instance for s in states)}); specify one explicitly"
+        ),
+        "code": "ambiguous_instance",
+    }
 
 
 async def _notify_result(pool: asyncpg.Pool[Any], call_id: str, payload: dict[str, Any]) -> None:
@@ -105,13 +140,18 @@ async def connector_status(
             return
         await _notify_result(pool, call_id, {"connectors": [s.snapshot() for s in states]})
         return
-    state = registry.state(connector, instance)
+    resolved, err = _resolve_instance_or_error(registry, connector, instance)
+    if err is not None:
+        await _notify_result(pool, call_id, err)
+        return
+    assert resolved is not None
+    state = registry.state(connector, resolved)
     if state is None:
         await _notify_result(
             pool,
             call_id,
             {
-                "error": f"connector instance {connector}:{instance} not enabled",
+                "error": f"connector instance {connector}:{resolved} not enabled",
                 "code": "not_enabled",
             },
         )
@@ -139,12 +179,18 @@ async def connector_tools(call_id: str, connector: str, instance: str) -> None:
         CircuitOpen,
         ConnectorNotEnabled,
         ConnectorNotReady,
+        instance_label,
     )
 
-    label = f"{connector}:{instance}"
+    resolved, err = _resolve_instance_or_error(registry, connector, instance)
+    if err is not None:
+        await _notify_result(pool, call_id, err)
+        return
+    assert resolved is not None
+    label = instance_label(connector, resolved)
     try:
         session = await asyncio.wait_for(
-            registry.get_session(connector, instance), timeout=_TOOLS_TIMEOUT_S
+            registry.get_session(connector, resolved), timeout=_TOOLS_TIMEOUT_S
         )
     except ConnectorNotEnabled:
         await _notify_result(
@@ -215,7 +261,12 @@ async def connector_call(
             pool, call_id, {"error": "worker not initialized", "code": "not_ready"}
         )
         return
-    result = await registry.dispatch_call(connector, instance, tool, arguments, meta=meta)
+    resolved, err = _resolve_instance_or_error(registry, connector, instance)
+    if err is not None:
+        await _notify_result(pool, call_id, err)
+        return
+    assert resolved is not None
+    result = await registry.dispatch_call(connector, resolved, tool, arguments, meta=meta)
     await _notify_result(pool, call_id, result)
 
 

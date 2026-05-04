@@ -81,6 +81,7 @@ _CODE_TO_STATUS: dict[str, int] = {
     "circuit_open": status.HTTP_503_SERVICE_UNAVAILABLE,
     "transport_error": status.HTTP_503_SERVICE_UNAVAILABLE,
     "tool_error": status.HTTP_502_BAD_GATEWAY,
+    "ambiguous_instance": status.HTTP_409_CONFLICT,
 }
 
 
