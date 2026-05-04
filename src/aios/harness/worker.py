@@ -116,6 +116,25 @@ async def worker_main() -> None:
 
         await procrastinate_app.open_async()
         procrastinate_opened = True
+
+        # Sweep orphan attachments BEFORE starting the connector
+        # supervisor.  Once ``connector_registry.start()`` returns, spool
+        # entries can flush and ``_handle_inbound`` may stage new files
+        # at any moment.  Those files are visible to the GC sweep as soon
+        # as they hit disk but are still inside the supervisor's dedup
+        # transaction — uncommitted, so the events query reports them as
+        # unreferenced and the sweep would unlink bytes that are about
+        # to commit.  Deferring the sweep to here means there cannot yet
+        # be any in-flight staging on this worker; cross-worker startup
+        # is fine because a freshly-booted worker only sweeps before its
+        # own supervisor opens, and a sibling worker mid-staging has the
+        # transaction already open by the time it stages, so its
+        # commit-happens-before-sweep ordering is governed by Postgres
+        # snapshot isolation rather than wall-clock.
+        deleted_attachments = await sweep_orphan_attachments(pool)
+        if deleted_attachments:
+            log.info("worker.reaped_orphan_attachments", count=deleted_attachments)
+
         await connector_registry.start()
 
         log.info(
@@ -146,10 +165,6 @@ async def worker_main() -> None:
         reaped = await sandbox_registry.reap_orphans(active_session_ids)
         if reaped:
             log.info("worker.reaped_orphan_containers", count=reaped)
-
-        deleted_attachments = await sweep_orphan_attachments(pool)
-        if deleted_attachments:
-            log.info("worker.reaped_orphan_attachments", count=deleted_attachments)
 
         # Start container idle-TTL reaper.
         sandbox_registry.start_reaper(idle_timeout=settings.container_idle_timeout_seconds)
