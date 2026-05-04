@@ -39,19 +39,30 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from aios.models.github_repositories import GithubRepositoryResourceEcho
     from aios.models.memory_stores import MemoryStoreResourceEcho
+    from aios.sandbox.git_proxy import GitProxy
 
 
 def mount_snapshot_from_echoes(
-    echoes: Iterable[MemoryStoreResourceEcho],
-) -> frozenset[tuple[str, str, str]]:
+    memory_echoes: Iterable[MemoryStoreResourceEcho],
+    github_echoes: Iterable[GithubRepositoryResourceEcho],
+) -> frozenset[tuple[str, ...]]:
     """The set of inputs that determines the docker ``--volume`` argv.
 
     Order-independent so rank reorders don't trigger spurious recycles.
-    Both the provisioner (snapshot-at-provision) and the registry
-    (snapshot-at-compare) call this so the tuple shape stays in lockstep.
+    Each tuple is type-prefixed so memory and github namespaces can't
+    collide. The github tuple includes ``updated_at`` so token rotation
+    (which bumps ``updated_at``) propagates to a container recycle.
     """
-    return frozenset((e.memory_store_id, e.name, e.access) for e in echoes)
+    from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE
+
+    items: set[tuple[str, ...]] = set()
+    for m in memory_echoes:
+        items.add((MEMORY_STORE, m.memory_store_id, m.name, m.access))
+    for g in github_echoes:
+        items.add((GITHUB_REPOSITORY, g.id, g.mount_path, g.updated_at.isoformat()))
+    return frozenset(items)
 
 
 @dataclass(slots=True, frozen=True)
@@ -129,12 +140,16 @@ class ContainerHandle:
         session_id: str,
         container_id: str,
         workspace_path: Path,
-        mount_snapshot: frozenset[tuple[str, str, str]] = frozenset(),
+        mount_snapshot: frozenset[tuple[str, ...]] = frozenset(),
+        git_proxy: GitProxy | None = None,
     ) -> None:
         self.session_id = session_id
         self.container_id = container_id
         self.workspace_path = workspace_path
         self.mount_snapshot = mount_snapshot
+        # Per-session credential broker for github_repository attachments.
+        # Held here so the handle's release path can stop it.
+        self.git_proxy = git_proxy
 
     async def run_command(
         self,

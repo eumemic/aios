@@ -13,12 +13,32 @@ from typing import Any
 
 import asyncpg
 
+from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.errors import PayloadTooLargeError
 from aios.models.events import Event, EventKind
-from aios.models.memory_stores import MemoryStoreResource
-from aios.models.sessions import MAX_USER_MESSAGE_CHARS, Session, SessionStatus
+from aios.models.sessions import (
+    MAX_USER_MESSAGE_CHARS,
+    Session,
+    SessionResource,
+    SessionResourceEcho,
+    SessionStatus,
+    split_resources_by_type,
+)
+from aios.services import github_repositories as github_repo_service
 from aios.services import memory_stores as memory_service
+
+
+async def _list_all_echoes(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> list[SessionResourceEcho]:
+    """Memory echoes first then github echoes, each in rank order."""
+    memory_echoes = await queries.list_session_memory_store_echoes(conn, session_id)
+    github_echoes = await queries.list_session_github_repo_echoes(conn, session_id)
+    out: list[SessionResourceEcho] = []
+    out.extend(memory_echoes)
+    out.extend(github_echoes)
+    return out
 
 
 async def create_session(
@@ -30,7 +50,8 @@ async def create_session(
     title: str | None,
     metadata: dict[str, Any],
     vault_ids: list[str] | None = None,
-    resources: list[MemoryStoreResource] | None = None,
+    resources: list[SessionResource] | None = None,
+    crypto_box: CryptoBox | None = None,
     workspace_path: str | None = None,
     env: dict[str, str] | None = None,
     spawned_from_connection_id: str | None = None,
@@ -48,6 +69,10 @@ async def create_session(
     together by the per_chat inbound flow — ``switch_channel``'s
     focal-locked invariant depends on the pair being written atomically
     with the row insert.
+
+    ``crypto_box`` is required when ``resources`` includes any
+    ``github_repository`` entries (their auth tokens are encrypted on
+    insert). Memory-store-only attachments don't need it.
     """
     async with pool.acquire() as conn, conn.transaction():
         session = await queries.insert_session(
@@ -66,8 +91,17 @@ async def create_session(
             await queries.set_session_vaults(conn, session.id, vault_ids)
             session = session.model_copy(update={"vault_ids": vault_ids})
         if resources:
-            await memory_service.attach_to_session(conn, session.id, resources)
-            echoes = await queries.list_session_memory_store_echoes(conn, session.id)
+            memory_resources, github_resources = split_resources_by_type(resources)
+            if memory_resources:
+                await memory_service.attach_to_session(conn, session.id, memory_resources)
+            if github_resources:
+                assert crypto_box is not None, (
+                    "API surface requires CryptoBox when attaching github_repository"
+                )
+                await github_repo_service.attach_to_session(
+                    conn, session.id, github_resources, crypto_box
+                )
+            echoes = await _list_all_echoes(conn, session.id)
             session = session.model_copy(update={"resources": echoes})
         return session
 
@@ -76,7 +110,7 @@ async def get_session(pool: asyncpg.Pool[Any], session_id: str) -> Session:
     async with pool.acquire() as conn:
         session = await queries.get_session(conn, session_id)
         vault_ids = await queries.get_session_vault_ids(conn, session_id)
-        echoes = await queries.list_session_memory_store_echoes(conn, session_id)
+        echoes = await _list_all_echoes(conn, session_id)
         return session.model_copy(update={"vault_ids": vault_ids, "resources": echoes})
 
 
@@ -96,7 +130,7 @@ async def list_sessions(
             vault_map = await queries.batch_get_session_vault_ids(conn, [s.id for s in sessions])
             enriched: list[Session] = []
             for s in sessions:
-                echoes = await queries.list_session_memory_store_echoes(conn, s.id)
+                echoes = await _list_all_echoes(conn, s.id)
                 enriched.append(
                     s.model_copy(
                         update={
@@ -258,7 +292,8 @@ async def update_session(
     title: str | None = queries._UNSET,
     metadata: dict[str, Any] | None = None,
     vault_ids: list[str] | None = None,
-    resources: list[MemoryStoreResource] | None = None,
+    resources: list[SessionResource] | None = None,
+    crypto_box: CryptoBox | None = None,
 ) -> Session:
     # One transaction so a 4xx from resource attach (e.g. name collision)
     # rolls back the earlier title/agent/vault writes.
@@ -274,9 +309,22 @@ async def update_session(
         if vault_ids is not None:
             await queries.set_session_vaults(conn, session_id, vault_ids)
         if resources is not None:
-            await memory_service.set_session_resources(conn, session_id, resources)
+            # Wire-level semantics is full-list-replace across all
+            # resource types, so an incoming list that omits a type
+            # detaches every existing attachment of that type.
+            memory_resources, github_resources = split_resources_by_type(resources)
+            await memory_service.set_session_resources(conn, session_id, memory_resources)
+            if github_resources:
+                assert crypto_box is not None, (
+                    "API surface requires CryptoBox when attaching github_repository"
+                )
+                await github_repo_service.set_session_resources(
+                    conn, session_id, github_resources, crypto_box
+                )
+            else:
+                await github_repo_service.detach_all_from_session(conn, session_id)
         vids = await queries.get_session_vault_ids(conn, session_id)
-        echoes = await queries.list_session_memory_store_echoes(conn, session_id)
+        echoes = await _list_all_echoes(conn, session_id)
         return session.model_copy(update={"vault_ids": vids, "resources": echoes})
 
 

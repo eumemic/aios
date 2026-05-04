@@ -33,6 +33,7 @@ SESSION_TEMPLATE: Final = "stpl"
 MEMORY_STORE: Final = "memstore"
 MEMORY: Final = "mem"
 MEMORY_VERSION: Final = "memver"
+GITHUB_REPOSITORY: Final = "ghrepo"
 
 _PREFIXES: Final = frozenset(
     {
@@ -50,6 +51,7 @@ _PREFIXES: Final = frozenset(
         MEMORY_STORE,
         MEMORY,
         MEMORY_VERSION,
+        GITHUB_REPOSITORY,
     }
 )
 

@@ -19,6 +19,7 @@ from sse_starlette import EventSourceResponse
 
 from aios.api.deps import (
     AuthDep,
+    CryptoBoxDep,
     DbUrlDep,
     PoolDep,
     ProcrastinateDep,
@@ -26,15 +27,21 @@ from aios.api.deps import (
 from aios.api.sse import sse_event_stream
 from aios.db import queries
 from aios.db.listen import listen_for_events
-from aios.errors import NotFoundError
+from aios.errors import NotFoundError, ValidationError
 from aios.harness.wake import defer_wake
+from aios.ids import GITHUB_REPOSITORY, split_id
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
+from aios.models.github_repositories import (
+    GithubRepositoryResourceEcho,
+    GithubRepositoryUpdate,
+)
 from aios.models.sessions import (
     ContextResponse,
     Session,
     SessionCreate,
     SessionInterruptRequest,
+    SessionResourceEcho,
     SessionStatus,
     SessionUpdate,
     SessionUserMessage,
@@ -42,6 +49,7 @@ from aios.models.sessions import (
     ToolResultRequest,
     WaitResponse,
 )
+from aios.services import github_repositories as github_repo_service
 from aios.services import sessions as service
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
@@ -52,6 +60,7 @@ async def create(
     body: SessionCreate,
     pool: PoolDep,
     procrastinate: ProcrastinateDep,
+    crypto_box: CryptoBoxDep,
     _auth: AuthDep,
 ) -> Session:
     session = await service.create_session(
@@ -63,6 +72,7 @@ async def create(
         metadata=body.metadata,
         vault_ids=body.vault_ids or None,
         resources=body.resources or None,
+        crypto_box=crypto_box,
         workspace_path=body.workspace_path,
         env=body.env or None,
     )
@@ -101,7 +111,13 @@ async def get(session_id: str, pool: PoolDep, _auth: AuthDep) -> Session:
 
 
 @router.put("/{session_id}")
-async def update(session_id: str, body: SessionUpdate, pool: PoolDep, _auth: AuthDep) -> Session:
+async def update(
+    session_id: str,
+    body: SessionUpdate,
+    pool: PoolDep,
+    crypto_box: CryptoBoxDep,
+    _auth: AuthDep,
+) -> Session:
     from aios.db.queries import _UNSET
 
     # Use model_fields_set to distinguish "not provided" from "explicitly null".
@@ -115,7 +131,87 @@ async def update(session_id: str, body: SessionUpdate, pool: PoolDep, _auth: Aut
         metadata=body.metadata,
         vault_ids=body.vault_ids,
         resources=body.resources,
+        crypto_box=crypto_box,
     )
+
+
+@router.get("/{session_id}/resources")
+async def list_resources(
+    session_id: str, pool: PoolDep, _auth: AuthDep
+) -> ListResponse[SessionResourceEcho]:
+    """List all resources attached to ``session_id``.
+
+    Returns the type-discriminated union of memory store and github
+    repository echoes, ordered by type (memory stores first) and rank.
+    Equivalent to reading the ``resources`` field on the full session
+    record, but cheaper if you don't need anything else.
+    """
+    # Reuse get_session for ordering + echo construction; resources are
+    # already on the returned record.
+    session = await service.get_session(pool, session_id)
+    return ListResponse[SessionResourceEcho](
+        data=session.resources, has_more=False, next_after=None
+    )
+
+
+@router.get("/{session_id}/resources/{resource_id}")
+async def get_resource(
+    session_id: str, resource_id: str, pool: PoolDep, _auth: AuthDep
+) -> GithubRepositoryResourceEcho:
+    """Fetch a single resource attached to ``session_id`` by its id.
+
+    v1 only supports ``github_repository`` (id prefix ``ghrepo_``) since
+    memory store attachments are keyed by ``(session_id, memory_store_id)``
+    and don't have a separate attachment id.
+    """
+    _require_github_resource_id(resource_id)
+    return await github_repo_service.get_resource(pool, session_id, resource_id)
+
+
+@router.post("/{session_id}/resources/{resource_id}")
+async def update_resource(
+    session_id: str,
+    resource_id: str,
+    body: GithubRepositoryUpdate,
+    pool: PoolDep,
+    crypto_box: CryptoBoxDep,
+    _auth: AuthDep,
+) -> GithubRepositoryResourceEcho:
+    """Rotate the auth token on a github_repository attachment.
+
+    The bumped ``updated_at`` propagates through the mount snapshot, so
+    the next sandbox provision recycles the container and re-clones the
+    working tree with the new token.
+    """
+    _require_github_resource_id(resource_id)
+    return await github_repo_service.rotate_token(
+        pool,
+        crypto_box,
+        session_id=session_id,
+        resource_id=resource_id,
+        new_token=body.authorization_token.get_secret_value(),
+    )
+
+
+def _require_github_resource_id(resource_id: str) -> None:
+    """Reject non-github resource ids with a useful 400 instead of a 404.
+
+    Memory store attachments don't have a separate id; pointing at a
+    ``memstore_`` here is almost always a client bug.
+    """
+    try:
+        prefix, _ = split_id(resource_id)
+    except ValueError as exc:
+        raise ValidationError(
+            f"malformed resource id: {resource_id!r}",
+            detail={"resource_id": resource_id},
+        ) from exc
+    if prefix != GITHUB_REPOSITORY:
+        raise ValidationError(
+            "only github_repository resource ids (prefix 'ghrepo_') are "
+            "supported on the per-resource sub-collection endpoints",
+            detail={"resource_id": resource_id, "prefix": prefix},
+        )
 
 
 @router.post("/{session_id}/archive")

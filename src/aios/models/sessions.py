@@ -11,17 +11,60 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aios.models.events import Event
+from aios.models.github_repositories import (
+    MAX_REPOS_PER_SESSION,
+    GithubRepositoryResource,
+    GithubRepositoryResourceEcho,
+)
+from aios.models.github_repositories import validate_resources as _validate_github_resources
 from aios.models.memory_stores import (
     MAX_STORES_PER_SESSION,
     MemoryStoreResource,
     MemoryStoreResourceEcho,
-    validate_resources,
 )
+from aios.models.memory_stores import validate_resources as _validate_memory_resources
+
+# Discriminated union over resource types. New types extend this union.
+SessionResource = Annotated[
+    MemoryStoreResource | GithubRepositoryResource,
+    Field(discriminator="type"),
+]
+SessionResourceEcho = Annotated[
+    MemoryStoreResourceEcho | GithubRepositoryResourceEcho,
+    Field(discriminator="type"),
+]
+
+# Combined per-session cap. Each type still enforces its own narrower cap
+# inside ``_validate_session_resources`` below.
+MAX_RESOURCES_PER_SESSION = MAX_STORES_PER_SESSION + MAX_REPOS_PER_SESSION
+
+
+def split_resources_by_type(
+    resources: list[SessionResource],
+) -> tuple[list[MemoryStoreResource], list[GithubRepositoryResource]]:
+    """Partition a heterogeneous resource list by its discriminator."""
+    memory: list[MemoryStoreResource] = []
+    github: list[GithubRepositoryResource] = []
+    for r in resources:
+        if isinstance(r, MemoryStoreResource):
+            memory.append(r)
+        else:
+            github.append(r)
+    return memory, github
+
+
+def _validate_session_resources(resources: list[SessionResource]) -> None:
+    """Pre-DB cross-item validation; failures surface as 4xx instead of
+    constraint violations."""
+    memory, github = split_resources_by_type(resources)
+    _validate_memory_resources(memory)
+    _validate_github_resources(github)
+
 
 SessionStatus = Literal["pending", "running", "idle", "rescheduling", "terminated"]
 
@@ -79,15 +122,16 @@ class SessionCreate(BaseModel):
             "enqueues a wake job. Equivalent to a follow-up POST /messages."
         ),
     )
-    resources: list[MemoryStoreResource] = Field(
+    resources: list[SessionResource] = Field(
         default_factory=list,
-        max_length=MAX_STORES_PER_SESSION,
+        max_length=MAX_RESOURCES_PER_SESSION,
         description=(
-            "Memory store resources to attach. Up to "
-            f"{MAX_STORES_PER_SESSION} per session, no duplicate "
-            "memory_store_id. Mounted under /mnt/memory/<store_name>/ in "
-            "the sandbox. Use ``PUT /v1/sessions/{id}`` with ``resources`` "
-            "to attach or detach stores after creation."
+            "Resources to attach. Mix of memory stores (mounted under "
+            "/mnt/memory/<name>/) and github repositories (cloned to a "
+            "user-specified mount_path). Each type has its own per-session "
+            "cap; duplicates within a type are rejected. Use "
+            "``PUT /v1/sessions/{id}`` with ``resources`` to detach or "
+            "replace the set after creation."
         ),
     )
 
@@ -105,7 +149,7 @@ class SessionCreate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_resources(self) -> SessionCreate:
-        validate_resources(self.resources)
+        _validate_session_resources(self.resources)
         return self
 
 
@@ -127,12 +171,12 @@ class SessionUpdate(BaseModel):
     title: str | None = None
     metadata: dict[str, Any] | None = None
     vault_ids: list[str] | None = None
-    resources: list[MemoryStoreResource] | None = None
+    resources: list[SessionResource] | None = None
 
     @model_validator(mode="after")
     def _validate_resources(self) -> SessionUpdate:
         if self.resources is not None:
-            validate_resources(self.resources)
+            _validate_session_resources(self.resources)
         return self
 
 
@@ -150,7 +194,7 @@ class Session(BaseModel):
     vault_ids: list[str] = Field(default_factory=list)
     last_event_seq: int
     usage: SessionUsage = Field(default_factory=SessionUsage)
-    resources: list[MemoryStoreResourceEcho] = Field(default_factory=list)
+    resources: list[SessionResourceEcho] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
