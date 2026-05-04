@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,6 +92,32 @@ class ConnectorSpec:
     cwd: Path | None = None
 
 
+# Patterns matching credentials that connector libraries embed in URL
+# paths and routinely log via their HTTP clients (e.g. python-telegram-bot
+# delegates to httpx, whose default logger emits the full request URL
+# including the bot token).  We redact at emission time rather than
+# upstream-filtering each library because stderr is a multi-source pipe
+# and the supervisor has no per-line knowledge of which library produced
+# each line.
+#
+# Telegram bot tokens have the shape ``<bot_id>:<32+ alphanum-_-_>``, used
+# as a path segment after ``/bot``.  The redaction preserves the URL
+# shape so the operator can still see *which* request was made (and
+# spot, e.g., a getUpdates polling loop) without exposing the token.
+_BOT_TOKEN_RE = re.compile(r"/bot\d+:[A-Za-z0-9_\-]+")
+
+
+def _redact_secrets(line: str) -> str:
+    """Strip embedded secrets from a stderr line before logging.
+
+    The redaction is deliberately conservative — it doesn't try to
+    parse log formats; it just matches well-known credential shapes.
+    Add new patterns here as connectors that leak their own
+    credentials are surfaced.
+    """
+    return _BOT_TOKEN_RE.sub("/bot<redacted>", line)
+
+
 async def _pump_stderr(connector_name: str, read_fd: int) -> None:
     """Read connector stderr via ``loop.add_reader`` and emit lines as structlog events.
 
@@ -129,7 +156,7 @@ async def _pump_stderr(connector_name: str, read_fd: int) -> None:
             if line:
                 bound.info(
                     "connector.stderr",
-                    line=line.decode("utf-8", errors="replace"),
+                    line=_redact_secrets(line.decode("utf-8", errors="replace")),
                 )
 
     loop.add_reader(read_fd, on_readable)
@@ -140,7 +167,7 @@ async def _pump_stderr(connector_name: str, read_fd: int) -> None:
         if pending:
             bound.info(
                 "connector.stderr",
-                line=pending.decode("utf-8", errors="replace"),
+                line=_redact_secrets(pending.decode("utf-8", errors="replace")),
             )
         with contextlib.suppress(OSError):
             os.close(read_fd)

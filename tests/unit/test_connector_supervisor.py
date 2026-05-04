@@ -271,6 +271,36 @@ class TestPumpStderrLineExtraction:
                 os.close(write_fd)
         assert captured == ["trailing-no-newline"]
 
+    async def test_telegram_bot_token_redacted_from_url(self) -> None:
+        """PTB's httpx logger writes ``https://api.telegram.org/bot<TOKEN>/...``
+        URLs to stderr.  The pump must redact the token before emitting
+        ``connector.stderr`` events — otherwise the bot token lives in
+        ``/tmp/aios-worker.log`` and anyone with log access can extract it.
+        """
+        captured: list[str] = []
+        read_fd, write_fd = os.pipe()
+        token = "8116307959:AAFv1He6CZ-tpGun19CTp1tjbBoWtJrGrL8"
+        try:
+            pump = asyncio.create_task(_pump_stderr("test_conn", read_fd))
+            with mock_log_capture(captured):
+                os.write(
+                    write_fd,
+                    f'HTTP Request: POST https://api.telegram.org/bot{token}/getMe "HTTP/1.1 200 OK"\n'.encode(),
+                )
+                await asyncio.sleep(0.05)
+                os.close(write_fd)
+                write_fd = -1
+                await asyncio.wait_for(pump, timeout=1.0)
+        finally:
+            if write_fd != -1:
+                os.close(write_fd)
+        assert len(captured) == 1
+        line = captured[0]
+        assert token not in line, "bot token must be redacted from stderr line"
+        # Existing path structure preserved — only the token is masked.
+        assert "/getMe" in line
+        assert "api.telegram.org" in line
+
 
 class TestDropCounter:
     """Drop counters bump per reason and surface in :meth:`snapshot`.
