@@ -21,8 +21,10 @@ work — set ``AIOS_SIGNAL_PHONES=+1555`` (a one-element list).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -32,9 +34,19 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    # Signal / daemon
-    phones: list[str]
+    # Signal / daemon — ``Annotated[..., NoDecode]`` skips pydantic-settings'
+    # default JSON parsing for ``list[str]`` env vars so the
+    # :meth:`_split_csv` validator below sees the raw env string.
+    phones: Annotated[list[str], NoDecode]
     config_dir: Path
     cli_bin: str = "signal-cli"
     daemon_host: str = "127.0.0.1"
     daemon_port: int = 7583
+
+    @field_validator("phones", mode="before")
+    @classmethod
+    def _split_csv(cls, value: object) -> object:
+        """Accept ``AIOS_SIGNAL_PHONES=+1,+2`` env strings as well as JSON arrays."""
+        if isinstance(value, str):
+            return [s.strip() for s in value.split(",") if s.strip()]
+        return value

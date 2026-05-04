@@ -107,3 +107,32 @@ class TestConnectorsEnabledValidator:
     def test_invalid_entry_surfaces_through_validator(self) -> None:
         with pytest.raises(ValidationError, match=r"connector name 'Bad'"):
             Settings(connectors_enabled=["Bad"], **_BASE_KWARGS)
+
+    def test_csv_env_value_parses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``AIOS_CONNECTORS_ENABLED=signal:main,telegram:bot1`` must parse as CSV.
+
+        Pydantic-settings v2 default-parses ``list[str]`` env vars as
+        JSON; the ``NoDecode`` annotation + ``mode='before'`` validator
+        on :class:`Settings` accepts CSV instead.  Without this, the
+        documented operator format ``AIOS_CONNECTORS_ENABLED=a,b``
+        crashes at startup with a ``SettingsError``.
+        """
+        monkeypatch.setenv("AIOS_API_KEY", _BASE_KWARGS["api_key"])
+        monkeypatch.setenv("AIOS_VAULT_KEY", _BASE_KWARGS["vault_key"])
+        monkeypatch.setenv("AIOS_DB_URL", _BASE_KWARGS["db_url"])
+        monkeypatch.setenv("AIOS_CONNECTORS_ENABLED", "signal:main,telegram:bot1")
+        s = Settings()
+        assert s.connectors_enabled == ["signal:main", "telegram:bot1"]
+        assert s.connector_instances() == [
+            ConnectorInstance(connector="signal", instance="main"),
+            ConnectorInstance(connector="telegram", instance="bot1"),
+        ]
+
+    def test_csv_env_handles_whitespace_and_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Whitespace around CSV entries is stripped; trailing commas drop empties."""
+        monkeypatch.setenv("AIOS_API_KEY", _BASE_KWARGS["api_key"])
+        monkeypatch.setenv("AIOS_VAULT_KEY", _BASE_KWARGS["vault_key"])
+        monkeypatch.setenv("AIOS_DB_URL", _BASE_KWARGS["db_url"])
+        monkeypatch.setenv("AIOS_CONNECTORS_ENABLED", " signal , telegram:bot1 , ")
+        s = Settings()
+        assert s.connectors_enabled == ["signal", "telegram:bot1"]

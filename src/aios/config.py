@@ -10,10 +10,10 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import NamedTuple
+from typing import Annotated, NamedTuple
 
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Instance names: stricter than ``Settings.instance_id`` (which allows a
 # leading underscore for Postgres identifier compatibility) because the
@@ -187,7 +187,13 @@ class Settings(BaseSettings):
     )
 
     # ── connectors ─────────────────────────────────────────────────────────
-    connectors_enabled: list[str] = Field(
+    # ``Annotated[..., NoDecode]`` tells pydantic-settings v2 to skip its
+    # default JSON parsing for ``list[str]`` env vars so the
+    # :meth:`_split_csv` validator below receives the raw string and can
+    # split on commas.  Without ``NoDecode`` the env source tries
+    # ``json.loads("signal:main,telegram:bot1")`` and raises
+    # ``SettingsError`` before the validator runs.
+    connectors_enabled: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
         description="Connector instances the worker should spawn at startup, "
         "as a CSV of ``<connector>[:<instance>]`` entries (e.g. "
@@ -208,6 +214,21 @@ class Settings(BaseSettings):
         "for non-default instances, so spool databases and other state files "
         "live next to each connector subprocess.",
     )
+
+    @field_validator("connectors_enabled", mode="before")
+    @classmethod
+    def _split_csv(cls, value: object) -> object:
+        """Accept CSV env strings (``"signal:main,telegram:bot1"``) as well as JSON arrays.
+
+        Pydantic-settings v2 only auto-parses JSON for ``list[str]``
+        env vars; without this hook ``AIOS_CONNECTORS_ENABLED='a,b'``
+        fails at startup with a SettingsError, contradicting the
+        documented CSV format.  Constructor kwargs (``Settings(connectors_enabled=[...])``)
+        bypass this branch and continue to take a list directly.
+        """
+        if isinstance(value, str):
+            return [s.strip() for s in value.split(",") if s.strip()]
+        return value
 
     @field_validator("connectors_enabled")
     @classmethod
