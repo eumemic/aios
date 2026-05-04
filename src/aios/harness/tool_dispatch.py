@@ -412,18 +412,36 @@ async def _execute_mcp_tool_async(
             else []
         )
         if connector_registry is not None and connector_instances:
+            # Resolve which account the call is targeting.  Tools that
+            # take ``account`` as an explicit arg (cross-chat ops like
+            # ``list_chats``) get it from there; focal-required tools
+            # (``signal_send``, ``telegram_send``) get it from the
+            # focal-channel ``_meta`` suffix's first segment.
             account_arg = arguments.get("account")
             if isinstance(account_arg, str):
+                account_for_routing: str | None = account_arg
+            elif suffix is not None:
+                account_for_routing = suffix.partition("/")[0] or None
+            else:
+                account_for_routing = None
+
+            # Authorize the call regardless of how the account was
+            # resolved.  The pre-fix version only ran this check for
+            # the explicit-arg path; focal-routed dispatch sailed
+            # through unauthorized, letting any session that could
+            # ``switch_channel`` to a connector's chat send via that
+            # connector — see PR #214 #39.
+            if account_for_routing is not None:
                 from aios.services import connections as connections_service
 
                 authorized = await connections_service.validate_account_for_session(
-                    pool, session_id, connector=server_name, account=account_arg
+                    pool, session_id, connector=server_name, account=account_for_routing
                 )
                 if not authorized:
                     bound_log.warning(
                         "mcp_tool.account_not_authorized",
                         server_name=server_name,
-                        account=account_arg,
+                        account=account_for_routing,
                     )
                     is_error = True
                     await _append_tool_result(
@@ -432,16 +450,13 @@ async def _execute_mcp_tool_async(
                         call_id,
                         name,
                         error=(
-                            f"account {account_arg!r} on connector {server_name!r} is not "
-                            "attached to this session or one that spawned it"
+                            f"account {account_for_routing!r} on connector "
+                            f"{server_name!r} is not attached to this session "
+                            "or one that spawned it"
                         ),
                     )
                     return
-                account_for_routing: str | None = account_arg
-            elif suffix is not None:
-                account_for_routing = suffix.partition("/")[0] or None
-            else:
-                account_for_routing = None
+
             if account_for_routing is not None:
                 result = await connector_registry.dispatch_call_for_account(
                     server_name, account_for_routing, tool_name, arguments, meta=meta
