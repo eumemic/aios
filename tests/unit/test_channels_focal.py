@@ -255,19 +255,25 @@ class TestDeriveUnreadCounts:
 
 
 class TestFocalChannelPath:
-    """Suffix-extraction helper for MCP _meta injection (slice 6)."""
+    """Suffix-extraction helper for MCP _meta injection.
+
+    Strips only the leading ``<connector>/`` segment per design §3.4.
+    The ``<account>`` segment is preserved so multi-account connectors
+    can route by account; single-account connectors take the chat
+    suffix only.
+    """
 
     def test_three_segment_address(self) -> None:
-        # Signal shape: signal/<bot>/<chat_id>
-        assert focal_channel_path("signal/bot/alice") == "alice"
+        # Signal shape: signal/<bot>/<chat_id> — account preserved.
+        assert focal_channel_path("signal/bot/alice") == "bot/alice"
 
     def test_four_segment_address_preserves_inner_slashes(self) -> None:
         # Telegram forum-thread shape: telegram/<bot>/<chat>/<thread>
-        assert focal_channel_path("telegram/bot/chat/thread") == "chat/thread"
+        assert focal_channel_path("telegram/bot/chat/thread") == "bot/chat/thread"
 
     def test_deep_address_preserves_all_tail_segments(self) -> None:
         # Defensive: connectors may use arbitrarily deep suffixes.
-        assert focal_channel_path("x/y/a/b/c") == "a/b/c"
+        assert focal_channel_path("x/y/a/b/c") == "y/a/b/c"
 
     def test_none_returns_none(self) -> None:
         assert focal_channel_path(None) is None
@@ -276,9 +282,9 @@ class TestFocalChannelPath:
         assert focal_channel_path("") is None
 
     def test_malformed_two_segments_returns_none(self) -> None:
-        # Missing suffix — should not leak a garbled value.
+        # Missing chat suffix — still rejected as malformed.
         assert focal_channel_path("signal/bot") is None
 
     def test_trailing_slash_yields_empty_suffix_is_none(self) -> None:
-        # "signal/bot/" → 3 segments but suffix is empty → None.
+        # "signal/bot/" → 3 segments but chat_id is empty → None.
         assert focal_channel_path("signal/bot/") is None

@@ -47,6 +47,12 @@ dev = [
     "testcontainers[postgres]>=4.8",
     "ruff>=0.8",
     "mypy>=1.13",
+    # Workspace-installed reference SDK + canonical echo example.  The
+    # echo connector exposes the ``aios.connectors`` entry point the
+    # supervisor's resolver looks up, so e2e tests exercising the full
+    # discovery → spawn → init pipeline can run.
+    "aios-connector",
+    "aios-echo",
 ]
 
 [project.scripts]
@@ -61,7 +67,20 @@ packages = ["src/aios"]
 
 # ─── uv workspace ────────────────────────────────────────────────────────────
 [tool.uv.workspace]
-members = ["connectors/signal", "connectors/telegram"]
+members = [
+    "connectors/signal",
+    "connectors/telegram",
+    "packages/aios-connector",
+    "packages/aios-echo",
+]
+
+# Install the reference SDK and the echo connector in editable mode for
+# development.  The echo connector exposes the ``aios.connectors``
+# entry-point group used by ``ConnectorSubprocessRegistry``'s resolver,
+# so e2e tests that exercise the full discovery pipeline can run.
+[tool.uv.sources]
+aios-connector = { workspace = true }
+aios-echo = { workspace = true }
 
 # ─── ruff ────────────────────────────────────────────────────────────────────
 [tool.ruff]

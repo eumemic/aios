@@ -29,8 +29,7 @@ VAULT: Final = "vlt"
 VAULT_CREDENTIAL: Final = "vcr"
 SKILL: Final = "skl"
 CONNECTION: Final = "conn"
-CHANNEL_BINDING: Final = "cbnd"
-ROUTING_RULE: Final = "rrul"
+SESSION_TEMPLATE: Final = "stpl"
 MEMORY_STORE: Final = "memstore"
 MEMORY: Final = "mem"
 MEMORY_VERSION: Final = "memver"
@@ -48,8 +47,7 @@ _PREFIXES: Final = frozenset(
         VAULT_CREDENTIAL,
         SKILL,
         CONNECTION,
-        CHANNEL_BINDING,
-        ROUTING_RULE,
+        SESSION_TEMPLATE,
         MEMORY_STORE,
         MEMORY,
         MEMORY_VERSION,

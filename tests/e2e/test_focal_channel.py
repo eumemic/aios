@@ -1,1191 +1,264 @@
-"""E2E tests for the focal-channel attention model (issue #29 redesign).
+"""E2E coverage for the focal-channel attention model.
 
-Covers event stamping (``orig_channel`` + ``focal_channel_at_arrival``)
-at append time, the ``switch_channel`` built-in tool, and (in later
-slices) MCP ``_meta`` injection + paradigm/tail blocks.
+Replaces the migration-era ``test_focal_channel.py`` (deleted with the
+old ``channel_bindings`` table).  Bound channels are now derived from
+``events.channel`` stamps; an inbound with ``metadata.channel`` set
+populates the column at append time.
+
+Coverage:
+
+* ``switch_channel`` happy path mutates ``sessions.focal_channel`` and
+  emits the success marker on the tool_result.
+* Unknown-target rejection — switching to a channel the session has
+  never seen returns ``is_error`` and leaves focal unchanged.
+* Per_chat-spawned sessions reject ``switch_channel`` calls regardless
+  of target (focal-locked invariant).
+* The cache-stable focal paradigm prose appears in the system prompt
+  whenever the session has any bound channel; the per-step tail block
+  appears as a user-role message and renders unread counts off the
+  event log.
+* Bare assistant text is auto-prefixed with the monologue marker once
+  the session has bound channels.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import secrets
-from collections.abc import AsyncIterator
 from typing import Any
-from unittest import mock
 
-import pytest
+from aios.db import queries
+from aios.harness.channels import (
+    FOCAL_CHANNEL_META_KEY,
+    MONOLOGUE_PREFIX,
+    SWITCH_CHANNEL_METADATA_KEY,
+    focal_channel_path,
+)
+from aios.services import sessions as sessions_service
+from tests.conftest import needs_docker
+from tests.e2e.harness import Harness, assistant, msg_text, tool_call
 
-from aios.models.routing_rules import SessionParams
-from tests.e2e.harness import msg_text
-
-
-def _uniq() -> str:
-    return secrets.token_hex(4)
-
-
-# ─── shared fixtures (mirrors the test_routing.py pattern) ──────────────────
-
-
-@pytest.fixture
-async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
-    from aios.config import get_settings
-    from aios.db.pool import create_pool
-
-    settings = get_settings()
-    p = await create_pool(settings.db_url, min_size=1, max_size=4)
-    yield p
-    await p.close()
+_TAIL_HEADER = "━━━ Channels ━━━"
+_PARADIGM_HEADER = "## Channels & focal attention"
 
 
-@pytest.fixture
-async def env_id(pool: Any) -> str:
-    from aios.db import queries
-
-    async with pool.acquire() as conn:
-        env = await queries.insert_environment(conn, name=f"focal-test-{_uniq()}")
-    return env.id
+def _switch_call(target: str | None, *, call_id: str = "call_switch") -> dict[str, Any]:
+    return tool_call("switch_channel", {"channel_id": target}, call_id=call_id)
 
 
-@pytest.fixture
-async def agent_id(pool: Any) -> str:
-    from aios.services import agents as svc
-
-    a = await svc.create_agent(
-        pool,
-        name=f"focal-agent-{_uniq()}",
-        model="openai/gpt-4o-mini",
-        system="",
-        tools=[],
-        description=None,
-        metadata={},
-        window_min=50_000,
-        window_max=150_000,
-    )
-    return a.id
-
-
-@pytest.fixture
-async def vault_id(pool: Any) -> str:
-    from aios.services import vaults as svc
-
-    v = await svc.create_vault(pool, display_name="focal-vault", metadata={})
-    return v.id
-
-
-# ─── helpers ────────────────────────────────────────────────────────────────
-
-
-async def _set_focal(pool: Any, session_id: str, focal: str | None) -> None:
-    """Direct DB update until the switch_channel tool (slice 5) lands."""
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE sessions SET focal_channel = $1 WHERE id = $2",
-            focal,
-            session_id,
-        )
-
-
-async def _setup_inbound(pool: Any, agent_id: str, env_id: str, vault_id: str) -> Any:
-    """Create a connection + per-connection catch-all routing rule, return the connection."""
-    from aios.services import channels as ch_svc
-    from aios.services import connections as conn_svc
-
-    connection = await conn_svc.create_connection(
-        pool,
-        connector="signal",
-        account=f"focal-{_uniq()}",
-        mcp_url="https://m",
-        vault_id=vault_id,
-        metadata={},
-    )
-    await ch_svc.create_routing_rule(
-        pool,
-        connection.id,
-        prefix="",
-        target=f"agent:{agent_id}",
-        session_params=SessionParams(environment_id=env_id),
-    )
-    return connection
-
-
-async def _post_inbound(
-    pool: Any, connection: Any, path: str, content: str = "hi"
-) -> tuple[str, str, str]:
-    """Resolve + append a user inbound message.
-
-    Returns ``(session_id, event_id, address)``. Bypasses the HTTP
-    layer so the test is DB-focused. Neither ``resolve_channel`` nor
-    ``append_user_message`` calls ``defer_wake``, so no mock is
-    needed — and using ``mock.patch`` here is unsafe under
-    ``asyncio.gather`` (concurrent enter/exit corrupts the saved
-    original and leaks the mock to later tests).
-    """
-    from aios.services import channels as ch_svc
-    from aios.services import sessions as sess_svc
-
-    address = f"{connection.connector}/{connection.account}/{path}"
-    resolution = await ch_svc.resolve_channel(pool, connection, path)
-    event = await sess_svc.append_user_message(
-        pool,
-        resolution.session_id,
-        content,
-        metadata={"channel": address},
-    )
-    return resolution.session_id, event.id, address
-
-
-# ─── slice 2: stamping tests ────────────────────────────────────────────────
-
-
-class TestEventStampingFromInbound:
-    async def test_inbound_stamps_orig_channel(
-        self, pool: Any, agent_id: str, env_id: str, vault_id: str
-    ) -> None:
-        from aios.db import queries
-
-        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _event_id, address = await _post_inbound(pool, connection, "chat-1")
-
-        async with pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_id)
-
-        msg = events[-1]
-        assert msg.orig_channel == address
-
-    async def test_inbound_stamps_focal_at_arrival_null_when_phone_down(
-        self, pool: Any, agent_id: str, env_id: str, vault_id: str
-    ) -> None:
-        from aios.db import queries
-
-        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _event_id, _address = await _post_inbound(pool, connection, "chat-1")
-
-        # Session was auto-created with focal_channel NULL (phone down).
-        async with pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_id)
-        msg = events[-1]
-        assert msg.focal_channel_at_arrival is None
-
-    async def test_inbound_stamps_focal_at_arrival_when_focused(
-        self, pool: Any, agent_id: str, env_id: str, vault_id: str
-    ) -> None:
-        from aios.db import queries
-
-        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        # First message auto-creates the session.
-        session_id, _e1, address = await _post_inbound(pool, connection, "chat-1")
-        # Focus the agent on this channel.
-        await _set_focal(pool, session_id, address)
-
-        # Second inbound on the same channel — focal matches orig.
-        _sid, _e2, _addr = await _post_inbound(pool, connection, "chat-1", content="still here")
-
-        async with pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_id)
-        msg = events[-1]
-        assert msg.orig_channel == address
-        assert msg.focal_channel_at_arrival == address
-
-    async def test_inbound_stamps_focal_when_orig_differs(
-        self, pool: Any, agent_id: str, env_id: str, vault_id: str
-    ) -> None:
-        """Focal=A, inbound on B → stamp orig=B, focal_at_arrival=A."""
-        from aios.db import queries
-        from aios.services import channels as ch_svc
-
-        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        # First message on chat-A auto-creates the session.
-        session_a_id, _e1, address_a = await _post_inbound(pool, connection, "chat-A")
-        # Focus on A.
-        await _set_focal(pool, session_a_id, address_a)
-        # Bind chat-B to the same session so a POST to B doesn't create a new session.
-        address_b = f"{connection.connector}/{connection.account}/chat-B"
-        await ch_svc.create_binding(pool, address=address_b, session_id=session_a_id)
-        # Inbound on B while focal is A.
-        _sid_b, _e2, _addr_b = await _post_inbound(pool, connection, "chat-B", content="hi from B")
-
-        async with pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_a_id)
-        msg = events[-1]
-        assert msg.orig_channel == address_b
-        assert msg.focal_channel_at_arrival == address_a
-
-    async def test_stamping_reflects_latest_focal_across_serial_appends(
-        self,
-        pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        """append_event reads focal inside the same txn that allocates seq.
-
-        We can't cleanly race asyncio transactions without adding test-
-        internal plumbing, but we can verify that the focal column's
-        value at append time is the value stamped on the event, across
-        multiple serial updates.  Because the UPDATE used for seq
-        allocation also reads focal_channel (RETURNING clause), the read
-        is serialized against any concurrent focal mutation.
+@needs_docker
+class TestFocalChannelE2E:
+    async def test_switch_channel_mutates_focal_and_marks_result(self, harness: Harness) -> None:
+        """Successful switch updates ``sessions.focal_channel`` and the
+        tool_result carries the ``switch_channel`` success marker the
+        unread-derivation helpers anchor on.
         """
-        from aios.db import queries
-
-        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e1, address_a = await _post_inbound(pool, connection, "chat-A")
-
-        # Flip focal repeatedly, appending between each flip, and assert
-        # each event carries the focal that was in effect at its append.
-        expected_stamps: list[str | None] = []
-        for focal in (None, address_a, None, address_a):
-            await _set_focal(pool, session_id, focal)
-            _sid, _eid, _addr = await _post_inbound(pool, connection, "chat-A", content="tick")
-            expected_stamps.append(focal)
-
-        async with pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_id)
-        # The first event (auto-created) is before our loop — drop it.
-        observed = [e.focal_channel_at_arrival for e in events[-len(expected_stamps) :]]
-        assert observed == expected_stamps
-
-    async def test_concurrent_appends_stamp_focal_consistently(
-        self, pool: Any, agent_id: str, env_id: str, vault_id: str
-    ) -> None:
-        """Concurrent appends serialize through the session row lock.
-
-        If two inbounds arrive simultaneously while focal is A, both
-        should stamp focal_at_arrival=A (not NULL, not each other's
-        scrap).  This pins down that the focal read lives inside the
-        same transaction that allocates the seq.
-        """
-        from aios.db import queries
-
-        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e1, address = await _post_inbound(pool, connection, "chat-C")
-        await _set_focal(pool, session_id, address)
-
-        async def _fire() -> None:
-            await _post_inbound(pool, connection, "chat-C", content=f"msg-{_uniq()}")
-
-        await asyncio.gather(*(_fire() for _ in range(5)))
-
-        async with pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_id)
-        # All 5 concurrent user events plus the setup one — each has focal=address.
-        user_events = [
-            e
-            for e in events
-            if e.data.get("role") == "user" and e.data.get("metadata", {}).get("channel") == address
-        ]
-        # The first user event was appended before focal was set; the
-        # remaining 5 were after.  All "after" events must stamp focal.
-        focal_stamps = [e.focal_channel_at_arrival for e in user_events[1:]]
-        assert len(focal_stamps) == 5
-        assert all(s == address for s in focal_stamps), focal_stamps
-
-
-# ─── slice 5: switch_channel tool ───────────────────────────────────────────
-
-
-@pytest.fixture
-async def runtime_pool(pool: Any) -> AsyncIterator[Any]:
-    """Install ``runtime.pool`` so tool handlers can use it directly.
-
-    Unit-style direct-handler tests exercise
-    ``switch_channel_handler(session_id, arguments)`` without running
-    the full step function; the handler calls ``runtime.require_pool()``
-    which needs ``runtime.pool`` populated.
-    """
-    import aios.tools  # noqa: F401 — trigger registry population
-    from aios.harness import runtime
-
-    prev = runtime.pool
-    runtime.pool = pool
-    yield pool
-    runtime.pool = prev
-
-
-async def _get_session_focal(pool: Any, session_id: str) -> str | None:
-    async with pool.acquire() as conn:
-        return await conn.fetchval("SELECT focal_channel FROM sessions WHERE id = $1", session_id)
-
-
-class TestSwitchChannelHandler:
-    async def test_switch_to_target_updates_session_focal(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        from aios.tools.switch_channel import switch_channel_handler
-
-        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
-
-        result = await switch_channel_handler(session_id, {"channel_id": address})
-
-        assert result.is_error is False
-        assert await _get_session_focal(runtime_pool, session_id) == address
-        assert result.metadata is not None
-        marker = result.metadata["switch_channel"]
-        assert marker == {"target": address, "success": True}
-
-    async def test_switch_to_none_clears_focal(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        from aios.tools.switch_channel import switch_channel_handler
-
-        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
-        await _set_focal(runtime_pool, session_id, address)
-
-        result = await switch_channel_handler(session_id, {"channel_id": None})
-
-        assert result.is_error is False
-        assert await _get_session_focal(runtime_pool, session_id) is None
-        assert result.content == "Focal cleared."
-        assert result.metadata is not None
-        assert result.metadata["switch_channel"] == {"target": None, "success": True}
-
-    async def test_switch_to_unknown_target_errors_and_keeps_focal(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        from aios.tools.switch_channel import switch_channel_handler
-
-        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
-        await _set_focal(runtime_pool, session_id, address)  # focus on A
-
-        result = await switch_channel_handler(session_id, {"channel_id": "signal/other/fake"})
-
-        assert result.is_error is True
-        # Focal is unchanged after an invalid switch.
-        assert await _get_session_focal(runtime_pool, session_id) == address
-        assert result.metadata is not None
-        marker = result.metadata["switch_channel"]
-        assert marker == {"target": "signal/other/fake", "success": False}
-
-    async def test_reorient_block_renders_recent_events_with_header(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        from aios.tools.switch_channel import switch_channel_handler
-
-        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(
-            runtime_pool, connection, "chat-1", content="first"
-        )
-        # Add more messages on this channel.
-        for i in range(3):
-            await _post_inbound(runtime_pool, connection, "chat-1", content=f"msg-{i}")
-
-        result = await switch_channel_handler(session_id, {"channel_id": address})
-
-        content = result.content
-        assert isinstance(content, str)
-        assert content.startswith(f"━━━ Recap: recent messages on {address} ━━━")
-        assert content.rstrip().endswith("━━━ End recap ━━━")
-        # All 4 messages should appear (under the FLOOR_N=10 floor).
-        for text in ("first", "msg-0", "msg-1", "msg-2"):
-            assert text in content
-        # The header convention signals focal rendering was used.
-        assert f"[channel={address}" in content
-        # Body lines are block-quoted.
-        assert "> [channel=" in content
-
-    async def test_reorient_block_respects_floor_on_quiet_channel(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        """A switch into a channel with only 2 prior messages still
-        shows those 2 (below the floor — no padding from nowhere)."""
-        from aios.tools.switch_channel import switch_channel_handler
-
-        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(
-            runtime_pool, connection, "chat-1", content="only-one"
-        )
-        await _post_inbound(runtime_pool, connection, "chat-1", content="only-two")
-
-        result = await switch_channel_handler(session_id, {"channel_id": address})
-        content = result.content
-        assert isinstance(content, str)
-        assert "only-one" in content
-        assert "only-two" in content
-
-    async def test_reorient_block_includes_all_unread(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        """Every genuinely-unread peer event must appear in the recap
-        regardless of the token floor — the floor is a minimum, not a
-        cap.  Post enough messages that the total rendered content
-        exceeds ``RE_ORIENT_FLOOR_TOKENS`` and verify nothing is
-        truncated.
-        """
-        from aios.tools.switch_channel import switch_channel_handler
-
-        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
-        # Post MANY messages while focal is NULL so they all count as
-        # unread, with enough content per message to overflow the floor.
-        body = "x" * 200
-        n = 60
-        for i in range(n):
-            await _post_inbound(
-                runtime_pool, connection, "chat-1", content=f"unread-{i:02d} {body}"
-            )
-
-        result = await switch_channel_handler(session_id, {"channel_id": address})
-        content = result.content
-        assert isinstance(content, str)
-        # Every unread message body should appear in the re-orient block.
-        for i in range(n):
-            assert f"unread-{i:02d}" in content
-
-    async def test_reorient_block_empty_channel_fallback(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        """Switching into a bound channel that has never received a
-        message shows a fallback line, not an empty block.
-        """
-        from aios.services import channels as ch_svc
-        from aios.services import sessions as sess_svc
-        from aios.tools.switch_channel import switch_channel_handler
-
-        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        # Create a session + bind an unused channel address to it.
-        session_id, _e, _addr_used = await _post_inbound(
-            runtime_pool, connection, "chat-used", content="seed"
-        )
-        unused_address = f"{connection.connector}/{connection.account}/chat-never"
-        await ch_svc.create_binding(runtime_pool, address=unused_address, session_id=session_id)
-        # Sanity check session exists.
-        await sess_svc.get_session(runtime_pool, session_id)
-
-        result = await switch_channel_handler(session_id, {"channel_id": unused_address})
-        content = result.content
-        assert isinstance(content, str)
-        assert "no prior messages on this channel" in content
-        assert await _get_session_focal(runtime_pool, session_id) == unused_address
-
-
-class TestSwitchChannelNoOp:
-    """No-op switches (target already equals current focal) return a
-    terse ack without rebuilding the recap and without emitting the
-    switch_channel metadata marker.  Fixes the "phantom stimulus"
-    weakness — a redundant switch was re-quoting past content, which
-    weak models mis-read as fresh inbound (issue #52).
-    """
-
-    async def test_switch_to_current_focal_returns_terse_ack(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        from aios.tools.switch_channel import switch_channel_handler
-
-        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
-        await _set_focal(runtime_pool, session_id, address)
-
-        result = await switch_channel_handler(session_id, {"channel_id": address})
-
-        assert result.is_error is False
-        assert result.content == f"Focal channel is already {address}."
-        # No snapshot built — no fences, no quoted body.
-        assert "━━━" not in (result.content or "")
-        # No metadata marker emitted — the marker is reserved for real
-        # switches that change the agent's attention.
-        assert result.metadata == {}
-        # Focal stays as it was.
-        assert await _get_session_focal(runtime_pool, session_id) == address
-
-    async def test_switch_null_to_null_returns_terse_ack(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        from aios.tools.switch_channel import switch_channel_handler
-
-        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, _address = await _post_inbound(runtime_pool, connection, "chat-1")
-        # _post_inbound leaves focal = None (phone down) by default.
-        assert await _get_session_focal(runtime_pool, session_id) is None
-
-        result = await switch_channel_handler(session_id, {"channel_id": None})
-
-        assert result.is_error is False
-        assert result.content == "Focal channel is already None."
-        assert result.metadata == {}
-        assert await _get_session_focal(runtime_pool, session_id) is None
-
-    async def test_no_op_tool_result_carries_no_marker(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        """A no-op switch's :class:`ToolResult` has empty metadata — so
-        once persisted by the dispatch path it carries no
-        ``switch_channel`` marker, and the marker-based anchoring path
-        in ``derive_last_seen`` / ``derive_unread_counts`` ignores it.
-
-        (``focal_channel_at_arrival == target`` stamping on any event
-        appended while focal=target still anchors through its own
-        branch — that's a separate, correct anchor and not what this
-        test is about.)
-        """
-        from aios.harness.channels import SWITCH_CHANNEL_METADATA_KEY, _switch_marker
-        from aios.tools.switch_channel import switch_channel_handler
-
-        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
-        await _set_focal(runtime_pool, session_id, address)
-
-        result = await switch_channel_handler(session_id, {"channel_id": address})
-        assert result.metadata == {}
-
-        # The dispatch path stores ``ToolResult.metadata`` under the
-        # persisted event's ``data.metadata``.  Simulate that persistence
-        # and confirm the marker-reader rejects it.
-        from aios.db import queries
-        from aios.models.events import Event
-
-        async with runtime_pool.acquire() as conn:
-            await queries.append_event(
-                conn,
-                session_id=session_id,
-                kind="message",
-                data={
-                    "role": "tool",
-                    "tool_call_id": "call_noop_synth",
-                    "content": result.content,
-                    "metadata": result.metadata,
-                },
-            )
-
-        async with runtime_pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_id)
-        noop: Event = next(e for e in events if e.data.get("tool_call_id") == "call_noop_synth")
-        assert SWITCH_CHANNEL_METADATA_KEY not in (noop.data.get("metadata") or {})
-        # Confirm the derivation helper's marker extractor ignores it
-        # (returning None is "no marker recognized here").
-        assert _switch_marker(noop) is None
-
-
-class TestEventChannelDerivation:
-    """Append-time stamping of the derived ``events.channel`` column —
-    "which channel does this event belong to?" — one predicate for
-    every downstream filter (issue #52).
-    """
-
-    async def test_user_event_channel_equals_orig_channel(
-        self, pool: Any, agent_id: str, env_id: str, vault_id: str
-    ) -> None:
-        from aios.db import queries
-
-        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(pool, connection, "chat-1")
-
-        async with pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_id)
-
-        user_evt = next(e for e in events if e.data.get("role") == "user")
-        assert user_evt.channel == address
-        assert user_evt.channel == user_evt.orig_channel
-
-    async def test_assistant_event_channel_equals_focal_at_arrival(
-        self, pool: Any, agent_id: str, env_id: str, vault_id: str
-    ) -> None:
-        from aios.db import queries
-        from aios.services import sessions as sess_svc
-
-        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(pool, connection, "chat-1")
-        await _set_focal(pool, session_id, address)
-
-        await sess_svc.append_event(
-            pool,
-            session_id,
-            "message",
-            {"role": "assistant", "content": "reply"},
-        )
-
-        async with pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_id)
-        asst = next(e for e in events if e.data.get("role") == "assistant")
-        assert asst.channel == address
-        assert asst.channel == asst.focal_channel_at_arrival
-
-    async def test_assistant_event_channel_null_when_phone_down(
-        self, pool: Any, agent_id: str, env_id: str, vault_id: str
-    ) -> None:
-        from aios.db import queries
-        from aios.services import sessions as sess_svc
-
-        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e, _address = await _post_inbound(pool, connection, "chat-1")
-        # focal remains None — "phone down"
-        await sess_svc.append_event(
-            pool,
-            session_id,
-            "message",
-            {"role": "assistant", "content": "monologue"},
-        )
-
-        async with pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_id)
-        asst = next(e for e in events if e.data.get("role") == "assistant")
-        assert asst.channel is None
-
-    async def test_tool_event_channel_from_parent_assistant_focal(
-        self, pool: Any, agent_id: str, env_id: str, vault_id: str
-    ) -> None:
-        """Tool result channel comes from its parent assistant's
-        focal_at_arrival — NOT from the live focal at tool-result
-        arrival.  A tool call started in A and completing after a
-        switch to B still belongs to A.
-        """
-        from aios.db import queries
-        from aios.services import channels as ch_svc
-        from aios.services import sessions as sess_svc
-
-        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e, addr_a = await _post_inbound(pool, connection, "chat-A")
-        addr_b = f"{connection.connector}/{connection.account}/chat-B"
-        await ch_svc.create_binding(pool, address=addr_b, session_id=session_id)
-
-        # Agent focused on A; emits an assistant message with a tool call.
-        await _set_focal(pool, session_id, addr_a)
-        await sess_svc.append_event(
-            pool,
-            session_id,
-            "message",
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "call_xyz",
-                        "type": "function",
-                        "function": {"name": "bash", "arguments": "{}"},
-                    }
-                ],
-            },
-        )
-
-        # Live focal moves to B before the tool result lands.
-        await _set_focal(pool, session_id, addr_b)
-
-        await sess_svc.append_event(
-            pool,
-            session_id,
-            "message",
-            {"role": "tool", "tool_call_id": "call_xyz", "content": "ran"},
-        )
-
-        async with pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_id)
-        tool_evt = next(e for e in events if e.data.get("role") == "tool")
-        # Parent's focal was A — the tool result belongs to A.
-        assert tool_evt.channel == addr_a
-        # Confirm the live-focal alternative would have been wrong.
-        assert tool_evt.focal_channel_at_arrival == addr_b
-
-    async def test_tool_event_channel_null_when_no_parent(
-        self, pool: Any, agent_id: str, env_id: str, vault_id: str
-    ) -> None:
-        """Tool result with a tool_call_id that matches no assistant
-        tool_calls entry gets channel=NULL (shouldn't happen in the
-        real flow, but the append-time derivation has to tolerate it).
-        """
-        from aios.db import queries
-        from aios.services import sessions as sess_svc
-
-        connection = await _setup_inbound(pool, agent_id, env_id, vault_id)
-        session_id, _e, _address = await _post_inbound(pool, connection, "chat-1")
-
-        await sess_svc.append_event(
-            pool,
-            session_id,
-            "message",
-            {"role": "tool", "tool_call_id": "call_orphan", "content": "wat"},
-        )
-
-        async with pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_id)
-        tool_evt = next(e for e in events if e.data.get("role") == "tool")
-        assert tool_evt.channel is None
-
-
-class TestSwitchChannelAsEvent:
-    """Switch_channel's tool_result event, as persisted by the dispatch
-    path, must carry the ``metadata.switch_channel`` marker so unread
-    derivation (slice 3) can use it as an anchor.
-    """
-
-    async def test_event_dispatch_persists_marker_metadata(
-        self,
-        harness: Any,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        from aios.db import queries
-        from aios.harness.tool_dispatch import launch_tool_calls
-
-        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-        session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
-
-        # Simulate an assistant message + a switch_channel tool call —
-        # launch_tool_calls will invoke the handler and persist the
-        # tool_result event via the dispatch path (exercising ToolResult).
-        async with runtime_pool.acquire() as conn:
-            await queries.append_event(
-                conn,
-                session_id=session_id,
-                kind="message",
-                data={
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "call_switch_1",
-                            "type": "function",
-                            "function": {
-                                "name": "switch_channel",
-                                "arguments": json.dumps({"channel_id": address}),
-                            },
-                        }
-                    ],
-                },
-            )
-        launch_tool_calls(
-            runtime_pool,
-            session_id,
+        harness.script_model(
             [
-                {
-                    "id": "call_switch_1",
-                    "type": "function",
-                    "function": {
-                        "name": "switch_channel",
-                        "arguments": json.dumps({"channel_id": address}),
-                    },
-                }
-            ],
+                assistant(tool_calls=[_switch_call("signal/+1/chat-a", call_id="c1")]),
+                assistant("ok"),
+            ]
         )
-        # Wait for the fire-and-forget tool task to complete.  The task
-        # registry tracks in-flight tasks by session; poll its count
-        # with a small sleep budget.
-        for _ in range(200):
-            if harness._task_registry.in_flight_count(session_id) == 0:
-                break
-            await asyncio.sleep(0.01)
-        assert harness._task_registry.in_flight_count(session_id) == 0
+        session = await harness.start("hi")
+        # Two channel-stamped inbounds so the session is "bound" to both.
+        await sessions_service.append_user_message(
+            harness._pool,
+            session.id,
+            "from chat-a",
+            metadata={"channel": "signal/+1/chat-a"},
+        )
+        await sessions_service.append_user_message(
+            harness._pool,
+            session.id,
+            "from chat-b",
+            metadata={"channel": "signal/+1/chat-b"},
+        )
+        await harness.run_until_idle(session.id)
 
-        async with runtime_pool.acquire() as conn:
-            events = await queries.read_message_events(conn, session_id)
+        # Focal updated to the requested target.
+        async with harness._pool.acquire() as conn:
+            focal = await queries.get_session_focal_channel(conn, session.id)
+        assert focal == "signal/+1/chat-a"
 
-        tool_events = [
-            e
-            for e in events
-            if e.data.get("role") == "tool" and e.data.get("name") == "switch_channel"
-        ]
-        assert len(tool_events) == 1
-        ev = tool_events[0]
-        # The marker lands under data.metadata — consumed by
-        # derive_last_seen / derive_unread_counts in slice 3.
-        assert ev.data.get("metadata", {}).get("switch_channel") == {
-            "target": address,
-            "success": True,
-        }
-        # Focal actually got flipped.
-        assert await _get_session_focal(runtime_pool, session_id) == address
+        # Tool result carries the success marker.
+        events = await harness.events(session.id)
+        tool_results = [e for e in events if e.data.get("role") == "tool"]
+        assert tool_results, "expected at least one tool_result event"
+        marker = tool_results[-1].data.get("metadata", {}).get(SWITCH_CHANNEL_METADATA_KEY)
+        assert marker == {"target": "signal/+1/chat-a", "success": True}
 
-
-class TestMcpMetaInjection:
-    """Slice 6: connection-provided MCP tools receive the focal channel
-    path via the JSON-RPC ``_meta`` field, without stuffing it into
-    arguments.  Agent-declared MCP servers don't get the meta stamp.
-    """
-
-    async def test_conn_tool_dispatch_injects_focal_suffix_into_meta(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        from unittest.mock import AsyncMock, patch
-
-        from aios.crypto.vault import CryptoBox
-        from aios.harness import runtime
-        from aios.harness.tool_dispatch import _execute_mcp_tool_async
-
-        # The dispatch path calls resolve_auth_for_url which uses
-        # runtime.crypto_box.
-        prev_crypto = runtime.crypto_box
-        runtime.crypto_box = CryptoBox(__import__("os").urandom(32))
-        try:
-            connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-            session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
-
-            # The connection created by _setup_inbound has id prefix `conn_`.
-            from aios.services import connections as conn_svc
-
-            connections = await conn_svc.list_connections(runtime_pool)
-            conn = next(c for c in connections if c.connector == "signal")
-
-            mcp_server_map = {conn.id: conn.mcp_url}
-            tool_call_dict = {
-                "id": "call_send_1",
-                "type": "function",
-                "function": {
-                    "name": f"mcp__{conn.id}__signal_send",
-                    "arguments": json.dumps({"text": "hi there"}),
-                },
-            }
-
-            with (
-                patch(
-                    "aios.mcp.client.resolve_auth_for_url",
-                    new=AsyncMock(return_value={}),
-                ),
-                patch(
-                    "aios.mcp.client.call_mcp_tool",
-                    new=AsyncMock(return_value={"content": "ok"}),
-                ) as mock_call,
-            ):
-                await _execute_mcp_tool_async(
-                    runtime_pool,
-                    session_id,
-                    tool_call_dict,
-                    mcp_server_map,
-                    focal_channel=address,  # focal=A → suffix=chat-1
-                )
-
-            # Verify call_mcp_tool was invoked with the focal suffix meta.
-            _args, kwargs = mock_call.call_args
-            meta = kwargs.get("meta")
-            assert isinstance(meta, dict)
-            assert meta == {"aios.focal_channel_path": "chat-1"}
-        finally:
-            runtime.crypto_box = prev_crypto
-
-    async def test_agent_mcp_tool_dispatch_no_meta_stamped(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        """Agent-declared MCP servers (not under the conn_* prefix) don't
-        get focal meta — aios has no business telling an agent-declared
-        MCP server about the session's focal channel.
+    async def test_switch_channel_rejects_unknown_target(self, harness: Harness) -> None:
+        """A target that the session has never received an event on is
+        not a bound channel; the handler returns is_error and leaves
+        focal unchanged.
         """
-        from unittest.mock import AsyncMock, patch
-
-        from aios.crypto.vault import CryptoBox
-        from aios.harness import runtime
-        from aios.harness.tool_dispatch import _execute_mcp_tool_async
-
-        prev_crypto = runtime.crypto_box
-        runtime.crypto_box = CryptoBox(__import__("os").urandom(32))
-        try:
-            connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-            session_id, _e, address = await _post_inbound(runtime_pool, connection, "chat-1")
-
-            # Agent-declared server: name does NOT start with conn_.
-            agent_server_name = "github"
-            mcp_server_map = {agent_server_name: "https://mcp.github.com"}
-            tool_call_dict = {
-                "id": "call_gh_1",
-                "type": "function",
-                "function": {
-                    "name": f"mcp__{agent_server_name}__create_issue",
-                    "arguments": json.dumps({"title": "bug"}),
-                },
-            }
-
-            with (
-                patch(
-                    "aios.mcp.client.resolve_auth_for_url",
-                    new=AsyncMock(return_value={}),
-                ),
-                patch(
-                    "aios.mcp.client.call_mcp_tool",
-                    new=AsyncMock(return_value={"content": "done"}),
-                ) as mock_call,
-            ):
-                await _execute_mcp_tool_async(
-                    runtime_pool,
-                    session_id,
-                    tool_call_dict,
-                    mcp_server_map,
-                    focal_channel=address,  # non-null focal, but agent server
-                )
-
-            _args, kwargs = mock_call.call_args
-            # No meta for agent-declared MCP.
-            assert kwargs.get("meta") is None
-        finally:
-            runtime.crypto_box = prev_crypto
-
-
-class TestOraSmokeTestRegression:
-    """Regression for the smoke-test bug that motivated this redesign.
-
-    The original failure: in a many-to-one session, a follow-up on a
-    quiet DM was indistinguishable from questions about other channels'
-    noise, because every channel's messages were interleaved.  Under
-    the focal model, switching back to the DM surfaces its last-N
-    messages (including the referent the follow-up points at) in the
-    re-orient block — the agent has the context it needs.
-
-    Design validation:
-    * the re-orient block contains the "I'm Ora" claim (seeded early).
-    * the re-orient block contains the follow-up "you sure about that?"
-      (which arrived while agent was focused elsewhere).
-    * focal_channel is set to the DM afterward, so the next inbound
-      stamps correctly.
-    """
-
-    async def test_switch_back_to_quiet_channel_surfaces_referent(
-        self,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        from aios.services import channels as ch_svc
-        from aios.tools.switch_channel import switch_channel_handler
-
-        connection = await _setup_inbound(runtime_pool, agent_id, env_id, vault_id)
-
-        # DM with Tom — session seeded here.
-        session_id, _e_seed, dm_address = await _post_inbound(
-            runtime_pool, connection, "dm-tom", content="hey"
+        harness.script_model(
+            [
+                assistant(tool_calls=[_switch_call("signal/+1/never-seen", call_id="c1")]),
+                assistant("ok"),
+            ]
         )
-        # Agent is focused on dm-tom, claims "I'm Ora".
-        await _set_focal(runtime_pool, session_id, dm_address)
-
-        # Inbound: the assistant self-identifies — in a real system this
-        # is an assistant event, but for regression purposes we seed a
-        # user event carrying the claim so it appears in the re-orient
-        # block later.  (A real assistant message would already live in
-        # the focal-native log and be visible to build_messages.)
-        async with runtime_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE sessions SET focal_channel = $1 WHERE id = $2",
-                dm_address,
-                session_id,
-            )
-        from aios.services import sessions as sess_svc
-
-        await sess_svc.append_user_message(
-            runtime_pool,
-            session_id,
-            "I'm Ora — an AI running on this Signal channel.",
-            metadata={"channel": dm_address, "sender_name": "Ora-claim"},
+        session = await harness.start("hi")
+        await sessions_service.append_user_message(
+            harness._pool,
+            session.id,
+            "from chat-a",
+            metadata={"channel": "signal/+1/chat-a"},
         )
+        await harness.run_until_idle(session.id)
 
-        # Now agent switches to a second channel + burst of activity.
-        qa_address = f"{connection.connector}/{connection.account}/qa-group"
-        await ch_svc.create_binding(runtime_pool, address=qa_address, session_id=session_id)
-        await _set_focal(runtime_pool, session_id, qa_address)
-        for i in range(30):
-            await _post_inbound(runtime_pool, connection, "qa-group", content=f"noise-{i:02d}")
+        async with harness._pool.acquire() as conn:
+            focal = await queries.get_session_focal_channel(conn, session.id)
+        assert focal is None, "rejected switch must not mutate focal"
 
-        # Agent puts phone down (focal=None) and user sends the DM
-        # follow-up while attention is elsewhere.
-        await _set_focal(runtime_pool, session_id, None)
-        await _post_inbound(runtime_pool, connection, "dm-tom", content="you sure about that?")
+        events = await harness.events(session.id)
+        result = next(e for e in events if e.data.get("role") == "tool")
+        assert result.data.get("is_error") is True
+        marker = result.data.get("metadata", {}).get(SWITCH_CHANNEL_METADATA_KEY)
+        assert marker == {"target": "signal/+1/never-seen", "success": False}
 
-        # Agent switches back to the DM.  Re-orient block must include
-        # BOTH the "I'm Ora" seed and the "you sure" follow-up.
-        result = await switch_channel_handler(session_id, {"channel_id": dm_address})
-        content = result.content
-        assert isinstance(content, str)
-        assert "I'm Ora" in content, f"missing referent in re-orient block:\n{content}"
-        assert "you sure about that?" in content, (
-            f"missing follow-up in re-orient block:\n{content}"
-        )
-        # Focal is set now; the DM-native view is active.
-        assert await _get_session_focal(runtime_pool, session_id) == dm_address
+    async def test_per_chat_session_rejects_switch_channel(self, harness: Harness) -> None:
+        """A session whose ``spawned_from_connection_id`` is set is bound
+        to one chat by construction; ``switch_channel`` rejects every
+        attempt regardless of target.
+        """
+        # Build a connection so we have a real id to point spawned_from at.
+        from aios.services import connections as connections_service
 
-
-class TestTailBlockInStep:
-    """Slice 7: the ephemeral channels tail block appears as the last
-    user-role message on the chat-completions list, and its unread
-    counts update across steps without busting the cache-stable
-    system prompt.
-    """
-
-    async def test_tail_block_appears_as_last_user_message(
-        self,
-        harness: Any,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        from aios.services import channels as ch_svc
-        from aios.services import connections as conn_svc
-        from tests.e2e.harness import assistant
-
-        # Build a session with a routed inbound so bindings exist.
-        account = f"tail-{_uniq()}"
-        connection = await conn_svc.create_connection(
-            runtime_pool,
+        conn_row = await connections_service.create_connection(
+            harness._pool,
             connector="signal",
-            account=account,
-            mcp_url="https://m",
-            vault_id=vault_id,
+            account="+1",
             metadata={},
         )
-        await ch_svc.create_routing_rule(
-            runtime_pool,
-            connection.id,
-            prefix="",
-            target=f"agent:{agent_id}",
-            session_params=SessionParams(environment_id=env_id),
+
+        harness.script_model(
+            [
+                assistant(tool_calls=[_switch_call("signal/+1/chat-a", call_id="c1")]),
+                assistant("ok"),
+            ]
         )
-        address = f"signal/{account}/chat-1"
-        with mock.patch("aios.harness.wake.defer_wake"):
-            resolution = await ch_svc.resolve_channel(runtime_pool, connection, "chat-1")
-            from aios.services import sessions as sess_svc
+        # Spawn a session in per_chat mode via the same code path the
+        # inbound handler will use in PR3.
+        from aios.ids import make_id
+        from aios.models.agents import ToolSpec
+        from aios.services import agents as agents_service
 
-            await sess_svc.append_user_message(
-                runtime_pool,
-                resolution.session_id,
-                "hi",
-                metadata={"channel": address},
+        if harness._env_id is None:
+            from aios.services import environments as environments_service
+
+            env = await environments_service.create_environment(
+                harness._pool, name=f"focal-env-{make_id('env')[-8:]}"
             )
-        session_id = resolution.session_id
-        # Ignore the connection — the channel listing pulls from bindings.
-        assert connection.id.startswith("conn_")
+            harness._env_id = env.id
+        agent = await agents_service.create_agent(
+            harness._pool,
+            name=f"focal-per-chat-{make_id('agent')[-8:]}",
+            model="fake/test",
+            system="test",
+            tools=[ToolSpec(type="bash")],
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+        session = await sessions_service.create_session(
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=harness._env_id,
+            title="per-chat",
+            metadata={},
+            spawned_from_connection_id=conn_row.id,
+            focal_channel="signal/+1/chat-a",
+        )
+        await sessions_service.append_user_message(
+            harness._pool,
+            session.id,
+            "hi from chat-a",
+            metadata={"channel": "signal/+1/chat-a"},
+        )
+        await harness.run_until_idle(session.id)
 
+        # Focal must be the spawn-time value, untouched.
+        async with harness._pool.acquire() as conn:
+            focal = await queries.get_session_focal_channel(conn, session.id)
+        assert focal == "signal/+1/chat-a"
+
+        events = await harness.events(session.id)
+        result = next(e for e in events if e.data.get("role") == "tool")
+        assert result.data.get("is_error") is True
+        assert "per_chat" in result.data["content"]
+
+    async def test_paradigm_block_renders_when_session_has_channels(self, harness: Harness) -> None:
+        """The cache-stable focal-channel paradigm block appears in the
+        system prompt once the session has any bound channel; the
+        ephemeral tail block appears as a user-role message.
+        """
         harness.script_model([assistant("ok")])
-        await harness.run_step(session_id)
-
-        calls = harness.model_calls
-        assert calls, "litellm was not called"
-        messages = calls[-1]["messages"]
-        # Tail block is the last user message in the payload.
-        assert messages[-1]["role"] == "user"
-        content = msg_text(messages[-1])
-        assert "━━━ Channels ━━━" in content
-        # NULL focal at this point → no ▸ marker, the one binding appears as ○.
-        assert f"○ channel_id={address}" in content
-        assert "▸" not in content
-
-    async def test_tail_block_reflects_focal_and_unread_changes(
-        self,
-        harness: Any,
-        runtime_pool: Any,
-        agent_id: str,
-        env_id: str,
-        vault_id: str,
-    ) -> None:
-        from aios.services import channels as ch_svc
-        from aios.services import connections as conn_svc
-        from tests.e2e.harness import assistant
-
-        account = f"tail2-{_uniq()}"
-        connection = await conn_svc.create_connection(
-            runtime_pool,
-            connector="signal",
-            account=account,
-            mcp_url="https://m",
-            vault_id=vault_id,
-            metadata={},
+        session = await harness.start("hi")
+        await sessions_service.append_user_message(
+            harness._pool,
+            session.id,
+            "first inbound",
+            metadata={"channel": "signal/+1/chat-a"},
         )
-        await ch_svc.create_routing_rule(
-            runtime_pool,
-            connection.id,
-            prefix="",
-            target=f"agent:{agent_id}",
-            session_params=SessionParams(environment_id=env_id),
+        await harness.run_until_idle(session.id)
+
+        msgs = harness.model_calls[0]["messages"]
+        # Paradigm prose lives in the system prompt for prefix-cache stability.
+        assert msgs[0]["role"] == "system"
+        assert _PARADIGM_HEADER in msgs[0]["content"]
+        # Tail block lives as the trailing user message.
+        tail = next(
+            (m for m in msgs if m.get("role") == "user" and _TAIL_HEADER in msg_text(m)),
+            None,
         )
-        address_a = f"signal/{account}/chat-A"
-        address_b = f"signal/{account}/chat-B"
-        with mock.patch("aios.harness.wake.defer_wake"):
-            resolution_a = await ch_svc.resolve_channel(runtime_pool, connection, "chat-A")
-            session_id = resolution_a.session_id
-            await ch_svc.create_binding(runtime_pool, address=address_b, session_id=session_id)
-            # Focus on A and let one message land in A.
-            from aios.services import sessions as sess_svc
+        assert tail is not None, f"tail block not found: {msgs!r}"
+        assert "channel_id=signal/+1/chat-a" in msg_text(tail)
 
-            await _set_focal(runtime_pool, session_id, address_a)
-            await sess_svc.append_user_message(
-                runtime_pool,
-                session_id,
-                "hi from A",
-                metadata={"channel": address_a},
-            )
-            # Then two messages on B while focal is A → unread in B.
-            await sess_svc.append_user_message(
-                runtime_pool,
-                session_id,
-                "msg-b1",
-                metadata={"channel": address_b},
-            )
-            await sess_svc.append_user_message(
-                runtime_pool,
-                session_id,
-                "msg-b2",
-                metadata={"channel": address_b},
-            )
-
-        # Step 1: focal=A.  Tail block should mark A as focal, show 2 unread on B.
-        harness.script_model([assistant("processing")])
-        await harness.run_step(session_id)
-        messages = harness.model_calls[-1]["messages"]
-        assert messages[-1]["role"] == "user"
-        content_step1 = msg_text(messages[-1])
-        assert f"▸ channel_id={address_a} (focal)" in content_step1
-        assert f"○ channel_id={address_b} — 2 unread" in content_step1
-        assert "msg-b2" in content_step1  # preview of latest unread
-
-        # Step 2: change focal to B and run again.  Tail block reflects.
-        await _set_focal(runtime_pool, session_id, address_b)
-        await sess_svc.append_user_message(
-            runtime_pool,
-            session_id,
-            "more activity",
-            metadata={"channel": address_b},
+    async def test_bare_assistant_text_gets_monologue_prefix(self, harness: Harness) -> None:
+        """Bare assistant text on a channel-bearing session is monologue
+        (the connector tools, not the text, deliver to the peer).  The
+        loop applies ``MONOLOGUE_PREFIX`` so the log is uniform on replay.
+        """
+        harness.script_model([assistant("thinking out loud")])
+        session = await harness.start("hi")
+        await sessions_service.append_user_message(
+            harness._pool,
+            session.id,
+            "channel inbound",
+            metadata={"channel": "signal/+1/chat-a"},
         )
-        harness.script_model([assistant("noted")])
-        await harness.run_step(session_id)
-        content_step2 = msg_text(harness.model_calls[-1]["messages"][-1])
-        assert f"▸ channel_id={address_b} (focal)" in content_step2
-        # A is now non-focal; no unread for A yet since we never switched
-        # away after its last focal-stamp, but the listing should show it.
-        assert f"○ channel_id={address_a}" in content_step2
+        await harness.run_until_idle(session.id)
+
+        events = await harness.events(session.id)
+        asst = next(e for e in events if e.data.get("role") == "assistant")
+        content = asst.data.get("content")
+        assert isinstance(content, str)
+        assert content.startswith(MONOLOGUE_PREFIX), content
+
+
+class TestFocalChannelPathHelper:
+    """Pure unit tests for the helper that strips the connector segment
+    from a focal address before injection into MCP ``_meta``.  Lives
+    here so the e2e file is the single home for focal-channel coverage;
+    the helper is otherwise covered indirectly by the dispatch path.
+
+    Account is preserved in the meta value so multi-account connectors
+    can route by it; single-account connectors take the chat suffix only.
+    """
+
+    def test_strips_only_connector_preserves_account(self) -> None:
+        assert focal_channel_path("signal/+1/chat-a") == "+1/chat-a"
+
+    def test_preserves_trailing_segments(self) -> None:
+        assert focal_channel_path("telegram/bot/group/thread-1") == "bot/group/thread-1"
+
+    def test_returns_none_when_focal_unset(self) -> None:
+        assert focal_channel_path(None) is None
+
+    def test_returns_none_for_two_segment_addresses(self) -> None:
+        # Less than 3 segments means no chat suffix to inject.
+        assert focal_channel_path("signal/+1") is None
+
+    def test_meta_key_constant_is_stable(self) -> None:
+        # External connectors snapshot this string; flag any rename.
+        assert FOCAL_CHANNEL_META_KEY == "aios.focal_channel_path"

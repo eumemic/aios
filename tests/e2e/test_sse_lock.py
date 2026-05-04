@@ -26,11 +26,11 @@ class TestSubscriberLockRoundTrip:
         self, pool: Any, aios_env: dict[str, str]
     ) -> None:
         from aios.config import get_settings
-        from aios.db.listen import _normalize_dsn
+        from aios.db.pool import normalize_dsn
         from aios.db.sse_lock import acquire_subscriber_lock, has_subscriber
 
         settings = get_settings()
-        dsn = _normalize_dsn(settings.db_url)
+        dsn = normalize_dsn(settings.db_url)
         session_id = "sess_01KAAA_LOCK_TEST_XX"
 
         assert await has_subscriber(pool, session_id) is False
@@ -52,11 +52,11 @@ class TestSubscriberLockRoundTrip:
 
     async def test_multiple_subscribers_coexist(self, pool: Any, aios_env: dict[str, str]) -> None:
         from aios.config import get_settings
-        from aios.db.listen import _normalize_dsn
+        from aios.db.pool import normalize_dsn
         from aios.db.sse_lock import acquire_subscriber_lock, has_subscriber
 
         settings = get_settings()
-        dsn = _normalize_dsn(settings.db_url)
+        dsn = normalize_dsn(settings.db_url)
         session_id = "sess_01KBBB_MULTI_LOCK"
 
         conn_a = await asyncpg.connect(dsn)
@@ -82,11 +82,11 @@ class TestSubscriberLockRoundTrip:
         self, pool: Any, aios_env: dict[str, str]
     ) -> None:
         from aios.config import get_settings
-        from aios.db.listen import _normalize_dsn
+        from aios.db.pool import normalize_dsn
         from aios.db.sse_lock import acquire_subscriber_lock, has_subscriber
 
         settings = get_settings()
-        dsn = _normalize_dsn(settings.db_url)
+        dsn = normalize_dsn(settings.db_url)
 
         conn = await asyncpg.connect(dsn)
         try:

@@ -22,7 +22,7 @@ and proceeds.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
@@ -210,29 +210,23 @@ async def _run_session_step_body(
 
     session = await sessions_service.get_session(pool, session_id)
 
-    # Load agent config — pinned version or latest.
     from aios.models.agents import Agent, AgentVersion
+    from aios.services.channels import list_session_channels
 
-    agent: Agent | AgentVersion
+    agent_task: asyncio.Task[Agent | AgentVersion]
     if session.agent_version is not None:
-        agent = await agents_service.get_agent_version(
-            pool, session.agent_id, session.agent_version
+        agent_task = asyncio.create_task(
+            agents_service.get_agent_version(pool, session.agent_id, session.agent_version)
         )
     else:
-        agent = await agents_service.get_agent(pool, session.agent_id)
-
-    from aios.harness.channels import connection_server_name, list_bindings_and_connections
-
-    bindings, connections = await list_bindings_and_connections(pool, session_id)
+        agent_task = asyncio.create_task(agents_service.get_agent(pool, session.agent_id))
+    agent, channels, memory_echoes = await asyncio.gather(
+        agent_task,
+        list_session_channels(pool, session_id),
+        refresh_session_mount_state(pool, session_id),
+    )
 
     mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
-    for c in connections:
-        mcp_server_map[connection_server_name(c)] = c.mcp_url
-
-    # Memory store mounts: load echoes once per step. Used both for the
-    # system-prompt block and (via runtime cache) by the tool intercept
-    # in write/edit, which needs a path → store mapping.
-    memory_echoes = await refresh_session_mount_state(pool, session_id)
 
     # Build the events-independent prelude (system prompt + tools)
     # before windowing so its overhead can be subtracted from the
@@ -243,8 +237,7 @@ async def _run_session_step_body(
         session_id,
         session=session,
         agent=agent,
-        bindings=bindings,
-        connections=connections,
+        channels=channels,
         memory_store_echoes=memory_echoes,
     )
     overhead_local = (
@@ -305,7 +298,7 @@ async def _run_session_step_body(
         step_ctx = await compose_step_context(
             session=session,
             agent=agent,
-            bindings=bindings,
+            channels=channels,
             prelude=prelude,
             events=events,
         )
@@ -444,7 +437,7 @@ async def _run_session_step_body(
         cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
     )
 
-    if bindings:
+    if channels:
         from aios.harness.channels import apply_monologue_prefix
 
         assistant_msg = apply_monologue_prefix(assistant_msg)
@@ -466,28 +459,24 @@ async def _run_session_step_body(
     tool_calls: list[dict[str, Any]] = assistant_msg.get("tool_calls") or []
 
     if tool_calls:
-        from aios.tools.registry import registry as tool_registry
-
         immediate: list[dict[str, Any]] = []
         mcp_immediate: list[dict[str, Any]] = []
         needs_confirm: list[dict[str, Any]] = []
         custom: list[dict[str, Any]] = []
+        unknown_mcp: list[dict[str, Any]] = []
 
         for tc in tool_calls:
-            name = _tc_name(tc)
-            if _is_mcp_tool(name):
-                # MCP tools default to always_ask (unlike built-in always_allow).
-                perm = resolve_mcp_permission(name, agent.tools)
-                if perm == "always_allow":
-                    mcp_immediate.append(tc)
-                else:
-                    needs_confirm.append(tc)
-            elif not tool_registry.has(name):
-                custom.append(tc)
-            elif resolve_permission(name, agent.tools) == "always_ask":
-                needs_confirm.append(tc)
-            else:
+            kind = _classify_tool_call(tc, agent, mcp_server_map)
+            if kind == "immediate":
                 immediate.append(tc)
+            elif kind == "mcp_immediate":
+                mcp_immediate.append(tc)
+            elif kind == "needs_confirm":
+                needs_confirm.append(tc)
+            elif kind == "custom":
+                custom.append(tc)
+            else:  # "unknown_mcp"
+                unknown_mcp.append(tc)
 
         if immediate:
             launch_tool_calls(pool, session_id, immediate)
@@ -498,19 +487,29 @@ async def _run_session_step_body(
                 tool_names=[_tc_name(tc) for tc in immediate],
             )
 
-        if mcp_immediate:
+        # Unknown-MCP tools route through the regular MCP dispatcher,
+        # bypassing the permission gate.  ``_execute_mcp_tool_async``
+        # already detects unknown servers and appends a tool_error
+        # event (``mcp_tool.server_not_found``); the prior code path
+        # parked the session in ``requires_action`` and dispatched
+        # only after a confirmation, which never came.  Routing them
+        # to immediate dispatch lets the model see the error in the
+        # next step and self-correct.
+        immediate_mcp = mcp_immediate + unknown_mcp
+        if immediate_mcp:
             launch_mcp_tool_calls(
                 pool,
                 session_id,
-                mcp_immediate,
+                immediate_mcp,
                 mcp_server_map,
                 focal_channel=session.focal_channel,
             )
             log.info(
                 "step.mcp_tools_launched",
                 session_id=session_id,
-                count=len(mcp_immediate),
-                tool_names=[_tc_name(tc) for tc in mcp_immediate],
+                count=len(immediate_mcp),
+                tool_names=[_tc_name(tc) for tc in immediate_mcp],
+                unknown_count=len(unknown_mcp),
             )
 
         if needs_confirm or custom:
@@ -554,7 +553,7 @@ def _switch_channel_tool_spec() -> dict[str, Any]:
     """Build the chat-completions tool entry for the ``switch_channel`` built-in.
 
     Injected unconditionally into the tool list when the session has
-    any active bindings (see ``run_session_step``).  Agents don't need
+    any bound channels (see ``run_session_step``).  Agents don't need
     to list it in their ``tools`` declaration — it's focal-machinery
     scope, not agent scope.
     """
@@ -569,24 +568,6 @@ def _switch_channel_tool_spec() -> dict[str, Any]:
             "parameters": tool.parameters_schema,
         },
     }
-
-
-def _hide_conn_tools_when_phone_down(
-    mcp_tools: list[dict[str, Any]], focal_channel: str | None
-) -> list[dict[str, Any]]:
-    """Filter connection-provided MCP tools out when focal is NULL.
-
-    Those tools resolve their ``chat_id`` from focal (injected into
-    ``_meta`` at dispatch time); a "phone down" state has no focal to
-    inject, so the model shouldn't be offered them.  Agent-declared
-    MCP tools are untouched.
-    """
-    from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
-
-    if focal_channel is not None:
-        return mcp_tools
-    prefix = f"mcp__{CONNECTION_SERVER_NAME_PREFIX}"
-    return [t for t in mcp_tools if not t.get("function", {}).get("name", "").startswith(prefix)]
 
 
 async def _dump_context_if_enabled(
@@ -639,6 +620,89 @@ def _is_mcp_tool(name: str) -> bool:
     return name.startswith("mcp__")
 
 
+def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, str]) -> bool:
+    """Return True if ``server_name`` resolves to a registered MCP server.
+
+    A server is "known" if either:
+
+    * It's a connector instance currently registered with the
+      :class:`~aios.harness.connector_supervisor.ConnectorSubprocessRegistry`,
+      or
+    * It appears in ``mcp_server_map`` (the agent-declared HTTP MCP
+      servers, keyed by ``McpServerSpec.name``).
+
+    Used by :func:`_classify_tool_call` to short-circuit hallucinated
+    tool names before the permission gate, so the model gets a tool
+    error in one turn instead of parking in ``requires_action`` forever
+    waiting on a confirmation that would dispatch into
+    ``mcp_tool.server_not_found`` anyway.
+    """
+    registry = runtime.connector_subprocess_registry
+    if registry is not None and registry.states_for_connector(server_name):
+        return True
+    return server_name in mcp_server_map
+
+
+type ToolDispatchKind = Literal[
+    "immediate", "mcp_immediate", "needs_confirm", "custom", "unknown_mcp"
+]
+
+
+def _classify_tool_call(
+    tool_call: dict[str, Any],
+    agent: Any,
+    mcp_server_map: dict[str, str],
+) -> ToolDispatchKind:
+    """Classify a tool call into a dispatch bucket.
+
+    Returns one of:
+
+    * ``"immediate"`` — built-in tool, run synchronously.
+    * ``"mcp_immediate"`` — known MCP tool, ``always_allow``.
+    * ``"needs_confirm"`` — built-in or MCP tool gated on
+      ``always_ask`` confirmation.
+    * ``"custom"`` — client-executed custom tool (the harness holds
+      the call until the client posts a tool-result).
+    * ``"unknown_mcp"`` — MCP-namespaced tool whose server is not
+      registered.  Routed to immediate tool-error so the model can
+      self-correct rather than parking in ``requires_action``.
+    """
+    from aios.harness.tool_dispatch import _parse_mcp_tool_name
+    from aios.tools.registry import registry as tool_registry
+
+    function = tool_call.get("function") or {}
+    name: str = function.get("name") or ""
+
+    if _is_mcp_tool(name):
+        try:
+            server_name, _ = _parse_mcp_tool_name(name)
+        except ValueError:
+            return "unknown_mcp"
+        if not _is_known_mcp_server(server_name, mcp_server_map):
+            return "unknown_mcp"
+        perm = resolve_mcp_permission(name, agent.tools)
+        if perm is None:
+            # Fallback to the operator-configured default for unmounted
+            # toolsets (``AIOS_DEFAULT_MCP_PERMISSION_POLICY``).  Unset
+            # → ``always_ask`` (safe default); explicit per-toolset
+            # policies on ``agent.tools`` always win and are returned
+            # above without reaching this branch.
+            from aios.config import get_settings
+
+            perm = get_settings().default_mcp_permission_policy
+        if perm == "always_allow":
+            return "mcp_immediate"
+        return "needs_confirm"
+
+    if not tool_registry.has(name):
+        return "custom"
+
+    if resolve_permission(name, agent.tools) == "always_ask":
+        return "needs_confirm"
+
+    return "immediate"
+
+
 def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
     """Look up the permission policy for a built-in or custom tool by name."""
     for spec in agent_tools:
@@ -651,21 +715,12 @@ def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
 def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
     """Look up the permission policy for an MCP tool.
 
-    Connection-provided tools (server name in the reserved ``conn_``
-    namespace) default to ``always_allow`` — the session's channel
-    binding is already explicit routing consent; gating every reply on
-    a confirmation prompt would defeat the connector autonomy story.
-
-    For agent-declared servers, finds the ``mcp_toolset`` entry whose
-    ``mcp_server_name`` matches the server portion of the namespaced
-    tool name, then returns the ``default_config.permission_policy.type``
-    or ``None`` (which callers treat as ``always_ask``).
+    Finds the ``mcp_toolset`` entry whose ``mcp_server_name`` matches
+    the server portion of the namespaced tool name, then returns the
+    ``default_config.permission_policy.type`` or ``None`` (which callers
+    treat as ``always_ask``).
     """
-    from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
-
     server_name = name.split("__", 2)[1]
-    if server_name.startswith(CONNECTION_SERVER_NAME_PREFIX):
-        return "always_allow"
     for spec in agent_tools:
         if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
             cfg = spec.default_config
@@ -679,33 +734,24 @@ async def discover_session_mcp_tools(
     pool: Any,
     session_id: str,
     agent: Any,
-    connections: list[Any],
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Discover MCP tools from agent-declared servers (filtered by enabled
-    ``mcp_toolset`` entries) unioned with connection-provided servers.
+    """Discover MCP tools from agent-declared servers, filtered by enabled
+    ``mcp_toolset`` entries.
 
     Returns ``(tools, instructions_by_server)`` where the second element
     maps ``server_name`` → the server's ``InitializeResult.instructions``
     string.  Servers that supplied no instructions (or ``""``) are
-    omitted from the dict — the harness uses presence in the dict as
-    the trigger for rendering a per-connector affordance block.
+    omitted from the dict.
     """
-    from aios.harness.channels import connection_server_name
     from aios.mcp.client import discover_mcp_tools, resolve_auth_for_url
-
-    servers: list[tuple[str, str]] = []
 
     enabled_server_names: set[str] = set()
     for spec in agent.tools:
         if spec.type == "mcp_toolset" and spec.enabled and spec.mcp_server_name:
             enabled_server_names.add(spec.mcp_server_name)
-    for s in agent.mcp_servers:
-        if s.name in enabled_server_names:
-            servers.append((s.name, s.url))
-
-    for c in connections:
-        servers.append((connection_server_name(c), c.mcp_url))
-
+    servers: list[tuple[str, str]] = [
+        (s.name, s.url) for s in agent.mcp_servers if s.name in enabled_server_names
+    ]
     if not servers:
         return [], {}
 

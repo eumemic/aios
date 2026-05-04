@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aios.models.skills import AgentSkillRef
 
@@ -44,6 +44,13 @@ class McpServerSpec(BaseModel):
     Declares a remote MCP server reachable via streamable HTTP transport.
     The ``name`` is used to cross-reference from ``mcp_toolset`` tool entries
     and to namespace discovered tools as ``mcp__<name>__<tool_name>``.
+
+    ``include_instructions`` controls whether the server's
+    ``InitializeResult.instructions`` (per MCP spec) is rendered into the
+    system prompt.  Defaults true so connector-mounted servers — and any
+    third-party server that ships useful affordance prose — light up
+    automatically.  Set false to opt out per agent (unfamiliar prose,
+    noisy servers).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -51,17 +58,7 @@ class McpServerSpec(BaseModel):
     type: Literal["url"] = "url"
     name: str = Field(min_length=1, max_length=64)
     url: str = Field(min_length=1)
-
-    @field_validator("name")
-    @classmethod
-    def _reject_reserved_prefix(cls, v: str) -> str:
-        from aios.models.connections import CONNECTION_SERVER_NAME_PREFIX
-
-        if v.startswith(CONNECTION_SERVER_NAME_PREFIX):
-            raise ValueError(
-                f"mcp_server name prefix {CONNECTION_SERVER_NAME_PREFIX!r} is reserved"
-            )
-        return v
+    include_instructions: bool = True
 
 
 # ── MCP toolset config (permission policies for discovered tools) ──────────

@@ -54,6 +54,8 @@ async def create_session(
     crypto_box: CryptoBox | None = None,
     workspace_path: str | None = None,
     env: dict[str, str] | None = None,
+    spawned_from_connection_id: str | None = None,
+    focal_channel: str | None = None,
 ) -> Session:
     """Create a session row and return it.
 
@@ -62,6 +64,11 @@ async def create_session(
     attachment runs in the same transaction as the session insert so a
     failed attach (e.g. archived store, name collision) leaves no
     orphaned session.
+
+    ``spawned_from_connection_id`` and ``focal_channel`` are set
+    together by the per_chat inbound flow — ``switch_channel``'s
+    focal-locked invariant depends on the pair being written atomically
+    with the row insert.
 
     ``crypto_box`` is required when ``resources`` includes any
     ``github_repository`` entries (their auth tokens are encrypted on
@@ -77,6 +84,8 @@ async def create_session(
             metadata=metadata,
             workspace_path=workspace_path,
             env=env,
+            spawned_from_connection_id=spawned_from_connection_id,
+            focal_channel=focal_channel,
         )
         if vault_ids:
             await queries.set_session_vaults(conn, session.id, vault_ids)
@@ -169,20 +178,11 @@ async def append_user_message(
             data=data,
             orig_channel=orig_channel,
         )
-        # Flip idle → pending so polling orchestrators can distinguish
-        # "queued but not started" from "turn finished." Other states
-        # (running / rescheduling / terminated) are left alone — the
-        # worker owns the running status, and changing rescheduling
-        # would lose the retry-in-progress signal.  Narrow scope by
-        # design: the tool-result and tool-confirmation paths have the
-        # same race but are deferred; an orchestrator resolving those
-        # still has to combine status polling with event-cursor
-        # tracking.  See issue #39.
-        await conn.execute(
-            "UPDATE sessions SET status = 'pending', updated_at = now() "
-            "WHERE id = $1 AND status = 'idle'",
-            session_id,
-        )
+        # Narrow scope by design: the tool-result and tool-confirmation
+        # paths have the same race but are deferred; an orchestrator
+        # resolving those still has to combine status polling with
+        # event-cursor tracking.  See issue #39.
+        await queries.flip_idle_to_pending(conn, session_id)
         return event
 
 
