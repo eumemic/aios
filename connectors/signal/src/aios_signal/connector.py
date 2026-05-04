@@ -34,7 +34,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from aios_connector import Connector, focal_required, make_account, tool
+from aios_connector import (
+    Attachment as SDKAttachment,
+)
+from aios_connector import (
+    AttachmentError,
+    Connector,
+    focal_required,
+    make_account,
+    tool,
+)
 
 from .addressing import decode_chat_id, encode_chat_id
 from .config import Settings
@@ -164,6 +173,7 @@ class SignalConnector(Connector):
                 "uuid": msg.sender_uuid,
                 "display_name": msg.sender_name or msg.sender_uuid,
             }
+            sdk_attachments = _build_sdk_attachments(msg)
             # Signal envelope timestamps are millis since epoch.  Render
             # them as ISO-8601 UTC so the supervisor stamps a string that
             # operators (and any future cross-platform tooling) can read
@@ -178,6 +188,7 @@ class SignalConnector(Connector):
                 chat_id=chat_id,
                 sender=sender_payload,
                 content=content,
+                attachments=sdk_attachments or None,
                 metadata=metadata,
                 timestamp=timestamp_iso,
             )
@@ -244,6 +255,36 @@ class SignalConnector(Connector):
         params = _build_react_params(phone, chat_id, target_author_uuid, target_timestamp_ms, emoji)
         await self._daemon.rpc.call("sendReaction", params)
         return {"status": "ok"}
+
+
+def _build_sdk_attachments(msg: InboundMessage) -> list[SDKAttachment]:
+    """Build SDK Attachment records, logging+skipping any rejected by ``as_params``."""
+    out: list[SDKAttachment] = []
+    for att in msg.attachments:
+        if att.host_path is None:
+            log.warning(
+                "signal.inbound.attachment_no_host_path",
+                content_type=att.content_type,
+                filename=att.filename,
+            )
+            continue
+        candidate = SDKAttachment(
+            host_path=att.host_path,
+            filename=att.filename or "unnamed",
+            content_type=att.content_type,
+        )
+        try:
+            candidate.as_params()
+        except AttachmentError as err:
+            log.warning(
+                "signal.inbound.attachment_rejected",
+                host_path=att.host_path,
+                filename=att.filename,
+                error=str(err),
+            )
+            continue
+        out.append(candidate)
+    return out
 
 
 def _build_send_params(account_phone: str, chat_id: str, text: str) -> dict[str, Any]:

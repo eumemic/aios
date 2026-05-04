@@ -82,13 +82,12 @@ def test_missing_source_uuid_returns_none(bot_uuid: str) -> None:
     assert parse_envelope(envelope, bot_account_uuid=bot_uuid) is None
 
 
-def test_build_content_text_with_attachments(
+def test_build_content_text_attachment_only_is_empty(
     envelope_attachment_only: dict[str, Any], bot_uuid: str
 ) -> None:
     msg = parse_envelope(envelope_attachment_only, bot_account_uuid=bot_uuid)
     assert msg is not None
-    rendered = build_content_text(msg)
-    assert rendered == "[attachment: photo.jpg (image/jpeg)]"
+    assert build_content_text(msg) == ""
 
 
 def test_build_content_text_with_text_and_attachment(bot_uuid: str) -> None:
@@ -102,9 +101,16 @@ def test_build_content_text_with_text_and_attachment(bot_uuid: str) -> None:
         chat_name=None,
         timestamp_ms=1,
         text="Check this out",
-        attachments=(Attachment(content_type="image/png", filename="x.png"),),
+        attachments=(Attachment(content_type="image/png", filename="x.png", host_path="/tmp/x"),),
         reply=None,
         reaction=None,
     )
-    rendered = build_content_text(msg)
-    assert rendered == "Check this out\n[attachment: x.png (image/png)]"
+    assert build_content_text(msg) == "Check this out"
+
+
+def test_attachment_captures_host_path(
+    envelope_attachment_only: dict[str, Any], bot_uuid: str
+) -> None:
+    msg = parse_envelope(envelope_attachment_only, bot_account_uuid=bot_uuid)
+    assert msg is not None
+    assert msg.attachments[0].host_path == "/tmp/signal-cli/attachments/abc-def-123"

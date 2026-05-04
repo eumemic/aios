@@ -23,6 +23,7 @@ MENTION_PLACEHOLDER = "\ufffc"
 class Attachment:
     content_type: str
     filename: str | None
+    host_path: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -149,6 +150,7 @@ def parse_envelope(
         Attachment(
             content_type=a.get("contentType", "application/octet-stream"),
             filename=a.get("filename") if isinstance(a.get("filename"), str) else None,
+            host_path=a.get("file") if isinstance(a.get("file"), str) else None,
         )
         for a in attachments_raw
         if isinstance(a, dict)
@@ -179,9 +181,4 @@ def parse_envelope(
 
 
 def build_content_text(msg: InboundMessage) -> str:
-    parts: list[str] = []
-    if msg.text:
-        parts.append(msg.text)
-    for a in msg.attachments:
-        parts.append(f"[attachment: {a.filename or '(unnamed)'} ({a.content_type})]")
-    return "\n".join(parts)
+    return msg.text

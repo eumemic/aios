@@ -149,6 +149,62 @@ def message_photo_no_text(ptb_bot: Bot) -> Message:
 
 
 @pytest.fixture
+def message_photo_with_caption(ptb_bot: Bot) -> Message:
+    return _make_message(
+        {
+            "message_id": 709,
+            "date": 1700000010,
+            "chat": {"id": 123456789, "type": "private"},
+            "from": {"id": 123456789, "is_bot": False, "first_name": "Alice"},
+            "caption": "look at this cat",
+            "photo": [
+                {"file_id": "S1", "file_unique_id": "s1", "width": 90, "height": 90},
+                {"file_id": "L1", "file_unique_id": "l1", "width": 1280, "height": 1280},
+            ],
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_voice(ptb_bot: Bot) -> Message:
+    return _make_message(
+        {
+            "message_id": 710,
+            "date": 1700000011,
+            "chat": {"id": 123456789, "type": "private"},
+            "from": {"id": 123456789, "is_bot": False, "first_name": "Alice"},
+            "voice": {
+                "file_id": "VOICE-A",
+                "file_unique_id": "voice-a",
+                "duration": 4,
+                "mime_type": "audio/ogg",
+            },
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_document(ptb_bot: Bot) -> Message:
+    return _make_message(
+        {
+            "message_id": 711,
+            "date": 1700000012,
+            "chat": {"id": 123456789, "type": "private"},
+            "from": {"id": 123456789, "is_bot": False, "first_name": "Alice"},
+            "document": {
+                "file_id": "DOC-A",
+                "file_unique_id": "doc-a",
+                "file_name": "report.pdf",
+                "mime_type": "application/pdf",
+            },
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
 def message_channel_post_no_sender(ptb_bot: Bot) -> Message:
     return _make_message(
         {
