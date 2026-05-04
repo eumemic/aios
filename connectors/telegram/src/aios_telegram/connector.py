@@ -74,18 +74,19 @@ class TelegramConnector(Connector):
         # Install message handler that pushes parsed inbound onto the
         # queue.  PTB uses its own background tasks for long-polling;
         # we keep handler bodies tiny so PTB's worker doesn't block on
-        # our spool write.
-        bot_id = self._bot_id
-        queue = self._inbound_queue
-
+        # our spool write.  References go through ``self`` so a future
+        # ``setup`` re-run wouldn't leave the closure pointing at a
+        # stale queue.
         async def on_message(update: Any, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
             message = update.message
             if message is None:
                 return
-            parsed = parse_message(message, bot_id=bot_id)
+            assert self._bot_id is not None
+            assert self._inbound_queue is not None
+            parsed = parse_message(message, bot_id=self._bot_id)
             if parsed is None:
                 return
-            await queue.put(parsed)
+            await self._inbound_queue.put(parsed)
 
         async def on_error(_update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
             log.error("telegram.handler.error", error=str(context.error))

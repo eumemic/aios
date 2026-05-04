@@ -144,20 +144,11 @@ async def append_user_message(
             data=data,
             orig_channel=orig_channel,
         )
-        # Flip idle → pending so polling orchestrators can distinguish
-        # "queued but not started" from "turn finished." Other states
-        # (running / rescheduling / terminated) are left alone — the
-        # worker owns the running status, and changing rescheduling
-        # would lose the retry-in-progress signal.  Narrow scope by
-        # design: the tool-result and tool-confirmation paths have the
-        # same race but are deferred; an orchestrator resolving those
-        # still has to combine status polling with event-cursor
-        # tracking.  See issue #39.
-        await conn.execute(
-            "UPDATE sessions SET status = 'pending', updated_at = now() "
-            "WHERE id = $1 AND status = 'idle'",
-            session_id,
-        )
+        # Narrow scope by design: the tool-result and tool-confirmation
+        # paths have the same race but are deferred; an orchestrator
+        # resolving those still has to combine status polling with
+        # event-cursor tracking.  See issue #39.
+        await queries.flip_idle_to_pending(conn, session_id)
         return event
 
 

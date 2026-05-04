@@ -156,13 +156,11 @@ def _build_input_schema(fn: ToolFn) -> dict[str, Any]:
     import inspect
 
     sig = inspect.signature(fn)
-    try:
-        hints = get_type_hints(fn)
-    except Exception:
-        # Forward references that can't resolve in a partially-built
-        # module — degrade to "any" for those params rather than fail
-        # registration.  Real connectors should make hints resolvable.
-        hints = {}
+    # Fail loudly here: an unresolvable hint at decoration time means
+    # the connector author has a forward-reference / circular-import
+    # bug.  Silently emitting an "any" schema would publish the wrong
+    # tool contract to the model.
+    hints = get_type_hints(fn)
 
     properties: dict[str, dict[str, Any]] = {}
     required: list[str] = []
@@ -280,6 +278,13 @@ class Connector:
         self._accounts_payload: dict[str, Any] = {"accounts": []}
         self._write_stream: anyio.abc.ObjectSendStream[SessionMessage] | None = None
         self._client_initialized: anyio.Event = anyio.Event()
+        # Flipped at the end of :meth:`_emit_initial_state` so live
+        # :meth:`emit_inbound` calls block until the accounts snapshot
+        # and any spool replay have been flushed.  Otherwise a
+        # connector whose :meth:`serve` fires inbounds eagerly during
+        # startup could race past the initial-state ordering invariant
+        # documented on :meth:`_emit_initial_state`.
+        self._initial_state_done: anyio.Event = anyio.Event()
         self._emit_count: int = 0
         self._warned: bool = False
 
@@ -350,6 +355,12 @@ class Connector:
                 "emit_inbound called before the MCP server started; "
                 "call from setup() / live operation, not __init__"
             )
+        # Block until the accounts snapshot + spool replay have been
+        # pushed.  Otherwise an eager :meth:`serve` could ship a fresh
+        # inbound past a half-initialized supervisor — out of order
+        # with the very entries the spool is supposed to deliver
+        # exactly once.
+        await self._initial_state_done.wait()
 
         event_id = str(ULID())
         params: dict[str, Any] = {
@@ -562,17 +573,22 @@ class Connector:
         inside :meth:`run`.  The wait avoids a race where the
         supervisor's splitter forwards an early aios notification before
         the client's session has registered its message handlers.
+        Sets ``_initial_state_done`` at the tail so ``emit_inbound``
+        callers (live :meth:`serve` work) can resume.
         """
-        await self._client_initialized.wait()
-        await self._send_aios_notification(_ACCOUNTS_METHOD, self._accounts_payload)
-        for event_id, payload in self._spool.unacked():
-            params = json.loads(payload.decode("utf-8"))
-            # Authoritative source of truth for the event_id is the
-            # spool key — the JSON payload should already match, but
-            # if a future schema migration adds keys we want the key
-            # to win.
-            params["event_id"] = event_id
-            await self._send_aios_notification(_INBOUND_METHOD, params)
+        try:
+            await self._client_initialized.wait()
+            await self._send_aios_notification(_ACCOUNTS_METHOD, self._accounts_payload)
+            for event_id, payload in self._spool.unacked():
+                params = json.loads(payload.decode("utf-8"))
+                # Authoritative source of truth for the event_id is the
+                # spool key — the JSON payload should already match, but
+                # if a future schema migration adds keys we want the key
+                # to win.
+                params["event_id"] = event_id
+                await self._send_aios_notification(_INBOUND_METHOD, params)
+        finally:
+            self._initial_state_done.set()
 
     def _maybe_warn_spool_growth(self) -> None:
         """Stat the spool every Nth emit; warn-once when it exceeds the soft threshold.

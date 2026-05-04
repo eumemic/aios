@@ -38,6 +38,7 @@ async def test_emit_inbound_persists_then_pushes(connector: _StubConnector) -> N
     stream = _StubStream()
     connector._write_stream = stream  # type: ignore[assignment]
     connector._client_initialized.set()
+    connector._initial_state_done.set()
 
     event_id = await connector.emit_inbound(
         account="echo-1",
@@ -83,6 +84,7 @@ async def test_unacked_replays_after_init(connector: _StubConnector) -> None:
     stream_pre = _StubStream()
     connector._write_stream = stream_pre  # type: ignore[assignment]
     connector._client_initialized.set()
+    connector._initial_state_done.set()
 
     eid_a = await connector.emit_inbound(
         account="echo-1", chat_id="c1", sender={"display_name": "A"}, content="m1"

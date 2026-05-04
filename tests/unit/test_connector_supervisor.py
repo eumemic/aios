@@ -248,9 +248,16 @@ class TestInboundMalformed:
     without losing the rest of the pipeline.
     """
 
-    async def test_missing_required_field_records_drop(
+    async def _build_registry(
         self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    ) -> tuple[ConnectorSubprocessRegistry, list[str]]:
+        """Construct a registry with a stubbed ack and an asserting pool.
+
+        The pool stub fails the test if any drop path tries to touch
+        the DB; the ack stub records event_ids without going through
+        ``dispatch_call`` (which would otherwise hit the 60s timeout
+        waiting for a connector subprocess).
+        """
         from aios.config import Settings
         from aios.harness.connector_supervisor import ConnectorState
 
@@ -258,24 +265,49 @@ class TestInboundMalformed:
         spec = ConnectorSpec(name="echo", command="x", args=[])
         registry._states["echo"] = ConnectorState(name="echo", spec=spec)
 
-        # Missing chat_id / event_id should drop with reason=malformed,
-        # never reach the DB lookup.
-        called = {"queries": 0}
-
         def fake_require_pool() -> None:
-            called["queries"] += 1
             raise AssertionError("DB should not be touched on malformed payload")
 
         monkeypatch.setattr(
             "aios.harness.connector_supervisor.runtime.require_pool",
             fake_require_pool,
         )
+
+        acked: list[str] = []
+
+        async def fake_ack(_self: object, _name: str, event_id: str) -> None:
+            acked.append(event_id)
+
+        monkeypatch.setattr(
+            ConnectorSubprocessRegistry,
+            "_send_ack",
+            fake_ack,
+        )
+        return registry, acked
+
+    async def test_missing_event_id_drops_without_ack(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing event_id → drop, NO ack (no id to ack against)."""
+        registry, acked = await self._build_registry(monkeypatch)
+        await registry._handle_inbound(
+            "echo",
+            {"account": "a", "chat_id": "c", "content": "x"},
+        )
+        assert registry._states["echo"].drops["malformed"] == 1
+        assert acked == []
+
+    async def test_missing_other_field_drops_with_ack(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Other fields missing → drop AND ack so spool clears."""
+        registry, acked = await self._build_registry(monkeypatch)
         await registry._handle_inbound(
             "echo",
             {"event_id": "01EVT", "account": "acct"},  # missing chat_id, content
         )
-        assert called["queries"] == 0
         assert registry._states["echo"].drops["malformed"] == 1
+        assert acked == ["01EVT"]
 
 
 class TestBackoffSchedule:

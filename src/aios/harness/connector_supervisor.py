@@ -44,6 +44,7 @@ from aios.harness.wake import defer_wake
 from aios.logging import get_logger
 from aios.mcp.client import shape_call_result
 from aios.mcp.stdio_transport import ConnectorSpec, open_connector_session
+from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services import sessions as sessions_service
 
 log = get_logger("aios.harness.connector_supervisor")
@@ -84,6 +85,7 @@ DropReason = Literal[
     "archived_template",
     "session_missing",
     "malformed",
+    "payload_too_large",
 ]
 
 
@@ -369,19 +371,25 @@ class ConnectorSubprocessRegistry:
         chat_id = params.get("chat_id")
         sender = params.get("sender") or {}
         content = params.get("content")
-        if not (
-            isinstance(event_id, str)
-            and isinstance(account, str)
-            and isinstance(chat_id, str)
-            and isinstance(content, str)
-        ):
+        connector_metadata = (
+            params.get("metadata") if isinstance(params.get("metadata"), dict) else None
+        )
+
+        # event_id is checked first because it's the only thing that lets
+        # us ack the spool entry — without it we can't dedup or clear,
+        # so the connector author must fix their emit shape.
+        if not isinstance(event_id, str):
+            log.warning("connector.inbound_missing_event_id", connector=name)
+            self._record_drop(state, "malformed")
+            return
+
+        if not (isinstance(account, str) and isinstance(chat_id, str) and isinstance(content, str)):
             log.warning(
                 "connector.inbound_malformed",
                 connector=name,
                 missing=[
                     key
                     for key, value in (
-                        ("event_id", event_id),
                         ("account", account),
                         ("chat_id", chat_id),
                         ("content", content),
@@ -390,6 +398,19 @@ class ConnectorSubprocessRegistry:
                 ],
             )
             self._record_drop(state, "malformed")
+            await self._send_ack(name, event_id)
+            return
+
+        if len(content) > MAX_USER_MESSAGE_CHARS:
+            log.warning(
+                "connector.inbound_too_large",
+                connector=name,
+                account=account,
+                length=len(content),
+                limit=MAX_USER_MESSAGE_CHARS,
+            )
+            self._record_drop(state, "payload_too_large")
+            await self._send_ack(name, event_id)
             return
 
         pool = runtime.require_pool()
@@ -432,31 +453,32 @@ class ConnectorSubprocessRegistry:
             return
 
         # 3. Append event + ledger row in the same transaction.
-        appended = await self._append_with_dedup(
-            connector_name=name,
-            account=account,
-            event_id=event_id,
-            session_id=target_session_id,
-            chat_id=chat_id,
-            sender=sender if isinstance(sender, dict) else {},
-            content=content,
-            attachments=params.get("attachments"),
-        )
+        try:
+            await self._append_with_dedup(
+                connector_name=name,
+                account=account,
+                event_id=event_id,
+                session_id=target_session_id,
+                chat_id=chat_id,
+                sender=sender if isinstance(sender, dict) else {},
+                content=content,
+                attachments=params.get("attachments"),
+                connector_metadata=connector_metadata,
+            )
+        except NotFoundError:
+            # The session vanished between resolution and append.
+            self._record_drop(state, "session_missing")
+            await self._send_ack(name, event_id)
+            return
 
-        # 4. Outside the transaction: defer wake (idempotent) and ack.
-        if appended:
-            try:
-                await defer_wake(pool, target_session_id, cause="inbound")
-            except Exception:
-                # Defer-wake failures are non-fatal — the next sweep
-                # picks up the unhandled message.  Logged so operator
-                # diagnoses if a connector goes silent.
-                log.warning(
-                    "connector.inbound_defer_wake_failed",
-                    connector=name,
-                    session_id=target_session_id,
-                    exc_info=True,
-                )
+        # 4. Outside the transaction: defer wake unconditionally.
+        # ``defer_wake`` is idempotent (procrastinate's queueing_lock
+        # coalesces duplicates), so we call it on both first-append and
+        # dedup paths — the dedup path heals the case where the prior
+        # attempt committed the event but failed to defer the wake.
+        # Failures propagate so the inbound task fails and the connector
+        # replays on reconnect, where this same path can re-run.
+        await defer_wake(pool, target_session_id, cause="inbound")
         await self._send_ack(name, event_id)
 
     async def _auto_create_or_drop(self, state: ConnectorState, *, name: str, account: str) -> None:
@@ -468,32 +490,31 @@ class ConnectorSubprocessRegistry:
         increment the ``no_connection`` counter so the operator sees
         the surface (auto-creating a row doesn't deliver the message
         that prompted it).
+
+        ``ConflictError`` is the documented race (another handler created
+        the row first); any other failure propagates so the inbound task
+        fails and the connector replays on reconnect.
+
+        No dedup-ledger row is written here on purpose: if the operator
+        attaches the auto-created connection later, the connector's
+        replay should deliver the message that prompted creation —
+        which a ledger row would block.
         """
 
         self._record_drop(state, "no_connection")
-        if self._settings.connectors_auto_create.get(name, True):
-            pool = runtime.require_pool()
-            try:
-                async with pool.acquire() as conn:
-                    await queries.insert_connection(
-                        conn, connector=name, account=account, metadata={}
-                    )
-                    log.info(
-                        "connector.auto_create_connection",
-                        connector=name,
-                        account=account,
-                    )
-            except ConflictError:
-                # Race: another handler created the row first; the
-                # outcome is what we wanted, no error.
-                pass
-            except Exception:
-                log.warning(
-                    "connector.auto_create_failed",
+        if not self._settings.connectors_auto_create.get(name, True):
+            return
+        pool = runtime.require_pool()
+        try:
+            async with pool.acquire() as conn:
+                await queries.insert_connection(conn, connector=name, account=account, metadata={})
+                log.info(
+                    "connector.auto_create_connection",
                     connector=name,
                     account=account,
-                    exc_info=True,
                 )
+        except ConflictError:
+            pass
 
     async def _resolve_per_chat_session(
         self,
@@ -567,21 +588,32 @@ class ConnectorSubprocessRegistry:
         sender: dict[str, Any],
         content: str,
         attachments: Any,
+        connector_metadata: dict[str, Any] | None,
     ) -> bool:
         """Append a user-message event AND record the dedup-ledger row.
 
         Both writes run in one transaction.  Returns ``True`` if the
-        event was appended, ``False`` if the ledger detected a
-        duplicate (already-processed inbound replayed by the
-        connector).  In the duplicate case the txn rolls back — no
-        second event row, no second seq increment, but the caller
-        still sends the ack so the connector clears its spool.
+        event was appended, ``False`` on dedup (already-processed
+        inbound replayed by the connector).  Raises :class:`NotFoundError`
+        if the target session vanished between resolution and append.
+
+        Connector-supplied metadata (signal's ``sender_uuid``,
+        ``timestamp_ms``, ``reply_to``, ``reaction``; telegram's
+        ``message_id``, ``reply_to``; anything else the connector
+        emits) is merged in BEFORE the supervisor's stamps so
+        supervisor-canonical fields (``channel``, ``sender``,
+        ``attachments``) win on key conflicts.  The model relies on
+        these fields — e.g. ``signal_react`` is documented to copy
+        ``sender_uuid`` and ``timestamp_ms`` from the inbound header.
         """
 
         pool = runtime.require_pool()
         channel = f"{connector_name}/{account}/{chat_id}"
         sender_name = sender.get("display_name")
-        metadata: dict[str, Any] = {"channel": channel}
+        metadata: dict[str, Any] = {}
+        if connector_metadata is not None:
+            metadata.update(connector_metadata)
+        metadata["channel"] = channel
         if isinstance(sender_name, str):
             metadata["sender"] = sender_name
         if isinstance(attachments, list) and attachments:
@@ -609,17 +641,8 @@ class ConnectorSubprocessRegistry:
                     appended_seq=event.seq,
                 )
                 if not inserted:
-                    # Duplicate inbound — undo this txn entirely.  The
-                    # ack still fires from the caller so the connector's
-                    # spool clears.
                     raise _DedupRollback()
-                # Same-txn pending flip (mirrors append_user_message)
-                # so polling orchestrators see the session leave idle.
-                await conn.execute(
-                    "UPDATE sessions SET status = 'pending', updated_at = now() "
-                    "WHERE id = $1 AND status = 'idle'",
-                    session_id,
-                )
+                await queries.flip_idle_to_pending(conn, session_id)
         except _DedupRollback:
             log.info(
                 "connector.inbound_duplicate",
@@ -627,22 +650,16 @@ class ConnectorSubprocessRegistry:
                 event_id=event_id,
             )
             return False
-        except NotFoundError:
-            # The session vanished between resolution and append.  Rare
-            # but possible if an operator just archived a per_chat
-            # session.  Drop with counter so it surfaces.
-            state = self._states[connector_name]
-            self._record_drop(state, "session_missing")
-            return False
         return True
 
     async def _send_ack(self, name: str, event_id: str) -> None:
-        """Fire-and-forget ``aios_inbound_ack`` to clear the connector's spool.
+        """Send ``aios_inbound_ack`` to clear the connector's spool.
 
-        Failures here aren't fatal: the connector replays on its next
-        reconnect, where the ledger conflict path catches the
-        duplicate.  We log but don't retry — retries would risk an
-        infinite loop if the connector is wedged.
+        Awaited inline so :meth:`shutdown` waits for in-flight acks
+        (or hits the 60s ``_DISPATCH_TIMEOUT_S``) before returning.
+        Failures here aren't fatal — the connector replays on its next
+        reconnect where the ledger conflict path catches the duplicate;
+        we log but don't retry to avoid pinning a wedged connector.
         """
         result = await self.dispatch_call(name, "aios_inbound_ack", {"event_id": event_id})
         if "error" in result:

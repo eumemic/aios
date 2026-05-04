@@ -2554,6 +2554,22 @@ async def insert_chat_session(
 # ─── connector_inbound_acks (dedup ledger) ──────────────────────────────────
 
 
+async def flip_idle_to_pending(conn: asyncpg.Connection[Any], session_id: str) -> None:
+    """Flip ``sessions.status`` from ``idle`` to ``pending`` if currently idle.
+
+    Called after appending a user message so polling orchestrators can
+    distinguish queued-but-not-started from turn-finished.  Other states
+    (running / rescheduling / terminated) are left alone — the worker
+    owns the running status, and changing rescheduling would lose the
+    retry-in-progress signal.
+    """
+    await conn.execute(
+        "UPDATE sessions SET status = 'pending', updated_at = now() "
+        "WHERE id = $1 AND status = 'idle'",
+        session_id,
+    )
+
+
 async def try_record_inbound_ack(
     conn: asyncpg.Connection[Any],
     *,
