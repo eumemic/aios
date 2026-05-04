@@ -98,6 +98,30 @@ async def test_emit_inbound_blocks_until_initial_state_done(
     assert len(stream.sent) == 1
 
 
+async def test_run_calls_teardown_when_setup_raises(tmp_path: Path) -> None:
+    """A failing ``setup`` still triggers ``teardown`` so resources released.
+
+    Pre-fix, ``setup()`` ran outside the ``try/finally``, so a partial
+    setup (e.g., signal-cli's ``__aenter__`` succeeded then
+    ``discover_bot_uuid`` raised) leaked the daemon subprocess.
+    """
+    teardown_called: list[bool] = []
+
+    class _BoomConnector(Connector):
+        name = "boom"
+
+        async def setup(self) -> None:
+            raise RuntimeError("simulated setup failure")
+
+        async def teardown(self) -> None:
+            teardown_called.append(True)
+
+    connector = _BoomConnector(spool_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="simulated setup failure"):
+        await connector.run()
+    assert teardown_called == [True]
+
+
 async def test_emit_inbound_before_run_raises(connector: _StubConnector) -> None:
     """Calling ``emit_inbound`` before :meth:`run` started is a programmer error.
 

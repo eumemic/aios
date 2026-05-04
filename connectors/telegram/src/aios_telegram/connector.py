@@ -65,7 +65,9 @@ class TelegramConnector(Connector):
         self._username = me.username or None
         self._inbound_queue = asyncio.Queue()
 
-        type(self).instructions = build_instructions(
+        # Set on instance, not class, so a second connector in tests
+        # doesn't see leakage from the first.
+        self.instructions = build_instructions(
             bot_id=self._bot_id,
             first_name=self._first_name,
             username=self._username,

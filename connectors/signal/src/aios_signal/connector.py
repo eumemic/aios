@@ -70,10 +70,11 @@ class SignalConnector(Connector):
         self._bot_uuid = await self._daemon.discover_bot_uuid()
         self._contact_names = await self._daemon.list_contacts()
         groups = await self._daemon.list_groups()
-        # Replace instructions with a runtime-built block that captures
-        # the bot's identity, contacts, and groups.  The SDK forwards
-        # this to aios as ``InitializeResult.instructions``.
-        type(self).instructions = build_instructions(
+        # Build a runtime instructions block that captures the bot's
+        # identity, contacts, and groups.  Set on the instance (not the
+        # class) so a second connector instance in tests doesn't see
+        # leakage from the first.
+        self.instructions = build_instructions(
             bot_uuid=self._bot_uuid,
             phone=self._cfg.phone,
             profile_name=self._contact_names.get(self._bot_uuid),

@@ -152,7 +152,12 @@ class Settings(BaseSettings):
         "detached connection row by default; setting ``{name: false}`` disables "
         "that for ``name``, dropping such inbounds with a ``no_connection`` "
         "counter increment instead.  Names not present in the dict default to "
-        "``True``.",
+        "``True``.\n\n"
+        "Shape note: the plan documented this as nested "
+        "``connectors.<name>.auto_create_connections``, but pydantic-settings "
+        "doesn't compose well with that shape under the ``AIOS_`` env prefix; "
+        "a flat ``AIOS_CONNECTORS_AUTO_CREATE='{\"signal\":false}'`` is "
+        "operationally equivalent and easier to override from systemd / env.",
     )
 
     # ── observability ──────────────────────────────────────────────────────

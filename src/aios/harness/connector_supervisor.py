@@ -371,9 +371,8 @@ class ConnectorSubprocessRegistry:
         chat_id = params.get("chat_id")
         sender = params.get("sender") or {}
         content = params.get("content")
-        connector_metadata = (
-            params.get("metadata") if isinstance(params.get("metadata"), dict) else None
-        )
+        raw_metadata = params.get("metadata")
+        connector_metadata = raw_metadata if isinstance(raw_metadata, dict) else None
 
         # event_id is checked first because it's the only thing that lets
         # us ack the spool entry — without it we can't dedup or clear,

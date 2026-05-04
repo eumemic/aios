@@ -122,6 +122,13 @@ def upgrade() -> None:
     # ``ON CONFLICT DO NOTHING`` is the dedup mechanism, giving at-most-once
     # event append.  Spool-side ack still runs after commit (different
     # purpose: spool pruning, not dedup).
+    #
+    # Pruning policy: intentionally none in v1 (plan decision #16).  The
+    # ledger grows by one row per delivered inbound; ``appended_at``
+    # supports a future ``DELETE FROM connector_inbound_acks WHERE
+    # appended_at < now() - interval '90 days'`` once retention needs
+    # arise.  At ~50 bytes/row that's negligible until well past 1M
+    # delivered messages per connector.
     op.execute("""
         CREATE TABLE connector_inbound_acks (
             connector      text NOT NULL,

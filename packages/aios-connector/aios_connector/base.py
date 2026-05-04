@@ -262,8 +262,12 @@ class Connector:
     """
 
     name: ClassVar[str] = ""
-    instructions: ClassVar[str | None] = None
     version: ClassVar[str] = "0.0.0"
+    # ``instructions`` is intentionally NOT a ClassVar so that
+    # connectors can set it on the instance from :meth:`setup` (e.g.,
+    # signal embedding the bot UUID + contacts in the prompt) without
+    # mutating a class-level attribute that would leak across instances.
+    instructions: str | None = None
 
     def __init__(self, *, spool_dir: Path | None = None) -> None:
         if not self.name:
@@ -390,9 +394,15 @@ class Connector:
         Runs ``setup()`` → ``discover_accounts()`` BEFORE the MCP server
         starts so a stuck setup trips the supervisor's bounded init
         handshake (30s) rather than parking the supervisor forever.
+
+        ``setup()`` runs INSIDE the try/finally so a partial-setup
+        failure (e.g., signal-cli's ``__aenter__`` succeeded then
+        ``discover_bot_uuid`` raised) still triggers ``teardown()`` —
+        otherwise the daemon subprocess leaks and the supervisor's
+        respawn would race the previous instance's socket lock.
         """
-        await self.setup()
         try:
+            await self.setup()
             self._accounts_payload = {"accounts": list(await self.discover_accounts())}
             server = self._build_server()
             init_opts = server.create_initialization_options(
