@@ -410,7 +410,7 @@ class TestAccountDriftInbound:
         ]
         ack_view = _patch_send_ack(registry)
         await registry._handle_inbound(
-            "echo",
+            ("echo", "echo"),
             {
                 "event_id": make_id("evt"),
                 "account": account,
@@ -459,7 +459,7 @@ class TestAccountDriftInbound:
             new=mock.AsyncMock(return_value=None),
         ):
             await registry._handle_inbound(
-                "echo",
+                ("echo", "echo"),
                 {
                     "event_id": make_id("evt"),
                     "account": account,
