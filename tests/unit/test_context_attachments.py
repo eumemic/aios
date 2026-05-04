@@ -216,6 +216,64 @@ class TestVisionAwareRendering:
         assert isinstance(msg["content"], str)
         assert "[image: photo.jpg" in msg["content"]
 
+    def test_image_only_no_caption_no_header_omits_empty_text(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """An image-only event with no caption AND no channel header must
+        NOT emit ``{"type":"text","text":""}`` — Anthropic rejects empty
+        text blocks (``text content blocks must be non-empty``).  The
+        common path is fine because the channel header populates the
+        leading text, but legacy events with metadata-stripped headers
+        would 400 against Anthropic-routed minds.  Regression test for
+        PR #218.
+        """
+        sandbox_path = _stage_image(
+            temp_workspace_root, "sess-1", "echo", "evt-1-photo.jpg", b"PNG"
+        )
+        # Construct an event whose metadata has attachments but lacks
+        # ``channel`` — _format_channel_header returns "" so leading_text
+        # stays empty.  Content is also empty (image-only inbound).
+        event: dict[str, Any] = {
+            "role": "user",
+            "content": "",
+            "metadata": {
+                "channel": "echo/acct/chat-1",
+                "attachments": [
+                    {
+                        "filename": "photo.jpg",
+                        "content_type": "image/jpeg",
+                        "size": 3,
+                        "in_sandbox_path": sandbox_path,
+                    }
+                ],
+            },
+        }
+        # Strip the channel header by zeroing all the fields _format_channel_header
+        # consumes after the bare "channel" key: the header is the channel marker
+        # plus the inbound content, both empty here, so leading_text is just the
+        # bare ``[channel=...]`` line.  To exercise the no-header branch we drop
+        # ``channel`` from metadata entirely below.
+        event["metadata"].pop("channel")
+        # Re-add ``attachments`` only — _format_channel_header returns "" when
+        # channel is absent, leaving leading_text empty for the image-only path.
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",
+            "echo/acct/chat-1",
+            model="mind/vision",
+            session_id="sess-1",
+        )
+        content = msg["content"]
+        assert isinstance(content, list), (
+            "image_only message must still emit content parts when image is inlined"
+        )
+        # No empty text block in the parts.
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                assert part.get("text"), f"empty text part rejected by Anthropic — got {part!r}"
+        # And the image_url part is preserved.
+        assert any(p.get("type") == "image_url" for p in content)
+
     def test_multiple_attachments_mixed(self, temp_workspace_root: Path) -> None:
         a = _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-a.jpg", b"AAA")
         b = _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-b.pdf", b"PDF")
