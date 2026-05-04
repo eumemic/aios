@@ -304,6 +304,49 @@ class TestDropCounter:
         assert state.snapshot()["recent_drops"] == {}
 
 
+class TestSnapshotSize:
+    """``ConnectorState.snapshot()`` is consumed by ``connector_status``,
+    which sends the JSON-encoded result via ``pg_notify``.  Postgres
+    NOTIFY caps payloads at 8000 bytes — large server-side
+    ``InitializeResult.instructions`` (signal with N phones, each with
+    per-account contacts and groups) easily exceeded this and crashed
+    the admin RPC.
+
+    The fix: instructions stay on the state for in-process consumers
+    (the model-context discovery path uses
+    :func:`discover_session_mcp_tools` directly, not the snapshot) but
+    are kept out of the admin-facing snapshot.
+    """
+
+    def _registry_with_state(self) -> tuple[Any, Any]:
+        from aios.config import Settings
+        from aios.harness.connector_supervisor import (
+            ConnectorState,
+            ConnectorSubprocessRegistry,
+        )
+
+        registry = ConnectorSubprocessRegistry([], settings=Settings())
+        spec = ConnectorSpec(name="echo", command="x", args=[])
+        state = ConnectorState(connector="echo", instance="echo", spec=spec)
+        registry._states[("echo", "echo")] = state
+        return registry, state
+
+    def test_snapshot_omits_large_instructions(self) -> None:
+        """A 6KB instructions block must not appear in the snapshot — the
+        admin RPC is the one consumer of ``snapshot()`` and Postgres
+        NOTIFY cannot carry it."""
+        import json
+
+        _, state = self._registry_with_state()
+        state.instructions = "x" * 6000
+
+        snap = state.snapshot()
+        assert "instructions" not in snap
+        # End-to-end size assertion: serialized snapshot fits comfortably
+        # under the 8000-byte NOTIFY cap.
+        assert len(json.dumps(snap)) < 8000
+
+
 class TestInboundMalformed:
     """Malformed inbound payloads count as ``malformed`` drops, never crash.
 

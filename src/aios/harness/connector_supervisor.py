@@ -162,11 +162,21 @@ class ConnectorState:
         return instance_label(self.connector, self.instance)
 
     def snapshot(self) -> dict[str, Any]:
+        """Build the admin-facing dict for ``connector_status`` / GET ``/v1/connectors``.
+
+        ``instructions`` is intentionally absent.  The MCP server's
+        ``InitializeResult.instructions`` is consumed for model context
+        via :func:`aios.harness.loop.discover_session_mcp_tools` (which
+        re-fetches it directly), not via this snapshot.  Including it
+        here previously broke ``connector_status``: the task pg_notifies
+        the JSON-encoded snapshot, and Postgres NOTIFY caps payloads at
+        8000 bytes — a signal connector serving N phones with their
+        contacts and groups easily exceeded that.
+        """
         return {
             "connector": self.connector,
             "instance": self.instance,
             "status": self.status,
-            "instructions": self.instructions,
             "accounts": list(self.accounts),
             "last_error": self.last_error,
             "recent_drops": dict(self.drops),
