@@ -55,8 +55,47 @@ def test_other_bot_returns_none(message_from_other_bot: Message, bot_id: int) ->
     assert parse_message(message_from_other_bot, bot_id=bot_id) is None
 
 
-def test_photo_without_text_returns_none(message_photo_no_text: Message, bot_id: int) -> None:
-    assert parse_message(message_photo_no_text, bot_id=bot_id) is None
+def test_photo_without_text_surfaces_attachment(
+    message_photo_no_text: Message, bot_id: int
+) -> None:
+    msg = parse_message(message_photo_no_text, bot_id=bot_id)
+    assert msg is not None
+    assert msg.text == ""
+    assert len(msg.attachments) == 1
+    att = msg.attachments[0]
+    assert att.content_type == "image/jpeg"
+    assert att.filename.endswith(".jpg")
+
+
+def test_photo_with_caption_surfaces_both(message_photo_with_caption: Message, bot_id: int) -> None:
+    msg = parse_message(message_photo_with_caption, bot_id=bot_id)
+    assert msg is not None
+    assert msg.text == "look at this cat"
+    assert len(msg.attachments) == 1
+    # Largest PhotoSize wins.
+    assert msg.attachments[0].file_id == "L1"
+
+
+def test_voice_surfaces_attachment(message_voice: Message, bot_id: int) -> None:
+    msg = parse_message(message_voice, bot_id=bot_id)
+    assert msg is not None
+    assert msg.text == ""
+    assert len(msg.attachments) == 1
+    att = msg.attachments[0]
+    assert att.file_id == "VOICE-A"
+    assert att.content_type == "audio/ogg"
+    assert att.filename.endswith(".ogg")
+
+
+def test_document_surfaces_attachment(message_document: Message, bot_id: int) -> None:
+    msg = parse_message(message_document, bot_id=bot_id)
+    assert msg is not None
+    assert msg.text == ""
+    assert len(msg.attachments) == 1
+    att = msg.attachments[0]
+    assert att.file_id == "DOC-A"
+    assert att.content_type == "application/pdf"
+    assert att.filename == "report.pdf"
 
 
 def test_channel_post_without_sender_returns_none(
