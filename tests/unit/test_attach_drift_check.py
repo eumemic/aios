@@ -58,7 +58,7 @@ def _patch_rpc(
     ) -> None:
         captured.append((call_id, connector))
 
-    monkeypatch.setattr("aios.api.routers.connections.listen_for_connector_result", fake_listen)
+    monkeypatch.setattr("aios.api.connector_rpc.listen_for_connector_result", fake_listen)
     monkeypatch.setattr("aios.api.routers.connections.defer_connector_status", fake_defer)
     return captured
 
@@ -99,6 +99,31 @@ class TestAssertAccountInSnapshot:
         assert exc_info.value.error_type == "account_drift"
         assert exc_info.value.detail == {"connector": "echo", "account": "vanished"}
 
+    async def test_running_with_empty_snapshot_raises_503(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Boot window: ``status == "running"`` but accounts haven't been pushed yet.
+
+        Mirrors the inbound handler's empty-snapshot exemption — without it,
+        an attach placed in this window would false-positive as drift.
+        """
+        from fastapi import HTTPException
+
+        from aios.api.routers.connections import _assert_account_in_snapshot
+
+        envelope = {
+            "connector": {
+                "name": "echo",
+                "status": "running",
+                "accounts": [],
+            }
+        }
+        _patch_rpc(monkeypatch, payload=json.dumps(envelope))
+        with pytest.raises(HTTPException) as exc_info:
+            await _assert_account_in_snapshot("postgresql://x", connector="echo", account="acct-1")
+        assert exc_info.value.status_code == 503
+        assert "not yet populated" in exc_info.value.detail
+
     async def test_connector_not_running_raises_503(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Snapshot unavailable while the connector is restarting / starting."""
         from fastapi import HTTPException
@@ -132,7 +157,7 @@ class TestAssertAccountInSnapshot:
         assert "snapshot unavailable" in exc_info.value.detail
 
     async def test_timeout_raises_408(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """No NOTIFY within the snapshot-check window → 408 with retry-friendly detail."""
+        """No NOTIFY within the snapshot-check window → 408 from the shared helper."""
         from fastapi import HTTPException
 
         from aios.api.routers.connections import _assert_account_in_snapshot
@@ -145,4 +170,4 @@ class TestAssertAccountInSnapshot:
         with pytest.raises(HTTPException) as exc_info:
             await _assert_account_in_snapshot("postgresql://x", connector="echo", account="acct-1")
         assert exc_info.value.status_code == 408
-        assert "snapshot-check window" in exc_info.value.detail
+        assert "did not respond" in exc_info.value.detail

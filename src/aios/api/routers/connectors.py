@@ -21,17 +21,14 @@ connector itself is down.
 
 from __future__ import annotations
 
-import asyncio
-import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, ConfigDict
-from ulid import ULID
 
+from aios.api.connector_rpc import connector_rpc
 from aios.api.deps import AuthDep, DbUrlDep
-from aios.db.listen import listen_for_connector_result
 from aios.harness.connector_tasks import (
     defer_connector_call,
     defer_connector_status,
@@ -52,25 +49,8 @@ class ConnectorCallBody(BaseModel):
 
 
 async def _rpc(db_url: str, defer: Callable[[str], Awaitable[None]]) -> dict[str, Any]:
-    """LISTEN-then-defer-then-await for one connector RPC round-trip.
-
-    ``defer`` is the call-site closure that enqueues the matching
-    procrastinate task with the minted ``call_id``.  Order matters:
-    LISTEN must be live before defer, otherwise a fast worker could
-    NOTIFY before the listener is attached and we'd hang waiting for
-    a payload that's already been dropped.
-    """
-    call_id = str(ULID())
-    async with listen_for_connector_result(db_url, call_id) as queue:
-        await defer(call_id)
-        try:
-            payload = await asyncio.wait_for(queue.get(), timeout=_RESULT_TIMEOUT_S)
-        except TimeoutError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_408_REQUEST_TIMEOUT,
-                detail="worker did not respond within 60s",
-            ) from exc
-    envelope: dict[str, Any] = json.loads(payload)
+    """Admin-endpoint round-trip: ``connector_rpc`` + granular error mapping."""
+    envelope = await connector_rpc(db_url, defer, timeout_s=_RESULT_TIMEOUT_S)
     _raise_for_error(envelope)
     return envelope
 

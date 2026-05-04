@@ -20,15 +20,12 @@ admin-only endpoint is invisible.
 
 from __future__ import annotations
 
-import asyncio
-import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
-from ulid import ULID
 
+from aios.api.connector_rpc import connector_rpc
 from aios.api.deps import AuthDep, DbUrlDep, PoolDep
-from aios.db.listen import listen_for_connector_result
 from aios.errors import AccountDriftError
 from aios.harness.connector_tasks import defer_connector_status
 from aios.models.common import ListResponse
@@ -62,20 +59,11 @@ async def _assert_account_in_snapshot(db_url: str, *, connector: str, account: s
     (per SDK convention via :func:`aios_connector.make_account`); the
     snapshot match is on that field.
     """
-    call_id = str(ULID())
-    async with listen_for_connector_result(db_url, call_id) as queue:
-        await defer_connector_status(call_id=call_id, connector=connector)
-        try:
-            payload = await asyncio.wait_for(queue.get(), timeout=_DRIFT_CHECK_TIMEOUT_S)
-        except TimeoutError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_408_REQUEST_TIMEOUT,
-                detail=(
-                    "worker did not respond within snapshot-check window; "
-                    "retry once the worker is reachable"
-                ),
-            ) from exc
-    envelope: dict[str, Any] = json.loads(payload)
+    envelope: dict[str, Any] = await connector_rpc(
+        db_url,
+        lambda cid: defer_connector_status(call_id=cid, connector=connector),
+        timeout_s=_DRIFT_CHECK_TIMEOUT_S,
+    )
     err = envelope.get("error")
     if err:
         # Supervisor not running / connector not booted → can't tell
@@ -95,6 +83,18 @@ async def _assert_account_in_snapshot(db_url: str, *, connector: str, account: s
             ),
         )
     accounts = state.get("accounts") or []
+    if not accounts:
+        # Boot-window race: supervisor flips ``status = "running"`` after MCP
+        # ``initialize`` returns, but the SDK only emits
+        # ``notifications/aios/accounts`` once the supervisor's
+        # ``notifications/initialized`` has round-tripped — at least one stdio
+        # leg of asymmetry.  An attach during that window must be 503 (retry
+        # shortly), not 409 drift; the inbound handler exempts the same case
+        # at ``connector_supervisor._handle_inbound``.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(f"connector {connector!r} snapshot not yet populated; retry shortly"),
+        )
     known_ids = {entry.get("id") for entry in accounts if isinstance(entry, dict)}
     if account not in known_ids:
         raise AccountDriftError(
@@ -105,6 +105,15 @@ async def _assert_account_in_snapshot(db_url: str, *, connector: str, account: s
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create(body: ConnectionCreate, pool: PoolDep, _auth: AuthDep) -> Connection:
+    """Create a detached connection, **idempotent on ``(connector, account)``**.
+
+    Per plan decision #5, this endpoint and the supervisor's
+    auto-create-on-first-inbound path race-safely converge on a single row:
+    posting twice with the same ``(connector, account)`` returns 201 with the
+    existing row rather than 409.  The ``id`` may differ from a freshly-allocated
+    one if a concurrent writer landed first; the response always reflects the
+    canonical active row.
+    """
     return await service.create_connection(
         pool,
         connector=body.connector,

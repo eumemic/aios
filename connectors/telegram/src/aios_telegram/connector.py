@@ -172,9 +172,10 @@ class TelegramConnector(Connector):
                 "display_name": msg.sender_name or str(msg.sender_id),
             }
             metadata = build_metadata(msg, self._bot_id)
-            # Telegram message ``date`` is unix-seconds; render as
-            # ISO-8601 UTC so aios's supervisor sees the same string
-            # shape as other connectors (signal etc.).
+            # Telegram's ``message.date`` is unix-seconds; the parser
+            # stamps it as ``timestamp_ms``.  Render that as ISO-8601
+            # UTC so aios's supervisor sees the same string shape as
+            # other connectors (signal etc.).
             timestamp_iso = (
                 datetime.fromtimestamp(msg.timestamp_ms / 1000, tz=UTC).isoformat()
                 if msg.timestamp_ms

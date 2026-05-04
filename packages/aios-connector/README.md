@@ -118,7 +118,7 @@ async def discover_accounts(self) -> list[dict[str, Any]]:
 The `id` field is what aios uses as the opaque `account` segment in the
 channel address `<connector>/<account>/<chat_id>`; it's the same value
 your `emit_inbound(account=...)` calls must pass.  `display_name` and
-`metadata` are surfaced in `aios connector <name> accounts` and to
+`metadata` are surfaced in `aios connectors accounts <name>` and to
 operator-facing CLI listings.
 
 ## Entry-point factory

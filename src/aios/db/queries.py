@@ -2192,40 +2192,35 @@ async def insert_connection(
     Use ``attach_connection`` or ``configure_per_chat_connection`` to bind
     a routing mode after creation.
     """
-    new_id = make_id(CONNECTION)
-    row = await conn.fetchrow(
-        """
-        INSERT INTO connections (id, connector, account, metadata)
-        VALUES ($1, $2, $3, $4::jsonb)
-        ON CONFLICT (connector, account) WHERE archived_at IS NULL DO NOTHING
-        RETURNING *
-        """,
-        new_id,
-        connector,
-        account,
-        json.dumps(metadata),
-    )
-    if row is not None:
-        return _row_to_connection(row)
-    existing = await get_connection_for_account(conn, connector=connector, account=account)
-    if existing is None:
-        # CONFLICT means an active row existed at INSERT time.  If it's
-        # gone now, it was archived between the two queries — fall back
-        # to a fresh insert which the unique index now permits.
+    # Retry loop: each iteration is INSERT-then-(if-conflict)-re-read.  Three
+    # concurrent writers + an archive-between-attempts can force a second
+    # round-trip, but the loop converges within at most two iterations under
+    # any realistic contention pattern.  The bound is defensive — three
+    # iterations is enough that exhaustion would mean the system is wedged
+    # in a hot insert/archive cycle that no retry strategy can resolve.
+    for _ in range(3):
         row = await conn.fetchrow(
             """
             INSERT INTO connections (id, connector, account, metadata)
             VALUES ($1, $2, $3, $4::jsonb)
+            ON CONFLICT (connector, account) WHERE archived_at IS NULL DO NOTHING
             RETURNING *
             """,
-            new_id,
+            make_id(CONNECTION),
             connector,
             account,
             json.dumps(metadata),
         )
-        assert row is not None
-        return _row_to_connection(row)
-    return existing
+        if row is not None:
+            return _row_to_connection(row)
+        existing = await get_connection_for_account(conn, connector=connector, account=account)
+        if existing is not None:
+            return existing
+        # Active row was archived between INSERT and re-read; loop to retry the
+        # INSERT, which the partial unique index now permits.
+    raise RuntimeError(
+        f"insert_connection({connector=}, {account=}) failed to converge after 3 attempts"
+    )
 
 
 async def get_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
