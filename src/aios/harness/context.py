@@ -262,6 +262,12 @@ def _apply_attachments(
             and can_inline_image(model=model, content_type=content_type, size_bytes=size)
         )
         if inline:
+            # v1 deliberately re-reads + re-base64-encodes per render: the
+            # staged bytes are typically immutable (`/mnt/attachments/` is
+            # read-only) so an LRU cache on (host_path, mtime, size) would
+            # be a clean follow-up if profiling shows pressure.  See
+            # PR #216 §14 for the discussion of cache vs. encode-at-staging
+            # alternatives we deferred for v1.
             try:
                 payload = host_path.read_bytes()
             except OSError as err:
@@ -289,7 +295,16 @@ def _apply_attachments(
         text = f"{text}\n{chr(10).join(marker_lines)}" if text else "\n".join(marker_lines)
 
     if image_parts:
-        msg["content"] = [{"type": "text", "text": text}, *image_parts]
+        # Anthropic rejects empty text blocks (`text content blocks must be
+        # non-empty`) so omit the leading text part when there is no caption,
+        # no channel header, and no markers — the image_url parts stand on
+        # their own.  OpenAI tolerates the empty part, but emitting it would
+        # break any vision-capable Anthropic-routed mind on a caption-less
+        # image-only inbound.
+        if text:
+            msg["content"] = [{"type": "text", "text": text}, *image_parts]
+        else:
+            msg["content"] = list(image_parts)
     else:
         msg["content"] = text
 
