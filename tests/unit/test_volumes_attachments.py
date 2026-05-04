@@ -95,3 +95,74 @@ class TestResolveToHostPath:
         assert resolve_to_host_path("sess-1", "workspace/foo") is None
         # Not /workspace itself but starts with the literal prefix.
         assert resolve_to_host_path("sess-1", "/workspaces/foo") is None
+
+
+class TestResolveToHostPathTraversal:
+    """Containment check: model-controlled paths must not escape the
+    bind-mount root via ``..`` normalization or symlink dereferencing."""
+
+    def test_dotdot_escape_from_workspace_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        # `/workspace/../../etc/hostname` resolves outside the session's
+        # workspace dir → must be rejected.
+        assert resolve_to_host_path("sess-1", "/workspace/../../etc/hostname") is None
+
+    def test_dotdot_escape_from_attachments_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        assert resolve_to_host_path("sess-1", "/mnt/attachments/../foo") is None
+
+    def test_deeply_nested_dotdot_escape_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        assert resolve_to_host_path("sess-1", "/workspace/sub/../../../../etc/passwd") is None
+
+    def test_innocuous_dotdot_inside_workspace_allowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``..`` that stays inside the workspace after normalization is fine."""
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        result = resolve_to_host_path("sess-1", "/workspace/sub/../foo.jpg")
+        assert result == (tmp_path / "sess-1").resolve() / "foo.jpg"
+
+    def test_symlink_escape_via_workspace_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A symlink inside ``/workspace`` whose target lives outside the
+        bind mount must be rejected.  This covers the real attack: the
+        model creates the symlink via ``bash`` inside the sandbox, then
+        ``read``s through it to bypass containment."""
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        # Create the workspace dir (the bind-mount source) and an
+        # outside-the-workspace target.
+        ws = (tmp_path / "sess-1").resolve()
+        ws.mkdir(parents=True)
+        outside = tmp_path / "outside.txt"
+        outside.write_text("host-secret")
+        (ws / "sneaky.jpg").symlink_to(outside)
+
+        assert resolve_to_host_path("sess-1", "/workspace/sneaky.jpg") is None
+
+    def test_symlink_target_inside_workspace_allowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A symlink whose target stays inside the workspace is fine."""
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        ws = (tmp_path / "sess-1").resolve()
+        ws.mkdir(parents=True)
+        target = ws / "real.jpg"
+        target.write_bytes(b"x")
+        (ws / "alias.jpg").symlink_to(target)
+
+        result = resolve_to_host_path("sess-1", "/workspace/alias.jpg")
+        assert result == target.resolve()
