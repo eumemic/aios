@@ -1288,6 +1288,16 @@ async def append_event(
         if kind == "message":
             prev = await _latest_cumulative_tokens(conn, session_id)
             if data.get("role") == "user" and orig_channel is not None:
+                # TODO(vision): plumb ``agent.model`` through here so
+                # :func:`render_user_event` matches build-time output for
+                # image-bearing events.  Today this call site renders without
+                # ``model``/``session_id``, so attachments degrade to text
+                # markers and the per-event ``cumulative_tokens`` undercounts
+                # inlined images by ~55 LiteLLM tokens each (text marker ~30
+                # vs. ``image_url`` part ~85).  The undercount is bounded by
+                # ``model_token_ratio`` calibration in
+                # :func:`read_windowed_events`; see PR #218 for the
+                # follow-up plan to make append-time vision-aware.
                 rendered = render_user_event(data, orig_channel, focal_at_arrival)
                 cum_tokens = (prev or 0) + approx_tokens([rendered])
             else:
