@@ -191,3 +191,85 @@ notification.  On reconnect the SDK replays unacked entries; the
 worker-side dedup ledger (`connector_inbound_acks`) guarantees
 at-most-once event append even across worker SIGKILL between commit
 and ack.
+
+## Attachments (inbound)
+
+Pass a list of `Attachment` instances to `emit_inbound(attachments=...)`
+when the platform delivers a photo, voice note, or document.  The
+connector hands aios a *host path* it owns (e.g. signal-cli's
+download dir, Telegram's `getFile()` result) — bytes never traverse
+stdio.
+
+```python
+from aios_connector import Attachment
+
+await self.emit_inbound(
+    account=...,
+    chat_id=...,
+    sender=...,
+    content="check this out",
+    attachments=[
+        Attachment(
+            host_path="/tmp/signal-cli-downloads/abc.jpg",
+            filename="photo.jpg",
+            content_type="image/jpeg",
+        ),
+    ],
+)
+```
+
+The SDK validates each attachment at `emit_inbound` time:
+
+- `host_path` must be a regular file the SDK can stat.
+- size must be ≤ 5 MiB.
+
+Failures raise `AttachmentError` synchronously; the connector decides
+whether to skip the attachment, send a placeholder text message, or
+refuse the inbound.
+
+The supervisor stages each attachment into a stable per-session
+location and bind-mounts it read-only into the sandbox at
+`/mnt/attachments/<connector>/<event-ulid>-<filename>`.
+
+## Outbound attachments
+
+Send tools take a structured `attachments: list[str] | None`
+parameter alongside `text`.  The model passes in-sandbox paths;
+the connector resolves each to a host path via
+`resolve_sandbox_path`, validates it's under `/workspace/` or
+`/mnt/attachments/`, then opens the file and uploads it as platform
+media with `text` as caption.
+
+```python
+from pathlib import Path
+import os
+from aios_connector import resolve_sandbox_path
+
+@tool()
+@focal_required
+async def signal_send(
+    self,
+    text: str,
+    attachments: list[str] | None = None,
+    *,
+    chat_id: str,
+) -> dict[str, Any]:
+    """Send a Signal message with optional attachments."""
+    workspace_root = Path(os.environ["AIOS_WORKSPACE_ROOT"])
+    session_id = self.current_session_id()
+    host_paths: list[str] = []
+    for sandbox_path in attachments or []:
+        host = resolve_sandbox_path(
+            session_id=session_id,
+            sandbox_path=sandbox_path,
+            workspace_root=workspace_root,
+        )
+        if host is None:
+            raise ValueError(f"path {sandbox_path!r} outside the sandbox bind mount")
+        host_paths.append(str(host))
+    # ... call platform send API with text + host_paths
+```
+
+Path allowlist: `/workspace/...` and `/mnt/attachments/...` only.
+`/mnt/attachments/` is read-only inside the sandbox, so the model
+must `cp` an inbound file into `/workspace/` before forwarding it.
