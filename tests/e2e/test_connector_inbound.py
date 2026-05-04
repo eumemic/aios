@@ -667,7 +667,6 @@ class TestRegistryIsolation:
                 "connector": "echo",
                 "instance": "echo",
                 "status": "starting",
-                "instructions": None,
                 "accounts": [],
                 "last_error": None,
                 "recent_drops": {},
