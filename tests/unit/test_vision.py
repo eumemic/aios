@@ -48,6 +48,25 @@ class TestSupportsVision:
         _patch_get_model_info(monkeypatch, {})  # any model raises
         assert vision.supports_vision("totally/unknown") is False
 
+    def test_litellm_exception_emits_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Bare exception path must surface at warn-level so operators can
+        grep when vision degrades across a deploy / provider blip."""
+        _patch_get_model_info(monkeypatch, {})  # any model raises
+
+        warned: list[tuple[str, dict[str, Any]]] = []
+
+        class _Recorder:
+            def warning(self, event: str, **kwargs: Any) -> None:
+                warned.append((event, kwargs))
+
+        monkeypatch.setattr("aios.harness.vision.log", _Recorder())
+        assert vision.supports_vision("totally/unknown") is False
+        assert len(warned) == 1
+        event, kwargs = warned[0]
+        assert event == "vision.litellm_lookup_failed"
+        assert kwargs["model"] == "totally/unknown"
+        assert "error" in kwargs
+
     def test_override_wins_over_litellm(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Even if litellm reports True, an explicit False override takes effect.
         _patch_get_model_info(monkeypatch, {"foo/vision": {"supports_vision": True}})
