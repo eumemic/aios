@@ -4,18 +4,28 @@ Replaces the pre-PR3 FastMCP HTTP server + ingest-HTTP-POST architecture
 with a single :class:`aios_connector.Connector` subclass communicating
 with aios over stdio MCP.
 
+Per-account paradigm: each Telegram bot token is a distinct platform
+identity (PTB's :class:`Application` is bound 1:1 to a token), so this
+connector is single-bot by design.  Operators deploy multiple bots by
+listing multiple instances under the same connector type (e.g.
+``connectors_enabled=telegram:support,telegram:alerts`` with
+``AIOS_TELEGRAM_SUPPORT_BOT_TOKEN`` / ``AIOS_TELEGRAM_ALERTS_BOT_TOKEN``).
+The supervisor spawns one subprocess per instance; each runs one PTB
+``Application`` and reports a single account.
+
 Lifecycle:
 
 * :meth:`setup` initializes the python-telegram-bot ``Application`` and
   discovers the bot's identity via ``Bot.get_me()`` (numeric id +
   ``first_name`` + optional ``@username``).
-* :meth:`discover_accounts` returns the bot account.
+* :meth:`discover_accounts` returns the one bot account.
 * :meth:`serve` starts PTB's long-polling loop and routes inbound
   messages to :meth:`emit_inbound`.  PTB runs its own background tasks;
   we just install a handler that funnels into :meth:`emit_inbound`.
 * :meth:`teardown` stops polling and shuts down the application cleanly.
 * The single model-facing tool ``telegram_send`` uses :func:`focal_required`
-  to receive the focal chat id from ``_meta``.
+  with only ``chat_id`` in its signature — the SDK injects nothing else,
+  so connector code stays focused on the per-bot logic.
 """
 
 from __future__ import annotations
@@ -173,7 +183,7 @@ class TelegramConnector(Connector):
 
     @tool()
     @focal_required
-    async def telegram_send(self, text: str, *, focal: str) -> dict[str, Any]:
+    async def telegram_send(self, text: str, *, chat_id: str) -> dict[str, Any]:
         """Send a text message to your focal Telegram chat.
 
         The chat id is taken implicitly from your focal channel — aios
@@ -185,10 +195,10 @@ class TelegramConnector(Connector):
         """
         assert self._application is not None
         try:
-            chat_id = int(focal)
+            chat_id_int = int(chat_id)
         except ValueError as e:
-            raise ValueError(f"telegram chat_id must be an integer; got {focal!r}") from e
-        sent = await self._application.bot.send_message(chat_id=chat_id, text=text)
+            raise ValueError(f"telegram chat_id must be an integer; got {chat_id!r}") from e
+        sent = await self._application.bot.send_message(chat_id=chat_id_int, text=text)
         return {"message_id": sent.message_id}
 
 

@@ -73,6 +73,14 @@ class ToolDescriptor:
     ``__init__``.  ``input_schema`` is the JSON Schema published in the
     ``tools/list`` response; the SDK builds it from the function's
     type hints (Python types → JSON Schema primitives).
+
+    ``focal_kwargs`` records which subset of ``{"account", "chat_id"}``
+    the tool method declared in its signature.  At dispatch time the SDK
+    splits the focal-channel path on the first ``/`` and injects only
+    those kwargs the method asked for — connectors that serve a single
+    account omit ``account`` from their signature and pay no
+    multi-account routing cost.  The frozenset is computed once at
+    registration so dispatch doesn't re-introspect on every call.
     """
 
     name: str
@@ -80,9 +88,15 @@ class ToolDescriptor:
     input_schema: dict[str, Any]
     fn: ToolFn
     focal_required: bool = False
+    focal_kwargs: frozenset[str] = frozenset()
 
 
 _TOOL_ATTR = "__aios_connector_tool__"
+
+# Kwargs the SDK injects from the focal-channel path on
+# ``@focal_required`` tools.  Tool methods opt in by listing them in
+# their signature; the SDK passes only the ones present.
+_FOCAL_INJECTED_KWARGS = frozenset({"account", "chat_id"})
 
 
 def tool(
@@ -97,12 +111,19 @@ def tool(
     the description; its parameter type hints become the JSON Schema
     properties.  Self isn't included in the schema.
 
-    Stack with :func:`focal_required` to inject the chat-id parsed
-    from ``_meta.aios.focal_channel_path``::
+    Stack with :func:`focal_required` to receive the focal-channel
+    parts as kwargs.  Declare whichever subset of ``account`` and
+    ``chat_id`` your tool needs::
 
-        @tool
+        # Multi-account connector — route by account
+        @tool()
         @focal_required
-        async def signal_send(self, text: str, *, focal: str) -> dict[str, Any]: ...
+        async def signal_send(self, text: str, *, account: str, chat_id: str): ...
+
+        # Single-account connector — chat is enough
+        @tool()
+        @focal_required
+        async def telegram_send(self, text: str, *, chat_id: str): ...
     """
 
     def decorate(fn: ToolFn) -> ToolFn:
@@ -113,13 +134,23 @@ def tool(
                 f"@tool {tool_name!r} needs a docstring or explicit description= "
                 "(MCP exposes the description to the model)"
             )
-        schema = _build_input_schema(fn)
+        is_focal = bool(getattr(fn, "__aios_focal_required__", False))
+        focal_kwargs = _detect_focal_kwargs(fn) if is_focal else frozenset()
+        if is_focal and not focal_kwargs:
+            raise ValueError(
+                f"@focal_required tool {tool_name!r} must declare at least one of "
+                f"{{account, chat_id}} as a kwarg — the SDK injects what's "
+                "present in the signature, and a tool that wants neither "
+                "shouldn't be focal-required"
+            )
+        schema = _build_input_schema(fn, focal_required=is_focal)
         descriptor = ToolDescriptor(
             name=tool_name,
             description=description or doc,
             input_schema=schema,
             fn=fn,
-            focal_required=getattr(fn, "__aios_focal_required__", False),
+            focal_required=is_focal,
+            focal_kwargs=focal_kwargs,
         )
         setattr(fn, _TOOL_ATTR, descriptor)
         return fn
@@ -130,10 +161,13 @@ def tool(
 def focal_required(fn: ToolFn) -> ToolFn:
     """Decorator marking a tool as requiring a focal channel.
 
-    The MCP request's ``_meta.aios.focal_channel_path`` is parsed and
-    passed as the ``focal`` keyword argument (a string — the chat-id /
-    suffix the harness stamps).  Calls without focal raise so the
-    model sees a tool error rather than a silent fallback.
+    The harness's ``_meta.aios.focal_channel_path`` carries the
+    connector-relative focal address (``<account>/<chat_id>`` or
+    ``<account>/<chat_id>/<thread>`` for nested forms).  The SDK splits
+    on the first ``/`` and injects ``account`` and/or ``chat_id`` based
+    on which the tool method declares in its signature.  Calls without
+    focal raise so the model sees a tool error rather than a silent
+    fallback.
 
     Apply BELOW :func:`tool` so the descriptor's ``focal_required``
     flag is set before the tool registration reads it.
@@ -142,7 +176,27 @@ def focal_required(fn: ToolFn) -> ToolFn:
     return fn
 
 
-def _build_input_schema(fn: ToolFn) -> dict[str, Any]:
+def _detect_focal_kwargs(fn: ToolFn) -> frozenset[str]:
+    """Return the subset of :data:`_FOCAL_INJECTED_KWARGS` ``fn`` declares.
+
+    Looks at named parameters (positional-or-keyword, keyword-only).
+    ``**kwargs`` catches don't count — the SDK injects only what the
+    signature explicitly names so connector authors who type-check their
+    tools see missing parameters at static-analysis time.
+    """
+    import inspect
+
+    sig = inspect.signature(fn)
+    found: set[str] = set()
+    for param_name, param in sig.parameters.items():
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
+        if param_name in _FOCAL_INJECTED_KWARGS:
+            found.add(param_name)
+    return frozenset(found)
+
+
+def _build_input_schema(fn: ToolFn, *, focal_required: bool) -> dict[str, Any]:
     """Generate a JSON Schema for ``fn``'s non-self parameters.
 
     Walks the resolved type hints (so ``from __future__ import
@@ -150,8 +204,11 @@ def _build_input_schema(fn: ToolFn) -> dict[str, Any]:
     primitives to the JSON Schema equivalents.  Optional parameters
     (defaulting to anything) are non-required; the rest are required.
 
-    ``focal`` is a SDK-injected kwarg — not a model-visible argument —
-    so it's excluded from the schema regardless of typing.
+    When ``focal_required=True``, ``account`` and ``chat_id`` are
+    SDK-injected from the focal-channel meta and are excluded from the
+    model-facing schema.  Non-focal tools that take ``account`` (e.g.
+    ``list_chats(account: str)`` per design §3.4) keep it as a
+    model-visible argument.
     """
     import inspect
 
@@ -165,7 +222,9 @@ def _build_input_schema(fn: ToolFn) -> dict[str, Any]:
     properties: dict[str, dict[str, Any]] = {}
     required: list[str] = []
     for param_name, param in sig.parameters.items():
-        if param_name == "self" or param_name == "focal":
+        if param_name == "self":
+            continue
+        if focal_required and param_name in _FOCAL_INJECTED_KWARGS:
             continue
         if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             continue
@@ -494,10 +553,14 @@ class Connector:
     ) -> list[TextContent]:
         """Dispatch a tool, parsing focal meta if the descriptor opted in.
 
-        :func:`focal_required` tools fail loudly when the meta key is
-        missing — the agent shouldn't reach a focal-required tool
-        without focal set, so any absence is a bug to surface, not a
-        condition to fall back on.
+        For ``@focal_required`` tools: split the focal path on the first
+        ``/`` (yielding ``account`` and the chat-id portion, which may
+        itself contain further ``/``-separated thread/sub-chat segments)
+        and inject only the kwargs the tool method's signature declared
+        (per ``descriptor.focal_kwargs``).  Tools fail loudly when the
+        meta key is missing — the agent shouldn't reach a focal-required
+        tool without focal set, so any absence is a bug to surface, not
+        a condition to fall back on.
         """
         kwargs = dict(arguments)
         if descriptor.focal_required:
@@ -507,7 +570,11 @@ class Connector:
                     f"tool {descriptor.name!r} requires a focal channel — "
                     "aios should inject _meta.aios.focal_channel_path"
                 )
-            kwargs["focal"] = focal
+            account, _, chat_id = focal.partition("/")
+            if "account" in descriptor.focal_kwargs:
+                kwargs["account"] = account
+            if "chat_id" in descriptor.focal_kwargs:
+                kwargs["chat_id"] = chat_id
 
         result = await descriptor.fn(self, **kwargs)
         if isinstance(result, list) and all(isinstance(x, TextContent) for x in result):

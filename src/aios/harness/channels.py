@@ -25,8 +25,10 @@ SWITCH_CHANNEL_METADATA_KEY = "switch_channel"
 
 # Top-level key inside the ``_meta`` field sent on JSON-RPC tool-call
 # requests to MCP servers.  The value is the focal-channel suffix (the
-# focal channel address with its first two ``<connector>/<account>``
-# segments stripped, since the connector already knows its own identity).
+# focal channel address with its leading ``<connector>/`` segment
+# stripped, since the connector already knows its own identity).  The
+# ``<account>`` segment is preserved so multi-account connectors can
+# route by account; single-account connectors take the chat suffix only.
 # Stamped on outbound MCP requests whenever the calling session has a
 # focal channel set; servers that don't care ignore unknown ``_meta``
 # keys per the MCP spec.
@@ -34,24 +36,26 @@ FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
 
 
 def focal_channel_path(focal: str | None) -> str | None:
-    """Return the connector-specific suffix of a focal address.
+    """Return the connector-relative suffix of a focal address.
 
-    The ``<connector>/<account>`` prefix is information the MCP server
-    already has (it was invoked *by* that connection), so sending it
-    would be redundant; we strip it.  For a 3-segment address like
-    ``signal/<bot>/<chat>`` the suffix is just ``<chat>``.  For
-    ``telegram/<bot>/<chat>/<thread>`` it's ``<chat>/<thread>``.
+    The leading ``<connector>/`` segment is implicit (the MCP server was
+    invoked by aios; it knows its own name).  The suffix is
+    ``<account>/<chat>`` for a 3-segment address like
+    ``signal/<bot>/<chat>``, ``<account>/<chat>/<thread>`` for nested
+    forms.  The SDK splits on the first ``/`` to expose ``account`` and
+    ``chat_id`` to focal-required tools.
 
     Returns ``None`` if ``focal`` is ``None`` or malformed (fewer than
-    three segments) — neither should reach the dispatch path, but
-    degrading gracefully avoids leaking garbled metadata to connectors.
+    three segments, or empty chat_id) — neither should reach the
+    dispatch path, but degrading gracefully avoids leaking garbled
+    metadata to connectors.
     """
     if not focal:
         return None
-    parts = focal.split("/", 2)
+    parts = focal.split("/")
     if len(parts) < 3 or not parts[2]:
         return None
-    return parts[2]
+    return "/".join(parts[1:])
 
 
 def build_focal_paradigm_block(channels: list[str]) -> str:

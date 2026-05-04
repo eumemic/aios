@@ -4,20 +4,27 @@ Replaces the pre-PR3 FastMCP HTTP server + ingest-HTTP-POST architecture
 with a single :class:`aios_connector.Connector` subclass communicating
 with aios over stdio MCP.
 
+Multi-account: one signal-cli daemon serves N registered phones (multi-
+account mode, no ``-a`` flag).  The connector aggregates per-phone
+identity (uuid + contacts + groups) and routes every send / react RPC
+through the explicit ``account`` param.  Single-phone setups still
+work — set ``AIOS_SIGNAL_PHONES`` to a one-element list.
+
 Lifecycle:
 
 * :meth:`setup` opens :class:`SignalDaemon` (which spawns ``signal-cli
-  daemon`` and waits for TCP readiness), discovers the bot UUID, and
-  loads contacts + groups for display-name resolution.
-* :meth:`discover_accounts` returns one account entry — Signal connectors
-  are single-bot by design.
-* :meth:`serve` drives the inbound pump: drains messages from
-  ``daemon.listener``, parses them, and calls :meth:`emit_inbound` for
-  each one.  Spool durability + dedup ledger are handled by the SDK.
+  daemon`` in multi-account mode and waits for TCP readiness),
+  discovers the per-phone bot UUIDs, and loads contacts + groups for
+  every account.
+* :meth:`discover_accounts` returns one entry per configured phone.
+* :meth:`serve` drives the inbound pump: drains ``(account, envelope)``
+  pairs from ``daemon.listener``, parses them with the right per-phone
+  bot UUID, and calls :meth:`emit_inbound` with the matching account.
+  Spool durability + dedup ledger are handled by the SDK.
 * :meth:`teardown` closes the daemon (SIGTERM → grace → SIGKILL).
 * The two model-facing tools, ``signal_send`` and ``signal_react``,
-  use :func:`focal_required` so the focal channel suffix is parsed
-  out of ``_meta`` and bound to the ``focal`` kwarg.
+  use :func:`focal_required` to receive ``account`` and ``chat_id``
+  from ``_meta.aios.focal_channel_path`` and route the RPC accordingly.
 """
 
 from __future__ import annotations
@@ -46,13 +53,19 @@ class SignalConnector(Connector):
         super().__init__()
         self._cfg = cfg
         self._daemon: SignalDaemon | None = None
-        self._bot_uuid: str | None = None
-        self._contact_names: dict[str, str] = {}
+        # Phone → bot UUID, populated during setup() from accounts.json.
+        self._bot_uuids: dict[str, str] = {}
+        # Convenience reverse map: UUID → phone, used in the inbound pump
+        # to look up the bot identity for a per-account envelope parse.
+        self._uuid_to_phone: dict[str, str] = {}
+        # Contacts + group rosters are per-account because each phone has
+        # its own contact store and group memberships in signal-cli.
+        self._contact_names_by_account: dict[str, dict[str, str]] = {}
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
     async def setup(self) -> None:
-        """Open the signal-cli daemon and load contacts + groups.
+        """Open the signal-cli daemon and load contacts + groups for every phone.
 
         signal-cli takes 5+ seconds to come up; the supervisor's bounded
         init handshake (30s) accommodates this.  The SDK doesn't
@@ -61,43 +74,52 @@ class SignalConnector(Connector):
         calls against an unready daemon.
         """
         self._daemon = await SignalDaemon(
-            phone=self._cfg.phone,
+            phones=self._cfg.phones,
             config_dir=self._cfg.config_dir,
             cli_bin=self._cfg.cli_bin,
             host=self._cfg.daemon_host,
             port=self._cfg.daemon_port,
         ).__aenter__()
-        self._bot_uuid = await self._daemon.discover_bot_uuid()
-        self._contact_names = await self._daemon.list_contacts()
-        groups = await self._daemon.list_groups()
-        # Build a runtime instructions block that captures the bot's
-        # identity, contacts, and groups.  Set on the instance (not the
-        # class) so a second connector instance in tests doesn't see
-        # leakage from the first.
-        self.instructions = build_instructions(
-            bot_uuid=self._bot_uuid,
-            phone=self._cfg.phone,
-            profile_name=self._contact_names.get(self._bot_uuid),
-            groups=groups,
-            contact_names=self._contact_names,
-        )
-        log.info(
-            "signal.ready",
-            bot_uuid=self._bot_uuid,
-            phone=self._cfg.phone,
-            contacts=len(self._contact_names),
-            groups=len(groups),
-        )
+        self._bot_uuids = await self._daemon.discover_bot_uuids()
+        self._uuid_to_phone = {uuid: phone for phone, uuid in self._bot_uuids.items()}
+        # Load per-account contacts + groups in series — N is small
+        # (typically 1-3 phones) and parallel listContacts calls would
+        # race for the daemon's contact-store lock without measurable
+        # speedup at this scale.
+        instructions_sections: list[str] = []
+        for phone, bot_uuid in self._bot_uuids.items():
+            contact_names = await self._daemon.list_contacts(account=phone)
+            self._contact_names_by_account[phone] = contact_names
+            groups = await self._daemon.list_groups(account=phone)
+            section = build_instructions(
+                bot_uuid=bot_uuid,
+                phone=phone,
+                profile_name=contact_names.get(bot_uuid),
+                groups=groups,
+                contact_names=contact_names,
+            )
+            instructions_sections.append(section)
+            log.info(
+                "signal.account.ready",
+                bot_uuid=bot_uuid,
+                phone=phone,
+                contacts=len(contact_names),
+                groups=len(groups),
+            )
+        # Concatenate per-account sections.  build_instructions already
+        # produces a self-contained block per account; joining with a
+        # blank line gives the agent clearly delimited identities.
+        self.instructions = "\n\n".join(instructions_sections) if instructions_sections else None
 
     async def discover_accounts(self) -> list[dict[str, Any]]:
-        assert self._bot_uuid is not None, "setup() must run before discover_accounts()"
-        profile_name = self._contact_names.get(self._bot_uuid)
+        assert self._bot_uuids, "setup() must run before discover_accounts()"
         return [
             make_account(
-                id=self._bot_uuid,
-                display_name=profile_name or self._cfg.phone,
-                metadata={"phone": self._cfg.phone},
+                id=bot_uuid,
+                display_name=self._contact_names_by_account.get(phone, {}).get(bot_uuid, phone),
+                metadata={"phone": phone},
             )
+            for phone, bot_uuid in self._bot_uuids.items()
         ]
 
     async def teardown(self) -> None:
@@ -106,31 +128,43 @@ class SignalConnector(Connector):
             self._daemon = None
 
     async def serve(self) -> None:
-        """Drain inbound envelopes from signal-cli and emit them to aios.
+        """Drain ``(account, envelope)`` pairs from signal-cli and emit to aios.
 
-        Falls back on signal-cli's contact store when an envelope's
-        ``sourceName`` is empty — Signal's UI resolves names via
-        profiles the envelope doesn't carry.
+        Per-account routing: the listener stamps every receive
+        notification with the phone the message arrived on; we look up
+        the matching bot UUID and pass it to ``parse_envelope`` so
+        self-message detection works correctly across all configured
+        accounts.  Falls back on each account's contact store when an
+        envelope's ``sourceName`` is empty.
         """
         assert self._daemon is not None, "setup() must run before serve()"
-        assert self._bot_uuid is not None
-        async for envelope in self._daemon.listener.messages():
-            msg = parse_envelope(envelope, bot_account_uuid=self._bot_uuid)
+        async for account, envelope in self._daemon.listener.messages():
+            phone = account.strip()
+            bot_uuid = self._bot_uuids.get(phone)
+            if bot_uuid is None:
+                # Notification for an account we didn't register — most
+                # likely operator added a phone via signal-cli directly
+                # without restarting the connector.  Drop with a warning;
+                # otherwise self-message filtering would misbehave.
+                log.warning("signal.inbound.unknown_account", account=phone)
+                continue
+            msg = parse_envelope(envelope, bot_account_uuid=bot_uuid)
             if msg is None:
                 continue
+            contact_names = self._contact_names_by_account.get(phone, {})
             if msg.sender_name is None:
-                resolved = self._contact_names.get(msg.sender_uuid)
+                resolved = contact_names.get(msg.sender_uuid)
                 if resolved:
                     msg = replace(msg, sender_name=resolved)
             chat_id = encode_chat_id(msg.raw_chat_id, msg.chat_type)
             content = build_content_text(msg)
-            metadata = build_metadata(msg, chat_id, self._bot_uuid)
+            metadata = build_metadata(msg, chat_id, bot_uuid)
             sender_payload: dict[str, Any] = {
                 "uuid": msg.sender_uuid,
                 "display_name": msg.sender_name or msg.sender_uuid,
             }
             await self.emit_inbound(
-                account=self._bot_uuid,
+                account=bot_uuid,
                 chat_id=chat_id,
                 sender=sender_payload,
                 content=content,
@@ -141,18 +175,22 @@ class SignalConnector(Connector):
 
     @tool()
     @focal_required
-    async def signal_send(self, text: str, *, focal: str) -> dict[str, Any]:
+    async def signal_send(self, text: str, *, account: str, chat_id: str) -> dict[str, Any]:
         """Send a text message to your focal Signal chat.
 
-        The chat id is taken implicitly from your focal channel —
-        aios injects it via the JSON-RPC ``_meta`` field on each call.
-        Set focal with the built-in ``switch_channel`` tool.
+        The account (your bot UUID) and chat id are taken implicitly
+        from your focal channel — aios injects them via the JSON-RPC
+        ``_meta`` field on each call.  Set focal with the built-in
+        ``switch_channel`` tool.
 
         Args:
             text: Message body. Markdown is converted to Signal text styles.
         """
         assert self._daemon is not None
-        params = _build_send_params(focal, text)
+        phone = self._uuid_to_phone.get(account)
+        if phone is None:
+            raise ValueError(f"signal_send: unknown account {account!r}")
+        params = _build_send_params(phone, chat_id, text)
         result = await self._daemon.rpc.call("send", params)
         ts = _extract_timestamp(result)
         return {"sent_at_ms": ts} if ts is not None else {"status": "ok"}
@@ -165,12 +203,14 @@ class SignalConnector(Connector):
         target_timestamp_ms: int,
         emoji: str,
         *,
-        focal: str,
+        account: str,
+        chat_id: str,
     ) -> dict[str, Any]:
         """React to a message in your focal Signal chat with an emoji.
 
-        The chat id is taken implicitly from your focal channel — aios
-        injects it via the JSON-RPC ``_meta`` field on each call.
+        The account (your bot UUID) and chat id are taken implicitly
+        from your focal channel — aios injects them via the JSON-RPC
+        ``_meta`` field on each call.
 
         The target message is identified by ``(target_author_uuid,
         target_timestamp_ms)``.  Every inbound Signal message in your
@@ -187,16 +227,19 @@ class SignalConnector(Connector):
             emoji: The reaction emoji.
         """
         assert self._daemon is not None
-        params = _build_react_params(focal, target_author_uuid, target_timestamp_ms, emoji)
+        phone = self._uuid_to_phone.get(account)
+        if phone is None:
+            raise ValueError(f"signal_react: unknown account {account!r}")
+        params = _build_react_params(phone, chat_id, target_author_uuid, target_timestamp_ms, emoji)
         await self._daemon.rpc.call("sendReaction", params)
         return {"status": "ok"}
 
 
-def _build_send_params(chat_id: str, text: str) -> dict[str, Any]:
-    """Translate ``(chat_id, text)`` into signal-cli ``send`` params."""
+def _build_send_params(account_phone: str, chat_id: str, text: str) -> dict[str, Any]:
+    """Translate ``(account_phone, chat_id, text)`` into signal-cli ``send`` params."""
     chat_type, raw_id = decode_chat_id(chat_id)
     stripped, styles = convert_markdown_to_signal_styles(text)
-    params: dict[str, Any] = {"message": stripped}
+    params: dict[str, Any] = {"account": account_phone, "message": stripped}
     if styles:
         params["textStyles"] = styles
     if chat_type == "group":
@@ -207,6 +250,7 @@ def _build_send_params(chat_id: str, text: str) -> dict[str, Any]:
 
 
 def _build_react_params(
+    account_phone: str,
     chat_id: str,
     target_author_uuid: str,
     target_timestamp_ms: int,
@@ -215,6 +259,7 @@ def _build_react_params(
     """Translate a react request into signal-cli ``sendReaction`` params."""
     chat_type, raw_id = decode_chat_id(chat_id)
     params: dict[str, Any] = {
+        "account": account_phone,
         "emoji": emoji,
         "targetAuthor": target_author_uuid,
         "targetTimestamp": target_timestamp_ms,

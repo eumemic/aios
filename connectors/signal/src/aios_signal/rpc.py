@@ -113,8 +113,14 @@ class RpcListener:
                 f"failed to connect listener to {self._host}:{self._port}: {e}"
             ) from e
 
-    async def messages(self) -> AsyncIterator[dict[str, Any]]:
-        """Yield envelope dicts from ``receive`` notifications.
+    async def messages(self) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """Yield ``(account, envelope)`` pairs from ``receive`` notifications.
+
+        In multi-account daemon mode, signal-cli stamps ``params.account``
+        on every receive notification so callers can route by phone.  We
+        require it: a notification without ``account`` is a contract
+        violation (single-account daemon mode is no longer supported by
+        this connector) and is dropped with a warning rather than guessed.
 
         Raises :class:`ListenerClosedError` when the connection drops.
         Non-``receive`` notifications and stray RPC responses are ignored.
@@ -141,9 +147,13 @@ class RpcListener:
             params = message.get("params")
             if not isinstance(params, dict):
                 continue
+            account = params.get("account")
             envelope = params.get("envelope")
+            if not isinstance(account, str) or not account:
+                log.warning("rpc.listener.missing_account", params=params)
+                continue
             if isinstance(envelope, dict):
-                yield envelope
+                yield account, envelope
 
     async def aclose(self) -> None:
         if self._writer is not None:

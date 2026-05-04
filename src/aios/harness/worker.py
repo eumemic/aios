@@ -120,7 +120,7 @@ async def worker_main() -> None:
             "worker.startup",
             worker_id=runtime.worker_id,
             concurrency=settings.worker_concurrency,
-            connectors=connector_registry.names,
+            connector_instances=[f"{c}:{i}" if c != i else c for c, i in connector_registry.keys],
         )
 
         # Startup sweep:

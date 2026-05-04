@@ -406,8 +406,25 @@ async def _execute_mcp_tool_async(
         # resolve in favor of the connector — connectors are first-class
         # in the redesign (#200), HTTP MCP servers are agent-scoped.
         connector_registry = runtime.connector_subprocess_registry
-        if connector_registry is not None and connector_registry.state(server_name) is not None:
+        connector_instances = (
+            connector_registry.states_for_connector(server_name)
+            if connector_registry is not None
+            else []
+        )
+        if connector_registry is not None and connector_instances:
+            # Resolve which instance of this connector type handles the call.
+            # Three sources of routing info, in order:
+            #   1. explicit ``account`` arg (cross-chat / setup tools)
+            #   2. focal-channel meta — the ``<account>/<chat>`` suffix
+            #      we just stamped above; account is the part before the
+            #      first ``/``
+            #   3. single-instance shortcut for tools without account
+            #      context (e.g. ``ping``); ambiguous if more than one
+            #      instance is enabled
             account_arg = arguments.get("account")
+            account_for_routing: str | None = account_arg if isinstance(account_arg, str) else None
+            if account_for_routing is None and suffix is not None:
+                account_for_routing = suffix.partition("/")[0] or None
             if isinstance(account_arg, str):
                 from aios.services import connections as connections_service
 
@@ -432,9 +449,36 @@ async def _execute_mcp_tool_async(
                         ),
                     )
                     return
-            result = await connector_registry.dispatch_call(
-                server_name, tool_name, arguments, meta=meta
-            )
+            if account_for_routing is not None:
+                result = await connector_registry.dispatch_call_for_account(
+                    server_name, account_for_routing, tool_name, arguments, meta=meta
+                )
+            elif len(connector_instances) == 1:
+                instance = connector_instances[0].instance
+                result = await connector_registry.dispatch_call(
+                    server_name, instance, tool_name, arguments, meta=meta
+                )
+            else:
+                bound_log.warning(
+                    "mcp_tool.connector_instance_ambiguous",
+                    server_name=server_name,
+                    instance_count=len(connector_instances),
+                )
+                is_error = True
+                await _append_tool_result(
+                    pool,
+                    session_id,
+                    call_id,
+                    name,
+                    error=(
+                        f"connector {server_name!r} has multiple instances "
+                        f"({', '.join(s.instance for s in connector_instances)}) "
+                        "and the call provides no routing info (no account arg, "
+                        "no focal channel) — set focal channel via switch_channel "
+                        "or pass account= explicitly"
+                    ),
+                )
+                return
         else:
             url = mcp_server_map.get(server_name)
             if url is None:

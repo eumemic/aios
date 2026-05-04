@@ -80,13 +80,21 @@ async def test_rpc_client_timeout() -> None:
             await client.call("slow")
 
 
-async def test_rpc_listener_yields_receive_envelopes() -> None:
+async def test_rpc_listener_yields_account_envelope_pairs() -> None:
+    """In multi-account daemon mode every receive notification carries
+    ``params.account`` — the listener exposes it alongside the envelope
+    so the connector can route inbound to the right per-phone bot UUID.
+    """
+
     async def handler(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
         for i in range(3):
             notification = {
                 "jsonrpc": "2.0",
                 "method": "receive",
-                "params": {"envelope": {"timestamp": i, "sourceUuid": f"u{i}"}},
+                "params": {
+                    "account": f"+155500000{i:02d}",
+                    "envelope": {"timestamp": i, "sourceUuid": f"u{i}"},
+                },
             }
             w.write(json.dumps(notification).encode() + b"\n")
             await w.drain()
@@ -96,32 +104,44 @@ async def test_rpc_listener_yields_receive_envelopes() -> None:
     async with server:
         listener = RpcListener("127.0.0.1", port)
         await listener.connect()
-        envelopes: list[dict[str, Any]] = []
+        pairs: list[tuple[str, dict[str, Any]]] = []
         with pytest.raises(ListenerClosedError):
-            async for env in _take_then_wait(listener.messages()):
-                envelopes.append(env)
-        assert len(envelopes) == 3
-        assert envelopes[0]["sourceUuid"] == "u0"
+            async for pair in _take_then_wait(listener.messages()):
+                pairs.append(pair)
+        assert len(pairs) == 3
+        assert pairs[0] == ("+15550000000", {"timestamp": 0, "sourceUuid": "u0"})
+        assert pairs[2] == ("+15550000002", {"timestamp": 2, "sourceUuid": "u2"})
         await listener.aclose()
 
 
 async def _take_then_wait(
-    it: AsyncIterator[dict[str, Any]],
-) -> AsyncIterator[dict[str, Any]]:
-    async for env in it:
-        yield env
+    it: AsyncIterator[tuple[str, dict[str, Any]]],
+) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+    async for pair in it:
+        yield pair
 
 
-async def test_rpc_listener_ignores_non_receive() -> None:
+async def test_rpc_listener_drops_notifications_without_account() -> None:
+    """Multi-account contract violation: a receive without ``account`` is
+    a connector-side bug (signal-cli stamps it in multi-account mode).
+    Drop with a warning rather than guessing.
+    """
+
     async def handler(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
-        # Stray RPC response, non-receive notification, then a real receive.
+        # Stray RPC response, non-receive notification, receive WITHOUT
+        # account (must be dropped), and finally a real receive WITH account.
         for msg in [
             {"jsonrpc": "2.0", "id": 99, "result": {"ignored": True}},
             {"jsonrpc": "2.0", "method": "other", "params": {}},
             {
                 "jsonrpc": "2.0",
                 "method": "receive",
-                "params": {"envelope": {"timestamp": 1}},
+                "params": {"envelope": {"timestamp": 1}},  # no account
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "receive",
+                "params": {"account": "+15550001111", "envelope": {"timestamp": 2}},
             },
         ]:
             w.write(json.dumps(msg).encode() + b"\n")
@@ -132,11 +152,12 @@ async def test_rpc_listener_ignores_non_receive() -> None:
     async with server:
         listener = RpcListener("127.0.0.1", port)
         await listener.connect()
-        envelopes: list[dict[str, Any]] = []
+        pairs: list[tuple[str, dict[str, Any]]] = []
         with pytest.raises(ListenerClosedError):
-            async for env in listener.messages():
-                envelopes.append(env)
-        assert envelopes == [{"timestamp": 1}]
+            async for pair in listener.messages():
+                pairs.append(pair)
+        # Only the well-formed receive survives.
+        assert pairs == [("+15550001111", {"timestamp": 2})]
         await listener.aclose()
 
 

@@ -10,6 +10,12 @@ MCP bind/token are also gone — the MCP server now runs over stdio
 (no HTTP bind, no bearer token).  Daemon host/port are still
 configurable since signal-cli's TCP daemon is internal to this
 subprocess and operators may need to avoid local port collisions.
+
+Multi-account: ``phones`` is a CSV of registered numbers (e.g.
+``AIOS_SIGNAL_PHONES=+1555,+1666``).  signal-cli's daemon is launched
+without ``-a`` so it serves all registered accounts; every RPC call
+includes the target account in its params.  Single-phone setups still
+work — set ``AIOS_SIGNAL_PHONES=+1555`` (a one-element list).
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ class Settings(BaseSettings):
     )
 
     # Signal / daemon
-    phone: str
+    phones: list[str]
     config_dir: Path
     cli_bin: str = "signal-cli"
     daemon_host: str = "127.0.0.1"

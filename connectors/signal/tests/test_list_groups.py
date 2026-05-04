@@ -14,7 +14,7 @@ def _make_daemon() -> SignalDaemon:
     from pathlib import Path
 
     return SignalDaemon(
-        phone="+15550001111",
+        phones=["+15550001111"],
         config_dir=Path("/tmp/aios-signal-test"),
         cli_bin="signal-cli",
         host="127.0.0.1",
@@ -45,7 +45,7 @@ class TestListGroups:
             ]
         )
 
-        groups = await daemon.list_groups()
+        groups = await daemon.list_groups(account="+15550001111")
 
         assert len(groups) == 2
         assert groups[0] == GroupInfo(
@@ -65,12 +65,12 @@ class TestListGroups:
     async def test_empty_list_when_rpc_fails(self) -> None:
         daemon = _make_daemon()
         daemon.rpc.call = AsyncMock(side_effect=RuntimeError("rpc broken"))  # type: ignore[method-assign]
-        assert await daemon.list_groups() == []
+        assert await daemon.list_groups(account="+15550001111") == []
 
     async def test_empty_list_when_rpc_returns_non_list(self) -> None:
         daemon = _make_daemon()
         daemon.rpc.call = AsyncMock(return_value={"unexpected": "shape"})  # type: ignore[method-assign]
-        assert await daemon.list_groups() == []
+        assert await daemon.list_groups(account="+15550001111") == []
 
     async def test_skips_malformed_entries(self) -> None:
         daemon = _make_daemon()
@@ -83,7 +83,7 @@ class TestListGroups:
                 {"id": "skip-no-members", "name": "no members"},
             ]
         )
-        groups = await daemon.list_groups()
+        groups = await daemon.list_groups(account="+15550001111")
         # Only the valid entry survives.
         assert len(groups) == 1
         assert groups[0].id == "valid="

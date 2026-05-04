@@ -1,119 +1,80 @@
 # aios-telegram
 
-Telegram connector for [aios](../../README.md). One long-running process per
-Telegram bot — ingests inbound messages into aios via
-`POST /v1/connections/{id}/messages`, and serves an MCP server exposing a
-`telegram_send` tool that the aios worker calls back into.
+Telegram connector for [aios](../../README.md).  Per-account paradigm:
+each Telegram bot token is a distinct platform identity (PTB's
+`Application` is bound 1:1 to a token), so this connector runs as one
+subprocess per bot.  Operators deploy multiple bots by listing
+multiple instances under one connector type at the supervisor.
 
 ## Prerequisites
 
 - Python ≥ 3.13
 - A Telegram bot token (talk to [@BotFather](https://t.me/BotFather))
-- A running aios instance with the connector/channel routing infra
-
-## Install
-
-Pip-installable standalone:
-
-```
-pip install ./connectors/telegram
-```
-
-Or as a uv workspace member (already wired from the repo root):
-
-```
-uv sync --all-packages --dev
-```
+- A running aios worker that includes `telegram` (or
+  `telegram:<instance>`) in its `connectors_enabled` list
 
 ## Operator walkthrough
 
-### 1. Create the bot
+### 1. Create the bot(s)
 
-Message [@BotFather](https://t.me/BotFather) on Telegram: `/newbot`. Copy
-the token. Learn the bot's numeric id by running a throwaway script
-(`curl https://api.telegram.org/bot<TOKEN>/getMe`) — you'll need it for
-the routing rule.
+Message [@BotFather](https://t.me/BotFather) on Telegram: `/newbot`.
+Copy the token.  Repeat for each bot you want to deploy.
 
-### 2. Create an aios vault + credential for the MCP token
+### 2. Configure the worker's connector instance(s)
 
-```
-VLT=$(curl -X POST :8090/v1/vaults -d '{"display_name": "Telegram personal"}' | jq -r .id)
+Single bot — default-instance shape:
 
-curl -X POST :8090/v1/vaults/$VLT/credentials -d '{
-  "mcp_server_url": "http://localhost:9200/mcp",
-  "auth_type": "static_bearer",
-  "token": "supersecret"
-}'
+```bash
+AIOS_CONNECTORS_ENABLED=telegram
+AIOS_TELEGRAM_BOT_TOKEN=123456:AA...
 ```
 
-### 3. Register the aios connection
+Multiple bots — explicit instances with scoped env:
 
-```
-curl -X POST :8090/v1/connections -d "{
-  \"connector\": \"telegram\",
-  \"account\": \"<bot-numeric-id-from-step-1>\",
-  \"mcp_url\": \"http://localhost:9200/mcp\",
-  \"vault_id\": \"$VLT\"
-}"
+```bash
+AIOS_CONNECTORS_ENABLED=telegram:support,telegram:alerts
+AIOS_TELEGRAM_SUPPORT_BOT_TOKEN=111:BB...   # → AIOS_TELEGRAM_BOT_TOKEN inside support
+AIOS_TELEGRAM_ALERTS_BOT_TOKEN=222:CC...    # → AIOS_TELEGRAM_BOT_TOKEN inside alerts
 ```
 
-### 4. Start the connector
+The supervisor re-exports `AIOS_TELEGRAM_<INSTANCE>_*` as
+`AIOS_TELEGRAM_*` inside each subprocess so the connector reads its
+config under the standard prefix.  Each instance runs as its own OS
+process — one bot's PTB `Application` crashing doesn't affect siblings.
+
+### 3. Restart the worker
+
+`aios worker` boots, spawns one telegram subprocess per instance, and
+each runs `Bot.get_me()` to identify itself.  Verify with
+`aios connector list`.
+
+### 4. Attach connections to sessions
+
+For each bot the connector serves, attach the auto-created
+`(connector=telegram, account=<bot_id>)` connection to a session:
 
 ```
-export AIOS_URL=http://localhost:8090
-export AIOS_API_KEY=...
-export AIOS_CONNECTION_ID=conn_...
-export AIOS_TELEGRAM_MCP_TOKEN=supersecret
-
-python -m aios_telegram start --bot-token 123456:AA...
+aios connections list --connector=telegram
+aios connections attach <conn_id> --session=<session_id>
 ```
 
-All settings can also be passed via env vars. Full list via
-`python -m aios_telegram start --help`.
+### 5. DM the bot — the agent replies
 
-### 5. Add a routing rule
-
-```
-curl -X POST :8090/v1/routing-rules -d '{
-  "prefix": "telegram/<bot-numeric-id>",
-  "target": "agent:<agent-id>",
-  "session_params": {"environment_id": "<env-id>"}
-}'
-```
-
-### 6. DM the bot — the agent replies
-
-DM the bot from a Telegram client. Watch the aios event log: the inbound
-message shows up with `metadata.channel` set, a session is created on
-first inbound, and the agent's `telegram_send` call delivers the reply
-back to Telegram.
+Inbound messages on each bot route to its connection's session.  The
+agent's `telegram_send` tool takes only `chat_id` from the focal
+channel meta; aios injects it automatically when the session has a
+focal channel set via `switch_channel`.
 
 ## Configuration reference
 
-| Flag | Env var | Default | Description |
-|---|---|---|---|
-| `--bot-token` | `AIOS_TELEGRAM_BOT_TOKEN` | required | Bot token from BotFather |
-| `--aios-url` | `AIOS_URL` | required | Base URL of aios API |
-| `--aios-api-key` | `AIOS_API_KEY` | required | Bearer token for aios API |
-| `--aios-connection-id` | `AIOS_CONNECTION_ID` | required | ID of the pre-registered connection |
-| `--mcp-bind` | `AIOS_TELEGRAM_MCP_BIND` | `127.0.0.1:9200` | Host:port for MCP server |
-| `--mcp-token` | `AIOS_TELEGRAM_MCP_TOKEN` | required | Token MCP clients must present |
+| Env var | Default | Description |
+|---|---|---|
+| `AIOS_TELEGRAM_BOT_TOKEN` | required | Bot token from BotFather |
 
-## Architecture
-
-`app.run()` wires two tasks under a single `asyncio.TaskGroup`:
-
-1. **PTB `Application`** — python-telegram-bot's asyncio Application drives
-   the update loop (long polling). Discovers the bot's numeric id via
-   `getMe` on startup. Every incoming message is parsed into an
-   `InboundMessage` and posted to aios via
-   `POST /v1/connections/{id}/messages`.
-2. **MCP server** — FastMCP on uvicorn, bearer-auth-gated, exposing
-   `telegram_send`.
-
-**Crash-is-fatal.** Any task failure propagates through the TaskGroup and
-exits the process non-zero. There is no auto-reconnect. Run under systemd
-(`Restart=on-failure`) or Docker (`restart: unless-stopped`).
+When deploying multiple instances, set
+`AIOS_TELEGRAM_<INSTANCE_UPPER>_BOT_TOKEN` for each instance (e.g.
+`AIOS_TELEGRAM_SUPPORT_BOT_TOKEN`).  Instance names match
+`^[a-z][a-z0-9_]*$`.
 
 ## Out of scope for v1
 
@@ -125,24 +86,13 @@ exits the process non-zero. There is no auto-reconnect. Run under systemd
 - Forum topics (`message_thread_id`) — ignored; every message treated as
   top-level in the chat.
 - Webhook mode — polling only.
-- Markdown rendering — plain text only. The agent's `**bold**` will render
-  literally until a v2 adds MarkdownV2 escaping.
-- Message splitting — Telegram's 4096-char limit surfaces as a Bad Request
-  the model must handle by retrying shorter.
-- User allowlist — routing rules gate access server-side.
-- Auto-reconnect on Telegram outage.
-
-## Troubleshooting
-
-- **MCP calls returning 401**: the `--mcp-token` on the connector doesn't
-  match the `token` stored in the aios vault's credential for this
-  connection.
-- **Inbound messages never appear in aios**: check the connector logs for
-  `ingest.client_error` (malformed payload — likely a connector bug) or
-  `ingest.retries_exhausted` (aios was unreachable long enough to exhaust
-  the 1/2/4/8s backoff).
-- **`Unauthorized` from Telegram on startup**: the bot token is wrong or
-  revoked. Re-check with BotFather.
+- Markdown rendering — plain text only.  The agent's `**bold**` will
+  render literally until a v2 adds MarkdownV2 escaping.
+- Message splitting — Telegram's 4096-char limit surfaces as a Bad
+  Request the model must handle by retrying shorter.
+- User allowlist — connection attachments gate access server-side.
+- Auto-reconnect on Telegram outage (the supervisor restarts the whole
+  subprocess on PTB exit).
 
 ## Development
 

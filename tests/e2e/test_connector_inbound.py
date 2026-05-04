@@ -70,8 +70,20 @@ def _spec(name: str = "echo") -> ConnectorSpec:
 
 
 def _registry(settings: Settings | None = None, name: str = "echo") -> ConnectorSubprocessRegistry:
+    """Build a registry with one default-instance entry for tests.
+
+    Default-instance shape (``instance == connector``) keeps the
+    inbound-handler call sites simple: ``_handle_inbound((name, name),
+    params)`` mirrors what the real splitter does for single-instance
+    setups.
+    """
+    from aios.config import ConnectorInstance
+
     settings = settings or Settings()
-    return ConnectorSubprocessRegistry([_spec(name)], settings=settings)
+    return ConnectorSubprocessRegistry(
+        [(ConnectorInstance(connector=name, instance=name), _spec(name))],
+        settings=settings,
+    )
 
 
 def _unique_account(prefix: str = "acct") -> str:
@@ -94,7 +106,7 @@ def _patch_send_ack(registry: ConnectorSubprocessRegistry) -> Callable[[], list[
     """
     recorded: list[str] = []
 
-    async def fake_ack(self: Any, name: str, event_id: str) -> None:
+    async def fake_ack(self: Any, connector: str, instance: str, event_id: str) -> None:
         recorded.append(event_id)
 
     registry._send_ack = fake_ack.__get__(registry, type(registry))  # type: ignore[method-assign]
@@ -157,7 +169,7 @@ class TestSingleSessionInbound:
             new=mock.AsyncMock(return_value=None),
         ):
             await registry._handle_inbound(
-                "echo",
+                ("echo", "echo"),
                 {
                     "event_id": make_id("evt"),
                     "account": account,
@@ -172,7 +184,7 @@ class TestSingleSessionInbound:
         assert any(e.data.get("content") == "hello world" for e in user_messages)
         assert len(ack_view()) == 1
         # Drop counter never bumped on the happy path.
-        assert dict(registry._states["echo"].drops) == {}
+        assert dict(registry._states[("echo", "echo")].drops) == {}
 
 
 @needs_docker
@@ -211,7 +223,7 @@ class TestPerChatInbound:
             new=mock.AsyncMock(return_value=None),
         ):
             await registry._handle_inbound(
-                "echo",
+                ("echo", "echo"),
                 {
                     "event_id": make_id("evt"),
                     "account": account,
@@ -270,7 +282,7 @@ class TestPerChatInbound:
         ):
             for chat_id in ("chat-A", "chat-B"):
                 await registry._handle_inbound(
-                    "echo",
+                    ("echo", "echo"),
                     {
                         "event_id": make_id("evt"),
                         "account": account,
@@ -299,7 +311,7 @@ class TestDetachedConnection:
         ack_view = _patch_send_ack(registry)
         event_id = make_id("evt")
         await registry._handle_inbound(
-            "echo",
+            ("echo", "echo"),
             {
                 "event_id": event_id,
                 "account": account,
@@ -308,7 +320,7 @@ class TestDetachedConnection:
                 "content": "ignored",
             },
         )
-        assert registry._states["echo"].drops["detached"] == 1
+        assert registry._states[("echo", "echo")].drops["detached"] == 1
         # Ack still fires so connector clears the spool.
         assert ack_view() == [event_id]
 
@@ -322,7 +334,7 @@ class TestAutoCreateConnection:
         ack_view = _patch_send_ack(registry)
         event_id = make_id("evt")
         await registry._handle_inbound(
-            "echo",
+            ("echo", "echo"),
             {
                 "event_id": event_id,
                 "account": account,
@@ -331,7 +343,7 @@ class TestAutoCreateConnection:
                 "content": "ignored",
             },
         )
-        assert registry._states["echo"].drops["no_connection"] == 1
+        assert registry._states[("echo", "echo")].drops["no_connection"] == 1
         async with harness._pool.acquire() as conn:
             row = await queries.get_connection_for_account(conn, connector="echo", account=account)
             assert row is not None
@@ -347,7 +359,7 @@ class TestAutoCreateConnection:
         ack_view = _patch_send_ack(registry)
         event_id = make_id("evt")
         await registry._handle_inbound(
-            "echo",
+            ("echo", "echo"),
             {
                 "event_id": event_id,
                 "account": account,
@@ -356,7 +368,7 @@ class TestAutoCreateConnection:
                 "content": "ignored",
             },
         )
-        assert registry._states["echo"].drops["no_connection"] == 1
+        assert registry._states[("echo", "echo")].drops["no_connection"] == 1
         async with harness._pool.acquire() as conn:
             row = await queries.get_connection_for_account(conn, connector="echo", account=account)
             assert row is None
@@ -401,8 +413,8 @@ class TestDedupLedger:
             "aios.harness.connector_supervisor.defer_wake",
             new=mock.AsyncMock(return_value=None),
         ):
-            await registry._handle_inbound("echo", params)
-            await registry._handle_inbound("echo", params)
+            await registry._handle_inbound(("echo", "echo"), params)
+            await registry._handle_inbound(("echo", "echo"), params)
 
         events = await harness.events(session.id)
         matches = [e for e in events if e.data.get("content") == "once and only once"]
@@ -437,7 +449,7 @@ class TestArchivedTemplateDrop:
         ack_view = _patch_send_ack(registry)
         event_id = make_id("evt")
         await registry._handle_inbound(
-            "echo",
+            ("echo", "echo"),
             {
                 "event_id": event_id,
                 "account": account,
@@ -446,7 +458,7 @@ class TestArchivedTemplateDrop:
                 "content": "no spawn",
             },
         )
-        assert registry._states["echo"].drops["archived_template"] == 1
+        assert registry._states[("echo", "echo")].drops["archived_template"] == 1
         assert ack_view() == [event_id]
 
 
@@ -484,7 +496,7 @@ class TestConnectorMetadataMerging:
             new=mock.AsyncMock(return_value=None),
         ):
             await registry._handle_inbound(
-                "echo",
+                ("echo", "echo"),
                 {
                     "event_id": make_id("evt"),
                     "account": account,
@@ -543,7 +555,7 @@ class TestPayloadTooLarge:
         ack_view = _patch_send_ack(registry)
         event_id = make_id("evt")
         await registry._handle_inbound(
-            "echo",
+            ("echo", "echo"),
             {
                 "event_id": event_id,
                 "account": account,
@@ -553,7 +565,7 @@ class TestPayloadTooLarge:
             },
         )
 
-        assert registry._states["echo"].drops["payload_too_large"] == 1
+        assert registry._states[("echo", "echo")].drops["payload_too_large"] == 1
         assert ack_view() == [event_id]
         # No event was appended.
         events = await harness.events(session.id)
@@ -613,7 +625,7 @@ class TestDeferWakeFailureHeals:
             ),
             pytest.raises(RuntimeError, match="simulated"),
         ):
-            await registry._handle_inbound("echo", params)
+            await registry._handle_inbound(("echo", "echo"), params)
 
         # Event was committed (the txn closed before defer_wake ran).
         events_after_first = await harness.events(session.id)
@@ -631,7 +643,7 @@ class TestDeferWakeFailureHeals:
             "aios.harness.connector_supervisor.defer_wake",
             new=fake_defer_wake_ok,
         ):
-            await registry._handle_inbound("echo", params)
+            await registry._handle_inbound(("echo", "echo"), params)
 
         # Still exactly one event (dedup ledger blocked the second).
         events_after_second = await harness.events(session.id)
@@ -652,7 +664,8 @@ class TestRegistryIsolation:
         assert registry._settings.connectors_auto_create == {}
         assert registry.snapshot_all() == [
             {
-                "name": "echo",
+                "connector": "echo",
+                "instance": "echo",
                 "status": "starting",
                 "instructions": None,
                 "accounts": [],
@@ -660,3 +673,114 @@ class TestRegistryIsolation:
                 "recent_drops": {},
             }
         ]
+
+
+@needs_docker
+class TestMultiAccountInboundRouting:
+    """Multi-account: ``(connector, account)`` is the routing primitive.
+
+    A single-instance connector serving N accounts must route inbound on
+    each account to the connection attached to that account, even when
+    the same instance fans out to multiple sessions.
+    """
+
+    async def test_two_accounts_route_to_distinct_sessions(self, harness: Harness) -> None:
+        agent_id, env_id = await _make_agent_and_env(harness)
+        account_a = _unique_account("acct-a")
+        account_b = _unique_account("acct-b")
+        session_a = await sessions_service.create_session(
+            harness._pool, agent_id=agent_id, environment_id=env_id, title="A", metadata={}
+        )
+        session_b = await sessions_service.create_session(
+            harness._pool, agent_id=agent_id, environment_id=env_id, title="B", metadata={}
+        )
+        conn_a = await connections_service.create_connection(
+            harness._pool, connector="echo", account=account_a, metadata={}
+        )
+        conn_b = await connections_service.create_connection(
+            harness._pool, connector="echo", account=account_b, metadata={}
+        )
+        await connections_service.attach_connection(
+            harness._pool, conn_a.id, session_id=session_a.id
+        )
+        await connections_service.attach_connection(
+            harness._pool, conn_b.id, session_id=session_b.id
+        )
+
+        registry = _registry()
+        _patch_send_ack(registry)
+        with mock.patch(
+            "aios.harness.connector_supervisor.defer_wake",
+            new=mock.AsyncMock(return_value=None),
+        ):
+            await registry._handle_inbound(
+                ("echo", "echo"),
+                {
+                    "event_id": make_id("evt"),
+                    "account": account_a,
+                    "chat_id": "chat-A",
+                    "sender": {"display_name": "Alice"},
+                    "content": "hello A",
+                },
+            )
+            await registry._handle_inbound(
+                ("echo", "echo"),
+                {
+                    "event_id": make_id("evt"),
+                    "account": account_b,
+                    "chat_id": "chat-B",
+                    "sender": {"display_name": "Bob"},
+                    "content": "hello B",
+                },
+            )
+
+        events_a = await harness.events(session_a.id)
+        events_b = await harness.events(session_b.id)
+        # Each session sees only its own account's inbound.
+        contents_a = {
+            e.data.get("content")
+            for e in events_a
+            if e.kind == "message" and e.data.get("role") == "user"
+        }
+        contents_b = {
+            e.data.get("content")
+            for e in events_b
+            if e.kind == "message" and e.data.get("role") == "user"
+        }
+        assert "hello A" in contents_a and "hello B" not in contents_a
+        assert "hello B" in contents_b and "hello A" not in contents_b
+
+
+@needs_docker
+class TestAccountConflictRejection:
+    """Two instances of the same connector type both reporting the same
+    account: second is rejected, primary keeps the map entry."""
+
+    async def test_second_instance_rejected_with_last_error(self) -> None:
+        from aios.config import ConnectorInstance
+        from aios.harness.connector_supervisor import ConnectorState
+
+        registry = ConnectorSubprocessRegistry(
+            [
+                (ConnectorInstance("signal", "primary"), _spec("signal")),
+                (ConnectorInstance("signal", "secondary"), _spec("signal")),
+            ],
+            settings=Settings(),
+        )
+        # Bypass the supervisor loop entirely; we only exercise routing.
+        # `_states` already wired by the registry constructor.
+        await registry._on_aios_notification(
+            ("signal", "primary"),
+            "notifications/aios/accounts",
+            {"accounts": [{"id": "+15551234567", "display_name": "X"}]},
+        )
+        await registry._on_aios_notification(
+            ("signal", "secondary"),
+            "notifications/aios/accounts",
+            {"accounts": [{"id": "+15551234567", "display_name": "X-dup"}]},
+        )
+        assert registry.lookup_instance_for_account("signal", "+15551234567") == "primary"
+        secondary: ConnectorState | None = registry.state("signal", "secondary")
+        assert secondary is not None
+        assert secondary.last_error is not None
+        assert "conflict" in secondary.last_error

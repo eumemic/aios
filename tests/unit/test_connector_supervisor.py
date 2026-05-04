@@ -45,29 +45,35 @@ class TestValidateCapability:
 
         return ConnectorSubprocessRegistry([], settings=Settings())
 
+    def _state(self) -> Any:
+        from aios.harness.connector_supervisor import ConnectorState
+
+        spec = ConnectorSpec(name="echo", command="x", args=[])
+        return ConnectorState(connector="echo", instance="echo", spec=spec)
+
     def test_passes_when_aios_connector_key_present(self) -> None:
         registry = self._registry()
         init = _fake_init_result({_AIOS_EXPERIMENTAL_KEY: {}})
         # Should not raise.
-        registry._validate_capability("echo", init)
+        registry._validate_capability(self._state(), init)
 
     def test_raises_on_missing_experimental_dict(self) -> None:
         registry = self._registry()
         init = _fake_init_result(None)
         with pytest.raises(RuntimeError, match=r"experimental\..*aios/connector"):
-            registry._validate_capability("echo", init)
+            registry._validate_capability(self._state(), init)
 
     def test_raises_on_empty_experimental_dict(self) -> None:
         registry = self._registry()
         init = _fake_init_result({})
         with pytest.raises(RuntimeError, match=r"experimental\..*aios/connector"):
-            registry._validate_capability("echo", init)
+            registry._validate_capability(self._state(), init)
 
     def test_raises_when_other_experimental_keys_present(self) -> None:
         registry = self._registry()
         init = _fake_init_result({"some/other/cap": {"option": True}})
         with pytest.raises(RuntimeError, match=r"experimental\..*aios/connector"):
-            registry._validate_capability("echo", init)
+            registry._validate_capability(self._state(), init)
 
 
 class TestResolveConnectorSpecs:
@@ -106,7 +112,9 @@ class TestResolveConnectorSpecs:
         with pytest.raises(RuntimeError, match="expected ConnectorSpec"):
             resolve_connector_specs(self._settings(enabled=["bad"]))
 
-    def test_returns_spec_with_default_cwd(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_instance_returns_single_segment_cwd(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from pathlib import Path
 
         ep = MagicMock()
@@ -121,10 +129,31 @@ class TestResolveConnectorSpecs:
             self._settings(enabled=["echo"], connectors_dir=connectors_dir)
         )
         assert len(specs) == 1
-        assert specs[0].name == "echo"
-        # Plan #11: cwd defaults to ``connectors_dir / name`` when the
-        # factory leaves it None.
-        assert specs[0].cwd == connectors_dir / "echo"
+        ci, spec = specs[0]
+        assert ci.connector == "echo" and ci.instance == "echo"
+        # Default-instance setups keep the PR3 single-segment path.
+        assert spec.cwd == connectors_dir / "echo"
+
+    def test_non_default_instance_gets_per_instance_subdir(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pathlib import Path
+
+        ep = MagicMock()
+        ep.name = "telegram"
+        ep.load.return_value = lambda name, settings: ConnectorSpec(name=name, command="/bin/echo")
+        monkeypatch.setattr(
+            "aios.harness.connector_supervisor.entry_points",
+            lambda group: [ep],
+        )
+        connectors_dir = Path("/tmp/aios-connectors-test")
+        specs = resolve_connector_specs(
+            self._settings(enabled=["telegram:bot1"], connectors_dir=connectors_dir)
+        )
+        assert len(specs) == 1
+        ci, spec = specs[0]
+        assert ci.connector == "telegram" and ci.instance == "bot1"
+        assert spec.cwd == connectors_dir / "telegram" / "bot1"
 
     def test_factory_explicit_cwd_is_preserved(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from pathlib import Path
@@ -140,7 +169,42 @@ class TestResolveConnectorSpecs:
             lambda group: [ep],
         )
         specs = resolve_connector_specs(self._settings(enabled=["echo"]))
-        assert specs[0].cwd == explicit
+        assert specs[0][1].cwd == explicit
+
+    def test_env_re_export_for_non_default_instance(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ep = MagicMock()
+        ep.name = "telegram"
+        ep.load.return_value = lambda name, settings: ConnectorSpec(name=name, command="/bin/echo")
+        monkeypatch.setattr(
+            "aios.harness.connector_supervisor.entry_points",
+            lambda group: [ep],
+        )
+        # Scoped + unscoped vars present in parent env; the scoped value
+        # must override under AIOS_TELEGRAM_BOT_TOKEN inside the bot1
+        # subprocess's env.
+        monkeypatch.setenv("AIOS_TELEGRAM_BOT_TOKEN", "unscoped")
+        monkeypatch.setenv("AIOS_TELEGRAM_BOT1_BOT_TOKEN", "scoped-bot1")
+        specs = resolve_connector_specs(self._settings(enabled=["telegram:bot1"]))
+        _, spec = specs[0]
+        assert spec.env is not None
+        assert spec.env["AIOS_TELEGRAM_BOT_TOKEN"] == "scoped-bot1"
+
+    def test_env_passes_unscoped_for_default_instance(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ep = MagicMock()
+        ep.name = "telegram"
+        ep.load.return_value = lambda name, settings: ConnectorSpec(name=name, command="/bin/echo")
+        monkeypatch.setattr(
+            "aios.harness.connector_supervisor.entry_points",
+            lambda group: [ep],
+        )
+        monkeypatch.setenv("AIOS_TELEGRAM_BOT_TOKEN", "the-only-token")
+        specs = resolve_connector_specs(self._settings(enabled=["telegram"]))
+        _, spec = specs[0]
+        # Default-instance just inherits parent env unmodified.
+        assert spec.env is not None
+        assert spec.env["AIOS_TELEGRAM_BOT_TOKEN"] == "the-only-token"
 
 
 class TestPumpStderrLineExtraction:
@@ -223,8 +287,8 @@ class TestDropCounter:
 
         registry = ConnectorSubprocessRegistry([], settings=Settings())
         spec = ConnectorSpec(name="echo", command="x", args=[])
-        state = ConnectorState(name="echo", spec=spec)
-        registry._states["echo"] = state
+        state = ConnectorState(connector="echo", instance="echo", spec=spec)
+        registry._states[("echo", "echo")] = state
         return registry, state
 
     def test_drops_accumulate_per_reason(self) -> None:
@@ -263,7 +327,9 @@ class TestInboundMalformed:
 
         registry = ConnectorSubprocessRegistry([], settings=Settings())
         spec = ConnectorSpec(name="echo", command="x", args=[])
-        registry._states["echo"] = ConnectorState(name="echo", spec=spec)
+        registry._states[("echo", "echo")] = ConnectorState(
+            connector="echo", instance="echo", spec=spec
+        )
 
         def fake_require_pool() -> None:
             raise AssertionError("DB should not be touched on malformed payload")
@@ -275,7 +341,7 @@ class TestInboundMalformed:
 
         acked: list[str] = []
 
-        async def fake_ack(_self: object, _name: str, event_id: str) -> None:
+        async def fake_ack(_self: object, _connector: str, _instance: str, event_id: str) -> None:
             acked.append(event_id)
 
         monkeypatch.setattr(
@@ -291,10 +357,10 @@ class TestInboundMalformed:
         """Missing event_id → drop, NO ack (no id to ack against)."""
         registry, acked = await self._build_registry(monkeypatch)
         await registry._handle_inbound(
-            "echo",
+            ("echo", "echo"),
             {"account": "a", "chat_id": "c", "content": "x"},
         )
-        assert registry._states["echo"].drops["malformed"] == 1
+        assert registry._states[("echo", "echo")].drops["malformed"] == 1
         assert acked == []
 
     async def test_missing_other_field_drops_with_ack(
@@ -303,10 +369,10 @@ class TestInboundMalformed:
         """Other fields missing → drop AND ack so spool clears."""
         registry, acked = await self._build_registry(monkeypatch)
         await registry._handle_inbound(
-            "echo",
+            ("echo", "echo"),
             {"event_id": "01EVT", "account": "acct"},  # missing chat_id, content
         )
-        assert registry._states["echo"].drops["malformed"] == 1
+        assert registry._states[("echo", "echo")].drops["malformed"] == 1
         assert acked == ["01EVT"]
 
 
@@ -327,7 +393,7 @@ class TestBackoffSchedule:
         )
 
         spec = ConnectorSpec(name="echo", command="x", args=[])
-        state = ConnectorState(name="echo", spec=spec)
+        state = ConnectorState(connector="echo", instance="echo", spec=spec)
 
         # Walk the doubling chain until we hit the cap.  The supervisor
         # loop applies ``state.backoff = min(backoff * 2, cap)`` after
@@ -358,12 +424,14 @@ class TestAccountsNotificationMalformed:
 
         registry = ConnectorSubprocessRegistry([], settings=Settings())
         spec = ConnectorSpec(name="echo", command="x", args=[])
-        registry._states["echo"] = ConnectorState(name="echo", spec=spec)
+        registry._states[("echo", "echo")] = ConnectorState(
+            connector="echo", instance="echo", spec=spec
+        )
 
         await registry._on_aios_notification(
-            "echo", "notifications/aios/accounts", {"accounts": None}
+            ("echo", "echo"), "notifications/aios/accounts", {"accounts": None}
         )
-        state = registry._states["echo"]
+        state = registry._states[("echo", "echo")]
         assert state.last_error == "malformed accounts payload"
         assert state.accounts == []
 
@@ -373,16 +441,97 @@ class TestAccountsNotificationMalformed:
 
         registry = ConnectorSubprocessRegistry([], settings=Settings())
         spec = ConnectorSpec(name="echo", command="x", args=[])
-        registry._states["echo"] = ConnectorState(name="echo", spec=spec)
+        registry._states[("echo", "echo")] = ConnectorState(
+            connector="echo", instance="echo", spec=spec
+        )
 
         await registry._on_aios_notification(
-            "echo",
+            ("echo", "echo"),
             "notifications/aios/accounts",
             {"accounts": [{"id": "a", "display_name": "A"}]},
         )
-        state = registry._states["echo"]
+        state = registry._states[("echo", "echo")]
         assert state.accounts == [{"id": "a", "display_name": "A"}]
         assert state.last_error is None
+        # Account map populated for the reporting instance.
+        assert registry._account_to_instance == {("echo", "a"): "echo"}
+
+
+class TestAccountMapRebuild:
+    """``_rebuild_account_map`` clears stale claims, refuses conflicts."""
+
+    def _registry_with_two_signal_instances(self) -> ConnectorSubprocessRegistry:
+        from aios.config import Settings
+        from aios.harness.connector_supervisor import ConnectorState
+
+        registry = ConnectorSubprocessRegistry([], settings=Settings())
+        spec = ConnectorSpec(name="signal", command="x", args=[])
+        registry._states[("signal", "primary")] = ConnectorState(
+            connector="signal", instance="primary", spec=spec
+        )
+        registry._states[("signal", "secondary")] = ConnectorState(
+            connector="signal", instance="secondary", spec=spec
+        )
+        return registry
+
+    async def test_clears_stale_entries_for_reporting_instance(self) -> None:
+        """A removed account leaves no stale map entry pointing at the
+        instance that used to serve it (clear-then-insert semantics)."""
+        registry = self._registry_with_two_signal_instances()
+        # Two-account snapshot from primary.
+        await registry._on_aios_notification(
+            ("signal", "primary"),
+            "notifications/aios/accounts",
+            {
+                "accounts": [
+                    {"id": "+1111", "display_name": "A"},
+                    {"id": "+2222", "display_name": "B"},
+                ]
+            },
+        )
+        assert registry._account_to_instance == {
+            ("signal", "+1111"): "primary",
+            ("signal", "+2222"): "primary",
+        }
+        # Primary now reports only +1111 — +2222 must be cleared.
+        await registry._on_aios_notification(
+            ("signal", "primary"),
+            "notifications/aios/accounts",
+            {"accounts": [{"id": "+1111", "display_name": "A"}]},
+        )
+        assert registry._account_to_instance == {("signal", "+1111"): "primary"}
+
+    async def test_conflict_rejects_second_claim(self) -> None:
+        """Two instances claiming the same account: second is rejected,
+        last_error set, primary keeps the map entry."""
+        registry = self._registry_with_two_signal_instances()
+        await registry._on_aios_notification(
+            ("signal", "primary"),
+            "notifications/aios/accounts",
+            {"accounts": [{"id": "+1111", "display_name": "A"}]},
+        )
+        await registry._on_aios_notification(
+            ("signal", "secondary"),
+            "notifications/aios/accounts",
+            {"accounts": [{"id": "+1111", "display_name": "A-dup"}]},
+        )
+        # Primary still owns +1111; secondary's last_error surfaces the conflict.
+        assert registry._account_to_instance == {("signal", "+1111"): "primary"}
+        secondary = registry._states[("signal", "secondary")]
+        assert secondary.last_error is not None
+        assert "conflict" in secondary.last_error
+
+    async def test_lookup_instance_for_account(self) -> None:
+        """``lookup_instance_for_account`` is the public read path."""
+        registry = self._registry_with_two_signal_instances()
+        await registry._on_aios_notification(
+            ("signal", "primary"),
+            "notifications/aios/accounts",
+            {"accounts": [{"id": "+1111", "display_name": "A"}]},
+        )
+        assert registry.lookup_instance_for_account("signal", "+1111") == "primary"
+        assert registry.lookup_instance_for_account("signal", "+9999") is None
+        assert registry.lookup_instance_for_account("telegram", "+1111") is None
 
 
 class mock_log_capture:

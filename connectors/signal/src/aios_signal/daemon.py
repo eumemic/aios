@@ -36,6 +36,7 @@ class GroupInfo:
     name: str
     member_uuids: list[str]
 
+
 log = structlog.get_logger(__name__)
 
 READY_POLL_ATTEMPTS = 150  # 150 attempts @ 200ms = 30s total
@@ -46,16 +47,25 @@ SHUTDOWN_GRACE_S = 5.0
 
 
 class SignalDaemon:
+    """Manages a single signal-cli daemon serving one or more accounts.
+
+    Multi-account: launched without ``-a`` so signal-cli serves every
+    registered account in ``config_dir/data/accounts.json``.  RPC calls
+    must include ``account`` in their params; receive notifications
+    carry ``params.account`` so callers know which phone the inbound
+    arrived on (see :meth:`RpcListener.messages`).
+    """
+
     def __init__(
         self,
         *,
-        phone: str,
+        phones: list[str],
         config_dir: Path,
         cli_bin: str,
         host: str,
         port: int,
     ) -> None:
-        self.phone = phone
+        self.phones = phones
         self.config_dir = config_dir
         self.cli_bin = cli_bin
         self.host = host
@@ -93,7 +103,7 @@ class SignalDaemon:
             try:
                 await asyncio.wait_for(self._proc.wait(), timeout=SHUTDOWN_GRACE_S)
             except TimeoutError:
-                log.warning("signal.daemon.sigkill", phone=self.phone)
+                log.warning("signal.daemon.sigkill", phones=self.phones)
                 with contextlib.suppress(ProcessLookupError):
                     self._proc.kill()
                 await self._proc.wait()
@@ -105,12 +115,15 @@ class SignalDaemon:
         self._drain_tasks.clear()
 
     async def _spawn(self) -> None:
+        # Multi-account daemon: no ``-a`` flag.  signal-cli will serve
+        # every account registered in ``config_dir/data/accounts.json``;
+        # callers route via ``account`` in RPC params.  Single-phone
+        # setups still benefit from the same shape (one-element phones
+        # list) — uniform code path beats a special case.
         args = [
             self.cli_bin,
             "--config",
             str(self.config_dir),
-            "-a",
-            self.phone,
             "-o",
             "json",
             "--trust-new-identities",
@@ -120,7 +133,7 @@ class SignalDaemon:
             f"{self.host}:{self.port}",
             "--receive-mode=on-connection",
         ]
-        log.info("signal.daemon.spawn", phone=self.phone, host=self.host, port=self.port)
+        log.info("signal.daemon.spawn", phones=self.phones, host=self.host, port=self.port)
         self._proc = await _spawn_subprocess(args)
         assert self._proc.stdout is not None
         assert self._proc.stderr is not None
@@ -151,9 +164,8 @@ class SignalDaemon:
         return self._crash_future
 
     async def _wait_for_tcp(self) -> None:
-        # ``listAccounts`` is rejected when the daemon is started with ``-a``
-        # (account-scoped mode), so probe with ``version`` — always
-        # implemented, side-effect-free.
+        # ``version`` is the universal readiness probe — works in
+        # multi-account daemon mode (no ``-a``) and is side-effect-free.
         last_error: Exception | None = None
         for _ in range(READY_POLL_ATTEMPTS):
             try:
@@ -169,10 +181,20 @@ class SignalDaemon:
             f"signal-cli daemon never became ready on {self.host}:{self.port}: {last_error!r}"
         )
 
-    async def discover_bot_uuid(self) -> str:
-        # Read signal-cli's on-disk account index rather than RPCing —
-        # ``listAccounts`` is the only method that returns this info and it's
-        # unavailable in account-scoped daemon mode.
+    async def discover_bot_uuids(self) -> dict[str, str]:
+        """Return a ``{phone: uuid}`` map for every configured phone.
+
+        Reads signal-cli's on-disk account index rather than RPCing —
+        ``listAccounts`` works in multi-account daemon mode but
+        accounts.json is the same source of truth and avoids a network
+        round-trip during startup.
+
+        Raises :class:`BotAccountNotFoundError` if any configured phone
+        lacks a registered account.  Operators must register every
+        phone in ``self.phones`` (via ``signal-cli -a <phone> register``)
+        before launching the connector — surfacing the missing entry at
+        startup beats discovering it on first inbound.
+        """
         import json as _json
 
         accounts_json = self.config_dir / "data" / "accounts.json"
@@ -188,17 +210,29 @@ class SignalDaemon:
             raise BotAccountNotFoundError(
                 f"malformed signal-cli accounts file at {accounts_json}: {e}"
             ) from e
-        target = self.phone.strip()
+        registered: dict[str, str] = {}
         for entry in data.get("accounts", []):
-            if str(entry.get("number", "")).strip() == target and entry.get("uuid"):
-                uuid: str = entry["uuid"]
-                return uuid
-        raise BotAccountNotFoundError(
-            f"signal-cli has no account for {self.phone} in {accounts_json}. "
-            f"Run `signal-cli -a {self.phone} register` first."
-        )
+            number = str(entry.get("number", "")).strip()
+            uuid = entry.get("uuid")
+            if number and isinstance(uuid, str) and uuid:
+                registered[number] = uuid
+        out: dict[str, str] = {}
+        missing: list[str] = []
+        for phone in self.phones:
+            target = phone.strip()
+            uuid = registered.get(target)
+            if uuid is None:
+                missing.append(target)
+            else:
+                out[target] = uuid
+        if missing:
+            raise BotAccountNotFoundError(
+                f"signal-cli has no account for {missing!r} in {accounts_json}. "
+                f"Run `signal-cli -a <phone> register` for each missing number first."
+            )
+        return out
 
-    async def list_groups(self) -> list[GroupInfo]:
+    async def list_groups(self, *, account: str) -> list[GroupInfo]:
         """Return the bot's group memberships via signal-cli ``listGroups``.
 
         Best-effort: returns an empty list on RPC failure or malformed
@@ -210,9 +244,9 @@ class SignalDaemon:
         complete picture of "who is in this room with me."
         """
         try:
-            result = await self.rpc.call("listGroups", {})
+            result = await self.rpc.call("listGroups", {"account": account})
         except Exception:
-            log.warning("signal.list_groups.failed", exc_info=True)
+            log.warning("signal.list_groups.failed", account=account, exc_info=True)
             return []
         if not isinstance(result, list):
             return []
@@ -245,7 +279,7 @@ class SignalDaemon:
             )
         return out
 
-    async def list_contacts(self) -> dict[str, str]:
+    async def list_contacts(self, *, account: str) -> dict[str, str]:
         """Return a ``{uuid: display_name}`` map from signal-cli's contact store.
 
         signal-cli's inbound ``sourceName`` is sometimes empty (e.g. for peers
@@ -255,9 +289,11 @@ class SignalDaemon:
         Returns an empty dict on RPC failure — name resolution is best-effort.
         """
         try:
-            result = await self.rpc.call("listContacts", {"allRecipients": True})
+            result = await self.rpc.call(
+                "listContacts", {"account": account, "allRecipients": True}
+            )
         except Exception:
-            log.warning("signal.list_contacts.failed", exc_info=True)
+            log.warning("signal.list_contacts.failed", account=account, exc_info=True)
             return {}
         if not isinstance(result, list):
             return {}

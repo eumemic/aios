@@ -237,17 +237,20 @@ class TestFocalChannelE2E:
 
 
 class TestFocalChannelPathHelper:
-    """Pure unit tests for the helper that strips connector/account from
-    a focal address before injection into MCP ``_meta``.  Lives here so
-    the e2e file is the single home for focal-channel coverage; the
-    helper is otherwise covered indirectly by the dispatch path.
+    """Pure unit tests for the helper that strips the connector segment
+    from a focal address before injection into MCP ``_meta``.  Lives
+    here so the e2e file is the single home for focal-channel coverage;
+    the helper is otherwise covered indirectly by the dispatch path.
+
+    Account is preserved in the meta value so multi-account connectors
+    can route by it; single-account connectors take the chat suffix only.
     """
 
-    def test_strips_connector_and_account(self) -> None:
-        assert focal_channel_path("signal/+1/chat-a") == "chat-a"
+    def test_strips_only_connector_preserves_account(self) -> None:
+        assert focal_channel_path("signal/+1/chat-a") == "+1/chat-a"
 
     def test_preserves_trailing_segments(self) -> None:
-        assert focal_channel_path("telegram/bot/group/thread-1") == "group/thread-1"
+        assert focal_channel_path("telegram/bot/group/thread-1") == "bot/group/thread-1"
 
     def test_returns_none_when_focal_unset(self) -> None:
         assert focal_channel_path(None) is None

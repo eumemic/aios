@@ -105,24 +105,62 @@ def _raise_for_error(envelope: dict[str, Any]) -> None:
 
 @router.get("")
 async def list_(db_url: DbUrlDep, _auth: AuthDep) -> dict[str, Any]:
-    return await _rpc(db_url, lambda cid: defer_connector_status(call_id=cid, name=None))
+    """Snapshot every enabled connector instance."""
+    return await _rpc(
+        db_url, lambda cid: defer_connector_status(call_id=cid, connector=None, instance=None)
+    )
 
 
-@router.get("/{name}/accounts")
-async def list_accounts(name: str, db_url: DbUrlDep, _auth: AuthDep) -> dict[str, Any]:
-    envelope = await _rpc(db_url, lambda cid: defer_connector_status(call_id=cid, name=name))
-    connector = envelope["connector"]
-    return {"name": connector["name"], "accounts": connector["accounts"]}
+@router.get("/{connector}")
+async def list_for_connector(connector: str, db_url: DbUrlDep, _auth: AuthDep) -> dict[str, Any]:
+    """Snapshot every instance of one connector type."""
+    return await _rpc(
+        db_url,
+        lambda cid: defer_connector_status(call_id=cid, connector=connector, instance=None),
+    )
 
 
-@router.get("/{name}/tools")
-async def list_tools(name: str, db_url: DbUrlDep, _auth: AuthDep) -> dict[str, Any]:
-    return await _rpc(db_url, lambda cid: defer_connector_tools(call_id=cid, name=name))
+@router.get("/{connector}/{instance}")
+async def get_instance(
+    connector: str, instance: str, db_url: DbUrlDep, _auth: AuthDep
+) -> dict[str, Any]:
+    """Snapshot a single ``(connector, instance)`` pair."""
+    return await _rpc(
+        db_url,
+        lambda cid: defer_connector_status(call_id=cid, connector=connector, instance=instance),
+    )
 
 
-@router.post("/{name}/call")
+@router.get("/{connector}/{instance}/accounts")
+async def list_accounts(
+    connector: str, instance: str, db_url: DbUrlDep, _auth: AuthDep
+) -> dict[str, Any]:
+    envelope = await _rpc(
+        db_url,
+        lambda cid: defer_connector_status(call_id=cid, connector=connector, instance=instance),
+    )
+    snapshot = envelope["connector"]
+    return {
+        "connector": snapshot["connector"],
+        "instance": snapshot["instance"],
+        "accounts": snapshot["accounts"],
+    }
+
+
+@router.get("/{connector}/{instance}/tools")
+async def list_tools(
+    connector: str, instance: str, db_url: DbUrlDep, _auth: AuthDep
+) -> dict[str, Any]:
+    return await _rpc(
+        db_url,
+        lambda cid: defer_connector_tools(call_id=cid, connector=connector, instance=instance),
+    )
+
+
+@router.post("/{connector}/{instance}/call")
 async def call(
-    name: str,
+    connector: str,
+    instance: str,
     body: ConnectorCallBody,
     db_url: DbUrlDep,
     _auth: AuthDep,
@@ -131,7 +169,8 @@ async def call(
         db_url,
         lambda cid: defer_connector_call(
             call_id=cid,
-            name=name,
+            connector=connector,
+            instance=instance,
             tool=body.tool,
             arguments=body.arguments,
             meta=body.meta,
