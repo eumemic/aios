@@ -33,6 +33,8 @@ from collections.abc import Callable
 from typing import Any
 from unittest import mock
 
+import pytest
+
 from aios.config import Settings
 from aios.db import queries
 from aios.harness.connector_supervisor import ConnectorSubprocessRegistry
@@ -446,6 +448,199 @@ class TestArchivedTemplateDrop:
         )
         assert registry._states["echo"].drops["archived_template"] == 1
         assert ack_view() == [event_id]
+
+
+@needs_docker
+class TestConnectorMetadataMerging:
+    """Connector-supplied ``params["metadata"]`` reaches the event log.
+
+    The model relies on these fields — e.g. ``signal_react`` is documented
+    to copy ``sender_uuid`` and ``timestamp_ms`` from the inbound header.
+    A regression that drops them silently would invalidate the tool
+    contract; this test catches that.
+    """
+
+    async def test_connector_metadata_lands_in_event_data(self, harness: Harness) -> None:
+        agent_id, env_id = await _make_agent_and_env(harness)
+        account = _unique_account()
+        session = await sessions_service.create_session(
+            harness._pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title="meta",
+            metadata={},
+        )
+        conn_row = await connections_service.create_connection(
+            harness._pool, connector="echo", account=account, metadata={}
+        )
+        await connections_service.attach_connection(
+            harness._pool, conn_row.id, session_id=session.id
+        )
+
+        registry = _registry()
+        _patch_send_ack(registry)
+        with mock.patch(
+            "aios.harness.connector_supervisor.defer_wake",
+            new=mock.AsyncMock(return_value=None),
+        ):
+            await registry._handle_inbound(
+                "echo",
+                {
+                    "event_id": make_id("evt"),
+                    "account": account,
+                    "chat_id": "chat-meta",
+                    "sender": {"display_name": "Alice"},
+                    "content": "hi",
+                    "metadata": {
+                        "sender_uuid": "abcd-1234",
+                        "timestamp_ms": 1700000000000,
+                        "reply_to": {"author_uuid": "x", "timestamp_ms": 1, "text": "?"},
+                    },
+                },
+            )
+
+        events = await harness.events(session.id)
+        user_event = next(e for e in events if e.data.get("role") == "user")
+        meta = user_event.data["metadata"]
+        # Connector fields preserved.
+        assert meta["sender_uuid"] == "abcd-1234"
+        assert meta["timestamp_ms"] == 1700000000000
+        assert meta["reply_to"]["author_uuid"] == "x"
+        # Supervisor-canonical stamps win on conflict / additive.
+        assert meta["channel"] == f"echo/{account}/chat-meta"
+        assert meta["sender"] == "Alice"
+
+
+@needs_docker
+class TestPayloadTooLarge:
+    """Oversized inbound content drops with a counter and acks the spool.
+
+    Mirrors ``services.sessions.append_user_message``'s
+    ``MAX_USER_MESSAGE_CHARS`` cap so a malformed/attacker payload can't
+    blow up the session's prompt-cache window.
+    """
+
+    async def test_oversized_content_drops_and_acks(self, harness: Harness) -> None:
+        from aios.models.sessions import MAX_USER_MESSAGE_CHARS
+
+        agent_id, env_id = await _make_agent_and_env(harness)
+        account = _unique_account()
+        session = await sessions_service.create_session(
+            harness._pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title="oversized",
+            metadata={},
+        )
+        conn_row = await connections_service.create_connection(
+            harness._pool, connector="echo", account=account, metadata={}
+        )
+        await connections_service.attach_connection(
+            harness._pool, conn_row.id, session_id=session.id
+        )
+
+        registry = _registry()
+        ack_view = _patch_send_ack(registry)
+        event_id = make_id("evt")
+        await registry._handle_inbound(
+            "echo",
+            {
+                "event_id": event_id,
+                "account": account,
+                "chat_id": "x",
+                "sender": {"display_name": "A"},
+                "content": "x" * (MAX_USER_MESSAGE_CHARS + 1),
+            },
+        )
+
+        assert registry._states["echo"].drops["payload_too_large"] == 1
+        assert ack_view() == [event_id]
+        # No event was appended.
+        events = await harness.events(session.id)
+        assert all(e.data.get("role") != "user" or e.data.get("content") != "x" for e in events)
+
+
+@needs_docker
+class TestDeferWakeFailureHeals:
+    """A transient ``defer_wake`` failure no longer strands the message.
+
+    Prior to the review fix, a swallowed ``defer_wake`` error meant the
+    appended event sat in the log with no wake job AND the connector
+    cleared its spool — message lost.  Post-fix: the inbound task fails
+    (no ack), the connector replays, the dedup ledger blocks a second
+    append, but ``defer_wake`` runs unconditionally on the replay, so the
+    wake gets enqueued the second time.
+    """
+
+    async def test_defer_wake_failure_is_healed_by_replay(self, harness: Harness) -> None:
+        agent_id, env_id = await _make_agent_and_env(harness)
+        account = _unique_account()
+        session = await sessions_service.create_session(
+            harness._pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title="heal",
+            metadata={},
+        )
+        conn_row = await connections_service.create_connection(
+            harness._pool, connector="echo", account=account, metadata={}
+        )
+        await connections_service.attach_connection(
+            harness._pool, conn_row.id, session_id=session.id
+        )
+
+        registry = _registry()
+        ack_view = _patch_send_ack(registry)
+
+        # First attempt: defer_wake raises, _send_ack should NOT be called.
+        params = {
+            "event_id": make_id("evt"),
+            "account": account,
+            "chat_id": "x",
+            "sender": {"display_name": "A"},
+            "content": "once",
+        }
+        defer_wake_calls: list[str] = []
+
+        async def fake_defer_wake_fail(_pool: Any, session_id: str, **_kw: Any) -> None:
+            defer_wake_calls.append(session_id)
+            raise RuntimeError("simulated transient DB hiccup")
+
+        with (
+            mock.patch(
+                "aios.harness.connector_supervisor.defer_wake",
+                new=fake_defer_wake_fail,
+            ),
+            pytest.raises(RuntimeError, match="simulated"),
+        ):
+            await registry._handle_inbound("echo", params)
+
+        # Event was committed (the txn closed before defer_wake ran).
+        events_after_first = await harness.events(session.id)
+        assert any(e.data.get("content") == "once" for e in events_after_first)
+        # ack NOT sent (defer_wake raised, _send_ack didn't run).
+        assert ack_view() == []
+
+        # Replay: defer_wake now succeeds.  Ledger conflict → no second
+        # append, but defer_wake runs (heals the prior strand) and ack
+        # fires (clears the connector's spool).
+        async def fake_defer_wake_ok(_pool: Any, session_id: str, **_kw: Any) -> None:
+            defer_wake_calls.append(session_id)
+
+        with mock.patch(
+            "aios.harness.connector_supervisor.defer_wake",
+            new=fake_defer_wake_ok,
+        ):
+            await registry._handle_inbound("echo", params)
+
+        # Still exactly one event (dedup ledger blocked the second).
+        events_after_second = await harness.events(session.id)
+        once_count = sum(1 for e in events_after_second if e.data.get("content") == "once")
+        assert once_count == 1
+        # defer_wake was called twice (once failing, once succeeding).
+        assert len(defer_wake_calls) == 2
+        # ack now fired.
+        assert len(ack_view()) == 1
 
 
 @needs_docker

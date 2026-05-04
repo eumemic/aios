@@ -57,6 +57,47 @@ async def test_emit_inbound_persists_then_pushes(connector: _StubConnector) -> N
     assert notification.params["content"] == "hello"
 
 
+async def test_emit_inbound_blocks_until_initial_state_done(
+    connector: _StubConnector,
+) -> None:
+    """Live ``emit_inbound`` waits for the accounts snapshot + spool replay.
+
+    Without this gate, a connector whose ``serve()`` fires fast inbounds
+    during startup could ship a fresh notification past a half-flushed
+    ``_emit_initial_state`` — out of order with the very entries the
+    spool replay is supposed to deliver exactly once.
+    """
+    stream = _StubStream()
+    connector._write_stream = stream  # type: ignore[assignment]
+    connector._client_initialized.set()
+    # _initial_state_done deliberately NOT set — emit_inbound must block.
+
+    completed = anyio.Event()
+
+    async def emit_and_signal() -> None:
+        await connector.emit_inbound(
+            account="echo-1",
+            chat_id="c",
+            sender={"display_name": "A"},
+            content="m",
+        )
+        completed.set()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(emit_and_signal)
+        # Give the task a beat to reach the await.
+        await anyio.sleep(0.05)
+        assert not completed.is_set(), "emit_inbound should be blocked"
+        assert stream.sent == [], "no notification should have been pushed yet"
+
+        # Releasing the gate unblocks the emit.
+        connector._initial_state_done.set()
+        with anyio.fail_after(1.0):
+            await completed.wait()
+
+    assert len(stream.sent) == 1
+
+
 async def test_emit_inbound_before_run_raises(connector: _StubConnector) -> None:
     """Calling ``emit_inbound`` before :meth:`run` started is a programmer error.
 
