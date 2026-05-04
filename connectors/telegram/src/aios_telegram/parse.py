@@ -1,13 +1,8 @@
 """Parse python-telegram-bot ``Message`` objects into :class:`InboundMessage`.
 
-v1 scope is text only. We return ``None`` for anything we don't forward to
-aios — messages from the bot itself, bot-to-bot traffic, non-text payloads
-(photos, stickers, voice, documents), and messages without a sender.
-
-Edits (``update.edited_message``) and channel posts never reach this
-function because the handler in :mod:`aios_telegram.bot` registers on
-``update.message`` with a ``filters.TEXT`` gate — this module is only
-responsible for the parse, not for the filter-at-dispatch.
+Returns ``None`` for messages from the bot itself, bot-to-bot
+traffic, channel posts (no ``from_user``), and otherwise-empty
+messages.
 """
 
 from __future__ import annotations
@@ -19,6 +14,13 @@ from telegram import Message
 from telegram.constants import ChatType
 
 ChatKind = Literal["dm", "group", "supergroup", "channel"]
+
+
+@dataclass(slots=True, frozen=True)
+class Attachment:
+    file_id: str
+    content_type: str
+    filename: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -37,6 +39,7 @@ class InboundMessage:
     message_id: int
     timestamp_ms: int
     text: str
+    attachments: tuple[Attachment, ...]
     reply: Reply | None
 
 
@@ -50,20 +53,71 @@ def _chat_kind(chat_type: str) -> ChatKind:
     return "channel"
 
 
+def _extract_attachments(message: Message) -> tuple[Attachment, ...]:
+    """Pick out media we forward: photo / voice / document / video / audio."""
+    out: list[Attachment] = []
+    if message.photo:
+        # ``photo`` is a tuple of progressively larger PhotoSizes; the
+        # last one is the largest the bot has access to.
+        largest = message.photo[-1]
+        out.append(
+            Attachment(
+                file_id=largest.file_id,
+                content_type="image/jpeg",
+                filename=f"photo-{message.message_id}.jpg",
+            )
+        )
+    if message.voice:
+        out.append(
+            Attachment(
+                file_id=message.voice.file_id,
+                content_type=message.voice.mime_type or "audio/ogg",
+                filename=f"voice-{message.message_id}.ogg",
+            )
+        )
+    if message.document:
+        doc = message.document
+        out.append(
+            Attachment(
+                file_id=doc.file_id,
+                content_type=doc.mime_type or "application/octet-stream",
+                filename=doc.file_name or f"document-{message.message_id}",
+            )
+        )
+    if message.video:
+        vid = message.video
+        out.append(
+            Attachment(
+                file_id=vid.file_id,
+                content_type=vid.mime_type or "video/mp4",
+                filename=vid.file_name or f"video-{message.message_id}.mp4",
+            )
+        )
+    if message.audio:
+        aud = message.audio
+        out.append(
+            Attachment(
+                file_id=aud.file_id,
+                content_type=aud.mime_type or "audio/mpeg",
+                filename=aud.file_name or f"audio-{message.message_id}.mp3",
+            )
+        )
+    return tuple(out)
+
+
 def parse_message(message: Message, *, bot_id: int) -> InboundMessage | None:
     sender = message.from_user
     if sender is None:
-        # Channel posts and anonymous admins have no ``from_user``. Out of
-        # scope for v1.
+        # Channel posts and anonymous admins have no ``from_user``.
         return None
     if sender.id == bot_id:
         return None
     if sender.is_bot:
         return None
 
-    text = message.text
-    if not text:
-        # v1 is text-only. Media, stickers, voice, etc. are dropped.
+    text = message.text or message.caption or ""
+    attachments = _extract_attachments(message)
+    if not text and not attachments:
         return None
 
     chat = message.chat
@@ -86,5 +140,6 @@ def parse_message(message: Message, *, bot_id: int) -> InboundMessage | None:
         message_id=message.message_id,
         timestamp_ms=int(message.date.timestamp() * 1000),
         text=text,
+        attachments=attachments,
         reply=reply,
     )

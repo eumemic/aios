@@ -32,15 +32,27 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import structlog
-from aios_connector import Connector, focal_required, make_account, tool
+from aios_connector import (
+    Attachment as SDKAttachment,
+)
+from aios_connector import (
+    AttachmentError,
+    Connector,
+    focal_required,
+    make_account,
+    tool,
+)
+from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from .config import Settings
-from .parse import InboundMessage, parse_message
+from .parse import Attachment, InboundMessage, parse_message
 from .prompts import build_instructions
 
 log = structlog.get_logger(__name__)
@@ -104,7 +116,8 @@ class TelegramConnector(Connector):
         async def on_error(_update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
             log.error("telegram.handler.error", error=str(context.error))
 
-        application.add_handler(MessageHandler(filters.TEXT, on_message))
+        # parse_message handles channel/bot filtering with full message context.
+        application.add_handler(MessageHandler(filters.ALL, on_message))
         application.add_error_handler(on_error)
         log.info(
             "telegram.bot.identified",
@@ -165,6 +178,7 @@ class TelegramConnector(Connector):
     async def _drain_queue(self) -> None:
         assert self._inbound_queue is not None
         assert self._bot_id is not None
+        assert self._application is not None
         while True:
             msg = await self._inbound_queue.get()
             sender_payload: dict[str, Any] = {
@@ -181,14 +195,72 @@ class TelegramConnector(Connector):
                 if msg.timestamp_ms
                 else None
             )
+            sdk_attachments = await self._download_attachments(msg.attachments)
             await self.emit_inbound(
                 account=str(self._bot_id),
                 chat_id=str(msg.chat_id),
                 sender=sender_payload,
                 content=msg.text,
+                attachments=sdk_attachments or None,
                 metadata=metadata,
                 timestamp=timestamp_iso,
             )
+
+    async def _download_attachments(
+        self, attachments: tuple[Attachment, ...]
+    ) -> list[SDKAttachment]:
+        """Download each attachment in parallel, log+skip the rejects."""
+        host_paths = await asyncio.gather(*(self._download_one(a) for a in attachments))
+        out: list[SDKAttachment] = []
+        for att, host_path in zip(attachments, host_paths, strict=True):
+            if host_path is None:
+                continue
+            candidate = SDKAttachment(
+                host_path=str(host_path),
+                filename=att.filename,
+                content_type=att.content_type,
+            )
+            try:
+                candidate.as_params()
+            except AttachmentError as err:
+                log.warning(
+                    "telegram.inbound.attachment_rejected",
+                    file_id=att.file_id,
+                    filename=att.filename,
+                    error=str(err),
+                )
+                continue
+            out.append(candidate)
+        return out
+
+    async def _download_one(self, att: Attachment) -> Path | None:
+        assert self._application is not None
+        try:
+            file = await self._application.bot.get_file(att.file_id)
+        except TelegramError as err:
+            log.warning(
+                "telegram.inbound.get_file_failed",
+                file_id=att.file_id,
+                error=str(err),
+            )
+            return None
+        # Close the handle immediately so PTB owns the write side.
+        with tempfile.NamedTemporaryFile(
+            prefix="aios-telegram-", suffix=Path(att.filename).suffix, delete=False
+        ) as tmp:
+            target = Path(tmp.name)
+        try:
+            await file.download_to_drive(custom_path=target)
+        except (TelegramError, OSError) as err:
+            log.warning(
+                "telegram.inbound.download_failed",
+                file_id=att.file_id,
+                target=str(target),
+                error=str(err),
+            )
+            await asyncio.to_thread(target.unlink, missing_ok=True)
+            return None
+        return target
 
     # ── model-facing tools ────────────────────────────────────────────
 
