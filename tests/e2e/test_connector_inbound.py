@@ -405,7 +405,9 @@ class TestAccountDriftInbound:
 
         registry = _registry()
         # Snapshot does NOT include this account — operator drift case.
-        registry._states["echo"].accounts = [{"id": "some-other-account", "display_name": "X"}]
+        registry._states[("echo", "echo")].accounts = [
+            {"id": "some-other-account", "display_name": "X"}
+        ]
         ack_view = _patch_send_ack(registry)
         await registry._handle_inbound(
             "echo",
@@ -421,7 +423,7 @@ class TestAccountDriftInbound:
         events = await harness.events(session.id)
         user_messages = [e for e in events if e.kind == "message" and e.data.get("role") == "user"]
         assert not any(e.data.get("content") == "should not land" for e in user_messages)
-        assert registry._states["echo"].drops["account_drift"] == 1
+        assert registry._states[("echo", "echo")].drops["account_drift"] == 1
         # Ack still fires so the connector clears its spool — there's
         # no recovery from drift via replay.
         assert len(ack_view()) == 1
@@ -450,7 +452,7 @@ class TestAccountDriftInbound:
         )
 
         registry = _registry()
-        registry._states["echo"].accounts = []  # unavailable
+        registry._states[("echo", "echo")].accounts = []  # unavailable
         _patch_send_ack(registry)
         with mock.patch(
             "aios.harness.connector_supervisor.defer_wake",
@@ -470,7 +472,7 @@ class TestAccountDriftInbound:
         events = await harness.events(session.id)
         contents = [e.data.get("content") for e in events if e.data.get("role") == "user"]
         assert "lands fine" in contents
-        assert "account_drift" not in registry._states["echo"].drops
+        assert "account_drift" not in registry._states[("echo", "echo")].drops
 
 
 @needs_docker
