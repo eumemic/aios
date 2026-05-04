@@ -12,6 +12,10 @@ from typing import Any
 
 import litellm
 
+from aios.logging import get_logger
+
+log = get_logger("aios.harness.vision")
+
 INLINE_SIZE_CAP_BYTES = 2 * 1024 * 1024
 
 _VISION_OVERRIDES: dict[str, bool] = {}
@@ -28,7 +32,15 @@ def supports_vision(model: str) -> bool:
         return _VISION_OVERRIDES[model]
     try:
         info = litellm.get_model_info(model)
-    except Exception:
+    except Exception as err:
+        # ``get_model_info`` raises a mix of ``BadRequestError`` (unknown
+        # model), KeyError, and import/network errors depending on the
+        # failure mode.  Collapsing to "no vision" is the safe fallback
+        # (we degrade to a text marker the model can still ``read``), but
+        # the silence makes a transient outage look identical to "unknown
+        # model" — log warn-level so operators have a grep target when
+        # vision unexpectedly degrades across a deploy or provider blip.
+        log.warning("vision.litellm_lookup_failed", model=model, error=str(err))
         return False
     return bool(info.get("supports_vision"))
 
