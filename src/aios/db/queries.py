@@ -770,6 +770,28 @@ async def list_running_session_ids(conn: asyncpg.Connection[Any]) -> list[str]:
     return [str(r["id"]) for r in rows]
 
 
+async def get_session_model(conn: asyncpg.Connection[Any], session_id: str) -> str:
+    """Return the bound mind URL for ``session_id`` in one round trip.
+
+    Pinned ``agent_version`` wins when set; otherwise the live agent's
+    current ``model`` is returned.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT COALESCE(av.model, a.model) AS model
+          FROM sessions s
+          JOIN agents a ON a.id = s.agent_id
+     LEFT JOIN agent_versions av
+            ON av.agent_id = s.agent_id AND av.version = s.agent_version
+         WHERE s.id = $1
+        """,
+        session_id,
+    )
+    if row is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    return str(row["model"])
+
+
 async def list_attachment_paths_for_sessions(
     conn: asyncpg.Connection[Any], session_ids: list[str]
 ) -> dict[str, set[str]]:

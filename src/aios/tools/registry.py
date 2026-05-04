@@ -56,13 +56,17 @@ class ToolResult:
     ``ToolResult`` instead.
 
     * ``content`` — ``str``: used verbatim.  ``dict``: JSON-encoded.
+      ``list[dict]``: passed through as a content-parts list (multimodal
+      tool results, e.g. ``read`` returning an image; the chat-completions
+      wire format already accepts ``content: list[dict]`` on tool messages
+      and LiteLLM translates per provider).
     * ``metadata`` — merged into the event's ``data.metadata`` (stripped
       from the chat-completions wire shape by ``_strip_to_spec``).
     * ``is_error`` — records a handler-level error (separate from
       dispatch-level exceptions, which raise).
     """
 
-    content: str | dict[str, Any]
+    content: str | dict[str, Any] | list[dict[str, Any]]
     metadata: dict[str, Any] | None = None
     is_error: bool = False
 

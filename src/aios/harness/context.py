@@ -10,7 +10,11 @@ Two public functions:
   tool calls and reordering tool results so they appear immediately
   after their requesting assistant message.
 
-Both are pure functions: no DB access, no side effects, easy to test.
+Both are pure functions of the event log + caller-supplied vision
+policy inputs (``model``, ``session_id``).  They DO read host bytes
+when an image attachment can be inlined for the bound mind — that I/O
+is the cost of producing an ``image_url`` content part.  No DB access,
+no async.
 
 The ``reacting_to`` field on assistant messages is the key coordination
 mechanism. Each assistant message records the seq of the latest user or
@@ -24,12 +28,22 @@ follow-up step.
 
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from aios.harness.vision import (
+    can_inline_image,
+    make_image_url_part,
+    text_marker,
+)
+from aios.logging import get_logger
 from aios.models.events import Event
+from aios.sandbox.volumes import resolve_to_host_path
+
+log = get_logger("aios.harness.context")
 
 # Chat-completions spec fields per role.  Only these are emitted in the
 # context; provider-specific extensions (reasoning_content, etc.) stay
@@ -167,14 +181,18 @@ def render_user_event(
     event_data: dict[str, Any],
     orig_channel: str | None,
     focal_channel_at_arrival: str | None,
+    *,
+    model: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """Render a user event into its chat-completions message form.
 
     Rendering is a deterministic function of the event's stamped
-    ``orig_channel`` and ``focal_channel_at_arrival``.  ``build_messages``
-    and the append-time token counter in ``queries.append_event`` share
-    this helper so the context and the ``cumulative_tokens`` column
-    stay in lock-step.
+    ``orig_channel``, ``focal_channel_at_arrival``, and the optional
+    vision policy inputs ``model`` / ``session_id``.  ``build_messages``
+    threads vision policy through; the append-time token counter in
+    ``queries.append_event`` does not (and pays a small under-count
+    per inlined image, absorbed by ``model_token_ratio`` calibration).
 
     Branches:
 
@@ -182,7 +200,11 @@ def render_user_event(
       metadata stripped, no header, no notification.  Covers direct
       ``POST /sessions/{id}/messages`` traffic and pre-migration rows.
     * ``orig == focal_at_arrival`` (non-NULL) → full content with a
-      metadata header inlined.
+      metadata header inlined.  When the focal event's metadata
+      carries ``attachments`` and the bound mind supports vision,
+      inlinable images are emitted as ``image_url`` content parts;
+      everything else gets a text marker referencing the in-sandbox
+      path.
     * Otherwise (focal is NULL, or focal differs from orig) →
       notification marker: a short, emoji-prefixed one-liner surfacing
       the origin channel, sender, and a truncated content preview.
@@ -200,6 +222,14 @@ def render_user_event(
             if header:
                 existing = msg.get("content") or ""
                 msg["content"] = f"{header}\n{existing}" if existing else header
+            attachments = metadata.get("attachments")
+            if isinstance(attachments, list) and attachments:
+                _apply_attachments(
+                    msg,
+                    attachments,
+                    model=model,
+                    session_id=session_id,
+                )
         return msg
 
     content = event_data.get("content", "")
@@ -207,6 +237,68 @@ def render_user_event(
         content = ""
     marker = _format_notification_marker(orig_channel, metadata, content)
     return {"role": "user", "content": marker}
+
+
+def _apply_attachments(
+    msg: dict[str, Any],
+    attachments: list[Any],
+    *,
+    model: str | None,
+    session_id: str | None,
+) -> None:
+    leading_text = msg.get("content") if isinstance(msg.get("content"), str) else ""
+    marker_lines: list[str] = []
+    image_parts: list[dict[str, Any]] = []
+
+    for record in attachments:
+        host_path = _resolve_attachment_host_path(record, session_id)
+        size = record.get("size")
+        content_type = record.get("content_type")
+        inline = (
+            host_path is not None
+            and model is not None
+            and isinstance(content_type, str)
+            and isinstance(size, int)
+            and can_inline_image(model=model, content_type=content_type, size_bytes=size)
+        )
+        if inline:
+            try:
+                payload = host_path.read_bytes()
+            except OSError as err:
+                # The staged file disappeared (manual cleanup, FS corruption,
+                # GC race). Fall back to a text marker rather than raising
+                # mid-render — losing one image shouldn't fail the whole step.
+                log.warning(
+                    "context.attachment_read_failed",
+                    path=str(host_path),
+                    error=str(err),
+                )
+                marker_lines.append(text_marker(record))
+                continue
+            image_parts.append(
+                make_image_url_part(
+                    content_type=content_type,
+                    data_b64=base64.b64encode(payload).decode("ascii"),
+                )
+            )
+        else:
+            marker_lines.append(text_marker(record))
+
+    text = leading_text
+    if marker_lines:
+        text = f"{text}\n{chr(10).join(marker_lines)}" if text else "\n".join(marker_lines)
+
+    if image_parts:
+        msg["content"] = [{"type": "text", "text": text}, *image_parts]
+    else:
+        msg["content"] = text
+
+
+def _resolve_attachment_host_path(record: dict[str, Any], session_id: str | None) -> Any:
+    sandbox_path = record.get("in_sandbox_path")
+    if not isinstance(sandbox_path, str) or session_id is None:
+        return None
+    return resolve_to_host_path(session_id, sandbox_path)
 
 
 def _sanitize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -345,6 +437,8 @@ def build_messages(
     events: list[Event],
     *,
     system_prompt: str | None,
+    model: str | None = None,
+    session_id: str | None = None,
 ) -> ContextResult:
     """Assemble a chat-completions message list from pre-windowed events.
 
@@ -404,7 +498,13 @@ def build_messages(
         role = e.data.get("role")
 
         if role == "user":
-            msg = render_user_event(e.data, e.orig_channel, e.focal_channel_at_arrival)
+            msg = render_user_event(
+                e.data,
+                e.orig_channel,
+                e.focal_channel_at_arrival,
+                model=model,
+                session_id=session_id,
+            )
             messages.append(msg)
             max_stimulus_seq = max(max_stimulus_seq, e.seq)
 
