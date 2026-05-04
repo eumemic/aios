@@ -74,8 +74,9 @@ class TestParseConnectorEntry:
 class TestConnectorsEnabledValidator:
     """The Settings field validator wraps the parser per entry."""
 
-    def test_empty_default(self) -> None:
-        s = Settings(**_BASE_KWARGS)
+    def test_empty_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("AIOS_CONNECTORS_ENABLED", raising=False)
+        s = Settings(_env_file=None, **_BASE_KWARGS)
         assert s.connectors_enabled == []
         assert s.connector_instances() == []
 
