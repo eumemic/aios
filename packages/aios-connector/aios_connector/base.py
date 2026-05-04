@@ -589,7 +589,7 @@ class Connector:
             ctx = request_ctx.get()
         except LookupError:
             return None
-        meta: RequestParams.Meta | None = getattr(ctx.request, "meta", None) if ctx else None
+        meta: RequestParams.Meta | None = ctx.meta if ctx else None
         if meta is None:
             return None
         extra = getattr(meta, "model_extra", None) or {}
