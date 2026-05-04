@@ -8,7 +8,7 @@ supervises.  It exposes:
 - **Inbound notifications** (`notifications/aios/inbound`) carrying user
   messages from the underlying platform into aios sessions.
 - **Account snapshots** (`notifications/aios/accounts`) the operator
-  surfaces in `aios connector list`.
+  surfaces in `aios connectors list`.
 
 ## Quickstart
 

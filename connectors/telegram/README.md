@@ -46,7 +46,7 @@ process — one bot's PTB `Application` crashing doesn't affect siblings.
 
 `aios worker` boots, spawns one telegram subprocess per instance, and
 each runs `Bot.get_me()` to identify itself.  Verify with
-`aios connector list`.
+`aios connectors list`.
 
 ### 4. Attach connections to sessions
 

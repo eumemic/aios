@@ -58,7 +58,7 @@ config under the standard prefix.
 
 `aios worker` boots, spawns the signal subprocess, runs `signal-cli
 daemon`, and reports the discovered accounts on
-`aios connector accounts signal`.
+`aios connectors accounts signal`.
 
 ### 4. Attach connections to sessions
 
