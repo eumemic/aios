@@ -451,28 +451,24 @@ async def _run_session_step_body(
     tool_calls: list[dict[str, Any]] = assistant_msg.get("tool_calls") or []
 
     if tool_calls:
-        from aios.tools.registry import registry as tool_registry
-
         immediate: list[dict[str, Any]] = []
         mcp_immediate: list[dict[str, Any]] = []
         needs_confirm: list[dict[str, Any]] = []
         custom: list[dict[str, Any]] = []
+        unknown_mcp: list[dict[str, Any]] = []
 
         for tc in tool_calls:
-            name = _tc_name(tc)
-            if _is_mcp_tool(name):
-                # MCP tools default to always_ask (unlike built-in always_allow).
-                perm = resolve_mcp_permission(name, agent.tools)
-                if perm == "always_allow":
-                    mcp_immediate.append(tc)
-                else:
-                    needs_confirm.append(tc)
-            elif not tool_registry.has(name):
-                custom.append(tc)
-            elif resolve_permission(name, agent.tools) == "always_ask":
-                needs_confirm.append(tc)
-            else:
+            kind = _classify_tool_call(tc, agent, mcp_server_map)
+            if kind == "immediate":
                 immediate.append(tc)
+            elif kind == "mcp_immediate":
+                mcp_immediate.append(tc)
+            elif kind == "needs_confirm":
+                needs_confirm.append(tc)
+            elif kind == "custom":
+                custom.append(tc)
+            else:  # "unknown_mcp"
+                unknown_mcp.append(tc)
 
         if immediate:
             launch_tool_calls(pool, session_id, immediate)
@@ -483,19 +479,29 @@ async def _run_session_step_body(
                 tool_names=[_tc_name(tc) for tc in immediate],
             )
 
-        if mcp_immediate:
+        # Unknown-MCP tools route through the regular MCP dispatcher,
+        # bypassing the permission gate.  ``_execute_mcp_tool_async``
+        # already detects unknown servers and appends a tool_error
+        # event (``mcp_tool.server_not_found``); the prior code path
+        # parked the session in ``requires_action`` and dispatched
+        # only after a confirmation, which never came.  Routing them
+        # to immediate dispatch lets the model see the error in the
+        # next step and self-correct.
+        immediate_mcp = mcp_immediate + unknown_mcp
+        if immediate_mcp:
             launch_mcp_tool_calls(
                 pool,
                 session_id,
-                mcp_immediate,
+                immediate_mcp,
                 mcp_server_map,
                 focal_channel=session.focal_channel,
             )
             log.info(
                 "step.mcp_tools_launched",
                 session_id=session_id,
-                count=len(mcp_immediate),
-                tool_names=[_tc_name(tc) for tc in mcp_immediate],
+                count=len(immediate_mcp),
+                tool_names=[_tc_name(tc) for tc in immediate_mcp],
+                unknown_count=len(unknown_mcp),
             )
 
         if needs_confirm or custom:
@@ -604,6 +610,74 @@ def _tc_name(tc: dict[str, Any]) -> str:
 def _is_mcp_tool(name: str) -> bool:
     """Return True if the tool name is an MCP-namespaced tool."""
     return name.startswith("mcp__")
+
+
+def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, str]) -> bool:
+    """Return True if ``server_name`` resolves to a registered MCP server.
+
+    A server is "known" if either:
+
+    * It's a connector instance currently registered with the
+      :class:`~aios.harness.connector_supervisor.ConnectorSubprocessRegistry`,
+      or
+    * It appears in ``mcp_server_map`` (the agent-declared HTTP MCP
+      servers, keyed by ``McpServerSpec.name``).
+
+    Used by :func:`_classify_tool_call` to short-circuit hallucinated
+    tool names before the permission gate, so the model gets a tool
+    error in one turn instead of parking in ``requires_action`` forever
+    waiting on a confirmation that would dispatch into
+    ``mcp_tool.server_not_found`` anyway.
+    """
+    registry = runtime.connector_subprocess_registry
+    if registry is not None and registry.states_for_connector(server_name):
+        return True
+    return server_name in mcp_server_map
+
+
+def _classify_tool_call(
+    tool_call: dict[str, Any],
+    agent: Any,
+    mcp_server_map: dict[str, str],
+) -> str:
+    """Classify a tool call into a dispatch bucket.
+
+    Returns one of:
+
+    * ``"immediate"`` — built-in tool, run synchronously.
+    * ``"mcp_immediate"`` — known MCP tool, ``always_allow``.
+    * ``"needs_confirm"`` — built-in or MCP tool gated on
+      ``always_ask`` confirmation.
+    * ``"custom"`` — client-executed custom tool (the harness holds
+      the call until the client posts a tool-result).
+    * ``"unknown_mcp"`` — MCP-namespaced tool whose server is not
+      registered.  Routed to immediate tool-error so the model can
+      self-correct rather than parking in ``requires_action``.
+    """
+    from aios.tools.registry import registry as tool_registry
+
+    function = tool_call.get("function") or {}
+    name: str = function.get("name") or ""
+
+    if _is_mcp_tool(name):
+        try:
+            server_name = name.split("__", 2)[1]
+        except IndexError:
+            server_name = ""
+        if not server_name or not _is_known_mcp_server(server_name, mcp_server_map):
+            return "unknown_mcp"
+        perm = resolve_mcp_permission(name, agent.tools)
+        if perm == "always_allow":
+            return "mcp_immediate"
+        return "needs_confirm"
+
+    if not tool_registry.has(name):
+        return "custom"
+
+    if resolve_permission(name, agent.tools) == "always_ask":
+        return "needs_confirm"
+
+    return "immediate"
 
 
 def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
