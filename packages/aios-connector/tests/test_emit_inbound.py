@@ -55,6 +55,33 @@ async def test_emit_inbound_persists_then_pushes(connector: _StubConnector) -> N
     assert notification.params["account"] == "echo-1"
     assert notification.params["chat_id"] == "chat-42"
     assert notification.params["content"] == "hello"
+    # Timestamp omitted by default (not all platforms supply one).
+    assert "timestamp" not in notification.params
+
+
+async def test_emit_inbound_passes_timestamp_through(connector: _StubConnector) -> None:
+    """Optional ``timestamp=`` becomes a top-level param on the notification.
+
+    Per design §3.3: the supervisor stamps it as
+    ``metadata.platform_timestamp`` on the appended event so operators
+    can compare against the server-side ``created_at``.
+    """
+    stream = _StubStream()
+    connector._write_stream = stream  # type: ignore[assignment]
+    connector._client_initialized.set()
+    connector._initial_state_done.set()
+
+    iso = "2026-04-30T17:01:23.456+00:00"
+    await connector.emit_inbound(
+        account="echo-1",
+        chat_id="chat-42",
+        sender={"display_name": "Alice"},
+        content="ping",
+        timestamp=iso,
+    )
+
+    notification = stream.sent[0].message.root
+    assert notification.params["timestamp"] == iso
 
 
 async def test_emit_inbound_blocks_until_initial_state_done(

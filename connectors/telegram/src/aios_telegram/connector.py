@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -171,12 +172,21 @@ class TelegramConnector(Connector):
                 "display_name": msg.sender_name or str(msg.sender_id),
             }
             metadata = build_metadata(msg, self._bot_id)
+            # Telegram message ``date`` is unix-seconds; render as
+            # ISO-8601 UTC so aios's supervisor sees the same string
+            # shape as other connectors (signal etc.).
+            timestamp_iso = (
+                datetime.fromtimestamp(msg.timestamp_ms / 1000, tz=UTC).isoformat()
+                if msg.timestamp_ms
+                else None
+            )
             await self.emit_inbound(
                 account=str(self._bot_id),
                 chat_id=str(msg.chat_id),
                 sender=sender_payload,
                 content=msg.text,
                 metadata=metadata,
+                timestamp=timestamp_iso,
             )
 
     # ── model-facing tools ────────────────────────────────────────────

@@ -293,23 +293,47 @@ class Connector:
 
     Lifecycle (driven by :meth:`run`):
 
-    1. ``setup()`` — open daemon connections, sign in, etc.
-    2. ``discover_accounts()`` — initial account snapshot.
-    3. Start MCP server over stdio.
+    1. ``setup()`` — open daemon connections, sign in, etc.  Runs
+       before the MCP server starts; blocking here keeps the supervisor
+       in ``starting`` until either this returns or the bounded init
+       handshake (30s) trips and respawns.
+    2. ``discover_accounts()`` — return the initial account snapshot.
+       Returns ``list[dict[str, Any]]`` (NOT a list of account-id
+       strings) — use :func:`make_account` to build entries.  The ``id``
+       field is what aios uses as the opaque ``account`` segment in
+       channel addresses.
+    3. Start MCP server over stdio.  ``notifications/initialized`` is
+       only sent after steps 1-2 complete: outbound dispatch into a
+       not-yet-ready connector therefore waits on first init rather
+       than racing past unset state.
     4. Send ``notifications/aios/accounts`` once the client is initialized.
     5. Replay unacked spool entries, then enter live mode.
-    6. ``teardown()`` on exit (normal or exception).
+    6. ``serve()`` — sibling task to the MCP server.  Default parks
+       forever; override to drive an inbound pump (signal-cli's
+       listener loop, etc.).  Calls to :meth:`emit_inbound` from here
+       block until step 5 completes so live inbounds can't race past
+       spool replay.
+    7. ``teardown()`` on exit (normal or exception, in ``run()``'s
+       ``finally``).
 
     Subclass contract:
 
     * Override ``name`` (e.g. ``"signal"``); the spool path and outbound
       channel-address prefix derive from it.
-    * Override :meth:`setup`, :meth:`discover_accounts`, :meth:`teardown`.
+    * Override :meth:`setup`, :meth:`discover_accounts`, :meth:`teardown`,
+      and (if event-driven inbound is needed) :meth:`serve`.
     * Decorate methods with :func:`tool` (and optionally
       :func:`focal_required`) to publish tools.
     * Call :meth:`emit_inbound` from your inbound pump.
-    * Optionally set ``instructions`` for a class-level
-      :class:`mcp.types.InitializeResult.instructions` block.
+    * Optionally set ``instructions`` for an
+      :class:`mcp.types.InitializeResult.instructions` block surfaced
+      to the model on every turn.
+
+    Register the connector via the ``aios.connectors`` entry-point group;
+    the entry point must point at a ``make_spec(connector_name, settings)``
+    factory that returns an
+    :class:`aios.mcp.stdio_transport.ConnectorSpec` (NOT the connector
+    class itself).  See ``packages/aios-echo`` for a minimal example.
     """
 
     name: ClassVar[str] = ""
@@ -360,6 +384,12 @@ class Connector:
         Most connectors maintain a single account (signal phone,
         telegram bot) and return a one-element list.  Use
         :func:`make_account` to build entries.
+
+        Each entry is a dict with at minimum ``id`` and ``display_name``
+        — NOT a bare account-id string.  The ``id`` field is the opaque
+        ``account`` segment aios uses in channel addresses
+        (``<connector>/<account>/<chat_id>``) and the value
+        :meth:`emit_inbound`'s ``account=`` argument must match.
         """
         return []
 
@@ -393,6 +423,7 @@ class Connector:
         content: str,
         attachments: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
+        timestamp: str | None = None,
     ) -> str:
         """Persist an inbound message to the spool, then push the notification.
 
@@ -404,6 +435,14 @@ class Connector:
         return value.  ``chat_id`` is the connector-specific identifier
         the model addresses via focal channel; the harness builds the
         full channel address as ``<connector>/<account>/<chat_id>``.
+
+        ``timestamp`` is an optional ISO-8601 string carrying the
+        platform's actual delivery time (Signal envelope timestamp,
+        Telegram message ``date``, etc.).  When supplied, the supervisor
+        stamps it as ``metadata.platform_timestamp`` on the appended
+        event so operators debugging "why did this arrive 30s late?"
+        can compare against the server-side ``created_at``.  Connectors
+        whose source platform doesn't carry a timestamp omit this kwarg.
         """
         if self._write_stream is None:
             raise RuntimeError(
@@ -429,6 +468,8 @@ class Connector:
             params["attachments"] = list(attachments)
         if metadata:
             params["metadata"] = dict(metadata)
+        if timestamp is not None:
+            params["timestamp"] = timestamp
 
         payload = json.dumps(params).encode("utf-8")
         self._spool.add(event_id, payload, created_at=time.time())

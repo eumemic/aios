@@ -75,20 +75,89 @@ class MyMultiConnector(Connector):
         ...
 ```
 
-### Entry-point registration
+## Lifecycle hooks
 
-Both shapes register via the `aios.connectors` entry-point group:
+The base class drives a fixed startup sequence; override the four
+hooks to slot in your platform's bookkeeping.  Order is load-bearing —
+inbounds emitted from `serve()` are blocked until the initial state has
+been pushed, so `setup()` and `discover_accounts()` are guaranteed to
+land before any inbound the model sees.
+
+| Hook | When it runs | What's allowed |
+|---|---|---|
+| `setup()` | Before MCP server start | Open daemon connections, sign in, load credentials.  Blocking here keeps the supervisor in `starting` until either this returns or the supervisor's bounded init handshake (30s) trips and respawns. |
+| `discover_accounts()` | Once, between `setup()` and server start | Return a list of account dicts (use `make_account`).  Most connectors return a one-element list for the single phone / bot the integrator owns. |
+| `serve()` | Sibling task to the MCP server, after init | Long-running background work — typically a daemon listener that calls `emit_inbound`.  Override or accept the default (parks forever). |
+| `teardown()` | Always, in `run()`'s `finally` | Close anything `setup()` opened.  Runs on normal exit, exception, and cancellation. |
+
+Readiness deferral: the SDK does NOT send `notifications/initialized`
+until `setup()` and `discover_accounts()` complete.  The supervisor's
+`get_session()` blocks on first init; aios outbound dispatch into a
+not-yet-ready connector waits, surfaces as a transport error after
+60s.
+
+## Account discovery
+
+`discover_accounts()` returns a `list[dict[str, Any]]` — a list of
+account snapshots, NOT a list of bare account-id strings.  Each entry
+must include `id` and `display_name`; arbitrary metadata may be added.
+Use the `make_account(id=..., display_name=..., metadata=...)`
+convenience builder:
+
+```python
+async def discover_accounts(self) -> list[dict[str, Any]]:
+    return [
+        make_account(
+            id=str(self._bot_id),
+            display_name=self._first_name,
+            metadata={"username": self._username},
+        )
+    ]
+```
+
+The `id` field is what aios uses as the opaque `account` segment in the
+channel address `<connector>/<account>/<chat_id>`; it's the same value
+your `emit_inbound(account=...)` calls must pass.  `display_name` and
+`metadata` are surfaced in `aios connector <name> accounts` and to
+operator-facing CLI listings.
+
+## Entry-point factory
+
+Register the connector via the `aios.connectors` entry-point group in
+your package's `pyproject.toml`.  Each entry point points at a
+`make_spec` factory function (NOT the connector class itself):
 
 ```toml
 [project.entry-points."aios.connectors"]
 my_connector = "my_package.factory:make_spec"
 ```
 
-`make_spec(name, settings)` returns an
-`aios.mcp.stdio_transport.ConnectorSpec` describing the launch command.
+The factory takes `(connector_name: str, settings)` and returns an
+`aios.mcp.stdio_transport.ConnectorSpec`:
+
+```python
+import sys
+from aios.mcp.stdio_transport import ConnectorSpec
+
+
+def make_spec(connector_name: str, settings) -> ConnectorSpec:
+    return ConnectorSpec(
+        name=connector_name,
+        command=sys.executable,
+        args=["-m", "my_package"],
+        # cwd left None → supervisor stamps a per-instance default
+    )
+```
+
 The factory stays instance-naive — the supervisor applies per-instance
-cwd + env scoping after the spec returns.  See `packages/aios-echo` for
-the canonical example.
+cwd + env scoping after the spec returns.  When the factory leaves
+`cwd` unset, the supervisor stamps `settings.connectors_dir / connector`
+(default instance) or `settings.connectors_dir / connector / instance`
+(non-default), and creates the directory at boot so first-run
+`FileNotFoundError` from `asyncio.create_subprocess_exec` is impossible.
+Factories that need a different layout can set `cwd` themselves.
+
+See `packages/aios-echo` for the canonical example.
 
 ## Multi-instance deployment
 

@@ -376,6 +376,104 @@ class TestAutoCreateConnection:
 
 
 @needs_docker
+class TestAccountDriftInbound:
+    """Inbound for an account absent from the supervisor snapshot drops as ``account_drift``.
+
+    Audit fix #1 / plan §15.  An attached connection whose account was
+    valid at attach time but disappeared from the snapshot (operator
+    rotated phones, signal-cli unlinked, etc.) would otherwise silently
+    accept events the connector can never reach for outbound — easier
+    to surface as a counter so the drift is visible.
+    """
+
+    async def test_inbound_for_drifted_account_drops_with_counter(self, harness: Harness) -> None:
+        agent_id, env_id = await _make_agent_and_env(harness)
+        account = _unique_account()
+        session = await sessions_service.create_session(
+            harness._pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title="drift",
+            metadata={},
+        )
+        conn_row = await connections_service.create_connection(
+            harness._pool, connector="echo", account=account, metadata={}
+        )
+        await connections_service.attach_connection(
+            harness._pool, conn_row.id, session_id=session.id
+        )
+
+        registry = _registry()
+        # Snapshot does NOT include this account — operator drift case.
+        registry._states["echo"].accounts = [{"id": "some-other-account", "display_name": "X"}]
+        ack_view = _patch_send_ack(registry)
+        await registry._handle_inbound(
+            "echo",
+            {
+                "event_id": make_id("evt"),
+                "account": account,
+                "chat_id": "chat-x",
+                "sender": {"display_name": "Alice"},
+                "content": "should not land",
+            },
+        )
+
+        events = await harness.events(session.id)
+        user_messages = [e for e in events if e.kind == "message" and e.data.get("role") == "user"]
+        assert not any(e.data.get("content") == "should not land" for e in user_messages)
+        assert registry._states["echo"].drops["account_drift"] == 1
+        # Ack still fires so the connector clears its spool — there's
+        # no recovery from drift via replay.
+        assert len(ack_view()) == 1
+
+    async def test_inbound_when_snapshot_empty_skips_drift_check(self, harness: Harness) -> None:
+        """An empty snapshot is "unavailable", not "drift": don't false-positive.
+
+        Connector boot order can briefly leave ``state.accounts`` empty
+        before the first ``notifications/aios/accounts`` lands; flagging
+        drift in that window would corrupt the boot path.
+        """
+        agent_id, env_id = await _make_agent_and_env(harness)
+        account = _unique_account()
+        session = await sessions_service.create_session(
+            harness._pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title="drift-empty",
+            metadata={},
+        )
+        conn_row = await connections_service.create_connection(
+            harness._pool, connector="echo", account=account, metadata={}
+        )
+        await connections_service.attach_connection(
+            harness._pool, conn_row.id, session_id=session.id
+        )
+
+        registry = _registry()
+        registry._states["echo"].accounts = []  # unavailable
+        _patch_send_ack(registry)
+        with mock.patch(
+            "aios.harness.connector_supervisor.defer_wake",
+            new=mock.AsyncMock(return_value=None),
+        ):
+            await registry._handle_inbound(
+                "echo",
+                {
+                    "event_id": make_id("evt"),
+                    "account": account,
+                    "chat_id": "chat-x",
+                    "sender": {"display_name": "Alice"},
+                    "content": "lands fine",
+                },
+            )
+
+        events = await harness.events(session.id)
+        contents = [e.data.get("content") for e in events if e.data.get("role") == "user"]
+        assert "lands fine" in contents
+        assert "account_drift" not in registry._states["echo"].drops
+
+
+@needs_docker
 class TestDedupLedger:
     async def test_replaying_same_event_id_appends_once(self, harness: Harness) -> None:
         """Two ``_handle_inbound`` calls with the same event_id yield one event.
@@ -508,6 +606,7 @@ class TestConnectorMetadataMerging:
                         "timestamp_ms": 1700000000000,
                         "reply_to": {"author_uuid": "x", "timestamp_ms": 1, "text": "?"},
                     },
+                    "timestamp": "2026-04-30T17:01:23.456+00:00",
                 },
             )
 
@@ -521,6 +620,11 @@ class TestConnectorMetadataMerging:
         # Supervisor-canonical stamps win on conflict / additive.
         assert meta["channel"] == f"echo/{account}/chat-meta"
         assert meta["sender"] == "Alice"
+        # Top-level ``timestamp`` (per design §3.3) stamped as
+        # ``metadata.platform_timestamp``.  Server-side ``created_at``
+        # remains authoritative for ordering; this is operator-debugging
+        # context only.
+        assert meta["platform_timestamp"] == "2026-04-30T17:01:23.456+00:00"
 
 
 @needs_docker

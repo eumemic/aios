@@ -113,10 +113,8 @@ class TestResolveConnectorSpecs:
             resolve_connector_specs(self._settings(enabled=["bad"]))
 
     def test_default_instance_returns_single_segment_cwd(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
-        from pathlib import Path
-
         ep = MagicMock()
         ep.name = "echo"
         ep.load.return_value = lambda name, settings: ConnectorSpec(name=name, command="/bin/echo")
@@ -124,7 +122,7 @@ class TestResolveConnectorSpecs:
             "aios.harness.connector_supervisor.entry_points",
             lambda group: [ep],
         )
-        connectors_dir = Path("/tmp/aios-connectors-test")
+        connectors_dir = tmp_path / "aios-connectors"
         specs = resolve_connector_specs(
             self._settings(enabled=["echo"], connectors_dir=connectors_dir)
         )
@@ -133,12 +131,13 @@ class TestResolveConnectorSpecs:
         assert ci.connector == "echo" and ci.instance == "echo"
         # Default-instance setups keep the PR3 single-segment path.
         assert spec.cwd == connectors_dir / "echo"
+        # Audit fix #5: resolver creates the cwd up-front so the first
+        # boot doesn't ``FileNotFoundError`` during subprocess spawn.
+        assert spec.cwd is not None and spec.cwd.is_dir()
 
     def test_non_default_instance_gets_per_instance_subdir(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
-        from pathlib import Path
-
         ep = MagicMock()
         ep.name = "telegram"
         ep.load.return_value = lambda name, settings: ConnectorSpec(name=name, command="/bin/echo")
@@ -146,7 +145,7 @@ class TestResolveConnectorSpecs:
             "aios.harness.connector_supervisor.entry_points",
             lambda group: [ep],
         )
-        connectors_dir = Path("/tmp/aios-connectors-test")
+        connectors_dir = tmp_path / "aios-connectors-test"
         specs = resolve_connector_specs(
             self._settings(enabled=["telegram:bot1"], connectors_dir=connectors_dir)
         )
@@ -154,11 +153,13 @@ class TestResolveConnectorSpecs:
         ci, spec = specs[0]
         assert ci.connector == "telegram" and ci.instance == "bot1"
         assert spec.cwd == connectors_dir / "telegram" / "bot1"
+        # Audit fix #5: resolver creates the per-instance cwd too.
+        assert spec.cwd is not None and spec.cwd.is_dir()
 
-    def test_factory_explicit_cwd_is_preserved(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from pathlib import Path
-
-        explicit = Path("/var/lib/aios/special")
+    def test_factory_explicit_cwd_is_preserved(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        explicit = tmp_path / "var-lib-aios-special"
         ep = MagicMock()
         ep.name = "echo"
         ep.load.return_value = lambda name, settings: ConnectorSpec(
@@ -170,6 +171,8 @@ class TestResolveConnectorSpecs:
         )
         specs = resolve_connector_specs(self._settings(enabled=["echo"]))
         assert specs[0][1].cwd == explicit
+        # Audit fix #5: resolver also creates the explicit path.
+        assert explicit.is_dir()
 
     def test_env_re_export_for_non_default_instance(self, monkeypatch: pytest.MonkeyPatch) -> None:
         ep = MagicMock()

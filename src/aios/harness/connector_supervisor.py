@@ -96,7 +96,7 @@ from mcp.types import InitializeResult
 
 from aios.config import ConnectorInstance, Settings, parse_connector_entry
 from aios.db import queries
-from aios.errors import ConflictError, NotFoundError
+from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.harness.wake import defer_wake
 from aios.logging import get_logger
@@ -144,6 +144,7 @@ DropReason = Literal[
     "session_missing",
     "malformed",
     "payload_too_large",
+    "account_drift",
 ]
 
 
@@ -236,6 +237,14 @@ def resolve_connector_specs(settings: Settings) -> list[tuple[ConnectorInstance,
     Unknown connector names raise — the operator listed something that
     isn't installed, which should fail loudly at boot rather than
     silently skip.
+
+    Per-instance cwd defaulting + on-disk creation happen inside
+    :func:`_apply_instance_overlay`: when the factory leaves ``cwd``
+    unset, the supervisor stamps ``settings.connectors_dir / connector``
+    (or ``/connector/instance`` for non-default instances) and
+    ``mkdir -p``s the result so first boot doesn't ``FileNotFoundError``
+    from inside :func:`asyncio.create_subprocess_exec`.  Idempotent —
+    subsequent boots are no-ops.
     """
     available = {ep.name: ep for ep in entry_points(group="aios.connectors")}
     out: list[tuple[ConnectorInstance, ConnectorSpec]] = []
@@ -269,6 +278,9 @@ def _apply_instance_overlay(
     (``<connectors_dir>/<connector>/``); non-default gets a per-instance
     subdir.  Either way an explicit ``spec.cwd`` from the factory wins
     (factories that hard-code their own state-file layout opt out).
+    The resolved cwd is ``mkdir -p``'d so the first
+    :func:`asyncio.create_subprocess_exec` doesn't ``FileNotFoundError``
+    on a fresh install.
 
     env: always pass the worker's ``os.environ`` to the subprocess so
     pydantic-settings reads the same vars the operator set.  For
@@ -283,6 +295,7 @@ def _apply_instance_overlay(
         cwd = settings.connectors_dir / ci.connector
         if ci.instance != ci.connector:
             cwd = cwd / ci.instance
+    cwd.mkdir(parents=True, exist_ok=True)
     env = _build_instance_env(ci, base=spec.env)
     return replace(spec, cwd=cwd, env=env)
 
@@ -662,6 +675,12 @@ class ConnectorSubprocessRegistry:
         content = params.get("content")
         raw_metadata = params.get("metadata")
         connector_metadata = raw_metadata if isinstance(raw_metadata, dict) else None
+        # Optional ISO-8601 platform timestamp (when the source platform
+        # supplies one).  Stamped onto the appended event as
+        # ``metadata.platform_timestamp`` so operators can compare against
+        # the server-side ``created_at`` when debugging delivery latency.
+        raw_timestamp = params.get("timestamp")
+        platform_timestamp = raw_timestamp if isinstance(raw_timestamp, str) else None
 
         # event_id is checked first because it's the only thing that lets
         # us ack the spool entry — without it we can't dedup or clear,
@@ -708,6 +727,19 @@ class ConnectorSubprocessRegistry:
             return
 
         pool = runtime.require_pool()
+
+        # Drift guard: an account that's persisted in ``connections``
+        # but absent from the connector's live snapshot is a no-op
+        # delivery target — the connector can't reach it on outbound,
+        # so silently appending an event would orphan the conversation.
+        # Surface as a counter so ``aios connector list`` shows the
+        # stuck account; the operator can detach + re-attach against a
+        # known-good account.  Plan §15 lists this as a drop reason.
+        known_account_ids = {entry.get("id") for entry in state.accounts if isinstance(entry, dict)}
+        if state.accounts and account not in known_account_ids:
+            self._record_drop(state, "account_drift")
+            await self._send_ack(state, event_id)
+            return
 
         # 1. Look up connection (fresh read — no caching, since the
         #    operator may have just attached/configured the connection).
@@ -758,6 +790,7 @@ class ConnectorSubprocessRegistry:
                 content=content,
                 attachments=params.get("attachments"),
                 connector_metadata=connector_metadata,
+                platform_timestamp=platform_timestamp,
             )
         except NotFoundError:
             # The session vanished between resolution and append.
@@ -785,9 +818,10 @@ class ConnectorSubprocessRegistry:
         the surface (auto-creating a row doesn't deliver the message
         that prompted it).
 
-        ``ConflictError`` is the documented race (another handler created
-        the row first); any other failure propagates so the inbound task
-        fails and the connector replays on reconnect.
+        Race-safe via :func:`queries.insert_connection`'s
+        ``ON CONFLICT DO NOTHING RETURNING`` shape (plan decision #5);
+        a concurrent explicit POST or sibling inbound handler that
+        beat us simply hands back the existing row, no exception.
 
         No dedup-ledger row is written here on purpose: if the operator
         attaches the auto-created connection later, the connector's
@@ -801,19 +835,16 @@ class ConnectorSubprocessRegistry:
         if not self._settings.connectors_auto_create.get(state.connector, True):
             return
         pool = runtime.require_pool()
-        try:
-            async with pool.acquire() as conn:
-                await queries.insert_connection(
-                    conn, connector=state.connector, account=account, metadata={}
-                )
-                log.info(
-                    "connector.auto_create_connection",
-                    connector=state.connector,
-                    instance=state.instance,
-                    account=account,
-                )
-        except ConflictError:
-            pass
+        async with pool.acquire() as conn:
+            await queries.insert_connection(
+                conn, connector=state.connector, account=account, metadata={}
+            )
+        log.info(
+            "connector.auto_create_connection",
+            connector=state.connector,
+            instance=state.instance,
+            account=account,
+        )
 
     async def _resolve_per_chat_session(
         self,
@@ -888,6 +919,7 @@ class ConnectorSubprocessRegistry:
         content: str,
         attachments: Any,
         connector_metadata: dict[str, Any] | None,
+        platform_timestamp: str | None = None,
     ) -> None:
         """Append a user-message event AND record the dedup-ledger row.
 
@@ -903,9 +935,16 @@ class ConnectorSubprocessRegistry:
         ``message_id``, ``reply_to``; anything else the connector
         emits) is merged in BEFORE the supervisor's stamps so
         supervisor-canonical fields (``channel``, ``sender``,
-        ``attachments``) win on key conflicts.  The model relies on
-        these fields — e.g. ``signal_react`` is documented to copy
-        ``sender_uuid`` and ``timestamp_ms`` from the inbound header.
+        ``attachments``, ``platform_timestamp``) win on key conflicts.
+        The model relies on these fields — e.g. ``signal_react`` is
+        documented to copy ``sender_uuid`` and ``timestamp_ms`` from
+        the inbound header.
+
+        ``platform_timestamp`` (when supplied by the connector via the
+        SDK's ``emit_inbound(timestamp=...)`` kwarg) is the source
+        platform's actual delivery time as ISO-8601.  Server-side
+        ``created_at`` always wins for ordering invariants; this field
+        is purely a debugging aid.
         """
 
         pool = runtime.require_pool()
@@ -919,6 +958,8 @@ class ConnectorSubprocessRegistry:
             metadata["sender"] = sender_name
         if isinstance(attachments, list) and attachments:
             metadata["attachments"] = attachments
+        if platform_timestamp is not None:
+            metadata["platform_timestamp"] = platform_timestamp
         data: dict[str, Any] = {
             "role": "user",
             "content": content,

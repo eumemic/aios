@@ -251,9 +251,11 @@ async def open_connector_session(
 
     On exit (normal or exception), the SDK runs the spec'd shutdown:
     close stdin, wait, SIGTERM, SIGKILL.
+
+    The ``spec.cwd`` directory must already exist —
+    :func:`aios.harness.connector_supervisor.resolve_connector_specs`
+    creates it once at supervisor boot, so no per-spawn ``mkdir`` here.
     """
-    if spec.cwd is not None:
-        spec.cwd.mkdir(parents=True, exist_ok=True)
     server_params = StdioServerParameters(
         command=spec.command,
         args=list(spec.args),

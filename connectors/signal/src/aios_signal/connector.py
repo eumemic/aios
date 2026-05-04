@@ -30,6 +30,7 @@ Lifecycle:
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -163,12 +164,22 @@ class SignalConnector(Connector):
                 "uuid": msg.sender_uuid,
                 "display_name": msg.sender_name or msg.sender_uuid,
             }
+            # Signal envelope timestamps are millis since epoch.  Render
+            # them as ISO-8601 UTC so the supervisor stamps a string that
+            # operators (and any future cross-platform tooling) can read
+            # without knowing the connector's source-timestamp shape.
+            timestamp_iso = (
+                datetime.fromtimestamp(msg.timestamp_ms / 1000, tz=UTC).isoformat()
+                if msg.timestamp_ms
+                else None
+            )
             await self.emit_inbound(
                 account=bot_uuid,
                 chat_id=chat_id,
                 sender=sender_payload,
                 content=content,
                 metadata=metadata,
+                timestamp=timestamp_iso,
             )
 
     # ── model-facing tools ────────────────────────────────────────────

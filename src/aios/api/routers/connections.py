@@ -6,13 +6,31 @@ only on detached connections (the service layer enforces this so
 operators can't silently break inbound delivery for live single_session
 connections or orphan ``spawned_from_connection_id`` pointers on
 per_chat-spawned sessions).
+
+``attach`` validates the connection's ``account`` against the connector
+subprocess's current snapshot (audit fix #1, design §5.6) — without
+this guard an operator can permanently attach a connection for an
+account the connector no longer serves, and inbound silently drops with
+the ``account_drift`` counter ticking up.  The validation flows through
+procrastinate RPC like the rest of ``/v1/connectors/*``: API mints a
+ULID, LISTENs on ``connector_result_<call_id>``, defers
+``harness.connector_status``, awaits NOTIFY.  ~50-200ms latency on an
+admin-only endpoint is invisible.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+import asyncio
+import json
+from typing import Any
 
-from aios.api.deps import AuthDep, PoolDep
+from fastapi import APIRouter, HTTPException, status
+from ulid import ULID
+
+from aios.api.deps import AuthDep, DbUrlDep, PoolDep
+from aios.db.listen import listen_for_connector_result
+from aios.errors import AccountDriftError
+from aios.harness.connector_tasks import defer_connector_status
 from aios.models.common import ListResponse
 from aios.models.connections import (
     Connection,
@@ -24,6 +42,65 @@ from aios.models.connections import (
 from aios.services import connections as service
 
 router = APIRouter(prefix="/v1/connections", tags=["connections"])
+
+# Snapshot lookup is cheap (worker reads in-memory state and returns) —
+# tighter than the 60s call timeout but generous enough that a busy
+# worker queue doesn't false-positive a drift error on the operator.
+_DRIFT_CHECK_TIMEOUT_S = 10.0
+
+
+async def _assert_account_in_snapshot(db_url: str, *, connector: str, account: str) -> None:
+    """Raise :class:`AccountDriftError` if ``account`` isn't in the connector's snapshot.
+
+    Treats supervisor-down (``not_ready`` / ``circuit_open``) as a
+    distinct condition: those surface as 503, not 409 — the operator
+    should retry once the connector boots, not assume drift.  The
+    ``not_enabled`` envelope from the worker means the connector isn't
+    in ``connectors_enabled`` at all and is also a 503.
+
+    The connector's account snapshot dicts each carry an ``id`` field
+    (per SDK convention via :func:`aios_connector.make_account`); the
+    snapshot match is on that field.
+    """
+    call_id = str(ULID())
+    async with listen_for_connector_result(db_url, call_id) as queue:
+        await defer_connector_status(call_id=call_id, connector=connector)
+        try:
+            payload = await asyncio.wait_for(queue.get(), timeout=_DRIFT_CHECK_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_408_REQUEST_TIMEOUT,
+                detail=(
+                    "worker did not respond within snapshot-check window; "
+                    "retry once the worker is reachable"
+                ),
+            ) from exc
+    envelope: dict[str, Any] = json.loads(payload)
+    err = envelope.get("error")
+    if err:
+        # Supervisor not running / connector not booted → can't tell
+        # whether the account is valid.  Surface as 503; the caller
+        # should retry rather than assume drift.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"connector {connector!r} snapshot unavailable: {err}",
+        )
+    state = envelope.get("connector") or {}
+    if state.get("status") != "running":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"connector {connector!r} is {state.get('status')!r}; "
+                "snapshot unavailable — retry once it's running"
+            ),
+        )
+    accounts = state.get("accounts") or []
+    known_ids = {entry.get("id") for entry in accounts if isinstance(entry, dict)}
+    if account not in known_ids:
+        raise AccountDriftError(
+            f"account {account!r} is not in {connector!r}'s current snapshot",
+            detail={"connector": connector, "account": account},
+        )
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -73,8 +150,21 @@ async def delete(connection_id: str, pool: PoolDep, _auth: AuthDep) -> None:
 
 @router.post("/{connection_id}/attach")
 async def attach(
-    connection_id: str, body: ConnectionAttach, pool: PoolDep, _auth: AuthDep
+    connection_id: str,
+    body: ConnectionAttach,
+    pool: PoolDep,
+    db_url: DbUrlDep,
+    _auth: AuthDep,
 ) -> Connection:
+    """Attach a connection to a session, after validating the account against the snapshot.
+
+    The drift check runs BEFORE the DB write so a stale account can't
+    move into ``single_session`` mode and silently swallow inbound.
+    """
+    connection = await service.get_connection(pool, connection_id)
+    await _assert_account_in_snapshot(
+        db_url, connector=connection.connector, account=connection.account
+    )
     return await service.attach_connection(pool, connection_id, session_id=body.session_id)
 
 

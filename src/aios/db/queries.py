@@ -2179,13 +2179,39 @@ async def insert_connection(
     account: str,
     metadata: dict[str, Any],
 ) -> Connection:
-    """Insert a detached connection (no session, no template).
+    """Insert a detached connection, idempotent on the active uniqueness key.
+
+    Per plan decision #5, both the explicit ``POST /v1/connections`` and
+    the supervisor's auto-create-on-first-inbound path race-safely
+    converge on a single row via ``INSERT ... ON CONFLICT DO NOTHING
+    RETURNING``: empty RETURNING means another writer beat us, so we
+    re-read the existing active row and hand it back.  The unique index
+    is ``(connector, account) WHERE archived_at IS NULL`` — an archived
+    row with the same pair will not collide; a fresh insert will land.
 
     Use ``attach_connection`` or ``configure_per_chat_connection`` to bind
     a routing mode after creation.
     """
     new_id = make_id(CONNECTION)
-    try:
+    row = await conn.fetchrow(
+        """
+        INSERT INTO connections (id, connector, account, metadata)
+        VALUES ($1, $2, $3, $4::jsonb)
+        ON CONFLICT (connector, account) WHERE archived_at IS NULL DO NOTHING
+        RETURNING *
+        """,
+        new_id,
+        connector,
+        account,
+        json.dumps(metadata),
+    )
+    if row is not None:
+        return _row_to_connection(row)
+    existing = await get_connection_for_account(conn, connector=connector, account=account)
+    if existing is None:
+        # CONFLICT means an active row existed at INSERT time.  If it's
+        # gone now, it was archived between the two queries — fall back
+        # to a fresh insert which the unique index now permits.
         row = await conn.fetchrow(
             """
             INSERT INTO connections (id, connector, account, metadata)
@@ -2197,13 +2223,9 @@ async def insert_connection(
             account,
             json.dumps(metadata),
         )
-    except asyncpg.UniqueViolationError as exc:
-        raise ConflictError(
-            f"an active connection for ({connector!r}, {account!r}) already exists",
-            detail={"connector": connector, "account": account},
-        ) from exc
-    assert row is not None
-    return _row_to_connection(row)
+        assert row is not None
+        return _row_to_connection(row)
+    return existing
 
 
 async def get_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
