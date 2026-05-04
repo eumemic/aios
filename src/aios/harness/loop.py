@@ -22,7 +22,7 @@ and proceeds.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
@@ -635,11 +635,16 @@ def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, str]) -> bo
     return server_name in mcp_server_map
 
 
+type ToolDispatchKind = Literal[
+    "immediate", "mcp_immediate", "needs_confirm", "custom", "unknown_mcp"
+]
+
+
 def _classify_tool_call(
     tool_call: dict[str, Any],
     agent: Any,
     mcp_server_map: dict[str, str],
-) -> str:
+) -> ToolDispatchKind:
     """Classify a tool call into a dispatch bucket.
 
     Returns one of:
@@ -654,6 +659,7 @@ def _classify_tool_call(
       registered.  Routed to immediate tool-error so the model can
       self-correct rather than parking in ``requires_action``.
     """
+    from aios.harness.tool_dispatch import _parse_mcp_tool_name
     from aios.tools.registry import registry as tool_registry
 
     function = tool_call.get("function") or {}
@@ -661,10 +667,10 @@ def _classify_tool_call(
 
     if _is_mcp_tool(name):
         try:
-            server_name = name.split("__", 2)[1]
-        except IndexError:
-            server_name = ""
-        if not server_name or not _is_known_mcp_server(server_name, mcp_server_map):
+            server_name, _ = _parse_mcp_tool_name(name)
+        except ValueError:
+            return "unknown_mcp"
+        if not _is_known_mcp_server(server_name, mcp_server_map):
             return "unknown_mcp"
         perm = resolve_mcp_permission(name, agent.tools)
         if perm is None:

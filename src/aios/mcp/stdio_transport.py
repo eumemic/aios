@@ -114,7 +114,13 @@ def _redact_secrets(line: str) -> str:
     parse log formats; it just matches well-known credential shapes.
     Add new patterns here as connectors that leak their own
     credentials are surfaced.
+
+    The substring fast-path skips the regex on the ~all-of-stderr
+    that doesn't mention ``/bot``; matters for high-frequency emitters
+    like PTB's ``getUpdates`` polling loop.
     """
+    if "/bot" not in line:
+        return line
     return _BOT_TOKEN_RE.sub("/bot<redacted>", line)
 
 
