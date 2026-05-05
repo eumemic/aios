@@ -104,7 +104,7 @@ from aios.harness.attachment_staging import (
 )
 from aios.harness.wake import defer_wake
 from aios.logging import get_logger
-from aios.mcp.client import shape_call_result
+from aios.mcp.client import MAX_TOOLS_PER_SERVER, shape_call_result
 from aios.mcp.stdio_transport import ConnectorSpec, open_connector_session
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services import sessions as sessions_service
@@ -288,8 +288,10 @@ def _apply_instance_overlay(
     on a fresh install.
 
     env: always pass the worker's ``os.environ`` to the subprocess so
-    pydantic-settings reads the same vars the operator set.  For
-    non-default instances, also re-export
+    pydantic-settings reads the same vars the operator set, with
+    path-shaped settings (``AIOS_WORKSPACE_ROOT``) absolutized so the
+    subprocess's different cwd doesn't shift the resolved location.
+    For non-default instances, also re-export
     ``AIOS_<CONN_UPPER>_<INST_UPPER>_*`` as ``AIOS_<CONN_UPPER>_*`` so
     connector subprocess code stays instance-naive — it just reads
     config under the standard prefix.  Single-instance deployments use
@@ -301,16 +303,20 @@ def _apply_instance_overlay(
         if ci.instance != ci.connector:
             cwd = cwd / ci.instance
     cwd.mkdir(parents=True, exist_ok=True)
-    env = _build_instance_env(ci, base=spec.env)
+    env = _build_instance_env(ci, settings=settings, base=spec.env)
     return replace(spec, cwd=cwd, env=env)
 
 
-def _build_instance_env(ci: ConnectorInstance, *, base: dict[str, str] | None) -> dict[str, str]:
+def _build_instance_env(
+    ci: ConnectorInstance, *, settings: Settings, base: dict[str, str] | None
+) -> dict[str, str]:
     """Construct the env dict for a connector subprocess.
 
     Starts from ``os.environ`` (so the subprocess inherits operator-set
     config), layers the factory-supplied ``base`` on top (factory wins
-    over inherited if both set the same key), and finally — for
+    over inherited if both set the same key), then absolutizes the
+    path-shaped settings the SDK and connector code rely on
+    (``AIOS_WORKSPACE_ROOT`` today — see below), and finally — for
     non-default instances — re-exports
     ``AIOS_<CONN_UPPER>_<INST_UPPER>_<FIELD>`` as
     ``AIOS_<CONN_UPPER>_<FIELD>`` so the connector reads its config
@@ -318,6 +324,18 @@ def _build_instance_env(ci: ConnectorInstance, *, base: dict[str, str] | None) -
     from the resulting env so each subprocess sees only its own
     credentials (a wedged or chatty connector that iterates
     ``os.environ`` won't surface sibling tokens).
+
+    Path absolutization: the worker resolves ``settings.workspace_root``
+    against its own cwd, but spawns connector subprocesses under
+    ``<connectors_dir>/<connector>/[<instance>/]``.  Inheriting the
+    operator's relative ``AIOS_WORKSPACE_ROOT`` (e.g. ``./workspaces``
+    in ``.env``) would let the SDK's ``SandboxPath`` resolution resolve
+    ``/workspace/foo.png`` against the wrong directory.  We stamp the
+    worker-resolved absolute path so harness and SDK agree on the
+    bind-mount root regardless of subprocess cwd.  Factory-supplied
+    overrides lose to this absolutized value: a connector that sets
+    ``AIOS_WORKSPACE_ROOT`` in ``spec.env`` would silently desynchronize
+    from the harness's bind-mount, which is almost certainly a bug.
 
     The re-export overrides any unscoped value: an operator running
     ``connectors_enabled=telegram:bot1,telegram:bot2`` with both
@@ -329,6 +347,11 @@ def _build_instance_env(ci: ConnectorInstance, *, base: dict[str, str] | None) -
     env: dict[str, str] = dict(os.environ)
     if base:
         env.update(base)
+    # Absolutize path-shaped settings the SDK/harness share via env so
+    # subprocesses don't resolve them against their own cwd.  Add new
+    # path-shaped settings here when they're introduced rather than
+    # relying on per-setting fixes scattered across call sites.
+    env["AIOS_WORKSPACE_ROOT"] = str(settings.workspace_root.resolve())
     if ci.instance == ci.connector:
         return env
     scope_prefix = f"AIOS_{ci.connector.upper()}_{ci.instance.upper()}_"
@@ -445,6 +468,54 @@ class ConnectorSubprocessRegistry:
     def lookup_instance_for_account(self, connector: str, account: str) -> str | None:
         """Return which instance serves ``(connector, account)`` per the routing map."""
         return self._account_to_instance.get((connector, account))
+
+    async def list_tools(self) -> list[dict[str, Any]]:
+        """Enumerate connector-subprocess tools as OpenAI-format tool dicts.
+
+        Each ``mcp__<connector>__<tool>`` namespace matches the HTTP-MCP
+        path in :func:`aios.mcp.client.discover_mcp_tools` so the
+        dispatcher resolves either kind without a branch.  Multi-instance
+        connectors collapse duplicates by name with first-wins ordering.
+        Instances not in ``running`` are skipped; truncation cap mirrors
+        the HTTP-MCP path.  ``aios_inbound_ack`` is internal harness
+        machinery and never reaches the model.
+        """
+        running = [
+            (connector, state.session)
+            for (connector, _instance), state in self._states.items()
+            if state.status == "running" and state.session is not None
+        ]
+        if not running:
+            return []
+        results = await asyncio.gather(*(session.list_tools() for _, session in running))
+        seen: set[str] = set()
+        tools: list[dict[str, Any]] = []
+        for (connector, _session), result in zip(running, results, strict=True):
+            if len(result.tools) > MAX_TOOLS_PER_SERVER:
+                log.warning(
+                    "connector.tools_truncated",
+                    connector=connector,
+                    total=len(result.tools),
+                    limit=MAX_TOOLS_PER_SERVER,
+                )
+            for tool in result.tools[:MAX_TOOLS_PER_SERVER]:
+                if tool.name == "aios_inbound_ack":
+                    continue
+                qualified = f"mcp__{connector}__{tool.name}"
+                if qualified in seen:
+                    continue
+                seen.add(qualified)
+                tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": qualified,
+                            "description": tool.description or "",
+                            "parameters": tool.inputSchema,
+                        },
+                    }
+                )
+        return tools
 
     async def get_session(self, connector: str, instance: str) -> ClientSession:
         """Return the live session for ``(connector, instance)``.

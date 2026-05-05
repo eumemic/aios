@@ -44,6 +44,7 @@ from aios_connector import (
 from aios_connector import (
     AttachmentError,
     Connector,
+    SandboxPath,
     focal_required,
     make_account,
     tool,
@@ -275,7 +276,7 @@ class TelegramConnector(Connector):
     async def telegram_send(
         self,
         text: str,
-        attachments: list[str] | None = None,
+        attachments: list[SandboxPath] | None = None,
         *,
         chat_id: str,
     ) -> dict[str, Any]:
@@ -288,15 +289,15 @@ class TelegramConnector(Connector):
         Args:
             text: Message body. Plain text only — markdown is not rendered.
                 Becomes the caption when attachments are present.
-            attachments: Optional list of in-sandbox file paths.  Type is
-                inferred from extension (``.jpg``/``.png``/``.gif``/``.webp``
-                → photo, ``.mp4``/``.mov`` → video, ``.ogg`` → voice,
+            attachments: Optional in-sandbox file paths.  Type is inferred
+                from extension (``.jpg``/``.png``/``.gif``/``.webp`` →
+                photo, ``.mp4``/``.mov`` → video, ``.ogg`` → voice,
                 ``.mp3``/``.m4a``/``.wav`` → audio, anything else →
                 document).  Single attachment uses ``send_photo`` /
                 ``send_voice`` / etc.; multiple attachments use
                 ``send_media_group`` with caption attached to the first
-                item only (per Telegram API).  Paths must be under
-                ``/workspace/`` or ``/mnt/attachments/``.
+                item only (per Telegram API).  The SDK resolves each
+                entry to a host path before this method runs.
         """
         assert self._application is not None
         try:
@@ -304,7 +305,7 @@ class TelegramConnector(Connector):
         except ValueError as e:
             raise ValueError(f"telegram chat_id must be an integer; got {chat_id!r}") from e
 
-        host_paths = self.resolve_media_paths(attachments or [], tool_name="telegram_send")
+        host_paths: list[Path] = list(attachments or [])
         bot = self._application.bot
 
         if not host_paths:
@@ -333,8 +334,8 @@ _VOICE_EXTS = frozenset({".ogg", ".oga"})
 _AUDIO_EXTS = frozenset({".mp3", ".m4a", ".wav", ".flac"})
 
 
-def _classify(host_path: str) -> str:
-    ext = Path(host_path).suffix.lower()
+def _classify(host_path: Path) -> str:
+    ext = host_path.suffix.lower()
     if ext in _PHOTO_EXTS:
         return "photo"
     if ext in _VIDEO_EXTS:
@@ -350,7 +351,7 @@ async def _send_single_media(
     bot: Any,
     *,
     chat_id: int,
-    host_path: str,
+    host_path: Path,
     caption: str | None,
 ) -> Any:
     kind = _classify(host_path)
@@ -367,7 +368,7 @@ async def _send_single_media(
     return await sender(**kwargs)
 
 
-def _build_media_group(host_paths: list[str], *, caption: str | None) -> list[Any]:
+def _build_media_group(host_paths: list[Path], *, caption: str | None) -> list[Any]:
     # Caption rides on the FIRST item only — Telegram's API ignores
     # captions on items 2..N of a media group.
     items: list[Any] = []
