@@ -136,3 +136,60 @@ def session_repo_working_tree_dir(session_id: str, repo_id: str) -> Path:
     ``mount_path``.
     """
     return session_repos_root(session_id) / repo_id
+
+
+_ATTACHMENTS_ROOT = "_attachments"
+
+
+def attachments_root() -> Path:
+    """Return ``<workspace_root>/_attachments`` — the parent of all
+    per-session inbound attachment directories.
+
+    Each session subdir is bind-mounted read-only into its container at
+    ``/mnt/attachments`` (see :mod:`aios.sandbox.provisioner`). Inbound
+    binary blobs (Signal photos, Telegram voice notes, etc.) are staged
+    here by :mod:`aios.harness.connector_supervisor` before the inbound
+    event is appended; the model sees them at stable in-sandbox paths
+    of the form ``/mnt/attachments/<connector>/<event-ulid>-<filename>``.
+    """
+    return (get_settings().workspace_root / _ATTACHMENTS_ROOT).resolve()
+
+
+def session_attachments_dir(session_id: str) -> Path:
+    """Per-session host directory backing ``/mnt/attachments``.
+
+    Pure — does not create the directory. Use
+    :func:`ensure_session_attachments_dir` to create.
+    """
+    return attachments_root() / session_id
+
+
+def ensure_session_attachments_dir(session_id: str) -> Path:
+    """Return the per-session attachments directory, creating it if needed.
+
+    Called eagerly from the provisioner at every container start so the
+    bind-mount source always exists before Docker tries to mount it,
+    even for sessions that have never received an attachment.
+    """
+    path = session_attachments_dir(session_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def resolve_to_host_path(session_id: str, sandbox_path: str) -> Path | None:
+    """Map an in-sandbox path to its host-side equivalent for known bind mounts.
+
+    Returns ``None`` when ``sandbox_path`` doesn't resolve into
+    ``/workspace`` or ``/mnt/attachments`` (e.g. ``/etc/hostname``,
+    ``/mnt/memory/...``, ``/tmp/...``). Callers can fall back to
+    docker-exec when the host-side fast path is unavailable.
+    """
+    if sandbox_path == "/workspace":
+        return workspace_dir_for(session_id)
+    if sandbox_path.startswith("/workspace/"):
+        return workspace_dir_for(session_id) / sandbox_path[len("/workspace/") :]
+    if sandbox_path == "/mnt/attachments":
+        return session_attachments_dir(session_id)
+    if sandbox_path.startswith("/mnt/attachments/"):
+        return session_attachments_dir(session_id) / sandbox_path[len("/mnt/attachments/") :]
+    return None
