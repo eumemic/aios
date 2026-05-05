@@ -26,6 +26,9 @@ Public API:
 * :class:`Attachment` / :class:`AttachmentError` — inbound binary blobs
   (photos, voice notes, documents) and the SDK-boundary validation
   failure connectors catch.
+* :func:`resolve_sandbox_path` — host-path resolver for outbound
+  attachments; connector send tools call this for each entry in
+  their ``attachments`` parameter.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from aios_connector.base import (
     make_account,
     tool,
 )
+from aios_connector.media import resolve_sandbox_path
 
 __all__ = [
     "Attachment",
@@ -45,5 +49,6 @@ __all__ = [
     "Connector",
     "focal_required",
     "make_account",
+    "resolve_sandbox_path",
     "tool",
 ]
