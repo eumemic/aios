@@ -49,8 +49,9 @@ from aios_connector import (
 
 from .addressing import decode_chat_id, encode_chat_id
 from .config import Settings
-from .daemon import SignalDaemon
+from .daemon import GroupInfo, SignalDaemon
 from .markdown import convert_markdown_to_signal_styles
+from .mentions import build_mention_strings, encode_mentions
 from .parse import InboundMessage, build_content_text, parse_envelope
 from .prompts import build_instructions
 
@@ -73,6 +74,9 @@ class SignalConnector(Connector):
         # Contacts + group rosters are per-account because each phone has
         # its own contact store and group memberships in signal-cli.
         self._contact_names_by_account: dict[str, dict[str, str]] = {}
+        # Group rosters retained for runtime use (outbound mention
+        # encoding needs the focal group's member UUIDs at send time).
+        self._groups_by_account: dict[str, list[GroupInfo]] = {}
         # Phone → error message for accounts whose boot-time probe
         # (``listContacts`` / ``listGroups``) failed.  signal-cli's
         # daemon stays running and accepts new attachments to other
@@ -129,6 +133,7 @@ class SignalConnector(Connector):
                 self._unavailable_accounts[phone] = str(err)
                 continue
             self._contact_names_by_account[phone] = contact_names
+            self._groups_by_account[phone] = groups
             section = build_instructions(
                 bot_uuid=bot_uuid,
                 phone=phone,
@@ -236,6 +241,9 @@ class SignalConnector(Connector):
         self,
         text: str,
         attachments: list[SandboxPath] | None = None,
+        quote_timestamp_ms: int | None = None,
+        quote_author_uuid: str | None = None,
+        edit_timestamp_ms: int | None = None,
         *,
         account: str,
         chat_id: str,
@@ -249,18 +257,151 @@ class SignalConnector(Connector):
 
         Args:
             text: Message body. Markdown is converted to Signal text styles.
+                In group chats, ``@<uuid_prefix>`` mentions are encoded
+                automatically when the prefix uniquely matches a member.
             attachments: Optional in-sandbox file paths to attach.  The SDK
                 resolves each entry to a host path before this method runs.
+            quote_timestamp_ms: ``timestamp_ms`` of the message you're
+                quoting.  Must be set together with ``quote_author_uuid``;
+                passing only one raises ``ValueError``.
+            quote_author_uuid: ``sender_uuid`` of the message you're quoting.
+            edit_timestamp_ms: ``sent_at_ms`` of a prior message FROM this
+                account to rewrite.  The new ``text`` replaces the old one;
+                Signal clients render an "edited" indicator.
         """
         assert self._daemon is not None
-        phone = self._uuid_to_phone.get(account)
-        if phone is None:
-            raise ValueError(f"signal_send: unknown account {account!r}")
+        phone = self._resolve_phone(account, "signal_send")
         host_paths: list[Path] = list(attachments or [])
-        params = _build_send_params(phone, chat_id, text, attachments=host_paths)
+        member_uuids = self._group_member_uuids(phone, chat_id)
+        params = _build_send_params(
+            phone,
+            chat_id,
+            text,
+            attachments=host_paths,
+            member_uuids=member_uuids,
+            quote_timestamp_ms=quote_timestamp_ms,
+            quote_author_uuid=quote_author_uuid,
+            edit_timestamp_ms=edit_timestamp_ms,
+        )
         result = await self._daemon.rpc.call("send", params)
         ts = _extract_timestamp(result)
         return {"sent_at_ms": ts} if ts is not None else {"status": "ok"}
+
+    @tool()
+    @focal_required
+    async def signal_delete(
+        self,
+        target_timestamp_ms: int,
+        *,
+        account: str,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Delete-for-everyone a prior message in your focal Signal chat.
+
+        signal-cli only allows deleting messages this account sent;
+        attempting to delete someone else's message returns an RPC
+        error.  Pass the ``sent_at_ms`` you got back from
+        ``signal_send`` (or ``timestamp_ms`` from an inbound header
+        for self-messages received as sync events).
+
+        Args:
+            target_timestamp_ms: The Signal timestamp of the message to delete.
+        """
+        assert self._daemon is not None
+        phone = self._resolve_phone(account, "signal_delete")
+        chat_type, raw_id = decode_chat_id(chat_id)
+        params: dict[str, Any] = {
+            "account": phone,
+            "targetTimestamp": target_timestamp_ms,
+        }
+        if chat_type == "group":
+            params["groupId"] = raw_id
+        else:
+            params["recipient"] = [raw_id]
+        await self._daemon.rpc.call("remoteDelete", params)
+        return {"status": "ok"}
+
+    @tool()
+    @focal_required
+    async def signal_create_group(
+        self,
+        name: str,
+        member_uuids: list[str],
+        *,
+        account: str,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Create a new Signal group on the focal account.
+
+        The new group is owned by the focal account.  ``chat_id`` is
+        passed through by the focal protocol but ignored here — the
+        new group has no chat_id yet.
+
+        Args:
+            name: Group display name.
+            member_uuids: ACI UUIDs of the members to add (excluding this
+                account, which is added implicitly as the creator).
+        """
+        assert self._daemon is not None
+        phone = self._resolve_phone(account, "signal_create_group")
+        result = await self._daemon.rpc.call(
+            "updateGroup",
+            {"account": phone, "name": name, "members": member_uuids},
+        )
+        if not isinstance(result, dict) or not result.get("groupId"):
+            raise RuntimeError(f"signal-cli updateGroup did not return a groupId; got {result!r}")
+        # Refresh the roster cache so an immediate signal_send into this
+        # new group can resolve ``@<uuid_prefix>`` mentions against its
+        # members.  Without the refresh the next send would silently drop
+        # any mentions (group missing from cache → empty member_uuids).
+        self._groups_by_account[phone] = await self._daemon.list_groups(account=phone)
+        return {"group_id": result["groupId"]}
+
+    @tool()
+    @focal_required
+    async def signal_rename_group(
+        self,
+        name: str,
+        *,
+        account: str,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Rename your focal Signal group.
+
+        Only valid when the focal channel is a group; calling this from
+        a DM raises ``ValueError`` with a message the model can recover
+        from on the next turn.
+
+        Args:
+            name: The new group name.
+        """
+        assert self._daemon is not None
+        phone = self._resolve_phone(account, "signal_rename_group")
+        chat_type, raw_id = decode_chat_id(chat_id)
+        if chat_type != "group":
+            raise ValueError("signal_rename_group: focal channel is a DM, not a group")
+        await self._daemon.rpc.call(
+            "updateGroup",
+            {"account": phone, "groupId": raw_id, "name": name},
+        )
+        return {"status": "ok"}
+
+    def _resolve_phone(self, account: str, tool_name: str) -> str:
+        phone = self._uuid_to_phone.get(account)
+        if phone is None:
+            raise ValueError(f"{tool_name}: unknown account {account!r}")
+        return phone
+
+    def _group_member_uuids(self, phone: str, chat_id: str) -> list[str]:
+        """Member UUIDs of the focal group, or ``[]`` if the chat is a DM
+        or the group isn't in the cached roster (mentions become a no-op)."""
+        chat_type, _ = decode_chat_id(chat_id)
+        if chat_type != "group":
+            return []
+        for group in self._groups_by_account.get(phone, []):
+            if group.id == chat_id:
+                return list(group.member_uuids)
+        return []
 
     @tool()
     @focal_required
@@ -294,9 +435,7 @@ class SignalConnector(Connector):
             emoji: The reaction emoji.
         """
         assert self._daemon is not None
-        phone = self._uuid_to_phone.get(account)
-        if phone is None:
-            raise ValueError(f"signal_react: unknown account {account!r}")
+        phone = self._resolve_phone(account, "signal_react")
         params = _build_react_params(phone, chat_id, target_author_uuid, target_timestamp_ms, emoji)
         await self._daemon.rpc.call("sendReaction", params)
         return {"status": "ok"}
@@ -349,19 +488,54 @@ def _build_send_params(
     text: str,
     *,
     attachments: list[Path],
+    member_uuids: list[str] | None = None,
+    quote_timestamp_ms: int | None = None,
+    quote_author_uuid: str | None = None,
+    edit_timestamp_ms: int | None = None,
 ) -> dict[str, Any]:
-    """Translate ``(account_phone, chat_id, text)`` into signal-cli ``send`` params."""
+    """Translate ``(account_phone, chat_id, text)`` into signal-cli ``send`` params.
+
+    ``member_uuids`` enables outbound mention encoding for group sends:
+    any ``@<uuid_prefix>`` in ``text`` that uniquely matches a member's
+    UUID is rewritten as a U+FFFC placeholder + ``mentions`` array
+    entry.  Mention encoding runs BEFORE markdown conversion so the
+    UTF-16 offsets stay correct for both annotation lists.
+
+    Quote: ``quote_timestamp_ms`` and ``quote_author_uuid`` must be
+    set together; one-without-the-other raises ``ValueError`` (signal-cli
+    rejects partial quotes, and silently dropping the model's intent
+    leaves no signal that the thread didn't land).
+
+    Edit: ``edit_timestamp_ms`` rewrites the prior message of this
+    account at that timestamp.  signal-cli routes via the same ``send``
+    RPC; the timestamp identifies which message to replace.
+    """
+    if (quote_timestamp_ms is None) != (quote_author_uuid is None):
+        raise ValueError("quote_timestamp_ms and quote_author_uuid must be set together")
     chat_type, raw_id = decode_chat_id(chat_id)
-    stripped, styles = convert_markdown_to_signal_styles(text)
+    # Mention encoding inserts U+FFFC placeholders; markdown stripping
+    # then removes delimiter chars (which can shift placeholder offsets
+    # leftward).  Compute Signal's mention offsets against the *final*
+    # stripped message so they match what the recipient sees.
+    encoded, ordered_uuids = encode_mentions(text, member_uuids or [])
+    stripped, styles = convert_markdown_to_signal_styles(encoded)
+    mentions = build_mention_strings(stripped, ordered_uuids)
     params: dict[str, Any] = {"account": account_phone, "message": stripped}
     if styles:
         params["textStyles"] = styles
+    if mentions:
+        params["mentions"] = mentions
     if chat_type == "group":
         params["groupId"] = raw_id
     else:
         params["recipient"] = [raw_id]
     if attachments:
         params["attachments"] = [str(p) for p in attachments]
+    if quote_timestamp_ms is not None and quote_author_uuid is not None:
+        params["quoteTimestamp"] = quote_timestamp_ms
+        params["quoteAuthor"] = quote_author_uuid
+    if edit_timestamp_ms is not None:
+        params["editTimestamp"] = edit_timestamp_ms
     return params
 
 

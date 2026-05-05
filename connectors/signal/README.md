@@ -132,9 +132,8 @@ forward an inbound file `cp` it into `/workspace/` first).
 ## Out of scope for v1
 
 - Voice / Say / SoundEffect / Listen tools.
-- Group create / rename / add-members.
+- Group add/remove members.
 - Typing indicators.
-- Message editing / deletion.
 - Automated registration.
 
 ## Development

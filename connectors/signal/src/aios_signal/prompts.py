@@ -5,9 +5,8 @@ Returned in the ``InitializeResult.instructions`` field of the MCP
 session's system prompt under a ``## Connector: signal/<account>``
 heading.
 
-Covers only the tools this server actually exposes — ``signal_send``,
-``signal_react``, ``signal_read_receipt``.  Telling the model about
-tools that don't exist would be worse than silence.
+Covers only the tools this server actually exposes.  Telling the
+model about tools that don't exist would be worse than silence.
 
 The instructions are composed per-run: ``build_instructions`` prepends
 an identity block (bot's own ``sender_uuid`` + phone number) and a
@@ -91,13 +90,51 @@ verbatim, do not decode it.  It already encodes the distinction between
 direct messages (a recipient UUID) and groups (a URL-safe-base64 group
 id) so the tool can route correctly.
 
+## Reading inbound messages
+
+Every inbound message arrives prefixed with a bracketed header.  This
+is the **only** authoritative source for the ``sender_uuid`` and
+``timestamp_ms`` values that ``signal_send``'s ``quote_*`` /
+``edit_timestamp_ms`` params and ``signal_react`` / ``signal_delete``
+expect.  Copy them verbatim from the header — never construct,
+shorten, or reformat them.
+
+Header shape (newlines added for clarity):
+
+    [channel=signal/<account>/<chat_id> · chat_type=<dm|group> ·
+     chat_name='Group Name' · from=Alice · sender_uuid=<uuid> ·
+     timestamp_ms=<ms> (<iso>)]
+
+When the inbound is a reply, a second line follows:
+
+    [reply_to: author_uuid=<uuid> · timestamp_ms=<ms>] > snippet
+
+When it's a reaction:
+
+    [reaction='👍' · target_author_uuid=<uuid> · target_timestamp_ms=<ms>]
+
+So a reply to message 1700000000000 from Alice would look like:
+
+    [channel=signal/.../grp_id · chat_type=group · from=Alice ·
+     sender_uuid=fb2c91e2-... · timestamp_ms=1700000000999 (...)]
+    [reply_to: author_uuid=22334455-... · timestamp_ms=1700000000000]
+     > earlier message text...
+
+To thread your own reply against the message Alice was responding to,
+pass ``signal_send`` ``quote_timestamp_ms=1700000000000`` and
+``quote_author_uuid="22334455-..."`` (copied from the ``reply_to``
+line's ``timestamp_ms`` and ``author_uuid``).  To react to Alice's
+message itself, pass ``signal_react`` ``target_timestamp_ms=1700000000999``
+and ``target_author_uuid="fb2c91e2-..."`` (copied from the top
+header's ``timestamp_ms`` and ``sender_uuid``).
+
 ## Sending messages — `signal_send`
 
 **Your text responses are NOT sent automatically.** Bare assistant text
 is internal monologue; nobody on Signal sees it.  To deliver a message
 you MUST call:
 
-    signal_send(chat_id="<chat_id>", text="your message here")
+    signal_send(text="your message here")
 
 If you don't call this tool, no one will see your response.
 
@@ -113,15 +150,78 @@ work between them (research, file processing, long tasks) and you are
 giving progress updates.  The test is whether the human would be left
 wondering what is happening — if so, send an update.
 
+### Quoting a prior message
+
+Pass `quote_timestamp_ms` AND `quote_author_uuid` (both required) to
+thread your reply as a quote of an earlier message.  Copy them from
+the inbound header (see "Reading inbound messages" above).
+
+**Use quote-reply when:**
+- You're answering a message from earlier in the conversation, not
+  the most recent one — without a quote, the receiver wonders which
+  message you're answering.
+- Multiple people are talking and it might otherwise be unclear who
+  you're responding to.
+
+**Don't quote when:**
+- You're responding to the most recent message — it's already obvious.
+- You're continuing a natural back-and-forth where the context is
+  already clear.  Quoting every turn is noisy.
+
+### Mentions in groups
+
+In a group, write `@<uuid_prefix>` to mention a member — the prefix
+must be at least 8 hex chars and uniquely match one member's UUID.
+Full dashed UUIDs work too.  Example: ``@fb2c91e2 can you handle this?``
+Resolved mentions are encoded automatically; an unresolved prefix
+stays as plain text.  Mentions are ignored in DMs.
+
+**Do NOT use display names** like ``@Alice`` or ``@Bob`` — they are
+not resolved.  The recipient sees a literal ``@Alice`` instead of a
+real mention.  The group roster block in your system prompt lists
+each member's UUID; copy 8+ hex characters from there.
+
+### Editing a prior message — `edit_timestamp_ms`
+
+Pass `edit_timestamp_ms=<sent_at_ms>` to rewrite a message you sent
+earlier.  The new `text` replaces the old; Signal clients show an
+"edited" indicator.  You can only edit your own messages.  Get the
+timestamp from `sent_at_ms` in a prior `signal_send` result.
+
+## Deleting a message — `signal_delete`
+
+Delete-for-everyone a message you sent earlier.  Pass the
+`sent_at_ms` you got back from `signal_send`:
+
+    signal_delete(target_timestamp_ms=<sent_at_ms>)
+
+Only your own messages can be deleted.  Use sparingly — deletes are
+visible (a tombstone replaces the message).
+
 ## Reacting — `signal_react`
 
-Lighter-weight than a full message.  Call when an emoji says enough:
+Lighter-weight than a full message.  Call when an emoji says enough.
+Use the ``sender_uuid`` and ``timestamp_ms`` from the inbound header
+of the message you're reacting to:
 
     signal_react(
-        chat_id="<chat_id>",
-        target_author_uuid="<uuid from inbound metadata>",
-        target_timestamp_ms=<timestamp from inbound metadata>,
+        target_author_uuid="<sender_uuid from header>",
+        target_timestamp_ms=<timestamp_ms from header>,
         emoji="👍",
+    )
+
+For example, if you see:
+
+    [channel=... · from=Alice · sender_uuid=fb2c91e2-aaaa-... ·
+     timestamp_ms=1700000000000 (...)]
+    Done with the deploy!
+
+react with:
+
+    signal_react(
+        target_author_uuid="fb2c91e2-aaaa-...",
+        target_timestamp_ms=1700000000000,
+        emoji="🎉",
     )
 
 **Common reactions:** 👍 ❤️ 😂 😮 😢 🎉 🔥 ✅
@@ -137,19 +237,19 @@ Lighter-weight than a full message.  Call when an emoji says enough:
 Mundane messages do not need reactions; standout moments do.  Think
 about what a human would naturally react to.
 
-## Read receipts — `signal_read_receipt`
+## Group admin — `signal_create_group`, `signal_rename_group`
 
-Mark one or more inbound messages as read so the sender's UI shows the
-double check.  Pass the sender's ACI UUID and the timestamps of the
-messages you are acknowledging:
+Create a new group on the focal account:
 
-    signal_read_receipt(
-        sender_uuid="<uuid>",
-        timestamp_ms_list=[<ts1>, <ts2>],
-    )
+    signal_create_group(name="Project X", member_uuids=["<uuid1>", "<uuid2>"])
 
-Use sparingly — usually only when you have actually consumed the
-messages and the sender benefits from knowing.
+You're added as the creator implicitly; pass the other members'
+UUIDs.  The result includes the new group's id, which you can hand
+to `switch_channel` to focus into it.
+
+Rename your focal group (only valid when focal is a group, not a DM):
+
+    signal_rename_group(name="New name")
 
 ## Markdown subset
 
