@@ -297,3 +297,45 @@ async def test_signal_send_in_group_encodes_mentions(
     assert sent_params["message"] == f"hey {MENTION_PLACEHOLDER}, ready?"
     assert sent_params["mentions"] == [f"4:1:{ALICE_UUID}"]
     assert sent_params["groupId"] == GROUP_RAW_ID
+
+
+async def test_signal_send_refreshes_group_cache_on_miss(
+    connector: SignalConnector,
+) -> None:
+    # signal-cli sometimes returns an empty listGroups at boot before the
+    # account state has finished loading; the boot-time cache stays
+    # empty for the lifetime of the connector and outbound mentions
+    # silently degrade.  signal_send must refresh on miss so the second
+    # listGroups (now populated) populates the cache and the mention
+    # encodes correctly.
+    connector._groups_by_account["+15550001"] = []
+    connector._daemon.list_groups.return_value = [  # type: ignore[union-attr]
+        GroupInfo(id=GROUP_CHAT_ID, name="Tea Party", member_uuids=[ALICE_UUID, BOB_UUID])
+    ]
+    stub_focal(connector, f"bot-uuid/{GROUP_CHAT_ID}")
+    await connector._invoke_tool(
+        descriptor(connector, "signal_send"), {"text": f"hey @{ALICE_UUID[:8]}"}
+    )
+    connector._daemon.list_groups.assert_awaited_once_with(account="+15550001")  # type: ignore[union-attr]
+    sent_params = connector._daemon.rpc.call.call_args.args[1]  # type: ignore[union-attr]
+    assert sent_params["mentions"] == [f"4:1:{ALICE_UUID}"]
+
+
+async def test_signal_send_skips_refresh_on_cache_hit(
+    connector: SignalConnector,
+) -> None:
+    connector._groups_by_account["+15550001"] = [
+        GroupInfo(id=GROUP_CHAT_ID, name="Tea Party", member_uuids=[ALICE_UUID, BOB_UUID])
+    ]
+    stub_focal(connector, f"bot-uuid/{GROUP_CHAT_ID}")
+    await connector._invoke_tool(descriptor(connector, "signal_send"), {"text": "no mentions"})
+    connector._daemon.list_groups.assert_not_awaited()  # type: ignore[union-attr]
+
+
+async def test_signal_send_dm_skips_refresh(connector: SignalConnector) -> None:
+    # DMs never need a group roster — refreshing on every DM send would
+    # be a wasted RPC.
+    connector._groups_by_account["+15550001"] = []
+    stub_focal(connector, f"bot-uuid/{ALICE_UUID}")
+    await connector._invoke_tool(descriptor(connector, "signal_send"), {"text": "hey"})
+    connector._daemon.list_groups.assert_not_awaited()  # type: ignore[union-attr]

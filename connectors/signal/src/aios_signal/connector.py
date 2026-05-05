@@ -272,7 +272,7 @@ class SignalConnector(Connector):
         assert self._daemon is not None
         phone = self._resolve_phone(account, "signal_send")
         host_paths: list[Path] = list(attachments or [])
-        member_uuids = self._group_member_uuids(phone, chat_id)
+        member_uuids = await self._group_member_uuids(phone, chat_id)
         params = _build_send_params(
             phone,
             chat_id,
@@ -392,16 +392,32 @@ class SignalConnector(Connector):
             raise ValueError(f"{tool_name}: unknown account {account!r}")
         return phone
 
-    def _group_member_uuids(self, phone: str, chat_id: str) -> list[str]:
-        """Member UUIDs of the focal group, or ``[]`` if the chat is a DM
-        or the group isn't in the cached roster (mentions become a no-op)."""
+    async def _group_member_uuids(self, phone: str, chat_id: str) -> list[str]:
+        """Member UUIDs of the focal group, or ``[]`` for a DM.
+
+        On cache miss, refreshes the per-account roster once via
+        ``listGroups`` and re-checks.  signal-cli sometimes returns an
+        empty group list at boot before the account's group state has
+        finished loading from disk; once the cache is empty the bot
+        never re-checks, so mentions stay broken for the lifetime of
+        the connector.  Refreshing on miss also picks up groups joined
+        after boot.
+        """
         chat_type, _ = decode_chat_id(chat_id)
         if chat_type != "group":
             return []
+        cached = self._lookup_group_members(phone, chat_id)
+        if cached is not None:
+            return cached
+        assert self._daemon is not None
+        self._groups_by_account[phone] = await self._daemon.list_groups(account=phone)
+        return self._lookup_group_members(phone, chat_id) or []
+
+    def _lookup_group_members(self, phone: str, chat_id: str) -> list[str] | None:
         for group in self._groups_by_account.get(phone, []):
             if group.id == chat_id:
                 return list(group.member_uuids)
-        return []
+        return None
 
     @tool()
     @focal_required
