@@ -6,10 +6,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from aios_connector import ConnectorSpec
+
 from aios.config import ConnectorInstance, Settings
 from aios.harness.connector_supervisor import ConnectorSubprocessRegistry
 from aios.ids import make_id
-from aios.mcp.stdio_transport import ConnectorSpec
 from aios.models.agents import ToolSpec
 from aios.services import (
     agents as agents_service,

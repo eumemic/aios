@@ -34,12 +34,12 @@ from typing import Any
 from unittest import mock
 
 import pytest
+from aios_connector import ConnectorSpec
 
 from aios.config import Settings
 from aios.db import queries
 from aios.harness.connector_supervisor import ConnectorSubprocessRegistry
 from aios.ids import make_id
-from aios.mcp.stdio_transport import ConnectorSpec
 from aios.models.agents import ToolSpec
 from aios.services import (
     agents as agents_service,

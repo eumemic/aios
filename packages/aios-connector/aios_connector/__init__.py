@@ -41,13 +41,17 @@ from aios_connector.base import (
     make_account,
     tool,
 )
+from aios_connector.logging import configure_logging
 from aios_connector.media import SandboxPath
+from aios_connector.spec import ConnectorSpec
 
 __all__ = [
     "Attachment",
     "AttachmentError",
     "Connector",
+    "ConnectorSpec",
     "SandboxPath",
+    "configure_logging",
     "focal_required",
     "make_account",
     "tool",

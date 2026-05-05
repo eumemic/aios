@@ -35,10 +35,11 @@ import typing
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Literal, get_type_hints
+from typing import Any, ClassVar, Literal, get_type_hints, overload
 
 import anyio
 import anyio.abc
+import structlog
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
@@ -54,6 +55,8 @@ from ulid import ULID
 
 from aios_connector.media import _resolve_sandbox_path, _SandboxPathMarker
 from aios_connector.spool import SOFT_WARN_BYTES, Spool
+
+log = structlog.get_logger("aios_connector")
 
 # Method names the connector emits over stdio.  Mirrors the constant in
 # ``aios.mcp.stdio_transport`` — duplicated rather than imported so the
@@ -125,11 +128,19 @@ _TOOL_ATTR = "__aios_connector_tool__"
 _FOCAL_INJECTED_KWARGS = frozenset({"account", "chat_id"})
 
 
+@overload
+def tool(fn: ToolFn, /) -> ToolFn: ...
+@overload
 def tool(
+    *, name: str | None = None, description: str | None = None
+) -> Callable[[ToolFn], ToolFn]: ...
+def tool(
+    fn: ToolFn | None = None,
+    /,
     *,
     name: str | None = None,
     description: str | None = None,
-) -> Callable[[ToolFn], ToolFn]:
+) -> ToolFn | Callable[[ToolFn], ToolFn]:
     """Decorator marking a coroutine method as an MCP tool.
 
     The method's name (or ``name=`` override) becomes the published
@@ -137,58 +148,64 @@ def tool(
     the description; its parameter type hints become the JSON Schema
     properties.  Self isn't included in the schema.
 
+    Both ``@tool`` and ``@tool()`` are supported; pass ``name=`` /
+    ``description=`` to override the defaults.
+
     Stack with :func:`focal_required` to receive the focal-channel
     parts as kwargs.  Declare whichever subset of ``account`` and
     ``chat_id`` your tool needs::
 
         # Multi-account connector — route by account
-        @tool()
+        @tool
         @focal_required
         async def signal_send(self, text: str, *, account: str, chat_id: str): ...
 
         # Single-account connector — chat is enough
-        @tool()
+        @tool
         @focal_required
         async def telegram_send(self, text: str, *, chat_id: str): ...
     """
+    if fn is not None:
+        # Bare ``@tool`` form — fn is the decorated function.
+        return _decorate_tool(fn, name=None, description=None)
+    return lambda f: _decorate_tool(f, name=name, description=description)
 
-    def decorate(fn: ToolFn) -> ToolFn:
-        tool_name = name or fn.__name__
-        doc = (fn.__doc__ or "").strip()
-        if not doc and description is None:
-            raise ValueError(
-                f"@tool {tool_name!r} needs a docstring or explicit description= "
-                "(MCP exposes the description to the model)"
-            )
-        is_focal = bool(getattr(fn, "__aios_focal_required__", False))
-        focal_kwargs = _detect_focal_kwargs(fn) if is_focal else frozenset()
-        if is_focal and not focal_kwargs:
-            raise ValueError(
-                f"@focal_required tool {tool_name!r} must declare at least one of "
-                f"{{account, chat_id}} as a kwarg — the SDK injects what's "
-                "present in the signature, and a tool that wants neither "
-                "shouldn't be focal-required"
-            )
-        hints = get_type_hints(fn, include_extras=True)
-        schema = _build_input_schema(fn, hints=hints, focal_required=is_focal)
-        sandbox_params: dict[str, Literal["scalar", "list"]] = {}
-        for param_name, hint in hints.items():
-            found = _extract_sandbox_kind(hint)
-            if found is not None:
-                sandbox_params[param_name] = found[1]
-        descriptor = ToolDescriptor(
-            name=tool_name,
-            description=description or doc,
-            input_schema=schema,
-            fn=fn,
-            focal_required=is_focal,
-            focal_kwargs=focal_kwargs,
-            sandbox_params=sandbox_params,
+
+def _decorate_tool(fn: ToolFn, *, name: str | None, description: str | None) -> ToolFn:
+    tool_name = name or fn.__name__
+    doc = (fn.__doc__ or "").strip()
+    if not doc and description is None:
+        raise ValueError(
+            f"@tool {tool_name!r} needs a docstring or explicit description= "
+            "(MCP exposes the description to the model)"
         )
-        setattr(fn, _TOOL_ATTR, descriptor)
-        return fn
-
-    return decorate
+    is_focal = bool(getattr(fn, "__aios_focal_required__", False))
+    focal_kwargs = _detect_focal_kwargs(fn) if is_focal else frozenset()
+    if is_focal and not focal_kwargs:
+        raise ValueError(
+            f"@focal_required tool {tool_name!r} must declare at least one of "
+            f"{{account, chat_id}} as a kwarg — the SDK injects what's "
+            "present in the signature, and a tool that wants neither "
+            "shouldn't be focal-required"
+        )
+    hints = get_type_hints(fn, include_extras=True)
+    schema = _build_input_schema(fn, hints=hints, focal_required=is_focal)
+    sandbox_params: dict[str, Literal["scalar", "list"]] = {}
+    for param_name, hint in hints.items():
+        found = _extract_sandbox_kind(hint)
+        if found is not None:
+            sandbox_params[param_name] = found[1]
+    descriptor = ToolDescriptor(
+        name=tool_name,
+        description=description or doc,
+        input_schema=schema,
+        fn=fn,
+        focal_required=is_focal,
+        focal_kwargs=focal_kwargs,
+        sandbox_params=sandbox_params,
+    )
+    setattr(fn, _TOOL_ATTR, descriptor)
+    return fn
 
 
 def focal_required(fn: ToolFn) -> ToolFn:
@@ -480,10 +497,11 @@ class Connector:
       to the model on every turn.
 
     Register the connector via the ``aios.connectors`` entry-point group;
-    the entry point must point at a ``make_spec(connector_name, settings)``
-    factory that returns an
-    :class:`aios.mcp.stdio_transport.ConnectorSpec` (NOT the connector
-    class itself).  See ``packages/aios-echo`` for a minimal example.
+    the entry point points at a zero-argument callable that returns a
+    :class:`Connector` instance (e.g. ``my_pkg:make_connector``).  The
+    supervisor synthesizes the launch command itself
+    (``python -m aios_connector run <name>``) and the SDK's runner loads
+    the entry point.  See ``packages/aios-echo`` for a minimal example.
     """
 
     name: ClassVar[str] = ""
@@ -494,9 +512,15 @@ class Connector:
     # mutating a class-level attribute that would leak across instances.
     instructions: str | None = None
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Catch ``class FooConnector(Connector): ...`` that forgot to set
+        # ``name`` at module-import time, so the failure shows up before
+        # the supervisor tries to spawn the subprocess in production.
+        super().__init_subclass__(**kwargs)
+        if not cls.name:
+            raise ValueError(f"{cls.__name__}.name must be set")
+
     def __init__(self, *, spool_dir: Path | None = None) -> None:
-        if not self.name:
-            raise ValueError(f"{type(self).__name__}.name must be set")
         # The supervisor cd's into ``~/.aios/connectors/<name>/`` before
         # spawning the subprocess (see ``resolve_connector_specs``); the
         # default spool path is therefore ``./spool.sqlite`` from the
@@ -828,7 +852,12 @@ class Connector:
         return self._read_meta_str(_FOCAL_CHANNEL_META_KEY)
 
     def current_session_id(self) -> str | None:
-        """Read ``_meta.aios.session_id`` from the active request, or ``None``."""
+        """Read ``_meta.aios.session_id`` from the active tool-call request.
+
+        Request-scoped: returns ``None`` outside an active tool dispatch
+        (e.g., when called from :meth:`serve` or an inbound pump).  Use
+        only inside ``@tool``-decorated methods.
+        """
         return self._read_meta_str(_SESSION_ID_META_KEY)
 
     def _read_meta_str(self, key: str) -> str | None:
@@ -918,7 +947,7 @@ class Connector:
         a bounded delay (a runaway connector might emit ~64 messages
         past the threshold before warning) for skipping ~98% of stats
         on the hot path.  ``_warned`` latches so one outage doesn't
-        flood stderr.
+        flood the log.
         """
         self._emit_count += 1
         if self._warned or self._emit_count & 63 != 0:
@@ -927,13 +956,12 @@ class Connector:
         if size <= SOFT_WARN_BYTES:
             return
         self._warned = True
-        import sys
-
-        print(
-            f"aios-connector: spool {self._spool.path} is {size} bytes "
-            f"(>{SOFT_WARN_BYTES}); aios is likely down — operator action recommended",
-            file=sys.stderr,
-            flush=True,
+        log.warning(
+            "spool.growth",
+            path=str(self._spool.path),
+            size_bytes=size,
+            threshold_bytes=SOFT_WARN_BYTES,
+            hint="aios is likely down — operator action recommended",
         )
 
 

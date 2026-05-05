@@ -86,12 +86,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import sys
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field, replace
 from importlib.metadata import entry_points
 from typing import Any, Literal
 
+from aios_connector import ConnectorSpec
 from mcp.client.session import ClientSession
 from mcp.types import InitializeResult
 
@@ -106,7 +108,7 @@ from aios.harness.attachment_staging import (
 from aios.harness.wake import defer_wake
 from aios.logging import get_logger
 from aios.mcp.client import MAX_TOOLS_PER_SERVER, shape_call_result
-from aios.mcp.stdio_transport import ConnectorSpec, open_connector_session
+from aios.mcp.stdio_transport import open_connector_session
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services import sessions as sessions_service
 
@@ -232,44 +234,40 @@ class ConnectorState:
 def resolve_connector_specs(settings: Settings) -> list[tuple[ConnectorInstance, ConnectorSpec]]:
     """Resolve ``connectors_enabled`` into ``(instance, spec)`` pairs.
 
-    Each entry-point factory's ``load()`` must return a callable that
-    accepts ``(connector_name, settings)`` and returns a
-    :class:`ConnectorSpec`.  Factories stay instance-naive — the
-    supervisor wraps the spec with per-instance cwd + env after the
-    factory call (so a future connector that needs to vary its
-    ``command`` by instance is the only kind that would force the
-    factory contract to grow an ``instance`` parameter).
+    The supervisor synthesizes the launch command itself: every connector
+    runs as ``python -m aios_connector run <connector_name>``, with the
+    SDK's runner module loading the ``aios.connectors`` entry point and
+    instantiating the connector.  Connector packages contribute only the
+    entry-point registration and a callable that returns a
+    :class:`Connector` instance — no per-package factory module.
 
     Unknown connector names raise — the operator listed something that
     isn't installed, which should fail loudly at boot rather than
     silently skip.
 
     Per-instance cwd defaulting + on-disk creation happen inside
-    :func:`_apply_instance_overlay`: when the factory leaves ``cwd``
-    unset, the supervisor stamps ``settings.connectors_dir / connector``
-    (or ``/connector/instance`` for non-default instances) and
-    ``mkdir -p``s the result so first boot doesn't ``FileNotFoundError``
-    from inside :func:`asyncio.create_subprocess_exec`.  Idempotent —
-    subsequent boots are no-ops.
+    :func:`_apply_instance_overlay`: the supervisor stamps
+    ``settings.connectors_dir / connector`` (or
+    ``/connector/instance`` for non-default instances) and ``mkdir -p``s
+    the result so first boot doesn't ``FileNotFoundError`` from inside
+    :func:`asyncio.create_subprocess_exec`.  Idempotent — subsequent
+    boots are no-ops.
     """
-    available = {ep.name: ep for ep in entry_points(group="aios.connectors")}
+    available = {ep.name for ep in entry_points(group="aios.connectors")}
     out: list[tuple[ConnectorInstance, ConnectorSpec]] = []
     for raw in settings.connectors_enabled:
         ci = parse_connector_entry(raw)
-        ep = available.get(ci.connector)
-        if ep is None:
+        if ci.connector not in available:
             raise RuntimeError(
                 f"connector {ci.connector!r} listed in connectors_enabled (entry "
                 f"{raw!r}) but no aios.connectors entry point with that name is "
                 f"installed"
             )
-        factory = ep.load()
-        spec = factory(ci.connector, settings)
-        if not isinstance(spec, ConnectorSpec):
-            raise RuntimeError(
-                f"entry point aios.connectors:{ci.connector} returned "
-                f"{type(spec).__name__!r}, expected ConnectorSpec"
-            )
+        spec = ConnectorSpec(
+            name=ci.connector,
+            command=sys.executable,
+            args=["-m", "aios_connector", "run", ci.connector],
+        )
         spec = _apply_instance_overlay(spec, ci, settings)
         out.append((ci, spec))
     return out

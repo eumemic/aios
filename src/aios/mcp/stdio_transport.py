@@ -3,12 +3,9 @@
 Thin wrapper over :func:`mcp.client.stdio.stdio_client`.  The SDK already
 handles subprocess lifecycle (``asyncio.create_subprocess_exec`` under the
 hood, env merging via ``get_default_environment()``, MCP-spec shutdown
-sequence: close stdin → SIGTERM → SIGKILL).  This module adds three
+sequence: close stdin → SIGTERM → SIGKILL).  This module adds two
 pieces on top:
 
-* A :class:`ConnectorSpec` dataclass so the supervisor can describe a
-  connector to launch without leaking ``StdioServerParameters`` shape
-  through its surface.
 * :func:`open_connector_session` — async context manager that spawns
   the subprocess, builds a :class:`ClientSession`, runs ``initialize()``,
   and yields the live session plus the ``InitializeResult``.  The
@@ -19,6 +16,10 @@ pieces on top:
   validation rejects unknown notification methods (``ServerNotification``
   is a closed union in the SDK), and the connector's account snapshots
   + inbound deliveries would get silently dropped.
+
+The :class:`ConnectorSpec` dataclass lives in :mod:`aios_connector.spec`
+so third-party connector packages can depend on the SDK alone without
+dragging in aios-server.
 
 Restart-with-backoff and circuit-breaker live in the connector
 supervisor, not here.  Each call to :func:`open_connector_session`
@@ -32,8 +33,6 @@ import contextlib
 import os
 import re
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO, cast
 
 import anyio
@@ -47,6 +46,7 @@ from aios.logging import get_logger
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
+    from aios_connector import ConnectorSpec
     from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 
@@ -72,24 +72,6 @@ def _safe_close_fd(fd: int) -> None:
     """
     with contextlib.suppress(OSError):
         os.close(fd)
-
-
-@dataclass(frozen=True)
-class ConnectorSpec:
-    """How to launch one connector subprocess.
-
-    The ``aios.connectors`` entry-point group resolves to a callable
-    that returns a :class:`ConnectorSpec` — that's the integration
-    point for connector packages (signal-cli, telegram, the reference
-    SDK).  Exposing the spec as data lets the supervisor log, diff,
-    and re-spawn without owning entry-point loading.
-    """
-
-    name: str
-    command: str
-    args: list[str] = field(default_factory=list)
-    env: dict[str, str] | None = None
-    cwd: Path | None = None
 
 
 # Patterns matching credentials that connector libraries embed in URL

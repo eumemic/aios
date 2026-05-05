@@ -1,7 +1,13 @@
-"""structlog wiring for the connector.
+"""structlog wiring for connector subprocesses.
 
 Mirrors the parent aios project's setup (stdlib LoggerFactory, JSON in
-production, console renderer in development based on `AIOS_SIGNAL_LOG_FORMAT`).
+production, console renderer in development).  Per-connector env vars
+``AIOS_<CONNECTOR_UPPER>_LOG_FORMAT`` and ``AIOS_<CONNECTOR_UPPER>_LOG_LEVEL``
+let operators pick format and level without affecting siblings.
+
+Called once from :func:`aios_connector.__main__.main` after the
+connector is instantiated; connector authors don't need to call it
+themselves.
 """
 
 from __future__ import annotations
@@ -13,10 +19,17 @@ import sys
 import structlog
 
 
-def configure_logging() -> None:
-    """Configure structlog once. Idempotent."""
-    log_format = os.environ.get("AIOS_SIGNAL_LOG_FORMAT", "console")
-    level_name = os.environ.get("AIOS_SIGNAL_LOG_LEVEL", "INFO").upper()
+def configure_logging(*, connector_name: str) -> None:
+    """Configure structlog for the connector subprocess. Idempotent.
+
+    Reads ``AIOS_<CONNECTOR_UPPER>_LOG_FORMAT`` (``console``/``json``;
+    default ``console``) and ``AIOS_<CONNECTOR_UPPER>_LOG_LEVEL`` (default
+    ``INFO``).  ``connector_name`` is the connector's :attr:`Connector.name`
+    ClassVar — typically ``"signal"``, ``"telegram"``, etc.
+    """
+    upper = connector_name.upper()
+    log_format = os.environ.get(f"AIOS_{upper}_LOG_FORMAT", "console")
+    level_name = os.environ.get(f"AIOS_{upper}_LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
 
     logging.basicConfig(

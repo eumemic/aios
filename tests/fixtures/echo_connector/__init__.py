@@ -15,7 +15,7 @@ in-memory snapshot is non-empty for the test that inspects it.
 Spawned in two ways:
 
 * As a Python module: ``python -m tests.fixtures.echo_connector``.  Used
-  by tests that build a :class:`~aios.mcp.stdio_transport.ConnectorSpec`
+  by tests that build a :class:`~aios_connector.ConnectorSpec`
   directly without entry-point lookup.
 * Via the ``aios.connectors`` entry point ``echo`` (declared in
   ``pyproject.toml``).  Used by tests that exercise the supervisor's

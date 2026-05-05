@@ -121,41 +121,37 @@ your `emit_inbound(account=...)` calls must pass.  `display_name` and
 `metadata` are surfaced in `aios connectors accounts <name>` and to
 operator-facing CLI listings.
 
-## Entry-point factory
+## Entry-point registration
 
 Register the connector via the `aios.connectors` entry-point group in
-your package's `pyproject.toml`.  Each entry point points at a
-`make_spec` factory function (NOT the connector class itself):
+your package's `pyproject.toml`.  The entry point resolves to a
+zero-argument callable that returns a `Connector` instance:
 
 ```toml
 [project.entry-points."aios.connectors"]
-my_connector = "my_package.factory:make_spec"
+my_connector = "my_package:make_connector"
 ```
-
-The factory takes `(connector_name: str, settings)` and returns an
-`aios.mcp.stdio_transport.ConnectorSpec`:
 
 ```python
-import sys
-from aios.mcp.stdio_transport import ConnectorSpec
+# my_package/__init__.py
+from .config import Settings
+from .connector import MyConnector
 
 
-def make_spec(connector_name: str, settings) -> ConnectorSpec:
-    return ConnectorSpec(
-        name=connector_name,
-        command=sys.executable,
-        args=["-m", "my_package"],
-        # cwd left None → supervisor stamps a per-instance default
-    )
+def make_connector() -> MyConnector:
+    return MyConnector(Settings())
 ```
 
-The factory stays instance-naive — the supervisor applies per-instance
-cwd + env scoping after the spec returns.  When the factory leaves
-`cwd` unset, the supervisor stamps `settings.connectors_dir / connector`
+That's it.  The supervisor synthesizes the launch command itself
+(`python -m aios_connector run my_connector`), and the SDK's runner
+loads the entry point, calls `make_connector()`, configures logging
+via `AIOS_<MY_CONNECTOR>_LOG_FORMAT` / `_LOG_LEVEL`, and parks on
+`Connector.run` until stdin EOF.
+
+The supervisor stamps `cwd` to `settings.connectors_dir / connector`
 (default instance) or `settings.connectors_dir / connector / instance`
 (non-default), and creates the directory at boot so first-run
-`FileNotFoundError` from `asyncio.create_subprocess_exec` is impossible.
-Factories that need a different layout can set `cwd` themselves.
+`FileNotFoundError` is impossible.
 
 See `packages/aios-echo` for the canonical example.
 
@@ -233,43 +229,38 @@ location and bind-mounts it read-only into the sandbox at
 
 ## Outbound attachments
 
-Send tools take a structured `attachments: list[str] | None`
-parameter alongside `text`.  The model passes in-sandbox paths;
-the connector resolves each to a host path via
-`resolve_sandbox_path`, validates it's under `/workspace/` or
-`/mnt/attachments/`, then opens the file and uploads it as platform
-media with `text` as caption.
+Send tools take an `attachments: list[SandboxPath] | None` parameter
+alongside `text`.  The model sees a JSON-schema `array of string` and
+passes in-sandbox paths (`/workspace/foo.png`, `/mnt/attachments/...`);
+the SDK resolves each to a host `pathlib.Path` before the tool body
+runs.  No manual resolver call needed.
 
 ```python
 from pathlib import Path
-import os
-from aios_connector import resolve_sandbox_path
+from typing import Any
 
-@tool()
-@focal_required
-async def signal_send(
-    self,
-    text: str,
-    attachments: list[str] | None = None,
-    *,
-    chat_id: str,
-) -> dict[str, Any]:
-    """Send a Signal message with optional attachments."""
-    workspace_root = Path(os.environ["AIOS_WORKSPACE_ROOT"])
-    session_id = self.current_session_id()
-    host_paths: list[str] = []
-    for sandbox_path in attachments or []:
-        host = resolve_sandbox_path(
-            session_id=session_id,
-            sandbox_path=sandbox_path,
-            workspace_root=workspace_root,
-        )
-        if host is None:
-            raise ValueError(f"path {sandbox_path!r} outside the sandbox bind mount")
-        host_paths.append(str(host))
-    # ... call platform send API with text + host_paths
+from aios_connector import Connector, SandboxPath, focal_required, tool
+
+class MyConnector(Connector):
+    name = "my_connector"
+
+    @tool()
+    @focal_required
+    async def my_send(
+        self,
+        text: str,
+        attachments: list[SandboxPath] | None = None,
+        *,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Send a message with optional attachments."""
+        host_paths: list[Path] = list(attachments or [])
+        # ... call platform send API with text + host_paths
+        return {"status": "ok"}
 ```
 
 Path allowlist: `/workspace/...` and `/mnt/attachments/...` only.
 `/mnt/attachments/` is read-only inside the sandbox, so the model
 must `cp` an inbound file into `/workspace/` before forwarding it.
+The SDK rejects paths outside the allowlist (and `..` escapes) with a
+`ValueError` before the tool body runs.
