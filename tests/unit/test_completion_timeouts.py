@@ -11,6 +11,7 @@ These tests confirm the wrapper raises ``TimeoutError`` instead.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -36,6 +37,17 @@ class _StallingResponse:
             return _make_chunk("hello")
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
+
+
+async def _slow_first_chunk_response(ttft_delay_s: float) -> AsyncIterator[object]:
+    """Delay the first chunk by ``ttft_delay_s``, yield it, then exit.
+
+    Mimics cold-cache long-prompt streaming: TTFT exceeds the inter-chunk
+    bound, but once streaming starts there's no abnormal gap — the failure
+    shape issue #239 fixes.
+    """
+    await asyncio.sleep(ttft_delay_s)
+    yield _make_chunk("hello")
 
 
 def _make_chunk(text: str | None) -> object:
@@ -77,7 +89,7 @@ async def test_stream_litellm_raises_timeout_on_stalled_stream(
 ) -> None:
     """A streaming response that hangs after the first chunk must raise
     ``TimeoutError`` once the per-chunk inactivity bound elapses."""
-    monkeypatch.setattr(completion, "_STREAM_INACTIVITY_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(completion, "_STREAM_INTER_CHUNK_TIMEOUT_S", 0.1)
 
     async def fake_acompletion(**kwargs: object) -> _StallingResponse:
         return _StallingResponse()
@@ -91,6 +103,38 @@ async def test_stream_litellm_raises_timeout_on_stalled_stream(
             pool=_StubPool(),  # type: ignore[arg-type]
             session_id="sess_test",
         )
+
+
+@pytest.mark.asyncio
+async def test_stream_litellm_long_ttft_succeeds_when_inter_chunk_is_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First-chunk wait may exceed the inter-chunk bound; the TTFT ceiling
+    applies only to the first chunk."""
+    monkeypatch.setattr(completion, "_STREAM_INTER_CHUNK_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(completion, "_STREAM_TTFT_TIMEOUT_S", 2.0)
+
+    async def fake_acompletion(**kwargs: object) -> AsyncIterator[object]:
+        return _slow_first_chunk_response(ttft_delay_s=0.1)
+
+    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(
+        completion.litellm,
+        "stream_chunk_builder",
+        lambda chunks: {
+            "usage": {},
+            "choices": [{"message": {"role": "assistant", "content": "hello"}}],
+        },
+    )
+
+    message, _, _ = await completion.stream_litellm(
+        model="anthropic/claude-sonnet-4-6",
+        messages=[{"role": "user", "content": "ping"}],
+        pool=_StubPool(),  # type: ignore[arg-type]
+        session_id="sess_test",
+    )
+
+    assert message["content"] == "hello"
 
 
 @pytest.mark.asyncio
@@ -130,7 +174,7 @@ async def test_stream_litellm_passes_timeout_kwargs(
     )
 
     assert captured["timeout"] == completion._REQUEST_TIMEOUT_S
-    assert captured["stream_timeout"] == completion._STREAM_INACTIVITY_TIMEOUT_S
+    assert captured["stream_timeout"] == completion._STREAM_INTER_CHUNK_TIMEOUT_S
 
 
 @pytest.mark.asyncio

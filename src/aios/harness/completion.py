@@ -33,7 +33,8 @@ litellm.modify_params = True
 # defaults so user values win. The harness's job-level cap in ``run_session_step``
 # is the safety net if both are bypassed somehow.
 _REQUEST_TIMEOUT_S = 300.0
-_STREAM_INACTIVITY_TIMEOUT_S = 60.0
+_STREAM_TTFT_TIMEOUT_S = 300.0
+_STREAM_INTER_CHUNK_TIMEOUT_S = 60.0
 
 if TYPE_CHECKING:
     import asyncpg
@@ -332,7 +333,7 @@ async def stream_litellm(
         "messages": messages,
         "stream": True,
         "timeout": _REQUEST_TIMEOUT_S,
-        "stream_timeout": _STREAM_INACTIVITY_TIMEOUT_S,
+        "stream_timeout": _STREAM_INTER_CHUNK_TIMEOUT_S,
     }
     if tools:
         kwargs["tools"] = tools
@@ -347,16 +348,22 @@ async def stream_litellm(
     # LiteLLM's own per-chunk bound, but its behavior varies by provider
     # adapter. Wrapping each ``__anext__`` with our own ``wait_for`` makes
     # the bound deterministic regardless of provider — a stalled connection
-    # raises ``TimeoutError`` after ``_STREAM_INACTIVITY_TIMEOUT_S`` rather
-    # than hanging the worker. (Required for the harness's zero-hang
-    # guarantee — see also ``run_session_step``'s job-level cap.)
+    # raises ``TimeoutError`` rather than hanging the worker. (Required for
+    # the harness's zero-hang guarantee — see also ``run_session_step``'s
+    # job-level cap.) The first ``__anext__`` waits for TTFT, which on
+    # cold-cache long-prompt requests can legitimately exceed the
+    # inter-chunk bound; the per-iteration timeout select uses the wider
+    # TTFT ceiling until the first chunk arrives.
     chunks: list[Any] = []
     aiter = response.__aiter__()
+    first = True
     while True:
+        timeout = _STREAM_TTFT_TIMEOUT_S if first else _STREAM_INTER_CHUNK_TIMEOUT_S
         try:
-            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=_STREAM_INACTIVITY_TIMEOUT_S)
+            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
         except StopAsyncIteration:
             break
+        first = False
         chunks.append(chunk)
         content = chunk.choices[0].delta.content
         if content:
