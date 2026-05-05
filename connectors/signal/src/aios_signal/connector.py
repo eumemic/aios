@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -40,6 +41,7 @@ from aios_connector import (
 from aios_connector import (
     AttachmentError,
     Connector,
+    SandboxPath,
     focal_required,
     make_account,
     tool,
@@ -230,8 +232,15 @@ class SignalConnector(Connector):
 
     @tool()
     @focal_required
-    async def signal_send(self, text: str, *, account: str, chat_id: str) -> dict[str, Any]:
-        """Send a text message to your focal Signal chat.
+    async def signal_send(
+        self,
+        text: str,
+        attachments: list[SandboxPath] | None = None,
+        *,
+        account: str,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Send a Signal message to your focal chat, optionally with attachments.
 
         The account (your bot UUID) and chat id are taken implicitly
         from your focal channel — aios injects them via the JSON-RPC
@@ -240,12 +249,15 @@ class SignalConnector(Connector):
 
         Args:
             text: Message body. Markdown is converted to Signal text styles.
+            attachments: Optional in-sandbox file paths to attach.  The SDK
+                resolves each entry to a host path before this method runs.
         """
         assert self._daemon is not None
         phone = self._uuid_to_phone.get(account)
         if phone is None:
             raise ValueError(f"signal_send: unknown account {account!r}")
-        params = _build_send_params(phone, chat_id, text)
+        host_paths: list[Path] = list(attachments or [])
+        params = _build_send_params(phone, chat_id, text, attachments=host_paths)
         result = await self._daemon.rpc.call("send", params)
         ts = _extract_timestamp(result)
         return {"sent_at_ms": ts} if ts is not None else {"status": "ok"}
@@ -331,7 +343,13 @@ class SignalConnector(Connector):
         return out
 
 
-def _build_send_params(account_phone: str, chat_id: str, text: str) -> dict[str, Any]:
+def _build_send_params(
+    account_phone: str,
+    chat_id: str,
+    text: str,
+    *,
+    attachments: list[Path],
+) -> dict[str, Any]:
     """Translate ``(account_phone, chat_id, text)`` into signal-cli ``send`` params."""
     chat_type, raw_id = decode_chat_id(chat_id)
     stripped, styles = convert_markdown_to_signal_styles(text)
@@ -342,6 +360,8 @@ def _build_send_params(account_phone: str, chat_id: str, text: str) -> dict[str,
         params["groupId"] = raw_id
     else:
         params["recipient"] = [raw_id]
+    if attachments:
+        params["attachments"] = [str(p) for p in attachments]
     return params
 
 
