@@ -228,6 +228,116 @@ class TestServiceLayer:
         assert recovered == new_token
         assert recovered != first_token
 
+    async def test_git_identity_round_trip(
+        self, pool: Any, crypto_box: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """Identity supplied at create-time persists through the DB and
+        echoes back on read.  Rotation overwrites it."""
+        env_id, agent_id = env_and_agent
+        session = await sessions_service.create_session(
+            pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title=None,
+            metadata={},
+            resources=[
+                GithubRepositoryResource.model_validate(
+                    {
+                        "type": "github_repository",
+                        "url": _OCTOCAT_REPO,
+                        "mount_path": "/workspace/repo",
+                        "authorization_token": _pat(),
+                        "git_user_name": "Agent JN",
+                        "git_user_email": "agent+jn@example.com",
+                    }
+                )
+            ],
+            crypto_box=crypto_box,
+        )
+        echo = session.resources[0]
+        assert echo.git_user_name == "Agent JN"
+        assert echo.git_user_email == "agent+jn@example.com"
+
+        rotated = await github_service.rotate_token(
+            pool,
+            crypto_box,
+            session_id=session.id,
+            resource_id=echo.id,
+            new_token=_pat(),
+            identity=("Different Author", "other@example.com"),
+        )
+        assert rotated.git_user_name == "Different Author"
+        assert rotated.git_user_email == "other@example.com"
+
+    async def test_token_only_rotation_preserves_identity(
+        self, pool: Any, crypto_box: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """Rotating just the PAT (no identity payload) must NOT silently
+        clear a previously configured ``git_user_name`` / ``git_user_email``.
+        The router omits ``identity`` from the service call when the
+        update body has no identity fields set.
+        """
+        env_id, agent_id = env_and_agent
+        session = await sessions_service.create_session(
+            pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title=None,
+            metadata={},
+            resources=[
+                GithubRepositoryResource.model_validate(
+                    {
+                        "type": "github_repository",
+                        "url": _OCTOCAT_REPO,
+                        "mount_path": "/workspace/repo",
+                        "authorization_token": _pat(),
+                        "git_user_name": "Agent JN",
+                        "git_user_email": "agent+jn@example.com",
+                    }
+                )
+            ],
+            crypto_box=crypto_box,
+        )
+        echo = session.resources[0]
+
+        rotated = await github_service.rotate_token(
+            pool,
+            crypto_box,
+            session_id=session.id,
+            resource_id=echo.id,
+            new_token=_pat(),
+        )
+        assert rotated.git_user_name == "Agent JN"
+        assert rotated.git_user_email == "agent+jn@example.com"
+
+    async def test_git_identity_optional_defaults_none(
+        self, pool: Any, crypto_box: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """Identity unset on create stays NULL through the DB and echoes
+        back as ``None`` — pre-#207 v1 behaviour preserved."""
+        env_id, agent_id = env_and_agent
+        session = await sessions_service.create_session(
+            pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title=None,
+            metadata={},
+            resources=[
+                GithubRepositoryResource.model_validate(
+                    {
+                        "type": "github_repository",
+                        "url": _OCTOCAT_REPO,
+                        "mount_path": "/workspace/repo",
+                        "authorization_token": _pat(),
+                    }
+                )
+            ],
+            crypto_box=crypto_box,
+        )
+        echo = session.resources[0]
+        assert echo.git_user_name is None
+        assert echo.git_user_email is None
+
     async def test_full_list_replace_detaches_then_reattaches(
         self, pool: Any, crypto_box: Any, env_and_agent: tuple[str, str]
     ) -> None:

@@ -230,6 +230,8 @@ async def _materialize_github_clones(
                 token=token,
                 cache_dir=cache_dir,
                 proxy_url=proxy.proxy_url(echo.url, host=_PROXY_HOST_ALIAS),
+                git_user_name=echo.git_user_name,
+                git_user_email=echo.git_user_email,
             )
         except GithubCloneError as err:
             failures.append((echo, err))

@@ -48,6 +48,12 @@ class GithubRepositoryResource(BaseModel):
     The ``authorization_token`` is a write-only ``SecretStr`` — present on
     request, encrypted on the way to the DB, and never returned in API
     responses (see :class:`GithubRepositoryResourceEcho`).
+
+    ``git_user_name`` / ``git_user_email`` are optional and stamped via
+    ``git config`` after clone so commits made inside the sandbox carry
+    a deterministic identity per resource without the agent needing to
+    self-correct from git's "Please tell me who you are" error.  Absent
+    means "no identity configured" — the v1 default.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -56,6 +62,8 @@ class GithubRepositoryResource(BaseModel):
     url: str = Field(min_length=1)
     mount_path: str = Field(min_length=2, max_length=4096, pattern=_MOUNT_PATH_PATTERN)
     authorization_token: SecretStr
+    git_user_name: str | None = Field(default=None, max_length=256)
+    git_user_email: str | None = Field(default=None, max_length=256)
 
     @model_validator(mode="after")
     def _check(self) -> GithubRepositoryResource:
@@ -70,7 +78,8 @@ class GithubRepositoryResourceEcho(BaseModel):
     ``Session.resources`` and on the per-resource sub-collection endpoints.
 
     Token is intentionally absent; ``id`` is the per-attachment ULID
-    (prefix ``ghrepo``) used by the rotation endpoint.
+    (prefix ``ghrepo``) used by the rotation endpoint.  ``git_user_name``
+    / ``git_user_email`` echo back as plaintext (they aren't secrets).
     """
 
     type: Literal["github_repository"] = "github_repository"
@@ -79,18 +88,25 @@ class GithubRepositoryResourceEcho(BaseModel):
     mount_path: str
     created_at: datetime
     updated_at: datetime
+    git_user_name: str | None = None
+    git_user_email: str | None = None
 
 
 class GithubRepositoryUpdate(BaseModel):
     """Request body for ``POST /v1/sessions/{sid}/resources/{rid}``.
 
-    Only the token rotates. ``url`` and ``mount_path`` are immutable after
-    creation — to change them, detach the resource and attach a new one.
+    Token rotation is the primary action; ``git_user_name`` /
+    ``git_user_email`` may also be supplied alongside, in which case the
+    stored identity is replaced.  ``url`` and ``mount_path`` are
+    immutable after creation — to change them, detach the resource and
+    attach a new one.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     authorization_token: SecretStr
+    git_user_name: str | None = Field(default=None, max_length=256)
+    git_user_email: str | None = Field(default=None, max_length=256)
 
     @model_validator(mode="after")
     def _check(self) -> GithubRepositoryUpdate:
