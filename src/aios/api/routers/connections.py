@@ -30,11 +30,14 @@ from aios.errors import AccountDriftError
 from aios.harness.connector_tasks import defer_connector_status
 from aios.models.common import ListResponse
 from aios.models.connections import (
+    BindChatRequest,
+    BoundChat,
     Connection,
     ConnectionAttach,
     ConnectionConfigurePerChat,
     ConnectionCreate,
     ConnectionMode,
+    RecentChat,
 )
 from aios.services import connections as service
 
@@ -194,3 +197,48 @@ async def configure_per_chat(
 @router.post("/{connection_id}/unconfigure")
 async def unconfigure(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connection:
     return await service.unconfigure_connection(pool, connection_id)
+
+
+@router.post("/{connection_id}/bind-chat", status_code=status.HTTP_201_CREATED)
+async def bind_chat(
+    connection_id: str, body: BindChatRequest, pool: PoolDep, _auth: AuthDep
+) -> BoundChat:
+    """Operator-curate a chat → session mapping (#215).
+
+    A row in ``connection_chat_sessions`` overrides the connection's
+    mode-default fallback for that ``chat_id``.  Operators use this to
+    point different chats on a single account at different existing
+    sessions — the middle case the unified ``connections`` shape didn't
+    cover after #205.
+
+    Idempotent on ``(connection_id, chat_id)``: a second call with the
+    same chat returns the existing row (its ``session_id`` may differ
+    from the requested one if a concurrent writer landed first or the
+    supervisor pre-populated it via per_chat spawn).
+    """
+    return await service.bind_chat_to_session(
+        pool, connection_id, chat_id=body.chat_id, session_id=body.session_id
+    )
+
+
+@router.delete("/{connection_id}/bind-chat/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def unbind_chat(connection_id: str, chat_id: str, pool: PoolDep, _auth: AuthDep) -> None:
+    """Drop the operator-curated row.  Idempotent — repeat calls 204."""
+    await service.unbind_chat(pool, connection_id, chat_id)
+
+
+@router.get("/{connection_id}/bound-chats")
+async def bound_chats(connection_id: str, pool: PoolDep, _auth: AuthDep) -> ListResponse[BoundChat]:
+    items = await service.list_bound_chats(pool, connection_id)
+    return ListResponse[BoundChat](data=items, has_more=False, next_after=None)
+
+
+@router.get("/{connection_id}/recent-chats")
+async def recent_chats(
+    connection_id: str,
+    pool: PoolDep,
+    _auth: AuthDep,
+    limit: int = 50,
+) -> ListResponse[RecentChat]:
+    items = await service.list_recent_chats(pool, connection_id, limit=limit)
+    return ListResponse[RecentChat](data=items, has_more=False, next_after=None)

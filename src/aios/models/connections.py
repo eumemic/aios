@@ -89,3 +89,45 @@ class Connection(BaseModel):
     attached_at: datetime | None = None
     updated_at: datetime
     archived_at: datetime | None = None
+
+
+class BindChatRequest(BaseModel):
+    """Request body for ``POST /v1/connections/{id}/bind-chat``.
+
+    Pre-populates a ``connection_chat_sessions`` row so inbound on
+    ``chat_id`` routes to ``session_id`` regardless of the connection's
+    mode-default fallback (#215).  Operators use this to point
+    different chats on a single account at different operator-curated
+    existing sessions.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    chat_id: str = Field(min_length=1, max_length=512)
+    session_id: str
+
+
+class BoundChat(BaseModel):
+    """Read view of one ``connection_chat_sessions`` row.
+
+    Returned by ``GET /v1/connections/{id}/bound-chats``.  Operator-bound
+    rows and supervisor-spawned rows are returned together — the table
+    doesn't tag the writer.
+    """
+
+    chat_id: str
+    session_id: str
+    created_at: datetime
+
+
+class RecentChat(BaseModel):
+    """Distinct chat_id observed on a connection's account, with the
+    most-recent inbound timestamp.
+
+    Returned by ``GET /v1/connections/{id}/recent-chats`` so operators
+    can find the chat_id for a specific peer without digging through
+    event logs before calling ``bind-chat``.
+    """
+
+    chat_id: str
+    last_seen_at: datetime

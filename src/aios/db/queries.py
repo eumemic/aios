@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from datetime import datetime
 from types import EllipsisType
 from typing import Any, NoReturn
 
@@ -2315,12 +2316,18 @@ async def session_authorizes_connector_account(
     """Permission check for outbound connector tool calls.
 
     True iff there's an active connection whose ``(connector, account)``
-    matches AND whose ``session_id`` is this session OR whose ``id`` is
-    the session's ``spawned_from_connection_id``.  Used by the
-    outbound MCP dispatch to gate tool calls that take an explicit
-    ``account`` argument — the supervisor will happily forward to the
-    connector regardless, but the model shouldn't be able to reach
-    accounts the operator hasn't bound to this session.
+    matches AND any of:
+
+    * ``c.session_id`` is this session (single_session attach), OR
+    * ``c.id`` is this session's ``spawned_from_connection_id``
+      (per_chat origin grant), OR
+    * a row in ``connection_chat_sessions`` ties this connection to
+      this session (operator-curated chat binding, #215).
+
+    Used by the outbound MCP dispatch to gate tool calls that take an
+    explicit ``account`` argument — the supervisor will happily forward
+    to the connector regardless, but the model shouldn't be able to
+    reach accounts the operator hasn't bound to this session.
     """
     row = await conn.fetchrow(
         """
@@ -2330,7 +2337,11 @@ async def session_authorizes_connector_account(
          WHERE c.connector = $2
            AND c.account = $3
            AND c.archived_at IS NULL
-           AND (c.session_id = $1 OR c.id = s.spawned_from_connection_id)
+           AND (c.session_id = $1
+                OR c.id = s.spawned_from_connection_id
+                OR EXISTS (SELECT 1 FROM connection_chat_sessions ccs
+                            WHERE ccs.connection_id = c.id
+                              AND ccs.session_id = $1))
          LIMIT 1
         """,
         session_id,
@@ -2639,6 +2650,107 @@ async def insert_chat_session(
             detail={"connection_id": connection_id, "chat_id": chat_id},
         )
     return existing
+
+
+async def delete_chat_session(
+    conn: asyncpg.Connection[Any], connection_id: str, chat_id: str
+) -> bool:
+    """Remove a ``connection_chat_sessions`` row.  Returns ``True`` iff
+    a row was actually deleted.
+
+    Used by the operator-bound chat unbind endpoint.  Hard delete (no
+    soft-archive): the row is just an operator-curated route, deleting
+    it returns the chat to the connection's mode-default fallback.
+    """
+    result = await conn.execute(
+        "DELETE FROM connection_chat_sessions WHERE connection_id = $1 AND chat_id = $2",
+        connection_id,
+        chat_id,
+    )
+    return bool(result.endswith(" 1"))
+
+
+async def get_chat_session_row(
+    conn: asyncpg.Connection[Any], connection_id: str, chat_id: str
+) -> tuple[str, str, datetime] | None:
+    """Return ``(chat_id, session_id, created_at)`` for one row, or ``None``.
+
+    Used after :func:`insert_chat_session` to materialise the just-bound
+    row's ``created_at`` for the API response without re-listing the
+    full per-connection set.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT chat_id, session_id, created_at
+          FROM connection_chat_sessions
+         WHERE connection_id = $1 AND chat_id = $2
+        """,
+        connection_id,
+        chat_id,
+    )
+    if row is None:
+        return None
+    return row["chat_id"], row["session_id"], row["created_at"]
+
+
+async def list_chat_sessions_for_connection(
+    conn: asyncpg.Connection[Any], connection_id: str
+) -> list[tuple[str, str, datetime]]:
+    """List ``(chat_id, session_id, created_at)`` rows in chat_id order.
+
+    Operator-bound and supervisor-spawned rows are returned together —
+    the table doesn't tag the writer, and the union is what an operator
+    wants to see when answering "where does each chat on this account
+    route?".
+    """
+    rows = await conn.fetch(
+        """
+        SELECT chat_id, session_id, created_at
+          FROM connection_chat_sessions
+         WHERE connection_id = $1
+         ORDER BY chat_id
+        """,
+        connection_id,
+    )
+    return [(r["chat_id"], r["session_id"], r["created_at"]) for r in rows]
+
+
+async def list_recent_chat_ids(
+    conn: asyncpg.Connection[Any], connector: str, account: str, *, limit: int
+) -> list[tuple[str, datetime]]:
+    """Distinct ``(chat_id, last_seen_at)`` for inbound user events
+    matching the ``<connector>/<account>/<chat_id>`` channel prefix.
+
+    Used by the operator's "what chats has this account produced
+    inbound on?" helper — the input to ``aios connections bind-chat``
+    when the operator doesn't know the chat_id off the top of their
+    head.
+
+    The chat_id is the third path segment of the derived
+    ``events.channel`` column; events arriving on a different
+    ``focal_channel_at_arrival`` still have ``orig_channel`` set to
+    their inbound channel, but ``channel`` (derived) collapses them
+    correctly.  We filter on user role to skip assistant / tool rows
+    that share the channel.
+    """
+    prefix = f"{connector}/{account}/"
+    rows = await conn.fetch(
+        """
+        SELECT
+          split_part(channel, '/', 3) AS chat_id,
+          MAX(created_at) AS last_seen_at
+        FROM events
+        WHERE channel LIKE $1
+          AND kind = 'message'
+          AND data->>'role' = 'user'
+        GROUP BY chat_id
+        ORDER BY last_seen_at DESC
+        LIMIT $2
+        """,
+        prefix + "%",
+        limit,
+    )
+    return [(r["chat_id"], r["last_seen_at"]) for r in rows if r["chat_id"]]
 
 
 # ─── connector_inbound_acks (dedup ledger) ──────────────────────────────────

@@ -182,6 +182,93 @@ def unconfigure(ctx: typer.Context, connection_id: str) -> None:
     run_or_die(_run)
 
 
+@app.command(
+    "bind-chat",
+    help="Pre-bind a chat_id on a connection's account to an existing session.",
+)
+def bind_chat(
+    ctx: typer.Context,
+    connection_id: str,
+    chat_id: Annotated[str, typer.Option("--chat-id", help="Platform-native chat id.")],
+    session_id: Annotated[str, typer.Option("--session-id", help="Target session id.")],
+) -> None:
+    def _run() -> None:
+        client = just_client(ctx)
+        with client:
+            obj = client.request(
+                "POST",
+                f"/v1/connections/{connection_id}/bind-chat",
+                json_body={"chat_id": chat_id, "session_id": session_id},
+            )
+        render_single(obj)
+
+    run_or_die(_run)
+
+
+@app.command(
+    "unbind-chat",
+    help="Drop a chat → session binding, returning the chat to the connection's mode default.",
+)
+def unbind_chat(
+    ctx: typer.Context,
+    connection_id: str,
+    chat_id: Annotated[str, typer.Option("--chat-id")],
+) -> None:
+    def _run() -> None:
+        client = just_client(ctx)
+        with client:
+            client.request("DELETE", f"/v1/connections/{connection_id}/bind-chat/{chat_id}")
+        print_success("unbound", f"{connection_id}:{chat_id}")
+
+    run_or_die(_run)
+
+
+@app.command(
+    "bound-chats",
+    help="List all chat → session bindings (operator-curated + supervisor-spawned).",
+)
+def bound_chats(ctx: typer.Context, connection_id: str) -> None:
+    def _run() -> None:
+        state, client = with_client(ctx)
+        with client:
+            envelope = client.request("GET", f"/v1/connections/{connection_id}/bound-chats")
+        render_list(
+            state.output_format,
+            envelope,
+            columns=("chat_id", "session_id", "created_at"),
+            max_widths={"chat_id": 40, "session_id": 24},
+        )
+
+    run_or_die(_run)
+
+
+@app.command(
+    "recent-chats",
+    help="List distinct chat_ids on this connection's account that have produced inbound.",
+)
+def recent_chats(
+    ctx: typer.Context,
+    connection_id: str,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
+) -> None:
+    def _run() -> None:
+        state, client = with_client(ctx)
+        with client:
+            envelope = client.request(
+                "GET",
+                f"/v1/connections/{connection_id}/recent-chats",
+                params={"limit": limit},
+            )
+        render_list(
+            state.output_format,
+            envelope,
+            columns=("chat_id", "last_seen_at"),
+            max_widths={"chat_id": 40},
+        )
+
+    run_or_die(_run)
+
+
 @app.command("archive", help="Archive a detached connection (soft-delete, retained for audit).")
 def archive(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:

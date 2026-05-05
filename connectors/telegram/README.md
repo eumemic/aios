@@ -58,6 +58,25 @@ aios connections list --connector=telegram
 aios connections attach <conn_id> --session=<session_id>
 ```
 
+#### Operator-curated per-chat bindings
+
+To route a specific chat on a bot's account to a specific existing
+session — the middle case between attach (whole bot → one session)
+and configure-per-chat (each chat → fresh template-spawn) — pre-populate
+a binding:
+
+```
+aios connections recent-chats <conn_id>           # find the chat_id
+aios connections bind-chat <conn_id> --chat-id=<id> --session-id=<sess_id>
+aios connections bound-chats <conn_id>            # inspect operator + supervisor rows
+aios connections unbind-chat <conn_id> --chat-id=<id>
+```
+
+The binding is consulted before the connection's mode-default fallback,
+so it works on top of any mode (single_session, per_chat, or even
+detached). Inbound on bound chats routes to the bound session;
+unbound chats fall back to the connection's default behaviour.
+
 ### 5. DM the bot — the agent replies
 
 Inbound messages on each bot route to its connection's session.  The
