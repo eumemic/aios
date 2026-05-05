@@ -68,6 +68,16 @@ _INBOUND_METHOD = f"{_AIOS_NOTIFICATION_PREFIX}inbound"
 # focal-required tool methods.
 _FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
 
+# MCP ``_meta`` key carrying the calling session's id.  Mirrors
+# ``aios.harness.channels.SESSION_ID_META_KEY`` server-side.
+_SESSION_ID_META_KEY = "aios.session_id"
+
+# Default sandbox bind-mount root.  Connector subprocesses inherit
+# ``AIOS_WORKSPACE_ROOT`` from the worker; this constant is only the
+# fallback for tests + dev environments without it set.  Must match
+# :attr:`aios.config.Settings.workspace_root`'s default.
+_DEFAULT_WORKSPACE_ROOT = "/var/lib/aios/workspaces"
+
 ToolFn = Callable[..., Awaitable[Any]]
 
 
@@ -683,13 +693,55 @@ class Connector:
         return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
 
     def _focal_from_request_meta(self) -> str | None:
-        """Read ``_meta.aios.focal_channel_path`` from the active request.
+        """Read the focal-channel suffix from the active request, or ``None``."""
+        return self._read_meta_str(_FOCAL_CHANNEL_META_KEY)
 
-        The lowlevel server stashes the raw request on a context var
-        the call_tool handler can reach via :attr:`Server.request_context`.
-        Missing or malformed meta returns ``None`` so the caller raises
-        a tool-level error.
+    def current_session_id(self) -> str | None:
+        """Read ``_meta.aios.session_id`` from the active request, or ``None``."""
+        return self._read_meta_str(_SESSION_ID_META_KEY)
+
+    def resolve_media_paths(self, paths: list[str], *, tool_name: str) -> list[str]:
+        """Map sandbox-visible attachment paths to host paths.
+
+        Empty input short-circuits without requiring ``_meta.aios.session_id``,
+        so text-only send tools work in test harnesses that don't stamp it.
+        Non-empty input raises ``RuntimeError`` if session_id is missing,
+        ``ValueError`` if any path fails containment or doesn't exist.
         """
+        if not paths:
+            return []
+        session_id = self.current_session_id()
+        if session_id is None:
+            raise RuntimeError(
+                f"{tool_name} with attachments requires _meta.aios.session_id; "
+                "the harness should always inject this for tool dispatches"
+            )
+        from aios_connector.media import resolve_sandbox_path
+
+        workspace_root = Path(os.environ.get("AIOS_WORKSPACE_ROOT", _DEFAULT_WORKSPACE_ROOT))
+        resolved: list[str] = []
+        for sandbox_path in paths:
+            host = resolve_sandbox_path(
+                session_id=session_id,
+                sandbox_path=sandbox_path,
+                workspace_root=workspace_root,
+            )
+            if host is None:
+                raise ValueError(
+                    f"attachment path {sandbox_path!r} could not be resolved "
+                    f"to a host path (must be under /workspace/ or "
+                    f"/mnt/attachments/, no .. escapes)"
+                )
+            if not host.is_file():
+                raise ValueError(
+                    f"attachment path {sandbox_path!r} does not exist (resolved to {host})"
+                )
+            resolved.append(str(host))
+        return resolved
+
+    def _read_meta_str(self, key: str) -> str | None:
+        """Fetch a string-typed key from ``_meta`` of the active tool-call
+        request, or ``None`` when absent / empty / wrong type."""
         from mcp.server.lowlevel.server import request_ctx
 
         try:
@@ -700,10 +752,10 @@ class Connector:
         if meta is None:
             return None
         extra = getattr(meta, "model_extra", None) or {}
-        path: Any = extra.get(_FOCAL_CHANNEL_META_KEY)
-        if not isinstance(path, str) or not path:
+        value: Any = extra.get(key)
+        if not isinstance(value, str) or not value:
             return None
-        return path
+        return value
 
     # ── Internal: aios_inbound_ack tool ───────────────────────────────
 
