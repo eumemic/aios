@@ -158,8 +158,9 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
 
         await queries.set_session_focal_channel(conn, session_id, target)
         all_events = await queries.read_message_events(conn, session_id)
+        model = await queries.get_session_model(conn, session_id)
 
-    content = render_reorient_block(all_events, target)
+    content = render_reorient_block(all_events, target, model=model, session_id=session_id)
     return ToolResult(
         content=content,
         metadata={
@@ -168,7 +169,13 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
     )
 
 
-def render_reorient_block(all_events: list[Event], target: str) -> str:
+def render_reorient_block(
+    all_events: list[Event],
+    target: str,
+    *,
+    model: str | None = None,
+    session_id: str | None = None,
+) -> str | list[dict[str, Any]]:
     """Render the recap block for ``target`` from the event log.
 
     Pure function over the session's message events — no database
@@ -213,6 +220,15 @@ def render_reorient_block(all_events: list[Event], target: str) -> str:
     through the role=tool framing.  Leading ``>`` inside any rendered
     line is escaped to ``\\>`` so peer messages that start with a
     quote character don't collide with the block-quote syntax.
+
+    When ``model`` and ``session_id`` are both supplied and a peer
+    user event on ``target`` carries an inlinable image attachment,
+    the recap return type widens to a content-parts list — the
+    ``image_url`` parts sit between blockquoted text parts so the
+    agent reads "here's the historical text from the channel, and
+    here are the pixels they sent" inside one tool_result.  Without
+    those kwargs (legacy callers), the recap stays a single string
+    and image attachments degrade to text path markers.
     """
     switch_result_tcids = _switch_channel_tool_result_tcids(all_events)
     target_events = [
@@ -236,7 +252,7 @@ def render_reorient_block(all_events: list[Event], target: str) -> str:
     rendered_msgs: list[dict[str, Any]] = []
     token_total = 0
     for e in reversed(target_events):
-        msg = _render_recap_event(e)
+        msg = _render_recap_event(e, model=model, session_id=session_id)
         if msg is None:
             continue
         rendered_msgs.append(msg)
@@ -249,8 +265,7 @@ def render_reorient_block(all_events: list[Event], target: str) -> str:
         return f"Switched to {target}. (no prior messages on this channel)"
 
     rendered_msgs.reverse()
-    quoted_body = _blockquote("\n\n".join(m["content"] for m in rendered_msgs))
-    return f"━━━ Recap: recent messages on {target} ━━━\n{quoted_body}\n━━━ End recap ━━━"
+    return _assemble_recap(rendered_msgs, target)
 
 
 def _switch_channel_tool_result_tcids(all_events: list[Event]) -> set[str]:
@@ -276,7 +291,12 @@ def _switch_channel_tool_result_tcids(all_events: list[Event]) -> set[str]:
     return tcids
 
 
-def _render_recap_event(event: Event) -> dict[str, Any] | None:
+def _render_recap_event(
+    event: Event,
+    *,
+    model: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any] | None:
     """Render a single event into a chat-completions message dict for
     the recap body, or ``None`` if the event contributes nothing.
 
@@ -290,7 +310,12 @@ def _render_recap_event(event: Event) -> dict[str, Any] | None:
     User events go through :func:`render_user_event` with
     ``focal_at_arrival=orig_channel`` to force the full-content branch
     (we want headers and full bodies inside the recap, never truncated
-    notification markers).
+    notification markers).  When ``model`` and ``session_id`` are
+    threaded through, the same vision policy that applies at arrival
+    time also applies here: inlinable images on the target channel
+    surface as ``image_url`` content parts inside the user message,
+    and :func:`_assemble_recap` then lifts them out into the recap's
+    top-level content-parts list.
 
     Assistant events drop their text content entirely and render only
     their tool_calls — ``[you called: name(args), ...]`` (second
@@ -311,17 +336,15 @@ def _render_recap_event(event: Event) -> dict[str, Any] | None:
     role = event.data.get("role") if event.kind == "message" else None
 
     if role == "user":
-        # Recap rendering is intentionally text-only: ``model``/``session_id``
-        # are not threaded through, so :func:`render_user_event` short-circuits
-        # any image inlining and emits text markers for every attachment.
-        # The recap body is consumed inside a ``switch_channel`` tool result
-        # (string content), where ``image_url`` parts wouldn't survive the
-        # tool-message envelope; degrading attachments to markers keeps the
-        # recap a single text blob that the agent can read or follow up on
-        # via the in-sandbox path.
-        rendered = render_user_event(event.data, event.orig_channel, event.orig_channel)
+        rendered = render_user_event(
+            event.data,
+            event.orig_channel,
+            event.orig_channel,
+            model=model,
+            session_id=session_id,
+        )
         content = rendered.get("content")
-        if not isinstance(content, str) or not content:
+        if not content or not isinstance(content, (str, list)):
             return None
         return {"role": "user", "content": content}
 
@@ -343,6 +366,51 @@ def _render_recap_event(event: Event) -> dict[str, Any] | None:
         }
 
     return None
+
+
+def _assemble_recap(rendered_msgs: list[dict[str, Any]], target: str) -> str | list[dict[str, Any]]:
+    """Compose rendered recap messages into the final tool-result content.
+
+    All-text rendered_msgs preserve the legacy ``str`` shape bit-for-bit
+    so sessions that never produce inlinable content see no behavior
+    change.  When any user message rendered as a content-parts list,
+    the result widens to a content-parts list with ``image_url`` parts
+    interleaved between the surrounding blockquoted text — the agent
+    reads the historical framing and the pixels in their original
+    conversational order.
+    """
+    if not any(isinstance(m["content"], list) for m in rendered_msgs):
+        quoted_body = _blockquote("\n\n".join(m["content"] for m in rendered_msgs))
+        return f"━━━ Recap: recent messages on {target} ━━━\n{quoted_body}\n━━━ End recap ━━━"
+
+    parts: list[dict[str, Any]] = [
+        {"type": "text", "text": f"━━━ Recap: recent messages on {target} ━━━"}
+    ]
+    text_buf: list[str] = []
+
+    def flush_text() -> None:
+        if not text_buf:
+            return
+        parts.append({"type": "text", "text": _blockquote("\n".join(text_buf))})
+        text_buf.clear()
+
+    for i, msg in enumerate(rendered_msgs):
+        content = msg["content"]
+        if i > 0:
+            text_buf.append("")
+        if isinstance(content, str):
+            text_buf.append(content)
+            continue
+        for sub in content:
+            if sub.get("type") == "image_url":
+                flush_text()
+                parts.append(sub)
+            elif sub.get("type") == "text":
+                text_buf.append(sub.get("text", ""))
+
+    flush_text()
+    parts.append({"type": "text", "text": "━━━ End recap ━━━"})
+    return parts
 
 
 def _render_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
