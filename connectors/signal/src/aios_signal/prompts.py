@@ -90,6 +90,42 @@ verbatim, do not decode it.  It already encodes the distinction between
 direct messages (a recipient UUID) and groups (a URL-safe-base64 group
 id) so the tool can route correctly.
 
+## Reading inbound messages
+
+Every inbound message arrives prefixed with a bracketed header.  This
+is the **only** authoritative source for the ``sender_uuid`` and
+``timestamp_ms`` values that ``signal_send``'s ``quote_*`` /
+``edit_timestamp_ms`` params and ``signal_react`` / ``signal_delete``
+expect.  Copy them verbatim from the header — never construct,
+shorten, or reformat them.
+
+Header shape (newlines added for clarity):
+
+    [channel=signal/<account>/<chat_id> · chat_type=<dm|group> ·
+     chat_name='Group Name' · from=Alice · sender_uuid=<uuid> ·
+     timestamp_ms=<ms> (<iso>)]
+
+When the inbound is a reply, a second line follows:
+
+    [reply_to: author_uuid=<uuid> · timestamp_ms=<ms>] > snippet
+
+When it's a reaction:
+
+    [reaction='👍' · target_author_uuid=<uuid> · target_timestamp_ms=<ms>]
+
+So a reply to message 1700000000000 from Alice would look like:
+
+    [channel=signal/.../grp_id · chat_type=group · from=Alice ·
+     sender_uuid=fb2c91e2-... · timestamp_ms=1700000000999 (...)]
+    [reply_to: author_uuid=22334455-... · timestamp_ms=1700000000000]
+     > earlier message text...
+
+To thread your own reply against the message Alice was responding to,
+you'd use ``quote_timestamp_ms=1700000000000`` and
+``quote_author_uuid="22334455-..."`` (the values from ``reply_to``).
+To react to Alice's message itself, use ``timestamp_ms=1700000000999``
+and ``sender_uuid=fb2c91e2-...`` (the values from the top header).
+
 ## Sending messages — `signal_send`
 
 **Your text responses are NOT sent automatically.** Bare assistant text
@@ -116,8 +152,19 @@ wondering what is happening — if so, send an update.
 
 Pass `quote_timestamp_ms` AND `quote_author_uuid` (both required) to
 thread your reply as a quote of an earlier message.  Copy them from
-the inbound header.  Use this when the conversation has moved on but
-your reply specifically responds to an older message.
+the inbound header (see "Reading inbound messages" above).
+
+**Use quote-reply when:**
+- You're answering a message from earlier in the conversation, not
+  the most recent one — without a quote, the receiver wonders which
+  message you're answering.
+- Multiple people are talking and it might otherwise be unclear who
+  you're responding to.
+
+**Don't quote when:**
+- You're responding to the most recent message — it's already obvious.
+- You're continuing a natural back-and-forth where the context is
+  already clear.  Quoting every turn is noisy.
 
 ### Mentions in groups
 
@@ -126,6 +173,11 @@ must be at least 8 hex chars and uniquely match one member's UUID.
 Full dashed UUIDs work too.  Example: ``@fb2c91e2 can you handle this?``
 Resolved mentions are encoded automatically; an unresolved prefix
 stays as plain text.  Mentions are ignored in DMs.
+
+**Do NOT use display names** like ``@Alice`` or ``@Bob`` — they are
+not resolved.  The recipient sees a literal ``@Alice`` instead of a
+real mention.  The group roster block in your system prompt lists
+each member's UUID; copy 8+ hex characters from there.
 
 ### Editing a prior message — `edit_timestamp_ms`
 
@@ -146,12 +198,28 @@ visible (a tombstone replaces the message).
 
 ## Reacting — `signal_react`
 
-Lighter-weight than a full message.  Call when an emoji says enough:
+Lighter-weight than a full message.  Call when an emoji says enough.
+Use the ``sender_uuid`` and ``timestamp_ms`` from the inbound header
+of the message you're reacting to:
 
     signal_react(
-        target_author_uuid="<uuid from inbound metadata>",
-        target_timestamp_ms=<timestamp from inbound metadata>,
+        target_author_uuid="<sender_uuid from header>",
+        target_timestamp_ms=<timestamp_ms from header>,
         emoji="👍",
+    )
+
+For example, if you see:
+
+    [channel=... · from=Alice · sender_uuid=fb2c91e2-aaaa-... ·
+     timestamp_ms=1700000000000 (...)]
+    Done with the deploy!
+
+react with:
+
+    signal_react(
+        target_author_uuid="fb2c91e2-aaaa-...",
+        target_timestamp_ms=1700000000000,
+        emoji="🎉",
     )
 
 **Common reactions:** 👍 ❤️ 😂 😮 😢 🎉 🔥 ✅
