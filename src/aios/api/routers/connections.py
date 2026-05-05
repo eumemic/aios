@@ -77,19 +77,10 @@ async def _assert_account_in_snapshot(db_url: str, *, connector: str, account: s
             detail=f"connector {connector!r} snapshot unavailable: {err}",
         )
     # ``connector_status(connector=<c>)`` returns ``{"connectors": [<one
-    # snapshot per instance>]}`` — aggregate accounts across instances so
-    # the drift check works on multi-instance deployments
-    # (e.g. ``telegram:support``, ``telegram:alerts``) without caring
-    # which instance owns the account.
+    # snapshot per instance>]}`` — aggregate across instances so the drift
+    # check works on multi-instance deployments (e.g. ``telegram:support``,
+    # ``telegram:alerts``) without caring which instance owns the account.
     instances = envelope.get("connectors") or []
-    if not instances:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                f"connector {connector!r} has no running instances; "
-                "snapshot unavailable — retry once it's running"
-            ),
-        )
     statuses = {entry.get("status") for entry in instances if isinstance(entry, dict)}
     if "running" not in statuses:
         raise HTTPException(
