@@ -124,11 +124,11 @@ class Session(BaseModel):
     focal_channel: str | None = None
 
 
-class SessionForkRequest(BaseModel):
-    """Request body for ``POST /v1/sessions/{id}/fork``.
+class SessionCloneRequest(BaseModel):
+    """Request body for ``POST /v1/sessions/{id}/clone``.
 
-    All fields optional; the fork inherits everything not overridden from
-    the parent at fork time.
+    All fields optional; the clone inherits everything not overridden from
+    the parent at clone time.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -136,8 +136,8 @@ class SessionForkRequest(BaseModel):
     workspace_path: str | None = Field(
         default=None,
         description=(
-            "Override the fork's workspace volume path. Defaults to a fresh "
-            "``workspace_root/<new_session_id>`` so forks don't fight over "
+            "Override the clone's workspace volume path. Defaults to a fresh "
+            "``workspace_root/<new_session_id>`` so clones don't fight over "
             "files. The directory must exist; aios will not create it."
         ),
     )

@@ -33,8 +33,8 @@ from aios.models.events import Event, EventKind
 from aios.models.sessions import (
     ContextResponse,
     Session,
+    SessionCloneRequest,
     SessionCreate,
-    SessionForkRequest,
     SessionInterruptRequest,
     SessionStatus,
     SessionUpdate,
@@ -122,22 +122,22 @@ async def archive(session_id: str, pool: PoolDep, _auth: AuthDep) -> Session:
     return await service.archive_session(pool, session_id)
 
 
-@router.post("/{session_id}/fork", status_code=status.HTTP_201_CREATED)
-async def fork(
+@router.post("/{session_id}/clone", status_code=status.HTTP_201_CREATED)
+async def clone(
     session_id: str,
-    body: SessionForkRequest,
+    body: SessionCloneRequest,
     pool: PoolDep,
     _auth: AuthDep,
 ) -> Session:
     """Clone a session at its current state into a new session.
 
-    The fork inherits everything that defines the parent's next-step context
+    The clone inherits everything that defines the parent's next-step context
     (events, agent binding, vaults, focal channel, status, stop_reason) but
     has its own session_id and a fresh workspace volume by default.
 
     Refuses if the parent isn't ``idle`` or ``terminated``.
     """
-    return await service.fork_session(pool, session_id, workspace_path=body.workspace_path)
+    return await service.clone_session(pool, session_id, workspace_path=body.workspace_path)
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

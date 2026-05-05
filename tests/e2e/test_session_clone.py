@@ -1,8 +1,8 @@
-"""E2E tests for ``POST /v1/sessions/{id}/fork``.
+"""E2E tests for ``POST /v1/sessions/{id}/clone``.
 
-Forking copies the parent's session row and its full event log into a new
-session id with fresh ``evt_`` ids but identical seqs, so the fork's next
-forward step sees a context byte-identical to the parent's at fork time.
+Cloneing copies the parent's session row and its full event log into a new
+session id with fresh ``evt_`` ids but identical seqs, so the clone's next
+forward step sees a context byte-identical to the parent's at clone time.
 """
 
 from __future__ import annotations
@@ -62,10 +62,10 @@ async def parent_session_id(pool: Any) -> str:
     from aios.services import sessions as sessions_svc
 
     async with pool.acquire() as conn:
-        env = await queries.insert_environment(conn, name=f"fork-env-{_uniq()}")
+        env = await queries.insert_environment(conn, name=f"clone-env-{_uniq()}")
     agent = await agents_svc.create_agent(
         pool,
-        name=f"fork-agent-{_uniq()}",
+        name=f"clone-agent-{_uniq()}",
         model="openai/gpt-4o-mini",
         system="",
         tools=[],
@@ -89,11 +89,11 @@ async def parent_session_id(pool: Any) -> str:
     return session.id
 
 
-class TestForkBasic:
+class TestCloneBasic:
     async def test_creates_new_session_id(
         self, http_client: httpx.AsyncClient, parent_session_id: str
     ) -> None:
-        r = await http_client.post(f"/v1/sessions/{parent_session_id}/fork", json={})
+        r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         assert r.status_code == 201, r.text
         body = r.json()
         assert body["id"] != parent_session_id
@@ -105,17 +105,17 @@ class TestForkBasic:
         from aios.services import sessions as sessions_svc
 
         parent = await sessions_svc.get_session(pool, parent_session_id)
-        r = await http_client.post(f"/v1/sessions/{parent_session_id}/fork", json={})
+        r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         assert r.status_code == 201, r.text
-        fork = r.json()
+        clone = r.json()
 
-        assert fork["agent_id"] == parent.agent_id
-        assert fork["environment_id"] == parent.environment_id
-        assert fork["agent_version"] == parent.agent_version
-        assert fork["title"] == parent.title
-        assert fork["metadata"] == parent.metadata
-        assert fork["status"] == parent.status
-        assert fork["last_event_seq"] == parent.last_event_seq
+        assert clone["agent_id"] == parent.agent_id
+        assert clone["environment_id"] == parent.environment_id
+        assert clone["agent_version"] == parent.agent_version
+        assert clone["title"] == parent.title
+        assert clone["metadata"] == parent.metadata
+        assert clone["status"] == parent.status
+        assert clone["last_event_seq"] == parent.last_event_seq
 
     async def test_copies_event_log_with_fresh_ids(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
@@ -125,12 +125,12 @@ class TestForkBasic:
         parent_events = await sessions_svc.read_events(pool, parent_session_id, limit=200)
         assert len(parent_events) >= 2
 
-        r = await http_client.post(f"/v1/sessions/{parent_session_id}/fork", json={})
-        fork_id = r.json()["id"]
-        fork_events = await sessions_svc.read_events(pool, fork_id, limit=200)
+        r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
+        clone_id = r.json()["id"]
+        clone_events = await sessions_svc.read_events(pool, clone_id, limit=200)
 
-        assert len(fork_events) == len(parent_events)
-        for p, f in zip(parent_events, fork_events, strict=True):
+        assert len(clone_events) == len(parent_events)
+        for p, f in zip(parent_events, clone_events, strict=True):
             assert f.id != p.id
             assert f.id.startswith("evt_")
             assert f.seq == p.seq
@@ -141,21 +141,21 @@ class TestForkBasic:
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
         await sessions_svc_increment_usage(pool, parent_session_id)
-        r = await http_client.post(f"/v1/sessions/{parent_session_id}/fork", json={})
-        fork = r.json()
-        # Parent had nonzero token counts; fork starts fresh.
-        assert fork["usage"]["input_tokens"] == 0
-        assert fork["usage"]["output_tokens"] == 0
+        r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
+        clone = r.json()
+        # Parent had nonzero token counts; clone starts fresh.
+        assert clone["usage"]["input_tokens"] == 0
+        assert clone["usage"]["output_tokens"] == 0
 
 
-class TestForkRefusal:
+class TestCloneRefusal:
     async def test_refuses_running_parent(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
         from aios.services import sessions as sessions_svc
 
         await sessions_svc.set_session_status(pool, parent_session_id, "running")
-        r = await http_client.post(f"/v1/sessions/{parent_session_id}/fork", json={})
+        r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         assert r.status_code == 409, r.text
 
     async def test_refuses_pending_parent(
@@ -164,7 +164,7 @@ class TestForkRefusal:
         from aios.services import sessions as sessions_svc
 
         await sessions_svc.set_session_status(pool, parent_session_id, "pending")
-        r = await http_client.post(f"/v1/sessions/{parent_session_id}/fork", json={})
+        r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         assert r.status_code == 409, r.text
 
     async def test_allowed_when_terminated(
@@ -173,55 +173,55 @@ class TestForkRefusal:
         from aios.services import sessions as sessions_svc
 
         await sessions_svc.set_session_status(pool, parent_session_id, "terminated")
-        r = await http_client.post(f"/v1/sessions/{parent_session_id}/fork", json={})
+        r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         assert r.status_code == 201, r.text
         assert r.json()["status"] == "terminated"
 
     async def test_404_on_missing_parent(self, http_client: httpx.AsyncClient) -> None:
         r = await http_client.post(
-            "/v1/sessions/sess_01HQR2K7VXBZ9MNPL3WYCT8FZZ/fork",
+            "/v1/sessions/sess_01HQR2K7VXBZ9MNPL3WYCT8FZZ/clone",
             json={},
         )
         assert r.status_code == 404, r.text
 
 
-class TestForkIndependence:
-    async def test_appending_to_fork_does_not_affect_parent(
+class TestCloneIndependence:
+    async def test_appending_to_clone_does_not_affect_parent(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
         from aios.services import sessions as sessions_svc
 
         parent_events_before = await sessions_svc.read_events(pool, parent_session_id, limit=200)
-        r = await http_client.post(f"/v1/sessions/{parent_session_id}/fork", json={})
-        fork_id = r.json()["id"]
+        r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
+        clone_id = r.json()["id"]
 
-        await sessions_svc.append_user_message(pool, fork_id, "fork-only")
+        await sessions_svc.append_user_message(pool, clone_id, "clone-only")
 
         parent_events_after = await sessions_svc.read_events(pool, parent_session_id, limit=200)
         assert len(parent_events_after) == len(parent_events_before)
 
-        fork_events = await sessions_svc.read_events(pool, fork_id, limit=200)
-        assert len(fork_events) == len(parent_events_before) + 1
+        clone_events = await sessions_svc.read_events(pool, clone_id, limit=200)
+        assert len(clone_events) == len(parent_events_before) + 1
         # New event got the next seq beyond the inherited prefix.
-        assert fork_events[-1].seq == parent_events_before[-1].seq + 1
-        assert fork_events[-1].data["content"] == "fork-only"
+        assert clone_events[-1].seq == parent_events_before[-1].seq + 1
+        assert clone_events[-1].data["content"] == "clone-only"
 
-    async def test_appending_to_parent_does_not_affect_fork(
+    async def test_appending_to_parent_does_not_affect_clone(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
         from aios.services import sessions as sessions_svc
 
-        r = await http_client.post(f"/v1/sessions/{parent_session_id}/fork", json={})
-        fork_id = r.json()["id"]
-        fork_events_before = await sessions_svc.read_events(pool, fork_id, limit=200)
+        r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
+        clone_id = r.json()["id"]
+        clone_events_before = await sessions_svc.read_events(pool, clone_id, limit=200)
 
         await sessions_svc.append_user_message(pool, parent_session_id, "parent-only")
 
-        fork_events_after = await sessions_svc.read_events(pool, fork_id, limit=200)
-        assert len(fork_events_after) == len(fork_events_before)
+        clone_events_after = await sessions_svc.read_events(pool, clone_id, limit=200)
+        assert len(clone_events_after) == len(clone_events_before)
 
 
-class TestForkVaults:
+class TestCloneVaults:
     async def test_copies_vault_bindings(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
@@ -234,17 +234,17 @@ class TestForkVaults:
         async with pool.acquire() as conn:
             await queries.set_session_vaults(conn, parent_session_id, [v1.id, v2.id])
 
-        r = await http_client.post(f"/v1/sessions/{parent_session_id}/fork", json={})
-        fork = r.json()
-        assert fork["vault_ids"] == [v1.id, v2.id]
+        r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
+        clone = r.json()
+        assert clone["vault_ids"] == [v1.id, v2.id]
 
         # Confirm round-trip via service too (covers the get-with-vaults shape).
-        fetched = await sessions_svc.get_session(pool, fork["id"])
+        fetched = await sessions_svc.get_session(pool, clone["id"])
         assert fetched.vault_ids == [v1.id, v2.id]
 
 
 async def sessions_svc_increment_usage(pool: Any, session_id: str) -> None:
-    """Helper: bump parent's cumulative usage so we can verify fork resets it."""
+    """Helper: bump parent's cumulative usage so we can verify clone resets it."""
     from aios.services import sessions as sessions_svc
 
     await sessions_svc.increment_usage(pool, session_id, input_tokens=42, output_tokens=7)

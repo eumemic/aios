@@ -145,21 +145,21 @@ def archive(ctx: typer.Context, session_id: str) -> None:
 
 
 @app.command(
-    "fork",
-    help="Fork a session — copy its event log into a new session id.",
+    "clone",
+    help="Clone a session — copy its event log into a new session id.",
 )
-def fork(
+def clone(
     ctx: typer.Context,
     session_id: str,
     count: Annotated[
         int,
-        typer.Option("--count", min=1, max=100, help="Create N forks; print each new session."),
+        typer.Option("--count", min=1, max=100, help="Create N clones; print each new session."),
     ] = 1,
     workspace_path: Annotated[
         str | None,
         typer.Option(
             "--workspace-path",
-            help="Override the fork's workspace volume path (must already exist). "
+            help="Override the clone's workspace volume path (must already exist). "
             "Mutually exclusive with --count > 1.",
         ),
     ] = None,
@@ -175,7 +175,7 @@ def fork(
         results: list[dict[str, Any]] = []
         with client:
             for _ in range(count):
-                obj = client.request("POST", f"/v1/sessions/{session_id}/fork", json_body=body)
+                obj = client.request("POST", f"/v1/sessions/{session_id}/clone", json_body=body)
                 results.append(obj)
         if count == 1:
             render_single(results[0])

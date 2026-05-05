@@ -803,30 +803,30 @@ async def delete_session(conn: asyncpg.Connection[Any], session_id: str) -> None
         await conn.execute("DELETE FROM sessions WHERE id = $1", session_id)
 
 
-async def fork_session(
+async def clone_session(
     conn: asyncpg.Connection[Any],
     parent_session_id: str,
     *,
     workspace_path: str | None = None,
 ) -> Session:
-    """Fork a session into a new one with the same prefix of events.
+    """Clone a session into a new one with the same prefix of events.
 
-    The fork inherits ``agent_id``, ``environment_id``, ``agent_version``,
+    The clone inherits ``agent_id``, ``environment_id``, ``agent_version``,
     ``title``, ``metadata``, ``env``, vault bindings, ``last_event_seq``,
     ``status``, ``stop_reason``, and ``focal_channel`` so its next forward
-    step sees a context byte-identical to the parent's at fork time.
+    step sees a context byte-identical to the parent's at clone time.
 
     Cumulative ``input_tokens`` / ``output_tokens`` start at 0 — those were
     paid on the parent and shouldn't be double-counted.
 
     Workspace volume defaults to a fresh ``workspace_root / new_id`` path so
-    forks don't fight over the same files.  Pass ``workspace_path`` to
-    override (e.g. share a read-only volume between forks).
+    clones don't fight over the same files.  Pass ``workspace_path`` to
+    override (e.g. share a read-only volume between clones).
 
     Refuses parents that aren't ``idle`` or ``terminated``: a ``running``
     parent has tool tasks in flight whose results would land only on its
-    own session_id, leaving the fork's expected event stream undefined.
-    The fork primitive locks the parent row for the copy, so concurrent
+    own session_id, leaving the clone's expected event stream undefined.
+    The clone primitive locks the parent row for the copy, so concurrent
     appenders serialize behind it and the copied seq range is gapless.
     """
     from aios.config import get_settings
@@ -847,7 +847,7 @@ async def fork_session(
             )
         if status not in ("idle", "terminated"):
             raise ConflictError(
-                f"can only fork sessions in 'idle' or 'terminated' state; "
+                f"can only clone sessions in 'idle' or 'terminated' state; "
                 f"parent {parent_session_id} is in {status!r}",
                 detail={"id": parent_session_id, "status": status},
             )
