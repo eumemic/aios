@@ -97,9 +97,21 @@ That env var is removed cleanly — set `AIOS_SIGNAL_PHONES=+1...` (a
 one-element CSV) for an equivalent single-phone deployment.  Multi-
 phone setups become `AIOS_SIGNAL_PHONES=+1...,+2...`.
 
+## Attachments
+
+Inbound photos, voice notes, and documents surface to the model as
+`image_url` content parts (vision-capable minds) or text markers,
+via the harness's vision pipeline.  Each file is staged under
+`<workspace_root>/_attachments/<session>/signal/...` and made
+readable inside the sandbox at `/mnt/attachments/signal/...`.
+
+Outbound: pass an `attachments: list[str]` parameter to
+`signal_send` alongside `text`.  Each path must be under
+`/workspace/` or `/mnt/attachments/` (the latter is read-only, so to
+forward an inbound file `cp` it into `/workspace/` first).
+
 ## Out of scope for v1
 
-- Attachments (inbound messages with attachments are posted text-only with `[attachment: <name> (<mime>)]` markers; `signal_send` has no attachment parameter).
 - Voice / Say / SoundEffect / Listen tools.
 - Group create / rename / add-members.
 - Typing indicators.

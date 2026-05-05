@@ -771,7 +771,7 @@ async def list_running_session_ids(conn: asyncpg.Connection[Any]) -> list[str]:
 
 
 async def get_session_model(conn: asyncpg.Connection[Any], session_id: str) -> str:
-    """Return the bound mind URL for ``session_id`` in one round trip.
+    """Return the bound model for ``session_id`` in one round trip.
 
     Pinned ``agent_version`` wins when set; otherwise the live agent's
     current ``model`` is returned.
@@ -996,13 +996,13 @@ async def model_token_ratio(
     Below-threshold results are not cached, so newly accumulating models
     can activate as soon as the minimum sample count is reached.
 
-    ``model`` is the raw mind string (``agent.model``) — NO NORMALIZATION.
+    ``model`` is the raw model string (``agent.model``) — NO NORMALIZATION.
     Different LiteLLM routes (``anthropic/...`` vs
     ``openrouter/anthropic/...``) hit different provider tokenizers and
     must partition separately.  The same string must appear at stamp time
     and at query time for the same step — always plumb ``agent.model`` on
     both sides.  aios sessions do not carry a model override; the session's
-    active mind is always its agent's configured model.
+    active model is always its agent's configured model.
 
     Scope: the aggregate pools samples across every session in this
     database.  Token counts are scalar only — no content crosses between
@@ -1450,7 +1450,7 @@ async def read_windowed_events(
     ``window_max`` by the overhead amount.  Callers that don't have any
     such overhead (preview tooling, test scaffolds) pass ``0``.
 
-    ``model`` must be the session's currently-active mind string —
+    ``model`` must be the session's currently-active model string —
     ``agent.model`` on the session's pinned agent/version.  The same
     string is what :func:`~aios.harness.loop.run_session_step` stamps on
     ``model_request_end`` spans, so stamp-side and query-side stay

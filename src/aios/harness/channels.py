@@ -34,6 +34,15 @@ SWITCH_CHANNEL_METADATA_KEY = "switch_channel"
 # keys per the MCP spec.
 FOCAL_CHANNEL_META_KEY = "aios.focal_channel_path"
 
+# Carries the calling session's id so MCP servers can resolve
+# model-visible in-sandbox paths to host equivalents.  Stamped on
+# every outbound MCP request alongside the focal-channel suffix —
+# including agent-declared HTTP MCP servers, which see the ULID and
+# ignore unknown ``_meta`` keys per the MCP spec.  ULIDs are not
+# secrets, but the leak is a real cross-boundary signal worth
+# knowing about.
+SESSION_ID_META_KEY = "aios.session_id"
+
 
 def focal_channel_path(focal: str | None) -> str | None:
     """Return the connector-relative suffix of a focal address.
