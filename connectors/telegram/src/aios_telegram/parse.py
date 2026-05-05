@@ -107,7 +107,13 @@ def _extract_attachments(message: Message) -> tuple[Attachment, ...]:
                 filename=f"voice-{message.message_id}.ogg",
             )
         )
-    if message.document:
+    if message.document and not message.animation:
+        # PTB aliases ``message.animation`` (GIFs) into ``message.document``
+        # too, and they share file_id + file_name.  Surfacing both produces
+        # two attachments with identical filenames, which the supervisor's
+        # staging layer rejects ("two attachments sanitize to the same
+        # staged name").  The animation branch below carries the same file
+        # with the right content-type, so skip the document alias here.
         doc = message.document
         out.append(
             Attachment(

@@ -133,12 +133,15 @@ def test_video_sticker_surfaces_webm_attachment(
 def test_animation_surfaces_video_attachment(message_animation: Message, bot_id: int) -> None:
     msg = parse_message(message_animation, bot_id=bot_id)
     assert msg is not None
-    # PTB also fills .document for animations; we surface the
-    # animation slot which is more accurate.
-    file_ids = {a.file_id for a in msg.attachments}
-    assert "ANIM-A" in file_ids
-    anim_atts = [a for a in msg.attachments if a.filename == "fun.mp4"]
-    assert any(a.content_type == "video/mp4" for a in anim_atts)
+    # PTB aliases ``animation`` into ``document`` for GIFs (same file_id +
+    # file_name).  Surfacing both produced duplicate attachments that the
+    # supervisor's staging layer refused — confirm we deduplicate to a
+    # single video/mp4 attachment.
+    assert len(msg.attachments) == 1
+    att = msg.attachments[0]
+    assert att.file_id == "ANIM-A"
+    assert att.filename == "fun.mp4"
+    assert att.content_type == "video/mp4"
 
 
 def test_video_note_surfaces_video_attachment(message_video_note: Message, bot_id: int) -> None:
