@@ -225,8 +225,8 @@ class TestResolveConnectorSpecs:
 
         The subprocess runs under ``<connectors_dir>/<connector>/`` as cwd,
         so a relative env value would resolve against the wrong directory
-        inside the SDK's ``resolve_sandbox_path`` helper.  Wire-level
-        symptom: outbound attachments fail with ``attachment path
+        inside the SDK's ``SandboxPath`` resolution.  Wire-level
+        symptom: outbound attachments fail with ``sandbox path
         '/workspace/foo.png' does not exist (resolved to
         <connectors_dir>/<connector>/workspaces/<session>/foo.png)``.
         """
@@ -267,7 +267,7 @@ class TestResolveConnectorSpecs:
         The harness uses ``settings.workspace_root`` to find session
         workspaces on the host; a connector author overriding it via
         ``spec.env`` would silently desynchronize the SDK's
-        ``resolve_sandbox_path`` from the harness's bind-mount, so the
+        ``SandboxPath`` resolution from the harness's bind-mount, so the
         absolutized worker value wins.
         """
         from pathlib import Path

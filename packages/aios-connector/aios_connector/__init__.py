@@ -26,9 +26,12 @@ Public API:
 * :class:`Attachment` / :class:`AttachmentError` — inbound binary blobs
   (photos, voice notes, documents) and the SDK-boundary validation
   failure connectors catch.
-* :func:`resolve_sandbox_path` — host-path resolver for outbound
-  attachments; connector send tools call this for each entry in
-  their ``attachments`` parameter.
+* :data:`SandboxPath` — type marker for outbound-attachment parameters.
+  Annotate ``attachments: list[SandboxPath] | None = None`` (or scalar
+  ``SandboxPath``) and the SDK auto-resolves the model-supplied
+  in-sandbox path strings to host :class:`pathlib.Path` objects BEFORE
+  the tool body runs.  Connector authors don't call any resolver
+  themselves; that's the entire point of the marker.
 """
 
 from __future__ import annotations
@@ -41,14 +44,14 @@ from aios_connector.base import (
     make_account,
     tool,
 )
-from aios_connector.media import resolve_sandbox_path
+from aios_connector.media import SandboxPath
 
 __all__ = [
     "Attachment",
     "AttachmentError",
     "Connector",
+    "SandboxPath",
     "focal_required",
     "make_account",
-    "resolve_sandbox_path",
     "tool",
 ]

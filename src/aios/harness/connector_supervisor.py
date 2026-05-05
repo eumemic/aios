@@ -329,7 +329,7 @@ def _build_instance_env(
     against its own cwd, but spawns connector subprocesses under
     ``<connectors_dir>/<connector>/[<instance>/]``.  Inheriting the
     operator's relative ``AIOS_WORKSPACE_ROOT`` (e.g. ``./workspaces``
-    in ``.env``) would let the SDK's ``resolve_sandbox_path`` resolve
+    in ``.env``) would let the SDK's ``SandboxPath`` resolution resolve
     ``/workspace/foo.png`` against the wrong directory.  We stamp the
     worker-resolved absolute path so harness and SDK agree on the
     bind-mount root regardless of subprocess cwd.  Factory-supplied

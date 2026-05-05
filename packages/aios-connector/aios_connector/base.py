@@ -30,6 +30,8 @@ import json
 import os
 import stat
 import time
+import types
+import typing
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +52,7 @@ from mcp.types import (
 from pydantic import TypeAdapter
 from ulid import ULID
 
+from aios_connector.media import _resolve_sandbox_path, _SandboxPathMarker
 from aios_connector.spool import SOFT_WARN_BYTES, Spool
 
 # Method names the connector emits over stdio.  Mirrors the constant in
@@ -99,6 +102,14 @@ class ToolDescriptor:
     account omit ``account`` from their signature and pay no
     multi-account routing cost.  The frozenset is computed once at
     registration so dispatch doesn't re-introspect on every call.
+
+    ``sandbox_params`` maps each parameter annotated with
+    :data:`SandboxPath` (or ``list[SandboxPath]``) to ``"scalar"`` /
+    ``"list"`` so the dispatch wrapper resolves model-supplied path
+    strings to host ``Path`` objects before the tool body runs.
+    Connector authors never call the resolver directly — failures
+    (containment violation, missing file, missing session_id) raise a
+    uniform error from the SDK boundary.
     """
 
     name: str
@@ -107,6 +118,7 @@ class ToolDescriptor:
     fn: ToolFn
     focal_required: bool = False
     focal_kwargs: frozenset[str] = frozenset()
+    sandbox_params: dict[str, str] = field(default_factory=dict)
 
 
 _TOOL_ATTR = "__aios_connector_tool__"
@@ -162,6 +174,12 @@ def tool(
                 "shouldn't be focal-required"
             )
         schema = _build_input_schema(fn, focal_required=is_focal)
+        sandbox_params: dict[str, str] = {}
+        for param_name, hint in get_type_hints(fn, include_extras=True).items():
+            if _extract_sandbox_marker(hint) is not None:
+                sandbox_params[param_name] = "scalar"
+            elif _extract_list_sandbox_marker(hint) is not None:
+                sandbox_params[param_name] = "list"
         descriptor = ToolDescriptor(
             name=tool_name,
             description=description or doc,
@@ -169,6 +187,7 @@ def tool(
             fn=fn,
             focal_required=is_focal,
             focal_kwargs=focal_kwargs,
+            sandbox_params=sandbox_params,
         )
         setattr(fn, _TOOL_ATTR, descriptor)
         return fn
@@ -221,8 +240,10 @@ def _build_input_schema(fn: ToolFn, *, focal_required: bool) -> dict[str, Any]:
     # Fail loudly here: an unresolvable hint at decoration time means
     # the connector author has a forward-reference / circular-import
     # bug.  Silently emitting an "any" schema would publish the wrong
-    # tool contract to the model.
-    hints = get_type_hints(fn)
+    # tool contract to the model.  ``include_extras=True`` keeps
+    # ``Annotated[...]`` metadata intact so the ``SandboxPath`` marker
+    # is detectable.
+    hints = get_type_hints(fn, include_extras=True)
 
     properties: dict[str, dict[str, Any]] = {}
     required: list[str] = []
@@ -257,7 +278,7 @@ def _hint_to_schema(hint: Any) -> dict[str, Any]:
     therefore can't ship a tool with a mis-typed schema as long as their
     annotations are honest.
 
-    Two normalizations on top of pydantic's output:
+    Three normalizations on top of pydantic's output:
 
     * Missing / ``None`` hints return ``{}`` — the SDK's "best effort"
       floor for parameters without an annotation.  ``inspect.Parameter
@@ -267,9 +288,17 @@ def _hint_to_schema(hint: Any) -> dict[str, Any]:
       Anthropic tool-args convention encodes optionality through
       absence from the parent object's ``required[]``, not via JSON
       ``null`` shape, so we strip the null arm and expose ``T``.
+    * :data:`aios_connector.media.SandboxPath` (an ``Annotated[Path,
+      _SandboxPathMarker]``) and ``list[SandboxPath]`` surface as
+      strings (or arrays of strings) with the marker's description —
+      the model passes in-sandbox path strings, the SDK auto-resolves
+      to host ``Path`` objects before the tool body runs.
     """
     if hint is None or hint is inspect.Parameter.empty:
         return {}
+    sandbox_schema = _sandbox_path_schema(hint)
+    if sandbox_schema is not None:
+        return sandbox_schema
     schema = TypeAdapter(hint).json_schema()
     any_of = schema.get("anyOf")
     if isinstance(any_of, list):
@@ -281,6 +310,116 @@ def _hint_to_schema(hint: Any) -> dict[str, Any]:
             merged.update(non_null[0])
             return merged
     return schema
+
+
+def _sandbox_path_schema(hint: Any) -> dict[str, Any] | None:
+    """Return the JSON Schema for a hint involving :data:`SandboxPath`, or ``None``.
+
+    Recognized shapes (and any ``| None`` variant — optionality is
+    handled by ``required[]`` absence, so the null arm doesn't change
+    the schema for the present argument):
+
+    * ``SandboxPath``                 → ``{"type": "string", "description": ...}``
+    * ``list[SandboxPath]``           → ``{"type": "array", "items": <string-schema>}``
+    * Optional flavors of either      → same shapes (null arm dropped).
+
+    The detection works at any depth via ``_extract_sandbox_marker`` —
+    it walks ``Annotated[..., metadata]`` looking for a
+    ``_SandboxPathMarker`` instance.  Connector authors can therefore
+    write ``list[SandboxPath]``, ``SandboxPath | None``, etc., and get
+    the right schema automatically.
+    """
+    inner_marker = _extract_sandbox_marker(hint)
+    if inner_marker is not None:
+        return {"type": "string", "description": inner_marker.description}
+    list_marker = _extract_list_sandbox_marker(hint)
+    if list_marker is not None:
+        return {
+            "type": "array",
+            "items": {"type": "string", "description": list_marker.description},
+        }
+    return None
+
+
+def _strip_optional(hint: Any) -> Any:
+    """Strip a ``| None`` arm from a union, returning the remaining single type.
+
+    Returns ``hint`` unchanged for non-unions or unions with more than
+    one non-None member (we don't try to be clever about general
+    unions — that's pydantic's job).
+    """
+    origin = typing.get_origin(hint)
+    if origin is None:
+        return hint
+    if origin is typing.Union or origin is types.UnionType:
+        args = [a for a in typing.get_args(hint) if a is not type(None)]
+        if len(args) == 1:
+            return args[0]
+    return hint
+
+
+def _extract_sandbox_marker(hint: Any) -> _SandboxPathMarker | None:
+    """Return the embedded :class:`_SandboxPathMarker` if ``hint`` is
+    :data:`SandboxPath` (or ``SandboxPath | None``), else ``None``.
+
+    ``Annotated[X, ...]`` carries its metadata tuple on
+    ``__metadata__``; ``typing.get_origin`` returns ``typing.Annotated``
+    on 3.13+.  We just probe ``__metadata__`` directly so the check
+    works whether or not the hint is wrapped in ``Optional``.
+    """
+    bare = _strip_optional(hint)
+    metadata = getattr(bare, "__metadata__", None)
+    if not metadata:
+        return None
+    for meta in metadata:
+        if isinstance(meta, _SandboxPathMarker):
+            return meta
+    return None
+
+
+def _extract_list_sandbox_marker(hint: Any) -> _SandboxPathMarker | None:
+    """Return the embedded marker if ``hint`` is ``list[SandboxPath]`` (or
+    its ``| None`` variant), else ``None``."""
+    bare = _strip_optional(hint)
+    if typing.get_origin(bare) is not list:
+        return None
+    args = typing.get_args(bare)
+    if len(args) != 1:
+        return None
+    return _extract_sandbox_marker(args[0])
+
+
+def _resolve_one_sandbox_path(
+    *,
+    sandbox_path: str,
+    session_id: str,
+    workspace_root: Path,
+    tool_name: str,
+) -> Path:
+    """Resolve one in-sandbox path string to its host :class:`Path`.
+
+    Wraps :func:`_resolve_sandbox_path` with the uniform ``ValueError``
+    wording the dispatch wrapper raises for every connector — single
+    code path means there's no drift between, say, ``signal_send`` and
+    ``telegram_send`` error messages.  Connector authors don't see this
+    helper at all; the SDK calls it.
+    """
+    host = _resolve_sandbox_path(
+        session_id=session_id,
+        sandbox_path=sandbox_path,
+        workspace_root=workspace_root,
+    )
+    if host is None:
+        raise ValueError(
+            f"{tool_name}: sandbox path {sandbox_path!r} could not be resolved "
+            f"to a host path (must be under /workspace/ or "
+            f"/mnt/attachments/, no .. escapes)"
+        )
+    if not host.is_file():
+        raise ValueError(
+            f"{tool_name}: sandbox path {sandbox_path!r} does not exist (resolved to {host})"
+        )
+    return host
 
 
 @dataclass
@@ -669,7 +808,7 @@ class Connector:
     async def _invoke_tool(
         self, descriptor: ToolDescriptor, arguments: dict[str, Any]
     ) -> list[TextContent]:
-        """Dispatch a tool, parsing focal meta if the descriptor opted in.
+        """Dispatch a tool, parsing focal meta and resolving sandbox paths.
 
         For ``@focal_required`` tools: split the focal path on the first
         ``/`` (yielding ``account`` and the chat-id portion, which may
@@ -679,6 +818,15 @@ class Connector:
         meta key is missing — the agent shouldn't reach a focal-required
         tool without focal set, so any absence is a bug to surface, not
         a condition to fall back on.
+
+        Then for any parameter declared as :data:`SandboxPath` /
+        ``list[SandboxPath]``, the model-supplied path string(s) are
+        resolved to host :class:`pathlib.Path` objects via
+        :func:`_resolve_sandbox_path` BEFORE the tool body's coroutine
+        starts.  Failures (containment violation, missing file, missing
+        ``_meta.aios.session_id``) raise the same error wording across
+        every connector — that's the whole point of lifting the
+        resolution into the SDK boundary.
         """
         kwargs = dict(arguments)
         if descriptor.focal_required:
@@ -694,12 +842,82 @@ class Connector:
             if "chat_id" in descriptor.focal_kwargs:
                 kwargs["chat_id"] = chat_id
 
+        if descriptor.sandbox_params:
+            self._resolve_sandbox_kwargs(descriptor, kwargs)
+
         result = await descriptor.fn(self, **kwargs)
         if isinstance(result, list) and all(isinstance(x, TextContent) for x in result):
             return result
         if isinstance(result, str):
             return [TextContent(type="text", text=result)]
         return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+
+    def _resolve_sandbox_kwargs(self, descriptor: ToolDescriptor, kwargs: dict[str, Any]) -> None:
+        """Replace each :data:`SandboxPath` / ``list[SandboxPath]`` argument
+        with a resolved host :class:`pathlib.Path`.
+
+        Mutates ``kwargs`` in place.  Skips parameters whose value is
+        ``None`` or absent — the tool body sees the optional argument as
+        the model passed it.  Empty lists pass through unchanged so
+        text-only send tools work in test harnesses that don't stamp
+        ``_meta.aios.session_id``.
+
+        Failures raise:
+        * :class:`RuntimeError` when the model passed a path but the
+          harness didn't stamp ``_meta.aios.session_id``.
+        * :class:`TypeError` when the argument shape doesn't match the
+          declared parameter (e.g. ``list[SandboxPath]`` got a string).
+        * :class:`ValueError` for containment violations or missing files.
+        """
+        workspace_root = Path(os.environ.get("AIOS_WORKSPACE_ROOT", _DEFAULT_WORKSPACE_ROOT))
+        # Resolved lazily so text-only calls (no SandboxPath args present
+        # in kwargs) don't require session_id to be stamped.
+        session_id: str | None = None
+
+        for param_name, kind in descriptor.sandbox_params.items():
+            if param_name not in kwargs:
+                continue
+            value = kwargs[param_name]
+            if value is None:
+                continue
+            if kind == "list":
+                if not isinstance(value, list):
+                    raise TypeError(
+                        f"tool {descriptor.name!r} parameter {param_name!r} expects a "
+                        f"list of in-sandbox path strings; got {type(value).__name__}"
+                    )
+                if not value:
+                    continue
+                if session_id is None:
+                    session_id = self._require_session_id(descriptor.name)
+                kwargs[param_name] = [
+                    _resolve_one_sandbox_path(
+                        sandbox_path=str(item),
+                        session_id=session_id,
+                        workspace_root=workspace_root,
+                        tool_name=descriptor.name,
+                    )
+                    for item in value
+                ]
+            else:  # "scalar"
+                if session_id is None:
+                    session_id = self._require_session_id(descriptor.name)
+                kwargs[param_name] = _resolve_one_sandbox_path(
+                    sandbox_path=str(value),
+                    session_id=session_id,
+                    workspace_root=workspace_root,
+                    tool_name=descriptor.name,
+                )
+
+    def _require_session_id(self, tool_name: str) -> str:
+        session_id = self.current_session_id()
+        if session_id is None:
+            raise RuntimeError(
+                f"{tool_name} with sandbox-path arguments requires "
+                "_meta.aios.session_id; the harness should always inject "
+                "this for tool dispatches"
+            )
+        return session_id
 
     def _focal_from_request_meta(self) -> str | None:
         """Read the focal-channel suffix from the active request, or ``None``."""
@@ -708,45 +926,6 @@ class Connector:
     def current_session_id(self) -> str | None:
         """Read ``_meta.aios.session_id`` from the active request, or ``None``."""
         return self._read_meta_str(_SESSION_ID_META_KEY)
-
-    def resolve_media_paths(self, paths: list[str], *, tool_name: str) -> list[str]:
-        """Map sandbox-visible attachment paths to host paths.
-
-        Empty input short-circuits without requiring ``_meta.aios.session_id``,
-        so text-only send tools work in test harnesses that don't stamp it.
-        Non-empty input raises ``RuntimeError`` if session_id is missing,
-        ``ValueError`` if any path fails containment or doesn't exist.
-        """
-        if not paths:
-            return []
-        session_id = self.current_session_id()
-        if session_id is None:
-            raise RuntimeError(
-                f"{tool_name} with attachments requires _meta.aios.session_id; "
-                "the harness should always inject this for tool dispatches"
-            )
-        from aios_connector.media import resolve_sandbox_path
-
-        workspace_root = Path(os.environ.get("AIOS_WORKSPACE_ROOT", _DEFAULT_WORKSPACE_ROOT))
-        resolved: list[str] = []
-        for sandbox_path in paths:
-            host = resolve_sandbox_path(
-                session_id=session_id,
-                sandbox_path=sandbox_path,
-                workspace_root=workspace_root,
-            )
-            if host is None:
-                raise ValueError(
-                    f"attachment path {sandbox_path!r} could not be resolved "
-                    f"to a host path (must be under /workspace/ or "
-                    f"/mnt/attachments/, no .. escapes)"
-                )
-            if not host.is_file():
-                raise ValueError(
-                    f"attachment path {sandbox_path!r} does not exist (resolved to {host})"
-                )
-            resolved.append(str(host))
-        return resolved
 
     def _read_meta_str(self, key: str) -> str | None:
         """Fetch a string-typed key from ``_meta`` of the active tool-call

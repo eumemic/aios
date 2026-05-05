@@ -7,6 +7,12 @@ array-of-strings shape, not an empty schema), plus an integration
 test that runs the full ``@tool()`` decorator path so a regression
 in the helper would also surface here.
 
+Also covers :data:`aios_connector.SandboxPath`, the marker connector
+authors annotate outbound-attachment parameters with: the schema must
+publish ``string`` (not ``Path``) so the model passes path strings,
+and the SDK's dispatch wrapper resolves them to host ``Path`` objects
+before the tool body runs.
+
 Wire evidence motivating this:  ``mcp__telegram__telegram_send``'s
 ``attachments: list[str] | None = None`` parameter previously
 published an empty ``{}`` schema, leaving the model to guess the
@@ -18,7 +24,7 @@ from __future__ import annotations
 import inspect
 from typing import Annotated
 
-from aios_connector import Connector, tool
+from aios_connector import Connector, SandboxPath, tool
 from aios_connector.base import _TOOL_ATTR, ToolDescriptor, _hint_to_schema
 
 # ── primitive shapes survive the swap ───────────────────────────────
@@ -148,3 +154,99 @@ def test_decorator_publishes_full_array_schema_for_optional_list() -> None:
     }
     # `attachments` has a default → optional → not in required[].
     assert descriptor.input_schema["required"] == ["text"]
+
+
+# ── SandboxPath: model-facing schema is `string`, body sees `Path` ───
+
+
+def test_sandbox_path_schema_is_string() -> None:
+    """A bare :data:`SandboxPath` parameter must publish a string schema —
+    the model passes in-sandbox path strings, the SDK auto-resolves to
+    a host :class:`Path` before the tool body runs.
+    """
+    schema = _hint_to_schema(SandboxPath)
+    assert schema["type"] == "string"
+    assert "/workspace/" in schema["description"]
+
+
+def test_list_sandbox_path_schema_is_array_of_strings() -> None:
+    schema = _hint_to_schema(list[SandboxPath])
+    assert schema == {
+        "type": "array",
+        "items": {
+            "type": "string",
+            "description": schema["items"]["description"],
+        },
+    }
+    assert "/workspace/" in schema["items"]["description"]
+
+
+def test_optional_sandbox_path_schema_is_string() -> None:
+    schema = _hint_to_schema(SandboxPath | None)
+    assert schema["type"] == "string"
+    assert "/workspace/" in schema["description"]
+
+
+def test_optional_list_sandbox_path_schema_is_array_of_strings() -> None:
+    """The headline shape signal/telegram tools use:
+    ``list[SandboxPath] | None = None``.
+    """
+    schema = _hint_to_schema(list[SandboxPath] | None)
+    assert schema["type"] == "array"
+    assert schema["items"]["type"] == "string"
+    assert "/workspace/" in schema["items"]["description"]
+
+
+class _SandboxFixtureConnector(Connector):
+    name = "_sandbox_fixture"
+
+    @tool()
+    async def with_attachments(
+        self,
+        text: str,
+        attachments: list[SandboxPath] | None = None,
+    ) -> dict[str, object]:
+        """End-to-end: list[SandboxPath] arrives resolved as list[Path]."""
+        if attachments is None:
+            return {"text": text}
+        return {"text": text, "first_path": str(attachments[0])}
+
+    @tool()
+    async def with_one_attachment(
+        self,
+        path: SandboxPath,
+    ) -> dict[str, object]:
+        """End-to-end: scalar SandboxPath arrives resolved as Path."""
+        return {"path": str(path)}
+
+
+def test_sandbox_path_descriptor_records_list_kind() -> None:
+    """The dispatch wrapper needs to know which params to resolve and how —
+    ``sandbox_params`` is the structured record built at decoration time.
+    """
+    descriptor = _descriptor(_SandboxFixtureConnector.with_attachments)
+    assert descriptor.sandbox_params == {"attachments": "list"}
+
+
+def test_sandbox_path_descriptor_records_scalar_kind() -> None:
+    descriptor = _descriptor(_SandboxFixtureConnector.with_one_attachment)
+    assert descriptor.sandbox_params == {"path": "scalar"}
+
+
+def test_sandbox_path_published_schema_is_string_array() -> None:
+    """Integration: the @tool() decorator publishes the array-of-strings
+    shape for ``attachments: list[SandboxPath] | None``."""
+    descriptor = _descriptor(_SandboxFixtureConnector.with_attachments)
+    properties = descriptor.input_schema["properties"]
+    assert properties["attachments"]["type"] == "array"
+    assert properties["attachments"]["items"]["type"] == "string"
+    assert "/workspace/" in properties["attachments"]["items"]["description"]
+    # `attachments` has a default → optional → not in required[].
+    assert descriptor.input_schema["required"] == ["text"]
+
+
+def test_scalar_sandbox_path_published_schema_is_string() -> None:
+    descriptor = _descriptor(_SandboxFixtureConnector.with_one_attachment)
+    properties = descriptor.input_schema["properties"]
+    assert properties["path"]["type"] == "string"
+    assert "/workspace/" in properties["path"]["description"]
