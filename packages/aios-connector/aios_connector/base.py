@@ -47,6 +47,7 @@ from mcp.types import (
     TextContent,
     Tool,
 )
+from pydantic import TypeAdapter
 from ulid import ULID
 
 from aios_connector.spool import SOFT_WARN_BYTES, Spool
@@ -247,31 +248,39 @@ def _build_input_schema(fn: ToolFn, *, focal_required: bool) -> dict[str, Any]:
 
 
 def _hint_to_schema(hint: Any) -> dict[str, Any]:
-    """Map a Python type hint to a JSON Schema fragment."""
-    if hint is None or hint is type(None):
-        return {"type": "null"}
-    if hint is str:
-        return {"type": "string"}
-    if hint is int:
-        return {"type": "integer"}
-    if hint is float:
-        return {"type": "number"}
-    if hint is bool:
-        return {"type": "boolean"}
-    if hint is list:
-        return {"type": "array"}
-    if hint is dict:
-        return {"type": "object"}
-    # Best effort for parameterized generics: ``list[str]`` etc.  The
-    # SDK keeps this minimal; connector authors who need richer schemas
-    # should pass description= on @tool or supply schemas via a
-    # follow-up enhancement.
-    origin = getattr(hint, "__origin__", None)
-    if origin is list:
-        return {"type": "array"}
-    if origin is dict:
-        return {"type": "object"}
-    return {}
+    """Map a Python type hint to a JSON Schema fragment.
+
+    Delegates to :class:`pydantic.TypeAdapter` so any annotation pydantic
+    understands — primitives, ``list[T]`` / ``dict[K, V]``, ``Annotated``,
+    ``Literal``, ``pathlib.Path``, ``BaseModel`` subclasses, etc. —
+    produces a correct JSON Schema automatically.  Connector authors
+    therefore can't ship a tool with a mis-typed schema as long as their
+    annotations are honest.
+
+    Two normalizations on top of pydantic's output:
+
+    * Missing / ``None`` hints return ``{}`` — the SDK's "best effort"
+      floor for parameters without an annotation.  ``inspect.Parameter
+      .empty`` is also accepted so callers can pass it directly.
+    * ``T | None`` is flattened to ``T``.  Pydantic emits an
+      ``anyOf`` with a ``{"type": "null"}`` arm; the MCP / OpenAI /
+      Anthropic tool-args convention encodes optionality through
+      absence from the parent object's ``required[]``, not via JSON
+      ``null`` shape, so we strip the null arm and expose ``T``.
+    """
+    if hint is None or hint is inspect.Parameter.empty:
+        return {}
+    schema = TypeAdapter(hint).json_schema()
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list):
+        non_null = [s for s in any_of if s != {"type": "null"}]
+        if len(non_null) == 1:
+            # Carry over any sibling keys pydantic attached to the
+            # union (e.g. ``description`` from ``Annotated``).
+            merged = {k: v for k, v in schema.items() if k != "anyOf"}
+            merged.update(non_null[0])
+            return merged
+    return schema
 
 
 @dataclass
