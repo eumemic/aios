@@ -215,3 +215,185 @@ def message_channel_post_no_sender(ptb_bot: Bot) -> Message:
         },
         ptb_bot,
     )
+
+
+@pytest.fixture
+def message_static_sticker(ptb_bot: Bot) -> Message:
+    return _make_message(
+        {
+            "message_id": 720,
+            "date": 1700000020,
+            "chat": {"id": 123456789, "type": "private"},
+            "from": {"id": 123456789, "is_bot": False, "first_name": "Alice"},
+            "sticker": {
+                "file_id": "STATIC-STICKER",
+                "file_unique_id": "ss",
+                "type": "regular",
+                "width": 512,
+                "height": 512,
+                "is_animated": False,
+                "is_video": False,
+                "emoji": "👍",
+            },
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_video_sticker(ptb_bot: Bot) -> Message:
+    return _make_message(
+        {
+            "message_id": 721,
+            "date": 1700000021,
+            "chat": {"id": 123456789, "type": "private"},
+            "from": {"id": 123456789, "is_bot": False, "first_name": "Alice"},
+            "sticker": {
+                "file_id": "VIDEO-STICKER",
+                "file_unique_id": "vs",
+                "type": "regular",
+                "width": 512,
+                "height": 512,
+                "is_animated": False,
+                "is_video": True,
+                "emoji": "🎉",
+            },
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_animation(ptb_bot: Bot) -> Message:
+    return _make_message(
+        {
+            "message_id": 722,
+            "date": 1700000022,
+            "chat": {"id": 123456789, "type": "private"},
+            "from": {"id": 123456789, "is_bot": False, "first_name": "Alice"},
+            "animation": {
+                "file_id": "ANIM-A",
+                "file_unique_id": "anim-a",
+                "width": 320,
+                "height": 240,
+                "duration": 3,
+                "mime_type": "video/mp4",
+                "file_name": "fun.mp4",
+            },
+            # Telegram also stuffs animation into the document field.
+            "document": {
+                "file_id": "ANIM-A",
+                "file_unique_id": "anim-a",
+                "file_name": "fun.mp4",
+                "mime_type": "video/mp4",
+            },
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_video_note(ptb_bot: Bot) -> Message:
+    return _make_message(
+        {
+            "message_id": 723,
+            "date": 1700000023,
+            "chat": {"id": 123456789, "type": "private"},
+            "from": {"id": 123456789, "is_bot": False, "first_name": "Alice"},
+            "video_note": {
+                "file_id": "VN-A",
+                "file_unique_id": "vn-a",
+                "length": 240,
+                "duration": 5,
+            },
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_edited(ptb_bot: Bot) -> Message:
+    """Edited DM text — same message_id as the original, with edit_date set."""
+    return _make_message(
+        {
+            "message_id": 730,
+            "date": 1700000030,
+            "edit_date": 1700000040,
+            "chat": {"id": 123456789, "type": "private"},
+            "from": {"id": 123456789, "is_bot": False, "first_name": "Alice"},
+            "text": "fixed typo",
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def reaction_added(ptb_bot: Bot) -> Any:
+    """User added a 👍 reaction to a bot message (no prior reaction)."""
+    from telegram import MessageReactionUpdated
+
+    payload: dict[str, Any] = {
+        "chat": {"id": 123456789, "type": "private"},
+        "message_id": 901,
+        "user": {"id": 123456789, "is_bot": False, "first_name": "Alice"},
+        "date": 1700000050,
+        "old_reaction": [],
+        "new_reaction": [{"type": "emoji", "emoji": "👍"}],
+    }
+    out = MessageReactionUpdated.de_json(payload, ptb_bot)
+    assert out is not None
+    return out
+
+
+@pytest.fixture
+def reaction_removed(ptb_bot: Bot) -> Any:
+    """User cleared a 👍 reaction (had one before, now none)."""
+    from telegram import MessageReactionUpdated
+
+    payload: dict[str, Any] = {
+        "chat": {"id": 123456789, "type": "private"},
+        "message_id": 901,
+        "user": {"id": 123456789, "is_bot": False, "first_name": "Alice"},
+        "date": 1700000051,
+        "old_reaction": [{"type": "emoji", "emoji": "👍"}],
+        "new_reaction": [],
+    }
+    out = MessageReactionUpdated.de_json(payload, ptb_bot)
+    assert out is not None
+    return out
+
+
+@pytest.fixture
+def reaction_anonymous_in_supergroup(ptb_bot: Bot) -> Any:
+    """Anonymous reaction (actor_chat instead of user) — should be dropped."""
+    from telegram import MessageReactionUpdated
+
+    payload: dict[str, Any] = {
+        "chat": {"id": -1001234567890, "type": "supergroup", "title": "Big"},
+        "message_id": 902,
+        "actor_chat": {"id": -1001234567890, "type": "supergroup", "title": "Big"},
+        "date": 1700000052,
+        "old_reaction": [],
+        "new_reaction": [{"type": "emoji", "emoji": "🔥"}],
+    }
+    out = MessageReactionUpdated.de_json(payload, ptb_bot)
+    assert out is not None
+    return out
+
+
+@pytest.fixture
+def reaction_custom_emoji_only(ptb_bot: Bot) -> Any:
+    """Reaction is a custom (premium) emoji only — should be dropped."""
+    from telegram import MessageReactionUpdated
+
+    payload: dict[str, Any] = {
+        "chat": {"id": 123456789, "type": "private"},
+        "message_id": 903,
+        "user": {"id": 123456789, "is_bot": False, "first_name": "Alice"},
+        "date": 1700000053,
+        "old_reaction": [],
+        "new_reaction": [{"type": "custom_emoji", "custom_emoji_id": "5123"}],
+    }
+    out = MessageReactionUpdated.de_json(payload, ptb_bot)
+    assert out is not None
+    return out

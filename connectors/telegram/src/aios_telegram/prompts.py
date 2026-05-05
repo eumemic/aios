@@ -5,8 +5,8 @@ Returned in the ``InitializeResult.instructions`` field of the MCP
 session's system prompt under a ``## Connector: telegram/<account>``
 heading.
 
-Covers only the tool this server exposes — ``telegram_send``. Telling the
-model about tools that don't exist would be worse than silence.
+Covers the tools this server exposes.  Telling the model about tools
+that don't exist would be worse than silence.
 
 ``build_instructions`` prepends an identity block (the bot's own numeric
 ``bot_id``, ``@username``, and display ``first_name``) so the agent knows
@@ -75,13 +75,17 @@ it on each call. Set focal with the built-in ``switch_channel`` tool.
 
 If you don't call this tool, no one will see your response.
 
-### Plain text only — no markdown
+### Formatting — opt in with `parse_mode="html"`
 
-v1 sends messages without a ``parse_mode``. Any markdown you write
-(``**bold**``, ``*italic*``, backticks, links) will appear as literal
-characters in the recipient's chat, not as formatted text.
+`telegram_send` defaults to plain text: any markdown you write appears
+as literal characters.  When you genuinely want emphasis or structure,
+pass `parse_mode="html"` and write Markdown — the connector converts
+it to Telegram's HTML parse mode.  Supported: ``**bold**``, ``*italic*``,
+``__bold__``, ``_italic_``, ``~~strike~~``, ``||spoiler||``, ``` `code` ```,
+fenced code blocks, ``[label](url)`` links, and ``> blockquote`` lines.
 
-Write plain prose. If you need emphasis, use word choice, not syntax.
+If you don't need formatting, leave ``parse_mode`` at its default —
+plain prose is usually clearer anyway.
 
 ### Avoid splitting one thought into multiple messages
 
@@ -101,4 +105,51 @@ Telegram caps a single message at 4096 characters. Longer messages are
 rejected by the API. Keep replies under that — concise is usually
 better anyway. If you truly need more, split the content across multiple
 ``telegram_send`` calls on your own judgment.
+
+## Showing you're working — `telegram_typing`
+
+Before slow work (a long tool run, a heavy LLM hop) you can call
+``telegram_typing()`` to show a "typing…" bubble in the chat.  Telegram
+displays it for up to 5 seconds or until your next message arrives — no
+need to call it on a timer for fast replies.  Use ``action="upload_photo"``
+or ``"upload_document"`` etc. before sending media if the upload is
+likely to take a moment.
+
+## Editing and deleting — `telegram_edit_message` / `telegram_delete_message`
+
+If you need to revise a message you sent (typo fix, streaming-style
+update from "thinking…" to a full answer), use ``telegram_edit_message``
+with the ``message_id`` returned by ``telegram_send``.  Same
+``parse_mode`` knob applies.  Telegram only lets you edit your own
+messages and only for 48 hours after sending.
+
+``telegram_delete_message`` removes one of your messages outright.
+In groups, deleting other people's messages requires admin "Delete
+Messages" permission — the API will reject the call otherwise.
+
+## Reacting — `telegram_react`
+
+Pass an emoji glyph plus a ``message_id`` to react to that message.
+Bots can set at most one reaction per message; pass ``emoji=None`` to
+clear yours.  Telegram restricts which emojis bots can use to a curated
+allowlist — unsupported emojis are rejected with a Bad Request you can
+react to (so to speak) by retrying with a different emoji or skipping
+the reaction.
+
+## What inbound looks like
+
+Edits arrive as a fresh inbound with ``metadata.edited == True`` — the
+``message_id`` is the same as the original message (Telegram preserves
+it), and the body is the new (post-edit) text.  Treat this like the
+user changing their mind, not as a brand-new message.
+
+Reactions arrive with empty body content and ``metadata.reaction``
+containing ``target_message_id``, ``old_emojis``, ``new_emojis``.  An
+addition has empty ``old_emojis``; a removal has empty ``new_emojis``.
+Anonymous-supergroup reactions and custom (premium) emoji reactions
+are dropped at the connector boundary.
+
+Stickers arrive as image (or video, for animated stickers) attachments
+with the sticker's emoji surfaced as ``metadata.sticker_emoji`` so you
+have a textual cue even when the sticker file isn't vision-readable.
 """

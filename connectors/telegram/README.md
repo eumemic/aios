@@ -100,13 +100,32 @@ When deploying multiple instances, set
 See [`../MIGRATION.md`](../MIGRATION.md#per-instance-cloister-238) — connector
 state moved to `~/.aios/instances/<instance_id>/connectors/<name>/` in #238.
 
-## Attachments
+## Inbound surface
 
-Inbound photos, voice notes, documents, video, and audio are
-downloaded via `bot.get_file()` and surfaced as `image_url` content
-parts (vision-capable minds) or text markers, via the harness's
-vision pipeline.  Stickers and animations are dropped; captions
-become the message text.
+Updates the connector subscribes to (set explicitly via PTB's
+`allowed_updates`):
+
+- **`message`** — new messages.  Photos, voice notes, video, audio,
+  documents, **stickers** (static `.webp`, video `.webm`, animated
+  `.tgs`), **animations** (GIFs, MP4-encoded), and **video notes** all
+  flow as attachments via the harness vision pipeline.  Captions become
+  the message text.  Sticker emoji is exposed in
+  `metadata.sticker_emoji` so models that can't see the sticker file
+  still get a textual cue.
+- **`edited_message`** — edits arrive as a fresh inbound with
+  `metadata.edited == True`.  The `message_id` is the same as the
+  original (Telegram preserves it across edits), and the body is the
+  new (post-edit) text.
+- **`message_reaction`** — emoji reactions on messages flow with empty
+  body content and `metadata.reaction` containing
+  `target_message_id` plus `old_emojis` / `new_emojis` as the delta.
+  Anonymous-supergroup reactions (`actor_chat`) and custom (premium)
+  reactions are dropped at the connector boundary.
+
+Channel posts (no `from_user`) and bot-to-bot traffic are filtered out
+in `parse.py`.
+
+## Attachments
 
 Outbound: pass an `attachments: list[str]` parameter to
 `telegram_send` alongside `text`.  Type is inferred from extension
@@ -117,19 +136,30 @@ use `send_media_group` (caption rides on the first item only, per
 Telegram's API).  Paths must be under `/workspace/` or
 `/mnt/attachments/`.
 
-## Out of scope for v1
+## Outbound tools
 
-- Stickers and animations (dropped on inbound).
-- Reactions — punt.
-- Message editing / deletion.
-- Typing indicators / chat actions.
-- Forum topics (`message_thread_id`) — ignored; every message treated as
+| Tool | What it does |
+|---|---|
+| `telegram_send` | Send a message (text + optional attachments).  Optional `parse_mode="html"` runs the body through a small Markdown→Telegram-HTML converter (bold/italic/strike/spoiler/code/links/blockquote). |
+| `telegram_typing` | Show a chat-action bubble (`typing`, `upload_photo`, `record_voice`, …).  Useful before slow work. |
+| `telegram_edit_message` | Replace the text of one of your earlier messages by `message_id` (48-hour window). |
+| `telegram_delete_message` | Delete one of your messages by `message_id`.  In groups, deleting others' messages requires admin permission. |
+| `telegram_react` | Set or clear the bot's reaction to a message.  Telegram restricts bot reactions to a curated emoji allowlist. |
+
+All five take `chat_id` implicitly from the focal channel via
+`focal_required`.
+
+## Out of scope
+
+- Inline mode and payment-related update types (`shipping_query`,
+  `pre_checkout_query`).
+- Inline keyboards / `callback_query` handling — would require a
+  two-way tool callback path; not in this PR.
+- Forum topics (`message_thread_id`) — every message is treated as
   top-level in the chat.
 - Webhook mode — polling only.
-- Markdown rendering — plain text only.  The agent's `**bold**` will
-  render literally until a v2 adds MarkdownV2 escaping.
 - Message splitting — Telegram's 4096-char limit surfaces as a Bad
-  Request the model must handle by retrying shorter.
+  Request the model handles by retrying shorter.
 - User allowlist — connection attachments gate access server-side.
 - Auto-reconnect on Telegram outage (the supervisor restarts the whole
   subprocess on PTB exit).

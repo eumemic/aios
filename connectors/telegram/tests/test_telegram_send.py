@@ -137,7 +137,7 @@ async def test_telegram_send_text_only(connector: TelegramConnector) -> None:
     result = _decode(await connector._invoke_tool(descriptor, {"text": "hello"}))
     assert result == {"message_id": 42}
     connector._application.bot.send_message.assert_awaited_once_with(  # type: ignore[union-attr]
-        chat_id=123, text="hello"
+        chat_id=123, text="hello", parse_mode=None
     )
 
 
