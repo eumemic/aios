@@ -19,14 +19,7 @@ from __future__ import annotations
 import re
 from typing import NamedTuple
 
-
-def _utf16_len(text: str) -> int:
-    # Each UTF-16 code unit is 2 bytes; divide by 2 to get code-unit count.
-    return len(text.encode("utf-16-le")) // 2
-
-
-def _codepoint_to_utf16_offset(text: str, cp_offset: int) -> int:
-    return _utf16_len(text[:cp_offset])
+from ._utf16 import codepoint_to_utf16_offset, utf16_len
 
 
 class _StyleSpan(NamedTuple):
@@ -320,8 +313,8 @@ def convert_markdown_to_signal_styles(
         if length_cp <= 0:
             continue
         # Convert to UTF-16 offsets
-        utf16_start = _codepoint_to_utf16_offset(stripped, adj_start)
-        utf16_length = _utf16_len(stripped[adj_start:adj_end])
+        utf16_start = codepoint_to_utf16_offset(stripped, adj_start)
+        utf16_length = utf16_len(stripped[adj_start:adj_end])
         styles.append(f"{utf16_start}:{utf16_length}:{span.style}")
 
     return stripped, styles

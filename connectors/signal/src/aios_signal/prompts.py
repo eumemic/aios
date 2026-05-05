@@ -5,9 +5,8 @@ Returned in the ``InitializeResult.instructions`` field of the MCP
 session's system prompt under a ``## Connector: signal/<account>``
 heading.
 
-Covers only the tools this server actually exposes — ``signal_send``,
-``signal_react``, ``signal_read_receipt``.  Telling the model about
-tools that don't exist would be worse than silence.
+Covers only the tools this server actually exposes.  Telling the
+model about tools that don't exist would be worse than silence.
 
 The instructions are composed per-run: ``build_instructions`` prepends
 an identity block (bot's own ``sender_uuid`` + phone number) and a
@@ -97,7 +96,7 @@ id) so the tool can route correctly.
 is internal monologue; nobody on Signal sees it.  To deliver a message
 you MUST call:
 
-    signal_send(chat_id="<chat_id>", text="your message here")
+    signal_send(text="your message here")
 
 If you don't call this tool, no one will see your response.
 
@@ -113,12 +112,43 @@ work between them (research, file processing, long tasks) and you are
 giving progress updates.  The test is whether the human would be left
 wondering what is happening — if so, send an update.
 
+### Quoting a prior message
+
+Pass `quote_timestamp_ms` AND `quote_author_uuid` (both required) to
+thread your reply as a quote of an earlier message.  Copy them from
+the inbound header.  Use this when the conversation has moved on but
+your reply specifically responds to an older message.
+
+### Mentions in groups
+
+In a group, write `@<uuid_prefix>` to mention a member — the prefix
+must be at least 8 hex chars and uniquely match one member's UUID.
+Full dashed UUIDs work too.  Example: ``@fb2c91e2 can you handle this?``
+Resolved mentions are encoded automatically; an unresolved prefix
+stays as plain text.  Mentions are ignored in DMs.
+
+### Editing a prior message — `edit_timestamp_ms`
+
+Pass `edit_timestamp_ms=<sent_at_ms>` to rewrite a message you sent
+earlier.  The new `text` replaces the old; Signal clients show an
+"edited" indicator.  You can only edit your own messages.  Get the
+timestamp from `sent_at_ms` in a prior `signal_send` result.
+
+## Deleting a message — `signal_delete`
+
+Delete-for-everyone a message you sent earlier.  Pass the
+`sent_at_ms` you got back from `signal_send`:
+
+    signal_delete(target_timestamp_ms=<sent_at_ms>)
+
+Only your own messages can be deleted.  Use sparingly — deletes are
+visible (a tombstone replaces the message).
+
 ## Reacting — `signal_react`
 
 Lighter-weight than a full message.  Call when an emoji says enough:
 
     signal_react(
-        chat_id="<chat_id>",
         target_author_uuid="<uuid from inbound metadata>",
         target_timestamp_ms=<timestamp from inbound metadata>,
         emoji="👍",
@@ -137,19 +167,19 @@ Lighter-weight than a full message.  Call when an emoji says enough:
 Mundane messages do not need reactions; standout moments do.  Think
 about what a human would naturally react to.
 
-## Read receipts — `signal_read_receipt`
+## Group admin — `signal_create_group`, `signal_rename_group`
 
-Mark one or more inbound messages as read so the sender's UI shows the
-double check.  Pass the sender's ACI UUID and the timestamps of the
-messages you are acknowledging:
+Create a new group on the focal account:
 
-    signal_read_receipt(
-        sender_uuid="<uuid>",
-        timestamp_ms_list=[<ts1>, <ts2>],
-    )
+    signal_create_group(name="Project X", member_uuids=["<uuid1>", "<uuid2>"])
 
-Use sparingly — usually only when you have actually consumed the
-messages and the sender benefits from knowing.
+You're added as the creator implicitly; pass the other members'
+UUIDs.  The result includes the new group's id, which you can hand
+to `switch_channel` to focus into it.
+
+Rename your focal group (only valid when focal is a group, not a DM):
+
+    signal_rename_group(name="New name")
 
 ## Markdown subset
 

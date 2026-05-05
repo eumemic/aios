@@ -19,6 +19,14 @@ from aios_connector.base import ToolDescriptor
 
 from aios_signal.config import Settings
 from aios_signal.connector import SignalConnector, _build_send_params
+from aios_signal.daemon import GroupInfo
+from aios_signal.parse import MENTION_PLACEHOLDER
+
+ALICE_UUID = "11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+BOB_UUID = "22222222-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+GROUP_CHAT_ID = "abcXYZ123_-"  # URL-safe base64; not a UUID
+# decode_chat_id maps URL-safe back to signal-cli's standard base64 form.
+GROUP_RAW_ID = "abcXYZ123/+"
 
 
 def test_build_params_no_attachments() -> None:
@@ -210,3 +218,91 @@ async def test_signal_send_unknown_account_raises(
     descriptor = _signal_send_descriptor(connector)
     with pytest.raises(ValueError, match="unknown account"):
         await connector._invoke_tool(descriptor, {"text": "hi"})
+
+
+# ── quote / reply ─────────────────────────────────────────────────────
+
+
+def test_build_params_quote_both_set_passes_through() -> None:
+    params = _build_send_params(
+        "+15550001",
+        ALICE_UUID,
+        "replying",
+        attachments=[],
+        quote_timestamp_ms=1700000000000,
+        quote_author_uuid=ALICE_UUID,
+    )
+    assert params["quoteTimestamp"] == 1700000000000
+    assert params["quoteAuthor"] == ALICE_UUID
+
+
+def test_build_params_quote_partial_raises() -> None:
+    with pytest.raises(ValueError, match="must be set together"):
+        _build_send_params("+15550001", ALICE_UUID, "x", attachments=[], quote_timestamp_ms=123)
+    with pytest.raises(ValueError, match="must be set together"):
+        _build_send_params(
+            "+15550001", ALICE_UUID, "x", attachments=[], quote_author_uuid=ALICE_UUID
+        )
+
+
+# ── edit ──────────────────────────────────────────────────────────────
+
+
+def test_build_params_edit_timestamp_threaded() -> None:
+    params = _build_send_params(
+        "+15550001",
+        ALICE_UUID,
+        "edited",
+        attachments=[],
+        edit_timestamp_ms=1700000005000,
+    )
+    assert params["editTimestamp"] == 1700000005000
+
+
+# ── outbound mentions ─────────────────────────────────────────────────
+
+
+def test_build_params_mentions_resolved_in_group() -> None:
+    params = _build_send_params(
+        "+15550001",
+        GROUP_CHAT_ID,
+        f"hi @{ALICE_UUID[:8]}",
+        attachments=[],
+        member_uuids=[ALICE_UUID, BOB_UUID],
+    )
+    assert params["message"] == f"hi {MENTION_PLACEHOLDER}"
+    assert params["mentions"] == [f"3:1:{ALICE_UUID}"]
+    assert params["groupId"] == GROUP_RAW_ID
+
+
+def test_build_params_no_member_uuids_no_mentions_added() -> None:
+    # DMs (and groups before the roster cache populates) get empty
+    # member_uuids; ``@<hex>`` syntax should pass through verbatim.
+    params = _build_send_params(
+        "+15550001",
+        ALICE_UUID,
+        f"hi @{ALICE_UUID[:8]}",
+        attachments=[],
+    )
+    assert params["message"] == f"hi @{ALICE_UUID[:8]}"
+    assert "mentions" not in params
+
+
+# ── group focal: signal_send picks up member_uuids from connector state ─
+
+
+async def test_signal_send_in_group_encodes_mentions(
+    connector: SignalConnector,
+) -> None:
+    # Seed the connector's group cache so signal_send knows the focal
+    # group's members at send time.
+    connector._groups_by_account["+15550001"] = [
+        GroupInfo(id=GROUP_CHAT_ID, name="Tea Party", member_uuids=[ALICE_UUID, BOB_UUID])
+    ]
+    _stub_focal(connector, f"bot-uuid/{GROUP_CHAT_ID}")
+    descriptor = _signal_send_descriptor(connector)
+    await connector._invoke_tool(descriptor, {"text": f"hey @{ALICE_UUID[:8]}, ready?"})
+    sent_params = connector._daemon.rpc.call.call_args.args[1]  # type: ignore[union-attr]
+    assert sent_params["message"] == f"hey {MENTION_PLACEHOLDER}, ready?"
+    assert sent_params["mentions"] == [f"4:1:{ALICE_UUID}"]
+    assert sent_params["groupId"] == GROUP_RAW_ID
