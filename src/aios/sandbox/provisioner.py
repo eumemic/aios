@@ -93,6 +93,25 @@ PACKAGE_REGISTRY_HOSTS: frozenset[str] = frozenset(
 # the worker step path (per issue #179 / commit e675ed2).
 _DOCKER_CLI_TIMEOUT_S = 30.0
 
+# Bind-mounted ``/workspace`` is the only path that survives idle release;
+# pinning pip/npm installs into these subdirs lets long-lived sessions
+# stop re-installing pdfminer / jq-cli-wrapper / etc. on every cold
+# sandbox.  See issue #227 for the trade-offs vs PIP_TARGET / project-
+# local node_modules / derived images.
+_WORKSPACE_VENV = "/workspace/.venv"
+_WORKSPACE_NPM = "/workspace/.npm"
+_WORKSPACE_RUNTIME_ENV: dict[str, str] = {
+    "VIRTUAL_ENV": _WORKSPACE_VENV,
+    "NPM_CONFIG_PREFIX": _WORKSPACE_NPM,
+    "NODE_PATH": f"{_WORKSPACE_NPM}/lib/node_modules",
+    # Hardcoded system PATH because docker --env doesn't expand $PATH;
+    # the suffix matches the python:3.13-slim-bookworm image's default.
+    "PATH": (
+        f"{_WORKSPACE_VENV}/bin:{_WORKSPACE_NPM}/bin:"
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    ),
+}
+
 
 async def _run_docker(
     argv: list[str], *, timeout_s: float = _DOCKER_CLI_TIMEOUT_S
@@ -313,6 +332,7 @@ async def _provision_for_session_inner(
     )
 
     merged_env: dict[str, str] = {
+        **_WORKSPACE_RUNTIME_ENV,
         **(env_config.env if env_config and env_config.env else {}),
         **session_env,
     }
@@ -400,6 +420,7 @@ async def _provision_for_session_inner(
     )
 
     try:
+        await _ensure_workspace_runtime_dirs(handle, session_id)
         await _install_packages(handle, env_config, session_id)
         if needs_lockdown and isinstance(networking, LimitedNetworking):
             extra_host_ports: list[tuple[str, int]] = (
@@ -423,6 +444,37 @@ async def _provision_for_session_inner(
     )
 
     return handle
+
+
+async def _ensure_workspace_runtime_dirs(handle: ContainerHandle, session_id: str) -> None:
+    """Idempotently create ``/workspace/.venv`` and ``/workspace/.npm``.
+
+    Both live under the workspace bind mount so they survive idle
+    release; the venv pins ``pip install`` into a persistent
+    ``site-packages``, and the npm prefix pins ``npm install -g``.  The
+    ``[ -e .venv/bin/python ]`` guard makes venv creation a no-op on
+    every cold provision after the first.
+
+    Failures are logged but don't fail the provision — the model can
+    still operate without the persistence layer (it just falls back to
+    re-installing tools after each idle release, which is the pre-#227
+    behaviour).
+    """
+    settings = get_settings()
+    cmd = (
+        f"mkdir -p {_WORKSPACE_NPM}/lib {_WORKSPACE_NPM}/bin && "
+        f"([ -e {_WORKSPACE_VENV}/bin/python ] || python3 -m venv {_WORKSPACE_VENV})"
+    )
+    result = await handle.run_command(
+        cmd, timeout_seconds=60, max_output_bytes=settings.bash_max_output_bytes
+    )
+    if result.exit_code != 0:
+        log.warning(
+            "sandbox.workspace_runtime_dirs_setup_failed",
+            session_id=session_id,
+            exit_code=result.exit_code,
+            stderr=result.stderr[:500],
+        )
 
 
 async def _install_packages(
