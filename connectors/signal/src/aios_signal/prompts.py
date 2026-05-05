@@ -121,10 +121,12 @@ So a reply to message 1700000000000 from Alice would look like:
      > earlier message text...
 
 To thread your own reply against the message Alice was responding to,
-you'd use ``quote_timestamp_ms=1700000000000`` and
-``quote_author_uuid="22334455-..."`` (the values from ``reply_to``).
-To react to Alice's message itself, use ``timestamp_ms=1700000000999``
-and ``sender_uuid=fb2c91e2-...`` (the values from the top header).
+pass ``signal_send`` ``quote_timestamp_ms=1700000000000`` and
+``quote_author_uuid="22334455-..."`` (copied from the ``reply_to``
+line's ``timestamp_ms`` and ``author_uuid``).  To react to Alice's
+message itself, pass ``signal_react`` ``target_timestamp_ms=1700000000999``
+and ``target_author_uuid="fb2c91e2-..."`` (copied from the top
+header's ``timestamp_ms`` and ``sender_uuid``).
 
 ## Sending messages — `signal_send`
 
