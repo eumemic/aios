@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
 import asyncpg
 import pytest
+
+from tests.e2e.conftest import wait_for_predicate
 
 
 @pytest.fixture
@@ -44,10 +45,10 @@ class TestSubscriberLockRoundTrip:
 
         # Give pg a moment to release — auto-release on close is
         # synchronous in Postgres, but asyncpg's close is async.
-        for _ in range(10):
-            if not await has_subscriber(pool, session_id):
-                break
-            await asyncio.sleep(0.05)
+        async def _released() -> bool:
+            return not await has_subscriber(pool, session_id)
+
+        await wait_for_predicate(_released, max_wait_s=0.5, interval_s=0.05)
         assert await has_subscriber(pool, session_id) is False
 
     async def test_multiple_subscribers_coexist(self, pool: Any, aios_env: dict[str, str]) -> None:
@@ -72,10 +73,10 @@ class TestSubscriberLockRoundTrip:
         finally:
             await conn_b.close()
 
-        for _ in range(10):
-            if not await has_subscriber(pool, session_id):
-                break
-            await asyncio.sleep(0.05)
+        async def _released() -> bool:
+            return not await has_subscriber(pool, session_id)
+
+        await wait_for_predicate(_released, max_wait_s=0.5, interval_s=0.05)
         assert await has_subscriber(pool, session_id) is False
 
     async def test_different_sessions_are_isolated(

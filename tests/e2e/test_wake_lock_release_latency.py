@@ -17,32 +17,6 @@ from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
 from tests.e2e.conftest import wait_for_predicate
 
-_TERMINAL_STATUSES = ("succeeded", "failed", "aborted", "cancelled")
-_TERMINAL_EVENT_TYPES = ("succeeded", "failed", "aborted")
-
-
-async def _has_doing_wake(pool: asyncpg.Pool[Any], session_id: str) -> bool:
-    async with pool.acquire() as conn:
-        n = await conn.fetchval(
-            "SELECT count(*) FROM procrastinate_jobs "
-            "WHERE task_name = 'harness.wake_session' "
-            "AND args->>'session_id' = $1 AND status = 'doing'",
-            session_id,
-        )
-    return bool(n)
-
-
-async def _both_wakes_terminal(pool: asyncpg.Pool[Any], session_id: str) -> bool:
-    async with pool.acquire() as conn:
-        n = await conn.fetchval(
-            "SELECT count(*) FROM procrastinate_jobs "
-            "WHERE task_name = 'harness.wake_session' "
-            "AND args->>'session_id' = $1 AND status = ANY($2)",
-            session_id,
-            list(_TERMINAL_STATUSES),
-        )
-    return int(n or 0) >= 2
-
 
 @needs_docker
 class TestWakeLockReleaseLatencyE2E:
@@ -107,18 +81,28 @@ class TestWakeLockReleaseLatencyE2E:
                 await defer_wake(pool, session_id, cause="message")
                 worker_task = asyncio.create_task(worker.run())
 
-                await wait_for_predicate(
-                    lambda: _has_doing_wake(pool, session_id),
-                    max_wait_s=5.0,
-                    interval_s=0.02,
-                )
-                await defer_wake(pool, session_id, cause="message")
+                async def _count_wakes(statuses: tuple[str, ...]) -> int:
+                    async with pool.acquire() as conn:
+                        n = await conn.fetchval(
+                            "SELECT count(*) FROM procrastinate_jobs "
+                            "WHERE task_name = 'harness.wake_session' "
+                            "AND args->>'session_id' = $1 AND status = ANY($2)",
+                            session_id,
+                            list(statuses),
+                        )
+                    return int(n or 0)
 
-                await wait_for_predicate(
-                    lambda: _both_wakes_terminal(pool, session_id),
-                    max_wait_s=15.0,
-                    interval_s=0.02,
-                )
+                async def _has_doing() -> bool:
+                    return await _count_wakes(("doing",)) >= 1
+
+                # Procrastinate's job-status enum has 'cancelled' but its
+                # event-type enum does not.
+                async def _both_terminal() -> bool:
+                    return await _count_wakes(("succeeded", "failed", "aborted", "cancelled")) >= 2
+
+                await wait_for_predicate(_has_doing, max_wait_s=5.0, interval_s=0.02)
+                await defer_wake(pool, session_id, cause="message")
+                await wait_for_predicate(_both_terminal, max_wait_s=15.0, interval_s=0.02)
                 worker.stop()
                 await asyncio.wait_for(worker_task, timeout=5.0)
         finally:
@@ -137,7 +121,7 @@ class TestWakeLockReleaseLatencyE2E:
                 "AND j.args->>'session_id' = $1 "
                 "ORDER BY j.id ASC",
                 session_id,
-                list(_TERMINAL_EVENT_TYPES),
+                ["succeeded", "failed", "aborted"],
             )
 
         assert len(rows) == 2, f"expected 2 wake_session jobs, got {len(rows)}: {rows}"

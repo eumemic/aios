@@ -47,7 +47,7 @@ async def _apply_procrastinate_schema_if_missing() -> None:
     """
     from aios.config import get_settings
     from aios.db.pool import create_pool
-    from aios.db.procrastinate_extensions import apply_lock_release_trigger
+    from aios.db.procrastinate_extensions import LOCK_RELEASE_TRIGGER_DDL
     from aios.harness.procrastinate_app import app as procrastinate_app
 
     settings = get_settings()
@@ -65,7 +65,7 @@ async def _apply_procrastinate_schema_if_missing() -> None:
                 print("procrastinate schema applied", file=sys.stderr)
             else:
                 print("procrastinate schema already present, skipping", file=sys.stderr)
-            await apply_lock_release_trigger(conn)
+            await conn.execute(LOCK_RELEASE_TRIGGER_DDL)
             print("aios lock-release trigger ensured", file=sys.stderr)
     finally:
         await pool.close()

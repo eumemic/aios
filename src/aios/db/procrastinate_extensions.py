@@ -9,12 +9,6 @@ This trigger fires the same NOTIFY on ``doing → !doing`` transitions
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import asyncpg
-
-
 LOCK_RELEASE_TRIGGER_DDL = """
 CREATE OR REPLACE FUNCTION aios_notify_job_lock_released_v1()
     RETURNS trigger
@@ -38,8 +32,3 @@ CREATE TRIGGER aios_jobs_notify_lock_released_v1
     WHEN (OLD.status = 'doing' AND NEW.status != 'doing')
     EXECUTE FUNCTION aios_notify_job_lock_released_v1();
 """
-
-
-async def apply_lock_release_trigger(conn: asyncpg.Connection[object]) -> None:
-    """Idempotently install the lock-release NOTIFY trigger on ``procrastinate_jobs``."""
-    await conn.execute(LOCK_RELEASE_TRIGGER_DDL)

@@ -67,7 +67,7 @@ async def ensure_procrastinate_schema(aios_db_url: str) -> None:
     from procrastinate import App, PsycopgConnector
 
     from aios.config import get_settings
-    from aios.db.procrastinate_extensions import apply_lock_release_trigger
+    from aios.db.procrastinate_extensions import LOCK_RELEASE_TRIGGER_DDL
 
     settings = get_settings()
     conn = await asyncpg.connect(settings.db_url)
@@ -81,7 +81,7 @@ async def ensure_procrastinate_schema(aios_db_url: str) -> None:
                 await tmp_app.schema_manager.apply_schema_async()
             finally:
                 await tmp_app.close_async()
-        await apply_lock_release_trigger(conn)
+        await conn.execute(LOCK_RELEASE_TRIGGER_DDL)
     finally:
         await conn.close()
 
