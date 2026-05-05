@@ -32,15 +32,34 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import structlog
-from aios_connector import Connector, focal_required, make_account, tool
+from aios_connector import (
+    Attachment as SDKAttachment,
+)
+from aios_connector import (
+    AttachmentError,
+    Connector,
+    SandboxPath,
+    focal_required,
+    make_account,
+    tool,
+)
+from telegram import (
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
+from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from .config import Settings
-from .parse import InboundMessage, parse_message
+from .parse import Attachment, InboundMessage, parse_message
 from .prompts import build_instructions
 
 log = structlog.get_logger(__name__)
@@ -104,7 +123,8 @@ class TelegramConnector(Connector):
         async def on_error(_update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
             log.error("telegram.handler.error", error=str(context.error))
 
-        application.add_handler(MessageHandler(filters.TEXT, on_message))
+        # parse_message handles channel/bot filtering with full message context.
+        application.add_handler(MessageHandler(filters.ALL, on_message))
         application.add_error_handler(on_error)
         log.info(
             "telegram.bot.identified",
@@ -165,6 +185,7 @@ class TelegramConnector(Connector):
     async def _drain_queue(self) -> None:
         assert self._inbound_queue is not None
         assert self._bot_id is not None
+        assert self._application is not None
         while True:
             msg = await self._inbound_queue.get()
             sender_payload: dict[str, Any] = {
@@ -181,21 +202,85 @@ class TelegramConnector(Connector):
                 if msg.timestamp_ms
                 else None
             )
+            sdk_attachments = await self._download_attachments(msg.attachments)
             await self.emit_inbound(
                 account=str(self._bot_id),
                 chat_id=str(msg.chat_id),
                 sender=sender_payload,
                 content=msg.text,
+                attachments=sdk_attachments or None,
                 metadata=metadata,
                 timestamp=timestamp_iso,
             )
+
+    async def _download_attachments(
+        self, attachments: tuple[Attachment, ...]
+    ) -> list[SDKAttachment]:
+        """Download each attachment in parallel, log+skip the rejects."""
+        host_paths = await asyncio.gather(*(self._download_one(a) for a in attachments))
+        out: list[SDKAttachment] = []
+        for att, host_path in zip(attachments, host_paths, strict=True):
+            if host_path is None:
+                continue
+            candidate = SDKAttachment(
+                host_path=str(host_path),
+                filename=att.filename,
+                content_type=att.content_type,
+            )
+            try:
+                candidate.as_params()
+            except AttachmentError as err:
+                log.warning(
+                    "telegram.inbound.attachment_rejected",
+                    file_id=att.file_id,
+                    filename=att.filename,
+                    error=str(err),
+                )
+                continue
+            out.append(candidate)
+        return out
+
+    async def _download_one(self, att: Attachment) -> Path | None:
+        assert self._application is not None
+        try:
+            file = await self._application.bot.get_file(att.file_id)
+        except TelegramError as err:
+            log.warning(
+                "telegram.inbound.get_file_failed",
+                file_id=att.file_id,
+                error=str(err),
+            )
+            return None
+        # Close the handle immediately so PTB owns the write side.
+        with tempfile.NamedTemporaryFile(
+            prefix="aios-telegram-", suffix=Path(att.filename).suffix, delete=False
+        ) as tmp:
+            target = Path(tmp.name)
+        try:
+            await file.download_to_drive(custom_path=target)
+        except (TelegramError, OSError) as err:
+            log.warning(
+                "telegram.inbound.download_failed",
+                file_id=att.file_id,
+                target=str(target),
+                error=str(err),
+            )
+            await asyncio.to_thread(target.unlink, missing_ok=True)
+            return None
+        return target
 
     # ── model-facing tools ────────────────────────────────────────────
 
     @tool()
     @focal_required
-    async def telegram_send(self, text: str, *, chat_id: str) -> dict[str, Any]:
-        """Send a text message to your focal Telegram chat.
+    async def telegram_send(
+        self,
+        text: str,
+        attachments: list[SandboxPath] | None = None,
+        *,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Send a Telegram message to your focal chat, optionally with attachments.
 
         The chat id is taken implicitly from your focal channel — aios
         injects it via the JSON-RPC ``_meta`` field on each call.  Set
@@ -203,14 +288,105 @@ class TelegramConnector(Connector):
 
         Args:
             text: Message body. Plain text only — markdown is not rendered.
+                Becomes the caption when attachments are present.
+            attachments: Optional in-sandbox file paths.  Type is inferred
+                from extension (``.jpg``/``.png``/``.gif``/``.webp`` →
+                photo, ``.mp4``/``.mov`` → video, ``.ogg`` → voice,
+                ``.mp3``/``.m4a``/``.wav`` → audio, anything else →
+                document).  Single attachment uses ``send_photo`` /
+                ``send_voice`` / etc.; multiple attachments use
+                ``send_media_group`` with caption attached to the first
+                item only (per Telegram API).  The SDK resolves each
+                entry to a host path before this method runs.
         """
         assert self._application is not None
         try:
             chat_id_int = int(chat_id)
         except ValueError as e:
             raise ValueError(f"telegram chat_id must be an integer; got {chat_id!r}") from e
-        sent = await self._application.bot.send_message(chat_id=chat_id_int, text=text)
-        return {"message_id": sent.message_id}
+
+        host_paths: list[Path] = list(attachments or [])
+        bot = self._application.bot
+
+        if not host_paths:
+            sent = await bot.send_message(chat_id=chat_id_int, text=text)
+            return {"message_id": sent.message_id}
+
+        if len(host_paths) == 1:
+            single = await _send_single_media(
+                bot,
+                chat_id=chat_id_int,
+                host_path=host_paths[0],
+                caption=text or None,
+            )
+            return {"message_id": single.message_id}
+
+        sent_group = await bot.send_media_group(
+            chat_id=chat_id_int,
+            media=_build_media_group(host_paths, caption=text or None),
+        )
+        return {"message_ids": [m.message_id for m in sent_group]}
+
+
+_PHOTO_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
+_VIDEO_EXTS = frozenset({".mp4", ".mov", ".webm"})
+_VOICE_EXTS = frozenset({".ogg", ".oga"})
+_AUDIO_EXTS = frozenset({".mp3", ".m4a", ".wav", ".flac"})
+
+
+def _classify(host_path: Path) -> str:
+    ext = host_path.suffix.lower()
+    if ext in _PHOTO_EXTS:
+        return "photo"
+    if ext in _VIDEO_EXTS:
+        return "video"
+    if ext in _VOICE_EXTS:
+        return "voice"
+    if ext in _AUDIO_EXTS:
+        return "audio"
+    return "document"
+
+
+async def _send_single_media(
+    bot: Any,
+    *,
+    chat_id: int,
+    host_path: Path,
+    caption: str | None,
+) -> Any:
+    kind = _classify(host_path)
+    sender = {
+        "photo": bot.send_photo,
+        "video": bot.send_video,
+        "voice": bot.send_voice,
+        "audio": bot.send_audio,
+        "document": bot.send_document,
+    }[kind]
+    kwargs: dict[str, Any] = {"chat_id": chat_id, kind: host_path}
+    if caption is not None:
+        kwargs["caption"] = caption
+    return await sender(**kwargs)
+
+
+def _build_media_group(host_paths: list[Path], *, caption: str | None) -> list[Any]:
+    # Caption rides on the FIRST item only — Telegram's API ignores
+    # captions on items 2..N of a media group.
+    items: list[Any] = []
+    for idx, path in enumerate(host_paths):
+        kind = _classify(path)
+        kwargs: dict[str, Any] = {"media": path}
+        if idx == 0 and caption is not None:
+            kwargs["caption"] = caption
+        if kind == "photo":
+            items.append(InputMediaPhoto(**kwargs))
+        elif kind == "video":
+            items.append(InputMediaVideo(**kwargs))
+        elif kind == "audio":
+            items.append(InputMediaAudio(**kwargs))
+        else:
+            # Voice can't go in a media group; fall back to document.
+            items.append(InputMediaDocument(**kwargs))
+    return items
 
 
 def build_metadata(msg: InboundMessage, bot_id: int) -> dict[str, Any]:

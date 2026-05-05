@@ -49,6 +49,11 @@ def envelope_attachment_only() -> dict[str, Any]:
 
 
 @pytest.fixture
+def envelope_attachment_no_file_field() -> dict[str, Any]:
+    return _load("attachment_no_file_field.json")
+
+
+@pytest.fixture
 def envelope_receipt() -> dict[str, Any]:
     return _load("receipt.json")
 

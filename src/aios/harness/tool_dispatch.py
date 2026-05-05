@@ -146,7 +146,7 @@ async def _execute_tool_async(
             "name": name,
         }
         if isinstance(result, ToolResult):
-            if isinstance(result.content, str):
+            if isinstance(result.content, (str, list)):
                 event_data["content"] = result.content
             else:
                 event_data["content"] = json.dumps(result.content, ensure_ascii=False)
@@ -392,12 +392,16 @@ async def _execute_mcp_tool_async(
 
         server_name, tool_name = _parse_mcp_tool_name(name)
 
-        from aios.harness.channels import FOCAL_CHANNEL_META_KEY, focal_channel_path
+        from aios.harness.channels import (
+            FOCAL_CHANNEL_META_KEY,
+            SESSION_ID_META_KEY,
+            focal_channel_path,
+        )
 
-        meta: dict[str, Any] | None = None
+        meta: dict[str, Any] = {SESSION_ID_META_KEY: session_id}
         suffix = focal_channel_path(focal_channel)
         if suffix is not None:
-            meta = {FOCAL_CHANNEL_META_KEY: suffix}
+            meta[FOCAL_CHANNEL_META_KEY] = suffix
 
         # Connector subprocesses (stdio MCP children of the worker) take
         # precedence over agent-declared HTTP MCP servers: the model

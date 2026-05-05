@@ -179,17 +179,46 @@ def ensure_session_attachments_dir(session_id: str) -> Path:
 def resolve_to_host_path(session_id: str, sandbox_path: str) -> Path | None:
     """Map an in-sandbox path to its host-side equivalent for known bind mounts.
 
-    Returns ``None`` when ``sandbox_path`` doesn't resolve into
-    ``/workspace`` or ``/mnt/attachments`` (e.g. ``/etc/hostname``,
-    ``/mnt/memory/...``, ``/tmp/...``). Callers can fall back to
-    docker-exec when the host-side fast path is unavailable.
+    Returns ``None`` when:
+
+    * ``sandbox_path`` doesn't resolve into ``/workspace`` or
+      ``/mnt/attachments`` (e.g. ``/etc/hostname``, ``/mnt/memory/...``,
+      ``/tmp/...``), or
+    * the resolved candidate escapes the bind-mount root after ``..``
+      normalization or symlink dereferencing.
+
+    The containment check defends model-controlled callers (notably the
+    image branch of :mod:`aios.tools.read`): without it, a path like
+    ``/workspace/../../etc/hostname`` or a symlink at
+    ``/workspace/sneaky.jpg`` pointing outside the bind mount would
+    let the model read arbitrary host files the worker can access.
+    """
+    base, suffix = _bind_mount_base(session_id, sandbox_path)
+    if base is None:
+        return None
+    candidate = base if suffix is None else base / suffix
+    try:
+        resolved = candidate.resolve(strict=False)
+        resolved_base = base.resolve(strict=False)
+    except OSError:
+        return None
+    if resolved != resolved_base and not resolved.is_relative_to(resolved_base):
+        return None
+    return resolved
+
+
+def _bind_mount_base(session_id: str, sandbox_path: str) -> tuple[Path | None, str | None]:
+    """Return the host base dir + remainder for ``sandbox_path``.
+
+    ``(None, None)`` when the path doesn't fall under a known bind
+    mount.  ``(base, None)`` when the path is exactly the root.
     """
     if sandbox_path == "/workspace":
-        return workspace_dir_for(session_id)
+        return workspace_dir_for(session_id), None
     if sandbox_path.startswith("/workspace/"):
-        return workspace_dir_for(session_id) / sandbox_path[len("/workspace/") :]
+        return workspace_dir_for(session_id), sandbox_path[len("/workspace/") :]
     if sandbox_path == "/mnt/attachments":
-        return session_attachments_dir(session_id)
+        return session_attachments_dir(session_id), None
     if sandbox_path.startswith("/mnt/attachments/"):
-        return session_attachments_dir(session_id) / sandbox_path[len("/mnt/attachments/") :]
-    return None
+        return session_attachments_dir(session_id), sandbox_path[len("/mnt/attachments/") :]
+    return None, None

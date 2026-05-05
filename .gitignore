@@ -40,3 +40,7 @@ venv/
 # aios runtime state
 /var/lib/aios/
 workspaces/
+
+# smoke-test runtime artifacts
+.logs/
+spool.sqlite

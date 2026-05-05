@@ -235,19 +235,22 @@ class SignalDaemon:
     async def list_groups(self, *, account: str) -> list[GroupInfo]:
         """Return the bot's group memberships via signal-cli ``listGroups``.
 
-        Best-effort: returns an empty list on RPC failure or malformed
-        responses.  Group IDs are re-encoded into URL-safe base64 so the
-        caller can use them directly as channel-path suffixes
+        Raises ``RpcError`` / ``RpcTimeoutError`` on RPC failure — the
+        boot-time caller in :meth:`SignalConnector.setup` uses the raise
+        to refuse marking the account ready when signal-cli reports
+        e.g. ``Specified account does not exist`` (the operator
+        forgot to register it, or the registration expired).  The
+        supervisor surfaces the resulting setup failure to ``aios
+        connectors list`` so the operator sees red instead of green.
+
+        Group IDs are re-encoded into URL-safe base64 so the caller
+        can use them directly as channel-path suffixes
         (``signal/<bot>/<id>``) — matching :func:`encode_chat_id`'s
-        ``group`` branch.  Groups missing either an ``id`` or ``members``
-        are dropped; the agent-facing roster is supposed to be a
-        complete picture of "who is in this room with me."
+        ``group`` branch.  Groups missing either an ``id`` or
+        ``members`` are dropped; the agent-facing roster is supposed
+        to be a complete picture of "who is in this room with me."
         """
-        try:
-            result = await self.rpc.call("listGroups", {"account": account})
-        except Exception:
-            log.warning("signal.list_groups.failed", account=account, exc_info=True)
-            return []
+        result = await self.rpc.call("listGroups", {"account": account})
         if not isinstance(result, list):
             return []
         out: list[GroupInfo] = []

@@ -1,35 +1,41 @@
 """The read tool — read a file inside the session's sandbox.
 
-A thin wrapper over ``cat -n`` piped through ``sed``. Returns file
-content with ``LINE_NUM<TAB>CONTENT`` line numbers, windowed by
-``offset`` (1-indexed) and ``limit`` so the model can page through
-large files without blowing its context window in one shot.
-
-The tool shells out once per call via :meth:`ContainerHandle.run_command`
-and trusts the model for everything else: no binary-file guard, no
-device blocklist, no char ceiling, no dedup. If the model reads
-``/dev/zero``, the container timeout (``bash_default_timeout_seconds``)
-kills it and the model sees an error. If the model re-reads the same
-range 10 times, that shows up in the session log and the model pays
-the token cost.
-
-Return shape::
-
-    {"path": "/workspace/foo.py", "content": "     1\\thello\\n     2\\tworld"}
-
-On failure (nonzero exit from ``cat``), returns ``{"error": "..."}``.
+Text files return ``LINE_NUM<TAB>CONTENT`` windowed by ``offset`` /
+``limit`` via ``cat -n | sed``.  Image files (extensions in
+:data:`_EXT_TO_MIME`) return a content-parts list with an
+``image_url`` block when the bound model supports vision and the file
+fits the inline cap; otherwise an explanatory ``ToolResult``.
 """
 
 from __future__ import annotations
 
+import base64
+import os
 import shlex
 from typing import Any
 
 from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
+from aios.harness.vision import (
+    can_inline_image,
+    human_size,
+    make_image_url_part,
+    supports_vision,
+)
+from aios.sandbox.container import ContainerHandle
+from aios.sandbox.volumes import resolve_to_host_path
+from aios.services import sessions as sessions_service
 from aios.tools.memory_intercept import resolve_memory_target
-from aios.tools.registry import registry
+from aios.tools.registry import ToolResult, registry
+
+_EXT_TO_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
 
 
 class ReadArgumentError(AiosError):
@@ -73,8 +79,8 @@ READ_PARAMETERS_SCHEMA: dict[str, Any] = {
 }
 
 
-async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Handler for the read tool. See module docstring for the return shape."""
+async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any] | ToolResult:
+    """Handler for the read tool. See module docstring for return shapes."""
     path = arguments.get("path")
     if not isinstance(path, str) or not path.strip():
         raise ReadArgumentError("read tool requires a non-empty 'path' string")
@@ -88,8 +94,13 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
         raise ReadArgumentError("limit must be a positive integer")
 
     settings = get_settings()
+    pool = runtime.require_pool()
     sandbox = runtime.require_sandbox_registry()
-    handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
+    handle = await sandbox.get_or_provision(session_id, pool=pool)
+
+    if _looks_like_image(path):
+        return await _read_image(session_id=session_id, path=path, handle=handle, pool=pool)
+
     target = resolve_memory_target(session_id, path)
 
     end = offset + limit - 1
@@ -128,6 +139,86 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     sha_line, _, content = result.stdout.partition("\n")
     runtime.set_read_sha(session_id, target.store_id, target.store_path, sha_line.strip())
     return {"path": path, "content": content}
+
+
+def _looks_like_image(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in _EXT_TO_MIME
+
+
+async def _read_image(
+    *,
+    session_id: str,
+    path: str,
+    handle: ContainerHandle,
+    pool: Any,
+) -> ToolResult:
+    mime = _EXT_TO_MIME[os.path.splitext(path)[1].lower()]
+    model = await sessions_service.get_session_model(pool, session_id)
+
+    host_path = resolve_to_host_path(session_id, path)
+    if host_path is not None:
+        try:
+            data = host_path.read_bytes()
+        except FileNotFoundError:
+            return ToolResult(content=f"file not found: {path}", is_error=True)
+        except OSError as err:
+            return ToolResult(content=f"read failed: {err}", is_error=True)
+        size = len(data)
+    else:
+        result = await _stat_and_read_via_exec(handle, path)
+        if result is None:
+            return ToolResult(
+                content=f"read failed: file not readable inside sandbox: {path}",
+                is_error=True,
+            )
+        data, size = result
+
+    if not can_inline_image(model=model, content_type=mime, size_bytes=size):
+        vision = "yes" if supports_vision(model) else "no"
+        return ToolResult(
+            content=(
+                f"Image at {path} exists ({human_size(size)}, {mime}) but cannot "
+                f"be inlined. Mind vision support: {vision}. Inline cap: 2 MiB."
+            ),
+            is_error=False,
+        )
+
+    encoded = base64.b64encode(data).decode("ascii")
+    return ToolResult(
+        content=[
+            {
+                "type": "text",
+                "text": f"Image: {os.path.basename(path)} ({mime}, {human_size(size)})",
+            },
+            make_image_url_part(content_type=mime, data_b64=encoded),
+        ],
+    )
+
+
+async def _stat_and_read_via_exec(handle: ContainerHandle, path: str) -> tuple[bytes, int] | None:
+    """Fetch ``(bytes, size)`` for non-bind-mount image paths via one docker-exec.
+
+    Returns ``None`` on any read failure (missing path, exec error,
+    unparseable size).  Combines stat + base64 into a single shell so
+    we don't pay two docker-exec round-trips.
+    """
+    settings = get_settings()
+    quoted = shlex.quote(path)
+    cmd = f"stat -c %s -- {quoted} && base64 -w0 -- {quoted}"
+    result = await handle.run_command(
+        cmd,
+        timeout_seconds=settings.bash_default_timeout_seconds,
+        max_output_bytes=settings.bash_max_output_bytes,
+    )
+    if result.exit_code != 0:
+        return None
+    size_line, _, b64 = result.stdout.partition("\n")
+    try:
+        size = int(size_line.strip())
+        data = base64.b64decode(b64.strip())
+    except (ValueError, TypeError):
+        return None
+    return data, size
 
 
 def _register() -> None:

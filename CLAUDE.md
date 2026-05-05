@@ -111,7 +111,6 @@ They don't share connections; they share Postgres state.
 - **Raw SQL + asyncpg**, no ORM. Every query lives in `db/queries.py`.
 - **`pg_notify($1, $2)` function form**, never literal `NOTIFY`. Postgres case-folds unquoted identifiers; our ULIDs have uppercase.
 - **structlog** with `structlog.stdlib.LoggerFactory()`. NOT `PrintLoggerFactory`.
-- **"Mind" not "brain"** — load-bearing terminology for the model/inference concept.
 - **Extreme simplicity.** No defensive guards for model mistakes, no fuzzy matching, no model-specific shims. The model sees raw errors and retries through the session log. Ask: "can the model handle this failure itself?" If yes, don't add complexity.
 - **Events are OpenAI chat-completions format**, not Anthropic Messages format. LiteLLM translates at the provider boundary.
 - **Conventional commits**: `feat:`, `fix:`, `refactor:`, etc. Substantial commit bodies.

@@ -770,6 +770,28 @@ async def list_running_session_ids(conn: asyncpg.Connection[Any]) -> list[str]:
     return [str(r["id"]) for r in rows]
 
 
+async def get_session_model(conn: asyncpg.Connection[Any], session_id: str) -> str:
+    """Return the bound model for ``session_id`` in one round trip.
+
+    Pinned ``agent_version`` wins when set; otherwise the live agent's
+    current ``model`` is returned.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT COALESCE(av.model, a.model) AS model
+          FROM sessions s
+          JOIN agents a ON a.id = s.agent_id
+     LEFT JOIN agent_versions av
+            ON av.agent_id = s.agent_id AND av.version = s.agent_version
+         WHERE s.id = $1
+        """,
+        session_id,
+    )
+    if row is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    return str(row["model"])
+
+
 async def list_attachment_paths_for_sessions(
     conn: asyncpg.Connection[Any], session_ids: list[str]
 ) -> dict[str, set[str]]:
@@ -974,13 +996,13 @@ async def model_token_ratio(
     Below-threshold results are not cached, so newly accumulating models
     can activate as soon as the minimum sample count is reached.
 
-    ``model`` is the raw mind string (``agent.model``) — NO NORMALIZATION.
+    ``model`` is the raw model string (``agent.model``) — NO NORMALIZATION.
     Different LiteLLM routes (``anthropic/...`` vs
     ``openrouter/anthropic/...``) hit different provider tokenizers and
     must partition separately.  The same string must appear at stamp time
     and at query time for the same step — always plumb ``agent.model`` on
     both sides.  aios sessions do not carry a model override; the session's
-    active mind is always its agent's configured model.
+    active model is always its agent's configured model.
 
     Scope: the aggregate pools samples across every session in this
     database.  Token counts are scalar only — no content crosses between
@@ -1266,6 +1288,16 @@ async def append_event(
         if kind == "message":
             prev = await _latest_cumulative_tokens(conn, session_id)
             if data.get("role") == "user" and orig_channel is not None:
+                # TODO(vision): plumb ``agent.model`` through here so
+                # :func:`render_user_event` matches build-time output for
+                # image-bearing events.  Today this call site renders without
+                # ``model``/``session_id``, so attachments degrade to text
+                # markers and the per-event ``cumulative_tokens`` undercounts
+                # inlined images by ~55 LiteLLM tokens each (text marker ~30
+                # vs. ``image_url`` part ~85).  The undercount is bounded by
+                # ``model_token_ratio`` calibration in
+                # :func:`read_windowed_events`; see PR #218 for the
+                # follow-up plan to make append-time vision-aware.
                 rendered = render_user_event(data, orig_channel, focal_at_arrival)
                 cum_tokens = (prev or 0) + approx_tokens([rendered])
             else:
@@ -1418,7 +1450,7 @@ async def read_windowed_events(
     ``window_max`` by the overhead amount.  Callers that don't have any
     such overhead (preview tooling, test scaffolds) pass ``0``.
 
-    ``model`` must be the session's currently-active mind string —
+    ``model`` must be the session's currently-active model string —
     ``agent.model`` on the session's pinned agent/version.  The same
     string is what :func:`~aios.harness.loop.run_session_step` stamps on
     ``model_request_end`` spans, so stamp-side and query-side stay

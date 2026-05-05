@@ -31,10 +31,21 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import structlog
-from aios_connector import Connector, focal_required, make_account, tool
+from aios_connector import (
+    Attachment as SDKAttachment,
+)
+from aios_connector import (
+    AttachmentError,
+    Connector,
+    SandboxPath,
+    focal_required,
+    make_account,
+    tool,
+)
 
 from .addressing import decode_chat_id, encode_chat_id
 from .config import Settings
@@ -62,6 +73,15 @@ class SignalConnector(Connector):
         # Contacts + group rosters are per-account because each phone has
         # its own contact store and group memberships in signal-cli.
         self._contact_names_by_account: dict[str, dict[str, str]] = {}
+        # Phone → error message for accounts whose boot-time probe
+        # (``listContacts`` / ``listGroups``) failed.  signal-cli's
+        # daemon stays running and accepts new attachments to other
+        # accounts, so we don't refuse the connector outright; but
+        # unhealthy accounts are dropped from ``discover_accounts``
+        # so the operator's ``aios connectors accounts`` listing
+        # surfaces only the working ones.  The connector refuses
+        # to start if NO accounts are healthy (in :meth:`setup`).
+        self._unavailable_accounts: dict[str, str] = {}
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
@@ -88,10 +108,27 @@ class SignalConnector(Connector):
         # race for the daemon's contact-store lock without measurable
         # speedup at this scale.
         instructions_sections: list[str] = []
+        healthy_count = 0
         for phone, bot_uuid in self._bot_uuids.items():
-            contact_names = await self._daemon.list_contacts(account=phone)
+            try:
+                contact_names = await self._daemon.list_contacts(account=phone)
+                groups = await self._daemon.list_groups(account=phone)
+            except Exception as err:
+                # signal-cli rejected the boot probe — typically because
+                # the account isn't registered with Signal's servers
+                # (operator hasn't run ``signal-cli register``, or the
+                # registration expired).  Don't mark this account ready;
+                # log loudly so the operator sees red on
+                # ``aios connectors list`` instead of silent inbound-drops.
+                log.error(
+                    "signal.account.unavailable",
+                    bot_uuid=bot_uuid,
+                    phone=phone,
+                    error=str(err),
+                )
+                self._unavailable_accounts[phone] = str(err)
+                continue
             self._contact_names_by_account[phone] = contact_names
-            groups = await self._daemon.list_groups(account=phone)
             section = build_instructions(
                 bot_uuid=bot_uuid,
                 phone=phone,
@@ -100,12 +137,18 @@ class SignalConnector(Connector):
                 contact_names=contact_names,
             )
             instructions_sections.append(section)
+            healthy_count += 1
             log.info(
                 "signal.account.ready",
                 bot_uuid=bot_uuid,
                 phone=phone,
                 contacts=len(contact_names),
                 groups=len(groups),
+            )
+        if healthy_count == 0 and self._bot_uuids:
+            errs = ", ".join(f"{phone}: {err}" for phone, err in self._unavailable_accounts.items())
+            raise RuntimeError(
+                f"signal connector cannot start: no configured account is healthy ({errs})"
             )
         # Concatenate per-account sections.  build_instructions already
         # produces a self-contained block per account; joining with a
@@ -121,6 +164,7 @@ class SignalConnector(Connector):
                 metadata={"phone": phone},
             )
             for phone, bot_uuid in self._bot_uuids.items()
+            if phone not in self._unavailable_accounts
         ]
 
     async def teardown(self) -> None:
@@ -164,6 +208,7 @@ class SignalConnector(Connector):
                 "uuid": msg.sender_uuid,
                 "display_name": msg.sender_name or msg.sender_uuid,
             }
+            sdk_attachments = self._build_sdk_attachments(msg)
             # Signal envelope timestamps are millis since epoch.  Render
             # them as ISO-8601 UTC so the supervisor stamps a string that
             # operators (and any future cross-platform tooling) can read
@@ -178,6 +223,7 @@ class SignalConnector(Connector):
                 chat_id=chat_id,
                 sender=sender_payload,
                 content=content,
+                attachments=sdk_attachments or None,
                 metadata=metadata,
                 timestamp=timestamp_iso,
             )
@@ -186,8 +232,15 @@ class SignalConnector(Connector):
 
     @tool()
     @focal_required
-    async def signal_send(self, text: str, *, account: str, chat_id: str) -> dict[str, Any]:
-        """Send a text message to your focal Signal chat.
+    async def signal_send(
+        self,
+        text: str,
+        attachments: list[SandboxPath] | None = None,
+        *,
+        account: str,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Send a Signal message to your focal chat, optionally with attachments.
 
         The account (your bot UUID) and chat id are taken implicitly
         from your focal channel — aios injects them via the JSON-RPC
@@ -196,12 +249,15 @@ class SignalConnector(Connector):
 
         Args:
             text: Message body. Markdown is converted to Signal text styles.
+            attachments: Optional in-sandbox file paths to attach.  The SDK
+                resolves each entry to a host path before this method runs.
         """
         assert self._daemon is not None
         phone = self._uuid_to_phone.get(account)
         if phone is None:
             raise ValueError(f"signal_send: unknown account {account!r}")
-        params = _build_send_params(phone, chat_id, text)
+        host_paths: list[Path] = list(attachments or [])
+        params = _build_send_params(phone, chat_id, text, attachments=host_paths)
         result = await self._daemon.rpc.call("send", params)
         ts = _extract_timestamp(result)
         return {"sent_at_ms": ts} if ts is not None else {"status": "ok"}
@@ -245,8 +301,55 @@ class SignalConnector(Connector):
         await self._daemon.rpc.call("sendReaction", params)
         return {"status": "ok"}
 
+    def _build_sdk_attachments(self, msg: InboundMessage) -> list[SDKAttachment]:
+        """Build SDK Attachment records, logging+skipping any rejected.
 
-def _build_send_params(account_phone: str, chat_id: str, text: str) -> dict[str, Any]:
+        signal-cli's JSON-RPC daemon mode (0.14.x) auto-downloads
+        attachment bytes but omits the ``file`` field from the
+        envelope — it was only emitted by the legacy CLI command
+        output.  We fall back to the storage-layout convention
+        ``<config_dir>/attachments/<id>`` for envelopes without a
+        host_path; SDK ``as_params`` validates the file actually
+        exists.
+        """
+        out: list[SDKAttachment] = []
+        for att in msg.attachments:
+            host_path = att.host_path
+            if host_path is None and att.id is not None:
+                host_path = str(self._cfg.config_dir / "attachments" / att.id)
+            if host_path is None:
+                log.warning(
+                    "signal.inbound.attachment_no_host_path",
+                    content_type=att.content_type,
+                    filename=att.filename,
+                )
+                continue
+            candidate = SDKAttachment(
+                host_path=host_path,
+                filename=att.filename or "unnamed",
+                content_type=att.content_type,
+            )
+            try:
+                candidate.as_params()
+            except AttachmentError as err:
+                log.warning(
+                    "signal.inbound.attachment_rejected",
+                    host_path=host_path,
+                    filename=att.filename,
+                    error=str(err),
+                )
+                continue
+            out.append(candidate)
+        return out
+
+
+def _build_send_params(
+    account_phone: str,
+    chat_id: str,
+    text: str,
+    *,
+    attachments: list[Path],
+) -> dict[str, Any]:
     """Translate ``(account_phone, chat_id, text)`` into signal-cli ``send`` params."""
     chat_type, raw_id = decode_chat_id(chat_id)
     stripped, styles = convert_markdown_to_signal_styles(text)
@@ -257,6 +360,8 @@ def _build_send_params(account_phone: str, chat_id: str, text: str) -> dict[str,
         params["groupId"] = raw_id
     else:
         params["recipient"] = [raw_id]
+    if attachments:
+        params["attachments"] = [str(p) for p in attachments]
     return params
 
 

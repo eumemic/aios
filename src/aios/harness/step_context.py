@@ -95,6 +95,7 @@ async def compute_step_prelude(
     :func:`compose_step_context` unchanged, so the composed prompt stays
     byte-identical to what it was before the split.
     """
+    from aios.harness import runtime
     from aios.harness.channels import (
         augment_with_focal_paradigm,
         max_tail_block_local,
@@ -118,6 +119,12 @@ async def compute_step_prelude(
         mcp_tools, mcp_instructions = await discover_session_mcp_tools(pool, session_id, agent)
         tools.extend(mcp_tools)
         instructions_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
+
+    # Connector-subprocess (stdio MCP) tools come from the worker-scoped
+    # registry, separate from agent.mcp_servers (HTTP MCP).
+    connector_registry = runtime.connector_subprocess_registry
+    if connector_registry is not None:
+        tools.extend(await connector_registry.list_tools())
 
     skill_versions = (
         await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
@@ -173,7 +180,12 @@ async def compose_step_context(
     """
     from aios.harness.channels import build_channels_tail_block
 
-    ctx = build_messages(events, system_prompt=prelude.system_prompt)
+    ctx = build_messages(
+        events,
+        system_prompt=prelude.system_prompt,
+        model=agent.model,
+        session_id=session.id,
+    )
 
     # Tail block lives *after* build_messages so its per-step mutations
     # (unread counts, previews) don't bust the prefix cache.  Paradigm
