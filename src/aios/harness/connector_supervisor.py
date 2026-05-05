@@ -774,10 +774,17 @@ class ConnectorSubprocessRegistry:
             return
 
         # 1. Look up connection (fresh read — no caching, since the
-        #    operator may have just attached/configured the connection).
+        #    operator may have just attached/configured the connection)
+        #    plus an operator-curated chat binding if any: a row in
+        #    ``connection_chat_sessions`` wins regardless of mode (#215).
         async with pool.acquire() as conn:
             connection = await queries.get_connection_for_account(
                 conn, connector=connector, account=account
+            )
+            target_session_id: str | None = (
+                await queries.lookup_chat_session(conn, connection.id, chat_id)
+                if connection is not None
+                else None
             )
         if connection is None:
             await self._auto_create_or_drop(state, account=account)
@@ -787,23 +794,25 @@ class ConnectorSubprocessRegistry:
             await self._send_ack(state, event_id)
             return
 
-        # 2. Branch on routing mode.
-        target_session_id: str | None = None
-        if connection.session_id is not None:
-            target_session_id = connection.session_id
-        elif connection.session_template_id is not None:
-            target_session_id = await self._resolve_per_chat_session(
-                state,
-                connection_id=connection.id,
-                template_id=connection.session_template_id,
-                connector_name=connector,
-                account=account,
-                chat_id=chat_id,
-            )
-        else:
-            self._record_drop(state, "detached")
-            await self._send_ack(state, event_id)
-            return
+        # 2. Resolve target session: bound row first (already fetched),
+        # else fall back to the connection's mode-default (single_session
+        # session_id, per_chat spawn-from-template, or detached drop).
+        if target_session_id is None:
+            if connection.session_id is not None:
+                target_session_id = connection.session_id
+            elif connection.session_template_id is not None:
+                target_session_id = await self._resolve_per_chat_session(
+                    state,
+                    connection_id=connection.id,
+                    template_id=connection.session_template_id,
+                    connector_name=connector,
+                    account=account,
+                    chat_id=chat_id,
+                )
+            else:
+                self._record_drop(state, "detached")
+                await self._send_ack(state, event_id)
+                return
 
         if target_session_id is None:
             # Per-chat resolution already recorded the drop reason.

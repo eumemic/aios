@@ -301,6 +301,275 @@ class TestPerChatInbound:
 
 
 @needs_docker
+class TestOperatorBoundChat:
+    """Operator-curated bindings on top of single_session / per_chat (#215).
+
+    The connection_chat_sessions ledger is consulted before the
+    connection's mode-default fallback, so an operator-inserted row
+    overrides where a chat would otherwise route — that gives the
+    middle case (different chats on one account → different existing
+    sessions) without reintroducing the channel_bindings table.
+    """
+
+    async def test_bound_chat_overrides_single_session_default(self, harness: Harness) -> None:
+        """A single_session connection with an operator-bound chat:
+        bound chat routes to the bound session, other chats fall back
+        to ``connection.session_id``.
+        """
+        agent_id, env_id = await _make_agent_and_env(harness)
+        default_session = await sessions_service.create_session(
+            harness._pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title="default",
+            metadata={},
+        )
+        bound_session = await sessions_service.create_session(
+            harness._pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title="bound",
+            metadata={},
+        )
+        account = _unique_account()
+        conn_row = await connections_service.create_connection(
+            harness._pool, connector="echo", account=account, metadata={}
+        )
+        await connections_service.attach_connection(
+            harness._pool, conn_row.id, session_id=default_session.id
+        )
+        async with harness._pool.acquire() as conn:
+            await queries.insert_chat_session(
+                conn,
+                connection_id=conn_row.id,
+                chat_id="chat-bound",
+                session_id=bound_session.id,
+            )
+
+        registry = _registry()
+        _patch_send_ack(registry)
+        with mock.patch(
+            "aios.harness.connector_supervisor.defer_wake",
+            new=mock.AsyncMock(return_value=None),
+        ):
+            await registry._handle_inbound(
+                ("echo", "echo"),
+                {
+                    "event_id": make_id("evt"),
+                    "account": account,
+                    "chat_id": "chat-bound",
+                    "sender": {"display_name": "Bound peer"},
+                    "content": "from bound chat",
+                },
+            )
+            await registry._handle_inbound(
+                ("echo", "echo"),
+                {
+                    "event_id": make_id("evt"),
+                    "account": account,
+                    "chat_id": "chat-fallback",
+                    "sender": {"display_name": "Other peer"},
+                    "content": "from fallback chat",
+                },
+            )
+
+        bound_events = await harness.events(bound_session.id)
+        bound_contents = [
+            e.data.get("content") for e in bound_events if e.data.get("role") == "user"
+        ]
+        assert "from bound chat" in bound_contents
+        assert "from fallback chat" not in bound_contents
+
+        default_events = await harness.events(default_session.id)
+        default_contents = [
+            e.data.get("content") for e in default_events if e.data.get("role") == "user"
+        ]
+        assert "from fallback chat" in default_contents
+        assert "from bound chat" not in default_contents
+
+    async def test_bound_chat_overrides_per_chat_spawn(self, harness: Harness) -> None:
+        """A per_chat connection with an operator-bound chat: bound chat
+        routes to the bound session (NOT a freshly-spawned one); other
+        chats spawn from the template as usual.
+        """
+        agent_id, env_id = await _make_agent_and_env(harness)
+        bound_session = await sessions_service.create_session(
+            harness._pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title="bound-existing",
+            metadata={},
+        )
+        account = _unique_account()
+        template = await session_templates_service.create_session_template(
+            harness._pool,
+            name=f"tpl-{make_id('stpl')[-8:]}",
+            agent_id=agent_id,
+            environment_id=env_id,
+            agent_version=None,
+            vault_ids=[],
+            memory_store_ids=[],
+            metadata={},
+        )
+        conn_row = await connections_service.create_connection(
+            harness._pool, connector="echo", account=account, metadata={}
+        )
+        await connections_service.configure_per_chat(
+            harness._pool, conn_row.id, session_template_id=template.id
+        )
+        async with harness._pool.acquire() as conn:
+            await queries.insert_chat_session(
+                conn,
+                connection_id=conn_row.id,
+                chat_id="chat-bound",
+                session_id=bound_session.id,
+            )
+
+        registry = _registry()
+        _patch_send_ack(registry)
+        with mock.patch(
+            "aios.harness.connector_supervisor.defer_wake",
+            new=mock.AsyncMock(return_value=None),
+        ):
+            await registry._handle_inbound(
+                ("echo", "echo"),
+                {
+                    "event_id": make_id("evt"),
+                    "account": account,
+                    "chat_id": "chat-bound",
+                    "sender": {"display_name": "Bound peer"},
+                    "content": "lands on bound",
+                },
+            )
+            await registry._handle_inbound(
+                ("echo", "echo"),
+                {
+                    "event_id": make_id("evt"),
+                    "account": account,
+                    "chat_id": "chat-spawn",
+                    "sender": {"display_name": "Spawn peer"},
+                    "content": "spawns new",
+                },
+            )
+
+        # Bound chat lands on the pre-existing session — NOT spawned from template.
+        bound_events = await harness.events(bound_session.id)
+        bound_contents = [
+            e.data.get("content") for e in bound_events if e.data.get("role") == "user"
+        ]
+        assert "lands on bound" in bound_contents
+        async with harness._pool.acquire() as conn:
+            spawned_origin = await queries.get_session_spawn_origin(conn, bound_session.id)
+        assert spawned_origin is None  # bound session was never per_chat-spawned
+
+        # Other chat spawns a fresh session via the template path.
+        async with harness._pool.acquire() as conn:
+            spawned_session_id = await queries.lookup_chat_session(conn, conn_row.id, "chat-spawn")
+        assert spawned_session_id is not None
+        assert spawned_session_id != bound_session.id
+
+    async def test_bind_chat_is_idempotent_and_404s_on_unknowns(self, harness: Harness) -> None:
+        """``bind_chat_to_session`` is idempotent on ``(connection_id,
+        chat_id)``: a second call returns the existing row rather than
+        ON CONFLICT-ing into a 500.  Unknown connection_id / session_id
+        each surface as 4xx (NotFoundError).
+        """
+        from aios.errors import NotFoundError
+
+        agent_id, env_id = await _make_agent_and_env(harness)
+        first_session = await sessions_service.create_session(
+            harness._pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title="first",
+            metadata={},
+        )
+        second_session = await sessions_service.create_session(
+            harness._pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title="second",
+            metadata={},
+        )
+        account = _unique_account()
+        conn_row = await connections_service.create_connection(
+            harness._pool, connector="echo", account=account, metadata={}
+        )
+
+        first = await connections_service.bind_chat_to_session(
+            harness._pool,
+            conn_row.id,
+            chat_id="chat-x",
+            session_id=first_session.id,
+        )
+        assert first.session_id == first_session.id
+
+        # Repeat: the existing row wins; second_session is intentionally
+        # ignored.  Operator who really wants to re-route must unbind
+        # first.
+        second = await connections_service.bind_chat_to_session(
+            harness._pool,
+            conn_row.id,
+            chat_id="chat-x",
+            session_id=second_session.id,
+        )
+        assert second.session_id == first_session.id
+
+        # Unknown connection_id → NotFoundError (FK guard, prevents 500).
+        with pytest.raises(NotFoundError):
+            await connections_service.bind_chat_to_session(
+                harness._pool,
+                "conn_missing",
+                chat_id="chat-x",
+                session_id=first_session.id,
+            )
+
+        # Unknown session_id → NotFoundError (FK guard, prevents 500).
+        with pytest.raises(NotFoundError):
+            await connections_service.bind_chat_to_session(
+                harness._pool,
+                conn_row.id,
+                chat_id="chat-y",
+                session_id="sess_missing",
+            )
+
+    async def test_validate_account_for_session_recognizes_ledger_binding(
+        self, harness: Harness
+    ) -> None:
+        """A session reachable only via an operator-bound row in
+        ``connection_chat_sessions`` (no direct attach, no spawn-from
+        pointer) must still pass outbound auth — the third OR clause
+        in ``session_authorizes_connector_account``.
+        """
+        agent_id, env_id = await _make_agent_and_env(harness)
+        bound_session = await sessions_service.create_session(
+            harness._pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title="bound-only",
+            metadata={},
+        )
+        account = _unique_account()
+        conn_row = await connections_service.create_connection(
+            harness._pool, connector="echo", account=account, metadata={}
+        )
+        # Connection is in detached mode — no attach, no per_chat config.
+        # bound_session is reachable only via the ledger row.
+        async with harness._pool.acquire() as conn:
+            await queries.insert_chat_session(
+                conn,
+                connection_id=conn_row.id,
+                chat_id="chat-bound",
+                session_id=bound_session.id,
+            )
+
+        authorized = await connections_service.validate_account_for_session(
+            harness._pool, bound_session.id, connector="echo", account=account
+        )
+        assert authorized is True
+
+
+@needs_docker
 class TestDetachedConnection:
     async def test_detached_drops_with_counter_and_ack(self, harness: Harness) -> None:
         account = _unique_account()
