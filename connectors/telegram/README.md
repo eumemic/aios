@@ -76,10 +76,26 @@ When deploying multiple instances, set
 `AIOS_TELEGRAM_SUPPORT_BOT_TOKEN`).  Instance names match
 `^[a-z][a-z0-9_]*$`.
 
+## Attachments
+
+Inbound photos, voice notes, documents, video, and audio are
+downloaded via `bot.get_file()` and surfaced as `image_url` content
+parts (vision-capable minds) or text markers, via the harness's
+vision pipeline.  Stickers and animations are dropped; captions
+become the message text.
+
+Outbound: pass an `attachments: list[str]` parameter to
+`telegram_send` alongside `text`.  Type is inferred from extension
+— `.jpg`/`.png` photo, `.mp4` video, `.ogg` voice, `.mp3` audio,
+anything else document.  Single attachment uses
+`send_photo`/`send_voice`/etc with caption; multiple attachments
+use `send_media_group` (caption rides on the first item only, per
+Telegram's API).  Paths must be under `/workspace/` or
+`/mnt/attachments/`.
+
 ## Out of scope for v1
 
-- Inbound media (photos, voice, documents, stickers) — dropped silently.
-- Outbound media — no `telegram_send_photo` / `_document`.
+- Stickers and animations (dropped on inbound).
 - Reactions — punt.
 - Message editing / deletion.
 - Typing indicators / chat actions.
