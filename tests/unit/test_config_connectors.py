@@ -7,6 +7,8 @@ backs ``AIOS_CONNECTORS_ENABLED`` env parsing.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -137,3 +139,61 @@ class TestConnectorsEnabledValidator:
         monkeypatch.setenv("AIOS_CONNECTORS_ENABLED", " signal , telegram:bot1 , ")
         s = Settings()
         assert s.connectors_enabled == ["signal", "telegram:bot1"]
+
+
+class TestConnectorsDirCloister:
+    """``connectors_dir`` defaults to a per-instance cloister under
+    ``~/.aios/instances/<instance_id>/connectors`` (#238).
+
+    The cloister keeps two worktree dev instances running connectors
+    concurrently from clobbering each other's spool databases at the
+    legacy shared ``~/.aios/connectors`` path.  Operators that override
+    ``AIOS_CONNECTORS_DIR`` explicitly keep their override.
+    """
+
+    def test_default_instance_resolves_to_default_cloister(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("AIOS_CONNECTORS_DIR", raising=False)
+        monkeypatch.delenv("AIOS_INSTANCE_ID", raising=False)
+        s = Settings(_env_file=None, **_BASE_KWARGS)
+        assert s.instance_id == "default"
+        assert s.connectors_dir == Path.home() / ".aios" / "instances" / "default" / "connectors"
+
+    def test_custom_instance_id_resolves_per_instance_cloister(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("AIOS_CONNECTORS_DIR", raising=False)
+        s = Settings(_env_file=None, instance_id="aios_dev_abc12345", **_BASE_KWARGS)
+        assert (
+            s.connectors_dir
+            == Path.home() / ".aios" / "instances" / "aios_dev_abc12345" / "connectors"
+        )
+
+    def test_explicit_connectors_dir_override_wins(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An explicit ``AIOS_CONNECTORS_DIR`` (env or kwarg) preserves the
+        operator's override even with a non-default instance_id.  This
+        is the escape hatch for ops that pre-bake connectors elsewhere.
+        """
+        monkeypatch.delenv("AIOS_CONNECTORS_DIR", raising=False)
+        custom = tmp_path / "operator-chosen-dir"
+        s = Settings(
+            _env_file=None,
+            instance_id="aios_dev_abc12345",
+            connectors_dir=custom,
+            **_BASE_KWARGS,
+        )
+        assert s.connectors_dir == custom
+
+    def test_env_var_override_wins(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """``AIOS_CONNECTORS_DIR`` env var wins over the cloister default."""
+        custom = tmp_path / "via-env"
+        monkeypatch.setenv("AIOS_CONNECTORS_DIR", str(custom))
+        monkeypatch.setenv("AIOS_API_KEY", _BASE_KWARGS["api_key"])
+        monkeypatch.setenv("AIOS_VAULT_KEY", _BASE_KWARGS["vault_key"])
+        monkeypatch.setenv("AIOS_DB_URL", _BASE_KWARGS["db_url"])
+        monkeypatch.setenv("AIOS_INSTANCE_ID", "aios_dev_abc12345")
+        s = Settings()
+        assert s.connectors_dir == custom
