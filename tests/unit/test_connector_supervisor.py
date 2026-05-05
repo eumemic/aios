@@ -85,12 +85,19 @@ class TestResolveConnectorSpecs:
     plan-decision #11.
     """
 
-    def _settings(self, *, enabled: list[str], connectors_dir: Any = None) -> Any:
+    def _settings(
+        self,
+        *,
+        enabled: list[str],
+        connectors_dir: Any = None,
+        workspace_root: Any = None,
+    ) -> Any:
         from pathlib import Path
 
         s = MagicMock()
         s.connectors_enabled = enabled
         s.connectors_dir = connectors_dir or Path("/tmp/aios-connectors-test")
+        s.workspace_root = workspace_root or Path("/tmp/aios-workspaces-test")
         return s
 
     def test_unknown_name_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,6 +215,79 @@ class TestResolveConnectorSpecs:
         # Default-instance just inherits parent env unmodified.
         assert spec.env is not None
         assert spec.env["AIOS_TELEGRAM_BOT_TOKEN"] == "the-only-token"
+
+    def test_workspace_root_absolutized_for_subprocess(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """Operator's relative ``AIOS_WORKSPACE_ROOT`` (or relative
+        ``workspace_root`` setting) must be absolutized before reaching the
+        connector subprocess.
+
+        The subprocess runs under ``<connectors_dir>/<connector>/`` as cwd,
+        so a relative env value would resolve against the wrong directory
+        inside the SDK's ``resolve_sandbox_path`` helper.  Wire-level
+        symptom: outbound attachments fail with ``attachment path
+        '/workspace/foo.png' does not exist (resolved to
+        <connectors_dir>/<connector>/workspaces/<session>/foo.png)``.
+        """
+        from pathlib import Path
+
+        ep = MagicMock()
+        ep.name = "telegram"
+        ep.load.return_value = lambda name, settings: ConnectorSpec(name=name, command="/bin/echo")
+        monkeypatch.setattr(
+            "aios.harness.connector_supervisor.entry_points",
+            lambda group: [ep],
+        )
+        # Operator's parent env carries a relative path (real .env scenario).
+        monkeypatch.setenv("AIOS_WORKSPACE_ROOT", "./workspaces")
+        monkeypatch.chdir(tmp_path)
+        specs = resolve_connector_specs(
+            self._settings(
+                enabled=["telegram"],
+                workspace_root=Path("./workspaces"),
+            )
+        )
+        _, spec = specs[0]
+        assert spec.env is not None
+        resolved = spec.env["AIOS_WORKSPACE_ROOT"]
+        assert os.path.isabs(resolved), (
+            f"AIOS_WORKSPACE_ROOT should be absolute in subprocess env, got {resolved!r}"
+        )
+        # And it should resolve against the worker's CWD (tmp_path), not
+        # the connector subprocess's cwd.
+        assert Path(resolved) == (tmp_path / "workspaces").resolve()
+
+    def test_factory_supplied_workspace_root_is_overridden(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """Factory specs that set ``AIOS_WORKSPACE_ROOT`` lose to the
+        worker-resolved absolute path.
+
+        The harness uses ``settings.workspace_root`` to find session
+        workspaces on the host; a connector author overriding it via
+        ``spec.env`` would silently desynchronize the SDK's
+        ``resolve_sandbox_path`` from the harness's bind-mount, so the
+        absolutized worker value wins.
+        """
+        from pathlib import Path
+
+        ep = MagicMock()
+        ep.name = "telegram"
+        ep.load.return_value = lambda name, settings: ConnectorSpec(
+            name=name,
+            command="/bin/echo",
+            env={"AIOS_WORKSPACE_ROOT": "/nope/factory/wins"},
+        )
+        monkeypatch.setattr(
+            "aios.harness.connector_supervisor.entry_points",
+            lambda group: [ep],
+        )
+        ws = tmp_path / "workspaces"
+        specs = resolve_connector_specs(self._settings(enabled=["telegram"], workspace_root=ws))
+        _, spec = specs[0]
+        assert spec.env is not None
+        assert Path(spec.env["AIOS_WORKSPACE_ROOT"]) == ws.resolve()
 
 
 class TestPumpStderrLineExtraction:
