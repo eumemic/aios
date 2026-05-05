@@ -115,7 +115,7 @@ async def get_session(pool: asyncpg.Pool[Any], session_id: str) -> Session:
 
 
 async def get_session_model(pool: asyncpg.Pool[Any], session_id: str) -> str:
-    """Bound mind URL for ``session_id`` (pinned agent version wins)."""
+    """Bound model for ``session_id`` (pinned agent version wins)."""
     async with pool.acquire() as conn:
         return await queries.get_session_model(conn, session_id)
 

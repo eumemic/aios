@@ -49,7 +49,7 @@ def can_inline_image(*, model: str, content_type: str, size_bytes: int) -> bool:
     """True when ``model`` can see image bytes inlined as ``image_url``.
 
     Returns ``False`` for non-image content_types, oversize files
-    (over :data:`INLINE_SIZE_CAP_BYTES`), and minds without vision
+    (over :data:`INLINE_SIZE_CAP_BYTES`), and models without vision
     support.  Callers fall back to a text marker referencing the
     in-sandbox path so the model can still ``read`` the file later.
     """
@@ -71,7 +71,7 @@ def make_image_url_part(*, content_type: str, data_b64: str) -> dict[str, Any]:
 def text_marker(record: dict[str, Any]) -> str:
     """Inert text marker for an attachment that won't be inlined.
 
-    Used when the model can't see the pixels (non-vision mind, oversize
+    Used when the model can't see the pixels (non-vision model, oversize
     image, non-image attachment, legacy stub without ``in_sandbox_path``).
     The marker carries enough info for the model to ``read`` the path
     if the file is in fact reachable.

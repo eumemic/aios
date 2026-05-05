@@ -3,7 +3,7 @@
 The renderer's vision policy is delegated to
 :mod:`aios.harness.vision`; here we exercise the wiring around it —
 host-bytes-read for inlinable images, text-marker fallback for
-non-vision minds and oversize images, and the legacy-stub path.
+non-vision models and oversize images, and the legacy-stub path.
 """
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ def _stub_supports_vision(monkeypatch: pytest.MonkeyPatch) -> Any:
     """
     saved = dict(vision._VISION_OVERRIDES)
     vision._VISION_OVERRIDES.clear()
-    vision._VISION_OVERRIDES["mind/vision"] = True
-    vision._VISION_OVERRIDES["mind/text"] = False
+    vision._VISION_OVERRIDES["model/vision"] = True
+    vision._VISION_OVERRIDES["model/text"] = False
     yield
     vision._VISION_OVERRIDES.clear()
     vision._VISION_OVERRIDES.update(saved)
@@ -85,7 +85,7 @@ class TestVisionAwareRendering:
             event,
             "echo/acct/chat-1",
             "echo/acct/chat-1",
-            model="mind/vision",
+            model="model/vision",
             session_id="sess-1",
         )
         content = msg["content"]
@@ -118,7 +118,7 @@ class TestVisionAwareRendering:
             event,
             "echo/acct/chat-1",
             "echo/acct/chat-1",
-            model="mind/vision",
+            model="model/vision",
             session_id="sess-1",
         )
         assert isinstance(msg["content"], str)
@@ -142,7 +142,7 @@ class TestVisionAwareRendering:
             event,
             "echo/acct/chat-1",
             "echo/acct/chat-1",
-            model="mind/text",
+            model="model/text",
             session_id="sess-1",
         )
         assert isinstance(msg["content"], str)
@@ -167,7 +167,7 @@ class TestVisionAwareRendering:
             event,
             "echo/acct/chat-1",
             "echo/acct/chat-1",
-            model="mind/vision",
+            model="model/vision",
             session_id="sess-1",
         )
         assert isinstance(msg["content"], str)
@@ -188,7 +188,7 @@ class TestVisionAwareRendering:
             event,
             "echo/acct/chat-1",
             "echo/acct/chat-1",
-            model="mind/vision",
+            model="model/vision",
             session_id="sess-1",
         )
         assert isinstance(msg["content"], str)
@@ -224,7 +224,7 @@ class TestVisionAwareRendering:
         text blocks (``text content blocks must be non-empty``).  The
         common path is fine because the channel header populates the
         leading text, but legacy events with metadata-stripped headers
-        would 400 against Anthropic-routed minds.  Regression test for
+        would 400 against Anthropic-routed models.  Regression test for
         PR #218.
         """
         sandbox_path = _stage_image(
@@ -260,7 +260,7 @@ class TestVisionAwareRendering:
             event,
             "echo/acct/chat-1",
             "echo/acct/chat-1",
-            model="mind/vision",
+            model="model/vision",
             session_id="sess-1",
         )
         content = msg["content"]
@@ -298,7 +298,7 @@ class TestVisionAwareRendering:
             event,
             "echo/acct/chat-1",
             "echo/acct/chat-1",
-            model="mind/vision",
+            model="model/vision",
             session_id="sess-1",
         )
         content = msg["content"]

@@ -12,7 +12,7 @@ Two public functions:
 
 Both are pure functions of the event log + caller-supplied vision
 policy inputs (``model``, ``session_id``).  They DO read host bytes
-when an image attachment can be inlined for the bound mind — that I/O
+when an image attachment can be inlined for the bound model — that I/O
 is the cost of producing an ``image_url`` content part.  No DB access,
 no async.
 
@@ -201,7 +201,7 @@ def render_user_event(
       ``POST /sessions/{id}/messages`` traffic and pre-migration rows.
     * ``orig == focal_at_arrival`` (non-NULL) → full content with a
       metadata header inlined.  When the focal event's metadata
-      carries ``attachments`` and the bound mind supports vision,
+      carries ``attachments`` and the bound model supports vision,
       inlinable images are emitted as ``image_url`` content parts;
       everything else gets a text marker referencing the in-sandbox
       path.
@@ -299,7 +299,7 @@ def _apply_attachments(
         # non-empty`) so omit the leading text part when there is no caption,
         # no channel header, and no markers — the image_url parts stand on
         # their own.  OpenAI tolerates the empty part, but emitting it would
-        # break any vision-capable Anthropic-routed mind on a caption-less
+        # break any vision-capable Anthropic-routed model on a caption-less
         # image-only inbound.
         if text:
             msg["content"] = [{"type": "text", "text": text}, *image_parts]

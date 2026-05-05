@@ -72,8 +72,8 @@ def stub_runtime(stub_handle: ContainerHandle) -> Any:
 def _vision_overrides(monkeypatch: pytest.MonkeyPatch) -> Any:
     saved = dict(vision._VISION_OVERRIDES)
     vision._VISION_OVERRIDES.clear()
-    vision._VISION_OVERRIDES["mind/vision"] = True
-    vision._VISION_OVERRIDES["mind/text"] = False
+    vision._VISION_OVERRIDES["model/vision"] = True
+    vision._VISION_OVERRIDES["model/text"] = False
     yield
     vision._VISION_OVERRIDES.clear()
     vision._VISION_OVERRIDES.update(saved)
@@ -84,7 +84,7 @@ def stub_get_session_model(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Replace the DB lookup with a callable returning whatever the test sets."""
 
     class _Model:
-        value: str = "mind/vision"
+        value: str = "model/vision"
 
     state = _Model()
 
@@ -118,7 +118,7 @@ class TestImageBranch:
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
-        stub_get_session_model.value = "mind/vision"
+        stub_get_session_model.value = "model/vision"
         _stage_workspace_image("sess_01TEST", "screenshot.png", b"PNGbytes")
 
         result = await read_handler("sess_01TEST", {"path": "/workspace/screenshot.png"})
@@ -139,7 +139,7 @@ class TestImageBranch:
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
-        stub_get_session_model.value = "mind/vision"
+        stub_get_session_model.value = "model/vision"
         _stage_attachment("sess_01TEST", "echo", "evt-1-photo.jpg", b"JPGbytes")
 
         result = await read_handler(
@@ -156,7 +156,7 @@ class TestImageBranch:
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
-        stub_get_session_model.value = "mind/text"
+        stub_get_session_model.value = "model/text"
         _stage_workspace_image("sess_01TEST", "screenshot.png", b"PNG")
 
         result = await read_handler("sess_01TEST", {"path": "/workspace/screenshot.png"})
@@ -172,7 +172,7 @@ class TestImageBranch:
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
-        stub_get_session_model.value = "mind/vision"
+        stub_get_session_model.value = "model/vision"
         _stage_workspace_image("sess_01TEST", "huge.png", b"\0" * (3 * 1024 * 1024))
 
         result = await read_handler("sess_01TEST", {"path": "/workspace/huge.png"})
@@ -188,7 +188,7 @@ class TestImageBranch:
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
-        stub_get_session_model.value = "mind/vision"
+        stub_get_session_model.value = "model/vision"
         workspace_dir_for("sess_01TEST").mkdir(parents=True, exist_ok=True)
 
         result = await read_handler("sess_01TEST", {"path": "/workspace/nope.png"})
@@ -207,7 +207,7 @@ class TestImageBranch:
     ) -> None:
         """Reading ``/etc/foo.png`` (not a bind mount) hits docker-exec
         with one combined stat+base64 invocation."""
-        stub_get_session_model.value = "mind/vision"
+        stub_get_session_model.value = "model/vision"
         b64_payload = base64.b64encode(b"otherbytes").decode()
         stub_handle.run_command = AsyncMock(  # type: ignore[method-assign]
             return_value=CommandResult(
@@ -248,7 +248,7 @@ class TestImagePathTraversalAttack:
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
-        stub_get_session_model.value = "mind/vision"
+        stub_get_session_model.value = "model/vision"
         host_secret = b"HOST-SECRET-BYTES-DO-NOT-LEAK"
         (temp_workspace_root / "host_secret.png").write_bytes(host_secret)
         workspace_dir_for("sess_01TEST").mkdir(parents=True, exist_ok=True)
@@ -282,7 +282,7 @@ class TestImagePathTraversalAttack:
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
-        stub_get_session_model.value = "mind/vision"
+        stub_get_session_model.value = "model/vision"
         host_secret = b"ATTACHMENTS-LEAK-PROBE"
         (temp_workspace_root / "leak.png").write_bytes(host_secret)
         session_attachments_dir("sess_01TEST").mkdir(parents=True, exist_ok=True)
@@ -317,7 +317,7 @@ class TestImagePathTraversalAttack:
         lives outside the bind-mount root (e.g. via ``ln -s`` from inside
         the sandbox), then ``read``s through it. Containment must follow
         the symlink and reject."""
-        stub_get_session_model.value = "mind/vision"
+        stub_get_session_model.value = "model/vision"
         host_secret = b"SYMLINK-ESCAPE-PROBE-BYTES"
         outside = temp_workspace_root / "outside.png"
         outside.write_bytes(host_secret)

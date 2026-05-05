@@ -3,7 +3,7 @@
 Text files return ``LINE_NUM<TAB>CONTENT`` windowed by ``offset`` /
 ``limit`` via ``cat -n | sed``.  Image files (extensions in
 :data:`_EXT_TO_MIME`) return a content-parts list with an
-``image_url`` block when the bound mind supports vision and the file
+``image_url`` block when the bound model supports vision and the file
 fits the inline cap; otherwise an explanatory ``ToolResult``.
 """
 
