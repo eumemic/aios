@@ -362,7 +362,10 @@ class TestPumpStderrLineExtraction:
         """
         captured: list[str] = []
         read_fd, write_fd = os.pipe()
-        token = "8116307959:AAFv1He6CZ-tpGun19CTp1tjbBoWtJrGrL8"
+        # Synthetic token matching the bot<digits>:<base64-ish> shape
+        # the redaction regex expects.  Replaces a real token that
+        # leaked through PR #214 / #205 (rotated upstream; #223 §4).
+        token = "1234567890:AAExample-Fake-Token-for-Tests-Only0"
         try:
             pump = asyncio.create_task(_pump_stderr("test_conn", read_fd))
             with mock_log_capture(captured):
