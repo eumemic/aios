@@ -51,7 +51,7 @@ from .addressing import decode_chat_id, encode_chat_id
 from .config import Settings
 from .daemon import GroupInfo, SignalDaemon
 from .markdown import convert_markdown_to_signal_styles
-from .mentions import encode_mentions
+from .mentions import build_mention_strings, encode_mentions
 from .parse import InboundMessage, build_content_text, parse_envelope
 from .prompts import build_instructions
 
@@ -348,8 +348,14 @@ class SignalConnector(Connector):
             "updateGroup",
             {"account": phone, "name": name, "members": member_uuids},
         )
-        group_id = result.get("groupId") if result else None
-        return {"group_id": group_id} if group_id else {"status": "ok"}
+        if not isinstance(result, dict) or not result.get("groupId"):
+            raise RuntimeError(f"signal-cli updateGroup did not return a groupId; got {result!r}")
+        # Refresh the roster cache so an immediate signal_send into this
+        # new group can resolve ``@<uuid_prefix>`` mentions against its
+        # members.  Without the refresh the next send would silently drop
+        # any mentions (group missing from cache → empty member_uuids).
+        self._groups_by_account[phone] = await self._daemon.list_groups(account=phone)
+        return {"group_id": result["groupId"]}
 
     @tool()
     @focal_required
@@ -507,8 +513,13 @@ def _build_send_params(
     if (quote_timestamp_ms is None) != (quote_author_uuid is None):
         raise ValueError("quote_timestamp_ms and quote_author_uuid must be set together")
     chat_type, raw_id = decode_chat_id(chat_id)
-    encoded, mentions = encode_mentions(text, member_uuids or [])
+    # Mention encoding inserts U+FFFC placeholders; markdown stripping
+    # then removes delimiter chars (which can shift placeholder offsets
+    # leftward).  Compute Signal's mention offsets against the *final*
+    # stripped message so they match what the recipient sees.
+    encoded, ordered_uuids = encode_mentions(text, member_uuids or [])
     stripped, styles = convert_markdown_to_signal_styles(encoded)
+    mentions = build_mention_strings(stripped, ordered_uuids)
     params: dict[str, Any] = {"account": account_phone, "message": stripped}
     if styles:
         params["textStyles"] = styles

@@ -38,18 +38,18 @@ async def test_create_group_sends_no_groupid(connector: SignalConnector) -> None
     assert "groupId" not in params
 
 
-async def test_create_group_falls_back_when_no_groupid_in_result(
+async def test_create_group_raises_when_no_groupid_in_result(
     connector: SignalConnector,
 ) -> None:
-    # signal-cli sometimes returns null; the tool should still report success.
+    # signal-cli's contract is to return {"groupId": ...} on a successful
+    # create.  Anything else is a contract break — fail loud rather than
+    # silently swallowing.
     stub_focal(connector, f"bot-uuid/{ALICE_UUID}")
-    result = decode_tool_result(
+    with pytest.raises(RuntimeError, match="did not return a groupId"):
         await connector._invoke_tool(
             descriptor(connector, "signal_create_group"),
             {"name": "x", "member_uuids": []},
         )
-    )
-    assert result == {"status": "ok"}
 
 
 # ── signal_rename_group ──────────────────────────────────────────────

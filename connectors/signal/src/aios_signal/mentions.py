@@ -2,14 +2,19 @@
 
 Signal represents mentions in the wire protocol as a U+FFFC placeholder
 in the message body plus a parallel ``mentions`` array of
-``"start:length:uuid"`` entries.  This module turns agent-friendly text
-of the form ``"hey @abcd1234, ping"`` into that wire form.
+``"start:length:uuid"`` entries with UTF-16 code-unit offsets.  The
+flow has two stages because markdown stripping happens between mention
+substitution and the final outbound message:
+
+1. :func:`encode_mentions` — replace ``@<hex>`` syntax with U+FFFC and
+   return the encoded text plus a left-to-right list of resolved UUIDs.
+2. :func:`build_mention_strings` — after any further text mutation
+   (markdown stripping), pair each remaining U+FFFC with its UUID and
+   compute UTF-16 offsets against the *final* message body.
 
 Group-only by design: the resolver matches each ``@<hex>`` candidate
-against the UUIDs of the current group's members.  In a DM there is
-only one possible counterparty, so callers pass an empty
-``member_uuids`` list and this module is a no-op (the text passes
-through unchanged).
+against the UUIDs of the current group's members.  In a DM the caller
+passes an empty ``member_uuids`` list and this module is a no-op.
 """
 
 from __future__ import annotations
@@ -45,18 +50,27 @@ def encode_mentions(
     text: str,
     member_uuids: list[str],
 ) -> tuple[str, list[str]]:
-    """Replace resolved ``@<hex>`` syntax with placeholders + mentions metadata.
+    """Replace resolved ``@<hex>`` syntax with U+FFFC placeholders.
 
-    Returns ``(encoded_text, mentions)`` where ``mentions`` is a list of
-    ``"<utf16_start>:1:<full_uuid>"`` strings (Signal's textStyles use
-    UTF-16 code-unit offsets, and so do mentions).  Unresolved candidates
-    are left in the text as-is so the agent can see they didn't land
-    when the message arrives.
+    Returns ``(encoded_text, ordered_uuids)`` where ``ordered_uuids[i]``
+    is the UUID that the i-th U+FFFC in ``encoded_text`` (left-to-right)
+    represents.  The caller pairs each placeholder with its UUID via
+    :func:`build_mention_strings` *after* any subsequent text mutation
+    (e.g. markdown stripping) — markdown removal preserves placeholder
+    order but shifts character offsets, so offsets must be computed on
+    the final message body.
+
+    Pre-existing U+FFFC characters in ``text`` are stripped before
+    encoding.  Outbound Signal sends use U+FFFC exclusively for
+    mentions; an orphan placeholder would either crash the offset/UUID
+    pairing or be rejected by signal-cli.
     """
+    if MENTION_PLACEHOLDER in text:
+        text = text.replace(MENTION_PLACEHOLDER, "")
     if not member_uuids or "@" not in text:
         return text, []
 
-    resolved: list[tuple[int, int, str]] = []  # (start, end, full_uuid) in original text
+    resolved: list[tuple[int, int, str]] = []  # (start, end, full_uuid)
     for m in _MENTION_RE.finditer(text):
         full_uuid = _resolve(m.group(1), member_uuids)
         if full_uuid is not None:
@@ -70,11 +84,24 @@ def encode_mentions(
     for start, end, _uuid in reversed(resolved):
         encoded = encoded[:start] + MENTION_PLACEHOLDER + encoded[end:]
 
-    # Signal mention offsets are UTF-16 code units, not Python code points.
-    mention_uuids = iter(uuid for _, _, uuid in resolved)
-    mentions = [
-        f"{codepoint_to_utf16_offset(encoded, i)}:1:{next(mention_uuids)}"
-        for i, ch in enumerate(encoded)
+    return encoded, [uuid for _, _, uuid in resolved]
+
+
+def build_mention_strings(message: str, ordered_uuids: list[str]) -> list[str]:
+    """Pair each U+FFFC in ``message`` with the next UUID and emit
+    ``"<utf16_start>:1:<uuid>"`` strings.
+
+    ``message`` is the final outbound text (already markdown-stripped);
+    ``ordered_uuids`` comes from :func:`encode_mentions`.  Caller
+    invariant: ``message`` contains exactly ``len(ordered_uuids)``
+    placeholders, in the same left-to-right order as the source
+    ``@<hex>`` matches.
+    """
+    if not ordered_uuids:
+        return []
+    uuid_iter = iter(ordered_uuids)
+    return [
+        f"{codepoint_to_utf16_offset(message, i)}:1:{next(uuid_iter)}"
+        for i, ch in enumerate(message)
         if ch == MENTION_PLACEHOLDER
     ]
-    return encoded, mentions

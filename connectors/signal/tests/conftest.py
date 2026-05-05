@@ -42,7 +42,14 @@ def connector(tmp_path: Path) -> SignalConnector:
     c = SignalConnector(cfg)
     c._uuid_to_phone = {"bot-uuid": "+15550001"}
     c._daemon = type(
-        "Daemon", (), {"rpc": type("Rpc", (), {"call": AsyncMock(return_value=None)})()}
+        "Daemon",
+        (),
+        {
+            "rpc": type("Rpc", (), {"call": AsyncMock(return_value=None)})(),
+            # signal_create_group refreshes the roster cache via list_groups
+            # post-create; tests that don't care can leave the default ``[]``.
+            "list_groups": AsyncMock(return_value=[]),
+        },
     )()
     return c
 
