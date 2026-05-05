@@ -24,6 +24,12 @@ class Attachment:
     content_type: str
     filename: str | None
     host_path: str | None
+    # signal-cli's storage id, used to compute the on-disk path when
+    # the daemon's JSON-RPC envelope omits the ``file`` field (which it
+    # does in JSON-RPC daemon mode 0.14.x — only the legacy CLI output
+    # included it).  By signal-cli convention the file lives at
+    # ``<config_dir>/attachments/<id>``.
+    id: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -151,6 +157,7 @@ def parse_envelope(
             content_type=a.get("contentType", "application/octet-stream"),
             filename=a.get("filename") if isinstance(a.get("filename"), str) else None,
             host_path=a.get("file") if isinstance(a.get("file"), str) else None,
+            id=a.get("id") if isinstance(a.get("id"), str) else None,
         )
         for a in attachments_raw
         if isinstance(a, dict)

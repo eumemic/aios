@@ -62,10 +62,13 @@ class TestListGroups:
             member_uuids=["33333333-0003-0000-0000-000000000000"],
         )
 
-    async def test_empty_list_when_rpc_fails(self) -> None:
+    async def test_rpc_failure_propagates(self) -> None:
+        """Boot-time callers depend on the raise to mark accounts unhealthy
+        rather than silently treating "not registered" as "no groups"."""
         daemon = _make_daemon()
         daemon.rpc.call = AsyncMock(side_effect=RuntimeError("rpc broken"))  # type: ignore[method-assign]
-        assert await daemon.list_groups(account="+15550001111") == []
+        with pytest.raises(RuntimeError, match="rpc broken"):
+            await daemon.list_groups(account="+15550001111")
 
     async def test_empty_list_when_rpc_returns_non_list(self) -> None:
         daemon = _make_daemon()

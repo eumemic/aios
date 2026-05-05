@@ -101,7 +101,14 @@ def test_build_content_text_with_text_and_attachment(bot_uuid: str) -> None:
         chat_name=None,
         timestamp_ms=1,
         text="Check this out",
-        attachments=(Attachment(content_type="image/png", filename="x.png", host_path="/tmp/x"),),
+        attachments=(
+            Attachment(
+                content_type="image/png",
+                filename="x.png",
+                host_path="/tmp/x",
+                id="abc",
+            ),
+        ),
         reply=None,
         reaction=None,
     )
@@ -114,3 +121,15 @@ def test_attachment_captures_host_path(
     msg = parse_envelope(envelope_attachment_only, bot_account_uuid=bot_uuid)
     assert msg is not None
     assert msg.attachments[0].host_path == "/tmp/signal-cli/attachments/abc-def-123"
+    assert msg.attachments[0].id == "abc-def-123"
+
+
+def test_attachment_no_file_field_carries_id(
+    envelope_attachment_no_file_field: dict[str, Any], bot_uuid: str
+) -> None:
+    """JSON-RPC daemon mode envelopes omit ``file`` but keep ``id``;
+    connector-side fallback uses ``id`` to reconstruct the on-disk path."""
+    msg = parse_envelope(envelope_attachment_no_file_field, bot_account_uuid=bot_uuid)
+    assert msg is not None
+    assert msg.attachments[0].host_path is None
+    assert msg.attachments[0].id == "xyz-789"
