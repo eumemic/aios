@@ -113,8 +113,9 @@ Updates the connector subscribes to (set explicitly via PTB's
   `metadata.sticker_emoji` so models that can't see the sticker file
   still get a textual cue.
 - **`edited_message`** — edits arrive as a fresh inbound with
-  `metadata.edit_of_message_id` set to the message_id being edited.
-  The body is the new (post-edit) text.
+  `metadata.edited == True`.  The `message_id` is the same as the
+  original (Telegram preserves it across edits), and the body is the
+  new (post-edit) text.
 - **`message_reaction`** — emoji reactions on messages flow with empty
   body content and `metadata.reaction` containing
   `target_message_id` plus `old_emojis` / `new_emojis` as the delta.

@@ -5,10 +5,8 @@ Returned in the ``InitializeResult.instructions`` field of the MCP
 session's system prompt under a ``## Connector: telegram/<account>``
 heading.
 
-Covers the tools this server exposes — ``telegram_send``,
-``telegram_typing``, ``telegram_edit_message``, ``telegram_delete_message``,
-``telegram_react``.  Telling the model about tools that don't exist
-would be worse than silence.
+Covers the tools this server exposes.  Telling the model about tools
+that don't exist would be worse than silence.
 
 ``build_instructions`` prepends an identity block (the bot's own numeric
 ``bot_id``, ``@username``, and display ``first_name``) so the agent knows
@@ -140,9 +138,10 @@ the reaction.
 
 ## What inbound looks like
 
-Edits arrive as a fresh inbound carrying ``metadata.edit_of_message_id``
-equal to the message_id being edited — the body is the new text.  Treat
-this like the user changing their mind, not as a brand-new message.
+Edits arrive as a fresh inbound with ``metadata.edited == True`` — the
+``message_id`` is the same as the original message (Telegram preserves
+it), and the body is the new (post-edit) text.  Treat this like the
+user changing their mind, not as a brand-new message.
 
 Reactions arrive with empty body content and ``metadata.reaction``
 containing ``target_message_id``, ``old_emojis``, ``new_emojis``.  An

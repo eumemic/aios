@@ -1,8 +1,4 @@
-"""Telegram connector ported to the aios-connector SDK.
-
-Replaces the pre-PR3 FastMCP HTTP server + ingest-HTTP-POST architecture
-with a single :class:`aios_connector.Connector` subclass communicating
-with aios over stdio MCP.
+"""Telegram connector built on the aios-connector SDK.
 
 Per-account paradigm: each Telegram bot token is a distinct platform
 identity (PTB's :class:`Application` is bound 1:1 to a token), so this
@@ -560,10 +556,8 @@ def _prepare_text(text: str, parse_mode: str) -> tuple[str, str | None]:
     return text, None
 
 
-def _iso(ts_ms: int) -> str | None:
-    """Render a unix-ms timestamp as ISO-8601 UTC, or None for falsy values."""
-    if not ts_ms:
-        return None
+def _iso(ts_ms: int) -> str:
+    """Render a unix-ms timestamp as ISO-8601 UTC."""
     return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).isoformat()
 
 
@@ -642,7 +636,7 @@ def build_metadata(msg: InboundMessage, bot_id: int) -> dict[str, Any]:
             "text": msg.reply.text,
         }
     if msg.edited:
-        metadata["edit_of_message_id"] = msg.message_id
+        metadata["edited"] = True
     if msg.sticker_emoji is not None:
         metadata["sticker_emoji"] = msg.sticker_emoji
     return metadata
