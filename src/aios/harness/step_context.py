@@ -121,12 +121,7 @@ async def compute_step_prelude(
         instructions_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
 
     # Connector-subprocess (stdio MCP) tools come from the worker-scoped
-    # registry, NOT from ``agent.mcp_servers`` (which only covers HTTP MCP
-    # servers declared on the agent).  Without this enumeration the model
-    # sees connector tool *names* only when they appear in prior tool_use
-    # events from the session log — and never sees their schemas, forcing
-    # it to guess parameter shapes and learn from JSON-schema validation
-    # errors the harness sends back.
+    # registry, separate from agent.mcp_servers (HTTP MCP).
     connector_registry = runtime.connector_subprocess_registry
     if connector_registry is not None:
         tools.extend(await connector_registry.list_tools())

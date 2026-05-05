@@ -362,8 +362,6 @@ async def _send_single_media(
         "audio": bot.send_audio,
         "document": bot.send_document,
     }[kind]
-    # PTB accepts ``str`` or ``Path`` for the media kwargs; pass the
-    # ``Path`` so callers can stat / open it without conversion.
     kwargs: dict[str, Any] = {"chat_id": chat_id, kind: host_path}
     if caption is not None:
         kwargs["caption"] = caption

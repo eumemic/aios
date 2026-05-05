@@ -26,12 +26,9 @@ Public API:
 * :class:`Attachment` / :class:`AttachmentError` — inbound binary blobs
   (photos, voice notes, documents) and the SDK-boundary validation
   failure connectors catch.
-* :data:`SandboxPath` — type marker for outbound-attachment parameters.
-  Annotate ``attachments: list[SandboxPath] | None = None`` (or scalar
-  ``SandboxPath``) and the SDK auto-resolves the model-supplied
-  in-sandbox path strings to host :class:`pathlib.Path` objects BEFORE
-  the tool body runs.  Connector authors don't call any resolver
-  themselves; that's the entire point of the marker.
+* :data:`SandboxPath` — type marker for outbound-attachment parameters;
+  the SDK auto-resolves model-supplied in-sandbox path strings to host
+  :class:`pathlib.Path` objects before the tool body runs.
 """
 
 from __future__ import annotations

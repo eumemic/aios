@@ -104,7 +104,7 @@ from aios.harness.attachment_staging import (
 )
 from aios.harness.wake import defer_wake
 from aios.logging import get_logger
-from aios.mcp.client import shape_call_result
+from aios.mcp.client import MAX_TOOLS_PER_SERVER, shape_call_result
 from aios.mcp.stdio_transport import ConnectorSpec, open_connector_session
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services import sessions as sessions_service
@@ -472,42 +472,35 @@ class ConnectorSubprocessRegistry:
     async def list_tools(self) -> list[dict[str, Any]]:
         """Enumerate connector-subprocess tools as OpenAI-format tool dicts.
 
-        Walks every running ``(connector, instance)`` state, calls each
-        live session's ``list_tools()``, and namespaces the results as
-        ``mcp__<connector>__<tool>`` — the same convention used by the
-        HTTP-MCP path in :func:`aios.mcp.client.discover_mcp_tools` so
-        the dispatcher in :mod:`aios.harness.tool_dispatch` resolves
-        either kind without a branch.
-
-        Multi-instance connectors (e.g. ``telegram:bot1`` + ``telegram:bot2``)
-        publish the same toolset, but the model sees one
-        ``mcp__telegram__*`` namespace.  Duplicates from sibling instances
-        are collapsed by name with first-instance-wins ordering.
-
-        Instances that aren't ``running`` (subprocess crashed, circuit
-        open, mid-restart) are silently skipped — their tools simply
-        aren't visible until the supervisor brings them back, matching
-        the dispatcher's "not_ready" behaviour.  Per-instance enumeration
-        failures are also swallowed (with a warning log) so one wedged
-        connector can't poison the whole tools list.
+        Each ``mcp__<connector>__<tool>`` namespace matches the HTTP-MCP
+        path in :func:`aios.mcp.client.discover_mcp_tools` so the
+        dispatcher resolves either kind without a branch.  Multi-instance
+        connectors collapse duplicates by name with first-wins ordering.
+        Instances not in ``running`` are skipped; truncation cap mirrors
+        the HTTP-MCP path.  ``aios_inbound_ack`` is internal harness
+        machinery and never reaches the model.
         """
+        running = [
+            (connector, state.session)
+            for (connector, _instance), state in self._states.items()
+            if state.status == "running" and state.session is not None
+        ]
+        if not running:
+            return []
+        results = await asyncio.gather(*(session.list_tools() for _, session in running))
         seen: set[str] = set()
         tools: list[dict[str, Any]] = []
-        for (connector, instance), state in self._states.items():
-            session = state.session
-            if state.status != "running" or session is None:
-                continue
-            try:
-                result = await session.list_tools()
-            except Exception:
+        for (connector, _session), result in zip(running, results, strict=True):
+            if len(result.tools) > MAX_TOOLS_PER_SERVER:
                 log.warning(
-                    "connector.list_tools_failed",
+                    "connector.tools_truncated",
                     connector=connector,
-                    instance=instance,
-                    exc_info=True,
+                    total=len(result.tools),
+                    limit=MAX_TOOLS_PER_SERVER,
                 )
-                continue
-            for tool in result.tools:
+            for tool in result.tools[:MAX_TOOLS_PER_SERVER]:
+                if tool.name == "aios_inbound_ack":
+                    continue
                 qualified = f"mcp__{connector}__{tool.name}"
                 if qualified in seen:
                     continue
