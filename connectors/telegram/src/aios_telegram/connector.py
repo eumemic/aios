@@ -20,12 +20,15 @@ Lifecycle:
   ``first_name`` + optional ``@username``).
 * :meth:`discover_accounts` returns the one bot account.
 * :meth:`serve` starts PTB's long-polling loop and routes inbound
-  messages to :meth:`emit_inbound`.  PTB runs its own background tasks;
-  we just install a handler that funnels into :meth:`emit_inbound`.
+  messages, edits, and reactions to :meth:`emit_inbound`.  PTB runs
+  its own background tasks; we just install handlers that funnel into
+  an internal queue.
 * :meth:`teardown` stops polling and shuts down the application cleanly.
-* The single model-facing tool ``telegram_send`` uses :func:`focal_required`
-  with only ``chat_id`` in its signature — the SDK injects nothing else,
-  so connector code stays focused on the per-bot logic.
+
+Tools exposed to the model: ``telegram_send``, ``telegram_typing``,
+``telegram_edit_message``, ``telegram_delete_message``, ``telegram_react``.
+All use :func:`focal_required` with ``chat_id`` so the focal channel
+selects the target chat without the model having to thread it through.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ import contextlib
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from aios_connector import (
@@ -54,20 +57,45 @@ from telegram import (
     InputMediaDocument,
     InputMediaPhoto,
     InputMediaVideo,
+    ReactionTypeEmoji,
+    Update,
 )
+from telegram.constants import ChatAction
 from telegram.error import TelegramError
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    ContextTypes,
+    MessageHandler,
+    MessageReactionHandler,
+    filters,
+)
 
 from .config import Settings
-from .parse import Attachment, InboundMessage, parse_message
+from .format import markdown_to_telegram_html
+from .parse import (
+    Attachment,
+    InboundMessage,
+    InboundReaction,
+    parse_message,
+    parse_reaction,
+)
 from .prompts import build_instructions
 
 log = structlog.get_logger(__name__)
 
 
+_ALLOWED_UPDATES: list[str] = [
+    Update.MESSAGE,
+    Update.EDITED_MESSAGE,
+    Update.MESSAGE_REACTION,
+]
+
+_PARSE_MODE_TO_PTB: dict[str, str | None] = {"plain": None, "html": "HTML"}
+
+
 class TelegramConnector(Connector):
     name = "telegram"
-    version = "0.1.0"
+    version = "0.2.0"
 
     def __init__(self, cfg: Settings) -> None:
         super().__init__()
@@ -76,7 +104,7 @@ class TelegramConnector(Connector):
         self._bot_id: int | None = None
         self._first_name: str | None = None
         self._username: str | None = None
-        self._inbound_queue: asyncio.Queue[InboundMessage] | None = None
+        self._inbound_queue: asyncio.Queue[InboundMessage | InboundReaction] | None = None
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
@@ -103,14 +131,13 @@ class TelegramConnector(Connector):
             username=self._username,
         )
 
-        # Install message handler that pushes parsed inbound onto the
-        # queue.  PTB uses its own background tasks for long-polling;
-        # we keep handler bodies tiny so PTB's worker doesn't block on
-        # our spool write.  References go through ``self`` so a future
-        # ``setup`` re-run wouldn't leave the closure pointing at a
-        # stale queue.
+        # Install handlers that push parsed inbound onto the queue.
+        # Handler bodies are tiny so PTB's worker doesn't block on our
+        # spool write — references go through ``self`` so a future
+        # ``setup`` re-run won't leave the closure pointing at a stale
+        # queue.
         async def on_message(update: Any, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-            message = update.message
+            message = update.message or update.edited_message
             if message is None:
                 return
             assert self._bot_id is not None
@@ -120,11 +147,24 @@ class TelegramConnector(Connector):
                 return
             await self._inbound_queue.put(parsed)
 
+        async def on_reaction(update: Any, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+            reaction = update.message_reaction
+            if reaction is None:
+                return
+            assert self._bot_id is not None
+            assert self._inbound_queue is not None
+            parsed = parse_reaction(reaction, bot_id=self._bot_id)
+            if parsed is None:
+                return
+            await self._inbound_queue.put(parsed)
+
         async def on_error(_update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
             log.error("telegram.handler.error", error=str(context.error))
 
+        # filters.UpdateType.MESSAGES matches both new and edited messages;
         # parse_message handles channel/bot filtering with full message context.
-        application.add_handler(MessageHandler(filters.ALL, on_message))
+        application.add_handler(MessageHandler(filters.UpdateType.MESSAGES, on_message))
+        application.add_handler(MessageReactionHandler(on_reaction))
         application.add_error_handler(on_error)
         log.info(
             "telegram.bot.identified",
@@ -179,7 +219,11 @@ class TelegramConnector(Connector):
         assert self._application is not None
         await self._application.start()
         assert self._application.updater is not None
-        await self._application.updater.start_polling()
+        # ``allowed_updates`` is opt-in — Telegram only delivers update
+        # types we explicitly subscribe to.  Without this, edits and
+        # reactions never reach the bot regardless of which handlers we
+        # register locally.
+        await self._application.updater.start_polling(allowed_updates=_ALLOWED_UPDATES)
         await asyncio.Event().wait()
 
     async def _drain_queue(self) -> None:
@@ -187,31 +231,72 @@ class TelegramConnector(Connector):
         assert self._bot_id is not None
         assert self._application is not None
         while True:
-            msg = await self._inbound_queue.get()
-            sender_payload: dict[str, Any] = {
-                "id": msg.sender_id,
-                "display_name": msg.sender_name or str(msg.sender_id),
-            }
-            metadata = build_metadata(msg, self._bot_id)
-            # Telegram's ``message.date`` is unix-seconds; the parser
-            # stamps it as ``timestamp_ms``.  Render that as ISO-8601
-            # UTC so aios's supervisor sees the same string shape as
-            # other connectors (signal etc.).
-            timestamp_iso = (
-                datetime.fromtimestamp(msg.timestamp_ms / 1000, tz=UTC).isoformat()
-                if msg.timestamp_ms
-                else None
-            )
-            sdk_attachments = await self._download_attachments(msg.attachments)
-            await self.emit_inbound(
-                account=str(self._bot_id),
-                chat_id=str(msg.chat_id),
-                sender=sender_payload,
-                content=msg.text,
-                attachments=sdk_attachments or None,
-                metadata=metadata,
-                timestamp=timestamp_iso,
-            )
+            item = await self._inbound_queue.get()
+            if isinstance(item, InboundReaction):
+                await self._emit_reaction(item)
+            else:
+                await self._emit_message(item)
+
+    async def _emit_message(self, msg: InboundMessage) -> None:
+        assert self._bot_id is not None
+        sender_payload: dict[str, Any] = {
+            "id": msg.sender_id,
+            "display_name": msg.sender_name or str(msg.sender_id),
+        }
+        metadata = build_metadata(msg, self._bot_id)
+        # Telegram's ``message.date`` is unix-seconds; the parser stamps
+        # it as ``timestamp_ms``.  Render that as ISO-8601 UTC so aios's
+        # supervisor sees the same string shape as other connectors.
+        timestamp_iso = (
+            datetime.fromtimestamp(msg.timestamp_ms / 1000, tz=UTC).isoformat()
+            if msg.timestamp_ms
+            else None
+        )
+        sdk_attachments = await self._download_attachments(msg.attachments)
+        await self.emit_inbound(
+            account=str(self._bot_id),
+            chat_id=str(msg.chat_id),
+            sender=sender_payload,
+            content=msg.text,
+            attachments=sdk_attachments or None,
+            metadata=metadata,
+            timestamp=timestamp_iso,
+        )
+
+    async def _emit_reaction(self, reaction: InboundReaction) -> None:
+        assert self._bot_id is not None
+        sender_payload: dict[str, Any] = {
+            "id": reaction.sender_id,
+            "display_name": reaction.sender_name or str(reaction.sender_id),
+        }
+        metadata: dict[str, Any] = {
+            "channel": f"telegram/{self._bot_id}/{reaction.chat_id}",
+            "chat_type": reaction.chat_kind,
+            "sender_id": reaction.sender_id,
+            "timestamp_ms": reaction.timestamp_ms,
+            "reaction": {
+                "target_message_id": reaction.target_message_id,
+                "old_emojis": list(reaction.old_emojis),
+                "new_emojis": list(reaction.new_emojis),
+            },
+        }
+        if reaction.sender_name is not None:
+            metadata["sender_name"] = reaction.sender_name
+        if reaction.chat_name is not None:
+            metadata["chat_name"] = reaction.chat_name
+        timestamp_iso = (
+            datetime.fromtimestamp(reaction.timestamp_ms / 1000, tz=UTC).isoformat()
+            if reaction.timestamp_ms
+            else None
+        )
+        await self.emit_inbound(
+            account=str(self._bot_id),
+            chat_id=str(reaction.chat_id),
+            sender=sender_payload,
+            content="",
+            metadata=metadata,
+            timestamp=timestamp_iso,
+        )
 
     async def _download_attachments(
         self, attachments: tuple[Attachment, ...]
@@ -277,6 +362,7 @@ class TelegramConnector(Connector):
         self,
         text: str,
         attachments: list[SandboxPath] | None = None,
+        parse_mode: Literal["plain", "html"] = "plain",
         *,
         chat_id: str,
     ) -> dict[str, Any]:
@@ -287,8 +373,8 @@ class TelegramConnector(Connector):
         focal with the built-in ``switch_channel`` tool.
 
         Args:
-            text: Message body. Plain text only — markdown is not rendered.
-                Becomes the caption when attachments are present.
+            text: Message body.  Becomes the caption when attachments are
+                present.  See ``parse_mode``.
             attachments: Optional in-sandbox file paths.  Type is inferred
                 from extension (``.jpg``/``.png``/``.gif``/``.webp`` →
                 photo, ``.mp4``/``.mov`` → video, ``.ogg`` → voice,
@@ -296,20 +382,27 @@ class TelegramConnector(Connector):
                 document).  Single attachment uses ``send_photo`` /
                 ``send_voice`` / etc.; multiple attachments use
                 ``send_media_group`` with caption attached to the first
-                item only (per Telegram API).  The SDK resolves each
-                entry to a host path before this method runs.
+                item only (per Telegram API).
+            parse_mode: ``"plain"`` (default) sends the text as-is —
+                literal characters, no formatting.  ``"html"`` runs
+                ``text`` through a Markdown→Telegram-HTML converter so
+                ``**bold**``, ``*italic*``, ``[label](url)``, fenced
+                code, ``> quotes``, and ``||spoilers||`` render with
+                Telegram's native styling.
         """
         assert self._application is not None
-        try:
-            chat_id_int = int(chat_id)
-        except ValueError as e:
-            raise ValueError(f"telegram chat_id must be an integer; got {chat_id!r}") from e
+        chat_id_int = _coerce_chat_id(chat_id)
 
+        body, ptb_parse_mode = _prepare_text(text, parse_mode)
         host_paths: list[Path] = list(attachments or [])
         bot = self._application.bot
 
         if not host_paths:
-            sent = await bot.send_message(chat_id=chat_id_int, text=text)
+            sent = await bot.send_message(
+                chat_id=chat_id_int,
+                text=body,
+                parse_mode=ptb_parse_mode,
+            )
             return {"message_id": sent.message_id}
 
         if len(host_paths) == 1:
@@ -317,15 +410,137 @@ class TelegramConnector(Connector):
                 bot,
                 chat_id=chat_id_int,
                 host_path=host_paths[0],
-                caption=text or None,
+                caption=body or None,
+                parse_mode=ptb_parse_mode,
             )
             return {"message_id": single.message_id}
 
         sent_group = await bot.send_media_group(
             chat_id=chat_id_int,
-            media=_build_media_group(host_paths, caption=text or None),
+            media=_build_media_group(host_paths, caption=body or None, parse_mode=ptb_parse_mode),
         )
         return {"message_ids": [m.message_id for m in sent_group]}
+
+    @tool()
+    @focal_required
+    async def telegram_typing(
+        self,
+        action: Literal[
+            "typing", "upload_photo", "record_voice", "upload_voice", "upload_document"
+        ] = "typing",
+        *,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Show a chat-action bubble (e.g. "typing…") in your focal chat.
+
+        Telegram displays the action for up to 5 seconds or until the
+        next message arrives.  Call this *before* doing slow work (a
+        long tool run, an LLM hop) so users see you're alive; you don't
+        need to keep re-calling it on a timer for typical replies.
+
+        Args:
+            action: Which bubble to show.  ``"typing"`` is the default
+                and right for plain replies; ``"upload_photo"`` /
+                ``"record_voice"`` / ``"upload_voice"`` /
+                ``"upload_document"`` make sense before sending media.
+        """
+        assert self._application is not None
+        chat_id_int = _coerce_chat_id(chat_id)
+        await self._application.bot.send_chat_action(chat_id=chat_id_int, action=ChatAction(action))
+        return {"status": "ok"}
+
+    @tool()
+    @focal_required
+    async def telegram_edit_message(
+        self,
+        message_id: int,
+        text: str,
+        parse_mode: Literal["plain", "html"] = "plain",
+        *,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Replace the text of a message you sent earlier in your focal chat.
+
+        Useful for streaming-style updates ("I'm thinking…" → final
+        answer) or correcting a typo without spamming a follow-up.
+        Telegram only lets you edit your own messages and only within
+        48 hours of sending.
+
+        Args:
+            message_id: The id of the message to edit.  Returned by
+                ``telegram_send`` as ``message_id``.
+            text: The new body.  See ``parse_mode``.
+            parse_mode: ``"plain"`` sends literal text; ``"html"`` runs
+                ``text`` through the same Markdown→Telegram-HTML
+                converter as ``telegram_send``.
+        """
+        assert self._application is not None
+        chat_id_int = _coerce_chat_id(chat_id)
+        body, ptb_parse_mode = _prepare_text(text, parse_mode)
+        edited = await self._application.bot.edit_message_text(
+            chat_id=chat_id_int,
+            message_id=message_id,
+            text=body,
+            parse_mode=ptb_parse_mode,
+        )
+        # ``edit_message_text`` returns ``True`` when the message is an
+        # inline-bot message we don't own, otherwise the edited Message.
+        if isinstance(edited, bool):
+            return {"status": "ok"}
+        return {"message_id": edited.message_id}
+
+    @tool()
+    @focal_required
+    async def telegram_delete_message(
+        self,
+        message_id: int,
+        *,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Delete a message in your focal chat by id.
+
+        You can delete your own messages within 48 hours.  In groups,
+        admins can delete others' messages — but bots only get that
+        permission when explicitly granted "Delete Messages."
+
+        Args:
+            message_id: The id of the message to delete.
+        """
+        assert self._application is not None
+        chat_id_int = _coerce_chat_id(chat_id)
+        await self._application.bot.delete_message(chat_id=chat_id_int, message_id=message_id)
+        return {"status": "ok"}
+
+    @tool()
+    @focal_required
+    async def telegram_react(
+        self,
+        message_id: int,
+        emoji: str | None,
+        *,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """React to a message in your focal chat with an emoji, or clear your reaction.
+
+        Bots can set at most one reaction per message.  Pass
+        ``emoji=None`` to clear the bot's existing reaction.
+
+        Args:
+            message_id: The id of the message to react to.
+            emoji: A single emoji glyph (e.g. ``"👍"``, ``"❤"``, ``"🔥"``).
+                Telegram restricts which emojis bots can use as reactions
+                to a curated allowlist; unsupported emojis are rejected
+                by the API.  Pass ``None`` to clear.
+        """
+        assert self._application is not None
+        chat_id_int = _coerce_chat_id(chat_id)
+        reaction = [ReactionTypeEmoji(emoji=emoji)] if emoji is not None else None
+        await self._application.bot.set_message_reaction(
+            chat_id=chat_id_int,
+            message_id=message_id,
+            reaction=reaction,
+        )
+        return {"status": "ok"}
 
 
 _PHOTO_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
@@ -347,12 +562,29 @@ def _classify(host_path: Path) -> str:
     return "document"
 
 
+def _coerce_chat_id(chat_id: str) -> int:
+    try:
+        return int(chat_id)
+    except ValueError as e:
+        raise ValueError(f"telegram chat_id must be an integer; got {chat_id!r}") from e
+
+
+def _prepare_text(text: str, parse_mode: str) -> tuple[str, str | None]:
+    """Map a model-facing parse_mode to (body, ptb_parse_mode)."""
+    if parse_mode not in _PARSE_MODE_TO_PTB:
+        raise ValueError(f"telegram parse_mode must be 'plain' or 'html'; got {parse_mode!r}")
+    if parse_mode == "html":
+        return markdown_to_telegram_html(text), "HTML"
+    return text, None
+
+
 async def _send_single_media(
     bot: Any,
     *,
     chat_id: int,
     host_path: Path,
     caption: str | None,
+    parse_mode: str | None = None,
 ) -> Any:
     kind = _classify(host_path)
     sender = {
@@ -365,10 +597,14 @@ async def _send_single_media(
     kwargs: dict[str, Any] = {"chat_id": chat_id, kind: host_path}
     if caption is not None:
         kwargs["caption"] = caption
+        if parse_mode is not None:
+            kwargs["parse_mode"] = parse_mode
     return await sender(**kwargs)
 
 
-def _build_media_group(host_paths: list[Path], *, caption: str | None) -> list[Any]:
+def _build_media_group(
+    host_paths: list[Path], *, caption: str | None, parse_mode: str | None = None
+) -> list[Any]:
     # Caption rides on the FIRST item only — Telegram's API ignores
     # captions on items 2..N of a media group.
     items: list[Any] = []
@@ -377,6 +613,8 @@ def _build_media_group(host_paths: list[Path], *, caption: str | None) -> list[A
         kwargs: dict[str, Any] = {"media": path}
         if idx == 0 and caption is not None:
             kwargs["caption"] = caption
+            if parse_mode is not None:
+                kwargs["parse_mode"] = parse_mode
         if kind == "photo":
             items.append(InputMediaPhoto(**kwargs))
         elif kind == "video":
@@ -414,4 +652,8 @@ def build_metadata(msg: InboundMessage, bot_id: int) -> dict[str, Any]:
             "message_id": msg.reply.message_id,
             "text": msg.reply.text,
         }
+    if msg.edited:
+        metadata["edit_of_message_id"] = msg.message_id
+    if msg.sticker_emoji is not None:
+        metadata["sticker_emoji"] = msg.sticker_emoji
     return metadata
