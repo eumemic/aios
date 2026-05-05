@@ -18,6 +18,12 @@ and ``<``/``>``/``&`` outside of tags are properly escaped.
 from __future__ import annotations
 
 import re
+from functools import partial
+from html import escape
+
+# Body-context escape: ``<``, ``>``, ``&`` only.  Quotes and apostrophes
+# render literally in Telegram body text, no need to entity-encode them.
+_escape_html = partial(escape, quote=False)
 
 # Capture order matters: code fences before inline code, links before
 # emphasis (so ``[text](_url_)`` doesn't get its url mangled).
@@ -29,24 +35,19 @@ _INLINE_CODE_RE = re.compile(r"`([^`\n]+?)`")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _BOLD_UNDER_RE = re.compile(r"__(.+?)__", re.DOTALL)
-_ITALIC_STAR_RE = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", re.DOTALL)
-_ITALIC_UNDER_RE = re.compile(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", re.DOTALL)
+# Italic patterns reject leading/trailing whitespace and snake_case word
+# boundaries — otherwise ``snake_case`` would render as ``snake<i>case</i>``.
+_ITALIC_STAR_RE = re.compile(r"(?<!\*)\*(?!\*)(?!\s)(.+?)(?<!\s)(?<!\*)\*(?!\*)", re.DOTALL)
+_ITALIC_UNDER_RE = re.compile(r"(?<!\w)_(?!_)(?!\s)(.+?)(?<!\s)(?<!_)_(?!\w)", re.DOTALL)
 _STRIKE_RE = re.compile(r"~~(.+?)~~", re.DOTALL)
 # Telegram-style spoiler.  Markdown has no canonical spoiler; ``||x||``
 # is the de-facto convention several chat clients use.
 _SPOILER_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
 
-# Sentinels for tag pairs that must survive the global HTML-escape pass.
-# Using control chars so they can't collide with model output or
-# escaped-entity strings.
 # Sentinels avoid ``_``, ``*``, ``~``, ``|`` so the inline-emphasis
 # regexes can't chew them up between escape and tag swap.
 _BQ_OPEN = "\x01BQOPEN\x01"
 _BQ_CLOSE = "\x01BQCLOSE\x01"
-
-
-def _escape_html(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _convert_inline(text: str) -> str:

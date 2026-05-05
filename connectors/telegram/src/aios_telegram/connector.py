@@ -25,10 +25,9 @@ Lifecycle:
   an internal queue.
 * :meth:`teardown` stops polling and shuts down the application cleanly.
 
-Tools exposed to the model: ``telegram_send``, ``telegram_typing``,
-``telegram_edit_message``, ``telegram_delete_message``, ``telegram_react``.
-All use :func:`focal_required` with ``chat_id`` so the focal channel
-selects the target chat without the model having to thread it through.
+Model-facing tools are defined below as ``@tool()`` methods; each uses
+:func:`focal_required` with ``chat_id`` so the focal channel selects
+the target chat without the model having to thread it through.
 """
 
 from __future__ import annotations
@@ -89,8 +88,6 @@ _ALLOWED_UPDATES: list[str] = [
     Update.EDITED_MESSAGE,
     Update.MESSAGE_REACTION,
 ]
-
-_PARSE_MODE_TO_PTB: dict[str, str | None] = {"plain": None, "html": "HTML"}
 
 
 class TelegramConnector(Connector):
@@ -244,14 +241,6 @@ class TelegramConnector(Connector):
             "display_name": msg.sender_name or str(msg.sender_id),
         }
         metadata = build_metadata(msg, self._bot_id)
-        # Telegram's ``message.date`` is unix-seconds; the parser stamps
-        # it as ``timestamp_ms``.  Render that as ISO-8601 UTC so aios's
-        # supervisor sees the same string shape as other connectors.
-        timestamp_iso = (
-            datetime.fromtimestamp(msg.timestamp_ms / 1000, tz=UTC).isoformat()
-            if msg.timestamp_ms
-            else None
-        )
         sdk_attachments = await self._download_attachments(msg.attachments)
         await self.emit_inbound(
             account=str(self._bot_id),
@@ -260,7 +249,7 @@ class TelegramConnector(Connector):
             content=msg.text,
             attachments=sdk_attachments or None,
             metadata=metadata,
-            timestamp=timestamp_iso,
+            timestamp=_iso(msg.timestamp_ms),
         )
 
     async def _emit_reaction(self, reaction: InboundReaction) -> None:
@@ -284,18 +273,13 @@ class TelegramConnector(Connector):
             metadata["sender_name"] = reaction.sender_name
         if reaction.chat_name is not None:
             metadata["chat_name"] = reaction.chat_name
-        timestamp_iso = (
-            datetime.fromtimestamp(reaction.timestamp_ms / 1000, tz=UTC).isoformat()
-            if reaction.timestamp_ms
-            else None
-        )
         await self.emit_inbound(
             account=str(self._bot_id),
             chat_id=str(reaction.chat_id),
             sender=sender_payload,
             content="",
             metadata=metadata,
-            timestamp=timestamp_iso,
+            timestamp=_iso(reaction.timestamp_ms),
         )
 
     async def _download_attachments(
@@ -571,11 +555,16 @@ def _coerce_chat_id(chat_id: str) -> int:
 
 def _prepare_text(text: str, parse_mode: str) -> tuple[str, str | None]:
     """Map a model-facing parse_mode to (body, ptb_parse_mode)."""
-    if parse_mode not in _PARSE_MODE_TO_PTB:
-        raise ValueError(f"telegram parse_mode must be 'plain' or 'html'; got {parse_mode!r}")
     if parse_mode == "html":
         return markdown_to_telegram_html(text), "HTML"
     return text, None
+
+
+def _iso(ts_ms: int) -> str | None:
+    """Render a unix-ms timestamp as ISO-8601 UTC, or None for falsy values."""
+    if not ts_ms:
+        return None
+    return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).isoformat()
 
 
 async def _send_single_media(

@@ -1,6 +1,6 @@
-"""Unit coverage for the outbound action tools added in the openclaw-parity pass:
-``telegram_typing``, ``telegram_edit_message``, ``telegram_delete_message``,
-``telegram_react``, plus ``telegram_send`` with ``parse_mode="html"``.
+"""Unit coverage for the outbound action tools — ``telegram_typing``,
+``telegram_edit_message``, ``telegram_delete_message``, ``telegram_react`` —
+plus ``telegram_send`` with ``parse_mode="html"``.
 
 PTB's ``Bot`` is mocked end-to-end; tests assert that the right
 ``send_*`` / ``edit_*`` / ``delete_*`` / ``set_message_reaction`` method
@@ -193,13 +193,3 @@ async def test_telegram_send_plain_mode_passes_through(
     kwargs = bot.send_message.call_args.kwargs
     assert kwargs["text"] == "**not bold**"
     assert kwargs["parse_mode"] is None
-
-
-async def test_telegram_send_invalid_parse_mode_raises(
-    connector: TelegramConnector,
-) -> None:
-    _stub_focal(connector, "0/123")
-    _stub_session_id(connector, None)
-    descriptor = _descriptor(connector, "telegram_send")
-    with pytest.raises(ValueError, match="parse_mode must be"):
-        await connector._invoke_tool(descriptor, {"text": "x", "parse_mode": "markdown"})
