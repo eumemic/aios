@@ -76,17 +76,38 @@ async def _assert_account_in_snapshot(db_url: str, *, connector: str, account: s
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"connector {connector!r} snapshot unavailable: {err}",
         )
-    state = envelope.get("connector") or {}
-    if state.get("status") != "running":
+    # ``connector_status(connector=<c>)`` returns ``{"connectors": [<one
+    # snapshot per instance>]}`` — aggregate accounts across instances so
+    # the drift check works on multi-instance deployments
+    # (e.g. ``telegram:support``, ``telegram:alerts``) without caring
+    # which instance owns the account.
+    instances = envelope.get("connectors") or []
+    if not instances:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
-                f"connector {connector!r} is {state.get('status')!r}; "
+                f"connector {connector!r} has no running instances; "
                 "snapshot unavailable — retry once it's running"
             ),
         )
-    accounts = state.get("accounts") or []
-    if not accounts:
+    statuses = {entry.get("status") for entry in instances if isinstance(entry, dict)}
+    if "running" not in statuses:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"connector {connector!r} has no running instances "
+                f"(states: {sorted(s for s in statuses if s)}); "
+                "snapshot unavailable — retry once it's running"
+            ),
+        )
+    known_ids: set[Any] = {
+        account_entry.get("id")
+        for entry in instances
+        if isinstance(entry, dict)
+        for account_entry in (entry.get("accounts") or [])
+        if isinstance(account_entry, dict)
+    }
+    if not known_ids:
         # Boot-window race: supervisor flips ``status = "running"`` after MCP
         # ``initialize`` returns, but the SDK only emits
         # ``notifications/aios/accounts`` once the supervisor's
@@ -98,7 +119,6 @@ async def _assert_account_in_snapshot(db_url: str, *, connector: str, account: s
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(f"connector {connector!r} snapshot not yet populated; retry shortly"),
         )
-    known_ids = {entry.get("id") for entry in accounts if isinstance(entry, dict)}
     if account not in known_ids:
         raise AccountDriftError(
             f"account {account!r} is not in {connector!r}'s current snapshot",

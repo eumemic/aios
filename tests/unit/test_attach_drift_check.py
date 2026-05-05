@@ -68,26 +68,57 @@ class TestAssertAccountInSnapshot:
         from aios.api.routers.connections import _assert_account_in_snapshot
 
         envelope = {
-            "connector": {
-                "name": "echo",
-                "status": "running",
-                "accounts": [{"id": "acct-1", "display_name": "A1"}],
-            }
+            "connectors": [
+                {
+                    "connector": "echo",
+                    "instance": "echo",
+                    "status": "running",
+                    "accounts": [{"id": "acct-1", "display_name": "A1"}],
+                }
+            ]
         }
         _patch_rpc(monkeypatch, payload=json.dumps(envelope))
         # Should not raise.
         await _assert_account_in_snapshot("postgresql://x", connector="echo", account="acct-1")
+
+    async def test_account_present_on_one_of_many_instances_does_not_raise(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Multi-instance: account on any running instance counts as present."""
+        from aios.api.routers.connections import _assert_account_in_snapshot
+
+        envelope = {
+            "connectors": [
+                {
+                    "connector": "telegram",
+                    "instance": "support",
+                    "status": "running",
+                    "accounts": [{"id": "111", "display_name": "Support"}],
+                },
+                {
+                    "connector": "telegram",
+                    "instance": "alerts",
+                    "status": "running",
+                    "accounts": [{"id": "222", "display_name": "Alerts"}],
+                },
+            ]
+        }
+        _patch_rpc(monkeypatch, payload=json.dumps(envelope))
+        await _assert_account_in_snapshot("postgresql://x", connector="telegram", account="222")
 
     async def test_account_absent_raises_drift(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from aios.api.routers.connections import _assert_account_in_snapshot
         from aios.errors import AccountDriftError
 
         envelope = {
-            "connector": {
-                "name": "echo",
-                "status": "running",
-                "accounts": [{"id": "acct-1", "display_name": "A1"}],
-            }
+            "connectors": [
+                {
+                    "connector": "echo",
+                    "instance": "echo",
+                    "status": "running",
+                    "accounts": [{"id": "acct-1", "display_name": "A1"}],
+                }
+            ]
         }
         _patch_rpc(monkeypatch, payload=json.dumps(envelope))
         with pytest.raises(AccountDriftError) as exc_info:
@@ -112,11 +143,14 @@ class TestAssertAccountInSnapshot:
         from aios.api.routers.connections import _assert_account_in_snapshot
 
         envelope = {
-            "connector": {
-                "name": "echo",
-                "status": "running",
-                "accounts": [],
-            }
+            "connectors": [
+                {
+                    "connector": "echo",
+                    "instance": "echo",
+                    "status": "running",
+                    "accounts": [],
+                }
+            ]
         }
         _patch_rpc(monkeypatch, payload=json.dumps(envelope))
         with pytest.raises(HTTPException) as exc_info:
@@ -124,23 +158,27 @@ class TestAssertAccountInSnapshot:
         assert exc_info.value.status_code == 503
         assert "not yet populated" in exc_info.value.detail
 
-    async def test_connector_not_running_raises_503(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Snapshot unavailable while the connector is restarting / starting."""
+    async def test_no_running_instances_raises_503(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Snapshot unavailable while every instance is starting / restarting."""
         from fastapi import HTTPException
 
         from aios.api.routers.connections import _assert_account_in_snapshot
 
         envelope = {
-            "connector": {
-                "name": "echo",
-                "status": "starting",
-                "accounts": [],
-            }
+            "connectors": [
+                {
+                    "connector": "echo",
+                    "instance": "echo",
+                    "status": "starting",
+                    "accounts": [],
+                }
+            ]
         }
         _patch_rpc(monkeypatch, payload=json.dumps(envelope))
         with pytest.raises(HTTPException) as exc_info:
             await _assert_account_in_snapshot("postgresql://x", connector="echo", account="acct-1")
         assert exc_info.value.status_code == 503
+        assert "no running instances" in exc_info.value.detail
         assert "starting" in exc_info.value.detail
 
     async def test_worker_error_envelope_raises_503(self, monkeypatch: pytest.MonkeyPatch) -> None:
