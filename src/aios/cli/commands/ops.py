@@ -39,15 +39,15 @@ def _run_worker() -> int:
 
 
 async def _apply_procrastinate_schema_if_missing() -> None:
-    """Apply procrastinate's schema if it isn't already present.
+    """Apply procrastinate's schema if missing, then idempotently install
+    aios's lock-release trigger.
 
-    ``apply_schema_async`` isn't idempotent, so we guard with
-    ``to_regclass('procrastinate_jobs')``.
+    ``apply_schema_async`` isn't idempotent, hence the ``to_regclass``
+    guard; the trigger DDL is.
     """
-    import asyncpg
-
     from aios.config import get_settings
     from aios.db.pool import create_pool
+    from aios.db.procrastinate_extensions import apply_lock_release_trigger
     from aios.harness.procrastinate_app import app as procrastinate_app
 
     settings = get_settings()
@@ -55,20 +55,20 @@ async def _apply_procrastinate_schema_if_missing() -> None:
     try:
         async with pool.acquire() as conn:
             present = await conn.fetchval("SELECT to_regclass('procrastinate_jobs')")
-            if present is not None:
+            if present is None:
+                print("applying procrastinate schema...", file=sys.stderr)
+                await procrastinate_app.open_async()
+                try:
+                    await procrastinate_app.schema_manager.apply_schema_async()
+                finally:
+                    await procrastinate_app.close_async()
+                print("procrastinate schema applied", file=sys.stderr)
+            else:
                 print("procrastinate schema already present, skipping", file=sys.stderr)
-                return
+            await apply_lock_release_trigger(conn)
+            print("aios lock-release trigger ensured", file=sys.stderr)
     finally:
         await pool.close()
-
-    print("applying procrastinate schema...", file=sys.stderr)
-    await procrastinate_app.open_async()
-    try:
-        await procrastinate_app.schema_manager.apply_schema_async()
-    finally:
-        await procrastinate_app.close_async()
-    print("procrastinate schema applied", file=sys.stderr)
-    _ = asyncpg  # validate asyncpg is on the path (create_pool uses it transitively)
 
 
 def _run_migrate() -> int:

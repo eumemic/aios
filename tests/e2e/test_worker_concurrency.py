@@ -16,12 +16,10 @@ test fails.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 from typing import Any
 from unittest import mock
 
 import asyncpg
-import pytest
 from procrastinate import PsycopgConnector
 
 from aios.models.agents import ToolSpec
@@ -29,25 +27,6 @@ from aios.services import agents as agents_service
 from aios.services import environments as environments_service
 from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
-from tests.e2e.conftest import ensure_procrastinate_schema
-
-
-@pytest.fixture
-async def real_wake_setup(aios_env: dict[str, str]) -> AsyncIterator[asyncpg.Pool[Any]]:
-    """Real pool + procrastinate schema, no harness mocks.
-
-    The standard ``harness`` fixture installs a no-op ``defer_wake``;
-    this test is the one place we *want* the real one to fire.
-    """
-    from aios.config import get_settings
-    from aios.db.pool import create_pool
-
-    await ensure_procrastinate_schema(aios_env["AIOS_DB_URL"])
-    pool = await create_pool(get_settings().db_url, min_size=1, max_size=8)
-    try:
-        yield pool
-    finally:
-        await pool.close()
 
 
 async def _create_session(pool: asyncpg.Pool[Any], agent_id: str, env_id: str) -> str:

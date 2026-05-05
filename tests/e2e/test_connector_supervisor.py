@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Any
 
 import pytest
 from aios_connector import ConnectorSpec
@@ -26,6 +25,7 @@ from aios_connector import ConnectorSpec
 from aios.config import ConnectorInstance, Settings
 from aios.harness import connector_supervisor as supervisor_mod
 from aios.harness.connector_supervisor import ConnectorSubprocessRegistry
+from tests.e2e.conftest import wait_for_predicate as _wait_for
 
 
 def _echo_specs() -> list[tuple[ConnectorInstance, ConnectorSpec]]:
@@ -64,21 +64,6 @@ def _multi_instance_echo_specs() -> list[tuple[ConnectorInstance, ConnectorSpec]
             ConnectorSpec(name="echo", command=sys.executable, args=base_args),
         ),
     ]
-
-
-async def _wait_for(predicate: Any, *, max_wait_s: float = 10.0) -> None:
-    """Poll ``predicate()`` every 50 ms until it returns truthy or we time out.
-
-    Used in place of bespoke event/Condition wiring — the supervisor
-    surfaces state changes as ``ConnectorState`` field updates, and
-    polling is fine for a small handful of test asserts.
-    """
-    deadline = asyncio.get_event_loop().time() + max_wait_s
-    while asyncio.get_event_loop().time() < deadline:
-        if predicate():
-            return
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"predicate {predicate!r} did not become true within {max_wait_s}s")
 
 
 class TestConnectorSupervisor:
