@@ -26,14 +26,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["aios_echo"]
 
-# Entry-point registration for the supervisor's resolver.  The factory
-# is called with ``(connector_name, settings)`` and returns a
-# :class:`aios.mcp.stdio_transport.ConnectorSpec`.
+# Entry-point registration for the supervisor's resolver.  Resolves to
+# a callable returning a :class:`Connector` instance.
 [project.entry-points."aios.connectors"]
-echo = "aios_echo.factory:make_spec"
-
-[project.scripts]
-aios-echo = "aios_echo.__main__:main"
+echo = "aios_echo:make_connector"
 
 # ─── ruff ────────────────────────────────────────────────────────────────────
 [tool.ruff]

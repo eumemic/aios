@@ -25,13 +25,11 @@ dev = [
     "mypy>=1.13",
 ]
 
-[project.scripts]
-aios-telegram = "aios_telegram.__main__:main"
-
 # Entry point registration for the supervisor's resolver.  ``telegram`` is
 # the connector name aios refers to in its ``connectors_enabled`` config.
+# Resolves to a callable returning a :class:`Connector` instance.
 [project.entry-points."aios.connectors"]
-telegram = "aios_telegram.factory:make_spec"
+telegram = "aios_telegram:make_connector"
 
 [build-system]
 requires = ["hatchling"]

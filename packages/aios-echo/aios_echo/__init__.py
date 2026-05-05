@@ -13,4 +13,10 @@ from __future__ import annotations
 
 from aios_echo.connector import EchoConnector
 
-__all__ = ["EchoConnector"]
+
+def make_connector() -> EchoConnector:
+    """Entry point resolved by the aios connector supervisor."""
+    return EchoConnector()
+
+
+__all__ = ["EchoConnector", "make_connector"]

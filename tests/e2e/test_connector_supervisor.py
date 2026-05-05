@@ -21,11 +21,11 @@ import sys
 from typing import Any
 
 import pytest
+from aios_connector import ConnectorSpec
 
 from aios.config import ConnectorInstance, Settings
 from aios.harness import connector_supervisor as supervisor_mod
 from aios.harness.connector_supervisor import ConnectorSubprocessRegistry
-from aios.mcp.stdio_transport import ConnectorSpec
 
 
 def _echo_specs() -> list[tuple[ConnectorInstance, ConnectorSpec]]:

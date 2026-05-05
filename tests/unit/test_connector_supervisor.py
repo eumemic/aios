@@ -15,13 +15,14 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from aios_connector import ConnectorSpec
 
 from aios.harness.connector_supervisor import (
     _AIOS_EXPERIMENTAL_KEY,
     ConnectorSubprocessRegistry,
     resolve_connector_specs,
 )
-from aios.mcp.stdio_transport import ConnectorSpec, _pump_stderr
+from aios.mcp.stdio_transport import _pump_stderr
 
 
 def _fake_init_result(experimental: dict[str, Any] | None) -> MagicMock:
@@ -77,12 +78,10 @@ class TestValidateCapability:
 
 
 class TestResolveConnectorSpecs:
-    """The resolver maps ``connectors_enabled`` to ``ConnectorSpec`` via entry points.
+    """The resolver maps ``connectors_enabled`` to ``(instance, spec)`` pairs.
 
-    Mocking ``entry_points`` keeps the test off-disk; we exercise the
-    three failure modes (unknown name, factory returns wrong type,
-    factory raises) plus the cwd-defaulting path that satisfies
-    plan-decision #11.
+    Tests cover unknown-name failure, the synthesized launch command,
+    and the cwd/env stamping that ``_apply_instance_overlay`` performs.
     """
 
     def _settings(
@@ -100,6 +99,11 @@ class TestResolveConnectorSpecs:
         s.workspace_root = workspace_root or Path("/tmp/aios-workspaces-test")
         return s
 
+    def _ep(self, name: str) -> Any:
+        ep = MagicMock()
+        ep.name = name
+        return ep
+
     def test_unknown_name_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "aios.harness.connector_supervisor.entry_points",
@@ -108,26 +112,30 @@ class TestResolveConnectorSpecs:
         with pytest.raises(RuntimeError, match=r"no aios\.connectors entry point"):
             resolve_connector_specs(self._settings(enabled=["unknown"]))
 
-    def test_factory_wrong_return_type_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        ep = MagicMock()
-        ep.name = "bad"
-        ep.load.return_value = lambda name, settings: "not a ConnectorSpec"
+    def test_synthesized_command_runs_sdk_module(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """The supervisor builds the launch command itself: every connector
+        runs as ``python -m aios_connector <name>``."""
+        import sys
+
         monkeypatch.setattr(
             "aios.harness.connector_supervisor.entry_points",
-            lambda group: [ep],
+            lambda group: [self._ep("echo")],
         )
-        with pytest.raises(RuntimeError, match="expected ConnectorSpec"):
-            resolve_connector_specs(self._settings(enabled=["bad"]))
+        specs = resolve_connector_specs(
+            self._settings(enabled=["echo"], connectors_dir=tmp_path / "c")
+        )
+        _, spec = specs[0]
+        assert spec.command == sys.executable
+        assert spec.args == ["-m", "aios_connector", "echo"]
 
     def test_default_instance_returns_single_segment_cwd(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
-        ep = MagicMock()
-        ep.name = "echo"
-        ep.load.return_value = lambda name, settings: ConnectorSpec(name=name, command="/bin/echo")
         monkeypatch.setattr(
             "aios.harness.connector_supervisor.entry_points",
-            lambda group: [ep],
+            lambda group: [self._ep("echo")],
         )
         connectors_dir = tmp_path / "aios-connectors"
         specs = resolve_connector_specs(
@@ -136,21 +144,18 @@ class TestResolveConnectorSpecs:
         assert len(specs) == 1
         ci, spec = specs[0]
         assert ci.connector == "echo" and ci.instance == "echo"
-        # Default-instance setups keep the PR3 single-segment path.
+        # Default-instance setups keep the single-segment path.
         assert spec.cwd == connectors_dir / "echo"
-        # Audit fix #5: resolver creates the cwd up-front so the first
-        # boot doesn't ``FileNotFoundError`` during subprocess spawn.
+        # Resolver creates the cwd up-front so the first boot doesn't
+        # ``FileNotFoundError`` during subprocess spawn.
         assert spec.cwd is not None and spec.cwd.is_dir()
 
     def test_non_default_instance_gets_per_instance_subdir(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
-        ep = MagicMock()
-        ep.name = "telegram"
-        ep.load.return_value = lambda name, settings: ConnectorSpec(name=name, command="/bin/echo")
         monkeypatch.setattr(
             "aios.harness.connector_supervisor.entry_points",
-            lambda group: [ep],
+            lambda group: [self._ep("telegram")],
         )
         connectors_dir = tmp_path / "aios-connectors-test"
         specs = resolve_connector_specs(
@@ -160,34 +165,12 @@ class TestResolveConnectorSpecs:
         ci, spec = specs[0]
         assert ci.connector == "telegram" and ci.instance == "bot1"
         assert spec.cwd == connectors_dir / "telegram" / "bot1"
-        # Audit fix #5: resolver creates the per-instance cwd too.
         assert spec.cwd is not None and spec.cwd.is_dir()
 
-    def test_factory_explicit_cwd_is_preserved(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-    ) -> None:
-        explicit = tmp_path / "var-lib-aios-special"
-        ep = MagicMock()
-        ep.name = "echo"
-        ep.load.return_value = lambda name, settings: ConnectorSpec(
-            name=name, command="/bin/echo", cwd=explicit
-        )
-        monkeypatch.setattr(
-            "aios.harness.connector_supervisor.entry_points",
-            lambda group: [ep],
-        )
-        specs = resolve_connector_specs(self._settings(enabled=["echo"]))
-        assert specs[0][1].cwd == explicit
-        # Audit fix #5: resolver also creates the explicit path.
-        assert explicit.is_dir()
-
     def test_env_re_export_for_non_default_instance(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        ep = MagicMock()
-        ep.name = "telegram"
-        ep.load.return_value = lambda name, settings: ConnectorSpec(name=name, command="/bin/echo")
         monkeypatch.setattr(
             "aios.harness.connector_supervisor.entry_points",
-            lambda group: [ep],
+            lambda group: [self._ep("telegram")],
         )
         # Scoped + unscoped vars present in parent env; the scoped value
         # must override under AIOS_TELEGRAM_BOT_TOKEN inside the bot1
@@ -202,12 +185,9 @@ class TestResolveConnectorSpecs:
     def test_env_passes_unscoped_for_default_instance(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        ep = MagicMock()
-        ep.name = "telegram"
-        ep.load.return_value = lambda name, settings: ConnectorSpec(name=name, command="/bin/echo")
         monkeypatch.setattr(
             "aios.harness.connector_supervisor.entry_points",
-            lambda group: [ep],
+            lambda group: [self._ep("telegram")],
         )
         monkeypatch.setenv("AIOS_TELEGRAM_BOT_TOKEN", "the-only-token")
         specs = resolve_connector_specs(self._settings(enabled=["telegram"]))
@@ -232,12 +212,9 @@ class TestResolveConnectorSpecs:
         """
         from pathlib import Path
 
-        ep = MagicMock()
-        ep.name = "telegram"
-        ep.load.return_value = lambda name, settings: ConnectorSpec(name=name, command="/bin/echo")
         monkeypatch.setattr(
             "aios.harness.connector_supervisor.entry_points",
-            lambda group: [ep],
+            lambda group: [self._ep("telegram")],
         )
         # Operator's parent env carries a relative path (real .env scenario).
         monkeypatch.setenv("AIOS_WORKSPACE_ROOT", "./workspaces")
@@ -257,37 +234,6 @@ class TestResolveConnectorSpecs:
         # And it should resolve against the worker's CWD (tmp_path), not
         # the connector subprocess's cwd.
         assert Path(resolved) == (tmp_path / "workspaces").resolve()
-
-    def test_factory_supplied_workspace_root_is_overridden(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-    ) -> None:
-        """Factory specs that set ``AIOS_WORKSPACE_ROOT`` lose to the
-        worker-resolved absolute path.
-
-        The harness uses ``settings.workspace_root`` to find session
-        workspaces on the host; a connector author overriding it via
-        ``spec.env`` would silently desynchronize the SDK's
-        ``SandboxPath`` resolution from the harness's bind-mount, so the
-        absolutized worker value wins.
-        """
-        from pathlib import Path
-
-        ep = MagicMock()
-        ep.name = "telegram"
-        ep.load.return_value = lambda name, settings: ConnectorSpec(
-            name=name,
-            command="/bin/echo",
-            env={"AIOS_WORKSPACE_ROOT": "/nope/factory/wins"},
-        )
-        monkeypatch.setattr(
-            "aios.harness.connector_supervisor.entry_points",
-            lambda group: [ep],
-        )
-        ws = tmp_path / "workspaces"
-        specs = resolve_connector_specs(self._settings(enabled=["telegram"], workspace_root=ws))
-        _, spec = specs[0]
-        assert spec.env is not None
-        assert Path(spec.env["AIOS_WORKSPACE_ROOT"]) == ws.resolve()
 
 
 class TestPumpStderrLineExtraction:

@@ -29,18 +29,20 @@ import asyncio
 import sys
 from typing import Any
 
+from aios_connector import ConnectorSpec
+
 from aios.config import ConnectorInstance, Settings
 from aios.harness.connector_supervisor import ConnectorSubprocessRegistry
-from aios.mcp.stdio_transport import ConnectorSpec
 
 
 def _aios_echo_specs() -> list[tuple[ConnectorInstance, ConnectorSpec]]:
-    """Spawn ``python -m aios_echo`` — the workspace's reference SDK example.
+    """Spawn the echo connector via the SDK runner — the supervisor's
+    real launch path.
 
-    Unlike ``tests.fixtures.echo_connector`` (hand-written against the
-    raw MCP SDK), ``aios_echo`` uses the public ``aios_connector.Connector``
-    base class.  The SDK's ``_focal_from_request_meta`` runs in the
-    spawned subprocess; this is the code path the test exercises.
+    ``aios_echo`` uses the public :class:`aios_connector.Connector` base
+    class and is loaded by ``python -m aios_connector echo`` via the
+    ``aios.connectors`` entry point — exercising the SDK's
+    ``_focal_from_request_meta`` in a real subprocess.
     """
     return [
         (
@@ -48,7 +50,7 @@ def _aios_echo_specs() -> list[tuple[ConnectorInstance, ConnectorSpec]]:
             ConnectorSpec(
                 name="echo",
                 command=sys.executable,
-                args=["-m", "aios_echo"],
+                args=["-m", "aios_connector", "echo"],
             ),
         )
     ]

@@ -24,13 +24,11 @@ dev = [
     "mypy>=1.13",
 ]
 
-[project.scripts]
-aios-signal = "aios_signal.__main__:main"
-
 # Entry point registration for the supervisor's resolver.  ``signal`` is
 # the connector name aios refers to in its ``connectors_enabled`` config.
+# Resolves to a callable returning a :class:`Connector` instance.
 [project.entry-points."aios.connectors"]
-signal = "aios_signal.factory:make_spec"
+signal = "aios_signal:make_connector"
 
 [build-system]
 requires = ["hatchling"]

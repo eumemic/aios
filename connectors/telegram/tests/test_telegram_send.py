@@ -183,9 +183,7 @@ async def test_telegram_send_single_voice_routes_to_send_voice(
     (ws / "v.ogg").write_bytes(b"x")
 
     descriptor = _telegram_send_descriptor(connector)
-    await connector._invoke_tool(
-        descriptor, {"text": "", "attachments": ["/workspace/v.ogg"]}
-    )
+    await connector._invoke_tool(descriptor, {"text": "", "attachments": ["/workspace/v.ogg"]})
 
     connector._application.bot.send_voice.assert_awaited_once()  # type: ignore[union-attr]
 
@@ -203,9 +201,7 @@ async def test_telegram_send_single_document_routes_to_send_document(
     (ws / "report.pdf").write_bytes(b"x")
 
     descriptor = _telegram_send_descriptor(connector)
-    await connector._invoke_tool(
-        descriptor, {"text": "", "attachments": ["/workspace/report.pdf"]}
-    )
+    await connector._invoke_tool(descriptor, {"text": "", "attachments": ["/workspace/report.pdf"]})
 
     connector._application.bot.send_document.assert_awaited_once()  # type: ignore[union-attr]
 
@@ -269,9 +265,7 @@ async def test_telegram_send_attachment_disallowed_root_raises(
     _stub_session_id(connector, "sess-1")
     descriptor = _telegram_send_descriptor(connector)
     with pytest.raises(ValueError, match="could not be resolved"):
-        await connector._invoke_tool(
-            descriptor, {"text": "", "attachments": ["/etc/passwd"]}
-        )
+        await connector._invoke_tool(descriptor, {"text": "", "attachments": ["/etc/passwd"]})
 
 
 async def test_telegram_send_attachment_without_session_id_raises(
@@ -284,9 +278,7 @@ async def test_telegram_send_attachment_without_session_id_raises(
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
     descriptor = _telegram_send_descriptor(connector)
     with pytest.raises(RuntimeError, match=r"aios\.session_id"):
-        await connector._invoke_tool(
-            descriptor, {"text": "", "attachments": ["/workspace/x.jpg"]}
-        )
+        await connector._invoke_tool(descriptor, {"text": "", "attachments": ["/workspace/x.jpg"]})
 
 
 async def test_telegram_send_non_int_chat_id_raises(

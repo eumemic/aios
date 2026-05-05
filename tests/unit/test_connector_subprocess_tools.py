@@ -27,13 +27,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aios_connector import ConnectorSpec
 
 from aios.config import Settings
 from aios.harness.connector_supervisor import (
     ConnectorState,
     ConnectorSubprocessRegistry,
 )
-from aios.mcp.stdio_transport import ConnectorSpec
 
 
 def _fake_tool(name: str, description: str = "", schema: dict[str, Any] | None = None) -> Any:
