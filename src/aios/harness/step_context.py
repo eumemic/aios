@@ -95,6 +95,7 @@ async def compute_step_prelude(
     :func:`compose_step_context` unchanged, so the composed prompt stays
     byte-identical to what it was before the split.
     """
+    from aios.harness import runtime
     from aios.harness.channels import (
         augment_with_focal_paradigm,
         max_tail_block_local,
@@ -118,6 +119,17 @@ async def compute_step_prelude(
         mcp_tools, mcp_instructions = await discover_session_mcp_tools(pool, session_id, agent)
         tools.extend(mcp_tools)
         instructions_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
+
+    # Connector-subprocess (stdio MCP) tools come from the worker-scoped
+    # registry, NOT from ``agent.mcp_servers`` (which only covers HTTP MCP
+    # servers declared on the agent).  Without this enumeration the model
+    # sees connector tool *names* only when they appear in prior tool_use
+    # events from the session log — and never sees their schemas, forcing
+    # it to guess parameter shapes and learn from JSON-schema validation
+    # errors the harness sends back.
+    connector_registry = runtime.connector_subprocess_registry
+    if connector_registry is not None:
+        tools.extend(await connector_registry.list_tools())
 
     skill_versions = (
         await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []

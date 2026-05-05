@@ -446,6 +446,61 @@ class ConnectorSubprocessRegistry:
         """Return which instance serves ``(connector, account)`` per the routing map."""
         return self._account_to_instance.get((connector, account))
 
+    async def list_tools(self) -> list[dict[str, Any]]:
+        """Enumerate connector-subprocess tools as OpenAI-format tool dicts.
+
+        Walks every running ``(connector, instance)`` state, calls each
+        live session's ``list_tools()``, and namespaces the results as
+        ``mcp__<connector>__<tool>`` — the same convention used by the
+        HTTP-MCP path in :func:`aios.mcp.client.discover_mcp_tools` so
+        the dispatcher in :mod:`aios.harness.tool_dispatch` resolves
+        either kind without a branch.
+
+        Multi-instance connectors (e.g. ``telegram:bot1`` + ``telegram:bot2``)
+        publish the same toolset, but the model sees one
+        ``mcp__telegram__*`` namespace.  Duplicates from sibling instances
+        are collapsed by name with first-instance-wins ordering.
+
+        Instances that aren't ``running`` (subprocess crashed, circuit
+        open, mid-restart) are silently skipped — their tools simply
+        aren't visible until the supervisor brings them back, matching
+        the dispatcher's "not_ready" behaviour.  Per-instance enumeration
+        failures are also swallowed (with a warning log) so one wedged
+        connector can't poison the whole tools list.
+        """
+        seen: set[str] = set()
+        tools: list[dict[str, Any]] = []
+        for (connector, instance), state in self._states.items():
+            session = state.session
+            if state.status != "running" or session is None:
+                continue
+            try:
+                result = await session.list_tools()
+            except Exception:
+                log.warning(
+                    "connector.list_tools_failed",
+                    connector=connector,
+                    instance=instance,
+                    exc_info=True,
+                )
+                continue
+            for tool in result.tools:
+                qualified = f"mcp__{connector}__{tool.name}"
+                if qualified in seen:
+                    continue
+                seen.add(qualified)
+                tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": qualified,
+                            "description": tool.description or "",
+                            "parameters": tool.inputSchema,
+                        },
+                    }
+                )
+        return tools
+
     async def get_session(self, connector: str, instance: str) -> ClientSession:
         """Return the live session for ``(connector, instance)``.
 
