@@ -156,12 +156,12 @@ def tool(
     ``chat_id`` your tool needs::
 
         # Multi-account connector — route by account
-        @tool
+        @tool()
         @focal_required
         async def signal_send(self, text: str, *, account: str, chat_id: str): ...
 
         # Single-account connector — chat is enough
-        @tool
+        @tool()
         @focal_required
         async def telegram_send(self, text: str, *, chat_id: str): ...
     """
@@ -500,7 +500,7 @@ class Connector:
     the entry point points at a zero-argument callable that returns a
     :class:`Connector` instance (e.g. ``my_pkg:make_connector``).  The
     supervisor synthesizes the launch command itself
-    (``python -m aios_connector run <name>``) and the SDK's runner loads
+    (``python -m aios_connector <name>``) and the SDK's runner loads
     the entry point.  See ``packages/aios-echo`` for a minimal example.
     """
 
@@ -516,9 +516,9 @@ class Connector:
         if not self.name:
             raise ValueError(f"{type(self).__name__}.name must be set")
         # The supervisor cd's into ``~/.aios/connectors/<name>/`` before
-        # spawning the subprocess (see ``resolve_connector_specs``); the
-        # default spool path is therefore ``./spool.sqlite`` from the
-        # connector's perspective.  Override via ``spool_dir=`` for tests.
+        # spawning the subprocess; the default spool path is therefore
+        # ``./spool.sqlite`` from the connector's perspective.  Override
+        # via ``spool_dir=`` for tests.
         self._spool_dir = (spool_dir or Path.cwd()).expanduser()
         self._spool: Spool = Spool(self._spool_dir / "spool.sqlite")
         self._tools: list[ToolDescriptor] = self._collect_tools()

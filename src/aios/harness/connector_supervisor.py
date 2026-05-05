@@ -268,80 +268,45 @@ def resolve_connector_specs(settings: Settings) -> list[tuple[ConnectorInstance,
 def _apply_instance_overlay(
     spec: ConnectorSpec, ci: ConnectorInstance, settings: Settings
 ) -> ConnectorSpec:
-    """Layer per-instance cwd + env on top of a factory-returned spec.
+    """Stamp per-instance cwd + env onto the synthesized spec.
 
-    cwd: default-instance keeps the PR3 single-segment path
-    (``<connectors_dir>/<connector>/``); non-default gets a per-instance
-    subdir.  Either way an explicit ``spec.cwd`` from the factory wins
-    (factories that hard-code their own state-file layout opt out).
-    The resolved cwd is ``mkdir -p``'d so the first
-    :func:`asyncio.create_subprocess_exec` doesn't ``FileNotFoundError``
-    on a fresh install.
-
-    env: always pass the worker's ``os.environ`` to the subprocess so
-    pydantic-settings reads the same vars the operator set, with
-    path-shaped settings (``AIOS_WORKSPACE_ROOT``) absolutized so the
-    subprocess's different cwd doesn't shift the resolved location.
-    For non-default instances, also re-export
-    ``AIOS_<CONN_UPPER>_<INST_UPPER>_*`` as ``AIOS_<CONN_UPPER>_*`` so
-    connector subprocess code stays instance-naive — it just reads
-    config under the standard prefix.  Single-instance deployments use
-    the unscoped vars directly with no transform.
+    cwd is ``<connectors_dir>/<connector>/`` for default instances and
+    ``<connectors_dir>/<connector>/<instance>/`` for non-default, and
+    is ``mkdir -p``'d so the first :func:`asyncio.create_subprocess_exec`
+    doesn't ``FileNotFoundError``.
     """
-    cwd = spec.cwd
-    if cwd is None:
-        cwd = settings.connectors_dir / ci.connector
-        if ci.instance != ci.connector:
-            cwd = cwd / ci.instance
+    cwd = settings.connectors_dir / ci.connector
+    if ci.instance != ci.connector:
+        cwd = cwd / ci.instance
     cwd.mkdir(parents=True, exist_ok=True)
-    env = _build_instance_env(ci, settings=settings, base=spec.env)
+    env = _build_instance_env(ci, settings=settings)
     return replace(spec, cwd=cwd, env=env)
 
 
-def _build_instance_env(
-    ci: ConnectorInstance, *, settings: Settings, base: dict[str, str] | None
-) -> dict[str, str]:
+def _build_instance_env(ci: ConnectorInstance, *, settings: Settings) -> dict[str, str]:
     """Construct the env dict for a connector subprocess.
 
     Starts from ``os.environ`` (so the subprocess inherits operator-set
-    config), layers the factory-supplied ``base`` on top (factory wins
-    over inherited if both set the same key), then absolutizes the
-    path-shaped settings the SDK and connector code rely on
-    (``AIOS_WORKSPACE_ROOT`` today — see below), and finally — for
+    config), absolutizes ``AIOS_WORKSPACE_ROOT`` so the subprocess's
+    different cwd doesn't shift the resolved location, and — for
     non-default instances — re-exports
-    ``AIOS_<CONN_UPPER>_<INST_UPPER>_<FIELD>`` as
-    ``AIOS_<CONN_UPPER>_<FIELD>`` so the connector reads its config
-    under the standard prefix.
-    from the resulting env so each subprocess sees only its own
-    credentials (a wedged or chatty connector that iterates
-    ``os.environ`` won't surface sibling tokens).
+    ``AIOS_<CONN_UPPER>_<INST_UPPER>_*`` as ``AIOS_<CONN_UPPER>_*`` so
+    connector code stays instance-naive.
 
     Path absolutization: the worker resolves ``settings.workspace_root``
     against its own cwd, but spawns connector subprocesses under
     ``<connectors_dir>/<connector>/[<instance>/]``.  Inheriting the
     operator's relative ``AIOS_WORKSPACE_ROOT`` (e.g. ``./workspaces``
     in ``.env``) would let the SDK's ``SandboxPath`` resolution resolve
-    ``/workspace/foo.png`` against the wrong directory.  We stamp the
-    worker-resolved absolute path so harness and SDK agree on the
-    bind-mount root regardless of subprocess cwd.  Factory-supplied
-    overrides lose to this absolutized value: a connector that sets
-    ``AIOS_WORKSPACE_ROOT`` in ``spec.env`` would silently desynchronize
-    from the harness's bind-mount, which is almost certainly a bug.
+    ``/workspace/foo.png`` against the wrong directory.
 
     The re-export overrides any unscoped value: an operator running
     ``connectors_enabled=telegram:bot1,telegram:bot2`` with both
-    ``AIOS_TELEGRAM_BOT_TOKEN`` (legacy unscoped) and
-    ``AIOS_TELEGRAM_BOT1_BOT_TOKEN`` should see ``bot1`` use the
-    scoped value, never the unscoped fallback (which would map two
-    instances to the same bot).
+    ``AIOS_TELEGRAM_BOT_TOKEN`` and ``AIOS_TELEGRAM_BOT1_BOT_TOKEN``
+    set sees ``bot1`` use the scoped value, never the unscoped
+    fallback (which would map two instances to the same bot).
     """
     env: dict[str, str] = dict(os.environ)
-    if base:
-        env.update(base)
-    # Absolutize path-shaped settings the SDK/harness share via env so
-    # subprocesses don't resolve them against their own cwd.  Add new
-    # path-shaped settings here when they're introduced rather than
-    # relying on per-setting fixes scattered across call sites.
     env["AIOS_WORKSPACE_ROOT"] = str(settings.workspace_root.resolve())
     if ci.instance == ci.connector:
         return env

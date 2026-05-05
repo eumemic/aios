@@ -143,9 +143,9 @@ def make_connector() -> MyConnector:
 ```
 
 That's it.  The supervisor synthesizes the launch command itself
-(`python -m aios_connector run my_connector`), and the SDK's runner
-loads the entry point, calls `make_connector()`, configures logging
-via `AIOS_<MY_CONNECTOR>_LOG_FORMAT` / `_LOG_LEVEL`, and parks on
+(`python -m aios_connector my_connector`), and the SDK's runner loads
+the entry point, calls `make_connector()`, configures logging via
+`AIOS_<MY_CONNECTOR>_LOG_FORMAT` / `_LOG_LEVEL`, and parks on
 `Connector.run` until stdin EOF.
 
 The supervisor stamps `cwd` to `settings.connectors_dir / connector`
