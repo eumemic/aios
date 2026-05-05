@@ -80,10 +80,8 @@ class TestValidateCapability:
 class TestResolveConnectorSpecs:
     """The resolver maps ``connectors_enabled`` to ``(instance, spec)`` pairs.
 
-    The supervisor synthesizes the launch command itself
-    (``python -m aios_connector run <name>``) — there is no per-package
-    factory.  Tests cover unknown-name failure plus the cwd/env stamping
-    that ``_apply_instance_overlay`` performs on the synthesized spec.
+    Tests cover unknown-name failure, the synthesized launch command,
+    and the cwd/env stamping that ``_apply_instance_overlay`` performs.
     """
 
     def _settings(
@@ -118,7 +116,7 @@ class TestResolveConnectorSpecs:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
         """The supervisor builds the launch command itself: every connector
-        runs as ``python -m aios_connector run <name>``."""
+        runs as ``python -m aios_connector <name>``."""
         import sys
 
         monkeypatch.setattr(
@@ -130,7 +128,7 @@ class TestResolveConnectorSpecs:
         )
         _, spec = specs[0]
         assert spec.command == sys.executable
-        assert spec.args == ["-m", "aios_connector", "run", "echo"]
+        assert spec.args == ["-m", "aios_connector", "echo"]
 
     def test_default_instance_returns_single_segment_cwd(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any

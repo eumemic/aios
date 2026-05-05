@@ -512,15 +512,9 @@ class Connector:
     # mutating a class-level attribute that would leak across instances.
     instructions: str | None = None
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        # Catch ``class FooConnector(Connector): ...`` that forgot to set
-        # ``name`` at module-import time, so the failure shows up before
-        # the supervisor tries to spawn the subprocess in production.
-        super().__init_subclass__(**kwargs)
-        if not cls.name:
-            raise ValueError(f"{cls.__name__}.name must be set")
-
     def __init__(self, *, spool_dir: Path | None = None) -> None:
+        if not self.name:
+            raise ValueError(f"{type(self).__name__}.name must be set")
         # The supervisor cd's into ``~/.aios/connectors/<name>/`` before
         # spawning the subprocess (see ``resolve_connector_specs``); the
         # default spool path is therefore ``./spool.sqlite`` from the

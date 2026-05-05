@@ -1,16 +1,10 @@
 """Connector launch description.
 
-A :class:`ConnectorSpec` tells the supervisor how to spawn one connector
-subprocess: which executable, which args, which env, which cwd.
-Lives in the SDK rather than in :mod:`aios.mcp.stdio_transport` so
-third-party connector packages can depend on ``aios-connector`` alone
-without dragging in aios-server.
-
-The supervisor builds the spec internally from the
+A :class:`ConnectorSpec` tells the supervisor how to spawn one
+connector subprocess: which executable, which args, which env, which
+cwd.  The supervisor builds the spec internally from the
 ``aios.connectors`` entry-point name — connector authors don't
-construct :class:`ConnectorSpec` themselves.  It's exposed as data so
-the supervisor can log, diff, and re-spawn without owning entry-point
-loading.
+construct :class:`ConnectorSpec` themselves.
 """
 
 from __future__ import annotations

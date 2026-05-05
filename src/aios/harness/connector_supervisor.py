@@ -234,24 +234,16 @@ class ConnectorState:
 def resolve_connector_specs(settings: Settings) -> list[tuple[ConnectorInstance, ConnectorSpec]]:
     """Resolve ``connectors_enabled`` into ``(instance, spec)`` pairs.
 
-    The supervisor synthesizes the launch command itself: every connector
-    runs as ``python -m aios_connector run <connector_name>``, with the
-    SDK's runner module loading the ``aios.connectors`` entry point and
-    instantiating the connector.  Connector packages contribute only the
-    entry-point registration and a callable that returns a
-    :class:`Connector` instance — no per-package factory module.
+    Each enabled connector launches as
+    ``python -m aios_connector <connector_name>``; the SDK's runner
+    loads the ``aios.connectors`` entry point and instantiates the
+    connector.  Unknown names raise so a typo in ``connectors_enabled``
+    fails loudly at boot.
 
-    Unknown connector names raise — the operator listed something that
-    isn't installed, which should fail loudly at boot rather than
-    silently skip.
-
-    Per-instance cwd defaulting + on-disk creation happen inside
-    :func:`_apply_instance_overlay`: the supervisor stamps
-    ``settings.connectors_dir / connector`` (or
-    ``/connector/instance`` for non-default instances) and ``mkdir -p``s
-    the result so first boot doesn't ``FileNotFoundError`` from inside
-    :func:`asyncio.create_subprocess_exec`.  Idempotent — subsequent
-    boots are no-ops.
+    :func:`_apply_instance_overlay` stamps a per-instance cwd
+    (``settings.connectors_dir / connector`` for default instances,
+    ``.../instance`` for non-default) and ``mkdir -p``s it so the first
+    spawn doesn't ``FileNotFoundError``.
     """
     available = {ep.name for ep in entry_points(group="aios.connectors")}
     out: list[tuple[ConnectorInstance, ConnectorSpec]] = []
@@ -266,7 +258,7 @@ def resolve_connector_specs(settings: Settings) -> list[tuple[ConnectorInstance,
         spec = ConnectorSpec(
             name=ci.connector,
             command=sys.executable,
-            args=["-m", "aios_connector", "run", ci.connector],
+            args=["-m", "aios_connector", ci.connector],
         )
         spec = _apply_instance_overlay(spec, ci, settings)
         out.append((ci, spec))
