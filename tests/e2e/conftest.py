@@ -14,13 +14,35 @@ Docker containers.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+import inspect
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from unittest import mock
 
 import pytest
 
 from tests.e2e.harness import Harness
+
+
+async def wait_for_predicate(
+    predicate: Callable[[], bool | Awaitable[bool]],
+    *,
+    max_wait_s: float = 10.0,
+    interval_s: float = 0.05,
+) -> None:
+    """Poll ``predicate()`` until truthy or ``max_wait_s`` elapses.
+    Predicate may be sync or async."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max_wait_s
+    while loop.time() < deadline:
+        result: bool | Awaitable[bool] = predicate()
+        if inspect.isawaitable(result):
+            result = await result
+        if result:
+            return
+        await asyncio.sleep(interval_s)
+    raise AssertionError(f"predicate {predicate!r} did not become true within {max_wait_s}s")
 
 
 async def _noop_defer_wake(
@@ -39,37 +61,48 @@ async def _noop_defer_retry_wake(pool: Any, session_id: str, *, delay_seconds: f
 
 
 async def ensure_procrastinate_schema(aios_db_url: str) -> None:
-    """Apply procrastinate's schema to the testcontainer DB if missing.
-
-    The shared ``migrated_db_url`` only runs aios's alembic migrations;
-    tests that touch ``procrastinate_jobs`` directly (or run a worker
-    against the testcontainer) need procrastinate's tables too. The
-    module-level :mod:`aios.harness.procrastinate_app` singleton's
-    connector is fixed at import time against whatever settings were
-    active then (usually wrong in tests), so we build a temporary
-    ``App`` here.
-    """
+    """Apply procrastinate's schema if missing, then install the aios
+    lock-release trigger. Mirrors ``aios migrate`` for tests."""
     import asyncpg
     from procrastinate import App, PsycopgConnector
 
     from aios.config import get_settings
+    from aios.db.procrastinate_extensions import LOCK_RELEASE_TRIGGER_DDL
 
     settings = get_settings()
     conn = await asyncpg.connect(settings.db_url)
     try:
         present = await conn.fetchval("SELECT to_regclass('procrastinate_jobs')")
+        if present is None:
+            conninfo = aios_db_url.replace("postgresql+psycopg://", "postgresql://")
+            tmp_app = App(connector=PsycopgConnector(conninfo=conninfo))
+            await tmp_app.open_async()
+            try:
+                await tmp_app.schema_manager.apply_schema_async()
+            finally:
+                await tmp_app.close_async()
+        await conn.execute(LOCK_RELEASE_TRIGGER_DDL)
     finally:
         await conn.close()
-    if present is not None:
-        return
 
-    conninfo = aios_db_url.replace("postgresql+psycopg://", "postgresql://")
-    tmp_app = App(connector=PsycopgConnector(conninfo=conninfo))
-    await tmp_app.open_async()
+
+@pytest.fixture
+async def real_wake_setup(aios_env: dict[str, str]) -> AsyncIterator[Any]:
+    """Real pool + procrastinate schema (with the aios lock-release trigger).
+
+    Used by tests that exercise the real ``defer_wake`` and a real
+    procrastinate worker — the ``harness`` fixture's ``defer_wake`` is
+    a no-op and so unsuitable here.
+    """
+    from aios.config import get_settings
+    from aios.db.pool import create_pool
+
+    await ensure_procrastinate_schema(aios_env["AIOS_DB_URL"])
+    pool = await create_pool(get_settings().db_url, min_size=1, max_size=8)
     try:
-        await tmp_app.schema_manager.apply_schema_async()
+        yield pool
     finally:
-        await tmp_app.close_async()
+        await pool.close()
 
 
 @pytest.fixture

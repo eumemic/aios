@@ -125,6 +125,7 @@ They don't share connections; they share Postgres state.
 - **Push back on bad requests** — if a request conflicts with existing architecture, or has an obvious root-cause fix the user missed, flag it before implementing. You have context the user may not in the moment.
 - **Don't deprecate, delete** — remove old code paths rather than leaving shims. Git history preserves them.
 - **After refactors, grep exhaustively** — for any rename or move, search the whole tree (including tests) for the old name before declaring done.
+- **Broken windows policy** — when a review (or your own pass) flags a clear quality issue, fix it now even if it's pre-existing. Don't pile new code on top of broken patterns or label them "out of scope." This complements rather than contradicts "don't add features beyond the task": the rule is reactive, not proactive — you don't go hunting for cleanup, but you don't ignore what you've already seen. Premature abstractions are still bad; three similar lines is still better than one over-engineered helper. The policy targets *flagged* issues, not aesthetic preferences.
 
 ## Key invariants
 

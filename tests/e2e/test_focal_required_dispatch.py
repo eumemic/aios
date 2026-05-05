@@ -27,12 +27,12 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Any
 
 from aios_connector import ConnectorSpec
 
 from aios.config import ConnectorInstance, Settings
 from aios.harness.connector_supervisor import ConnectorSubprocessRegistry
+from tests.e2e.conftest import wait_for_predicate as _wait_for
 
 
 def _aios_echo_specs() -> list[tuple[ConnectorInstance, ConnectorSpec]]:
@@ -54,15 +54,6 @@ def _aios_echo_specs() -> list[tuple[ConnectorInstance, ConnectorSpec]]:
             ),
         )
     ]
-
-
-async def _wait_for(predicate: Any, *, max_wait_s: float = 10.0) -> None:
-    deadline = asyncio.get_event_loop().time() + max_wait_s
-    while asyncio.get_event_loop().time() < deadline:
-        if predicate():
-            return
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"predicate {predicate!r} did not become true within {max_wait_s}s")
 
 
 class TestFocalRequiredDispatch:

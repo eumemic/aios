@@ -16,9 +16,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import pytest
-
 from tests.conftest import needs_docker
+from tests.e2e.conftest import wait_for_predicate
 from tests.e2e.harness import Harness, assistant, tool_call
 
 
@@ -60,20 +59,16 @@ class TestOrphanRecovery:
         await asyncio.wait_for(tool_a_started.wait(), timeout=5.0)
         await asyncio.wait_for(tool_b_started.wait(), timeout=5.0)
 
-        # Wait for tool A's result to appear in the event log.
-        for _ in range(50):
+        async def _tool_a_logged() -> bool:
             events = await harness.events(session.id)
-            tool_a_done = any(
+            return any(
                 e.kind == "message"
                 and e.data.get("role") == "tool"
                 and e.data.get("tool_call_id") == "call_a"
                 for e in events
             )
-            if tool_a_done:
-                break
-            await asyncio.sleep(0.05)
-        else:
-            pytest.fail("tool A result never appeared in event log")
+
+        await wait_for_predicate(_tool_a_logged, max_wait_s=2.5, interval_s=0.05)
 
         # Verify precondition: tool B has no result in the log.
         events = await harness.events(session.id)

@@ -12,6 +12,7 @@ from typing import Any
 
 from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
+from tests.e2e.conftest import wait_for_predicate
 from tests.e2e.harness import Harness, assistant, tool_call
 
 # ─── ghost recovery ──────────────────────────────────────────────────────────
@@ -190,16 +191,15 @@ class TestGhostRecovery:
         await harness.run_step(session.id)
         await asyncio.wait_for(tool_a_started.wait(), timeout=5.0)
 
-        # Wait for fast_tool to complete.
-        for _ in range(50):
+        async def _call_fast_logged() -> bool:
             events = await harness.events(session.id)
-            if any(
+            return any(
                 e.data.get("tool_call_id") == "call_fast"
                 for e in events
                 if e.kind == "message" and e.data.get("role") == "tool"
-            ):
-                break
-            await asyncio.sleep(0.05)
+            )
+
+        await wait_for_predicate(_call_fast_logged, max_wait_s=2.5, interval_s=0.05)
 
         # Simulate SIGKILL of slow_tool.
         await harness.simulate_sigkill(session.id)
@@ -426,16 +426,15 @@ class TestSweepWaking:
         await asyncio.wait_for(tool_a_started.wait(), timeout=5.0)
         await asyncio.wait_for(tool_b_started.wait(), timeout=5.0)
 
-        # Wait for tool A result to appear in the log.
-        for _ in range(50):
+        async def _call_a_logged() -> bool:
             events = await harness.events(session.id)
-            if any(
+            return any(
                 e.data.get("tool_call_id") == "call_a"
                 for e in events
                 if e.kind == "message" and e.data.get("role") == "tool"
-            ):
-                break
-            await asyncio.sleep(0.05)
+            )
+
+        await wait_for_predicate(_call_a_logged, max_wait_s=2.5, interval_s=0.05)
 
         # Tool B is still in-flight. Sweep should say "not ready."
         needs = await harness.sessions_needing_inference(session.id)
