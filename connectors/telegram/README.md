@@ -95,6 +95,11 @@ When deploying multiple instances, set
 `AIOS_TELEGRAM_SUPPORT_BOT_TOKEN`).  Instance names match
 `^[a-z][a-z0-9_]*$`.
 
+## Migration from pre-cloister `~/.aios/connectors`
+
+See [`../MIGRATION.md`](../MIGRATION.md#per-instance-cloister-238) — connector
+state moved to `~/.aios/instances/<instance_id>/connectors/<name>/` in #238.
+
 ## Attachments
 
 Inbound photos, voice notes, documents, video, and audio are

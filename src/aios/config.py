@@ -12,7 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal, NamedTuple
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Instance names: stricter than ``Settings.instance_id`` (which allows a
@@ -21,6 +21,13 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 # re-export would produce double-underscore POSIX env names like
 # ``AIOS_SIGNAL__BOT_TOKEN`` if leading underscores were allowed.
 _INSTANCE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+# Sentinel that ``connectors_dir`` defaults to when neither env nor kwarg
+# explicitly sets it.  ``Settings._cloister_connectors_dir`` swaps this
+# for ``~/.aios/instances/<instance_id>/connectors`` post-init (#238).
+# A clearly-marked absolute path no operator would set is safer than an
+# Optional + None handshake that would force every consumer to narrow.
+_CONNECTORS_DIR_SENTINEL = Path("/__aios_connectors_dir_unset__")
 
 # Sentinel ``instance`` value the CLI / API passes when the operator
 # omits the instance segment.  The worker resolves it to the sole
@@ -207,13 +214,34 @@ class Settings(BaseSettings):
         "Empty (the default) means the worker boots no connector children.",
     )
     connectors_dir: Path = Field(
-        default=Path.home() / ".aios" / "connectors",
-        description="Per-connector working-directory root. The supervisor cd's "
-        "into ``<connectors_dir>/<connector>/`` for default-instance setups "
-        "(``instance == connector``) and ``<connectors_dir>/<connector>/<instance>/`` "
-        "for non-default instances, so spool databases and other state files "
-        "live next to each connector subprocess.",
+        default_factory=lambda: _CONNECTORS_DIR_SENTINEL,
+        description="Defaults to ``~/.aios/instances/<instance_id>/connectors`` "
+        "(the sentinel default is rewritten by the model validator). The "
+        "supervisor cd's into ``<connectors_dir>/<connector>/`` for default-"
+        "instance setups (``instance == connector``) and "
+        "``<connectors_dir>/<connector>/<instance>/`` for non-default instances, "
+        "so spool databases and other state files live next to each connector "
+        "subprocess.  The cloister default (#238) keeps concurrent dev instances "
+        "from clobbering each other's spools at the legacy shared "
+        "``~/.aios/connectors`` path.  An explicit value (env or kwarg) "
+        "bypasses the cloister default — the escape hatch for ops that pre-bake "
+        "connector state elsewhere.",
+        json_schema_extra={"default": "~/.aios/instances/<instance_id>/connectors"},
     )
+
+    @model_validator(mode="after")
+    def _cloister_connectors_dir(self) -> Settings:
+        """Cloister ``connectors_dir`` under ``instance_id`` when not set.
+
+        Pydantic v2's ``default_factory`` can't see ``instance_id``, so we
+        emit a sentinel default and patch it here once the model is
+        otherwise built.  Explicit values pass through.
+        """
+        if self.connectors_dir == _CONNECTORS_DIR_SENTINEL:
+            self.connectors_dir = (
+                Path.home() / ".aios" / "instances" / self.instance_id / "connectors"
+            )
+        return self
 
     @field_validator("connectors_enabled", mode="before")
     @classmethod

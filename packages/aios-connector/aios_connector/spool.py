@@ -15,9 +15,10 @@ Deliberate non-features:
 * No per-row TTL.  Spool entries clear on ack; that's the only
   pruning path.
 
-Schema lives at ``~/.aios/connectors/<name>/spool.sqlite`` (the cwd
-the supervisor stamps on every connector subprocess).  Single
-``inbound`` table:
+Schema lives at ``~/.aios/instances/<instance_id>/connectors/<name>/spool.sqlite``
+— the cwd the supervisor stamps on every connector subprocess (#238).
+Per-instance cloistering keeps concurrent dev instances from clobbering
+each other's spools.  Single ``inbound`` table:
 
     event_id    TEXT PRIMARY KEY  — ULID, also the dedup-ledger key
     payload     BLOB NOT NULL     — raw JSON-RPC params bytes

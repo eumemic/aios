@@ -162,7 +162,13 @@ def load_instance_env(repo_root: Path) -> dict[str, str]:
     """
     env_path = repo_root / ".env"
     env = parse_env_file(env_path)
-    required = ("AIOS_INSTANCE_ID", "AIOS_DB_URL", "AIOS_API_PORT", "AIOS_WORKSPACE_ROOT")
+    required = (
+        "AIOS_INSTANCE_ID",
+        "AIOS_DB_URL",
+        "AIOS_API_PORT",
+        "AIOS_WORKSPACE_ROOT",
+        "AIOS_CONNECTORS_DIR",
+    )
     missing = [k for k in required if k not in env]
     if missing:
         print_error(
@@ -435,8 +441,11 @@ def bootstrap() -> None:
     else:
         port = pick_free_port()
 
-    workspace_root = (Path.home() / ".aios" / "workspaces" / instance_id).resolve()
+    instance_root = (Path.home() / ".aios" / "instances" / instance_id).resolve()
+    workspace_root = instance_root / "workspaces"
+    connectors_dir = instance_root / "connectors"
     workspace_root.mkdir(parents=True, exist_ok=True)
+    connectors_dir.mkdir(parents=True, exist_ok=True)
 
     runtime_db_url = derive_runtime_db_url(admin_url, instance_id)
 
@@ -447,6 +456,7 @@ def bootstrap() -> None:
             "AIOS_DB_URL": runtime_db_url,
             "AIOS_API_PORT": str(port),
             "AIOS_WORKSPACE_ROOT": str(workspace_root),
+            "AIOS_CONNECTORS_DIR": str(connectors_dir),
         },
     )
 
@@ -459,6 +469,7 @@ def bootstrap() -> None:
         "AIOS_DB_URL": runtime_db_url,
         "AIOS_API_PORT": str(port),
         "AIOS_WORKSPACE_ROOT": str(workspace_root),
+        "AIOS_CONNECTORS_DIR": str(connectors_dir),
         "AIOS_API_KEY": secrets["AIOS_API_KEY"],
         "AIOS_VAULT_KEY": secrets["AIOS_VAULT_KEY"],
     }
@@ -563,11 +574,13 @@ def status() -> None:
     db_name = DB_PREFIX + instance_id
     port = int(env["AIOS_API_PORT"])
     workspace_root = Path(env["AIOS_WORKSPACE_ROOT"])
+    connectors_dir = Path(env["AIOS_CONNECTORS_DIR"])
 
     print(f"instance_id:     {instance_id}")
     print(f"database:        {db_name}")
     print(f"api_port:        {port}")
     print(f"workspace_root:  {workspace_root}")
+    print(f"connectors_dir:  {connectors_dir}")
 
     container_ids = _list_instance_containers(instance_id)
     print(f"containers:      {len(container_ids)}")

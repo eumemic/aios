@@ -43,4 +43,4 @@ workspaces/
 
 # smoke-test runtime artifacts
 .logs/
-spool.sqlite
+spool.sqlite*

@@ -109,6 +109,11 @@ when the session has a focal channel set via `switch_channel`.
 | `AIOS_SIGNAL_DAEMON_HOST` | `127.0.0.1` | Internal TCP host for signal-cli daemon |
 | `AIOS_SIGNAL_DAEMON_PORT` | `7583` | Internal TCP port for signal-cli daemon |
 
+## Migration from pre-cloister `~/.aios/connectors`
+
+See [`../MIGRATION.md`](../MIGRATION.md#per-instance-cloister-238) — connector
+state moved to `~/.aios/instances/<instance_id>/connectors/<name>/` in #238.
+
 ## Migration from single-phone PR3
 
 Pre-this-PR signal connectors used `AIOS_SIGNAL_PHONE` (singular).
