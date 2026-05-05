@@ -36,6 +36,8 @@ venv/
 !.claude/settings.json
 !.claude/hooks/
 !.claude/hooks/**
+!.claude/skills/
+!.claude/skills/**
 
 # aios runtime state
 /var/lib/aios/
