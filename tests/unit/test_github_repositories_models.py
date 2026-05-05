@@ -76,6 +76,23 @@ class TestGithubRepositoryResourceCreate:
         with pytest.raises(ValidationError, match="traversal"):
             _resource(mount_path="/workspace/./repo")
 
+    def test_git_identity_fields_optional_default_none(self) -> None:
+        r = _resource()
+        assert r.git_user_name is None
+        assert r.git_user_email is None
+
+    def test_git_identity_fields_accepted(self) -> None:
+        r = GithubRepositoryResource(
+            type="github_repository",
+            url="https://github.com/octocat/Hello-World",
+            mount_path="/workspace/repo",
+            authorization_token=SecretStr("ghp_secret"),
+            git_user_name="Agent JN",
+            git_user_email="agent+jn@example.com",
+        )
+        assert r.git_user_name == "Agent JN"
+        assert r.git_user_email == "agent+jn@example.com"
+
     def test_mount_path_rejects_memory_overlap(self) -> None:
         with pytest.raises(ValidationError, match="/mnt/memory"):
             _resource(mount_path="/mnt/memory/foo")
@@ -129,6 +146,20 @@ class TestGithubRepositoryUpdate:
                 }
             )
 
+    def test_git_identity_fields_optional_default_none(self) -> None:
+        u = GithubRepositoryUpdate(authorization_token=SecretStr("ghp_new"))
+        assert u.git_user_name is None
+        assert u.git_user_email is None
+
+    def test_git_identity_fields_accepted_alongside_token(self) -> None:
+        u = GithubRepositoryUpdate(
+            authorization_token=SecretStr("ghp_new"),
+            git_user_name="Agent JN",
+            git_user_email="agent+jn@example.com",
+        )
+        assert u.git_user_name == "Agent JN"
+        assert u.git_user_email == "agent+jn@example.com"
+
 
 class TestValidateResources:
     def test_empty_list_ok(self) -> None:
@@ -181,3 +212,31 @@ class TestGithubRepositoryResourceEcho:
             updated_at=datetime.now(UTC),
         )
         assert e.type == "github_repository"
+
+    def test_echoes_git_identity_fields(self) -> None:
+        from datetime import UTC, datetime
+
+        e = GithubRepositoryResourceEcho(
+            id="ghrepo_01TEST",
+            url="https://github.com/o/r",
+            mount_path="/workspace/r",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            git_user_name="Agent JN",
+            git_user_email="agent+jn@example.com",
+        )
+        assert e.git_user_name == "Agent JN"
+        assert e.git_user_email == "agent+jn@example.com"
+
+    def test_git_identity_fields_default_none(self) -> None:
+        from datetime import UTC, datetime
+
+        e = GithubRepositoryResourceEcho(
+            id="ghrepo_01TEST",
+            url="https://github.com/o/r",
+            mount_path="/workspace/r",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        assert e.git_user_name is None
+        assert e.git_user_email is None

@@ -206,6 +206,8 @@ async def ensure_session_working_tree(
     token: str,
     cache_dir: Path,
     proxy_url: str,
+    git_user_name: str | None = None,
+    git_user_email: str | None = None,
 ) -> Path:
     """Create a per-session working tree from the cache, then rewrite
     ``origin`` to point at the per-session ``GitProxy`` URL so the
@@ -217,6 +219,13 @@ async def ensure_session_working_tree(
     snapshot) takes effect on the next provision without any "is this
     stale?" detection logic. The ``--reference`` clone is fast because
     object data is reused from the cache.
+
+    When ``git_user_name`` and/or ``git_user_email`` are set, the
+    resulting working tree's ``.git/config`` is stamped via
+    ``git config`` so commits inside the sandbox carry that identity
+    without the agent self-correcting from git's "Please tell me who
+    you are" error (#207).  Both ``None`` means "no identity
+    configured" — pre-#207 v1 behavior, preserved.
     """
     work_dir = session_repo_working_tree_dir(session_id, resource_id)
     session_repos_root(session_id).mkdir(parents=True, exist_ok=True)
@@ -262,6 +271,18 @@ async def ensure_session_working_tree(
             f"failed to scrub origin URL for session {session_id} repo {resource_id}: "
             f"{_redact_token_from_message(stderr.decode('utf-8', errors='replace'), token)}"
         )
+
+    for key, value in (("user.name", git_user_name), ("user.email", git_user_email)):
+        if value is None:
+            continue
+        rc, _stdout, stderr = await _run_git(
+            ["config", key, value], cwd=work_dir, op=f"config {key}"
+        )
+        if rc != 0:
+            raise GithubCloneError(
+                f"failed to set git {key} for session {session_id} repo {resource_id}: "
+                f"{stderr.decode('utf-8', errors='replace')}"
+            )
 
     log.info(
         "github_clone.session_clone_created",

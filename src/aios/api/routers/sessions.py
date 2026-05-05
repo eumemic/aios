@@ -184,12 +184,22 @@ async def update_resource(
     working tree with the new token.
     """
     _require_github_resource_id(resource_id)
+    # Identity is replaced atomically when the caller mentions either
+    # field in the payload; absent means preserve the stored values
+    # (the common token-only rotation must not silently clear identity).
+    fields_set = body.model_fields_set
+    identity = (
+        (body.git_user_name, body.git_user_email)
+        if "git_user_name" in fields_set or "git_user_email" in fields_set
+        else None
+    )
     return await github_repo_service.rotate_token(
         pool,
         crypto_box,
         session_id=session_id,
         resource_id=resource_id,
         new_token=body.authorization_token.get_secret_value(),
+        identity=identity,
     )
 
 

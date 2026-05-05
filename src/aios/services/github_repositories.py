@@ -62,10 +62,10 @@ async def attach_to_session(
     """
     if not resources:
         return
-    entries: list[tuple[str, str, Any]] = []
+    entries: list[tuple[str, str, Any, str | None, str | None]] = []
     for res in resources:
         blob = _encrypt_token(crypto_box, res.authorization_token.get_secret_value())
-        entries.append((res.url, res.mount_path, blob))
+        entries.append((res.url, res.mount_path, blob, res.git_user_name, res.git_user_email))
     try:
         await queries.attach_github_repos_to_session(conn, session_id, entries)
     except asyncpg.UniqueViolationError as exc:
@@ -133,16 +133,26 @@ async def rotate_token(
     session_id: str,
     resource_id: str,
     new_token: str,
+    identity: tuple[str | None, str | None] | None = None,
 ) -> GithubRepositoryResourceEcho:
-    """Update only the encrypted token; ``url`` and ``mount_path`` remain.
+    """Update the encrypted token (and optionally the git identity);
+    ``url`` and ``mount_path`` remain.
 
-    Decrypt-merge-encrypt isn't actually needed here (we store only the
-    token, not a payload of multiple fields), so this is a single
-    encrypt-then-update. The transaction guards against torn writes.
+    ``identity`` is ``None`` to preserve the existing identity (the
+    common token-only rotation) or a ``(name, email)`` tuple to replace
+    both fields atomically.  Token-only callers leave ``identity``
+    unset and the stored ``git_user_name`` / ``git_user_email`` survive
+    the rotation.
     """
     blob = _encrypt_token(crypto_box, new_token)
     async with pool.acquire() as conn, conn.transaction():
-        return await queries.update_session_github_repo_blob(conn, session_id, resource_id, blob)
+        return await queries.update_session_github_repo_blob(
+            conn,
+            session_id,
+            resource_id,
+            blob,
+            identity=identity,
+        )
 
 
 async def get_session_token(

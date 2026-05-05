@@ -3575,29 +3575,33 @@ def _row_to_github_repo_echo(row: asyncpg.Record) -> GithubRepositoryResourceEch
         mount_path=row["mount_path"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        git_user_name=row["git_user_name"],
+        git_user_email=row["git_user_email"],
     )
 
 
 async def attach_github_repos_to_session(
     conn: asyncpg.Connection[Any],
     session_id: str,
-    entries: list[tuple[str, str, EncryptedBlob]],
+    entries: list[tuple[str, str, EncryptedBlob, str | None, str | None]],
 ) -> None:
     """Insert pre-encrypted github_repository attachments for a session.
 
-    ``entries`` is ``(repo_url, mount_path, encrypted_token)`` tuples in
-    rank order. Encryption is the caller's responsibility (service layer
-    holds the CryptoBox). Uniqueness on (session_id, mount_path) is
-    enforced by the partial unique index — a duplicate raises asyncpg's
+    ``entries`` is ``(repo_url, mount_path, encrypted_token,
+    git_user_name, git_user_email)`` tuples in rank order. Encryption is
+    the caller's responsibility (service layer holds the CryptoBox).
+    Uniqueness on (session_id, mount_path) is enforced by the partial
+    unique index — a duplicate raises asyncpg's
     ``UniqueViolationError`` which the service layer maps to a 4xx.
     """
-    for rank, (repo_url, mount_path, blob) in enumerate(entries):
+    for rank, (repo_url, mount_path, blob, git_user_name, git_user_email) in enumerate(entries):
         rid = make_id(GITHUB_REPOSITORY)
         await conn.execute(
             """
             INSERT INTO session_github_repositories
-                (id, session_id, rank, repo_url, mount_path, ciphertext, nonce)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (id, session_id, rank, repo_url, mount_path, ciphertext, nonce,
+                 git_user_name, git_user_email)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             """,
             rid,
             session_id,
@@ -3606,6 +3610,8 @@ async def attach_github_repos_to_session(
             mount_path,
             blob.ciphertext,
             blob.nonce,
+            git_user_name,
+            git_user_email,
         )
 
 
@@ -3660,26 +3666,50 @@ async def update_session_github_repo_blob(
     session_id: str,
     resource_id: str,
     blob: EncryptedBlob,
+    *,
+    identity: tuple[str | None, str | None] | None = None,
 ) -> GithubRepositoryResourceEcho:
     """Replace the encrypted token blob and bump ``updated_at``.
 
-    Only the secret rotates; ``url`` and ``mount_path`` are immutable to
-    match CMA's behavior (verified by API probe — PUT returns 405,
-    DELETE returns 400, only POST with ``{authorization_token}`` is
-    accepted).
+    ``url`` and ``mount_path`` are immutable to match CMA's behavior
+    (verified by API probe — PUT returns 405, DELETE returns 400, only
+    POST with ``{authorization_token}`` is accepted).  ``identity`` is
+    ``None`` to preserve the existing ``git_user_name`` /
+    ``git_user_email`` (the common token-only rotation), or a
+    ``(name, email)`` tuple to replace both fields atomically — either
+    component may itself be ``None`` to clear that column.
     """
-    row = await conn.fetchrow(
-        """
-        UPDATE session_github_repositories
-        SET ciphertext = $1, nonce = $2, updated_at = now()
-        WHERE session_id = $3 AND id = $4
-        RETURNING *
-        """,
-        blob.ciphertext,
-        blob.nonce,
-        session_id,
-        resource_id,
-    )
+    if identity is None:
+        row = await conn.fetchrow(
+            """
+            UPDATE session_github_repositories
+            SET ciphertext = $1, nonce = $2, updated_at = now()
+            WHERE session_id = $3 AND id = $4
+            RETURNING *
+            """,
+            blob.ciphertext,
+            blob.nonce,
+            session_id,
+            resource_id,
+        )
+    else:
+        git_user_name, git_user_email = identity
+        row = await conn.fetchrow(
+            """
+            UPDATE session_github_repositories
+            SET ciphertext = $1, nonce = $2,
+                git_user_name = $3, git_user_email = $4,
+                updated_at = now()
+            WHERE session_id = $5 AND id = $6
+            RETURNING *
+            """,
+            blob.ciphertext,
+            blob.nonce,
+            git_user_name,
+            git_user_email,
+            session_id,
+            resource_id,
+        )
     if row is None:
         raise NotFoundError(
             f"github_repository resource {resource_id} not found on session {session_id}",
