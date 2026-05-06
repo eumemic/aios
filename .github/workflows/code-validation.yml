@@ -6,7 +6,69 @@ on:
   pull_request:
 
 jobs:
+  # Mirrors the pre-commit hook's short-circuit: docs-only changes skip
+  # the heavy validation pipeline.  Widened beyond the hook's `.py$`
+  # filter to also catch files that can break the build without
+  # touching a `.py` directly (lint config, pinned deps, sandbox image,
+  # the workflow itself).
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      run_checks: ${{ steps.filter.outputs.run_checks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need both base and head reachable for the diff below.  Aios
+          # is small enough that a full fetch is cheap.
+          fetch-depth: 0
+
+      - name: Detect build-affecting changes
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PR_BASE_SHA"
+            head="$PR_HEAD_SHA"
+          else
+            base="$PUSH_BEFORE_SHA"
+            head="$PUSH_HEAD_SHA"
+          fi
+
+          # First push to a new branch, force-push from a non-fast-forward,
+          # or any case where `before` is the all-zeros SHA: be conservative
+          # and run the full pipeline.
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            echo "No usable base ref — running checks."
+            echo "run_checks=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed=$(git diff --name-only "$base" "$head")
+          echo "Changed files:"
+          echo "$changed"
+          echo
+
+          # Anything that can affect lint / types / tests / sandbox
+          # build / the workflow itself counts as build-affecting.
+          # Everything else (READMEs, LICENSE, prose docs) skips.
+          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^\.github/workflows/'; then
+            echo "Build-affecting changes detected — running checks."
+            echo "run_checks=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Docs/config-only changes — skipping checks."
+            echo "run_checks=false" >> "$GITHUB_OUTPUT"
+          fi
+
   validate:
+    needs: detect
+    if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
 
     services:
