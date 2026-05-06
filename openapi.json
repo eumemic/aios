@@ -2075,7 +2075,8 @@
           "skills"
         ],
         "summary": "Create",
-        "operationId": "create_v1_skills_post",
+        "description": "Create a new skill from an uploaded file bundle.\n\nThe bundle must include exactly one ``<directory>/SKILL.md`` file with\nYAML frontmatter containing at least a ``name`` field. The skill's\n``directory``, ``name``, and ``description`` are extracted from that\nfrontmatter; subsequent versions reuse this extraction.",
+        "operationId": "create_skill",
         "parameters": [
           {
             "name": "Authorization",
@@ -2132,7 +2133,8 @@
           "skills"
         ],
         "summary": "List ",
-        "operationId": "list__v1_skills_get",
+        "description": "List skills (latest version of each), newest first, excluding archived.\n\nCursor pagination via ``after``.",
+        "operationId": "list_skills",
         "parameters": [
           {
             "name": "limit",
@@ -2207,7 +2209,8 @@
           "skills"
         ],
         "summary": "Get",
-        "operationId": "get_v1_skills__skill_id__get",
+        "description": "Fetch one skill by id, returning the latest version's config.",
+        "operationId": "get_skill",
         "parameters": [
           {
             "name": "skill_id",
@@ -2263,7 +2266,8 @@
           "skills"
         ],
         "summary": "Archive",
-        "operationId": "archive_v1_skills__skill_id__delete",
+        "description": "Archive a skill: sets ``archived_at`` and hides it from default lists.\n\nThe row and version history persist; agents that reference this skill\nby id continue to resolve their pinned versions. There is no API\nsurface to un-archive currently.",
+        "operationId": "archive_skill",
         "parameters": [
           {
             "name": "skill_id",
@@ -2314,7 +2318,8 @@
           "skills"
         ],
         "summary": "Create Version",
-        "operationId": "create_version_v1_skills__skill_id__versions_post",
+        "description": "Upload a new immutable version of a skill's file bundle.\n\nThe bundle must include the same SKILL.md frontmatter shape as the\ninitial create: directory, ``name``, ``description``. Each version is\na complete snapshot \u2014 files not present in the upload are not carried\nover from previous versions.",
+        "operationId": "create_skill_version",
         "parameters": [
           {
             "name": "skill_id",
@@ -2380,7 +2385,8 @@
           "skills"
         ],
         "summary": "List Versions",
-        "operationId": "list_versions_v1_skills__skill_id__versions_get",
+        "description": "List historical versions of a skill, newest first.\n\nCursor pagination by version number: pass ``after`` from a previous\nresponse's ``next_after`` to get the next page. Each version is a\ncomplete file-bundle snapshot at the time it was created.",
+        "operationId": "list_skill_versions",
         "parameters": [
           {
             "name": "skill_id",
@@ -2464,7 +2470,8 @@
           "skills"
         ],
         "summary": "Get Version",
-        "operationId": "get_version_v1_skills__skill_id__versions__version__get",
+        "description": "Fetch one historical version's file bundle.\n\nThe bundle reflects the skill's state at the time the version was\nwritten and is unaffected by subsequent versions or archival.",
+        "operationId": "get_skill_version",
         "parameters": [
           {
             "name": "skill_id",
