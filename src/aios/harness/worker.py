@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
+from aios.db.listen import listen_for_session_interrupts
 from aios.db.pool import create_pool, normalize_dsn
 from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
@@ -96,6 +97,7 @@ async def worker_main() -> None:
     connector_registry: ConnectorSubprocessRegistry | None = None
     procrastinate_opened = False
     sweep_task: asyncio.Task[None] | None = None
+    interrupt_task: asyncio.Task[None] | None = None
 
     try:
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
@@ -175,6 +177,11 @@ async def worker_main() -> None:
             name="periodic_sweep",
         )
 
+        interrupt_task = asyncio.create_task(
+            _run_interrupt_listener(settings.db_url, task_registry),
+            name="interrupt_listener",
+        )
+
         await procrastinate_app.run_worker_async(
             queues=["sessions", "connectors"],
             concurrency=settings.worker_concurrency,
@@ -187,6 +194,10 @@ async def worker_main() -> None:
             sweep_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await sweep_task
+        if interrupt_task is not None:
+            interrupt_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await interrupt_task
         if sandbox_registry is not None:
             sandbox_registry.stop_reaper()
         if task_registry is not None:
@@ -265,3 +276,25 @@ async def _periodic_sweep(
                 )
         except Exception:
             log.exception("periodic_sweep.failed")
+
+
+async def _run_interrupt_listener(
+    db_url: str,
+    task_registry: TaskRegistry,
+) -> None:
+    """Drain pg_notify on the session-interrupt channel and cancel matching steps."""
+    log = get_logger("aios.worker.interrupt_listener")
+    try:
+        async with listen_for_session_interrupts(db_url) as queue:
+            while True:
+                session_id = await queue.get()
+                step_cancelled = task_registry.cancel_step(session_id)
+                tools_cancelled = task_registry.cancel_session(session_id)
+                log.info(
+                    "interrupt_listener.dispatch",
+                    session_id=session_id,
+                    step_cancelled=step_cancelled,
+                    tools_cancelled=tools_cancelled,
+                )
+    except Exception:
+        log.exception("interrupt_listener.failed")
