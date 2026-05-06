@@ -46,12 +46,12 @@ class TestDeferWakeLockValues:
         assert len(rows) == 1
         assert rows[0]["queueing_lock"] == "sess_beta"
 
-    async def test_defer_retry_wake_uses_session_id_lock(self, in_memory_app: App) -> None:
-        from aios.harness.wake import defer_retry_wake
+    async def test_reschedule_defer_wake_uses_session_id_lock(self, in_memory_app: App) -> None:
+        from aios.harness.wake import defer_wake
 
         pool = MagicMock()
         with patch("aios.harness.wake.sessions_service.append_event", AsyncMock()):
-            await defer_retry_wake(pool, "sess_gamma", delay_seconds=2)
+            await defer_wake(pool, "sess_gamma", cause="reschedule", delay_seconds=2)
 
         rows = _job_rows(in_memory_app)
         assert len(rows) == 1

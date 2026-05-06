@@ -31,7 +31,7 @@ from aios.harness.step_context import compose_step_context, compute_step_prelude
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
-from aios.harness.wake import defer_retry_wake
+from aios.harness.wake import defer_wake
 from aios.logging import get_logger
 from aios.models.agents import ToolSpec
 from aios.services import agents as agents_service
@@ -148,7 +148,7 @@ async def run_session_step(
     # step's queue-latency calculation — the one path where delay is
     # a known quantity (the retry backoff).
     if retry_delay is not None:
-        await defer_retry_wake(pool, session_id, delay_seconds=retry_delay)
+        await defer_wake(pool, session_id, cause="reschedule", delay_seconds=retry_delay)
 
 
 async def _run_session_step_body(
@@ -160,10 +160,10 @@ async def _run_session_step_body(
     wake_reason: str | None,
 ) -> float | None:
     """Returns the retry backoff delay when the model errored and the
-    outer function should ``defer_retry_wake`` after ``step_end``; ``None``
-    otherwise.  Keeping the actual ``defer_retry_wake`` call outside the
-    body is what makes the reschedule's ``wake_deferred`` land in the
-    next step's temporal window."""
+    outer function should defer a ``cause="reschedule"`` wake after
+    ``step_end``; ``None`` otherwise.  Keeping the actual ``defer_wake``
+    call outside the body is what makes the reschedule's
+    ``wake_deferred`` land in the next step's temporal window."""
     if cause == "scheduled" and wake_reason:
         await sessions_service.append_event(
             pool,
@@ -390,20 +390,9 @@ async def _run_session_step_body(
                 "cost_usd": None,
             },
         )
-
-        attempt = await _count_consecutive_rescheduling(pool, session_id)
-        delay = _retry_delay_for_attempt(attempt)
+        delay = await _apply_retry_or_failure(pool, session_id)
         if delay is not None:
-            await sessions_service.set_session_status(
-                pool, session_id, "rescheduling", stop_reason={"type": "rescheduling"}
-            )
-            await _append_lifecycle(pool, session_id, "turn_ended", "rescheduling", "rescheduling")
             return delay
-
-        await sessions_service.set_session_status(
-            pool, session_id, "idle", stop_reason={"type": "error"}
-        )
-        await _append_lifecycle(pool, session_id, "turn_ended", "idle", "error")
         raise
 
     # ``local_tokens`` costs the full payload (messages + tools) so it
@@ -826,20 +815,15 @@ async def _dispatch_confirmed_tools(
     return pending
 
 
-async def _handle_step_timeout(pool: Any, session_id: str) -> float | None:
-    """Synthesize a reschedulable error state when the job-level cap fires.
+async def _apply_retry_or_failure(pool: Any, session_id: str) -> float | None:
+    """Apply the rescheduling state when backoff budget allows; otherwise
+    mark a terminal error.
 
-    Mirrors the rescheduling logic in the litellm-error handler so the
-    session ends each step in a clean status regardless of which path
-    surfaced the failure. Returns the retry delay (seconds) when the
-    backoff budget allows, ``None`` for a terminal failure.
+    Returns the retry delay (seconds) when a retry will be deferred, or
+    ``None`` when the budget is spent and the session ends in error
+    state.  Both branches advance the session's lifecycle and status;
+    the caller decides whether to also propagate an exception.
     """
-    await sessions_service.append_event(
-        pool,
-        session_id,
-        "span",
-        {"event": "step_timeout", "timeout_seconds": _JOB_TIMEOUT_S},
-    )
     attempt = await _count_consecutive_rescheduling(pool, session_id)
     delay = _retry_delay_for_attempt(attempt)
     if delay is not None:
@@ -853,6 +837,17 @@ async def _handle_step_timeout(pool: Any, session_id: str) -> float | None:
     )
     await _append_lifecycle(pool, session_id, "turn_ended", "idle", "error")
     return None
+
+
+async def _handle_step_timeout(pool: Any, session_id: str) -> float | None:
+    """Synthesize a reschedulable error state when the job-level cap fires."""
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {"event": "step_timeout", "timeout_seconds": _JOB_TIMEOUT_S},
+    )
+    return await _apply_retry_or_failure(pool, session_id)
 
 
 async def _count_consecutive_rescheduling(pool: Any, session_id: str) -> int:

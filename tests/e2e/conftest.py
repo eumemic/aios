@@ -56,10 +56,6 @@ async def _noop_defer_wake(
     pass
 
 
-async def _noop_defer_retry_wake(pool: Any, session_id: str, *, delay_seconds: float) -> None:
-    pass
-
-
 async def ensure_procrastinate_schema(aios_db_url: str) -> None:
     """Apply procrastinate's schema if missing, then install the aios
     lock-release trigger. Mirrors ``aios migrate`` for tests."""
@@ -155,7 +151,6 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
         mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),
         mock.patch("aios.harness.completion.litellm.stream_chunk_builder", _fake_chunk_builder),
         mock.patch("aios.harness.wake.defer_wake", _noop_defer_wake),
-        mock.patch("aios.harness.loop.defer_retry_wake", _noop_defer_retry_wake),
     ):
         yield h
 
@@ -218,7 +213,6 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
         mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),
         mock.patch("aios.harness.completion.litellm.stream_chunk_builder", _fake_chunk_builder),
         mock.patch("aios.harness.wake.defer_wake", _noop_defer_wake),
-        mock.patch("aios.harness.loop.defer_retry_wake", _noop_defer_retry_wake),
     ):
         yield h
 
