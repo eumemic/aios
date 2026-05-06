@@ -39,6 +39,7 @@ from aios.models.github_repositories import (
 from aios.models.sessions import (
     ContextResponse,
     Session,
+    SessionCloneRequest,
     SessionCreate,
     SessionInterruptRequest,
     SessionResourceEcho,
@@ -227,6 +228,24 @@ def _require_github_resource_id(resource_id: str) -> None:
 @router.post("/{session_id}/archive")
 async def archive(session_id: str, pool: PoolDep, _auth: AuthDep) -> Session:
     return await service.archive_session(pool, session_id)
+
+
+@router.post("/{session_id}/clone", status_code=status.HTTP_201_CREATED)
+async def clone(
+    session_id: str,
+    body: SessionCloneRequest,
+    pool: PoolDep,
+    _auth: AuthDep,
+) -> Session:
+    """Clone a session at its current state into a new session.
+
+    The clone inherits everything that defines the parent's next-step context
+    (events, agent binding, vaults, focal channel, status, stop_reason) but
+    has its own session_id and a fresh workspace volume by default.
+
+    Refuses if the parent isn't ``idle`` or ``terminated``.
+    """
+    return await service.clone_session(pool, session_id, workspace_path=body.workspace_path)
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

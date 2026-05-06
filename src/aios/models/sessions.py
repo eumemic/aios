@@ -138,13 +138,8 @@ class SessionCreate(BaseModel):
     @field_validator("workspace_path")
     @classmethod
     def _validate_workspace_path(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        p = Path(v)
-        if not p.is_absolute():
+        if v is not None and not Path(v).is_absolute():
             raise ValueError("workspace_path must be an absolute path")
-        if not p.is_dir():
-            raise ValueError(f"workspace_path directory does not exist: {v}")
         return v
 
     @model_validator(mode="after")
@@ -199,6 +194,32 @@ class Session(BaseModel):
     updated_at: datetime
     archived_at: datetime | None = None
     focal_channel: str | None = None
+
+
+class SessionCloneRequest(BaseModel):
+    """Request body for ``POST /v1/sessions/{id}/clone``.
+
+    All fields optional; the clone inherits everything not overridden from
+    the parent at clone time.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_path: str | None = Field(
+        default=None,
+        description=(
+            "Override the clone's workspace volume path. Defaults to a fresh "
+            "``workspace_root/<new_session_id>`` so clones don't fight over "
+            "files. The directory must exist; aios will not create it."
+        ),
+    )
+
+    @field_validator("workspace_path")
+    @classmethod
+    def _validate_workspace_path(cls, v: str | None) -> str | None:
+        if v is not None and not Path(v).is_absolute():
+            raise ValueError("workspace_path must be an absolute path")
+        return v
 
 
 class SessionUserMessage(BaseModel):
