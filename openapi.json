@@ -5478,7 +5478,8 @@
           "session-templates"
         ],
         "summary": "Create",
-        "operationId": "create_v1_session_templates_post",
+        "description": "Create a session template \u2014 a frozen recipe for per_chat session spawn.\n\nCaptures the agent + environment + vaults + memory stores that a\nper_chat connection will use when spawning a session for a new chat\npartner. Pin ``agent_version`` to a specific version for deterministic\nspawning, or leave unset to track the agent's latest.",
+        "operationId": "create_session_template",
         "parameters": [
           {
             "name": "Authorization",
@@ -5535,7 +5536,8 @@
           "session-templates"
         ],
         "summary": "List ",
-        "operationId": "list__v1_session_templates_get",
+        "description": "List session templates, newest first, excluding archived.\n\nCursor pagination via ``after``.",
+        "operationId": "list_session_templates",
         "parameters": [
           {
             "name": "limit",
@@ -5610,7 +5612,8 @@
           "session-templates"
         ],
         "summary": "Get",
-        "operationId": "get_v1_session_templates__template_id__get",
+        "description": "Fetch one session template by id.",
+        "operationId": "get_session_template",
         "parameters": [
           {
             "name": "template_id",
@@ -5666,7 +5669,8 @@
           "session-templates"
         ],
         "summary": "Update",
-        "operationId": "update_v1_session_templates__template_id__put",
+        "description": "Update a session template's recipe fields. Omitted fields are preserved.\n\nThe ``agent_version`` field uses sentinel-based partial-update semantics:\nomit it to preserve the current pin (or current \"track latest\" state),\npass null to switch to \"track latest,\" pass a number to pin to that\nspecific version. Already-spawned sessions are unaffected.",
+        "operationId": "update_session_template",
         "parameters": [
           {
             "name": "template_id",
@@ -5732,7 +5736,8 @@
           "session-templates"
         ],
         "summary": "Delete",
-        "operationId": "delete_v1_session_templates__template_id__delete",
+        "description": "Archive a session template (soft-delete via DELETE verb).\n\nAlready-spawned sessions are unaffected and continue normally. Per-chat\nconnections that reference this template by id keep their existing\nsessions but will fail to spawn new chat sessions at the inbound\nhandler until the connection is reconfigured to point at a different\ntemplate. There is no API surface to un-archive currently.",
+        "operationId": "archive_session_template",
         "parameters": [
           {
             "name": "template_id",
