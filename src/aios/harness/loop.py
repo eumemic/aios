@@ -118,6 +118,9 @@ async def run_session_step(
         "span",
         {"event": "step_start", "cause": cause},
     )
+    current_task = asyncio.current_task()
+    assert current_task is not None
+    task_registry.register_step(session_id, current_task)
     retry_delay: float | None = None
     try:
         try:
@@ -134,6 +137,7 @@ async def run_session_step(
             log.exception("step.job_timeout", session_id=session_id, timeout=_JOB_TIMEOUT_S)
             retry_delay = await _handle_step_timeout(pool, session_id)
     finally:
+        task_registry.unregister_step(session_id)
         await sessions_service.append_event(
             pool,
             session_id,

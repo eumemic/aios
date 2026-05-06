@@ -22,6 +22,7 @@ class TaskRegistry:
 
     def __init__(self) -> None:
         self._tasks: dict[str, dict[str, asyncio.Task[None]]] = {}
+        self._step_tasks: dict[str, asyncio.Task[None]] = {}
 
     def add(self, session_id: str, tool_call_id: str, task: asyncio.Task[None]) -> None:
         session_tasks = self._tasks.setdefault(session_id, {})
@@ -81,6 +82,20 @@ class TaskRegistry:
             if active:
                 result[sid] = active
         return result
+
+    def register_step(self, session_id: str, task: asyncio.Task[None]) -> None:
+        self._step_tasks[session_id] = task
+
+    def unregister_step(self, session_id: str) -> None:
+        self._step_tasks.pop(session_id, None)
+
+    def cancel_step(self, session_id: str) -> bool:
+        task = self._step_tasks.get(session_id)
+        if task is None or task.done():
+            return False
+        task.cancel()
+        log.info("step.cancelled", session_id=session_id)
+        return True
 
     async def shutdown(self) -> None:
         """Cancel all tasks and await them for cleanup (finally blocks)."""

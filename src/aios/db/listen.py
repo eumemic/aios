@@ -180,3 +180,37 @@ async def listen_for_events(
             await conn.remove_listener(channel, _callback)
         with contextlib.suppress(Exception):
             await conn.close()
+
+
+SESSION_INTERRUPT_CHANNEL = "aios_session_interrupt"
+
+
+@asynccontextmanager
+async def listen_for_session_interrupts(
+    db_url: str,
+) -> AsyncIterator[asyncio.Queue[str]]:
+    """Yield a queue of session_id payloads from the interrupt channel."""
+    conn = await asyncpg.connect(normalize_dsn(db_url))
+    try:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1024)
+
+        def _callback(
+            _conn: asyncpg.Connection[object],
+            _pid: int,
+            _channel: str,
+            payload: str,
+        ) -> None:
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                log.warning("listen.session_interrupt_queue_full")
+
+        await conn.add_listener(SESSION_INTERRUPT_CHANNEL, _callback)
+        try:
+            yield queue
+        finally:
+            with contextlib.suppress(Exception):
+                await conn.remove_listener(SESSION_INTERRUPT_CHANNEL, _callback)
+    finally:
+        with contextlib.suppress(Exception):
+            await conn.close()

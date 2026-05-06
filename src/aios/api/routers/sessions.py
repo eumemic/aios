@@ -26,7 +26,7 @@ from aios.api.deps import (
 )
 from aios.api.sse import sse_event_stream
 from aios.db import queries
-from aios.db.listen import listen_for_events
+from aios.db.listen import SESSION_INTERRUPT_CHANNEL, listen_for_events
 from aios.errors import NotFoundError, ValidationError
 from aios.harness.wake import defer_wake
 from aios.ids import GITHUB_REPOSITORY, split_id
@@ -284,6 +284,7 @@ async def interrupt(
         "lifecycle",
         {"event": "interrupted", "status": "idle", "stop_reason": "interrupt"},
     )
+    await pool.execute("SELECT pg_notify($1, $2)", SESSION_INTERRUPT_CHANNEL, session_id)
     return await service.get_session(pool, session_id)
 
 
