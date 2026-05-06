@@ -77,13 +77,8 @@ class SessionCreate(BaseModel):
     @field_validator("workspace_path")
     @classmethod
     def _validate_workspace_path(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        p = Path(v)
-        if not p.is_absolute():
+        if v is not None and not Path(v).is_absolute():
             raise ValueError("workspace_path must be an absolute path")
-        if not p.is_dir():
-            raise ValueError(f"workspace_path directory does not exist: {v}")
         return v
 
 
@@ -145,13 +140,8 @@ class SessionCloneRequest(BaseModel):
     @field_validator("workspace_path")
     @classmethod
     def _validate_workspace_path(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        p = Path(v)
-        if not p.is_absolute():
+        if v is not None and not Path(v).is_absolute():
             raise ValueError("workspace_path must be an absolute path")
-        if not p.is_dir():
-            raise ValueError(f"workspace_path directory does not exist: {v}")
         return v
 
 

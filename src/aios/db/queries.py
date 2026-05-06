@@ -803,6 +803,9 @@ async def delete_session(conn: asyncpg.Connection[Any], session_id: str) -> None
         await conn.execute("DELETE FROM sessions WHERE id = $1", session_id)
 
 
+_CLONEABLE_STATUSES: tuple[SessionStatus, ...] = ("idle", "terminated")
+
+
 async def clone_session(
     conn: asyncpg.Connection[Any],
     parent_session_id: str,
@@ -845,9 +848,9 @@ async def clone_session(
                 f"session {parent_session_id} not found",
                 detail={"id": parent_session_id},
             )
-        if status not in ("idle", "terminated"):
+        if status not in _CLONEABLE_STATUSES:
             raise ConflictError(
-                f"can only clone sessions in 'idle' or 'terminated' state; "
+                f"can only clone sessions in {_CLONEABLE_STATUSES} state; "
                 f"parent {parent_session_id} is in {status!r}",
                 detail={"id": parent_session_id, "status": status},
             )
@@ -877,41 +880,32 @@ async def clone_session(
             parent_session_id,
         )
 
-        # Pre-generate one fresh evt_ id per parent event and join by ordinal
-        # position so we copy the whole log in a single round trip while
-        # preserving seq.  Event ids are PRIMARY KEY so they must change;
-        # everything else (kind/data/created_at/derived columns) is preserved
+        # Events are gapless 1..last_event_seq per session, so we pre-generate
+        # exactly that many fresh evt_ ids and join by ordinal.  Event ids are
+        # PRIMARY KEY so they must change; everything else is preserved
         # verbatim — context builder semantics depend on it.
-        event_count: int = (
-            await conn.fetchval(
-                "SELECT count(*) FROM events WHERE session_id = $1",
-                parent_session_id,
+        new_event_ids = [make_id(EVENT) for _ in range(new_row["last_event_seq"])]
+        await conn.execute(
+            """
+            INSERT INTO events (
+                id, session_id, seq, kind, data, created_at, cumulative_tokens,
+                channel, orig_channel, focal_channel_at_arrival,
+                role, tool_name, is_error, sender_name
             )
-            or 0
+            SELECT i.id, $2, s.seq, s.kind, s.data, s.created_at,
+                   s.cumulative_tokens,
+                   s.channel, s.orig_channel, s.focal_channel_at_arrival,
+                   s.role, s.tool_name, s.is_error, s.sender_name
+              FROM (
+                SELECT *, row_number() OVER (ORDER BY seq) AS rn
+                  FROM events WHERE session_id = $1
+              ) s
+              JOIN unnest($3::text[]) WITH ORDINALITY AS i(id, rn) USING (rn)
+            """,
+            parent_session_id,
+            new_id,
+            new_event_ids,
         )
-        if event_count > 0:
-            new_event_ids = [make_id(EVENT) for _ in range(event_count)]
-            await conn.execute(
-                """
-                INSERT INTO events (
-                    id, session_id, seq, kind, data, created_at, cumulative_tokens,
-                    channel, orig_channel, focal_channel_at_arrival,
-                    role, tool_name, is_error, sender_name
-                )
-                SELECT i.id, $2, s.seq, s.kind, s.data, s.created_at,
-                       s.cumulative_tokens,
-                       s.channel, s.orig_channel, s.focal_channel_at_arrival,
-                       s.role, s.tool_name, s.is_error, s.sender_name
-                  FROM (
-                    SELECT *, row_number() OVER (ORDER BY seq) AS rn
-                      FROM events WHERE session_id = $1
-                  ) s
-                  JOIN unnest($3::text[]) WITH ORDINALITY AS i(id, rn) USING (rn)
-                """,
-                parent_session_id,
-                new_id,
-                new_event_ids,
-            )
 
     return _row_to_session(new_row)
 

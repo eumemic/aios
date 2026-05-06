@@ -140,10 +140,13 @@ class TestCloneBasic:
     async def test_resets_cumulative_usage(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
-        await sessions_svc_increment_usage(pool, parent_session_id)
+        from aios.services import sessions as sessions_svc
+
+        await sessions_svc.increment_usage(
+            pool, parent_session_id, input_tokens=42, output_tokens=7
+        )
         r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         clone = r.json()
-        # Parent had nonzero token counts; clone starts fresh.
         assert clone["usage"]["input_tokens"] == 0
         assert clone["usage"]["output_tokens"] == 0
 
@@ -241,10 +244,3 @@ class TestCloneVaults:
         # Confirm round-trip via service too (covers the get-with-vaults shape).
         fetched = await sessions_svc.get_session(pool, clone["id"])
         assert fetched.vault_ids == [v1.id, v2.id]
-
-
-async def sessions_svc_increment_usage(pool: Any, session_id: str) -> None:
-    """Helper: bump parent's cumulative usage so we can verify clone resets it."""
-    from aios.services import sessions as sessions_svc
-
-    await sessions_svc.increment_usage(pool, session_id, input_tokens=42, output_tokens=7)
