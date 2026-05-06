@@ -199,14 +199,14 @@ def mock_step_dependencies() -> Any:
             AsyncMock(side_effect=RuntimeError("provider boom")),
         ),
         patch(
-            "aios.harness.loop.defer_retry_wake",
+            "aios.harness.loop.defer_wake",
             AsyncMock(),
-        ) as defer_retry,
+        ) as defer_wake_mock,
     ):
         yield SimpleNamespace(
             set_status=set_status,
             append_event=append_event,
-            defer_retry=defer_retry,
+            defer_wake=defer_wake_mock,
         )
 
 
@@ -220,7 +220,9 @@ class TestRunSessionStepOnModelError:
         ):
             await run_session_step("sess_x")
 
-        mock_step_dependencies.defer_retry.assert_awaited_once_with(ANY, "sess_x", delay_seconds=2)
+        mock_step_dependencies.defer_wake.assert_awaited_once_with(
+            ANY, "sess_x", cause="reschedule", delay_seconds=2
+        )
         status_calls = [call.args[2] for call in mock_step_dependencies.set_status.call_args_list]
         assert "rescheduling" in status_calls
         assert "idle" not in status_calls
@@ -237,7 +239,7 @@ class TestRunSessionStepOnModelError:
         ):
             await run_session_step("sess_x")
 
-        mock_step_dependencies.defer_retry.assert_not_awaited()
+        mock_step_dependencies.defer_wake.assert_not_awaited()
         idle_call = next(
             call
             for call in mock_step_dependencies.set_status.call_args_list

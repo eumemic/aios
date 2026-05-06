@@ -12,19 +12,19 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from procrastinate import App
 
 
 class TestE2EConftestMockSignatures:
-    """The e2e conftest installs no-op mocks in place of ``defer_wake`` and
-    ``defer_retry_wake``.  If the mocks' signatures drift from the real
-    functions', every e2e test crashes with ``TypeError`` at the first
-    deferral.  This is exactly what happened when PR #138 added ``pool`` as
-    the first positional arg but forgot to update the conftest — catch
-    future drift with a signature-equality assertion."""
+    """The e2e conftest installs a no-op mock in place of ``defer_wake``.
+    If the mock's signature drifts from the real function's, every e2e
+    test crashes with ``TypeError`` at the first deferral.  This is
+    exactly what happened when PR #138 added ``pool`` as the first
+    positional arg but forgot to update the conftest — catch future
+    drift with a signature-equality assertion."""
 
     def test_noop_defer_wake_matches_real_defer_wake(self) -> None:
         import inspect
@@ -34,16 +34,6 @@ class TestE2EConftestMockSignatures:
 
         real_params = list(inspect.signature(defer_wake).parameters.keys())
         mock_params = list(inspect.signature(_noop_defer_wake).parameters.keys())
-        assert real_params == mock_params
-
-    def test_noop_defer_retry_wake_matches_real(self) -> None:
-        import inspect
-
-        from aios.harness.wake import defer_retry_wake
-        from tests.e2e.conftest import _noop_defer_retry_wake
-
-        real_params = list(inspect.signature(defer_retry_wake).parameters.keys())
-        mock_params = list(inspect.signature(_noop_defer_retry_wake).parameters.keys())
         assert real_params == mock_params
 
 
@@ -96,13 +86,15 @@ class TestWakeDeferredEvent:
         # Procrastinate coalesced 2/3 but the third cause still wrote its span.
         assert len(in_memory_app.connector.jobs) == 1
 
-    async def test_defer_retry_wake_emits_reschedule_span(self, in_memory_app: App) -> None:
-        from aios.harness.wake import defer_retry_wake
+    async def test_defer_wake_with_reschedule_cause_emits_reschedule_span(
+        self, in_memory_app: App
+    ) -> None:
+        from aios.harness.wake import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
         with patch("aios.harness.wake.sessions_service.append_event", mock_append):
-            await defer_retry_wake(pool, "sess_x", delay_seconds=2)
+            await defer_wake(pool, "sess_x", cause="reschedule", delay_seconds=2)
 
         mock_append.assert_awaited_once_with(
             pool,
@@ -169,12 +161,13 @@ class TestStepStartEndSpans:
         assert end == {"event": "step_end", "step_start_id": "ev_step"}
 
     async def test_reschedule_defers_wake_after_step_end(self) -> None:
-        """On the model-error retry path, ``defer_retry_wake`` must fire AFTER
-        ``step_end`` so its ``wake_deferred`` lands in step N+1's temporal
-        window, not step N's.  Under the "all wake_deferred since previous
-        step_end" pairing rule, the reverse ordering would make the
-        reschedule invisible to the next step's queue-latency calculation —
-        the one path where delay is a known quantity (the backoff)."""
+        """On the model-error retry path, the reschedule ``defer_wake`` must
+        fire AFTER ``step_end`` so its ``wake_deferred`` lands in step
+        N+1's temporal window, not step N's.  Under the "all
+        wake_deferred since previous step_end" pairing rule, the reverse
+        ordering would make the reschedule invisible to the next step's
+        queue-latency calculation — the one path where delay is a known
+        quantity (the backoff)."""
         from aios.harness.loop import run_session_step
 
         session = SimpleNamespace(
@@ -194,9 +187,9 @@ class TestStepStartEndSpans:
 
         manager = MagicMock()
         append_event = AsyncMock(return_value=start_event)
-        defer_retry = AsyncMock()
+        defer_wake_mock = AsyncMock()
         manager.attach_mock(append_event, "append_event")
-        manager.attach_mock(defer_retry, "defer_retry")
+        manager.attach_mock(defer_wake_mock, "defer_wake")
 
         with (
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
@@ -246,7 +239,7 @@ class TestStepStartEndSpans:
                 "aios.harness.loop.stream_litellm",
                 AsyncMock(side_effect=RuntimeError("provider boom")),
             ),
-            patch("aios.harness.loop.defer_retry_wake", defer_retry),
+            patch("aios.harness.loop.defer_wake", defer_wake_mock),
             patch(
                 "aios.harness.loop._count_consecutive_rescheduling",
                 AsyncMock(return_value=0),
@@ -266,11 +259,12 @@ class TestStepStartEndSpans:
             for i, (name, args, _kw) in enumerate(manager.mock_calls)
             if name == "append_event" and args[2] == "span" and args[3].get("event") == "step_end"
         )
-        first_defer = call_names.index("defer_retry")
+        first_defer = call_names.index("defer_wake")
         assert first_defer > last_append, (
-            f"defer_retry_wake must be called after step_end; "
-            f"got step_end at {last_append}, defer_retry at {first_defer}"
+            f"reschedule defer_wake must be called after step_end; "
+            f"got step_end at {last_append}, defer_wake at {first_defer}"
         )
+        defer_wake_mock.assert_awaited_once_with(ANY, "sess_x", cause="reschedule", delay_seconds=2)
 
     async def test_happy_path_span_ordering(self) -> None:
         """Regression fence: on a clean end-turn, spans nest in the expected order."""
@@ -435,7 +429,7 @@ class TestStepStartEndSpans:
                 "aios.harness.loop.stream_litellm",
                 AsyncMock(side_effect=RuntimeError("provider boom")),
             ),
-            patch("aios.harness.loop.defer_retry_wake", AsyncMock()),
+            patch("aios.harness.loop.defer_wake", AsyncMock()),
             patch(
                 "aios.harness.loop._count_consecutive_rescheduling",
                 AsyncMock(return_value=4),  # budget exhausted — re-raises
