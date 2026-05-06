@@ -77,15 +77,23 @@ If you don't call this tool, no one will see your response.
 
 ### Formatting — opt in with `parse_mode="html"`
 
-`telegram_send` defaults to plain text: any markdown you write appears
-as literal characters.  When you genuinely want emphasis or structure,
-pass `parse_mode="html"` and write Markdown — the connector converts
-it to Telegram's HTML parse mode.  Supported: ``**bold**``, ``*italic*``,
-``__bold__``, ``_italic_``, ``~~strike~~``, ``||spoiler||``, ``` `code` ```,
-fenced code blocks, ``[label](url)`` links, and ``> blockquote`` lines.
+`telegram_send` defaults to plain text.
 
-If you don't need formatting, leave ``parse_mode`` at its default —
-plain prose is usually clearer anyway.
+**Rule:** if your message contains any markdown — ``**bold**``,
+``*italic*``, ``~~strike~~``, ``||spoiler||``, ``` `code` ``` or fenced
+code blocks, ``[label](url)`` links, ``> blockquote`` lines — you MUST
+pass `parse_mode="html"`, or the markup renders as literal characters
+in the recipient's chat.  The connector converts the markdown to
+Telegram's HTML parse mode for you.
+
+Examples:
+
+    telegram_send(text="**done** — see [results](https://example.com)",
+                  parse_mode="html")
+    telegram_send(text="```python\\nprint(\\"hi\\")\\n```", parse_mode="html")
+
+If your text is plain prose with no markup, leave ``parse_mode`` at its
+default.
 
 ### Avoid splitting one thought into multiple messages
 
@@ -152,4 +160,22 @@ are dropped at the connector boundary.
 Stickers arrive as image (or video, for animated stickers) attachments
 with the sticker's emoji surfaced as ``metadata.sticker_emoji`` so you
 have a textual cue even when the sticker file isn't vision-readable.
+
+## What you can and can't see in attachments
+
+Inbound attachments differ in what your model can actually perceive:
+
+- **Photos and static stickers** — vision-readable; you see the pixels.
+- **Voice notes and audio messages** — NOT readable.  You see only the
+  filename, mime type, and size.  Don't claim to have heard the audio.
+- **Videos, video notes, GIFs, video stickers** — NOT readable.  You
+  cannot watch frames.  The filename can hint at content but is not
+  authoritative.
+- **Animated stickers** (``.tgs`` Lottie JSON) — not renderable.  The
+  sticker emoji in ``metadata.sticker_emoji`` is your only textual cue.
+
+**Rule:** never describe content you didn't actually perceive.  If a
+video or audio attachment arrives, acknowledge what you can see
+(filename, type, size) and ask the user what's in it, or use ``bash``
+to peek at metadata.
 """
