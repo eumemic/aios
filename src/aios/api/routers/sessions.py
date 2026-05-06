@@ -150,9 +150,7 @@ async def list_resources(
     # Reuse get_session for ordering + echo construction; resources are
     # already on the returned record.
     session = await service.get_session(pool, session_id)
-    return ListResponse[SessionResourceEcho](
-        data=session.resources, has_more=False, next_after=None
-    )
+    return ListResponse[SessionResourceEcho](data=session.resources)
 
 
 @router.get("/{session_id}/resources/{resource_id}")
