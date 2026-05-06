@@ -9,7 +9,8 @@
     "/health": {
       "get": {
         "summary": "Health",
-        "operationId": "health_health_get",
+        "description": "Liveness probe. Unauthenticated; returns the running aios version.\n\nSuitable for load balancer health checks and monitoring probes. Always\nreturns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the\nprocess is up.",
+        "operationId": "get_health",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -20,7 +21,7 @@
                     "type": "string"
                   },
                   "type": "object",
-                  "title": "Response Health Health Get"
+                  "title": "Response Get Health"
                 }
               }
             }
