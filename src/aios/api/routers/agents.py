@@ -12,8 +12,13 @@ from aios.services import agents as service
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post("", operation_id="create_agent", status_code=status.HTTP_201_CREATED)
 async def create(body: AgentCreate, pool: PoolDep, _auth: AuthDep) -> Agent:
+    """Create a new agent at version 1.
+
+    Subsequent updates produce new immutable versions in the history; see
+    ``update_agent`` and ``list_agent_versions``.
+    """
     return await service.create_agent(
         pool,
         name=body.name,
@@ -30,7 +35,7 @@ async def create(body: AgentCreate, pool: PoolDep, _auth: AuthDep) -> Agent:
     )
 
 
-@router.get("")
+@router.get("", operation_id="list_agents")
 async def list_(
     pool: PoolDep,
     _auth: AuthDep,
@@ -38,6 +43,12 @@ async def list_(
     after: str | None = None,
     name: str | None = None,
 ) -> ListResponse[Agent]:
+    """List agents (latest version of each), newest first, excluding archived.
+
+    Cursor pagination: pass ``after`` from a previous response's
+    ``next_after`` to get the next page. Optional ``name`` filter matches
+    exactly.
+    """
     items = await service.list_agents(pool, limit=limit, after=after, name=name)
     return ListResponse[Agent](
         data=items,
@@ -46,13 +57,22 @@ async def list_(
     )
 
 
-@router.get("/{agent_id}")
+@router.get("/{agent_id}", operation_id="get_agent")
 async def get(agent_id: str, pool: PoolDep, _auth: AuthDep) -> Agent:
+    """Fetch one agent by id, returning the latest version's config."""
     return await service.get_agent(pool, agent_id)
 
 
-@router.put("/{agent_id}")
+@router.put("/{agent_id}", operation_id="update_agent")
 async def update(agent_id: str, body: AgentUpdate, pool: PoolDep, _auth: AuthDep) -> Agent:
+    """Update an agent, creating a new immutable version.
+
+    The ``version`` field on the body is required for optimistic concurrency
+    and must match the agent's current version. Omitted config fields are
+    preserved from the previous version. If the merged config is identical
+    to the current version, no new version is created and the existing one
+    is returned unchanged (no-op).
+    """
     return await service.update_agent(
         pool,
         agent_id,
@@ -71,12 +91,17 @@ async def update(agent_id: str, body: AgentUpdate, pool: PoolDep, _auth: AuthDep
     )
 
 
-@router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{agent_id}", operation_id="archive_agent", status_code=status.HTTP_204_NO_CONTENT)
 async def archive(agent_id: str, pool: PoolDep, _auth: AuthDep) -> None:
+    """Archive an agent: sets ``archived_at`` and hides it from default lists.
+
+    The row and all version history persist; sessions referencing the agent
+    continue to function. There is no API surface to un-archive currently.
+    """
     await service.archive_agent(pool, agent_id)
 
 
-@router.get("/{agent_id}/versions")
+@router.get("/{agent_id}/versions", operation_id="list_agent_versions")
 async def list_versions(
     agent_id: str,
     pool: PoolDep,
@@ -84,6 +109,12 @@ async def list_versions(
     limit: int = 50,
     after: int | None = None,
 ) -> ListResponse[AgentVersion]:
+    """List historical versions of an agent, newest first.
+
+    Cursor pagination by version number: pass ``after`` from a previous
+    response's ``next_after`` to get the next page. Each version is a
+    complete snapshot of the agent's config at the time it was created.
+    """
     items = await service.list_agent_versions(pool, agent_id, limit=limit, after=after)
     return ListResponse[AgentVersion](
         data=items,
@@ -92,6 +123,7 @@ async def list_versions(
     )
 
 
-@router.get("/{agent_id}/versions/{version}")
+@router.get("/{agent_id}/versions/{version}", operation_id="get_agent_version")
 async def get_version(agent_id: str, version: int, pool: PoolDep, _auth: AuthDep) -> AgentVersion:
+    """Fetch one historical version of an agent by version number."""
     return await service.get_agent_version(pool, agent_id, version)
