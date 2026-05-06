@@ -217,3 +217,56 @@ async def test_extra_overrides_default_timeout(
     )
 
     assert captured["timeout"] == 1234.0
+
+
+def _make_empty_choices_chunk() -> object:
+    """Build a usage-summary chunk: ``choices=[]`` with usage metadata.
+
+    OpenAI with ``stream_options.include_usage=True``, OpenRouter, Grok,
+    and OpenAI-compatible vLLM all emit a final chunk of this shape that
+    carries usage but no delta.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(choices=[], usage=SimpleNamespace(total_tokens=42))
+
+
+@pytest.mark.asyncio
+async def test_stream_litellm_tolerates_empty_choices_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A streaming response that includes a chunk with ``choices=[]`` (a
+    usage-summary chunk emitted by OpenRouter/Grok/vLLM/OpenAI-with-usage)
+    must not crash the stream loop."""
+
+    async def fake_stream() -> AsyncIterator[object]:
+        yield _make_chunk("hello")
+        yield _make_empty_choices_chunk()
+
+    async def fake_acompletion(**kwargs: object) -> AsyncIterator[object]:
+        return fake_stream()
+
+    captured: dict[str, list[object]] = {}
+
+    def fake_builder(chunks: list[object]) -> dict[str, object]:
+        captured["chunks"] = list(chunks)
+        return {
+            "usage": {"total_tokens": 42},
+            "choices": [{"message": {"role": "assistant", "content": "hello"}}],
+        }
+
+    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(completion.litellm, "stream_chunk_builder", fake_builder)
+
+    message, _, _ = await completion.stream_litellm(
+        model="openrouter/anthropic/claude-sonnet-4-6",
+        messages=[{"role": "user", "content": "ping"}],
+        pool=_StubPool(),  # type: ignore[arg-type]
+        session_id="sess_test",
+    )
+
+    assert message["content"] == "hello"
+    # The usage-summary chunk must reach stream_chunk_builder so usage data
+    # isn't dropped — the guard skips notify, not collection.
+    assert len(captured["chunks"]) == 2
+    assert captured["chunks"][-1].choices == []  # type: ignore[attr-defined]
