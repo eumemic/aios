@@ -261,9 +261,19 @@ async def post_message(
     procrastinate: ProcrastinateDep,
     _auth: AuthDep,
 ) -> Event:
-    event = await service.append_user_message(
-        pool, session_id, body.content, metadata=body.metadata or None
-    )
+    metadata = body.metadata or None
+    if metadata is not None:
+        channel = metadata.get("channel")
+        if isinstance(channel, str):
+            async with pool.acquire() as conn:
+                bound = await queries.list_session_channels(conn, session_id)
+            if channel not in bound:
+                raise ValidationError(
+                    f"metadata.channel={channel!r} is not a bound channel "
+                    f"on this session; omit metadata.channel to inject as a "
+                    f"global-inbox event"
+                )
+    event = await service.append_user_message(pool, session_id, body.content, metadata=metadata)
     await defer_wake(pool, session_id, cause="message")
     return event
 
