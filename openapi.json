@@ -35,7 +35,8 @@
           "environments"
         ],
         "summary": "Create",
-        "operationId": "create_v1_environments_post",
+        "description": "Create a new environment \u2014 a reusable sandbox configuration template.\n\nThe ``config`` field describes the container the sessions running this\nenvironment will spawn (pre-installed packages, network access rules,\nbase image). Sessions reference environments by id; multiple sessions\ncan share one environment.",
+        "operationId": "create_environment",
         "parameters": [
           {
             "name": "Authorization",
@@ -92,7 +93,8 @@
           "environments"
         ],
         "summary": "List ",
-        "operationId": "list__v1_environments_get",
+        "description": "List environments, newest first, excluding archived.\n\nCursor pagination via ``after``.",
+        "operationId": "list_environments",
         "parameters": [
           {
             "name": "limit",
@@ -167,7 +169,8 @@
           "environments"
         ],
         "summary": "Get",
-        "operationId": "get_v1_environments__env_id__get",
+        "description": "Fetch one environment by id.",
+        "operationId": "get_environment",
         "parameters": [
           {
             "name": "env_id",
@@ -223,7 +226,8 @@
           "environments"
         ],
         "summary": "Update",
-        "operationId": "update_v1_environments__env_id__put",
+        "description": "Update an environment's ``name`` and/or ``config``.\n\nSessions resolve the environment config fresh each time their sandbox\nis provisioned (lazily, at the next session step that needs the\ncontainer), so updates take effect for existing sessions on their next\nprovision rather than at update time.",
+        "operationId": "update_environment",
         "parameters": [
           {
             "name": "env_id",
@@ -289,7 +293,8 @@
           "environments"
         ],
         "summary": "Archive",
-        "operationId": "archive_v1_environments__env_id__delete",
+        "description": "Archive an environment: hides from default lists, leaves the row in place.\n\nSessions referencing the archived environment continue to function \u2014 the\nsandbox provisioner reads the config by JOIN and does not filter by\narchive state. There is no API surface to un-archive currently.",
+        "operationId": "archive_environment",
         "parameters": [
           {
             "name": "env_id",
