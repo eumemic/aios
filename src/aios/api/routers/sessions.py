@@ -446,7 +446,7 @@ async def get_context(
     )
 
 
-@router.get("/{session_id}/stream")
+@router.get("/{session_id}/stream", openapi_extra={"x-codegen": {"targets": []}})
 async def stream_events(
     session_id: str,
     db_url: DbUrlDep,
@@ -462,7 +462,7 @@ async def stream_events(
     )
 
 
-@router.get("/{session_id}/wait")
+@router.get("/{session_id}/wait", openapi_extra={"x-codegen": {"targets": []}})
 async def wait_for_events(
     session_id: str,
     db_url: DbUrlDep,
