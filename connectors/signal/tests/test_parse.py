@@ -146,7 +146,6 @@ def test_is_group_update_envelope_detects_update() -> None:
 def test_is_group_update_envelope_false_for_deliver(
     envelope_text_group: dict[str, Any],
 ) -> None:
-    """A regular group-message envelope (type=DELIVER) is not a roster-altering update."""
     assert is_group_update_envelope(envelope_text_group) is False
 
 

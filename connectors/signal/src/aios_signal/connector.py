@@ -394,12 +394,10 @@ class SignalConnector(Connector):
         return phone
 
     async def _maybe_refresh_roster(self, phone: str, envelope: dict[str, Any]) -> None:
-        """Refresh the cached roster when Signal reports a group metadata change."""
         if is_group_update_envelope(envelope):
             await self._refresh_roster(phone)
 
     async def _refresh_roster(self, phone: str) -> None:
-        """Overwrite the cached group roster for *phone* with a fresh listGroups."""
         assert self._daemon is not None
         self._groups_by_account[phone] = await self._daemon.list_groups(account=phone)
 

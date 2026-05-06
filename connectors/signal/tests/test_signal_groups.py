@@ -84,7 +84,7 @@ async def test_rename_group_unknown_account_raises(connector: SignalConnector) -
         await connector._invoke_tool(descriptor(connector, "signal_rename_group"), {"name": "X"})
 
 
-# ── _maybe_refresh_roster (group-update steady-state refresh, #248) ────
+# ── _maybe_refresh_roster ──────────────────────────────────────────────
 
 
 async def test_maybe_refresh_roster_calls_list_groups_on_update(
