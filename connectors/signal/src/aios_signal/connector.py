@@ -52,7 +52,7 @@ from .config import Settings
 from .daemon import GroupInfo, SignalDaemon
 from .markdown import convert_markdown_to_signal_styles
 from .mentions import build_mention_strings, encode_mentions
-from .parse import InboundMessage, build_content_text, parse_envelope
+from .parse import InboundMessage, build_content_text, is_group_update_envelope, parse_envelope
 from .prompts import build_instructions
 
 log = structlog.get_logger(__name__)
@@ -198,6 +198,7 @@ class SignalConnector(Connector):
                 # otherwise self-message filtering would misbehave.
                 log.warning("signal.inbound.unknown_account", account=phone)
                 continue
+            await self._maybe_refresh_roster(phone, envelope)
             msg = parse_envelope(envelope, bot_account_uuid=bot_uuid)
             if msg is None:
                 continue
@@ -354,7 +355,7 @@ class SignalConnector(Connector):
         # new group can resolve ``@<uuid_prefix>`` mentions against its
         # members.  Without the refresh the next send would silently drop
         # any mentions (group missing from cache → empty member_uuids).
-        self._groups_by_account[phone] = await self._daemon.list_groups(account=phone)
+        await self._refresh_roster(phone)
         return {"group_id": result["groupId"]}
 
     @tool()
@@ -392,6 +393,14 @@ class SignalConnector(Connector):
             raise ValueError(f"{tool_name}: unknown account {account!r}")
         return phone
 
+    async def _maybe_refresh_roster(self, phone: str, envelope: dict[str, Any]) -> None:
+        if is_group_update_envelope(envelope):
+            await self._refresh_roster(phone)
+
+    async def _refresh_roster(self, phone: str) -> None:
+        assert self._daemon is not None
+        self._groups_by_account[phone] = await self._daemon.list_groups(account=phone)
+
     async def _group_member_uuids(self, phone: str, chat_id: str) -> list[str]:
         """Member UUIDs of the focal group, or ``[]`` for a DM.
 
@@ -409,8 +418,7 @@ class SignalConnector(Connector):
         cached = self._lookup_group_members(phone, chat_id)
         if cached is not None:
             return cached
-        assert self._daemon is not None
-        self._groups_by_account[phone] = await self._daemon.list_groups(account=phone)
+        await self._refresh_roster(phone)
         return self._lookup_group_members(phone, chat_id) or []
 
     def _lookup_group_members(self, phone: str, chat_id: str) -> list[str] | None:

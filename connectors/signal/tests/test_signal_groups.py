@@ -82,3 +82,33 @@ async def test_rename_group_unknown_account_raises(connector: SignalConnector) -
     stub_focal(connector, f"nope/{GROUP_CHAT_ID}")
     with pytest.raises(ValueError, match="unknown account"):
         await connector._invoke_tool(descriptor(connector, "signal_rename_group"), {"name": "X"})
+
+
+# ── _maybe_refresh_roster ──────────────────────────────────────────────
+
+
+async def test_maybe_refresh_roster_calls_list_groups_on_update(
+    connector: SignalConnector,
+) -> None:
+    from aios_signal.daemon import GroupInfo
+
+    fresh = [GroupInfo(id="abc", name="QA", member_uuids=[ALICE_UUID, BOB_UUID])]
+    connector._daemon.list_groups.return_value = fresh  # type: ignore[union-attr]
+    envelope = {"dataMessage": {"groupInfo": {"groupId": "abc==", "type": "UPDATE"}}}
+    await connector._maybe_refresh_roster("+15550001", envelope)
+    connector._daemon.list_groups.assert_awaited_once_with(account="+15550001")  # type: ignore[union-attr]
+    assert connector._groups_by_account["+15550001"] == fresh
+
+
+async def test_maybe_refresh_roster_no_op_for_regular_message(
+    connector: SignalConnector,
+) -> None:
+    envelope = {
+        "dataMessage": {
+            "message": "hi",
+            "groupInfo": {"groupId": "abc==", "type": "DELIVER"},
+        }
+    }
+    await connector._maybe_refresh_roster("+15550001", envelope)
+    connector._daemon.list_groups.assert_not_awaited()  # type: ignore[union-attr]
+    assert "+15550001" not in connector._groups_by_account
