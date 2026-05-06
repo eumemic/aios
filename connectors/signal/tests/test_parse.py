@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from aios_signal.parse import build_content_text, parse_envelope
+from aios_signal.parse import build_content_text, is_group_update_envelope, parse_envelope
 
 
 def test_text_dm(envelope_text_dm: dict[str, Any], bot_uuid: str) -> None:
@@ -133,3 +133,32 @@ def test_attachment_no_file_field_carries_id(
     assert msg is not None
     assert msg.attachments[0].host_path is None
     assert msg.attachments[0].id == "xyz-789"
+
+
+# ── is_group_update_envelope ──────────────────────────────────────────
+
+
+def test_is_group_update_envelope_detects_update() -> None:
+    envelope = {"dataMessage": {"groupInfo": {"groupId": "abc==", "type": "UPDATE"}}}
+    assert is_group_update_envelope(envelope) is True
+
+
+def test_is_group_update_envelope_false_for_deliver(
+    envelope_text_group: dict[str, Any],
+) -> None:
+    """A regular group-message envelope (type=DELIVER) is not a roster-altering update."""
+    assert is_group_update_envelope(envelope_text_group) is False
+
+
+def test_is_group_update_envelope_false_for_dm(
+    envelope_text_dm: dict[str, Any],
+) -> None:
+    assert is_group_update_envelope(envelope_text_dm) is False
+
+
+def test_is_group_update_envelope_false_for_no_data_message() -> None:
+    assert is_group_update_envelope({"sourceUuid": "xxx"}) is False
+
+
+def test_is_group_update_envelope_false_for_no_group_info() -> None:
+    assert is_group_update_envelope({"dataMessage": {"message": "hi"}}) is False

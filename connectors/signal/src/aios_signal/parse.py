@@ -19,6 +19,17 @@ from .addressing import ChatType
 MENTION_PLACEHOLDER = "\ufffc"
 
 
+def is_group_update_envelope(envelope: dict[str, Any]) -> bool:
+    """True when *envelope* signals a Signal group metadata change
+    (membership add/remove, rename).
+    """
+    data_message = envelope.get("dataMessage")
+    if not isinstance(data_message, dict):
+        return False
+    group_info = data_message.get("groupInfo")
+    return isinstance(group_info, dict) and group_info.get("type") == "UPDATE"
+
+
 @dataclass(slots=True, frozen=True)
 class Attachment:
     content_type: str
