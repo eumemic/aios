@@ -272,8 +272,7 @@ def _switch_channel_tool_result_tcids(all_events: list[Event]) -> set[str]:
     """Collect tool_call_ids whose parent assistant requested ``switch_channel``.
 
     A single O(N) walk builds the set once; the recap filter then does
-    O(1) membership checks per event — replacing the prior O(K*N)
-    per-tool-result reverse scan into ``_find_assistant_for_tool_call``.
+    O(1) membership checks per event.
 
     Recap rendering excludes tool_result events whose id is in the
     returned set to prevent recursive embedding (each prior recap's

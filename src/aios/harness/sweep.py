@@ -1,7 +1,6 @@
 """Unified session wake/recovery sweep.
 
-Replaces the per-session ``defer_wake`` + ``should_call_model`` +
-``recover_orphans`` triad with a single function that:
+A single function that:
 
 1. **Repairs ghosts** — tool calls that were dispatched but never
    completed (SIGKILL, crash before launch, etc.).

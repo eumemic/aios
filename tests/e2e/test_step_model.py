@@ -165,7 +165,7 @@ class TestMidTurnInjection:
         tool_proceed.set()
         await harness.wait_for_tools(session.id)
 
-        # Step 2: should_call_model sees both tool result AND user injection
+        # Step 2: gate sees both tool result AND user injection
         await harness.run_step(session.id)
 
         events = await harness.events(session.id)
@@ -390,7 +390,7 @@ class TestContextOrdering:
 @needs_docker
 class TestBatchGating:
     async def test_partial_batch_does_not_trigger_model(self, harness: Harness) -> None:
-        """If 2 of 3 tools in a batch complete, should_call_model returns False."""
+        """If 2 of 3 tools in a batch complete, the inference gate returns False."""
         completed = asyncio.Event()
         gate = asyncio.Event()
 
@@ -565,8 +565,8 @@ class TestReactingTo:
         tool_proceed.set()
         await harness.wait_for_tools(session.id)
 
-        # Step 3: should_call_model should return True because the model's
-        # last response (step 2) has reacting_to < the tool result's seq.
+        # Step 3: the inference gate returns True because the model's last
+        # response (step 2) has reacting_to < the tool result's seq.
         # The tool result is "new" relative to what the model reacted to.
         await harness.run_step(session.id)
 
