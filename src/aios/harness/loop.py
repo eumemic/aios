@@ -4,7 +4,8 @@ Phase 5 replaces the synchronous multi-turn loop with an event-driven
 step function. Each procrastinate ``wake_session`` job calls
 :func:`run_session_step`, which:
 
-1. Checks whether the model needs to be called (:func:`should_call_model`).
+1. Checks whether the model needs to be called
+   (:func:`~aios.harness.sweep.find_sessions_needing_inference`).
 2. Builds the chat-completions message list with pending-result synthesis.
 3. Calls LiteLLM exactly once.
 4. Appends the assistant message to the session log.
@@ -15,8 +16,8 @@ Tool completion triggers a new ``wake_session`` job, which runs another
 step. The "loop" is the job queue re-entering this function.
 
 Mid-turn user injection is free: a new user message is just another
-event in the log. The next step's :func:`should_call_model` sees it
-and proceeds.
+event in the log. The next step's gate sees it via the ``reacting_to``
+watermark and proceeds.
 """
 
 from __future__ import annotations
@@ -435,9 +436,9 @@ async def _run_session_step_body(
 
         assistant_msg = apply_monologue_prefix(assistant_msg)
 
-    # Inject reacting_to so should_call_model knows what this response
-    # was based on. This is the seq of the latest user/tool event in the
-    # context — events after this seq are "new" on the next wake.
+    # Record the seq of the latest user/tool event in the context this
+    # response was based on; events after this seq are "new" on the next
+    # wake. ``find_sessions_needing_inference`` uses it as the watermark.
     assistant_msg["reacting_to"] = step_ctx.reacting_to
 
     # Append assistant message to the session log (unfenced — procrastinate

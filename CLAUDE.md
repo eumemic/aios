@@ -84,7 +84,7 @@ Both share Postgres: same database, same `LISTEN/NOTIFY`, same procrastinate job
 - **Monotonicity invariant**: appending events only appends to the context, never rewrites earlier messages (prompt cache stability).
 - **Pending-result synthesis**: in-flight tool calls get synthetic `"pending"` results so the message structure is valid.
 - **Blind-spot injection**: tool results that arrived during inference are injected as user messages at the tail.
-- **`reacting_to` watermark**: each assistant message records the max seq of events it saw, so `should_call_model` knows what's "new."
+- **`reacting_to` watermark**: each assistant message records the max seq of events it saw, so `find_sessions_needing_inference` knows what's "new."
 
 ### Custom tools (client-executed)
 
@@ -94,7 +94,7 @@ When the model calls a custom tool (type="custom"), the harness does NOT execute
 3. Client POSTs result to `POST /sessions/:id/tool-results`
 4. Result appended → wake deferred → next step fires
 
-Built-in and custom tools can be called in the same response. `should_call_model`'s batch gating waits for ALL tool_call_ids to have results.
+Built-in and custom tools can be called in the same response. The inference gate's batch logic waits for ALL tool_call_ids to have results.
 
 ### Two pools in one process
 

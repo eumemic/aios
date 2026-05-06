@@ -1,4 +1,4 @@
-"""Unit tests for the context builder (should_call_model + build_messages).
+"""Unit tests for the context builder (build_messages).
 
 Uses lightweight FakeEvent objects to avoid touching the DB.
 """
@@ -13,7 +13,6 @@ from aios.harness.channels import build_channels_tail_block
 from aios.harness.context import (
     build_messages,
     separate_adjacent_user_messages,
-    should_call_model,
     stub_missing_reasoning_content,
 )
 from aios.models.events import Event
@@ -79,86 +78,6 @@ def _evt(
 def _tc(call_id: str, name: str = "bash") -> dict[str, Any]:
     """Build a tool_call dict."""
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}
-
-
-# ─── should_call_model ──────────────────────────────────────────────────────
-
-
-class TestShouldCallModel:
-    def test_empty_events_returns_false(self) -> None:
-        assert should_call_model([]) is False
-
-    def test_first_user_message_returns_true(self) -> None:
-        events = [_evt(1, "user", content="hello")]
-        assert should_call_model(events) is True
-
-    def test_duplicate_wake_no_new_events(self) -> None:
-        events = [
-            _evt(1, "user", content="hello"),
-            _evt(2, "assistant", content="hi"),
-        ]
-        assert should_call_model(events) is False
-
-    def test_user_injection_returns_true(self) -> None:
-        events = [
-            _evt(1, "user", content="do X"),
-            _evt(2, "assistant", tool_calls=[_tc("a")]),
-            _evt(3, "user", content="also do Y"),
-        ]
-        assert should_call_model(events) is True
-
-    def test_all_tools_resolved_returns_true(self) -> None:
-        events = [
-            _evt(1, "user", content="do X"),
-            _evt(2, "assistant", tool_calls=[_tc("a"), _tc("b")]),
-            _evt(3, "tool", tool_call_id="a", content="result a"),
-            _evt(4, "tool", tool_call_id="b", content="result b"),
-        ]
-        assert should_call_model(events) is True
-
-    def test_partial_tools_returns_false(self) -> None:
-        events = [
-            _evt(1, "user", content="do X"),
-            _evt(2, "assistant", tool_calls=[_tc("a"), _tc("b"), _tc("c")]),
-            _evt(3, "tool", tool_call_id="a", content="result a"),
-        ]
-        assert should_call_model(events) is False
-
-    def test_batch_from_earlier_assistant_completes(self) -> None:
-        """The scenario from the design conversation: assistant at seq=2 requested
-        tool X. A later assistant at seq=4 has no tool_calls. X completes at seq=5.
-        should_call_model should see that batch (seq=2) is fully resolved."""
-        events = [
-            _evt(1, "user", content="do X"),
-            _evt(2, "assistant", tool_calls=[_tc("x")]),
-            _evt(3, "user", content="how's it going?"),
-            _evt(4, "assistant", content="still working on it"),
-            _evt(5, "tool", tool_call_id="x", content="done"),
-        ]
-        assert should_call_model(events) is True
-
-    def test_stale_tool_result_only_returns_false(self) -> None:
-        """Tool result for an already-responded-to batch doesn't trigger."""
-        events = [
-            _evt(1, "user", content="do X"),
-            _evt(2, "assistant", tool_calls=[_tc("a")]),
-            _evt(3, "tool", tool_call_id="a", content="done"),
-            _evt(4, "assistant", content="X is done"),
-            # No new events after seq=4 that need a response
-        ]
-        assert should_call_model(events) is False
-
-    def test_two_batches_one_complete(self) -> None:
-        """Two assistant messages with tool_calls. Only batch 2 is fully resolved."""
-        events = [
-            _evt(1, "user", content="do X and Y"),
-            _evt(2, "assistant", tool_calls=[_tc("x1"), _tc("x2")]),
-            _evt(3, "tool", tool_call_id="x1", content="done"),
-            _evt(4, "tool", tool_call_id="x2", content="done"),
-            _evt(5, "assistant", tool_calls=[_tc("y1")]),
-            _evt(6, "tool", tool_call_id="y1", content="done"),
-        ]
-        assert should_call_model(events) is True
 
 
 # ─── build_messages ──────────────────────────────────────────────────────────
