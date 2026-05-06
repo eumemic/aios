@@ -241,7 +241,7 @@ async def unbind_chat(connection_id: str, chat_id: str, pool: PoolDep, _auth: Au
 @router.get("/{connection_id}/bound-chats")
 async def bound_chats(connection_id: str, pool: PoolDep, _auth: AuthDep) -> ListResponse[BoundChat]:
     items = await service.list_bound_chats(pool, connection_id)
-    return ListResponse[BoundChat](data=items, has_more=False, next_after=None)
+    return ListResponse[BoundChat](data=items)
 
 
 @router.get("/{connection_id}/recent-chats")
@@ -252,4 +252,4 @@ async def recent_chats(
     limit: int = 50,
 ) -> ListResponse[RecentChat]:
     items = await service.list_recent_chats(pool, connection_id, limit=limit)
-    return ListResponse[RecentChat](data=items, has_more=False, next_after=None)
+    return ListResponse[RecentChat](data=items)
