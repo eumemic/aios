@@ -790,6 +790,75 @@ class TestFieldStripping:
         assert "reasoning_content" in events[1].data
 
 
+class TestThinkingBlockPreservation:
+    def test_thinking_blocks_preserved_for_thinking_capable_target(self) -> None:
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        events[1].data["thinking_blocks"] = [
+            {"type": "thinking", "thinking": "user said hi", "signature": "abc"}
+        ]
+        msgs = build_messages(
+            events, system_prompt=None, model="anthropic/claude-haiku-4-5"
+        ).messages
+        assert msgs[1]["thinking_blocks"] == [
+            {"type": "thinking", "thinking": "user said hi", "signature": "abc"}
+        ]
+
+    def test_reasoning_content_preserved_for_thinking_capable_target(self) -> None:
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        events[1].data["reasoning_content"] = "deep thoughts about hi"
+        msgs = build_messages(
+            events, system_prompt=None, model="anthropic/claude-haiku-4-5"
+        ).messages
+        assert msgs[1]["reasoning_content"] == "deep thoughts about hi"
+
+    def test_thinking_blocks_stripped_for_non_thinking_target(self) -> None:
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        events[1].data["thinking_blocks"] = [{"type": "thinking", "thinking": "user said hi"}]
+        events[1].data["reasoning_content"] = "deep thoughts"
+        msgs = build_messages(events, system_prompt=None, model="openai/gpt-4o-mini").messages
+        assert "thinking_blocks" not in msgs[1]
+        assert "reasoning_content" not in msgs[1]
+
+    def test_thinking_blocks_stripped_when_model_arg_omitted(self) -> None:
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        events[1].data["thinking_blocks"] = [{"type": "thinking", "thinking": "user said hi"}]
+        msgs = build_messages(events, system_prompt=None).messages
+        assert "thinking_blocks" not in msgs[1]
+
+    def test_other_provider_fields_still_stripped_on_thinking_target(self) -> None:
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        events[1].data.update(
+            {
+                "thinking_blocks": [{"type": "thinking", "thinking": "..."}],
+                "reasoning": "step 1",
+                "reasoning_details": [{"type": "thinking", "content": "..."}],
+                "reacting_to": 1,
+            }
+        )
+        msgs = build_messages(
+            events, system_prompt=None, model="anthropic/claude-haiku-4-5"
+        ).messages
+        assert "thinking_blocks" in msgs[1]
+        assert "reasoning" not in msgs[1]
+        assert "reasoning_details" not in msgs[1]
+        assert "reacting_to" not in msgs[1]
+
+
 class TestToolCallSanitization:
     """_strip_to_spec sanitizes the inner structure of tool_calls so
     malformed entries from one model don't break cross-model replay."""
