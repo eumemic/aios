@@ -2531,7 +2531,8 @@
           "vaults"
         ],
         "summary": "Create",
-        "operationId": "create_v1_vaults_post",
+        "description": "Create a new vault \u2014 a named collection for MCP server credentials.\n\nCredentials are added separately via ``create_vault_credential``.",
+        "operationId": "create_vault",
         "parameters": [
           {
             "name": "Authorization",
@@ -2588,7 +2589,8 @@
           "vaults"
         ],
         "summary": "List ",
-        "operationId": "list__v1_vaults_get",
+        "description": "List vaults, newest first, excluding archived.\n\nCursor pagination: pass ``after`` from a previous response's\n``next_after`` to get the next page.",
+        "operationId": "list_vaults",
         "parameters": [
           {
             "name": "limit",
@@ -2663,7 +2665,8 @@
           "vaults"
         ],
         "summary": "Get",
-        "operationId": "get_v1_vaults__vault_id__get",
+        "description": "Fetch one vault by id.",
+        "operationId": "get_vault",
         "parameters": [
           {
             "name": "vault_id",
@@ -2719,7 +2722,8 @@
           "vaults"
         ],
         "summary": "Update",
-        "operationId": "update_v1_vaults__vault_id__put",
+        "description": "Update a vault's ``display_name`` and/or ``metadata``.\n\nOmitted fields are preserved.",
+        "operationId": "update_vault",
         "parameters": [
           {
             "name": "vault_id",
@@ -2785,7 +2789,8 @@
           "vaults"
         ],
         "summary": "Delete",
-        "operationId": "delete_v1_vaults__vault_id__delete",
+        "description": "Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).\n\nReturns 204. Unlike ``archive_vault``, this removes the rows entirely\nand leaves no audit trail. Prefer archive unless you specifically need\nthe rows gone.",
+        "operationId": "delete_vault",
         "parameters": [
           {
             "name": "vault_id",
@@ -2836,7 +2841,8 @@
           "vaults"
         ],
         "summary": "Archive",
-        "operationId": "archive_v1_vaults__vault_id__archive_post",
+        "description": "Archive a vault and **purge the encrypted secret material** of its credentials.\n\nSets ``archived_at`` and hides the vault from default lists. In the same\ntransaction, every active credential is archived and its encrypted blob\nis zeroed \u2014 the credential rows persist for audit but the stored secrets\nare unrecoverable. Defense in depth: a future DB dump cannot leak\nsecrets that were already retired.\n\nUse ``delete_vault`` instead if you want to remove the rows entirely.",
+        "operationId": "archive_vault",
         "parameters": [
           {
             "name": "vault_id",
@@ -2894,7 +2900,8 @@
           "vaults"
         ],
         "summary": "Create Credential",
-        "operationId": "create_credential_v1_vaults__vault_id__credentials_post",
+        "description": "Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.\n\nValidates required fields per ``auth_type``: ``mcp_oauth`` requires\n``access_token`` (plus the refresh fields needed for rotation);\n``static_bearer`` requires ``token``. Caps at 20 active credentials per\nvault. The ``mcp_server_url`` is immutable after creation \u2014 to retarget\na credential, archive the existing one and create a new credential at\nthe new URL.",
+        "operationId": "create_vault_credential",
         "parameters": [
           {
             "name": "vault_id",
@@ -2960,7 +2967,8 @@
           "vaults"
         ],
         "summary": "List Credentials",
-        "operationId": "list_credentials_v1_vaults__vault_id__credentials_get",
+        "description": "List credentials in a vault, newest first, excluding archived.\n\nCursor pagination via ``after``. Secret material is never returned \u2014\nonly metadata (display name, mcp_server_url, auth_type, timestamps).",
+        "operationId": "list_vault_credentials",
         "parameters": [
           {
             "name": "vault_id",
@@ -3044,7 +3052,8 @@
           "vaults"
         ],
         "summary": "Get Credential",
-        "operationId": "get_credential_v1_vaults__vault_id__credentials__credential_id__get",
+        "description": "Fetch one credential's metadata. Secrets are never returned.\n\nInternal MCP clients resolve the secret directly through the service\nlayer (with OAuth refresh as needed); the HTTP API never exposes it.",
+        "operationId": "get_vault_credential",
         "parameters": [
           {
             "name": "vault_id",
@@ -3109,7 +3118,8 @@
           "vaults"
         ],
         "summary": "Update Credential",
-        "operationId": "update_credential_v1_vaults__vault_id__credentials__credential_id__put",
+        "description": "Update a credential's metadata and/or rotate its auth secrets.\n\nOmitted secret fields are preserved (decrypt-merge-encrypt cycle on the\nencrypted payload). ``mcp_server_url`` and ``auth_type`` are immutable\nand not accepted in the body. To rotate an OAuth refresh token, send\nonly the new ``refresh_token`` (and optional ``access_token`` /\n``expires_at``); other auth fields stay intact.",
+        "operationId": "update_vault_credential",
         "parameters": [
           {
             "name": "vault_id",
@@ -3184,7 +3194,8 @@
           "vaults"
         ],
         "summary": "Delete Credential",
-        "operationId": "delete_credential_v1_vaults__vault_id__credentials__credential_id__delete",
+        "description": "Hard-delete a credential row. Returns 204.\n\nUnlike ``archive_vault_credential``, removes the row entirely and\nleaves no audit trail. Prefer archive unless you specifically need the\nrow gone.",
+        "operationId": "delete_vault_credential",
         "parameters": [
           {
             "name": "vault_id",
@@ -3244,7 +3255,8 @@
           "vaults"
         ],
         "summary": "Archive Credential",
-        "operationId": "archive_credential_v1_vaults__vault_id__credentials__credential_id__archive_post",
+        "description": "Archive a credential and **zero its encrypted secret payload**.\n\nSets ``archived_at`` and hides the credential from default lists. The\nencrypted blob is scrubbed at archive time so a future DB dump cannot\nleak the secret. Use ``delete_vault_credential`` for full removal.",
+        "operationId": "archive_vault_credential",
         "parameters": [
           {
             "name": "vault_id",
