@@ -135,3 +135,18 @@ class TestGroupRoster:
             contact_names={"x": "X"},
         )
         assert "(unnamed)" in result
+
+
+# ── prompt-content tightening (#250) ─────────────────────────────────
+
+
+class TestPromptContent:
+    def test_documents_non_vision_attachment_kinds(self) -> None:
+        """Models confabulated content of video/audio attachments because
+        the prompt didn't tell them what they could and couldn't see.
+        Issue #250: add an explicit perception map."""
+        result = build_instructions(bot_uuid="u", phone="+1")
+        assert "What you can and can't see" in result
+        for kind in ("Voice", "Videos", "Photos"):
+            assert kind in result, f"missing perception entry: {kind}"
+        assert "never describe content you didn't actually perceive" in result

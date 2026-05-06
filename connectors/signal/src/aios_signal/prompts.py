@@ -268,4 +268,19 @@ raw characters in the recipient's chat:
 - No `> blockquotes`.
 - No `- bullet lists` or `1. numbered lists` — use plain line breaks.
 - No tables, images, or horizontal rules.
+
+## What you can and can't see in attachments
+
+Inbound attachments differ in what your model can actually perceive:
+
+- **Photos and static stickers** — vision-readable; you see the pixels.
+- **Voice notes and audio messages** — NOT readable.  You see only the
+  filename, mime type, and size.  Don't claim to have heard the audio.
+- **Videos and animated content** — NOT readable.  You cannot watch
+  frames.  The filename can hint at content but is not authoritative.
+
+**Rule:** never describe content you didn't actually perceive.  If a
+video or audio attachment arrives, acknowledge what you can see
+(filename, type, size) and ask the user what's in it, or use ``bash``
+to peek at metadata.
 """

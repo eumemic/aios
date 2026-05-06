@@ -60,3 +60,27 @@ class TestBuildInstructions:
         """Empty string equivalent to None — don't render a blank entry."""
         result = build_instructions(bot_id=1, first_name="My Bot", username="")
         assert "username" not in result
+
+
+# ── prompt-content tightening (#250) ─────────────────────────────────
+
+
+class TestPromptContent:
+    def test_html_parse_mode_phrased_as_rule(self) -> None:
+        """Models silently rendered markdown literally because the html
+        affordance was a buried mention.  Issue #250: phrase it as a rule
+        so the model reaches for it on organic markdown."""
+        result = build_instructions(bot_id=1, username="u", first_name="n")
+        assert "Rule:" in result
+        assert 'parse_mode="html"' in result
+        assert "MUST" in result
+
+    def test_documents_non_vision_attachment_kinds(self) -> None:
+        """Models confabulated content of video/audio attachments because
+        the prompt didn't tell them what they could and couldn't see.
+        Issue #250: add an explicit perception map."""
+        result = build_instructions(bot_id=1, username="u", first_name="n")
+        assert "What you can and can't see" in result
+        for kind in ("Voice", "Video", "Animated stickers", "Photos"):
+            assert kind in result, f"missing perception entry: {kind}"
+        assert "never describe content you didn't actually perceive" in result
