@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import litellm
+
 from aios.harness.vision import (
     can_inline_image,
     make_image_url_part,
@@ -45,19 +47,19 @@ from aios.sandbox.volumes import resolve_to_host_path
 
 log = get_logger("aios.harness.context")
 
-# Chat-completions spec fields per role.  Only these are emitted in the
-# context; provider-specific extensions (reasoning_content, etc.) stay
-# in the event log but are excluded from the message list.
-#
-# `thinking_blocks` and `reasoning_content` are intentionally stripped even
-# on same-provider replays — see #196 for cost/benefit and the OpenRouter
-# transport gaps before re-litigating.
+# Chat-completions spec fields per role.  Provider-specific extensions
+# (reasoning, reasoning_details, internal reacting_to, etc.) stay in the
+# event log but are excluded from the message list.
 _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
     "assistant": frozenset({"role", "content", "tool_calls"}),
     "tool": frozenset({"role", "tool_call_id", "content", "name"}),
     "user": frozenset({"role", "content", "name"}),
     "system": frozenset({"role", "content", "name"}),
 }
+
+# Anthropic's contract: thinking blocks must be preserved across turns
+# for the model to use them as continuation context.
+_THINKING_FIELDS: frozenset[str] = frozenset({"thinking_blocks", "reasoning_content"})
 
 # Notification markers truncate the source content to this many chars
 # (plus an ellipsis when truncated) so a busy non-focal channel
@@ -347,9 +349,20 @@ def _sanitize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any
     return sanitized
 
 
-def _strip_to_spec(msg: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of *msg* with only chat-completions spec fields."""
-    allowed = _ALLOWED_FIELDS.get(msg.get("role", ""), frozenset())
+def _strip_to_spec(
+    msg: dict[str, Any],
+    *,
+    target_supports_thinking: bool,
+) -> dict[str, Any]:
+    """Return a copy of *msg* with only chat-completions spec fields.
+
+    When ``target_supports_thinking``, also preserve ``thinking_blocks``
+    and ``reasoning_content`` on assistant turns.
+    """
+    role = msg.get("role", "")
+    allowed = _ALLOWED_FIELDS.get(role, frozenset())
+    if role == "assistant" and target_supports_thinking:
+        allowed = allowed | _THINKING_FIELDS
     out = {k: v for k, v in msg.items() if k in allowed}
     if out.get("tool_calls"):
         out["tool_calls"] = _sanitize_tool_calls(out["tool_calls"])
@@ -609,8 +622,11 @@ def build_messages(
     if system_prompt:
         messages.insert(0, {"role": "system", "content": system_prompt})
 
+    target_supports_thinking = bool(model) and litellm.supports_reasoning(model)
     return ContextResult(
-        messages=[_strip_to_spec(m) for m in messages],
+        messages=[
+            _strip_to_spec(m, target_supports_thinking=target_supports_thinking) for m in messages
+        ],
         reacting_to=max_stimulus_seq,
     )
 
