@@ -200,6 +200,15 @@ def _parse_jsonb(raw: Any) -> Any:
     return json.loads(raw) if isinstance(raw, str) else raw
 
 
+def _escape_like(value: str) -> str:
+    """Escape ``\\``, ``%``, and ``_`` so ``value`` matches literally under SQL ``LIKE``.
+
+    Postgres' default LIKE escape is ``\\``, so no explicit ``ESCAPE`` clause is
+    needed at the call site. Order matters: escape the escape character first.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _row_to_agent(row: asyncpg.Record) -> Agent:
     tools_data = _parse_jsonb(row["tools"])
     skills_data = _parse_jsonb(row["skills"])
@@ -3438,7 +3447,10 @@ async def list_memories(
     args: list[Any] = [store_id]
     if path_prefix:
         args.append(path_prefix)
-        where += f" AND (path = ${len(args)} OR path LIKE ${len(args)} || '%')"
+        # Escape LIKE metacharacters so the prefix matches literally — paths
+        # legitimately contain ``_`` and ``%`` per the schema CHECK regex.
+        args.append(_escape_like(path_prefix))
+        where += f" AND (path = ${len(args) - 1} OR path LIKE ${len(args)} || '%')"
     order_sql = "path ASC" if order_by == "path" else "created_at DESC"
     rows = await conn.fetch(f"SELECT * FROM memories WHERE {where} ORDER BY {order_sql}", *args)
 

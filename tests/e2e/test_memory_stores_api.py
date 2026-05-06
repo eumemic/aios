@@ -210,6 +210,34 @@ class TestMemoryCrud:
         )
         assert r.status_code == 409, r.text
 
+    async def test_list_path_prefix_treats_underscore_literally(
+        self, http_client: httpx.AsyncClient
+    ) -> None:
+        """``path_prefix`` is a literal prefix, not a SQL ``LIKE`` pattern.
+
+        The schema allows ``_`` and ``%`` in path segments, so they must
+        not act as wildcards in filter queries.
+        """
+        store = await _create_store(http_client)
+        await _create_memory(http_client, store["id"], "/notes/draft_alice.md", "a")
+        await _create_memory(http_client, store["id"], "/notes/draftXalice.md", "b")
+
+        r = await http_client.get(
+            f"/v1/memory-stores/{store['id']}/memories",
+            params={"path_prefix": "/notes/draft_a"},
+        )
+        assert r.status_code == 200, r.text
+        paths = sorted(item["path"] for item in r.json()["data"])
+        assert paths == ["/notes/draft_alice.md"]
+
+        # ``%`` must not match every path in the store.
+        r = await http_client.get(
+            f"/v1/memory-stores/{store['id']}/memories",
+            params={"path_prefix": "%"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["data"] == []
+
 
 class TestVersionsAndRedact:
     async def test_redact_head_rejected(self, http_client: httpx.AsyncClient) -> None:
