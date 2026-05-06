@@ -125,5 +125,9 @@ async def list_versions(
 
 @router.get("/{agent_id}/versions/{version}", operation_id="get_agent_version")
 async def get_version(agent_id: str, version: int, pool: PoolDep, _auth: AuthDep) -> AgentVersion:
-    """Fetch one historical version of an agent by version number."""
+    """Fetch one historical version's config snapshot.
+
+    The snapshot reflects the agent's config at the time the version was
+    written and is unaffected by subsequent updates or archival.
+    """
     return await service.get_agent_version(pool, agent_id, version)
