@@ -117,7 +117,7 @@ async def _assert_account_in_snapshot(db_url: str, *, connector: str, account: s
         )
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post("", operation_id="create_connection", status_code=status.HTTP_201_CREATED)
 async def create(body: ConnectionCreate, pool: PoolDep, _auth: AuthDep) -> Connection:
     """Create a detached connection, **idempotent on ``(connector, account)``**.
 
@@ -136,7 +136,7 @@ async def create(body: ConnectionCreate, pool: PoolDep, _auth: AuthDep) -> Conne
     )
 
 
-@router.get("")
+@router.get("", operation_id="list_connections")
 async def list_(
     pool: PoolDep,
     _auth: AuthDep,
@@ -146,6 +146,12 @@ async def list_(
     limit: int = 50,
     after: str | None = None,
 ) -> ListResponse[Connection]:
+    """List connections, newest first, excluding archived. Cursor pagination via ``after``.
+
+    Filters: ``connector`` (e.g. ``"telegram"``), ``session_id`` (only
+    connections in single_session mode bound to that session), ``mode``
+    (``detached`` / ``single_session`` / ``per_chat``). Filters compose.
+    """
     items = await service.list_connections(
         pool,
         connector=connector,
@@ -161,17 +167,30 @@ async def list_(
     )
 
 
-@router.get("/{connection_id}")
+@router.get("/{connection_id}", operation_id="get_connection")
 async def get(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connection:
+    """Fetch one connection by id."""
     return await service.get_connection(pool, connection_id)
 
 
-@router.delete("/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{connection_id}",
+    operation_id="archive_connection",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 async def delete(connection_id: str, pool: PoolDep, _auth: AuthDep) -> None:
+    """Archive a connection (DELETE soft-archives, only on detached connections).
+
+    The service layer rejects archive attempts on ``single_session`` or
+    ``per_chat`` connections — archiving those would silently break
+    inbound delivery for live sessions or orphan
+    ``spawned_from_connection_id`` pointers on per_chat-spawned sessions.
+    Detach or unconfigure first, then archive.
+    """
     await service.archive_connection(pool, connection_id)
 
 
-@router.post("/{connection_id}/attach")
+@router.post("/{connection_id}/attach", operation_id="attach_connection")
 async def attach(
     connection_id: str,
     body: ConnectionAttach,
@@ -191,26 +210,53 @@ async def attach(
     return await service.attach_connection(pool, connection_id, session_id=body.session_id)
 
 
-@router.post("/{connection_id}/detach")
+@router.post("/{connection_id}/detach", operation_id="detach_connection")
 async def detach(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connection:
+    """Detach a single_session connection back to detached mode.
+
+    The bound session is unaffected (continues to exist); only the
+    connection's mode/binding changes. Inbound on this connection is
+    paused until it's re-attached or configured for per_chat.
+    """
     return await service.detach_connection(pool, connection_id)
 
 
-@router.post("/{connection_id}/configure-per-chat")
+@router.post(
+    "/{connection_id}/configure-per-chat",
+    operation_id="configure_connection_per_chat",
+)
 async def configure_per_chat(
     connection_id: str, body: ConnectionConfigurePerChat, pool: PoolDep, _auth: AuthDep
 ) -> Connection:
+    """Move a detached connection into per_chat mode, pinned to a session template.
+
+    Inbound from new chat partners on this connection will spawn fresh
+    sessions using the named template (agent + environment + vaults +
+    memory stores). Use ``unconfigure_connection`` to return to detached.
+    """
     return await service.configure_per_chat(
         pool, connection_id, session_template_id=body.session_template_id
     )
 
 
-@router.post("/{connection_id}/unconfigure")
+@router.post("/{connection_id}/unconfigure", operation_id="unconfigure_connection")
 async def unconfigure(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connection:
+    """Return a per_chat connection to detached mode.
+
+    Already-spawned sessions are unaffected and continue normally;
+    operator-bound chat → session rows persist and continue to route
+    those specific chats. Only the per_chat fallback (spawn for unseen
+    chats) is removed — inbound from new chat partners is paused until
+    the connection is reconfigured.
+    """
     return await service.unconfigure_connection(pool, connection_id)
 
 
-@router.post("/{connection_id}/bind-chat", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{connection_id}/bind-chat",
+    operation_id="bind_chat",
+    status_code=status.HTTP_201_CREATED,
+)
 async def bind_chat(
     connection_id: str, body: BindChatRequest, pool: PoolDep, _auth: AuthDep
 ) -> BoundChat:
@@ -232,24 +278,40 @@ async def bind_chat(
     )
 
 
-@router.delete("/{connection_id}/bind-chat/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{connection_id}/bind-chat/{chat_id}",
+    operation_id="unbind_chat",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 async def unbind_chat(connection_id: str, chat_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     """Drop the operator-curated row.  Idempotent — repeat calls 204."""
     await service.unbind_chat(pool, connection_id, chat_id)
 
 
-@router.get("/{connection_id}/bound-chats")
+@router.get("/{connection_id}/bound-chats", operation_id="list_bound_chats")
 async def bound_chats(connection_id: str, pool: PoolDep, _auth: AuthDep) -> ListResponse[BoundChat]:
+    """List operator-curated chat → session bindings on this connection.
+
+    Includes both manually-bound rows (via ``bind_chat``) and per_chat
+    auto-spawned rows (via the supervisor on first inbound from a new
+    chat partner).
+    """
     items = await service.list_bound_chats(pool, connection_id)
     return ListResponse[BoundChat](data=items)
 
 
-@router.get("/{connection_id}/recent-chats")
+@router.get("/{connection_id}/recent-chats", operation_id="list_recent_chats")
 async def recent_chats(
     connection_id: str,
     pool: PoolDep,
     _auth: AuthDep,
     limit: int = 50,
 ) -> ListResponse[RecentChat]:
+    """List chats that recently sent inbound on this connection, newest first.
+
+    Useful for picking a ``chat_id`` to bind via ``bind_chat`` —
+    enumerates the conversational counterparts that the connector has
+    delivered messages from.
+    """
     items = await service.list_recent_chats(pool, connection_id, limit=limit)
     return ListResponse[RecentChat](data=items)

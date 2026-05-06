@@ -4291,7 +4291,7 @@
         ],
         "summary": "Create",
         "description": "Create a detached connection, **idempotent on ``(connector, account)``**.\n\nPer plan decision #5, this endpoint and the supervisor's\nauto-create-on-first-inbound path race-safely converge on a single row:\nposting twice with the same ``(connector, account)`` returns 201 with the\nexisting row rather than 409.  The ``id`` may differ from a freshly-allocated\none if a concurrent writer landed first; the response always reflects the\ncanonical active row.",
-        "operationId": "create_v1_connections_post",
+        "operationId": "create_connection",
         "parameters": [
           {
             "name": "Authorization",
@@ -4348,7 +4348,8 @@
           "connections"
         ],
         "summary": "List ",
-        "operationId": "list__v1_connections_get",
+        "description": "List connections, newest first, excluding archived. Cursor pagination via ``after``.\n\nFilters: ``connector`` (e.g. ``\"telegram\"``), ``session_id`` (only\nconnections in single_session mode bound to that session), ``mode``\n(``detached`` / ``single_session`` / ``per_chat``). Filters compose.",
+        "operationId": "list_connections",
         "parameters": [
           {
             "name": "connector",
@@ -4476,7 +4477,8 @@
           "connections"
         ],
         "summary": "Get",
-        "operationId": "get_v1_connections__connection_id__get",
+        "description": "Fetch one connection by id.",
+        "operationId": "get_connection",
         "parameters": [
           {
             "name": "connection_id",
@@ -4532,7 +4534,8 @@
           "connections"
         ],
         "summary": "Delete",
-        "operationId": "delete_v1_connections__connection_id__delete",
+        "description": "Archive a connection (DELETE soft-archives, only on detached connections).\n\nThe service layer rejects archive attempts on ``single_session`` or\n``per_chat`` connections \u2014 archiving those would silently break\ninbound delivery for live sessions or orphan\n``spawned_from_connection_id`` pointers on per_chat-spawned sessions.\nDetach or unconfigure first, then archive.",
+        "operationId": "archive_connection",
         "parameters": [
           {
             "name": "connection_id",
@@ -4584,7 +4587,7 @@
         ],
         "summary": "Attach",
         "description": "Attach a connection to a session, after validating the account against the snapshot.\n\nThe drift check runs BEFORE the DB write so a stale account can't\nmove into ``single_session`` mode and silently swallow inbound.",
-        "operationId": "attach_v1_connections__connection_id__attach_post",
+        "operationId": "attach_connection",
         "parameters": [
           {
             "name": "connection_id",
@@ -4652,7 +4655,8 @@
           "connections"
         ],
         "summary": "Detach",
-        "operationId": "detach_v1_connections__connection_id__detach_post",
+        "description": "Detach a single_session connection back to detached mode.\n\nThe bound session is unaffected (continues to exist); only the\nconnection's mode/binding changes. Inbound on this connection is\npaused until it's re-attached or configured for per_chat.",
+        "operationId": "detach_connection",
         "parameters": [
           {
             "name": "connection_id",
@@ -4710,7 +4714,8 @@
           "connections"
         ],
         "summary": "Configure Per Chat",
-        "operationId": "configure_per_chat_v1_connections__connection_id__configure_per_chat_post",
+        "description": "Move a detached connection into per_chat mode, pinned to a session template.\n\nInbound from new chat partners on this connection will spawn fresh\nsessions using the named template (agent + environment + vaults +\nmemory stores). Use ``unconfigure_connection`` to return to detached.",
+        "operationId": "configure_connection_per_chat",
         "parameters": [
           {
             "name": "connection_id",
@@ -4778,7 +4783,8 @@
           "connections"
         ],
         "summary": "Unconfigure",
-        "operationId": "unconfigure_v1_connections__connection_id__unconfigure_post",
+        "description": "Return a per_chat connection to detached mode.\n\nAlready-spawned sessions are unaffected and continue normally;\noperator-bound chat \u2192 session rows persist and continue to route\nthose specific chats. Only the per_chat fallback (spawn for unseen\nchats) is removed \u2014 inbound from new chat partners is paused until\nthe connection is reconfigured.",
+        "operationId": "unconfigure_connection",
         "parameters": [
           {
             "name": "connection_id",
@@ -4837,7 +4843,7 @@
         ],
         "summary": "Bind Chat",
         "description": "Operator-curate a chat \u2192 session mapping (#215).\n\nA row in ``connection_chat_sessions`` overrides the connection's\nmode-default fallback for that ``chat_id``.  Operators use this to\npoint different chats on a single account at different existing\nsessions \u2014 the middle case the unified ``connections`` shape didn't\ncover after #205.\n\nIdempotent on ``(connection_id, chat_id)``: a second call with the\nsame chat returns the existing row (its ``session_id`` may differ\nfrom the requested one if a concurrent writer landed first or the\nsupervisor pre-populated it via per_chat spawn).",
-        "operationId": "bind_chat_v1_connections__connection_id__bind_chat_post",
+        "operationId": "bind_chat",
         "parameters": [
           {
             "name": "connection_id",
@@ -4906,7 +4912,7 @@
         ],
         "summary": "Unbind Chat",
         "description": "Drop the operator-curated row.  Idempotent \u2014 repeat calls 204.",
-        "operationId": "unbind_chat_v1_connections__connection_id__bind_chat__chat_id__delete",
+        "operationId": "unbind_chat",
         "parameters": [
           {
             "name": "connection_id",
@@ -4966,7 +4972,8 @@
           "connections"
         ],
         "summary": "Bound Chats",
-        "operationId": "bound_chats_v1_connections__connection_id__bound_chats_get",
+        "description": "List operator-curated chat \u2192 session bindings on this connection.\n\nIncludes both manually-bound rows (via ``bind_chat``) and per_chat\nauto-spawned rows (via the supervisor on first inbound from a new\nchat partner).",
+        "operationId": "list_bound_chats",
         "parameters": [
           {
             "name": "connection_id",
@@ -5024,7 +5031,8 @@
           "connections"
         ],
         "summary": "Recent Chats",
-        "operationId": "recent_chats_v1_connections__connection_id__recent_chats_get",
+        "description": "List chats that recently sent inbound on this connection, newest first.\n\nUseful for picking a ``chat_id`` to bind via ``bind_chat`` \u2014\nenumerates the conversational counterparts that the connector has\ndelivered messages from.",
+        "operationId": "list_recent_chats",
         "parameters": [
           {
             "name": "connection_id",
