@@ -15,7 +15,7 @@ import asyncpg
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.errors import PayloadTooLargeError, ValidationError
+from aios.errors import PayloadTooLargeError
 from aios.models.events import Event, EventKind
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -161,11 +161,6 @@ async def append_user_message(
     full channel address), we lift it into the event's ``orig_channel``
     column so the context builder and unread-derivation helpers can key
     off it directly — without re-parsing a JSONB blob on every read.
-
-    A caller-supplied ``metadata.channel`` must already be a bound channel
-    on this session — otherwise the model would see a notification
-    marker pointing at a channel ``switch_channel`` can't reach.  Omit
-    ``metadata.channel`` to inject as a global-inbox event.
     """
     if len(content) > MAX_USER_MESSAGE_CHARS:
         raise PayloadTooLargeError(
@@ -182,14 +177,6 @@ async def append_user_message(
         if isinstance(channel, str):
             orig_channel = channel
     async with pool.acquire() as conn:
-        if orig_channel is not None:
-            bound = await queries.list_session_channels(conn, session_id)
-            if orig_channel not in bound:
-                raise ValidationError(
-                    f"metadata.channel={orig_channel!r} is not a bound channel "
-                    f"on this session; omit metadata.channel to inject as a "
-                    f"global-inbox event"
-                )
         event = await queries.append_event(
             conn,
             session_id=session_id,
