@@ -3335,7 +3335,8 @@
           "memory-stores"
         ],
         "summary": "Create Store",
-        "operationId": "create_store_v1_memory_stores_post",
+        "description": "Create a new memory store \u2014 a named collection of file-like memories.\n\nMemories created in this store are mirrored to a per-store host\ndirectory so that sessions referencing the store can read them through\nthe sandbox filesystem.",
+        "operationId": "create_memory_store",
         "parameters": [
           {
             "name": "Authorization",
@@ -3392,7 +3393,8 @@
           "memory-stores"
         ],
         "summary": "List Stores",
-        "operationId": "list_stores_v1_memory_stores_get",
+        "description": "List memory stores, newest first.\n\nUnlike most resources, archived stores can be included via\n``include_archived=true`` (default false). No cursor pagination \u2014 bumps\nthe default limit to 100 since stores are typically few.",
+        "operationId": "list_memory_stores",
         "parameters": [
           {
             "name": "include_archived",
@@ -3461,7 +3463,8 @@
           "memory-stores"
         ],
         "summary": "Get Store",
-        "operationId": "get_store_v1_memory_stores__store_id__get",
+        "description": "Fetch one memory store by id.",
+        "operationId": "get_memory_store",
         "parameters": [
           {
             "name": "store_id",
@@ -3517,7 +3520,8 @@
           "memory-stores"
         ],
         "summary": "Update Store",
-        "operationId": "update_store_v1_memory_stores__store_id__post",
+        "description": "Update a memory store's ``name``, ``description``, or ``metadata``.\n\nRejects with ``MemoryStoreArchivedError`` if the store is archived \u2014\narchived stores are read-only. Treat as partial update on the listed\nfields.",
+        "operationId": "update_memory_store",
         "parameters": [
           {
             "name": "store_id",
@@ -3583,7 +3587,8 @@
           "memory-stores"
         ],
         "summary": "Delete Store",
-        "operationId": "delete_store_v1_memory_stores__store_id__delete",
+        "description": "Hard-delete a memory store, all its memories, and its host mirror.\n\nCascade-deletes memories and versions in the database. After the DB\ntransaction commits, the per-store host mirror directory is removed\n(best-effort \u2014 a missing dir is fine, indicates no session ever\nprovisioned for this store). Returns 204.",
+        "operationId": "delete_memory_store",
         "parameters": [
           {
             "name": "store_id",
@@ -3634,7 +3639,8 @@
           "memory-stores"
         ],
         "summary": "Archive Store",
-        "operationId": "archive_store_v1_memory_stores__store_id__archive_post",
+        "description": "Archive a memory store: hides from default lists, makes it read-only.\n\nThe store and its memories persist; sessions can still resolve memory\ncontent. Subsequent ``update_memory_store`` calls fail until\nun-archived (no API surface for that currently). Use\n``delete_memory_store`` for full removal.",
+        "operationId": "archive_memory_store",
         "parameters": [
           {
             "name": "store_id",
@@ -3692,7 +3698,8 @@
           "memory-stores"
         ],
         "summary": "Create Memory",
-        "operationId": "create_memory_v1_memory_stores__store_id__memories_post",
+        "description": "Create a memory at the given path within a store.\n\nThe content is also mirrored to the store's host directory so that\nsandboxed sessions can read it through the filesystem. Creates an\ninitial version (every memory mutation creates a version).",
+        "operationId": "create_memory",
         "parameters": [
           {
             "name": "store_id",
@@ -3758,7 +3765,8 @@
           "memory-stores"
         ],
         "summary": "List Memories",
-        "operationId": "list_memories_v1_memory_stores__store_id__memories_get",
+        "description": "List memories in a store, optionally filtered and grouped by path.\n\n``path_prefix`` is a literal prefix match on the memory path. ``depth``\ngroups deeper paths into ``MemoryPrefix`` entries (directory-style\nlistings) \u2014 entries past the depth boundary are collapsed into a\nsingle prefix entry per shared directory. ``order_by`` accepts\n``created_at`` (default) or ``path``.",
+        "operationId": "list_memories",
         "parameters": [
           {
             "name": "store_id",
@@ -3858,7 +3866,8 @@
           "memory-stores"
         ],
         "summary": "Get Memory",
-        "operationId": "get_memory_v1_memory_stores__store_id__memories__memory_id__get",
+        "description": "Fetch one memory by id, including its current content.",
+        "operationId": "get_memory",
         "parameters": [
           {
             "name": "store_id",
@@ -3923,7 +3932,8 @@
           "memory-stores"
         ],
         "summary": "Update Memory",
-        "operationId": "update_memory_v1_memory_stores__store_id__memories__memory_id__post",
+        "description": "Update a memory's content and/or path. Creates a new version.\n\nOptionally honors a ``precondition.content_sha256`` for optimistic\nconcurrency \u2014 if the current content's SHA-256 differs, the update\nfails with a precondition error rather than overwriting. The host\nmirror is updated to match: renames delete the old path and write the\nnew one.",
+        "operationId": "update_memory",
         "parameters": [
           {
             "name": "store_id",
@@ -3998,7 +4008,8 @@
           "memory-stores"
         ],
         "summary": "Delete Memory",
-        "operationId": "delete_memory_v1_memory_stores__store_id__memories__memory_id__delete",
+        "description": "Soft-delete a memory and remove it from the host mirror.\n\nSets ``deleted_at`` on the memory and appends a ``deleted`` tombstone\nversion. The row and version history persist; live reads filter on\n``deleted_at IS NULL`` so the memory becomes invisible. Returns 204.",
+        "operationId": "delete_memory",
         "parameters": [
           {
             "name": "store_id",
@@ -4058,7 +4069,8 @@
           "memory-stores"
         ],
         "summary": "List Versions",
-        "operationId": "list_versions_v1_memory_stores__store_id__memory_versions_get",
+        "description": "List memory versions in a store, newest first.\n\nOptional ``memory_id`` filters to a single memory's version history.\nWithout the filter, returns versions across all memories in the store\n(useful for audit). No cursor pagination; bumps default limit to 100.",
+        "operationId": "list_memory_versions",
         "parameters": [
           {
             "name": "store_id",
@@ -4142,7 +4154,8 @@
           "memory-stores"
         ],
         "summary": "Get Version",
-        "operationId": "get_version_v1_memory_stores__store_id__memory_versions__version_id__get",
+        "description": "Fetch one historical memory version by id.",
+        "operationId": "get_memory_version",
         "parameters": [
           {
             "name": "store_id",
@@ -4209,7 +4222,8 @@
           "memory-stores"
         ],
         "summary": "Redact Version",
-        "operationId": "redact_version_v1_memory_stores__store_id__memory_versions__version_id__redact_post",
+        "description": "Redact the content of a historical memory version in place.\n\nThe version row persists for audit (with the actor and timestamp) but\nits content field is cleared. Use to scrub sensitive data that was\npreviously written into a memory. Live memory content is unaffected\n(only this specific historical version is redacted).",
+        "operationId": "redact_memory_version",
         "parameters": [
           {
             "name": "store_id",
