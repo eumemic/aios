@@ -25,8 +25,15 @@ from aios.services import session_templates as service
 router = APIRouter(prefix="/v1/session-templates", tags=["session-templates"])
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post("", operation_id="create_session_template", status_code=status.HTTP_201_CREATED)
 async def create(body: SessionTemplateCreate, pool: PoolDep, _auth: AuthDep) -> SessionTemplate:
+    """Create a session template — a frozen recipe for per_chat session spawn.
+
+    Captures the agent + environment + vaults + memory stores that a
+    per_chat connection will use when spawning a session for a new chat
+    partner. Pin ``agent_version`` to a specific version for deterministic
+    spawning, or leave unset to track the agent's latest.
+    """
     return await service.create_session_template(
         pool,
         name=body.name,
@@ -39,13 +46,17 @@ async def create(body: SessionTemplateCreate, pool: PoolDep, _auth: AuthDep) -> 
     )
 
 
-@router.get("")
+@router.get("", operation_id="list_session_templates")
 async def list_(
     pool: PoolDep,
     _auth: AuthDep,
     limit: int = 50,
     after: str | None = None,
 ) -> ListResponse[SessionTemplate]:
+    """List session templates, newest first, excluding archived.
+
+    Cursor pagination via ``after``.
+    """
     items = await service.list_session_templates(pool, limit=limit, after=after)
     return ListResponse[SessionTemplate](
         data=items,
@@ -54,15 +65,23 @@ async def list_(
     )
 
 
-@router.get("/{template_id}")
+@router.get("/{template_id}", operation_id="get_session_template")
 async def get(template_id: str, pool: PoolDep, _auth: AuthDep) -> SessionTemplate:
+    """Fetch one session template by id."""
     return await service.get_session_template(pool, template_id)
 
 
-@router.put("/{template_id}")
+@router.put("/{template_id}", operation_id="update_session_template")
 async def update(
     template_id: str, body: SessionTemplateUpdate, pool: PoolDep, _auth: AuthDep
 ) -> SessionTemplate:
+    """Update a session template's recipe fields. Omitted fields are preserved.
+
+    The ``agent_version`` field uses sentinel-based partial-update semantics:
+    omit it to preserve the current pin (or current "track latest" state),
+    pass null to switch to "track latest," pass a number to pin to that
+    specific version. Already-spawned sessions are unaffected.
+    """
     return await service.update_session_template(
         pool,
         template_id,
@@ -76,6 +95,18 @@ async def update(
     )
 
 
-@router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{template_id}",
+    operation_id="archive_session_template",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 async def delete(template_id: str, pool: PoolDep, _auth: AuthDep) -> None:
+    """Archive a session template (soft-delete via DELETE verb).
+
+    Already-spawned sessions are unaffected and continue normally. Per-chat
+    connections that reference this template by id keep their existing
+    sessions but will fail to spawn new chat sessions at the inbound
+    handler until the connection is reconfigured to point at a different
+    template. There is no API surface to un-archive currently.
+    """
     await service.archive_session_template(pool, template_id)

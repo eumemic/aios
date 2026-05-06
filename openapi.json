@@ -9,7 +9,8 @@
     "/health": {
       "get": {
         "summary": "Health",
-        "operationId": "health_health_get",
+        "description": "Liveness probe. Unauthenticated; returns the running aios version.\n\nSuitable for load balancer health checks and monitoring probes. Always\nreturns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the\nprocess is up.",
+        "operationId": "get_health",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -20,7 +21,7 @@
                     "type": "string"
                   },
                   "type": "object",
-                  "title": "Response Health Health Get"
+                  "title": "Response Get Health"
                 }
               }
             }
@@ -34,7 +35,8 @@
           "environments"
         ],
         "summary": "Create",
-        "operationId": "create_v1_environments_post",
+        "description": "Create a new environment \u2014 a reusable sandbox configuration template.\n\nThe ``config`` field describes the container the sessions running this\nenvironment will spawn (pre-installed packages, network access rules,\nbase image). Sessions reference environments by id; multiple sessions\ncan share one environment.",
+        "operationId": "create_environment",
         "parameters": [
           {
             "name": "Authorization",
@@ -91,7 +93,8 @@
           "environments"
         ],
         "summary": "List ",
-        "operationId": "list__v1_environments_get",
+        "description": "List environments, newest first, excluding archived.\n\nCursor pagination via ``after``.",
+        "operationId": "list_environments",
         "parameters": [
           {
             "name": "limit",
@@ -166,7 +169,8 @@
           "environments"
         ],
         "summary": "Get",
-        "operationId": "get_v1_environments__env_id__get",
+        "description": "Fetch one environment by id.",
+        "operationId": "get_environment",
         "parameters": [
           {
             "name": "env_id",
@@ -222,7 +226,8 @@
           "environments"
         ],
         "summary": "Update",
-        "operationId": "update_v1_environments__env_id__put",
+        "description": "Update an environment's ``name`` and/or ``config``.\n\nSessions resolve the environment config fresh each time their sandbox\nis provisioned (lazily, at the next session step that needs the\ncontainer), so updates take effect for existing sessions on their next\nprovision rather than at update time.",
+        "operationId": "update_environment",
         "parameters": [
           {
             "name": "env_id",
@@ -288,7 +293,8 @@
           "environments"
         ],
         "summary": "Archive",
-        "operationId": "archive_v1_environments__env_id__delete",
+        "description": "Archive an environment: hides from default lists, leaves the row in place.\n\nSessions referencing the archived environment continue to function \u2014 the\nsandbox provisioner reads the config by JOIN and does not filter by\narchive state. There is no API surface to un-archive currently.",
+        "operationId": "archive_environment",
         "parameters": [
           {
             "name": "env_id",
@@ -2074,7 +2080,8 @@
           "skills"
         ],
         "summary": "Create",
-        "operationId": "create_v1_skills_post",
+        "description": "Create a new skill from an uploaded file bundle.\n\nThe bundle must include exactly one ``<directory>/SKILL.md`` file with\nYAML frontmatter containing at least a ``name`` field. The skill's\n``directory``, ``name``, and ``description`` are extracted from that\nfrontmatter; subsequent versions reuse this extraction.",
+        "operationId": "create_skill",
         "parameters": [
           {
             "name": "Authorization",
@@ -2131,7 +2138,8 @@
           "skills"
         ],
         "summary": "List ",
-        "operationId": "list__v1_skills_get",
+        "description": "List skills (latest version of each), newest first, excluding archived.\n\nCursor pagination via ``after``.",
+        "operationId": "list_skills",
         "parameters": [
           {
             "name": "limit",
@@ -2206,7 +2214,8 @@
           "skills"
         ],
         "summary": "Get",
-        "operationId": "get_v1_skills__skill_id__get",
+        "description": "Fetch one skill by id, returning the latest version's config.",
+        "operationId": "get_skill",
         "parameters": [
           {
             "name": "skill_id",
@@ -2262,7 +2271,8 @@
           "skills"
         ],
         "summary": "Archive",
-        "operationId": "archive_v1_skills__skill_id__delete",
+        "description": "Archive a skill: sets ``archived_at`` and hides it from default lists.\n\nThe row and version history persist; agents that reference this skill\nby id continue to resolve their pinned versions. There is no API\nsurface to un-archive currently.",
+        "operationId": "archive_skill",
         "parameters": [
           {
             "name": "skill_id",
@@ -2313,7 +2323,8 @@
           "skills"
         ],
         "summary": "Create Version",
-        "operationId": "create_version_v1_skills__skill_id__versions_post",
+        "description": "Upload a new immutable version of a skill's file bundle.\n\nThe bundle must include the same SKILL.md frontmatter shape as the\ninitial create: directory, ``name``, ``description``. Each version is\na complete snapshot \u2014 files not present in the upload are not carried\nover from previous versions.",
+        "operationId": "create_skill_version",
         "parameters": [
           {
             "name": "skill_id",
@@ -2379,7 +2390,8 @@
           "skills"
         ],
         "summary": "List Versions",
-        "operationId": "list_versions_v1_skills__skill_id__versions_get",
+        "description": "List historical versions of a skill, newest first.\n\nCursor pagination by version number: pass ``after`` from a previous\nresponse's ``next_after`` to get the next page. Each version is a\ncomplete file-bundle snapshot at the time it was created.",
+        "operationId": "list_skill_versions",
         "parameters": [
           {
             "name": "skill_id",
@@ -2463,7 +2475,8 @@
           "skills"
         ],
         "summary": "Get Version",
-        "operationId": "get_version_v1_skills__skill_id__versions__version__get",
+        "description": "Fetch one historical version's file bundle.\n\nThe bundle reflects the skill's state at the time the version was\nwritten and is unaffected by subsequent versions or archival.",
+        "operationId": "get_skill_version",
         "parameters": [
           {
             "name": "skill_id",
@@ -2530,7 +2543,8 @@
           "vaults"
         ],
         "summary": "Create",
-        "operationId": "create_v1_vaults_post",
+        "description": "Create a new vault \u2014 a named collection for MCP server credentials.\n\nCredentials are added separately via ``create_vault_credential``.",
+        "operationId": "create_vault",
         "parameters": [
           {
             "name": "Authorization",
@@ -2587,7 +2601,8 @@
           "vaults"
         ],
         "summary": "List ",
-        "operationId": "list__v1_vaults_get",
+        "description": "List vaults, newest first, excluding archived.\n\nCursor pagination: pass ``after`` from a previous response's\n``next_after`` to get the next page.",
+        "operationId": "list_vaults",
         "parameters": [
           {
             "name": "limit",
@@ -2662,7 +2677,8 @@
           "vaults"
         ],
         "summary": "Get",
-        "operationId": "get_v1_vaults__vault_id__get",
+        "description": "Fetch one vault by id.",
+        "operationId": "get_vault",
         "parameters": [
           {
             "name": "vault_id",
@@ -2718,7 +2734,8 @@
           "vaults"
         ],
         "summary": "Update",
-        "operationId": "update_v1_vaults__vault_id__put",
+        "description": "Update a vault's ``display_name`` and/or ``metadata``.\n\nOmitted fields are preserved.",
+        "operationId": "update_vault",
         "parameters": [
           {
             "name": "vault_id",
@@ -2784,7 +2801,8 @@
           "vaults"
         ],
         "summary": "Delete",
-        "operationId": "delete_v1_vaults__vault_id__delete",
+        "description": "Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).\n\nReturns 204. Unlike ``archive_vault``, this removes the rows entirely\nand leaves no audit trail. Prefer archive unless you specifically need\nthe rows gone.",
+        "operationId": "delete_vault",
         "parameters": [
           {
             "name": "vault_id",
@@ -2835,7 +2853,8 @@
           "vaults"
         ],
         "summary": "Archive",
-        "operationId": "archive_v1_vaults__vault_id__archive_post",
+        "description": "Archive a vault and **purge the encrypted secret material** of its credentials.\n\nSets ``archived_at`` and hides the vault from default lists. In the same\ntransaction, every active credential is archived and its encrypted blob\nis zeroed \u2014 the credential rows persist for audit but the stored secrets\nare unrecoverable. Defense in depth: a future DB dump cannot leak\nsecrets that were already retired.\n\nUse ``delete_vault`` instead if you want to remove the rows entirely.",
+        "operationId": "archive_vault",
         "parameters": [
           {
             "name": "vault_id",
@@ -2893,7 +2912,8 @@
           "vaults"
         ],
         "summary": "Create Credential",
-        "operationId": "create_credential_v1_vaults__vault_id__credentials_post",
+        "description": "Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.\n\nValidates required fields per ``auth_type``: ``mcp_oauth`` requires\n``access_token`` (plus the refresh fields needed for rotation);\n``static_bearer`` requires ``token``. Caps at 20 active credentials per\nvault. The ``mcp_server_url`` is immutable after creation \u2014 to retarget\na credential, archive the existing one and create a new credential at\nthe new URL.",
+        "operationId": "create_vault_credential",
         "parameters": [
           {
             "name": "vault_id",
@@ -2959,7 +2979,8 @@
           "vaults"
         ],
         "summary": "List Credentials",
-        "operationId": "list_credentials_v1_vaults__vault_id__credentials_get",
+        "description": "List credentials in a vault, newest first, excluding archived.\n\nCursor pagination via ``after``. Secret material is never returned \u2014\nonly metadata (display name, mcp_server_url, auth_type, timestamps).",
+        "operationId": "list_vault_credentials",
         "parameters": [
           {
             "name": "vault_id",
@@ -3043,7 +3064,8 @@
           "vaults"
         ],
         "summary": "Get Credential",
-        "operationId": "get_credential_v1_vaults__vault_id__credentials__credential_id__get",
+        "description": "Fetch one credential's metadata. Secrets are never returned.\n\nInternal MCP clients resolve the secret directly through the service\nlayer (with OAuth refresh as needed); the HTTP API never exposes it.",
+        "operationId": "get_vault_credential",
         "parameters": [
           {
             "name": "vault_id",
@@ -3108,7 +3130,8 @@
           "vaults"
         ],
         "summary": "Update Credential",
-        "operationId": "update_credential_v1_vaults__vault_id__credentials__credential_id__put",
+        "description": "Update a credential's metadata and/or rotate its auth secrets.\n\nOmitted secret fields are preserved (decrypt-merge-encrypt cycle on the\nencrypted payload). ``mcp_server_url`` and ``auth_type`` are immutable\nand not accepted in the body. To rotate an OAuth refresh token, send\nonly the new ``refresh_token`` (and optional ``access_token`` /\n``expires_at``); other auth fields stay intact.",
+        "operationId": "update_vault_credential",
         "parameters": [
           {
             "name": "vault_id",
@@ -3183,7 +3206,8 @@
           "vaults"
         ],
         "summary": "Delete Credential",
-        "operationId": "delete_credential_v1_vaults__vault_id__credentials__credential_id__delete",
+        "description": "Hard-delete a credential row. Returns 204.\n\nUnlike ``archive_vault_credential``, removes the row entirely and\nleaves no audit trail. Prefer archive unless you specifically need the\nrow gone.",
+        "operationId": "delete_vault_credential",
         "parameters": [
           {
             "name": "vault_id",
@@ -3243,7 +3267,8 @@
           "vaults"
         ],
         "summary": "Archive Credential",
-        "operationId": "archive_credential_v1_vaults__vault_id__credentials__credential_id__archive_post",
+        "description": "Archive a credential and **zero its encrypted secret payload**.\n\nSets ``archived_at`` and hides the credential from default lists. The\nencrypted blob is scrubbed at archive time so a future DB dump cannot\nleak the secret. Use ``delete_vault_credential`` for full removal.",
+        "operationId": "archive_vault_credential",
         "parameters": [
           {
             "name": "vault_id",
@@ -3310,7 +3335,8 @@
           "memory-stores"
         ],
         "summary": "Create Store",
-        "operationId": "create_store_v1_memory_stores_post",
+        "description": "Create a new memory store \u2014 a named collection of file-like memories.\n\nMemories created in this store are mirrored to a per-store host\ndirectory so that sessions referencing the store can read them through\nthe sandbox filesystem.",
+        "operationId": "create_memory_store",
         "parameters": [
           {
             "name": "Authorization",
@@ -3367,7 +3393,8 @@
           "memory-stores"
         ],
         "summary": "List Stores",
-        "operationId": "list_stores_v1_memory_stores_get",
+        "description": "List memory stores, newest first.\n\nUnlike most resources, archived stores can be included via\n``include_archived=true`` (default false). No cursor pagination \u2014 bumps\nthe default limit to 100 since stores are typically few.",
+        "operationId": "list_memory_stores",
         "parameters": [
           {
             "name": "include_archived",
@@ -3436,7 +3463,8 @@
           "memory-stores"
         ],
         "summary": "Get Store",
-        "operationId": "get_store_v1_memory_stores__store_id__get",
+        "description": "Fetch one memory store by id.",
+        "operationId": "get_memory_store",
         "parameters": [
           {
             "name": "store_id",
@@ -3492,7 +3520,8 @@
           "memory-stores"
         ],
         "summary": "Update Store",
-        "operationId": "update_store_v1_memory_stores__store_id__post",
+        "description": "Update a memory store's ``name``, ``description``, or ``metadata``.\n\nRejects with ``MemoryStoreArchivedError`` if the store is archived \u2014\narchived stores are read-only. Treat as partial update on the listed\nfields.",
+        "operationId": "update_memory_store",
         "parameters": [
           {
             "name": "store_id",
@@ -3558,7 +3587,8 @@
           "memory-stores"
         ],
         "summary": "Delete Store",
-        "operationId": "delete_store_v1_memory_stores__store_id__delete",
+        "description": "Hard-delete a memory store, all its memories, and its host mirror.\n\nCascade-deletes memories and versions in the database. After the DB\ntransaction commits, the per-store host mirror directory is removed\n(best-effort \u2014 a missing dir is fine, indicates no session ever\nprovisioned for this store). Returns 204.",
+        "operationId": "delete_memory_store",
         "parameters": [
           {
             "name": "store_id",
@@ -3609,7 +3639,8 @@
           "memory-stores"
         ],
         "summary": "Archive Store",
-        "operationId": "archive_store_v1_memory_stores__store_id__archive_post",
+        "description": "Archive a memory store: hides from default lists, makes it read-only.\n\nThe store and its memories persist; sessions can still resolve memory\ncontent. Subsequent ``update_memory_store`` calls fail until\nun-archived (no API surface for that currently). Use\n``delete_memory_store`` for full removal.",
+        "operationId": "archive_memory_store",
         "parameters": [
           {
             "name": "store_id",
@@ -3667,7 +3698,8 @@
           "memory-stores"
         ],
         "summary": "Create Memory",
-        "operationId": "create_memory_v1_memory_stores__store_id__memories_post",
+        "description": "Create a memory at the given path within a store.\n\nThe content is also mirrored to the store's host directory so that\nsandboxed sessions can read it through the filesystem. Creates an\ninitial version (every memory mutation creates a version).",
+        "operationId": "create_memory",
         "parameters": [
           {
             "name": "store_id",
@@ -3733,7 +3765,8 @@
           "memory-stores"
         ],
         "summary": "List Memories",
-        "operationId": "list_memories_v1_memory_stores__store_id__memories_get",
+        "description": "List memories in a store, optionally filtered and grouped by path.\n\n``path_prefix`` is a literal prefix match on the memory path. ``depth``\ngroups deeper paths into ``MemoryPrefix`` entries (directory-style\nlistings) \u2014 entries past the depth boundary are collapsed into a\nsingle prefix entry per shared directory. ``order_by`` accepts\n``created_at`` (default) or ``path``.",
+        "operationId": "list_memories",
         "parameters": [
           {
             "name": "store_id",
@@ -3833,7 +3866,8 @@
           "memory-stores"
         ],
         "summary": "Get Memory",
-        "operationId": "get_memory_v1_memory_stores__store_id__memories__memory_id__get",
+        "description": "Fetch one memory by id, including its current content.",
+        "operationId": "get_memory",
         "parameters": [
           {
             "name": "store_id",
@@ -3898,7 +3932,8 @@
           "memory-stores"
         ],
         "summary": "Update Memory",
-        "operationId": "update_memory_v1_memory_stores__store_id__memories__memory_id__post",
+        "description": "Update a memory's content and/or path. Creates a new version.\n\nOptionally honors a ``precondition.content_sha256`` for optimistic\nconcurrency \u2014 if the current content's SHA-256 differs, the update\nfails with a precondition error rather than overwriting. The host\nmirror is updated to match: renames delete the old path and write the\nnew one.",
+        "operationId": "update_memory",
         "parameters": [
           {
             "name": "store_id",
@@ -3973,7 +4008,8 @@
           "memory-stores"
         ],
         "summary": "Delete Memory",
-        "operationId": "delete_memory_v1_memory_stores__store_id__memories__memory_id__delete",
+        "description": "Soft-delete a memory and remove it from the host mirror.\n\nSets ``deleted_at`` on the memory and appends a ``deleted`` tombstone\nversion. The row and version history persist; live reads filter on\n``deleted_at IS NULL`` so the memory becomes invisible. Returns 204.",
+        "operationId": "delete_memory",
         "parameters": [
           {
             "name": "store_id",
@@ -4033,7 +4069,8 @@
           "memory-stores"
         ],
         "summary": "List Versions",
-        "operationId": "list_versions_v1_memory_stores__store_id__memory_versions_get",
+        "description": "List memory versions in a store, newest first.\n\nOptional ``memory_id`` filters to a single memory's version history.\nWithout the filter, returns versions across all memories in the store\n(useful for audit). No cursor pagination; bumps default limit to 100.",
+        "operationId": "list_memory_versions",
         "parameters": [
           {
             "name": "store_id",
@@ -4117,7 +4154,8 @@
           "memory-stores"
         ],
         "summary": "Get Version",
-        "operationId": "get_version_v1_memory_stores__store_id__memory_versions__version_id__get",
+        "description": "Fetch one historical memory version by id.",
+        "operationId": "get_memory_version",
         "parameters": [
           {
             "name": "store_id",
@@ -4184,7 +4222,8 @@
           "memory-stores"
         ],
         "summary": "Redact Version",
-        "operationId": "redact_version_v1_memory_stores__store_id__memory_versions__version_id__redact_post",
+        "description": "Redact the content of a historical memory version in place.\n\nThe version row persists for audit (with the actor and timestamp) but\nits content field is cleared. Use to scrub sensitive data that was\npreviously written into a memory. Live memory content is unaffected\n(only this specific historical version is redacted).",
+        "operationId": "redact_memory_version",
         "parameters": [
           {
             "name": "store_id",
@@ -4252,7 +4291,7 @@
         ],
         "summary": "Create",
         "description": "Create a detached connection, **idempotent on ``(connector, account)``**.\n\nPer plan decision #5, this endpoint and the supervisor's\nauto-create-on-first-inbound path race-safely converge on a single row:\nposting twice with the same ``(connector, account)`` returns 201 with the\nexisting row rather than 409.  The ``id`` may differ from a freshly-allocated\none if a concurrent writer landed first; the response always reflects the\ncanonical active row.",
-        "operationId": "create_v1_connections_post",
+        "operationId": "create_connection",
         "parameters": [
           {
             "name": "Authorization",
@@ -4309,7 +4348,8 @@
           "connections"
         ],
         "summary": "List ",
-        "operationId": "list__v1_connections_get",
+        "description": "List connections, newest first, excluding archived. Cursor pagination via ``after``.\n\nFilters: ``connector`` (e.g. ``\"telegram\"``), ``session_id`` (only\nconnections in single_session mode bound to that session), ``mode``\n(``detached`` / ``single_session`` / ``per_chat``). Filters compose.",
+        "operationId": "list_connections",
         "parameters": [
           {
             "name": "connector",
@@ -4437,7 +4477,8 @@
           "connections"
         ],
         "summary": "Get",
-        "operationId": "get_v1_connections__connection_id__get",
+        "description": "Fetch one connection by id.",
+        "operationId": "get_connection",
         "parameters": [
           {
             "name": "connection_id",
@@ -4493,7 +4534,8 @@
           "connections"
         ],
         "summary": "Delete",
-        "operationId": "delete_v1_connections__connection_id__delete",
+        "description": "Archive a connection (DELETE soft-archives, only on detached connections).\n\nThe service layer rejects archive attempts on ``single_session`` or\n``per_chat`` connections \u2014 archiving those would silently break\ninbound delivery for live sessions or orphan\n``spawned_from_connection_id`` pointers on per_chat-spawned sessions.\nDetach or unconfigure first, then archive.",
+        "operationId": "archive_connection",
         "parameters": [
           {
             "name": "connection_id",
@@ -4545,7 +4587,7 @@
         ],
         "summary": "Attach",
         "description": "Attach a connection to a session, after validating the account against the snapshot.\n\nThe drift check runs BEFORE the DB write so a stale account can't\nmove into ``single_session`` mode and silently swallow inbound.",
-        "operationId": "attach_v1_connections__connection_id__attach_post",
+        "operationId": "attach_connection",
         "parameters": [
           {
             "name": "connection_id",
@@ -4613,7 +4655,8 @@
           "connections"
         ],
         "summary": "Detach",
-        "operationId": "detach_v1_connections__connection_id__detach_post",
+        "description": "Detach a single_session connection back to detached mode.\n\nThe bound session is unaffected (continues to exist); only the\nconnection's mode/binding changes. Inbound on this connection is\npaused until it's re-attached or configured for per_chat.",
+        "operationId": "detach_connection",
         "parameters": [
           {
             "name": "connection_id",
@@ -4671,7 +4714,8 @@
           "connections"
         ],
         "summary": "Configure Per Chat",
-        "operationId": "configure_per_chat_v1_connections__connection_id__configure_per_chat_post",
+        "description": "Move a detached connection into per_chat mode, pinned to a session template.\n\nInbound from new chat partners on this connection will spawn fresh\nsessions using the named template (agent + environment + vaults +\nmemory stores). Use ``unconfigure_connection`` to return to detached.",
+        "operationId": "configure_connection_per_chat",
         "parameters": [
           {
             "name": "connection_id",
@@ -4739,7 +4783,8 @@
           "connections"
         ],
         "summary": "Unconfigure",
-        "operationId": "unconfigure_v1_connections__connection_id__unconfigure_post",
+        "description": "Return a per_chat connection to detached mode.\n\nAlready-spawned sessions are unaffected and continue normally;\noperator-bound chat \u2192 session rows persist and continue to route\nthose specific chats. Only the per_chat fallback (spawn for unseen\nchats) is removed \u2014 inbound from new chat partners is paused until\nthe connection is reconfigured.",
+        "operationId": "unconfigure_connection",
         "parameters": [
           {
             "name": "connection_id",
@@ -4798,7 +4843,7 @@
         ],
         "summary": "Bind Chat",
         "description": "Operator-curate a chat \u2192 session mapping (#215).\n\nA row in ``connection_chat_sessions`` overrides the connection's\nmode-default fallback for that ``chat_id``.  Operators use this to\npoint different chats on a single account at different existing\nsessions \u2014 the middle case the unified ``connections`` shape didn't\ncover after #205.\n\nIdempotent on ``(connection_id, chat_id)``: a second call with the\nsame chat returns the existing row (its ``session_id`` may differ\nfrom the requested one if a concurrent writer landed first or the\nsupervisor pre-populated it via per_chat spawn).",
-        "operationId": "bind_chat_v1_connections__connection_id__bind_chat_post",
+        "operationId": "bind_chat",
         "parameters": [
           {
             "name": "connection_id",
@@ -4867,7 +4912,7 @@
         ],
         "summary": "Unbind Chat",
         "description": "Drop the operator-curated row.  Idempotent \u2014 repeat calls 204.",
-        "operationId": "unbind_chat_v1_connections__connection_id__bind_chat__chat_id__delete",
+        "operationId": "unbind_chat",
         "parameters": [
           {
             "name": "connection_id",
@@ -4927,7 +4972,8 @@
           "connections"
         ],
         "summary": "Bound Chats",
-        "operationId": "bound_chats_v1_connections__connection_id__bound_chats_get",
+        "description": "List operator-curated chat \u2192 session bindings on this connection.\n\nIncludes both manually-bound rows (via ``bind_chat``) and per_chat\nauto-spawned rows (via the supervisor on first inbound from a new\nchat partner).",
+        "operationId": "list_bound_chats",
         "parameters": [
           {
             "name": "connection_id",
@@ -4985,7 +5031,8 @@
           "connections"
         ],
         "summary": "Recent Chats",
-        "operationId": "recent_chats_v1_connections__connection_id__recent_chats_get",
+        "description": "List chats that recently sent inbound on this connection, newest first.\n\nUseful for picking a ``chat_id`` to bind via ``bind_chat`` \u2014\nenumerates the conversational counterparts that the connector has\ndelivered messages from.",
+        "operationId": "list_recent_chats",
         "parameters": [
           {
             "name": "connection_id",
@@ -5453,7 +5500,8 @@
           "session-templates"
         ],
         "summary": "Create",
-        "operationId": "create_v1_session_templates_post",
+        "description": "Create a session template \u2014 a frozen recipe for per_chat session spawn.\n\nCaptures the agent + environment + vaults + memory stores that a\nper_chat connection will use when spawning a session for a new chat\npartner. Pin ``agent_version`` to a specific version for deterministic\nspawning, or leave unset to track the agent's latest.",
+        "operationId": "create_session_template",
         "parameters": [
           {
             "name": "Authorization",
@@ -5510,7 +5558,8 @@
           "session-templates"
         ],
         "summary": "List ",
-        "operationId": "list__v1_session_templates_get",
+        "description": "List session templates, newest first, excluding archived.\n\nCursor pagination via ``after``.",
+        "operationId": "list_session_templates",
         "parameters": [
           {
             "name": "limit",
@@ -5585,7 +5634,8 @@
           "session-templates"
         ],
         "summary": "Get",
-        "operationId": "get_v1_session_templates__template_id__get",
+        "description": "Fetch one session template by id.",
+        "operationId": "get_session_template",
         "parameters": [
           {
             "name": "template_id",
@@ -5641,7 +5691,8 @@
           "session-templates"
         ],
         "summary": "Update",
-        "operationId": "update_v1_session_templates__template_id__put",
+        "description": "Update a session template's recipe fields. Omitted fields are preserved.\n\nThe ``agent_version`` field uses sentinel-based partial-update semantics:\nomit it to preserve the current pin (or current \"track latest\" state),\npass null to switch to \"track latest,\" pass a number to pin to that\nspecific version. Already-spawned sessions are unaffected.",
+        "operationId": "update_session_template",
         "parameters": [
           {
             "name": "template_id",
@@ -5707,7 +5758,8 @@
           "session-templates"
         ],
         "summary": "Delete",
-        "operationId": "delete_v1_session_templates__template_id__delete",
+        "description": "Archive a session template (soft-delete via DELETE verb).\n\nAlready-spawned sessions are unaffected and continue normally. Per-chat\nconnections that reference this template by id keep their existing\nsessions but will fail to spawn new chat sessions at the inbound\nhandler until the connection is reconfigured to point at a different\ntemplate. There is no API surface to un-archive currently.",
+        "operationId": "archive_session_template",
         "parameters": [
           {
             "name": "template_id",
