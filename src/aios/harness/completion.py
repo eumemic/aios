@@ -365,6 +365,10 @@ async def stream_litellm(
             break
         first = False
         chunks.append(chunk)
+        # Some providers (OpenRouter, Grok, vLLM, OpenAI with stream_options.
+        # include_usage) emit a terminal usage-summary chunk with empty choices.
+        if not chunk.choices:
+            continue
         content = chunk.choices[0].delta.content
         if content:
             await _notify_delta(pool, session_id, content)
