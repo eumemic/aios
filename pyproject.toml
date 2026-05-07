@@ -37,6 +37,10 @@ dependencies = [
     "typer>=0.12",
     # Observability
     "structlog>=24.4",
+    # Connector SDK — imported unconditionally by harness/connector_supervisor.py
+    # at module load (whether or not any connectors are enabled), so it has to
+    # be a runtime dep rather than a dev-only workspace install.
+    "aios-connector",
 ]
 
 [dependency-groups]
@@ -49,11 +53,10 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "openapi-python-client>=0.21",
-    # Workspace-installed reference SDK + canonical echo example.  The
-    # echo connector exposes the ``aios.connectors`` entry point the
-    # supervisor's resolver looks up, so e2e tests exercising the full
-    # discovery → spawn → init pipeline can run.
-    "aios-connector",
+    # Canonical echo connector. Exposes the ``aios.connectors`` entry point
+    # the supervisor's resolver looks up, so e2e tests exercising the full
+    # discovery → spawn → init pipeline can run. Only needed in dev/test;
+    # production uses real connectors (signal, telegram, ...).
     "aios-echo",
 ]
 
