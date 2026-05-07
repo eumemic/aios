@@ -1,3 +1,5 @@
+"""MCP tool schemas — sanitize inputSchemas, build OpenAI function-tool envelopes."""
+
 from __future__ import annotations
 
 from typing import Any
