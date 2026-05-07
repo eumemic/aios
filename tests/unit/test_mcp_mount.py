@@ -100,7 +100,7 @@ def test_apply_mcp_polish_populates_annotations_and_instructions() -> None:
     from fastapi_mcp import AuthConfig, FastApiMCP
 
     from aios.api.app import (
-        _MCP_INSTRUCTIONS,
+        MCP_INSTRUCTIONS,
         _apply_mcp_polish,
         _compute_mcp_excluded_operations,
         create_app,
@@ -115,7 +115,7 @@ def test_apply_mcp_polish_populates_annotations_and_instructions() -> None:
         exclude_operations=_compute_mcp_excluded_operations(app),
         auth_config=AuthConfig(dependencies=[Depends(require_bearer_auth)]),
     )
-    _apply_mcp_polish(app, mcp, instructions=_MCP_INSTRUCTIONS)
+    _apply_mcp_polish(app, mcp, instructions=MCP_INSTRUCTIONS)
 
     by_name = {tool.name: tool for tool in mcp.tools}
 
@@ -145,4 +145,4 @@ def test_apply_mcp_polish_populates_annotations_and_instructions() -> None:
     assert by_name["create_agent"].annotations is None
 
     # Server-level instructions populated
-    assert mcp.server.instructions == _MCP_INSTRUCTIONS
+    assert mcp.server.instructions == MCP_INSTRUCTIONS

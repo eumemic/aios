@@ -8,7 +8,7 @@ operate the management plane via the same Bearer auth as the HTTP API.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -94,7 +94,7 @@ def create_app() -> FastAPI:
     return app
 
 
-_MCP_INSTRUCTIONS = """\
+MCP_INSTRUCTIONS = """\
 aios is a Postgres-backed agent runtime. The management plane is organized
 around five resource types: agents (versioned config), sessions (live
 execution contexts), environments (sandbox templates), memory stores
@@ -135,8 +135,26 @@ def _mount_mcp(app: FastAPI) -> None:
         exclude_operations=_compute_mcp_excluded_operations(app),
         auth_config=AuthConfig(dependencies=[Depends(require_bearer_auth)]),
     )
-    _apply_mcp_polish(app, mcp, instructions=_MCP_INSTRUCTIONS)
+    _apply_mcp_polish(app, mcp, instructions=MCP_INSTRUCTIONS)
     mcp.mount_http(mount_path="/mcp")
+
+
+def _iter_operations(app: FastAPI) -> Iterator[tuple[str, str, dict[str, Any]]]:
+    """Yield ``(operation_id, http_verb, x_codegen_dict)`` for every operation.
+
+    Skips path-level keys that aren't HTTP methods (parameters, summary,
+    description, ...) and operations without an ``operationId``. The
+    ``x_codegen_dict`` is the raw ``x-codegen`` extension content (or
+    ``{}`` if absent); each caller projects out the sub-key it needs.
+    """
+    for path_obj in app.openapi()["paths"].values():
+        for verb, method_obj in path_obj.items():
+            if not isinstance(method_obj, dict):
+                continue
+            op_id = method_obj.get("operationId")
+            if not isinstance(op_id, str):
+                continue
+            yield op_id, verb.lower(), method_obj.get("x-codegen", {}) or {}
 
 
 def _verb_default_annotations(verb: str) -> dict[str, bool]:
@@ -168,16 +186,10 @@ def _apply_mcp_polish(app: FastAPI, mcp: Any, *, instructions: str) -> None:
     """
     from mcp.types import ToolAnnotations
 
-    op_meta: dict[str, tuple[str, dict[str, Any]]] = {}
-    for path_obj in app.openapi()["paths"].values():
-        for verb, method_obj in path_obj.items():
-            if not isinstance(method_obj, dict):
-                continue
-            op_id = method_obj.get("operationId")
-            if not isinstance(op_id, str):
-                continue
-            overrides = method_obj.get("x-codegen", {}).get("mcp", {}) or {}
-            op_meta[op_id] = (verb.lower(), overrides)
+    op_meta: dict[str, tuple[str, dict[str, Any]]] = {
+        op_id: (verb, codegen.get("mcp", {}) or {})
+        for op_id, verb, codegen in _iter_operations(app)
+    }
 
     for tool in mcp.tools:
         meta = op_meta.get(tool.name)
@@ -198,17 +210,11 @@ def _compute_mcp_excluded_operations(app: FastAPI) -> list[str]:
     every generator target (per the contract documented in #267); only
     explicit ``targets`` lists that omit ``"mcp"`` exclude.
     """
-    excluded: list[str] = []
-    for path_obj in app.openapi()["paths"].values():
-        for method_obj in path_obj.values():
-            # Filter out non-method path-level keys (parameters, summary, ...).
-            if not isinstance(method_obj, dict):
-                continue
-            op_id = method_obj.get("operationId")
-            targets = method_obj.get("x-codegen", {}).get("targets")
-            if op_id and targets is not None and "mcp" not in targets:
-                excluded.append(op_id)
-    return excluded
+    return [
+        op_id
+        for op_id, _verb, codegen in _iter_operations(app)
+        if (targets := codegen.get("targets")) is not None and "mcp" not in targets
+    ]
 
 
 def _redact_dsn(dsn: str) -> str:
