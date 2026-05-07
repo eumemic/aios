@@ -5,6 +5,7 @@ Uses lightweight FakeEvent objects to avoid touching the DB.
 
 from __future__ import annotations
 
+import base64
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -1096,6 +1097,75 @@ class TestFocalRendering:
         msgs = build_messages([ev_early, ev_late], system_prompt=None).messages
         assert msgs[0]["content"].startswith(f"🔔 channel_id={self._CHAN_B}")
         assert msgs[1]["content"].startswith(f"[channel={self._CHAN_A}")
+
+
+class TestImageMimeCorrection:
+    """Anthropic 400s when the declared content-type of an inlined image
+    disagrees with the actual bytes.  ``build_messages`` rewrites the
+    declared mime to the magic-byte-detected one to avoid the rejection.
+    """
+
+    # Real magic-byte prefixes for each format, base64-encoded.
+    _PNG_HEAD = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32).decode()
+    _JPEG_HEAD = base64.b64encode(b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 24).decode()
+    _GIF_HEAD = base64.b64encode(b"GIF89a" + b"\x00" * 32).decode()
+
+    def _image_msg(self, declared: str, b64: str) -> dict[str, Any]:
+        return {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{declared};base64,{b64}"},
+                },
+            ],
+        }
+
+    def test_jpeg_bytes_with_png_declaration_corrected(self) -> None:
+        ev = _evt(1, "user", content=self._image_msg("image/png", self._JPEG_HEAD)["content"])
+        msgs = build_messages([ev], system_prompt=None).messages
+        url = msgs[0]["content"][1]["image_url"]["url"]
+        assert url.startswith("data:image/jpeg;base64,")
+
+    def test_png_bytes_with_jpeg_declaration_corrected(self) -> None:
+        ev = _evt(1, "user", content=self._image_msg("image/jpeg", self._PNG_HEAD)["content"])
+        msgs = build_messages([ev], system_prompt=None).messages
+        url = msgs[0]["content"][1]["image_url"]["url"]
+        assert url.startswith("data:image/png;base64,")
+
+    def test_matching_mime_unchanged(self) -> None:
+        ev = _evt(1, "user", content=self._image_msg("image/png", self._PNG_HEAD)["content"])
+        msgs = build_messages([ev], system_prompt=None).messages
+        url = msgs[0]["content"][1]["image_url"]["url"]
+        assert url.startswith("data:image/png;base64,")
+
+    def test_gif_bytes_corrected(self) -> None:
+        ev = _evt(1, "user", content=self._image_msg("image/png", self._GIF_HEAD)["content"])
+        msgs = build_messages([ev], system_prompt=None).messages
+        url = msgs[0]["content"][1]["image_url"]["url"]
+        assert url.startswith("data:image/gif;base64,")
+
+    def test_unrecognized_magic_leaves_declared_alone(self) -> None:
+        random_b64 = base64.b64encode(b"\x00" * 32).decode()
+        ev = _evt(1, "user", content=self._image_msg("image/png", random_b64)["content"])
+        msgs = build_messages([ev], system_prompt=None).messages
+        url = msgs[0]["content"][1]["image_url"]["url"]
+        assert url.startswith("data:image/png;base64,")
+
+    def test_non_data_url_unchanged(self) -> None:
+        ev = _evt(
+            1,
+            "user",
+            content=[
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/cat.png"},
+                }
+            ],
+        )
+        msgs = build_messages([ev], system_prompt=None).messages
+        assert msgs[0]["content"][0]["image_url"]["url"] == "https://example.com/cat.png"
 
 
 class TestSeparateAdjacentUserMessages:

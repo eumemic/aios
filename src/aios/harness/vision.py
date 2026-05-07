@@ -8,6 +8,7 @@ recoverable.
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import litellm
@@ -19,6 +20,39 @@ log = get_logger("aios.harness.vision")
 INLINE_SIZE_CAP_BYTES = 2 * 1024 * 1024
 
 _VISION_OVERRIDES: dict[str, bool] = {}
+
+# Magic-byte signatures for the image formats Anthropic accepts.  Used to
+# correct mismatched ``Content-Type`` declarations that creep in from
+# inbound platform metadata or extension-based guesses (Anthropic's
+# ``/v1/messages`` strictly validates declared mime against actual bytes
+# and 400s on mismatch — see #294 incident).
+_IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def sniff_image_mime(data_b64: str) -> str | None:
+    """Return the actual mime type of the base64-encoded image, or None.
+
+    Decodes only the first ~16 bytes (24 base64 chars) — enough to
+    discriminate the four formats Anthropic supports.  WebP is not in
+    the magic table because it requires reading offset 8-11; if we hit
+    a real WebP we add it.  Unknown signatures return ``None`` so the
+    caller can leave the declared mime untouched.
+    """
+    head_b64 = data_b64[:24]
+    pad = (-len(head_b64)) % 4
+    try:
+        head = base64.b64decode(head_b64 + "=" * pad)
+    except Exception:
+        return None
+    for sig, mime in _IMAGE_MAGIC:
+        if head.startswith(sig):
+            return mime
+    return None
 
 
 def supports_vision(model: str) -> bool:

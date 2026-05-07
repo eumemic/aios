@@ -34,6 +34,7 @@ import litellm
 from aios.harness.vision import (
     can_inline_image,
     make_image_url_part,
+    sniff_image_mime,
     text_marker,
 )
 from aios.logging import get_logger
@@ -370,6 +371,49 @@ def _strip_to_spec(
     return out
 
 
+def _correct_image_data_url_mimes(messages: list[dict[str, Any]]) -> None:
+    """Rewrite ``data:<mime>;base64,...`` URLs whose declared mime conflicts
+    with the actual image bytes.
+
+    Anthropic's ``/v1/messages`` rejects content where the declared mime
+    doesn't match the magic-byte-detected format ("The image was specified
+    using the image/png media type, but the image appears to be a
+    image/jpeg image" — 400 invalid_request_error).  This walks every
+    image_url part (including those nested inside tool messages and
+    user-message content lists) and replaces the declared mime with the
+    sniffed mime when they disagree.  Unrecognized magic leaves the
+    declared mime untouched (callers handle their own fallback).
+
+    Mutates messages in place.
+    """
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            if not isinstance(image_url, dict):
+                continue
+            url = image_url.get("url")
+            if not isinstance(url, str) or not url.startswith("data:"):
+                continue
+            head, sep, data_b64 = url.partition(",")
+            if not sep or ";base64" not in head:
+                continue
+            declared = head.removeprefix("data:").split(";", 1)[0]
+            actual = sniff_image_mime(data_b64)
+            if actual is None or actual == declared:
+                continue
+            log.warning(
+                "context.image_mime_corrected",
+                declared=declared,
+                actual=actual,
+            )
+            image_url["url"] = f"data:{actual};base64,{data_b64}"
+
+
 # ─── build_messages ──────────────────────────────────────────────────────────
 
 
@@ -553,6 +597,8 @@ def build_messages(
 
     if system_prompt:
         messages.insert(0, {"role": "system", "content": system_prompt})
+
+    _correct_image_data_url_mimes(messages)
 
     target_supports_thinking = bool(model) and litellm.supports_reasoning(model)
     return ContextResult(
