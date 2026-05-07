@@ -88,6 +88,11 @@ jobs:
 
     env:
       AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
+      # Dummy values so import-time get_settings() doesn't fail in tests
+      # that import aios.harness.worker (and transitively procrastinate_app)
+      # at collection time. Real production keys are set in Coolify.
+      AIOS_API_KEY: test-key-for-ci
+      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
 
     steps:
       - uses: actions/checkout@v4

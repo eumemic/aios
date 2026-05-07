@@ -75,17 +75,24 @@ CMD ["aios", "api"]
 # Docker, not Docker-in-Docker.
 FROM base AS worker
 
-# The worker has no HTTP listener and nothing to liveness-check usefully,
-# but Coolify's deploy job grep-detects ``HEALTHCHECK`` anywhere in the
-# Dockerfile (even a stage we don't target) and unconditionally waits for
-# ``docker inspect --format {{.State.Health.Status}}`` on the resulting
-# container. ``HEALTHCHECK NONE`` here keeps the inspect template happy
-# at the docker level but Coolify's parser still flips
-# ``custom_healthcheck_found=true``, so the wait still runs and there's
-# nothing to read. Give it a trivially-passing check so docker has a
-# Health field for Coolify to read; the worker's actual liveness comes
-# from the procrastinate job heartbeat, not docker.
-HEALTHCHECK --interval=30s --timeout=3s CMD true
+# Liveness check: the worker process touches /var/run/aios-worker-alive
+# every 15 s once it's fully started (lock acquired, pool open,
+# procrastinate consuming jobs). A stale or missing file means the
+# worker is hung, crashlooping, or still in startup — all "unhealthy"
+# from an orchestrator's point of view.
+#
+# Why a file instead of a TCP listener or DB query: the worker has no
+# HTTP surface, and a DB-touching healthcheck would impose a per-check
+# query on Postgres for a signal a ``aios.worker.heartbeat`` log line
+# could equally provide. tmpfs writes are essentially free.
+#
+# The 60 s threshold = 4× the heartbeat interval; tolerates a few
+# missed beats from slow event loops without flapping. ``start-period``
+# of 60 s covers worst-case startup (the 30 s lock-wait + ~5 s of pool
+# / procrastinate setup) — the orchestrator won't kill the container
+# while it's still legitimately booting.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD test "$(stat -c %Y /var/run/aios-worker-alive 2>/dev/null || echo 0)" -gt $(($(date +%s) - 60))
 
 USER root
 RUN apt-get update \
