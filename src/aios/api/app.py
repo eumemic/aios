@@ -94,6 +94,23 @@ def create_app() -> FastAPI:
     return app
 
 
+_MCP_INSTRUCTIONS = """\
+aios is a Postgres-backed agent runtime. The management plane is organized
+around five resource types: agents (versioned config), sessions (live
+execution contexts), environments (sandbox templates), memory stores
+(shared file-like memory), and vaults (encrypted credentials). Resources
+attach to sessions to grant agent read/write access.
+
+Conventions:
+- ``archive`` is reversible soft-removal preserving audit history;
+  ``delete`` is hard-removal, no audit trail. Prefer archive unless you
+  specifically need rows gone.
+- Listed resources exclude archived by default unless ``include_archived``
+  is supported on the operation.
+- Mutations marked ``destructiveHint`` should be confirmed before invoking.
+"""
+
+
 def _mount_mcp(app: FastAPI) -> None:
     """Mount fastapi-mcp at ``/mcp`` after all routers are registered.
 
@@ -118,7 +135,60 @@ def _mount_mcp(app: FastAPI) -> None:
         exclude_operations=_compute_mcp_excluded_operations(app),
         auth_config=AuthConfig(dependencies=[Depends(require_bearer_auth)]),
     )
+    _apply_mcp_polish(app, mcp, instructions=_MCP_INSTRUCTIONS)
     mcp.mount_http(mount_path="/mcp")
+
+
+def _verb_default_annotations(verb: str) -> dict[str, bool]:
+    """Map HTTP verb to default MCP tool annotation hints.
+
+    GET → read-only. DELETE → destructive. PUT → destructive + idempotent.
+    POST defaults to no annotations (additive by REST convention); routes
+    that are POST-but-destructive (e.g. ``.../archive``) override via
+    ``x-codegen.mcp`` per route.
+    """
+    if verb == "get":
+        return {"readOnlyHint": True}
+    if verb == "delete":
+        return {"destructiveHint": True}
+    if verb == "put":
+        return {"destructiveHint": True, "idempotentHint": True}
+    return {}
+
+
+def _apply_mcp_polish(app: FastAPI, mcp: Any, *, instructions: str) -> None:
+    """Post-construction patch: per-tool annotations + server instructions.
+
+    fastapi-mcp 0.4 doesn't infer annotations from HTTP verbs and exposes
+    no construction-time hook for them, so we walk the spec, build verb-
+    based defaults, layer the route's ``x-codegen.mcp`` overrides on top,
+    and assign the result to each ``mcp.tools[i].annotations``. Also sets
+    ``mcp.server.instructions`` (the MCP handshake field, inlined into the
+    calling LLM's system prompt by clients that respect it).
+    """
+    from mcp.types import ToolAnnotations
+
+    op_meta: dict[str, tuple[str, dict[str, Any]]] = {}
+    for path_obj in app.openapi()["paths"].values():
+        for verb, method_obj in path_obj.items():
+            if not isinstance(method_obj, dict):
+                continue
+            op_id = method_obj.get("operationId")
+            if not isinstance(op_id, str):
+                continue
+            overrides = method_obj.get("x-codegen", {}).get("mcp", {}) or {}
+            op_meta[op_id] = (verb.lower(), overrides)
+
+    for tool in mcp.tools:
+        meta = op_meta.get(tool.name)
+        if meta is None:
+            continue
+        verb, overrides = meta
+        annotations = _verb_default_annotations(verb) | overrides
+        if annotations:
+            tool.annotations = ToolAnnotations(**annotations)
+
+    mcp.server.instructions = instructions
 
 
 def _compute_mcp_excluded_operations(app: FastAPI) -> list[str]:

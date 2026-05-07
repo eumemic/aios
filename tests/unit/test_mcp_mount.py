@@ -54,3 +54,95 @@ def test_excluded_operations_match_x_codegen_annotations() -> None:
                 assert op_id not in excluded, (
                     f"unexpected exclusion of {op_id} (no x-codegen.targets opt-out)"
                 )
+
+
+class TestVerbDefaultAnnotations:
+    """``_verb_default_annotations`` maps HTTP verb to MCP annotation hints.
+
+    GETs are read-only; DELETE/PUT are destructive; POST defaults to no
+    annotations (additive by REST convention, with per-route overrides
+    via ``x-codegen.mcp`` for POST routes that are actually destructive).
+    """
+
+    def test_get_is_read_only(self) -> None:
+        from aios.api.app import _verb_default_annotations
+
+        assert _verb_default_annotations("get") == {"readOnlyHint": True}
+
+    def test_delete_is_destructive(self) -> None:
+        from aios.api.app import _verb_default_annotations
+
+        assert _verb_default_annotations("delete") == {"destructiveHint": True}
+
+    def test_put_is_destructive_and_idempotent(self) -> None:
+        from aios.api.app import _verb_default_annotations
+
+        assert _verb_default_annotations("put") == {
+            "destructiveHint": True,
+            "idempotentHint": True,
+        }
+
+    def test_post_has_no_default_annotations(self) -> None:
+        from aios.api.app import _verb_default_annotations
+
+        assert _verb_default_annotations("post") == {}
+
+
+def test_apply_mcp_polish_populates_annotations_and_instructions() -> None:
+    """End-to-end: the MCP tool list has verb-default annotations + overrides.
+
+    Constructs a fresh FastApiMCP against the live app's OpenAPI spec and
+    applies the polish — same code path as ``_mount_mcp`` but without the
+    HTTP mount. Verifies representative tools across each
+    annotation-bearing category.
+    """
+    from fastapi import Depends
+    from fastapi_mcp import AuthConfig, FastApiMCP
+
+    from aios.api.app import (
+        _MCP_INSTRUCTIONS,
+        _apply_mcp_polish,
+        _compute_mcp_excluded_operations,
+        create_app,
+    )
+    from aios.api.deps import require_bearer_auth
+
+    app = create_app()
+    mcp = FastApiMCP(
+        app,
+        name="test",
+        description="test",
+        exclude_operations=_compute_mcp_excluded_operations(app),
+        auth_config=AuthConfig(dependencies=[Depends(require_bearer_auth)]),
+    )
+    _apply_mcp_polish(app, mcp, instructions=_MCP_INSTRUCTIONS)
+
+    by_name = {tool.name: tool for tool in mcp.tools}
+
+    # GET → readOnlyHint
+    assert by_name["list_agents"].annotations is not None
+    assert by_name["list_agents"].annotations.readOnlyHint is True
+    assert by_name["get_health"].annotations.readOnlyHint is True
+
+    # DELETE → destructiveHint
+    assert by_name["delete_vault"].annotations.destructiveHint is True
+
+    # PUT → destructiveHint + idempotentHint
+    assert by_name["update_agent"].annotations.destructiveHint is True
+    assert by_name["update_agent"].annotations.idempotentHint is True
+
+    # POST .../archive → destructiveHint via x-codegen.mcp override
+    # (POST verb default is empty, so the annotation only appears because
+    # of the explicit override stamped on the route)
+    assert by_name["archive_vault"].annotations is not None
+    assert by_name["archive_vault"].annotations.destructiveHint is True
+    assert by_name["archive_memory_store"].annotations.destructiveHint is True
+    assert by_name["archive_vault_credential"].annotations.destructiveHint is True
+    assert by_name["detach_connection"].annotations.destructiveHint is True
+    assert by_name["unconfigure_connection"].annotations.destructiveHint is True
+
+    # POST create → no annotations (additive; no override needed)
+    assert by_name["create_agent"].annotations is None
+
+    # Server-level instructions populated
+    assert mcp.server.instructions == _MCP_INSTRUCTIONS

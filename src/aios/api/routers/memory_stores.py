@@ -83,7 +83,11 @@ async def update_store(
     )
 
 
-@router.post("/{store_id}/archive", operation_id="archive_memory_store")
+@router.post(
+    "/{store_id}/archive",
+    operation_id="archive_memory_store",
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
+)
 async def archive_store(store_id: str, pool: PoolDep, _auth: AuthDep) -> MemoryStore:
     """Archive a memory store: hides from default lists, makes it read-only.
 

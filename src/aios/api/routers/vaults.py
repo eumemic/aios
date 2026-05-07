@@ -68,7 +68,11 @@ async def update(vault_id: str, body: VaultUpdate, pool: PoolDep, _auth: AuthDep
     )
 
 
-@router.post("/{vault_id}/archive", operation_id="archive_vault")
+@router.post(
+    "/{vault_id}/archive",
+    operation_id="archive_vault",
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
+)
 async def archive(vault_id: str, pool: PoolDep, _auth: AuthDep) -> Vault:
     """Archive a vault and **purge the encrypted secret material** of its credentials.
 
@@ -179,6 +183,7 @@ async def update_credential(
 @router.post(
     "/{vault_id}/credentials/{credential_id}/archive",
     operation_id="archive_vault_credential",
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
 )
 async def archive_credential(
     vault_id: str, credential_id: str, pool: PoolDep, _auth: AuthDep
