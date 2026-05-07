@@ -22,16 +22,18 @@ or the proxy.
                             ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ Server B — CCX13 @ Hetzner HIL                                │
-│ Role: aios (api + worker + Postgres + sandbox host)           │
-│ Hostname: aios.eumemic.ai                                     │
+│ Role: aios (web + api + worker + Postgres + sandbox host)     │
+│ Public hostnames:                                             │
+│   aios.eumemic.ai      → aios-web (Next.js console)           │
+│   api.aios.eumemic.ai  → aios-api (bearer-only HTTP API)      │
 │                                                               │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────┐   │
-│  │ aios-api        │  │ aios-worker     │  │ Postgres     │   │
-│  │ (Coolify App)   │  │ (Coolify App)   │  │ (Coolify DB) │   │
-│  │ :8080           │  │ /var/run/docker │  │ :5432 inner  │   │
-│  └────────┬────────┘  └────────┬────────┘  └──────┬───────┘   │
-│           │                     │                  │           │
-│           └────────── eumemic-aios network ────────┘           │
+│  ┌──────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────┐ │
+│  │ aios-web │  │ aios-api        │  │ aios-worker     │  │ Postgres     │ │
+│  │ (Coolify)│  │ (Coolify App)   │  │ (Coolify App)   │  │ (Coolify DB) │ │
+│  │ :3000    │  │ :8080           │  │ /var/run/docker │  │ :5432 inner  │ │
+│  └────┬─────┘  └────────┬────────┘  └────────┬────────┘  └──────┬───────┘ │
+│       │                 │                     │                  │         │
+│       └─────── eumemic-aios network ──────────┴──────────────────┘         │
 │                                 │                              │
 │           ┌─────────────────────┴────────────────┐             │
 │           │  spawned siblings on host docker     │             │
@@ -49,8 +51,13 @@ or the proxy.
   from the same git repo and the same `Dockerfile`, with different
   `--target` values (`api` vs `worker`). Same image cache, same deploy
   trigger, independent log streams + scale.
-- All three live in one Coolify **Project** (`eumemic-aios`) on Server B,
-  so they auto-share an internal Docker network.
+- **web** is a third Coolify **Application** built from the
+  `eumemic/aios-web` repo, deployed at `aios.eumemic.ai`. See
+  `aios-web/DEPLOY.md` in that repo for its specifics. The console
+  reaches `aios-api` via its public URL (`api.aios.eumemic.ai`),
+  injecting `AIOS_API_KEY` server-side; the browser never sees the key.
+- All four resources live in one Coolify **Project** (`eumemic-aios`)
+  on Server B, so they auto-share an internal Docker network.
 
 **Why two Applications instead of one Compose stack:**
 
@@ -79,9 +86,13 @@ view of the filesystem — no path translation logic needed inside the
 worker. Workspaces survive sandbox lifetimes; cleanup of stale dirs is
 deferred.
 
-Your laptop → `https://aios.eumemic.ai` → Server B → aios-api container
-→ Postgres (Coolify-managed) + aios-worker (which spawns sandboxes on
-the host docker daemon → workspaces in `/srv/aios/workspaces/`).
+CLI / MCP from laptop → `https://api.aios.eumemic.ai` → Server B →
+aios-api container → Postgres (Coolify-managed) + aios-worker (which
+spawns sandboxes on the host docker daemon → workspaces in
+`/srv/aios/workspaces/`).
+
+Browser → `https://aios.eumemic.ai` → aios-web (Next.js) → server-side
+proxy injecting bearer → `https://api.aios.eumemic.ai` → aios-api.
 
 **What this deploy covers:** Server B provisioned + hardened + Docker
 installed; Coolify registers it as a remote Server; Postgres + api +
@@ -146,13 +157,16 @@ Cloudflare → `eumemic.ai` → **DNS → Records**:
 | Type | Name | Content | Proxy |
 |---|---|---|---|
 | A | `aios` | `<server B IPv4>` | DNS only (grey) |
+| A | `api.aios` | `<server B IPv4>` | DNS only (grey) |
 
-Grey-cloud for the same Let's Encrypt HTTP-01 reason as ant-proxy — see
-the comparable note in `ant-proxy/DEPLOY.md`. Verify:
+`aios.eumemic.ai` resolves to aios-web; `api.aios.eumemic.ai` resolves
+to aios-api. Grey-cloud both, for the same Let's Encrypt HTTP-01
+reason as ant-proxy — see the comparable note in
+`ant-proxy/DEPLOY.md`. Verify:
 
 ```bash
-dig +short aios.eumemic.ai
-# → Server B's IP
+dig +short aios.eumemic.ai     # → Server B's IP
+dig +short api.aios.eumemic.ai # → Server B's IP
 ```
 
 ---
@@ -395,7 +409,11 @@ Private Repository (GitHub App)** → pick `eumemic/aios`.
 | Base Directory | `/` |
 | Build Target Stage | `api` |
 | Ports Exposed | `8080` |
-| Domains | `https://aios.eumemic.ai` |
+| Domains | `https://api.aios.eumemic.ai` |
+
+(The web console — also at `aios.eumemic.ai` — is a separate Coolify
+Application built from `eumemic/aios-web`. See that repo's `DEPLOY.md`
+for the web side.)
 
 **Environment variables** (app → **Environment Variables**):
 
@@ -548,7 +566,7 @@ acquires the procrastinate advisory lock, tails the job queue, idles.
 Verify on the laptop:
 
 ```bash
-curl -s https://aios.eumemic.ai/health | jq
+curl -s https://api.aios.eumemic.ai/health | jq
 # {"ok": true, "version": "...", ...}
 ```
 
@@ -589,7 +607,7 @@ new env reaches the migration command.
 On the laptop:
 
 ```bash
-export AIOS_URL=https://aios.eumemic.ai
+export AIOS_URL=https://api.aios.eumemic.ai
 export AIOS_API_KEY=<LAPTOP_KEY from step 6>
 
 # Reachability
