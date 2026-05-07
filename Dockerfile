@@ -75,6 +75,13 @@ CMD ["aios", "api"]
 # Docker, not Docker-in-Docker.
 FROM base AS worker
 
+# Explicitly disable the parent image's healthcheck inheritance. The base
+# stage has no HEALTHCHECK, but Coolify parses the Dockerfile text and
+# treats the api stage's HEALTHCHECK as global, then waits for
+# `.State.Health` on the worker container too. Without this NONE the
+# wait fails with "map has no entry for key Health" on every deploy.
+HEALTHCHECK NONE
+
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
