@@ -174,15 +174,105 @@ def _verb_default_annotations(verb: str) -> dict[str, bool]:
     return {}
 
 
+_RESPONSE_BLOCK_SEPARATOR = "\n\n### Responses:\n"
+
+# JSON Schema keywords whose presence on a branch means the branch carries
+# enough structure that lifting its keys onto a parent during nullable-anyOf
+# flattening would change semantics.  ``_flatten_nullable_anyof`` only
+# flattens when the non-null branch's keys are a subset of the
+# scalar-metadata allow-list, so this set is the inverse safety net.
+_FLATTEN_SAFE_KEYS = frozenset(
+    {
+        "type",
+        "enum",
+        "const",
+        "format",
+        "pattern",
+        "minLength",
+        "maxLength",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "description",
+        "default",
+        "examples",
+        "title",
+    }
+)
+
+
+def _strip_response_block(description: str) -> str | None:
+    """Drop fastapi-mcp's auto-appended ``### Responses:`` example block."""
+    # ``rpartition`` guards against a route docstring legitimately containing
+    # the literal separator — fastapi-mcp's block is always last-appended.
+    head, _sep, _rest = description.rpartition(_RESPONSE_BLOCK_SEPARATOR)
+    return head.rstrip() or None
+
+
+def _drop_redundant_titles(schema: dict[str, Any]) -> None:
+    """Recursively drop ``title`` fields whose value matches the property key."""
+    for key, prop in schema.get("properties", {}).items():
+        if prop.get("title") == key:
+            prop.pop("title")
+        _drop_redundant_titles(prop)
+    if (items := schema.get("items")) is not None:
+        _drop_redundant_titles(items)
+    for combinator in ("anyOf", "oneOf", "allOf"):
+        for branch in schema.get(combinator, []):
+            _drop_redundant_titles(branch)
+
+
+def _flatten_nullable_anyof(schema: dict[str, Any]) -> None:
+    """Rewrite ``anyOf: [T, {"type": "null"}]`` to ``T`` with ``type: [..., "null"]``.
+
+    Only flattens when the non-null branch's keys are a subset of
+    :data:`_FLATTEN_SAFE_KEYS` — anything else (nested ``properties``,
+    further combinators) keeps its original ``anyOf`` form to avoid
+    silently changing the semantics of complex unions.
+    """
+    for prop in schema.get("properties", {}).values():
+        _flatten_nullable_anyof(prop)
+    if (items := schema.get("items")) is not None:
+        _flatten_nullable_anyof(items)
+    for combinator in ("anyOf", "oneOf", "allOf"):
+        for branch in schema.get(combinator, []):
+            _flatten_nullable_anyof(branch)
+
+    branches = schema.get("anyOf")
+    if not isinstance(branches, list) or len(branches) != 2:
+        return
+    b0, b1 = branches
+    if b0 == {"type": "null"}:
+        other = b1
+    elif b1 == {"type": "null"}:
+        other = b0
+    else:
+        return
+    other_type = other.get("type")
+    if not isinstance(other_type, str):
+        return
+    if not other.keys() <= _FLATTEN_SAFE_KEYS:
+        return
+    del schema["anyOf"]
+    schema.update(other)
+    schema["type"] = [other_type, "null"]
+
+
 def _apply_mcp_polish(app: FastAPI, mcp: Any, *, instructions: str) -> None:
-    """Post-construction patch: per-tool annotations + server instructions.
+    """Post-construction patch: per-tool annotations, schema cleanup, server instructions.
 
     fastapi-mcp 0.4 doesn't infer annotations from HTTP verbs and exposes
     no construction-time hook for them, so we walk the spec, build verb-
     based defaults, layer the route's ``x-codegen.mcp`` overrides on top,
-    and assign the result to each ``mcp.tools[i].annotations``. Also sets
-    ``mcp.server.instructions`` (the MCP handshake field, inlined into the
-    calling LLM's system prompt by clients that respect it).
+    and assign the result to each ``mcp.tools[i].annotations``.  Also
+    strips three sources of schema noise — auto-appended response-example
+    blocks, redundant ``title`` fields, and verbose ``anyOf`` nullable
+    encodings — so the tool list the model sees is roughly half its raw
+    fastapi-mcp size.  Finally sets ``mcp.server.instructions`` (the MCP
+    handshake field, inlined into the calling LLM's system prompt by
+    clients that respect it).
     """
     from mcp.types import ToolAnnotations
 
@@ -199,6 +289,10 @@ def _apply_mcp_polish(app: FastAPI, mcp: Any, *, instructions: str) -> None:
         annotations = _verb_default_annotations(verb) | overrides
         if annotations:
             tool.annotations = ToolAnnotations(**annotations)
+        if tool.description is not None:
+            tool.description = _strip_response_block(tool.description)
+        _drop_redundant_titles(tool.inputSchema)
+        _flatten_nullable_anyof(tool.inputSchema)
 
     mcp.server.instructions = instructions
 
