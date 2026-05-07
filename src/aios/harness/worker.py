@@ -31,6 +31,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
+import structlog
 
 import aios.tools  # noqa: F401  — side-effect: register built-in tools
 
@@ -72,28 +73,14 @@ def _make_worker_id() -> str:
     return f"worker_{ULID()}"
 
 
-def install_exit_diagnostics(log: Any) -> None:
-    """Make every worker-process exit produce a log line we can audit.
+def install_exit_diagnostics(log: structlog.stdlib.BoundLogger) -> None:
+    """Wire faulthandler, asyncio loop exception handler, and atexit so any
+    worker-process exit produces an auditable log line.
 
-    The silent-exit bug (#268) surfaced because the process disappeared
-    with no graceful-shutdown line, no traceback, no signal log — leaving
-    the operator no way to tell from logs alone whether the worker had
-    exited or simply gone idle. This wires three mechanisms so that any
-    exit path produces something:
-
-    * :func:`faulthandler.enable` — dumps a Python traceback to stderr on
-      ``SIGSEGV`` / ``SIGABRT`` / ``SIGBUS`` / ``SIGFPE`` / ``SIGILL``,
-      which Python would otherwise silently die from.
-    * The asyncio loop exception handler — routes uncaught task
-      exceptions through structlog instead of stderr's
-      ``Task exception was never retrieved`` warning, which doesn't fire
-      until garbage-collection and never appears in the JSON log stream.
-    * :func:`atexit.register` — emits a final ``worker.exit`` line on any
-      interpreter-shutdown path (``sys.exit``, ``return`` from
-      ``asyncio.run``, ``BaseException`` propagation), so the absence
-      of an exit log unambiguously means the process was killed
-      externally (``SIGKILL``, OOM kill, host crash) rather than wound
-      down on its own.
+    Without these, native crashes, unretrieved task exceptions, and
+    ordinary process exits can all leave zero trace in the structured
+    log stream — exactly the failure shape that made the silent-exit
+    incident undiagnosable.
     """
     faulthandler.enable()
 

@@ -1,11 +1,3 @@
-"""Worker exit-diagnostics wiring (#268).
-
-The silent-exit failure mode the issue describes was identifiable by *no*
-log output for ~2 hours after the worker died. These tests pin the three
-mechanisms :func:`install_exit_diagnostics` wires to ensure that any
-future exit produces something we can audit.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -35,7 +27,6 @@ def captured_atexit(monkeypatch: pytest.MonkeyPatch) -> list[Callable[[], None]]
 
 @pytest.fixture
 def capture_logs() -> Iterator[structlog.testing.LogCapture]:
-    """Pin a structlog ``LogCapture`` so emitted events are inspectable."""
     cap = structlog.testing.LogCapture()
     structlog.configure(processors=[cap])
     try:
@@ -44,38 +35,30 @@ def capture_logs() -> Iterator[structlog.testing.LogCapture]:
         structlog.reset_defaults()
 
 
-def test_install_enables_faulthandler(captured_atexit: list[Callable[[], None]]) -> None:
-    """``faulthandler.enable()`` runs idempotently and stays enabled.
-
-    We can't synthesize a ``SIGSEGV`` without killing the test runner, so
-    we settle for the observable proxy: ``is_enabled()`` is True after
-    the helper runs.
-    """
+@pytest.fixture
+def installed(
+    captured_atexit: list[Callable[[], None]],
+    capture_logs: structlog.testing.LogCapture,
+) -> tuple[list[Callable[[], None]], structlog.testing.LogCapture]:
+    """Run :func:`install_exit_diagnostics` inside an asyncio loop."""
 
     async def _run() -> None:
-        log = structlog.get_logger("aios.worker")
-        install_exit_diagnostics(log)
+        install_exit_diagnostics(structlog.get_logger("aios.worker"))
 
     asyncio.run(_run())
+    return captured_atexit, capture_logs
+
+
+def test_enables_faulthandler(installed: object) -> None:
     assert faulthandler.is_enabled()
-    assert len(captured_atexit) == 1
 
 
-def test_install_routes_loop_exception_through_log(
+def test_routes_loop_exception_through_log(
     captured_atexit: list[Callable[[], None]],
     capture_logs: structlog.testing.LogCapture,
 ) -> None:
-    """Uncaught task exceptions land in structlog as ``worker.task_exception``.
-
-    Without this, asyncio's default handler prints a free-form
-    ``Task exception was never retrieved`` warning to stderr — invisible
-    to a JSON log consumer and absent until the offending Task is
-    garbage-collected.
-    """
-
     async def _run() -> None:
-        log = structlog.get_logger("aios.worker")
-        install_exit_diagnostics(log)
+        install_exit_diagnostics(structlog.get_logger("aios.worker"))
         loop = asyncio.get_running_loop()
         loop.call_exception_handler(
             {"message": "synthetic task failure", "exception": RuntimeError("boom")}
@@ -92,23 +75,11 @@ def test_install_routes_loop_exception_through_log(
     assert entry["error_type"] == "RuntimeError"
 
 
-def test_install_registers_atexit_hook(
-    captured_atexit: list[Callable[[], None]],
-    capture_logs: structlog.testing.LogCapture,
+def test_atexit_hook_emits_worker_exit(
+    installed: tuple[list[Callable[[], None]], structlog.testing.LogCapture],
 ) -> None:
-    """The atexit hook is the safety net for "did the process actually exit?"
-
-    Invokes the captured callback manually (rather than waiting for
-    interpreter shutdown) and asserts a ``worker.exit`` log line emerges.
-    """
-
-    async def _run() -> None:
-        log = structlog.get_logger("aios.worker")
-        install_exit_diagnostics(log)
-
-    asyncio.run(_run())
-
-    assert len(captured_atexit) == 1, "expected exactly one atexit registration"
+    captured_atexit, capture_logs = installed
+    assert len(captured_atexit) == 1
 
     capture_logs.entries.clear()
     captured_atexit[0]()
