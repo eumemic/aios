@@ -8,7 +8,6 @@ migrations — they do NOT talk to the HTTP API.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import subprocess
 import sys
 
@@ -32,9 +31,23 @@ def _run_api() -> int:
 
 def _run_worker() -> int:
     from aios.harness.worker import worker_main
+    from aios.logging import get_logger
 
-    with contextlib.suppress(KeyboardInterrupt):
+    try:
         asyncio.run(worker_main())
+    except KeyboardInterrupt:
+        pass
+    except SystemExit:
+        # Already-logged refusal paths (e.g. duplicate worker locked out
+        # by ``_acquire_worker_lock``).  Don't double-report.
+        raise
+    except BaseException:
+        # Last-ditch logging before the process dies (#268). configure_logging
+        # may not have run if startup failed early, but structlog falls back
+        # to print-to-stderr and that still beats the silent-exit failure
+        # mode the issue describes.
+        get_logger("aios.worker").exception("worker.unexpected_exit")
+        raise
     return 0
 
 

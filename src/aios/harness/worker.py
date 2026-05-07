@@ -24,7 +24,9 @@ supervisor, and closes connections.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
+import faulthandler
 import sys
 from typing import TYPE_CHECKING, Any
 
@@ -70,10 +72,51 @@ def _make_worker_id() -> str:
     return f"worker_{ULID()}"
 
 
+def install_exit_diagnostics(log: Any) -> None:
+    """Make every worker-process exit produce a log line we can audit.
+
+    The silent-exit bug (#268) surfaced because the process disappeared
+    with no graceful-shutdown line, no traceback, no signal log — leaving
+    the operator no way to tell from logs alone whether the worker had
+    exited or simply gone idle. This wires three mechanisms so that any
+    exit path produces something:
+
+    * :func:`faulthandler.enable` — dumps a Python traceback to stderr on
+      ``SIGSEGV`` / ``SIGABRT`` / ``SIGBUS`` / ``SIGFPE`` / ``SIGILL``,
+      which Python would otherwise silently die from.
+    * The asyncio loop exception handler — routes uncaught task
+      exceptions through structlog instead of stderr's
+      ``Task exception was never retrieved`` warning, which doesn't fire
+      until garbage-collection and never appears in the JSON log stream.
+    * :func:`atexit.register` — emits a final ``worker.exit`` line on any
+      interpreter-shutdown path (``sys.exit``, ``return`` from
+      ``asyncio.run``, ``BaseException`` propagation), so the absence
+      of an exit log unambiguously means the process was killed
+      externally (``SIGKILL``, OOM kill, host crash) rather than wound
+      down on its own.
+    """
+    faulthandler.enable()
+
+    def _on_loop_exception(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        exc = context.get("exception")
+        log.error(
+            "worker.task_exception",
+            message=context.get("message"),
+            error_type=type(exc).__name__ if exc is not None else None,
+            error=str(exc) if exc is not None else None,
+            exc_info=exc,
+        )
+
+    asyncio.get_running_loop().set_exception_handler(_on_loop_exception)
+
+    atexit.register(lambda: log.info("worker.exit"))
+
+
 async def worker_main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     log = get_logger("aios.worker")
+    install_exit_diagnostics(log)
 
     # Single-instance guard.  Two `aios worker` processes against the same
     # database would race for connector subprocess ownership (signal-cli's
