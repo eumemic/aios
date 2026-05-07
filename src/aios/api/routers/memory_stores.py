@@ -253,6 +253,7 @@ async def get_version(
 @router.post(
     "/{store_id}/memory-versions/{version_id}/redact",
     operation_id="redact_memory_version",
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
 )
 async def redact_version(
     store_id: str, version_id: str, pool: PoolDep, _auth: AuthDep

@@ -225,6 +225,7 @@ def _require_github_resource_id(resource_id: str) -> None:
 
 @router.post(
     "/{session_id}/archive",
+    operation_id="archive_session",
     openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
 )
 async def archive(session_id: str, pool: PoolDep, _auth: AuthDep) -> Session:

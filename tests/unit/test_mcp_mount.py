@@ -136,10 +136,12 @@ def test_apply_mcp_polish_populates_annotations_and_instructions() -> None:
     # of the explicit override stamped on the route)
     assert by_name["archive_vault"].annotations is not None
     assert by_name["archive_vault"].annotations.destructiveHint is True
+    assert by_name["archive_session"].annotations.destructiveHint is True
     assert by_name["archive_memory_store"].annotations.destructiveHint is True
     assert by_name["archive_vault_credential"].annotations.destructiveHint is True
     assert by_name["detach_connection"].annotations.destructiveHint is True
     assert by_name["unconfigure_connection"].annotations.destructiveHint is True
+    assert by_name["redact_memory_version"].annotations.destructiveHint is True
 
     # POST create → no annotations (additive; no override needed)
     assert by_name["create_agent"].annotations is None

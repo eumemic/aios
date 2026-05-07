@@ -154,16 +154,16 @@ def _iter_operations(app: FastAPI) -> Iterator[tuple[str, str, dict[str, Any]]]:
             op_id = method_obj.get("operationId")
             if not isinstance(op_id, str):
                 continue
-            yield op_id, verb.lower(), method_obj.get("x-codegen", {}) or {}
+            yield op_id, verb.lower(), method_obj.get("x-codegen", {})
 
 
 def _verb_default_annotations(verb: str) -> dict[str, bool]:
     """Map HTTP verb to default MCP tool annotation hints.
 
-    GET → read-only. DELETE → destructive. PUT → destructive + idempotent.
-    POST defaults to no annotations (additive by REST convention); routes
-    that are POST-but-destructive (e.g. ``.../archive``) override via
-    ``x-codegen.mcp`` per route.
+    POST is the asymmetric case: REST convention says POST is additive, but
+    operations like ``.../archive`` and ``.../detach`` are POST-but-destructive
+    and override via ``x-codegen.mcp`` per route — hence the empty default
+    rather than a destructive one.
     """
     if verb == "get":
         return {"readOnlyHint": True}
@@ -187,15 +187,15 @@ def _apply_mcp_polish(app: FastAPI, mcp: Any, *, instructions: str) -> None:
     from mcp.types import ToolAnnotations
 
     op_meta: dict[str, tuple[str, dict[str, Any]]] = {
-        op_id: (verb, codegen.get("mcp", {}) or {})
-        for op_id, verb, codegen in _iter_operations(app)
+        op_id: (verb, codegen.get("mcp", {})) for op_id, verb, codegen in _iter_operations(app)
     }
 
     for tool in mcp.tools:
-        meta = op_meta.get(tool.name)
-        if meta is None:
-            continue
-        verb, overrides = meta
+        # Direct lookup, not .get + None-skip: mcp.tools is built from the
+        # same app.openapi() that op_meta walks, so every tool.name must be
+        # an operationId we've seen. A KeyError here is a real invariant
+        # break worth surfacing, not a silent annotation dropout.
+        verb, overrides = op_meta[tool.name]
         annotations = _verb_default_annotations(verb) | overrides
         if annotations:
             tool.annotations = ToolAnnotations(**annotations)
