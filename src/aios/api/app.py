@@ -2,6 +2,8 @@
 
 Builds the app, wires in the routers, the exception handlers, and the
 lifespan that opens/closes the asyncpg pool and constructs the CryptoBox.
+Also mounts the auto-reflected MCP server at ``/mcp`` so agents can
+operate the management plane via the same Bearer auth as the HTTP API.
 """
 
 from __future__ import annotations
@@ -10,8 +12,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
+from aios.api.deps import require_bearer_auth
 from aios.api.routers import (
     agents,
     connections,
@@ -82,7 +85,55 @@ def create_app() -> FastAPI:
     app.include_router(connections.router)
     app.include_router(connectors.router)
     app.include_router(session_templates.router)
+    _mount_mcp(app)
     return app
+
+
+def _mount_mcp(app: FastAPI) -> None:
+    """Mount fastapi-mcp at ``/mcp`` after all routers are registered.
+
+    The MCP tool surface is whatever FastAPI's OpenAPI spec says it is,
+    minus operations whose ``x-codegen.targets`` excludes ``"mcp"``.
+    Today that excludes the SSE / long-poll session-event routes (no
+    JSON response shape) and the connectors RPC routes (raw
+    ``dict[str, Any]`` envelopes that need Pydantic models authored
+    before they MCP cleanly).
+    """
+    # fastapi-mcp doesn't ship a py.typed marker yet, so mypy can't see
+    # the package's actual signatures.
+    from fastapi_mcp import AuthConfig, FastApiMCP  # type: ignore[import-untyped]
+
+    mcp = FastApiMCP(
+        app,
+        name="aios",
+        description=(
+            "aios management plane: agents, sessions, environments, vaults, "
+            "memory stores, skills, connections, session templates."
+        ),
+        exclude_operations=_compute_mcp_excluded_operations(app),
+        auth_config=AuthConfig(dependencies=[Depends(require_bearer_auth)]),
+    )
+    mcp.mount_http(mount_path="/mcp")
+
+
+def _compute_mcp_excluded_operations(app: FastAPI) -> list[str]:
+    """Return operationIds whose ``x-codegen.targets`` excludes ``"mcp"``.
+
+    Routes without an ``x-codegen.targets`` list default to included in
+    every generator target (per the contract documented in #267); only
+    explicit ``targets`` lists that omit ``"mcp"`` exclude.
+    """
+    excluded: list[str] = []
+    for path_obj in app.openapi()["paths"].values():
+        for method_obj in path_obj.values():
+            # Filter out non-method path-level keys (parameters, summary, ...).
+            if not isinstance(method_obj, dict):
+                continue
+            op_id = method_obj.get("operationId")
+            targets = method_obj.get("x-codegen", {}).get("targets")
+            if op_id and targets is not None and "mcp" not in targets:
+                excluded.append(op_id)
+    return excluded
 
 
 def _redact_dsn(dsn: str) -> str:

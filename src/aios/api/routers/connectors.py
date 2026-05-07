@@ -84,7 +84,7 @@ def _raise_for_error(envelope: dict[str, Any]) -> None:
     )
 
 
-@router.get("")
+@router.get("", openapi_extra={"x-codegen": {"targets": []}})
 async def list_(db_url: DbUrlDep, _auth: AuthDep) -> dict[str, Any]:
     """Snapshot every enabled connector instance."""
     return await _rpc(
@@ -92,7 +92,7 @@ async def list_(db_url: DbUrlDep, _auth: AuthDep) -> dict[str, Any]:
     )
 
 
-@router.get("/{connector}")
+@router.get("/{connector}", openapi_extra={"x-codegen": {"targets": []}})
 async def list_for_connector(connector: str, db_url: DbUrlDep, _auth: AuthDep) -> dict[str, Any]:
     """Snapshot every instance of one connector type."""
     return await _rpc(
@@ -101,7 +101,7 @@ async def list_for_connector(connector: str, db_url: DbUrlDep, _auth: AuthDep) -
     )
 
 
-@router.get("/{connector}/{instance}")
+@router.get("/{connector}/{instance}", openapi_extra={"x-codegen": {"targets": []}})
 async def get_instance(
     connector: str, instance: str, db_url: DbUrlDep, _auth: AuthDep
 ) -> dict[str, Any]:
@@ -112,7 +112,7 @@ async def get_instance(
     )
 
 
-@router.get("/{connector}/{instance}/accounts")
+@router.get("/{connector}/{instance}/accounts", openapi_extra={"x-codegen": {"targets": []}})
 async def list_accounts(
     connector: str, instance: str, db_url: DbUrlDep, _auth: AuthDep
 ) -> dict[str, Any]:
@@ -128,7 +128,7 @@ async def list_accounts(
     }
 
 
-@router.get("/{connector}/{instance}/tools")
+@router.get("/{connector}/{instance}/tools", openapi_extra={"x-codegen": {"targets": []}})
 async def list_tools(
     connector: str, instance: str, db_url: DbUrlDep, _auth: AuthDep
 ) -> dict[str, Any]:
@@ -138,7 +138,7 @@ async def list_tools(
     )
 
 
-@router.post("/{connector}/{instance}/call")
+@router.post("/{connector}/{instance}/call", openapi_extra={"x-codegen": {"targets": []}})
 async def call(
     connector: str,
     instance: str,
