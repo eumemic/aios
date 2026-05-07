@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sys
+import time
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
@@ -223,13 +224,27 @@ async def worker_main() -> None:
         runtime.connector_subprocess_registry = None
 
 
-async def _acquire_worker_lock(db_url: str, log: Any) -> asyncpg.Connection[Any] | None:
-    """Try to grab the single-worker advisory lock on a dedicated connection.
+async def _acquire_worker_lock(
+    db_url: str,
+    log: Any,
+    *,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 0.5,
+) -> asyncpg.Connection[Any] | None:
+    """Try to grab the single-worker advisory lock, waiting up to
+    ``timeout_seconds`` for an existing holder to release.
 
-    Returns the held connection on success (caller must keep it alive),
-    or ``None`` when another worker already owns the lock.  Postgres
-    releases session-scoped advisory locks on connection close, so the
-    caller's only obligation is to close the connection on shutdown.
+    Returns the held connection on success, or ``None`` after timeout.
+    The caller exits the process on ``None`` per the single-instance
+    invariant. Postgres releases session-scoped advisory locks on
+    connection close, so the caller's only obligation is to close the
+    connection on shutdown.
+
+    The wait handles rolling deploys: the previous worker is still
+    shutting down when the new one starts, and a few seconds of
+    polling is plenty of time for the old container to release. The
+    timeout cap distinguishes "normal handoff" (resolves in seconds)
+    from "stuck holder" (real bug, fail fast so it surfaces).
 
     The connection is dedicated — never returned to the pool — because
     pool reset would issue ``DISCARD ALL``, which releases advisory
@@ -237,22 +252,35 @@ async def _acquire_worker_lock(db_url: str, log: Any) -> asyncpg.Connection[Any]
     """
     dsn = normalize_dsn(db_url)
     conn = await asyncpg.connect(dsn)
+    deadline = time.monotonic() + timeout_seconds
+    waiting_logged = False
     try:
-        held: bool = await conn.fetchval(
-            "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
-            _WORKER_LOCK_KEY_TEXT,
-        )
+        while True:
+            held: bool = await conn.fetchval(
+                "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
+                _WORKER_LOCK_KEY_TEXT,
+            )
+            if held:
+                return conn
+            if time.monotonic() >= deadline:
+                log.error(
+                    "worker.duplicate_instance_refused",
+                    lock_key=_WORKER_LOCK_KEY_TEXT,
+                    waited_seconds=timeout_seconds,
+                )
+                await conn.close()
+                return None
+            if not waiting_logged:
+                log.info(
+                    "worker.lock_busy.waiting",
+                    lock_key=_WORKER_LOCK_KEY_TEXT,
+                    timeout_seconds=timeout_seconds,
+                )
+                waiting_logged = True
+            await asyncio.sleep(poll_interval_seconds)
     except Exception:
         await conn.close()
         raise
-    if not held:
-        log.error(
-            "worker.duplicate_instance_refused",
-            lock_key=_WORKER_LOCK_KEY_TEXT,
-        )
-        await conn.close()
-        return None
-    return conn
 
 
 async def _periodic_sweep(
