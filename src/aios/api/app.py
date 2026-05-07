@@ -98,11 +98,6 @@ def _mount_mcp(app: FastAPI) -> None:
     JSON response shape) and the connectors RPC routes (raw
     ``dict[str, Any]`` envelopes that need Pydantic models authored
     before they MCP cleanly).
-
-    Per-tool annotations (``destructiveHint``, ``readOnlyHint``, etc.)
-    and a server-level ``instructions`` field are deferred to a
-    follow-up so we can observe what fastapi-mcp infers from HTTP verbs
-    by default before authoring overrides.
     """
     # fastapi-mcp doesn't ship a py.typed marker yet, so mypy can't see
     # the package's actual signatures.

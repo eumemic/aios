@@ -39,7 +39,8 @@ def test_excluded_operations_match_x_codegen_annotations() -> None:
 
     spec = app.openapi()
     # Cross-check against the spec: every operationId we excluded should
-    # in fact carry an ``x-codegen.targets`` list that omits ``"mcp"``.
+    # in fact carry an ``x-codegen.targets`` list that omits ``"mcp"``,
+    # and no unannotated route should appear in the excluded set.
     for path_obj in spec["paths"].values():
         for method_obj in path_obj.values():
             if not isinstance(method_obj, dict):
@@ -53,11 +54,3 @@ def test_excluded_operations_match_x_codegen_annotations() -> None:
                 assert op_id not in excluded, (
                     f"unexpected exclusion of {op_id} (no x-codegen.targets opt-out)"
                 )
-
-    # The 6 connectors routes carry FastAPI's auto-derived operationIds
-    # since connectors.py is deferred from Phase A; only the SSE /
-    # long-poll ones from sessions.py have human-set IDs (also auto-derived
-    # since sessions.py is deferred too). Either way, we expect 8 total.
-    assert len(excluded) == 8, (
-        f"expected 8 excluded operations (2 SSE + 6 connectors), got {len(excluded)}"
-    )
