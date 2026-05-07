@@ -88,7 +88,7 @@ installed; Coolify registers it as a remote Server; Postgres + api +
 worker stand up; sandbox base image is built and present; alembic
 migrations run on every deploy; smoke-tested via `aios chat` from the
 laptop. HTTPS via Coolify's Traefik + Let's Encrypt. Auto-deploy on
-push to `main`. Nightly Postgres dumps + workspace tarballs to off-box
+push to `master`. Nightly Postgres dumps + workspace tarballs to off-box
 storage.
 
 **Deferred:** Tailscale to home-5090 for inference (Phase 2 LiteLLM
@@ -381,7 +381,7 @@ Private Repository (GitHub App)** → pick `eumemic/aios`.
 | Field | Value |
 |---|---|
 | Name | `aios-api` |
-| Branch | `main` |
+| Branch | `master` |
 | Build Pack | `Dockerfile` |
 | Dockerfile Location | `/Dockerfile` |
 | Base Directory | `/` |
@@ -439,7 +439,7 @@ Same project → **New Resource → Application → Private Repository
 | Field | Value |
 |---|---|
 | Name | `aios-worker` |
-| Branch | `main` |
+| Branch | `master` |
 | Build Pack | `Dockerfile` |
 | Dockerfile Location | `/Dockerfile` |
 | Base Directory | `/` |
@@ -633,7 +633,7 @@ the rclone for Postgres.
 
 ---
 
-## Step 14 — Verify auto-deploy on `main`
+## Step 14 — Verify auto-deploy on `master`
 
 Make a trivial change in `aios` (edit README, bump a comment), commit,
 `git push`. Coolify's webhook fires on both `aios-api` and `aios-worker`
