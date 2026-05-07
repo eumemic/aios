@@ -124,6 +124,55 @@ class TestMakeImageUrlPart:
             "image_url": {"url": "data:image/png;base64,ZmFrZQ=="},
         }
 
+    def test_sniff_corrects_mismatched_declared_type(self) -> None:
+        import base64
+
+        jpeg = base64.b64encode(b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 24).decode()
+        part = vision.make_image_url_part(content_type="image/png", data_b64=jpeg)
+        assert part["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+    def test_unrecognized_magic_passes_through(self) -> None:
+        part = vision.make_image_url_part(content_type="image/png", data_b64="ZmFrZQ==")
+        assert part["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+class TestSniffImageMime:
+    def test_png(self) -> None:
+        import base64
+
+        b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20).decode()
+        assert vision.sniff_image_mime(b64) == "image/png"
+
+    def test_jpeg(self) -> None:
+        import base64
+
+        b64 = base64.b64encode(b"\xff\xd8\xff\xe0\x00\x10JFIF").decode()
+        assert vision.sniff_image_mime(b64) == "image/jpeg"
+
+    def test_gif87(self) -> None:
+        import base64
+
+        b64 = base64.b64encode(b"GIF87a" + b"\x00" * 20).decode()
+        assert vision.sniff_image_mime(b64) == "image/gif"
+
+    def test_gif89(self) -> None:
+        import base64
+
+        b64 = base64.b64encode(b"GIF89a" + b"\x00" * 20).decode()
+        assert vision.sniff_image_mime(b64) == "image/gif"
+
+    def test_unknown_returns_none(self) -> None:
+        import base64
+
+        b64 = base64.b64encode(b"\x00" * 32).decode()
+        assert vision.sniff_image_mime(b64) is None
+
+    def test_short_input_returns_none(self) -> None:
+        assert vision.sniff_image_mime("") is None
+
+    def test_invalid_base64_returns_none(self) -> None:
+        assert vision.sniff_image_mime("!!!!not-base64!!!!") is None
+
 
 class TestTextMarker:
     def test_image_with_path(self) -> None:

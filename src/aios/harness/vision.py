@@ -95,7 +95,26 @@ def can_inline_image(*, model: str, content_type: str, size_bytes: int) -> bool:
 
 
 def make_image_url_part(*, content_type: str, data_b64: str) -> dict[str, Any]:
-    """Build a chat-completions ``image_url`` content part."""
+    """Build a chat-completions ``image_url`` content part.
+
+    The declared ``content_type`` is reconciled against the actual magic
+    bytes — inbound platform metadata and extension-based guesses both
+    occasionally lie ("png" extension on a JPEG, Telegram reporting
+    image/jpeg for a PNG photo, etc.).  Anthropic's ``/v1/messages``
+    rejects mismatches outright and that error round-trips into a tight
+    retry loop because the bad mime is baked into the persisted event.
+    Sniffing here means new events carry the correct mime from the
+    start; ``_correct_image_data_url_mimes`` in context.py handles
+    historical events whose mime was already wrong.
+    """
+    actual = sniff_image_mime(data_b64)
+    if actual is not None and actual != content_type:
+        log.warning(
+            "vision.image_mime_corrected_at_write",
+            declared=content_type,
+            actual=actual,
+        )
+        content_type = actual
     return {
         "type": "image_url",
         "image_url": {"url": f"data:{content_type};base64,{data_b64}"},
