@@ -46,6 +46,7 @@ from aios.harness.connector_supervisor import (
     instance_label,
     resolve_connector_specs,
 )
+from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.harness.sweep import (
     reap_stalled_jobs,
@@ -74,6 +75,7 @@ async def worker_main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     log = get_logger("aios.worker")
+    install_exit_diagnostics(log)
 
     # Single-instance guard.  Two `aios worker` processes against the same
     # database would race for connector subprocess ownership (signal-cli's

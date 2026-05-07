@@ -8,7 +8,6 @@ migrations — they do NOT talk to the HTTP API.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import subprocess
 import sys
 
@@ -32,9 +31,17 @@ def _run_api() -> int:
 
 def _run_worker() -> int:
     from aios.harness.worker import worker_main
+    from aios.logging import get_logger
 
-    with contextlib.suppress(KeyboardInterrupt):
+    try:
         asyncio.run(worker_main())
+    except KeyboardInterrupt:
+        pass
+    except SystemExit:
+        raise
+    except BaseException:
+        get_logger("aios.worker").exception("worker.unexpected_exit")
+        raise
     return 0
 
 
