@@ -148,7 +148,9 @@ ensure_db() {
 # ── 4. start api + worker ─────────────────────────────────────────────
 start_runtime() {
   mkdir -p "$WORKTREE/.logs"
-  # Don't double-start: kill any previous OUR-worktree processes only.
+  # Kill the supervisor first (sentinel is in its bash command line) so
+  # it doesn't restart the worker we're about to kill.
+  pkill -f "AIOS_WORKER_SUPERVISOR_FOR=${WORKTREE}" 2>/dev/null || true
   pkill -f "${WORKTREE}.*-m aios api" 2>/dev/null || true
   pkill -f "${WORKTREE}.*-m aios worker" 2>/dev/null || true
   sleep 0.5
@@ -158,7 +160,24 @@ start_runtime() {
   : > "$WORKTREE/.logs/worker.log"
   ( set -a; source "$WORKTREE/.env"; set +a
     nohup uv run python -m aios api > "$WORKTREE/.logs/api.log" 2>&1 &
-    nohup uv run python -m aios worker > "$WORKTREE/.logs/worker.log" 2>&1 & )
+    # Worker runs under a supervisor loop with capped backoff.  Backoff
+    # protects against startup-failure storms (e.g. lock contention on
+    # an aborted prior run); a process that lives >30s is considered
+    # healthy and resets the backoff.
+    nohup bash -c '# AIOS_WORKER_SUPERVISOR_FOR='"$WORKTREE"'
+      delay=1
+      while true; do
+        started=$SECONDS
+        uv run python -m aios worker
+        ec=$?
+        ran=$((SECONDS - started))
+        if (( ran > 30 )); then delay=1; fi
+        echo "[supervisor] worker exited ec=$ec ran=${ran}s, restarting in ${delay}s" >&2
+        sleep "$delay"
+        if (( delay < 15 )); then delay=$((delay * 2)); fi
+        if (( delay > 15 )); then delay=15; fi
+      done
+    ' > "$WORKTREE/.logs/worker.log" 2>&1 & )
 
   # Wait for bot identification or fatal
   local deadline=$((SECONDS + 60))
