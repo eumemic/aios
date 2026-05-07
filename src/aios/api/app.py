@@ -73,6 +73,11 @@ def create_app() -> FastAPI:
         description="Open-source agent runtime: Postgres-backed sessions, "
         "Docker sandbox, any LiteLLM model.",
         lifespan=lifespan,
+        # One schema per Pydantic model (not a Foo-Input / Foo-Output pair).
+        # We use distinct ``Foo`` / ``FooCreate`` / ``FooUpdate`` types instead
+        # of the read-only-field split, and the hyphenated split-schema names
+        # break openapi-python-client when it generates the typed SDK.
+        separate_input_output_schemas=False,
     )
     install_exception_handlers(app)
     app.include_router(health.router)
