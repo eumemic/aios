@@ -6,6 +6,7 @@ import httpx
 from typer.testing import CliRunner
 
 from aios.cli.app import app
+from tests.unit.cli.conftest import resource_response
 
 runner = CliRunner()
 
@@ -19,7 +20,7 @@ def test_list_with_pagination(mocked_cli):
 
 
 def test_create_ergonomic_with_display_name(mocked_cli):
-    mocked_cli.queue_response(httpx.Response(201, json={"id": "vlt_new"}))
+    mocked_cli.queue_response(httpx.Response(201, json=resource_response("vault", id="vlt_new")))
     result = runner.invoke(
         app,
         ["vaults", "create", "--display-name", "prod-secrets"],
@@ -59,7 +60,11 @@ def test_create_requires_display_name_when_ergonomic(mocked_cli):
 
 
 def test_archive_uses_post(mocked_cli):
-    mocked_cli.queue_response(httpx.Response(200, json={"id": "vlt_1", "archived_at": "t"}))
+    mocked_cli.queue_response(
+        httpx.Response(
+            200, json=resource_response("vault", archived_at="2024-01-02T00:00:00+00:00")
+        )
+    )
     result = runner.invoke(app, ["vaults", "archive", "vlt_1"])
     assert result.exit_code == 0, result.output
     assert mocked_cli.captured.method == "POST"

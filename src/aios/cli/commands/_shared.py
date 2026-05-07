@@ -1,19 +1,19 @@
-"""Helpers shared by every resource subcommand.
-
-Keeps the per-resource files tiny — they mostly declare columns and call
-the helpers here.
-"""
+"""Helpers shared by every resource subcommand."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import typer
+from pydantic import ValidationError
 
-from aios.cli.client import AiosClient
+from aios.cli.client import AiosApiError, AiosClient
 from aios.cli.output import OutputFormat, print_json, print_note, print_table
 from aios.cli.runtime import CliState, get_state
+from aios.models.common import ErrorResponse
+from aios.sdk._generated.types import Response, Unset
 
 
 def with_client(ctx: typer.Context) -> tuple[CliState, AiosClient]:
@@ -93,6 +93,80 @@ def fetch_all(
         if cursor is None:
             break
     return {"data": accumulated, "has_more": False, "next_after": None}
+
+
+def unwrap(response: Response[Any]) -> Any:
+    """2xx → parsed body (``None`` for 204); non-2xx → :class:`AiosApiError`."""
+    status = int(response.status_code)
+    if 200 <= status < 300:
+        return response.parsed
+    try:
+        body = json.loads(response.content) if response.content else None
+    except (ValueError, json.JSONDecodeError):
+        body = None
+    if body is None:
+        raise AiosApiError(
+            status_code=status,
+            error_type="http_error",
+            message=response.content.decode(errors="replace") or f"HTTP {status}",
+        )
+    try:
+        envelope = ErrorResponse.model_validate(body)
+    except ValidationError:
+        raise AiosApiError(
+            status_code=status, error_type="http_error", message=json.dumps(body)
+        ) from None
+    raise AiosApiError(
+        status_code=status,
+        error_type=envelope.error.type,
+        message=envelope.error.message,
+        detail=envelope.error.detail,
+    )
+
+
+def render_paginated(
+    ctx: typer.Context,
+    fn: Callable[..., Response[Any]],
+    *,
+    columns: Sequence[str],
+    all_: bool,
+    limit: int = 50,
+    after: Any = None,
+    max_widths: dict[str, int] | None = None,
+    page_size: int = 200,
+    **filters: Any,
+) -> None:
+    """Render an SDK list endpoint, paginated or fully fetched per ``all_``.
+
+    Single entry point used by every ``aios <resource> list`` command:
+    opens an SDK client, walks pages when ``all_`` is True (or fetches one
+    page otherwise), then renders through :func:`render_list`.
+    """
+    state = get_state(ctx)
+    with state.sdk_client() as client:
+        if all_:
+            items: list[Any] = []
+            cursor: str | None = None
+            while True:
+                kwargs: dict[str, Any] = {**filters, "limit": page_size}
+                if cursor is not None:
+                    kwargs["after"] = cursor
+                page = unwrap(fn(client=client, **kwargs))
+                items.extend(page.data)
+                if isinstance(page.has_more, Unset) or not page.has_more:
+                    break
+                if isinstance(page.next_after, Unset) or page.next_after is None:
+                    break
+                cursor = page.next_after
+            envelope: dict[str, Any] = {
+                "data": [item.to_dict() for item in items],
+                "has_more": False,
+                "next_after": None,
+            }
+        else:
+            page = unwrap(fn(client=client, limit=limit, after=after, **filters))
+            envelope = page.to_dict()
+    render_list(state.output_format, envelope, columns=columns, max_widths=max_widths)
 
 
 def fetch_all_events(

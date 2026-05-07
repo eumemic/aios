@@ -7,16 +7,19 @@ from typing import Annotated
 
 import typer
 
-from aios.cli.commands._shared import (
-    fetch_all,
-    just_client,
-    render_list,
-    render_single,
-    with_client,
-)
+from aios.cli.commands._shared import render_paginated, render_single, unwrap
 from aios.cli.files import PayloadError, load_payload
 from aios.cli.output import print_error, print_success
-from aios.cli.runtime import run_or_die
+from aios.cli.runtime import get_state, run_or_die
+from aios.sdk._generated.api.environments import (
+    archive_environment,
+    create_environment,
+    get_environment,
+    list_environments,
+    update_environment,
+)
+from aios.sdk._generated.models.environment_create import EnvironmentCreate
+from aios.sdk._generated.models.environment_update import EnvironmentUpdate
 
 app = typer.Typer(name="envs", help="Manage environments (sandbox configs).", no_args_is_help=True)
 
@@ -31,16 +34,14 @@ def list_(
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
-        with client:
-            envelope = (
-                fetch_all(client, "/v1/environments")
-                if all_
-                else client.request(
-                    "GET", "/v1/environments", params={"limit": limit, "after": after}
-                )
-            )
-        render_list(state.output_format, envelope, columns=_COLS)
+        render_paginated(
+            ctx,
+            list_environments.sync_detailed,
+            columns=_COLS,
+            all_=all_,
+            limit=limit,
+            after=after,
+        )
 
     run_or_die(_run)
 
@@ -48,10 +49,9 @@ def list_(
 @app.command("get")
 def get(ctx: typer.Context, env_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request("GET", f"/v1/environments/{env_id}")
-        render_single(obj)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(get_environment.sync_detailed(client=client, env_id=env_id))
+        render_single(obj.to_dict())
 
     run_or_die(_run)
 
@@ -69,10 +69,10 @@ def create(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        client = just_client(ctx)
-        with client:
-            obj = client.request("POST", "/v1/environments", json_body=payload)
-        render_single(obj)
+        body = EnvironmentCreate.from_dict(payload)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(create_environment.sync_detailed(client=client, body=body))
+        render_single(obj.to_dict())
         return None
 
     run_or_die(_run)
@@ -92,10 +92,10 @@ def update(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        client = just_client(ctx)
-        with client:
-            obj = client.request("PUT", f"/v1/environments/{env_id}", json_body=payload)
-        render_single(obj)
+        body = EnvironmentUpdate.from_dict(payload)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(update_environment.sync_detailed(client=client, env_id=env_id, body=body))
+        render_single(obj.to_dict())
         return None
 
     run_or_die(_run)
@@ -104,9 +104,8 @@ def update(
 @app.command("archive", help="Archive an environment (soft-delete, retained for audit).")
 def archive(ctx: typer.Context, env_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            client.request("DELETE", f"/v1/environments/{env_id}")
+        with get_state(ctx).sdk_client() as client:
+            unwrap(archive_environment.sync_detailed(client=client, env_id=env_id))
         print_success("archived", env_id)
 
     run_or_die(_run)

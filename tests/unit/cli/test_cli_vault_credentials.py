@@ -6,6 +6,7 @@ import httpx
 from typer.testing import CliRunner
 
 from aios.cli.app import app
+from tests.unit.cli.conftest import resource_response
 
 runner = CliRunner()
 
@@ -33,7 +34,9 @@ def test_create_via_body_file(mocked_cli, tmp_path):
         '{"display_name": "my-creds", "mcp_server_url": "http://x",'
         ' "auth_type": "static_bearer", "token": "t"}'
     )
-    mocked_cli.queue_response(httpx.Response(201, json={"id": "cred_new"}))
+    mocked_cli.queue_response(
+        httpx.Response(201, json=resource_response("vault_credential", id="cred_new"))
+    )
     result = runner.invoke(
         app,
         [
@@ -57,7 +60,9 @@ def test_create_via_file_alias(mocked_cli, tmp_path):
     body.write_text(
         '{"display_name": "x", "mcp_server_url": "http://y", "auth_type": "static_bearer", "token": "t"}'
     )
-    mocked_cli.queue_response(httpx.Response(201, json={"id": "cred_new"}))
+    mocked_cli.queue_response(
+        httpx.Response(201, json=resource_response("vault_credential", id="cred_new"))
+    )
     result = runner.invoke(
         app,
         ["vaults", "credentials", "create", "vlt_1", "--file", str(body)],
@@ -67,7 +72,7 @@ def test_create_via_file_alias(mocked_cli, tmp_path):
 
 
 def test_archive_uses_post(mocked_cli):
-    mocked_cli.queue_response(httpx.Response(200, json={"id": "cred_1"}))
+    mocked_cli.queue_response(httpx.Response(200, json=resource_response("vault_credential")))
     result = runner.invoke(app, ["vaults", "credentials", "archive", "vlt_1", "cred_1"])
     assert result.exit_code == 0, result.output
     assert mocked_cli.captured.method == "POST"

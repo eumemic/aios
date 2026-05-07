@@ -11,6 +11,7 @@ import httpx
 from typer.testing import CliRunner
 
 from aios.cli.app import app
+from tests.unit.cli.conftest import resource_response
 
 runner = CliRunner()
 
@@ -47,7 +48,9 @@ def test_list_filters_pass_through(mocked_cli):
 
 
 def test_create_ergonomic(mocked_cli):
-    mocked_cli.queue_response(httpx.Response(201, json={"id": "conn_new"}))
+    mocked_cli.queue_response(
+        httpx.Response(201, json=resource_response("connection", id="conn_new"))
+    )
     result = runner.invoke(
         app,
         [
@@ -69,7 +72,9 @@ def test_create_ergonomic(mocked_cli):
 
 
 def test_create_ergonomic_with_metadata_json(mocked_cli):
-    mocked_cli.queue_response(httpx.Response(201, json={"id": "conn_new"}))
+    mocked_cli.queue_response(
+        httpx.Response(201, json=resource_response("connection", id="conn_new"))
+    )
     result = runner.invoke(
         app,
         [
@@ -131,7 +136,7 @@ def test_archive_uses_delete(mocked_cli):
 
 
 def test_attach_posts_session_id(mocked_cli):
-    mocked_cli.queue_response(httpx.Response(200, json={"id": "conn_01"}))
+    mocked_cli.queue_response(httpx.Response(200, json=resource_response("connection")))
     result = runner.invoke(
         app,
         ["connections", "attach", "conn_01", "--session-id", "sess_1"],

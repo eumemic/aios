@@ -97,3 +97,44 @@ def mocked_cli(monkeypatch: pytest.MonkeyPatch) -> MockedCli:
     monkeypatch.setenv("AIOS_API_KEY", "test-key")
     monkeypatch.setenv("AIOS_URL", "http://test.invalid")
     return MockedCli(captured=captured, response_queue=responses)
+
+
+# Minimally-complete response payloads for SDK-backed CLI tests. The SDK's
+# ``<Model>.from_dict`` is strict about required fields, so tests asserting
+# only request shape still need a complete response to keep the parser from
+# raising before the exit-code assertion runs.
+
+_FIXED_TS = "2024-01-01T00:00:00+00:00"
+
+_RESOURCE_BASES: dict[str, dict[str, Any]] = {
+    "connection": {
+        "id": "conn_01",
+        "connector": "signal",
+        "account": "acct-1",
+        "metadata": {},
+        "created_at": _FIXED_TS,
+        "updated_at": _FIXED_TS,
+    },
+    "vault": {
+        "id": "vlt_1",
+        "display_name": "test",
+        "metadata": {},
+        "created_at": _FIXED_TS,
+        "updated_at": _FIXED_TS,
+    },
+    "vault_credential": {
+        "id": "cred_1",
+        "vault_id": "vlt_1",
+        "display_name": "test-cred",
+        "mcp_server_url": "http://example.invalid",
+        "auth_type": "static_bearer",
+        "metadata": {},
+        "created_at": _FIXED_TS,
+        "updated_at": _FIXED_TS,
+    },
+}
+
+
+def resource_response(kind: str, **overrides: Any) -> dict[str, Any]:
+    """Return a minimally-valid SDK response payload for the given resource kind."""
+    return {**_RESOURCE_BASES[kind], **overrides}
