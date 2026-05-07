@@ -14,6 +14,42 @@ time and the conftest env-var fixture only fires after collection.
 
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
+
+
+@pytest.fixture
+def polished_mcp() -> Any:
+    """Live ``FastApiMCP`` against ``create_app()``'s spec, with polish applied.
+
+    Same code path as ``_mount_mcp`` minus the HTTP mount. Imports are
+    inside the fixture body because ``aios.harness.procrastinate_app``
+    runs ``get_settings()`` at module-import time and the conftest
+    env-var fixture only fires after collection.
+    """
+    from fastapi import Depends
+    from fastapi_mcp import AuthConfig, FastApiMCP
+
+    from aios.api.app import (
+        MCP_INSTRUCTIONS,
+        _apply_mcp_polish,
+        _compute_mcp_excluded_operations,
+        create_app,
+    )
+    from aios.api.deps import require_bearer_auth
+
+    app = create_app()
+    mcp = FastApiMCP(
+        app,
+        name="test",
+        description="test",
+        exclude_operations=_compute_mcp_excluded_operations(app),
+        auth_config=AuthConfig(dependencies=[Depends(require_bearer_auth)]),
+    )
+    _apply_mcp_polish(app, mcp, instructions=MCP_INSTRUCTIONS)
+    return mcp
+
 
 def test_mcp_route_is_mounted() -> None:
     from aios.api.app import create_app
@@ -88,36 +124,14 @@ class TestVerbDefaultAnnotations:
         assert _verb_default_annotations("post") == {}
 
 
-def test_apply_mcp_polish_populates_annotations_and_instructions() -> None:
+def test_apply_mcp_polish_populates_annotations_and_instructions(polished_mcp: Any) -> None:
     """End-to-end: the MCP tool list has verb-default annotations + overrides.
 
-    Constructs a fresh FastApiMCP against the live app's OpenAPI spec and
-    applies the polish — same code path as ``_mount_mcp`` but without the
-    HTTP mount. Verifies representative tools across each
-    annotation-bearing category.
+    Verifies representative tools across each annotation-bearing category.
     """
-    from fastapi import Depends
-    from fastapi_mcp import AuthConfig, FastApiMCP
+    from aios.api.app import MCP_INSTRUCTIONS
 
-    from aios.api.app import (
-        MCP_INSTRUCTIONS,
-        _apply_mcp_polish,
-        _compute_mcp_excluded_operations,
-        create_app,
-    )
-    from aios.api.deps import require_bearer_auth
-
-    app = create_app()
-    mcp = FastApiMCP(
-        app,
-        name="test",
-        description="test",
-        exclude_operations=_compute_mcp_excluded_operations(app),
-        auth_config=AuthConfig(dependencies=[Depends(require_bearer_auth)]),
-    )
-    _apply_mcp_polish(app, mcp, instructions=MCP_INSTRUCTIONS)
-
-    by_name = {tool.name: tool for tool in mcp.tools}
+    by_name = {tool.name: tool for tool in polished_mcp.tools}
 
     # GET → readOnlyHint
     assert by_name["list_agents"].annotations is not None
@@ -147,11 +161,11 @@ def test_apply_mcp_polish_populates_annotations_and_instructions() -> None:
     assert by_name["create_agent"].annotations is None
 
     # Server-level instructions populated
-    assert mcp.server.instructions == MCP_INSTRUCTIONS
+    assert polished_mcp.server.instructions == MCP_INSTRUCTIONS
 
 
-def test_apply_mcp_polish_cleans_schemas() -> None:
-    """End-to-end: the MCP tool list ships with cleaned-up descriptions and inputSchemas.
+def test_apply_mcp_polish_cleans_schemas(polished_mcp: Any) -> None:
+    """End-to-end: every MCP tool ships with cleaned-up descriptions and inputSchemas.
 
     Three transforms applied per tool:
     - The auto-appended ``### Responses:`` example block is gone.
@@ -162,28 +176,7 @@ def test_apply_mcp_polish_cleans_schemas() -> None:
     plus a deliberate non-target case to confirm complex multi-branch
     ``anyOf`` schemas are preserved.
     """
-    from fastapi import Depends
-    from fastapi_mcp import AuthConfig, FastApiMCP
-
-    from aios.api.app import (
-        MCP_INSTRUCTIONS,
-        _apply_mcp_polish,
-        _compute_mcp_excluded_operations,
-        create_app,
-    )
-    from aios.api.deps import require_bearer_auth
-
-    app = create_app()
-    mcp = FastApiMCP(
-        app,
-        name="test",
-        description="test",
-        exclude_operations=_compute_mcp_excluded_operations(app),
-        auth_config=AuthConfig(dependencies=[Depends(require_bearer_auth)]),
-    )
-    _apply_mcp_polish(app, mcp, instructions=MCP_INSTRUCTIONS)
-
-    by_name = {tool.name: tool for tool in mcp.tools}
+    by_name = {tool.name: tool for tool in polished_mcp.tools}
 
     # Description-strip: the ``### Responses:`` block + example payload are gone
     archive = by_name["archive_session"]

@@ -176,82 +176,87 @@ def _verb_default_annotations(verb: str) -> dict[str, bool]:
 
 _RESPONSE_BLOCK_SEPARATOR = "\n\n### Responses:\n"
 
+# JSON Schema keywords whose presence on a branch means the branch carries
+# enough structure that lifting its keys onto a parent during nullable-anyOf
+# flattening would change semantics.  ``_flatten_nullable_anyof`` only
+# flattens when the non-null branch's keys are a subset of the
+# scalar-metadata allow-list, so this set is the inverse safety net.
+_FLATTEN_SAFE_KEYS = frozenset(
+    {
+        "type",
+        "enum",
+        "const",
+        "format",
+        "pattern",
+        "minLength",
+        "maxLength",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "description",
+        "default",
+        "examples",
+        "title",
+    }
+)
+
 
 def _strip_response_block(description: str) -> str | None:
-    """Drop fastapi-mcp's auto-appended ``### Responses:`` example block.
-
-    fastapi-mcp inlines the route's full response example into every tool
-    description (``fastapi_mcp/openapi/convert.py:74,155``).  The model
-    will see the real response when it calls; the embedded example is
-    pure prompt bloat, often longer than the route's actual prose.
-    """
-    head, _sep, _rest = description.partition(_RESPONSE_BLOCK_SEPARATOR)
+    """Drop fastapi-mcp's auto-appended ``### Responses:`` example block."""
+    # ``rpartition`` guards against a route docstring legitimately containing
+    # the literal separator — fastapi-mcp's block is always last-appended.
+    head, _sep, _rest = description.rpartition(_RESPONSE_BLOCK_SEPARATOR)
     return head.rstrip() or None
 
 
 def _drop_redundant_titles(schema: dict[str, Any]) -> None:
-    """Recursively drop ``title`` fields whose value equals their property key.
-
-    fastapi-mcp emits ``"title": "<param_name>"`` for every parameter,
-    duplicating the key the property is already keyed by.  Pure noise.
-    """
-    properties = schema.get("properties")
-    if isinstance(properties, dict):
-        for key, prop in properties.items():
-            if isinstance(prop, dict):
-                if prop.get("title") == key:
-                    prop.pop("title")
-                _drop_redundant_titles(prop)
-    items = schema.get("items")
-    if isinstance(items, dict):
+    """Recursively drop ``title`` fields whose value matches the property key."""
+    for key, prop in schema.get("properties", {}).items():
+        if prop.get("title") == key:
+            prop.pop("title")
+        _drop_redundant_titles(prop)
+    if (items := schema.get("items")) is not None:
         _drop_redundant_titles(items)
     for combinator in ("anyOf", "oneOf", "allOf"):
-        branches = schema.get(combinator)
-        if isinstance(branches, list):
-            for branch in branches:
-                if isinstance(branch, dict):
-                    _drop_redundant_titles(branch)
+        for branch in schema.get(combinator, []):
+            _drop_redundant_titles(branch)
 
 
 def _flatten_nullable_anyof(schema: dict[str, Any]) -> None:
     """Rewrite ``anyOf: [T, {"type": "null"}]`` to ``T`` with ``type: [..., "null"]``.
 
-    Conservative — only flattens when one branch is exactly
-    ``{"type": "null"}`` and the other has a string ``type`` plus only
-    scalar metadata (``enum``, ``format``, ``minLength``, etc.).  Branches
-    that carry nested ``properties`` / ``items`` / ``additionalProperties``
-    keep their original ``anyOf`` form so we don't silently change the
-    semantics of complex unions.
+    Only flattens when the non-null branch's keys are a subset of
+    :data:`_FLATTEN_SAFE_KEYS` — anything else (nested ``properties``,
+    further combinators) keeps its original ``anyOf`` form to avoid
+    silently changing the semantics of complex unions.
     """
-    properties = schema.get("properties")
-    if isinstance(properties, dict):
-        for prop in properties.values():
-            if isinstance(prop, dict):
-                _flatten_nullable_anyof(prop)
-    items = schema.get("items")
-    if isinstance(items, dict):
+    for prop in schema.get("properties", {}).values():
+        _flatten_nullable_anyof(prop)
+    if (items := schema.get("items")) is not None:
         _flatten_nullable_anyof(items)
+    for combinator in ("anyOf", "oneOf", "allOf"):
+        for branch in schema.get(combinator, []):
+            _flatten_nullable_anyof(branch)
 
     branches = schema.get("anyOf")
     if not isinstance(branches, list) or len(branches) != 2:
         return
-    null_branch = next(
-        (b for b in branches if isinstance(b, dict) and b == {"type": "null"}),
-        None,
-    )
-    if null_branch is None:
-        return
-    other = next(b for b in branches if b is not null_branch)
-    if not isinstance(other, dict):
+    b0, b1 = branches
+    if b0 == {"type": "null"}:
+        other = b1
+    elif b1 == {"type": "null"}:
+        other = b0
+    else:
         return
     other_type = other.get("type")
     if not isinstance(other_type, str):
         return
-    if {"properties", "items", "additionalProperties", "patternProperties"} & other.keys():
+    if not other.keys() <= _FLATTEN_SAFE_KEYS:
         return
     del schema["anyOf"]
-    for key, value in other.items():
-        schema[key] = value
+    schema.update(other)
     schema["type"] = [other_type, "null"]
 
 
