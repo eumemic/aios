@@ -15,17 +15,20 @@ import pytest
 
 from aios.config import get_settings
 from aios.harness import runtime, vision
-from aios.sandbox.container import CommandResult, ContainerHandle
+from aios.sandbox.backends.base import CommandResult, SandboxHandle
 from aios.sandbox.volumes import session_attachments_dir, workspace_dir_for
 from aios.tools.read import read_handler
 from aios.tools.registry import ToolResult
 
 
 class _StubRegistry:
-    def __init__(self, handle: ContainerHandle) -> None:
-        self._handle = handle
+    """Minimal stand-in for SandboxRegistry used by handler tests."""
 
-    async def get_or_provision(self, session_id: str, **_kwargs: Any) -> ContainerHandle:
+    def __init__(self, handle: SandboxHandle, result: CommandResult) -> None:
+        self._handle = handle
+        self.exec = AsyncMock(return_value=result)
+
+    async def get_or_provision(self, session_id: str, **_kwargs: Any) -> SandboxHandle:
         return self._handle
 
 
@@ -37,32 +40,35 @@ def temp_workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 
 
 @pytest.fixture
-def stub_handle(tmp_path: Path) -> ContainerHandle:
-    handle = ContainerHandle(
+def stub_handle(tmp_path: Path) -> SandboxHandle:
+    handle = SandboxHandle(
         session_id="sess_01TEST",
-        container_id="container_abc",
+        sandbox_id="container_abc",
         workspace_path=tmp_path,
-    )
-    handle.run_command = AsyncMock(  # type: ignore[method-assign]
-        return_value=CommandResult(
-            exit_code=0,
-            stdout="",
-            stderr="",
-            timed_out=False,
-            truncated=False,
-        )
     )
     return handle
 
 
 @pytest.fixture
-def stub_runtime(stub_handle: ContainerHandle) -> Any:
+def canned_result() -> CommandResult:
+    return CommandResult(
+        exit_code=0,
+        stdout="",
+        stderr="",
+        timed_out=False,
+        truncated=False,
+    )
+
+
+@pytest.fixture
+def stub_runtime(stub_handle: SandboxHandle, canned_result: CommandResult) -> Any:
     prev_registry = runtime.sandbox_registry
     prev_pool = runtime.pool
-    runtime.sandbox_registry = _StubRegistry(stub_handle)  # type: ignore[assignment]
+    stub = _StubRegistry(stub_handle, canned_result)
+    runtime.sandbox_registry = stub  # type: ignore[assignment]
     runtime.pool = MagicMock()
     try:
-        yield
+        yield stub
     finally:
         runtime.sandbox_registry = prev_registry
         runtime.pool = prev_pool
@@ -201,7 +207,7 @@ class TestImageBranch:
     async def test_non_bind_mount_falls_back_to_docker_exec(
         self,
         temp_workspace_root: Path,
-        stub_handle: ContainerHandle,
+        stub_handle: SandboxHandle,
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
@@ -209,7 +215,7 @@ class TestImageBranch:
         with one combined stat+base64 invocation."""
         stub_get_session_model.value = "model/vision"
         b64_payload = base64.b64encode(b"otherbytes").decode()
-        stub_handle.run_command = AsyncMock(  # type: ignore[method-assign]
+        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
             return_value=CommandResult(
                 exit_code=0,
                 stdout=f"10\n{b64_payload}",
@@ -222,10 +228,10 @@ class TestImageBranch:
         result = await read_handler("sess_01TEST", {"path": "/etc/foo.png"})
 
         assert isinstance(result, ToolResult)
-        run_command = stub_handle.run_command
+        run_command = stub_runtime.exec
         assert isinstance(run_command, AsyncMock)
         assert run_command.call_count == 1
-        cmd_arg = run_command.call_args.args[0]
+        cmd_arg = run_command.call_args.args[1]
         assert "stat -c %s" in cmd_arg
         assert "base64 -w0" in cmd_arg
 
@@ -244,7 +250,7 @@ class TestImagePathTraversalAttack:
     async def test_dotdot_traversal_does_not_return_host_bytes(
         self,
         temp_workspace_root: Path,
-        stub_handle: ContainerHandle,
+        stub_handle: SandboxHandle,
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
@@ -255,7 +261,7 @@ class TestImagePathTraversalAttack:
 
         sandbox_payload = b"sandbox-side-content"
         b64 = base64.b64encode(sandbox_payload).decode()
-        stub_handle.run_command = AsyncMock(  # type: ignore[method-assign]
+        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
             return_value=CommandResult(
                 exit_code=0,
                 stdout=f"{len(sandbox_payload)}\n{b64}",
@@ -273,12 +279,12 @@ class TestImagePathTraversalAttack:
             assert b64_secret not in url
         elif isinstance(result, dict):
             assert b64_secret not in str(result)
-        assert stub_handle.run_command.call_count == 1  # type: ignore[attr-defined]
+        assert stub_runtime.exec.call_count == 1  # type: ignore[attr-defined]
 
     async def test_attachments_traversal_does_not_return_host_bytes(
         self,
         temp_workspace_root: Path,
-        stub_handle: ContainerHandle,
+        stub_handle: SandboxHandle,
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
@@ -287,7 +293,7 @@ class TestImagePathTraversalAttack:
         (temp_workspace_root / "leak.png").write_bytes(host_secret)
         session_attachments_dir("sess_01TEST").mkdir(parents=True, exist_ok=True)
 
-        stub_handle.run_command = AsyncMock(  # type: ignore[method-assign]
+        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
             return_value=CommandResult(
                 exit_code=0,
                 stdout=f"{4}\n{base64.b64encode(b'safe').decode()}",
@@ -309,7 +315,7 @@ class TestImagePathTraversalAttack:
     async def test_symlink_escape_does_not_return_host_bytes(
         self,
         temp_workspace_root: Path,
-        stub_handle: ContainerHandle,
+        stub_handle: SandboxHandle,
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
@@ -325,7 +331,7 @@ class TestImagePathTraversalAttack:
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "sneaky.jpg").symlink_to(outside)
 
-        stub_handle.run_command = AsyncMock(  # type: ignore[method-assign]
+        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
             return_value=CommandResult(
                 exit_code=0,
                 stdout=f"{3}\n{base64.b64encode(b'sbx').decode()}",
@@ -343,4 +349,4 @@ class TestImagePathTraversalAttack:
             assert b64_secret not in url
         elif isinstance(result, dict):
             assert b64_secret not in str(result)
-        assert stub_handle.run_command.call_count == 1  # type: ignore[attr-defined]
+        assert stub_runtime.exec.call_count == 1  # type: ignore[attr-defined]

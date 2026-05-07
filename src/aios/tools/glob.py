@@ -69,7 +69,8 @@ async def glob_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
 
     cmd = f"rg --files --glob {shlex.quote(pattern)} {shlex.quote(path)} 2>/dev/null | head -500"
 
-    result = await handle.run_command(
+    result = await sandbox.exec(
+        handle,
         cmd,
         timeout_seconds=settings.bash_default_timeout_seconds,
         max_output_bytes=settings.bash_max_output_bytes,

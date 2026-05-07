@@ -176,6 +176,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     from aios.db.pool import create_pool
     from aios.harness import runtime
     from aios.harness.task_registry import TaskRegistry
+    from aios.sandbox.backends import make_backend
     from aios.sandbox.registry import SandboxRegistry
     from aios.tools.registry import registry
 
@@ -183,7 +184,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     pool = await create_pool(settings.db_url, min_size=1, max_size=4)
     crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
     task_reg = TaskRegistry()
-    sandbox_reg = SandboxRegistry()
+    sandbox_reg = SandboxRegistry(backend=make_backend(settings.sandbox_backend))
 
     prev = (
         runtime.pool,

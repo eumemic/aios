@@ -1,7 +1,7 @@
 """The bash tool — run a shell command inside the session's sandbox.
 
 Phase 3's headline tool. Each call runs ``bash -c <command>`` inside the
-session's sandbox container via :meth:`ContainerHandle.run_command`. The
+session's sandbox container via :meth:`SandboxRegistry.exec`. The
 container is lazily provisioned on the first bash call (or any tool
 call) and reused for subsequent calls within the same turn.
 
@@ -124,7 +124,8 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     sandbox = runtime.require_sandbox_registry()
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
-    result = await handle.run_command(
+    result = await sandbox.exec(
+        handle,
         command,
         timeout_seconds=timeout,
         max_output_bytes=settings.bash_max_output_bytes,

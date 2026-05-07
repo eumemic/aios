@@ -1,21 +1,21 @@
 """Unit tests for ``SandboxRegistry.release_if_mounts_changed`` (issue #198).
 
 Exercises the worker-side mount-drift detector that recycles a cached
-container when the session's attached memory stores have changed since
-the container was provisioned. The check fires once per step at the top
+sandbox when the session's attached memory stores have changed since
+the sandbox was provisioned. The check fires once per step at the top
 of ``loop._run_session_step_body``.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
+import asyncio
 
 import pytest
 
 from aios.models.memory_stores import Access, MemoryStoreResourceEcho
-from aios.sandbox.container import ContainerHandle
+from aios.sandbox.backends.base import SandboxHandle
 from aios.sandbox.registry import SandboxRegistry
+from tests.helpers.sandbox import FakeBackend, make_handle
 
 
 def _echo(
@@ -31,58 +31,56 @@ def _echo(
     )
 
 
-def _handle(
-    session_id: str, snapshot: frozenset[tuple[str, str, str]] = frozenset()
-) -> ContainerHandle:
-    return ContainerHandle(
-        session_id=session_id,
-        container_id="abc123def456abc123def456",
-        workspace_path=Path("/tmp/w"),
-        mount_snapshot=snapshot,
-    )
+def _seed(
+    registry: SandboxRegistry,
+    session_id: str,
+    snapshot: frozenset[tuple[str, ...]] = frozenset(),
+) -> SandboxHandle:
+    handle = make_handle(session_id=session_id, mount_snapshot=snapshot)
+    registry._handles[session_id] = handle
+    registry._last_used[session_id] = 0.0
+    return handle
 
 
 class TestReleaseIfMountsChanged:
     async def test_no_cached_handle_is_noop(self) -> None:
-        registry = SandboxRegistry()
-        provisioner_release = AsyncMock()
-        with patch("aios.sandbox.registry.provisioner_release", provisioner_release):
-            await registry.release_if_mounts_changed("sess_NONE", [_echo("memstore_a", "a")], [])
-        provisioner_release.assert_not_awaited()
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        await registry.release_if_mounts_changed("sess_NONE", [_echo("memstore_a", "a")], [])
+        destroys = [c for c in backend.calls if c[0] == "destroy"]
+        assert destroys == []
 
     async def test_identical_snapshot_does_not_release(self) -> None:
-        registry = SandboxRegistry()
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
         snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
-        registry._handles["sess_X"] = _handle("sess_X", snapshot)
-        registry._last_used["sess_X"] = 0.0
+        _seed(registry, "sess_X", snapshot)
 
-        provisioner_release = AsyncMock()
-        with patch("aios.sandbox.registry.provisioner_release", provisioner_release):
-            await registry.release_if_mounts_changed("sess_X", [_echo("memstore_a", "a")], [])
+        await registry.release_if_mounts_changed("sess_X", [_echo("memstore_a", "a")], [])
 
-        provisioner_release.assert_not_awaited()
+        destroys = [c for c in backend.calls if c[0] == "destroy"]
+        assert destroys == []
         assert registry.peek("sess_X") is not None
 
     async def test_reorder_does_not_release(self) -> None:
-        registry = SandboxRegistry()
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
         snapshot = frozenset(
             [
                 ("memstore", "memstore_a", "a", "read_write"),
                 ("memstore", "memstore_b", "b", "read_only"),
             ]
         )
-        registry._handles["sess_X"] = _handle("sess_X", snapshot)
-        registry._last_used["sess_X"] = 0.0
+        _seed(registry, "sess_X", snapshot)
 
-        provisioner_release = AsyncMock()
-        with patch("aios.sandbox.registry.provisioner_release", provisioner_release):
-            await registry.release_if_mounts_changed(
-                "sess_X",
-                [_echo("memstore_b", "b", "read_only"), _echo("memstore_a", "a")],
-                [],
-            )
+        await registry.release_if_mounts_changed(
+            "sess_X",
+            [_echo("memstore_b", "b", "read_only"), _echo("memstore_a", "a")],
+            [],
+        )
 
-        provisioner_release.assert_not_awaited()
+        destroys = [c for c in backend.calls if c[0] == "destroy"]
+        assert destroys == []
         assert registry.peek("sess_X") is not None
 
     @pytest.mark.parametrize(
@@ -98,17 +96,16 @@ class TestReleaseIfMountsChanged:
     async def test_diverging_snapshot_releases(
         self, current_echoes: list[MemoryStoreResourceEcho], description: str
     ) -> None:
-        registry = SandboxRegistry()
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
         snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
-        handle = _handle("sess_X", snapshot)
-        registry._handles["sess_X"] = handle
-        registry._last_used["sess_X"] = 0.0
+        handle = _seed(registry, "sess_X", snapshot)
 
-        provisioner_release = AsyncMock()
-        with patch("aios.sandbox.registry.provisioner_release", provisioner_release):
-            await registry.release_if_mounts_changed("sess_X", current_echoes, [])
+        await registry.release_if_mounts_changed("sess_X", current_echoes, [])
 
-        provisioner_release.assert_awaited_once_with(handle)
+        destroys = [c for c in backend.calls if c[0] == "destroy"]
+        assert len(destroys) == 1
+        assert destroys[0][1]["sandbox_id"] == handle.sandbox_id
         assert registry.peek("sess_X") is None
         assert "sess_X" not in registry._last_used
 
@@ -116,36 +113,58 @@ class TestReleaseIfMountsChanged:
         """The per-session lock must serialize release_if_mounts_changed against
         a concurrent get_or_provision so the registry never returns a handle
         that's about to be torn down."""
-        import asyncio
+        from unittest.mock import AsyncMock
 
-        registry = SandboxRegistry()
+        from aios.sandbox.spec import ProvisioningPlan
+
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
         old_snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
-        old_handle = _handle("sess_X", old_snapshot)
-        registry._handles["sess_X"] = old_handle
-        registry._last_used["sess_X"] = 0.0
+        old_handle = _seed(registry, "sess_X", old_snapshot)
+        new_snapshot = frozenset([("memstore", "memstore_b", "b", "read_write")])
 
         provision_started = asyncio.Event()
         let_provision_continue = asyncio.Event()
 
-        async def slow_provision(_session_id: str) -> ContainerHandle:
+        async def slow_build_spec(_session_id: str) -> ProvisioningPlan:
             provision_started.set()
             await let_provision_continue.wait()
-            return _handle("sess_X", frozenset([("memstore", "memstore_b", "b", "read_write")]))
+            from aios.sandbox.backends.base import Mount, SandboxSpec, Unrestricted
+
+            spec = SandboxSpec(
+                session_id="sess_X",
+                instance_id="inst_T",
+                workspace=Mount(host_path=old_handle.workspace_path, sandbox_path="/workspace"),
+                extra_mounts=(),
+                environment={},
+                labels={},
+                network_policy=Unrestricted(),
+                host_gateway_aliases=(),
+                image="aios-sandbox:test",
+            )
+            return ProvisioningPlan(
+                spec=spec,
+                env_config=None,
+                memory_echoes=[],
+                github_echoes=[],
+                git_proxy=None,
+                mount_snapshot=new_snapshot,
+            )
 
         # Force a cache miss so get_or_provision contends for the lock.
         registry._handles.pop("sess_X")
 
-        provisioner_release = AsyncMock()
+        from unittest.mock import patch
+
         with (
-            patch("aios.sandbox.registry.provision_for_session", slow_provision),
-            patch("aios.sandbox.registry.provisioner_release", provisioner_release),
+            patch("aios.sandbox.registry.build_spec_from_session", slow_build_spec),
+            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
         ):
             provision_task = asyncio.create_task(registry.get_or_provision("sess_X"))
             await provision_started.wait()
 
-            # Re-seed the cache so release has something to release once it
-            # gets the lock — this models a real cycle: provision finishes,
-            # then drift is detected, then release fires.
             release_task = asyncio.create_task(
                 registry.release_if_mounts_changed("sess_X", [_echo("memstore_b", "b")], [])
             )
@@ -158,4 +177,5 @@ class TestReleaseIfMountsChanged:
             await release_task
 
         # New handle's snapshot matches current echoes → no release fired.
-        provisioner_release.assert_not_awaited()
+        destroys = [c for c in backend.calls if c[0] == "destroy"]
+        assert destroys == []

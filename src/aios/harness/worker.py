@@ -54,6 +54,7 @@ from aios.harness.sweep import (
 from aios.harness.task_registry import TaskRegistry
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
+from aios.sandbox.backends import make_backend
 from aios.sandbox.registry import SandboxRegistry
 
 # 64-bit hash of the lock identifier; stable across processes / restarts.
@@ -102,7 +103,7 @@ async def worker_main() -> None:
     try:
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
         crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-        sandbox_registry = SandboxRegistry()
+        sandbox_registry = SandboxRegistry(backend=make_backend(settings.sandbox_backend))
         task_registry = TaskRegistry()
         mcp_session_pool = McpSessionPool()
         connector_specs = resolve_connector_specs(settings)

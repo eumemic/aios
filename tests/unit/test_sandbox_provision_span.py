@@ -2,35 +2,60 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aios.sandbox.backends.base import (
+    Mount,
+    SandboxSpec,
+    Unrestricted,
+)
 from aios.sandbox.registry import SandboxRegistry
+from aios.sandbox.spec import ProvisioningPlan
+from tests.helpers.sandbox import FakeBackend, make_handle
 
 
-@pytest.fixture
-def fake_handle() -> SimpleNamespace:
-    return SimpleNamespace(
+def _make_plan() -> ProvisioningPlan:
+    spec = SandboxSpec(
         session_id="sess_01TEST",
-        container_id="abc123def456abc123def456",
-        workspace_path="/tmp/w",
+        instance_id="inst_TEST",
+        workspace=Mount(host_path=Path("/tmp/w"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={},
+        network_policy=Unrestricted(),
+        host_gateway_aliases=(),
+        image="aios-sandbox:test",
+    )
+    return ProvisioningPlan(
+        spec=spec,
+        env_config=None,
+        memory_echoes=[],
+        github_echoes=[],
+        git_proxy=None,
+        mount_snapshot=frozenset(),
     )
 
 
 class TestSandboxProvisionSpan:
-    async def test_cold_start_emits_span_pair(self, fake_handle: SimpleNamespace) -> None:
-        registry = SandboxRegistry()
+    async def test_cold_start_emits_span_pair(self) -> None:
+        backend = FakeBackend(next_handle_id="abc123def456abc123def456")
+        registry = SandboxRegistry(backend=backend)
         pool = MagicMock()
         span_start = SimpleNamespace(id="ev_span_start")
         append_event = AsyncMock(return_value=span_start)
 
         with (
             patch(
-                "aios.sandbox.registry.provision_for_session",
-                AsyncMock(return_value=fake_handle),
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=_make_plan()),
             ),
+            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
             patch("aios.services.sessions.append_event", append_event),
         ):
             await registry.get_or_provision("sess_01TEST", pool=pool)
@@ -44,28 +69,34 @@ class TestSandboxProvisionSpan:
         assert end_data["is_error"] is False
         assert end_data["container_id"] == "abc123def456"  # 12-char short id
 
-    async def test_warm_hit_emits_no_span(self, fake_handle: SimpleNamespace) -> None:
-        registry = SandboxRegistry()
-        registry._handles["sess_01TEST"] = fake_handle  # type: ignore[assignment]
+    async def test_warm_hit_emits_no_span(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        cached = make_handle(sandbox_id="warmcache_id")
+        registry._handles["sess_01TEST"] = cached
         pool = MagicMock()
         append_event = AsyncMock()
 
         with patch("aios.services.sessions.append_event", append_event):
             result = await registry.get_or_provision("sess_01TEST", pool=pool)
 
-        assert result is fake_handle
+        assert result is cached
         append_event.assert_not_awaited()
 
-    async def test_no_pool_no_span(self, fake_handle: SimpleNamespace) -> None:
+    async def test_no_pool_no_span(self) -> None:
         """When pool is not passed (e.g. worker startup paths), no span emission."""
-        registry = SandboxRegistry()
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
         append_event = AsyncMock()
 
         with (
             patch(
-                "aios.sandbox.registry.provision_for_session",
-                AsyncMock(return_value=fake_handle),
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=_make_plan()),
             ),
+            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
             patch("aios.services.sessions.append_event", append_event),
         ):
             await registry.get_or_provision("sess_01TEST")
@@ -73,7 +104,8 @@ class TestSandboxProvisionSpan:
         append_event.assert_not_awaited()
 
     async def test_provision_failure_emits_error_end_span(self) -> None:
-        registry = SandboxRegistry()
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
         pool = MagicMock()
         span_start = SimpleNamespace(id="ev_span_start")
         append_event = AsyncMock(return_value=span_start)
@@ -83,7 +115,7 @@ class TestSandboxProvisionSpan:
 
         with (
             patch(
-                "aios.sandbox.registry.provision_for_session",
+                "aios.sandbox.registry.build_spec_from_session",
                 AsyncMock(side_effect=ProvisionError("docker exploded")),
             ),
             patch("aios.services.sessions.append_event", append_event),

@@ -1,26 +1,37 @@
-"""Sandbox provisioner pins language-package installs into /workspace (#227).
+"""Sandbox provisioning pins language-package installs into /workspace (#227).
 
 Tools the model installs at runtime (``pip install``, ``npm install -g``)
-land in the container's writable layer by default, which gets reclaimed
+land in the sandbox's writable layer by default, which gets reclaimed
 on ``sandbox.idle_release``.  By pre-creating ``/workspace/.venv`` and
 ``/workspace/.npm`` at every provision and setting the matching env
 vars (``VIRTUAL_ENV``, ``NPM_CONFIG_PREFIX``, ``NODE_PATH``, ``PATH``),
 those installs land inside the bind mount and survive idle release.
 
-These tests exercise the provisioner's docker-run argv composition and
-the post-start setup that creates the runtime dirs.
+After the SandboxBackend refactor these tests exercise:
+- The ``DockerBackend.create`` argv translation (env vars on the
+  spec end up as ``--env`` flags on the docker CLI).
+- The ``setup.ensure_workspace_runtime_dirs`` helper (the post-create
+  command that creates the venv + npm dirs idempotently).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from aios.models.environments import EnvironmentConfig
-from aios.sandbox.container import CommandResult
+from aios.sandbox.backends.base import (
+    CommandResult,
+    Mount,
+    SandboxSpec,
+    Unrestricted,
+)
+from aios.sandbox.backends.docker import DockerBackend
+from aios.sandbox.setup import (
+    WORKSPACE_RUNTIME_ENV,
+    ensure_workspace_runtime_dirs,
+)
+from tests.helpers.sandbox import FakeBackend, make_handle
 
 
 def _env_dict_from_argv(argv: list[str]) -> dict[str, str]:
@@ -40,80 +51,53 @@ def _env_dict_from_argv(argv: list[str]) -> dict[str, str]:
     return out
 
 
-async def _capture_provision_argv(
-    *,
-    env_config: EnvironmentConfig | None = None,
-    session_env: dict[str, str] | None = None,
-) -> tuple[list[str], list[tuple[tuple[Any, ...], dict[str, Any]]]]:
-    """Run provision_for_session under heavy mock; return docker run argv
-    and the run_command call list (for inspecting the post-start setup).
-    """
-    from aios.sandbox.container import ContainerHandle
+def _make_spec(environment: dict[str, str]) -> SandboxSpec:
+    """Construct a SandboxSpec with the given environment, defaults elsewhere."""
+    return SandboxSpec(
+        session_id="sess_01TEST",
+        instance_id="inst_TEST",
+        workspace=Mount(host_path=Path("/tmp/ws"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment=environment,
+        labels={"aios.managed": "true"},
+        network_policy=Unrestricted(),
+        host_gateway_aliases=(),
+        image="aios-sandbox:test",
+    )
 
-    captured_argv: list[list[str]] = []
-    captured_run_commands: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
-    async def fake_run_docker(argv: list[str]) -> tuple[int, bytes, bytes]:
-        captured_argv.append(argv)
+async def _capture_docker_argv(spec: SandboxSpec, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Call DockerBackend.create(spec) with _run_docker patched; return argv."""
+    captured: list[list[str]] = []
+
+    async def fake_run_docker(
+        argv: list[str], *, timeout_s: float = 30.0
+    ) -> tuple[int, bytes, bytes]:
+        captured.append(argv)
         return 0, b"container_abc123\n", b""
 
-    async def fake_run_command(self: ContainerHandle, command: str, **kwargs: Any) -> CommandResult:
-        captured_run_commands.append(((command,), kwargs))
-        return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
-
-    with (
-        patch.object(ContainerHandle, "run_command", fake_run_command),
-        patch(
-            "aios.sandbox.provisioner._load_environment_config",
-            AsyncMock(return_value=env_config),
-        ),
-        patch("aios.sandbox.provisioner._run_docker", fake_run_docker),
-        patch(
-            "aios.sandbox.provisioner._load_session_provisioning",
-            AsyncMock(return_value=("/tmp/ws", session_env or {})),
-        ),
-        patch(
-            "aios.sandbox.provisioner._materialize_memory_mounts",
-            AsyncMock(return_value=[]),
-        ),
-        patch(
-            "aios.sandbox.provisioner._materialize_github_clones",
-            AsyncMock(return_value=([], None)),
-        ),
-        patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
-        patch(
-            "aios.sandbox.volumes.ensure_session_attachments_dir",
-            return_value=Path("/tmp/attachments"),
-        ),
-    ):
-        from aios.sandbox.provisioner import provision_for_session
-
-        await provision_for_session("sess_01TEST")
-
-    return captured_argv[0], captured_run_commands
+    monkeypatch.setattr("aios.sandbox.backends.docker._run_docker", fake_run_docker)
+    await DockerBackend().create(spec)
+    return captured[0]
 
 
-class TestWorkspaceRuntimeEnv:
-    @pytest.mark.asyncio
-    async def test_default_env_includes_venv_and_npm_pins(self) -> None:
-        """Default provision (no env_config) sets VIRTUAL_ENV / NPM_CONFIG_PREFIX
-        / NODE_PATH / PATH so language-package installs land inside the bind
-        mount.
-        """
-        argv, _ = await _capture_provision_argv()
+class TestWorkspaceRuntimeEnvOnSpec:
+    """The merged environment on a SandboxSpec carries the runtime pins."""
+
+    async def test_default_env_includes_venv_and_npm_pins(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        spec = _make_spec(environment=dict(WORKSPACE_RUNTIME_ENV))
+        argv = await _capture_docker_argv(spec, monkeypatch)
         env = _env_dict_from_argv(argv)
 
         assert env["VIRTUAL_ENV"] == "/workspace/.venv"
         assert env["NPM_CONFIG_PREFIX"] == "/workspace/.npm"
         assert env["NODE_PATH"] == "/workspace/.npm/lib/node_modules"
 
-    @pytest.mark.asyncio
-    async def test_path_prepends_venv_and_npm_bin(self) -> None:
-        """PATH must put /workspace/.venv/bin and /workspace/.npm/bin BEFORE
-        system bin dirs so the venv's python and npm-installed tools resolve
-        ahead of the image's defaults.
-        """
-        argv, _ = await _capture_provision_argv()
+    async def test_path_prepends_venv_and_npm_bin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        spec = _make_spec(environment=dict(WORKSPACE_RUNTIME_ENV))
+        argv = await _capture_docker_argv(spec, monkeypatch)
         env = _env_dict_from_argv(argv)
 
         path_segments = env["PATH"].split(":")
@@ -122,14 +106,10 @@ class TestWorkspaceRuntimeEnv:
         assert "/usr/local/bin" in path_segments
         assert "/usr/bin" in path_segments
 
-    @pytest.mark.asyncio
-    async def test_user_env_overrides_runtime_pins(self) -> None:
-        """env_config.env wins over the runtime-pin defaults so operators
-        can opt out (e.g. a session that needs a different VIRTUAL_ENV).
-        """
-        argv, _ = await _capture_provision_argv(
-            env_config=EnvironmentConfig(env={"VIRTUAL_ENV": "/custom/venv"})
-        )
+    async def test_user_env_overrides_runtime_pins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        merged = {**WORKSPACE_RUNTIME_ENV, "VIRTUAL_ENV": "/custom/venv"}
+        spec = _make_spec(environment=merged)
+        argv = await _capture_docker_argv(spec, monkeypatch)
         env = _env_dict_from_argv(argv)
 
         assert env["VIRTUAL_ENV"] == "/custom/venv"
@@ -137,32 +117,43 @@ class TestWorkspaceRuntimeEnv:
 
 
 class TestWorkspaceRuntimeDirsSetup:
-    @pytest.mark.asyncio
+    """ensure_workspace_runtime_dirs runs the right command via the backend."""
+
     async def test_post_start_creates_venv_and_npm_dirs(self) -> None:
-        """After docker run, the provisioner runs a setup command that
-        creates ``/workspace/.venv`` (via python3 -m venv) and the
-        ``/workspace/.npm/{lib,bin}`` dirs.
-        """
-        _, run_commands = await _capture_provision_argv()
+        backend = FakeBackend()
+        handle = make_handle()
 
-        cmds = [pargs[0] for pargs, _pkwargs in run_commands]
-        joined = "\n".join(cmds)
+        await ensure_workspace_runtime_dirs(backend, handle, session_id=handle.session_id)
 
+        commands = [c[1]["command"] for c in backend.calls if c[0] == "exec"]
+        joined = "\n".join(commands)
         assert "python3 -m venv /workspace/.venv" in joined
         assert "/workspace/.npm/lib" in joined
         assert "/workspace/.npm/bin" in joined
 
-    @pytest.mark.asyncio
     async def test_venv_creation_is_idempotent(self) -> None:
-        """The setup command must not re-run python3 -m venv when the venv
-        already exists (would error out / waste cycles on every cold
-        provision).  A ``[ -e .venv/bin/python ] || python3 -m venv``
-        guard handles this in one shell call.
-        """
-        _, run_commands = await _capture_provision_argv()
+        backend = FakeBackend()
+        handle = make_handle()
 
-        cmds = [pargs[0] for pargs, _pkwargs in run_commands]
-        joined = "\n".join(cmds)
+        await ensure_workspace_runtime_dirs(backend, handle, session_id=handle.session_id)
 
+        commands = [c[1]["command"] for c in backend.calls if c[0] == "exec"]
+        joined = "\n".join(commands)
         assert "[ -e /workspace/.venv/bin/python ]" in joined
         assert "||" in joined
+
+    async def test_failure_is_logged_not_raised(self) -> None:
+        """Failure of the setup exec must not propagate — the model can
+        still operate without the persistence layer."""
+        backend = FakeBackend()
+        backend.next_result = CommandResult(
+            exit_code=1,
+            stdout="",
+            stderr="boom",
+            timed_out=False,
+            truncated=False,
+        )
+        handle = make_handle()
+
+        # Must not raise.
+        await ensure_workspace_runtime_dirs(backend, handle, session_id=handle.session_id)

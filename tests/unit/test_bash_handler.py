@@ -13,51 +13,53 @@ from unittest.mock import AsyncMock
 import pytest
 
 from aios.harness import runtime
-from aios.sandbox.container import CommandResult, ContainerHandle
+from aios.sandbox.backends.base import CommandResult, SandboxHandle
 from aios.tools.bash import BashArgumentError, bash_handler
 
 
 class _StubRegistry:
-    """Minimal stand-in for SandboxRegistry used by the handler."""
+    """Minimal stand-in for SandboxRegistry used by handler tests."""
 
-    def __init__(self, handle: ContainerHandle) -> None:
+    def __init__(self, handle: SandboxHandle, result: CommandResult) -> None:
         self._handle = handle
         self.get_or_provision_calls: list[str] = []
+        self.exec = AsyncMock(return_value=result)
 
-    async def get_or_provision(self, session_id: str, **_kwargs: Any) -> ContainerHandle:
+    async def get_or_provision(self, session_id: str, **_kwargs: Any) -> SandboxHandle:
         self.get_or_provision_calls.append(session_id)
         return self._handle
 
 
 @pytest.fixture
-def stub_handle() -> ContainerHandle:
-    """A ContainerHandle with run_command mocked out."""
-    handle = ContainerHandle(
+def stub_handle() -> SandboxHandle:
+    """A SandboxHandle with run_command mocked out."""
+    handle = SandboxHandle(
         session_id="sess_01TEST",
-        container_id="container_abc123",
+        sandbox_id="container_abc123",
         workspace_path=Path("/tmp/aios-test-workspace"),
-    )
-    # Patch run_command so we don't need a real container.
-    handle.run_command = AsyncMock(  # type: ignore[method-assign]
-        return_value=CommandResult(
-            exit_code=0,
-            stdout="hello world\n",
-            stderr="",
-            timed_out=False,
-            truncated=False,
-        )
     )
     return handle
 
 
 @pytest.fixture
-def stub_registry(stub_handle: ContainerHandle) -> _StubRegistry:
+def canned_result() -> CommandResult:
+    return CommandResult(
+        exit_code=0,
+        stdout="hello world\n",
+        stderr="",
+        timed_out=False,
+        truncated=False,
+    )
+
+
+@pytest.fixture
+def stub_registry(stub_handle: SandboxHandle, canned_result: CommandResult) -> _StubRegistry:
     """Install a stub sandbox registry on the runtime module, restore after."""
     from unittest.mock import MagicMock
 
     prev_registry = runtime.sandbox_registry
     prev_pool = runtime.pool
-    stub = _StubRegistry(stub_handle)
+    stub = _StubRegistry(stub_handle, canned_result)
     runtime.sandbox_registry = stub  # type: ignore[assignment]
     runtime.pool = MagicMock()
     try:
@@ -97,7 +99,7 @@ class TestArguments:
 
 class TestResultShape:
     async def test_returns_structured_dict(
-        self, stub_registry: _StubRegistry, stub_handle: ContainerHandle
+        self, stub_registry: _StubRegistry, stub_handle: SandboxHandle
     ) -> None:
         result = await bash_handler("sess_01TEST", {"command": "echo hello world"})
         assert result == {
@@ -113,13 +115,14 @@ class TestResultShape:
         assert stub_registry.get_or_provision_calls == ["sess_01TEST"]
 
     async def test_passes_command_to_container(
-        self, stub_registry: _StubRegistry, stub_handle: ContainerHandle
+        self, stub_registry: _StubRegistry, stub_handle: SandboxHandle
     ) -> None:
         await bash_handler("sess_01TEST", {"command": "echo hi"})
-        stub_handle.run_command.assert_awaited_once()  # type: ignore[attr-defined]
-        kwargs: dict[str, Any] = stub_handle.run_command.await_args.kwargs  # type: ignore[attr-defined]
-        args: tuple[Any, ...] = stub_handle.run_command.await_args.args  # type: ignore[attr-defined]
-        assert args[0] == "echo hi"
+        stub_registry.exec.assert_awaited_once()  # type: ignore[attr-defined]
+        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        args: tuple[Any, ...] = stub_registry.exec.await_args.args  # type: ignore[attr-defined]
+        # call signature is (handle, command, kwargs)
+        assert args[1] == "echo hi"
         assert kwargs["timeout_seconds"] > 0
         assert kwargs["max_output_bytes"] > 0
 
@@ -128,7 +131,7 @@ class TestTimeoutCapping:
     async def test_caps_at_default_maximum(
         self,
         stub_registry: _StubRegistry,
-        stub_handle: ContainerHandle,
+        stub_handle: SandboxHandle,
     ) -> None:
         from aios.config import get_settings
 
@@ -137,17 +140,17 @@ class TestTimeoutCapping:
             "sess_01TEST",
             {"command": "true", "timeout_seconds": max_allowed * 10},
         )
-        kwargs: dict[str, Any] = stub_handle.run_command.await_args.kwargs  # type: ignore[attr-defined]
+        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
         assert kwargs["timeout_seconds"] == max_allowed
 
     async def test_respects_smaller_timeout(
         self,
         stub_registry: _StubRegistry,
-        stub_handle: ContainerHandle,
+        stub_handle: SandboxHandle,
     ) -> None:
         await bash_handler(
             "sess_01TEST",
             {"command": "true", "timeout_seconds": 5},
         )
-        kwargs: dict[str, Any] = stub_handle.run_command.await_args.kwargs  # type: ignore[attr-defined]
+        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
         assert kwargs["timeout_seconds"] == 5

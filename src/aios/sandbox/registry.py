@@ -1,32 +1,51 @@
-"""Per-worker in-memory registry of live session containers.
+"""Per-worker in-memory registry of live session sandboxes.
 
-The registry makes container provisioning lazy: a tool handler asks for
-a session's :class:`ContainerHandle`; the registry either returns the
-cached handle or calls :func:`provision_for_session` to create a fresh
-one.
+The registry makes sandbox provisioning lazy: a tool handler asks for
+a session's :class:`SandboxHandle`; the registry either returns the
+cached handle or builds a :class:`ProvisioningPlan` (DB queries +
+GitProxy + clone materialization) and asks its :class:`SandboxBackend`
+to bring a sandbox up.
 
 One registry instance per worker process, stashed on
 :mod:`aios.harness.runtime`. The procrastinate ``lock`` parameter
-ensures only one step runs per session at a time.
+ensures only one step runs per session at a time; the registry's own
+per-session ``asyncio.Lock`` serializes provisioning against drift
+detection so the registry never returns a handle that's about to be
+torn down.
 
-Container lifecycle is decoupled from step lifecycle via an idle-TTL
-reaper. Containers stay alive across consecutive steps for the same
+Sandbox lifecycle is decoupled from step lifecycle via an idle-TTL
+reaper. Sandboxes stay alive across consecutive steps for the same
 session and are released when idle for longer than
 ``container_idle_timeout_seconds``. Worker shutdown calls
 :meth:`release_all` to clean up everything.
+
+The registry owns the per-session :class:`GitProxy`, not the handle —
+the proxy is a host-side process whose lifetime tracks the session, not
+the sandbox container. Releasing a session stops its proxy (if any) in
+addition to destroying the sandbox.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from aios.logging import get_logger
-from aios.sandbox.container import ContainerHandle, mount_snapshot_from_echoes
-from aios.sandbox.provisioner import force_remove, list_managed_containers, provision_for_session
-from aios.sandbox.provisioner import release as provisioner_release
+from aios.sandbox.backends.base import CommandResult, SandboxBackend, SandboxHandle
+from aios.sandbox.git_proxy import GitProxy
+from aios.sandbox.setup import (
+    apply_network_lockdown,
+    ensure_workspace_runtime_dirs,
+    install_packages,
+)
+from aios.sandbox.spec import (
+    ProvisioningPlan,
+    build_spec_from_session,
+    mount_snapshot_from_echoes,
+)
 
 if TYPE_CHECKING:
     import asyncpg
@@ -37,14 +56,32 @@ if TYPE_CHECKING:
 log = get_logger("aios.sandbox.registry")
 
 
-class SandboxRegistry:
-    """Maps session_id to a live :class:`ContainerHandle` with idle-TTL."""
+# Hostname the sandbox uses to reach the host-side credential proxy.
+# Imported here for the network-lockdown extra-host-ports list.
+_PROXY_HOST_ALIAS = "host.docker.internal"
 
-    def __init__(self) -> None:
-        self._handles: dict[str, ContainerHandle] = {}
+
+class SandboxRegistry:
+    """Maps session_id to a live :class:`SandboxHandle` with idle-TTL.
+
+    Construct with the chosen :class:`SandboxBackend`; the registry holds
+    it for the worker's lifetime and dispatches all provision/exec/destroy
+    calls through it. Backend swaps require restarting the worker (the
+    registry doesn't re-discover existing sandboxes from a different
+    backend).
+    """
+
+    def __init__(self, backend: SandboxBackend) -> None:
+        self._backend = backend
+        self._handles: dict[str, SandboxHandle] = {}
+        self._git_proxies: dict[str, GitProxy] = {}
         self._last_used: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task[None] | None = None
+
+    @property
+    def backend(self) -> SandboxBackend:
+        return self._backend
 
     def _lock_for(self, session_id: str) -> asyncio.Lock:
         lock = self._locks.get(session_id)
@@ -58,8 +95,8 @@ class SandboxRegistry:
         session_id: str,
         *,
         pool: asyncpg.Pool[Any] | None = None,
-    ) -> ContainerHandle:
-        """Return the cached handle, or provision a new container.
+    ) -> SandboxHandle:
+        """Return the cached handle, or provision a new sandbox.
 
         Passing ``pool`` emits a ``sandbox_provision_*`` span pair on
         the cold-start path only (issue #78) — warm hits stay
@@ -82,9 +119,9 @@ class SandboxRegistry:
 
     async def _provision_with_span(
         self, session_id: str, *, pool: asyncpg.Pool[Any] | None
-    ) -> ContainerHandle:
+    ) -> SandboxHandle:
         if pool is None:
-            return await provision_for_session(session_id)
+            return await self._provision(session_id)
 
         from aios.services import sessions as sessions_service
 
@@ -92,9 +129,9 @@ class SandboxRegistry:
             pool, session_id, "span", {"event": "sandbox_provision_start"}
         )
         is_error = False
-        handle: ContainerHandle | None = None
+        handle: SandboxHandle | None = None
         try:
-            handle = await provision_for_session(session_id)
+            handle = await self._provision(session_id)
             return handle
         except Exception:
             is_error = True
@@ -106,16 +143,148 @@ class SandboxRegistry:
                 "is_error": is_error,
             }
             if handle is not None:
-                end_payload["container_id"] = handle.container_id[:12]
+                end_payload["container_id"] = handle.sandbox_id[:12]
             await sessions_service.append_event(pool, session_id, "span", end_payload)
 
+    async def _provision(self, session_id: str) -> SandboxHandle:
+        """Build the plan, ask the backend to create the sandbox, run setup."""
+        plan = await build_spec_from_session(session_id)
+
+        # Record the GitProxy before backend.create so a failure midway
+        # has us in a state where release() will find and stop it.
+        if plan.git_proxy is not None:
+            self._git_proxies[session_id] = plan.git_proxy
+
+        try:
+            handle = await self._backend.create(plan.spec)
+            handle = dataclasses.replace(handle, mount_snapshot=plan.mount_snapshot)
+        except BaseException:
+            # Spec was built (proxy may be running) but the backend
+            # couldn't create the sandbox. Stop the proxy so its port +
+            # token map don't leak.
+            if plan.git_proxy is not None:
+                try:
+                    await plan.git_proxy.stop()
+                except Exception as cleanup_err:
+                    log.warning(
+                        "sandbox.git_proxy_cleanup_after_create_failure",
+                        session_id=session_id,
+                        error=str(cleanup_err),
+                    )
+                self._git_proxies.pop(session_id, None)
+            raise
+
+        # Setup steps after create. If any of these raise, tear the
+        # sandbox down so we don't leak an empty container alongside
+        # the proxy.
+        try:
+            await ensure_workspace_runtime_dirs(self._backend, handle, session_id=session_id)
+            await install_packages(self._backend, handle, plan.env_config, session_id=session_id)
+            await self._maybe_apply_lockdown(handle, plan, session_id)
+        except BaseException:
+            await self._destroy_quietly(handle, session_id)
+            raise
+
+        log.info(
+            "sandbox.provisioned",
+            session_id=session_id,
+            container_id=handle.sandbox_id[:12],
+            workspace_path=str(handle.workspace_path),
+            backend=self._backend.name,
+            networking=type(plan.spec.network_policy).__name__,
+        )
+        return handle
+
+    async def _maybe_apply_lockdown(
+        self, handle: SandboxHandle, plan: ProvisioningPlan, session_id: str
+    ) -> None:
+        """Apply network lockdown if the plan calls for it."""
+        from aios.models.environments import LimitedNetworking
+
+        networking = plan.env_config.networking if plan.env_config else None
+        if not isinstance(networking, LimitedNetworking):
+            return
+        extra_host_ports: list[tuple[str, int]] = (
+            [(_PROXY_HOST_ALIAS, plan.git_proxy.port)] if plan.git_proxy is not None else []
+        )
+        await apply_network_lockdown(
+            self._backend,
+            handle,
+            networking,
+            session_id=session_id,
+            extra_host_ports=extra_host_ports,
+        )
+
+    async def _destroy_quietly(self, handle: SandboxHandle, session_id: str) -> None:
+        """Tear down the handle's sandbox and stop the session's proxy.
+
+        Used by the partial-failure cleanup path during provisioning, so
+        cleanup errors are warnings (not raises). Caller's exception is
+        propagating.
+        """
+        try:
+            await self._backend.destroy(handle)
+        except Exception as err:
+            log.warning(
+                "sandbox.destroy_during_cleanup_failed",
+                session_id=session_id,
+                container_id=handle.sandbox_id[:12],
+                error=str(err),
+            )
+        proxy = self._git_proxies.pop(session_id, None)
+        if proxy is not None:
+            try:
+                await proxy.stop()
+            except Exception as err:
+                log.warning(
+                    "sandbox.git_proxy_stop_during_cleanup_failed",
+                    session_id=session_id,
+                    error=str(err),
+                )
+
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        timeout_seconds: int,
+        max_output_bytes: int,
+        cwd: str = "/workspace",
+    ) -> CommandResult:
+        """Run ``command`` inside ``handle``'s sandbox via the backend.
+
+        Tools call this instead of the deleted ``handle.run_command``;
+        the registry forwards to ``self._backend.exec(...)``.
+        """
+        return await self._backend.exec(
+            handle,
+            command,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=max_output_bytes,
+            cwd=cwd,
+        )
+
     async def release(self, session_id: str) -> None:
-        """Tear down one session's container. No-op if not cached."""
+        """Tear down one session's sandbox + proxy. No-op if not cached."""
         handle = self._handles.pop(session_id, None)
         self._last_used.pop(session_id, None)
+        proxy = self._git_proxies.pop(session_id, None)
+
+        if proxy is not None:
+            try:
+                await proxy.stop()
+            except Exception as err:
+                # Best-effort cleanup — never let a stuck proxy block
+                # sandbox teardown.
+                log.warning(
+                    "sandbox.git_proxy_stop_failed",
+                    session_id=session_id,
+                    error=str(err),
+                )
+
         if handle is None:
             return
-        await provisioner_release(handle)
+        await self._backend.destroy(handle)
 
     async def release_if_mounts_changed(
         self,
@@ -123,7 +292,7 @@ class SandboxRegistry:
         memory_echoes: list[MemoryStoreResourceEcho],
         github_echoes: list[GithubRepositoryResourceEcho],
     ) -> None:
-        """Release the cached container if its mount snapshot has drifted.
+        """Release the cached sandbox if its mount snapshot has drifted.
 
         Acquires the per-session lock so a tool task from a prior step
         can't race with the release via ``get_or_provision``.
@@ -142,46 +311,94 @@ class SandboxRegistry:
             log.info(
                 "sandbox.released_for_mount_change",
                 session_id=session_id,
-                container_id=handle.container_id[:12],
+                container_id=handle.sandbox_id[:12],
             )
             self._handles.pop(session_id, None)
             self._last_used.pop(session_id, None)
-            await provisioner_release(handle)
+            proxy = self._git_proxies.pop(session_id, None)
+            if proxy is not None:
+                try:
+                    await proxy.stop()
+                except Exception as err:
+                    log.warning(
+                        "sandbox.git_proxy_stop_failed",
+                        session_id=session_id,
+                        error=str(err),
+                    )
+            await self._backend.destroy(handle)
 
-    def peek(self, session_id: str) -> ContainerHandle | None:
+    def peek(self, session_id: str) -> SandboxHandle | None:
         """Return the cached handle without provisioning. ``None`` if not cached."""
         return self._handles.get(session_id)
 
     def evict(self, session_id: str) -> None:
-        """Drop the cache entry without docker teardown (container is dead)."""
+        """Drop the cache entry without backend teardown (sandbox is dead).
+
+        Used by tool_dispatch when it detects a sandbox-side failure that
+        suggests the sandbox itself is unhealthy; the next tool call will
+        cold-start a fresh one.
+        """
         self._last_used.pop(session_id, None)
         if self._handles.pop(session_id, None) is not None:
             log.info("sandbox.evicted", session_id=session_id)
+        # Drop the proxy too — a fresh sandbox will get a fresh proxy
+        # from the next provision pass.
+        proxy = self._git_proxies.pop(session_id, None)
+        if proxy is not None:
+            # Fire-and-forget — eviction is best-effort cleanup.
+            asyncio.create_task(self._stop_proxy_quietly(proxy, session_id))  # noqa: RUF006
+
+    async def _stop_proxy_quietly(self, proxy: GitProxy, session_id: str) -> None:
+        try:
+            await proxy.stop()
+        except Exception as err:
+            log.warning(
+                "sandbox.git_proxy_stop_after_evict_failed",
+                session_id=session_id,
+                error=str(err),
+            )
 
     async def release_all(self) -> None:
-        """Tear down every container. Called at worker shutdown."""
+        """Tear down every sandbox + proxy. Called at worker shutdown."""
         handles = list(self._handles.values())
+        proxies = list(self._git_proxies.values())
         self._handles.clear()
         self._last_used.clear()
+        self._git_proxies.clear()
+
+        if proxies:
+            proxy_results = await asyncio.gather(
+                *(p.stop() for p in proxies), return_exceptions=True
+            )
+            for _p, result in zip(proxies, proxy_results, strict=True):
+                if isinstance(result, BaseException):
+                    log.warning(
+                        "sandbox.release_all_proxy_error",
+                        error=str(result),
+                    )
+
         if not handles:
             return
         log.info("sandbox.release_all", count=len(handles))
         results = await asyncio.gather(
-            *(provisioner_release(h) for h in handles), return_exceptions=True
+            *(self._backend.destroy(h) for h in handles), return_exceptions=True
         )
         for h, result in zip(handles, results, strict=True):
             if isinstance(result, BaseException):
                 log.warning(
                     "sandbox.release_all_error",
                     session_id=h.session_id,
-                    container_id=h.container_id[:12],
+                    container_id=h.sandbox_id[:12],
                     error=str(result),
                 )
 
     async def reap_orphans(self, active_session_ids: Iterable[str]) -> int:
-        """At startup, remove containers not matching an active session."""
+        """At startup, remove sandboxes not matching an active session."""
+        from aios.config import get_settings
+
+        instance_id = get_settings().instance_id
         try:
-            managed = await list_managed_containers()
+            managed = await self._backend.list_managed(instance_id=instance_id)
         except Exception as err:
             log.warning("sandbox.reap_list_failed", error=str(err))
             return 0
@@ -190,21 +407,21 @@ class SandboxRegistry:
 
         active = set(active_session_ids)
         removed = 0
-        for container_id, session_id in managed:
-            if session_id and session_id in active:
+        for ref in managed:
+            if ref.session_id and ref.session_id in active:
                 continue
             log.info(
                 "sandbox.reap_orphan",
-                container_id=container_id[:12],
-                session_id=session_id or "<no-label>",
+                container_id=ref.sandbox_id[:12],
+                session_id=ref.session_id or "<no-label>",
             )
             try:
-                await force_remove(container_id)
+                await self._backend.force_remove(ref.sandbox_id)
                 removed += 1
             except Exception as err:
                 log.warning(
                     "sandbox.reap_remove_failed",
-                    container_id=container_id[:12],
+                    container_id=ref.sandbox_id[:12],
                     error=str(err),
                 )
         return removed
@@ -212,7 +429,7 @@ class SandboxRegistry:
     # ── idle-TTL reaper ──────────────────────────────────────────────────
 
     async def _reap_idle_loop(self, idle_timeout: float, interval: float = 60.0) -> None:
-        """Background loop: release containers idle > idle_timeout seconds."""
+        """Background loop: release sandboxes idle > idle_timeout seconds."""
         while True:
             await asyncio.sleep(interval)
             now = time.monotonic()

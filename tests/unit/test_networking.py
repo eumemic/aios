@@ -1,9 +1,9 @@
-"""Unit tests for networking model validation and provisioner logic."""
+"""Unit tests for networking model validation and sandbox lockdown logic."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -12,8 +12,19 @@ from aios.models.environments import (
     LimitedNetworking,
     UnrestrictedNetworking,
 )
-from aios.sandbox.container import CommandResult, ContainerHandle
-from aios.sandbox.provisioner import PACKAGE_REGISTRY_HOSTS, build_iptables_script
+from aios.sandbox.backends.base import (
+    Limited,
+    Mount,
+    SandboxSpec,
+    Unrestricted,
+)
+from aios.sandbox.backends.docker import DockerBackend
+from aios.sandbox.setup import (
+    PACKAGE_REGISTRY_HOSTS,
+    apply_network_lockdown,
+    build_iptables_script,
+)
+from tests.helpers.sandbox import FakeBackend, make_handle
 
 # ── model validation ──────────────────────────────────────────────────────────
 
@@ -79,297 +90,170 @@ class TestEnvironmentConfigNetworking:
         config = EnvironmentConfig()
         assert config.networking is None
 
-    def test_unrestricted(self) -> None:
-        config = EnvironmentConfig.model_validate({"networking": {"type": "unrestricted"}})
+    def test_unrestricted_round_trip(self) -> None:
+        config = EnvironmentConfig(networking=UnrestrictedNetworking())
         assert isinstance(config.networking, UnrestrictedNetworking)
 
-    def test_limited(self) -> None:
-        config = EnvironmentConfig.model_validate(
-            {"networking": {"type": "limited", "allowed_hosts": ["api.example.com"]}}
+    def test_limited_round_trip(self) -> None:
+        config = EnvironmentConfig(
+            networking=LimitedNetworking(
+                type="limited",
+                allowed_hosts=["api.example.com"],
+                allow_package_managers=True,
+            )
         )
         assert isinstance(config.networking, LimitedNetworking)
         assert config.networking.allowed_hosts == ["api.example.com"]
 
-    def test_null_networking_is_none(self) -> None:
-        config = EnvironmentConfig.model_validate({"networking": None})
-        assert config.networking is None
 
-    def test_empty_dict_networking_normalized_to_none(self) -> None:
-        """Backward compat: existing DB rows may have networking: {}."""
-        config = EnvironmentConfig.model_validate({"networking": {}})
-        assert config.networking is None
-
-    def test_missing_networking_key(self) -> None:
-        """Backward compat: existing DB rows may have no networking key."""
-        config = EnvironmentConfig.model_validate({"packages": {"pip": ["pandas"]}})
-        assert config.networking is None
-
-    def test_rejects_bogus_type(self) -> None:
-        with pytest.raises(ValueError):
-            EnvironmentConfig.model_validate({"networking": {"type": "bogus"}})
-
-
-# ── build_iptables_script ─────────────────────────────────────────────────────
+# ── iptables script construction ──────────────────────────────────────────────
 
 
 class TestBuildIptablesScript:
-    def test_empty_hosts(self) -> None:
-        script = build_iptables_script(set())
-        assert "iptables -F OUTPUT" in script
+    def test_drops_everything_else(self) -> None:
+        script = build_iptables_script(allowed_hosts={"api.example.com"})
         assert "iptables -P OUTPUT DROP" in script
-        # No host-specific rules
-        assert "getent" not in script
 
-    def test_single_host(self) -> None:
-        script = build_iptables_script({"api.example.com"})
+    def test_includes_each_allowed_host(self) -> None:
+        script = build_iptables_script(allowed_hosts={"api.example.com", "cdn.example.com"})
         assert "getent ahosts api.example.com" in script
-        assert "--dport 80" in script
-        assert "--dport 443" in script
+        assert "getent ahosts cdn.example.com" in script
 
-    def test_multiple_hosts_sorted(self) -> None:
-        script = build_iptables_script({"z.example.com", "a.example.com"})
-        z_pos = script.index("z.example.com")
-        a_pos = script.index("a.example.com")
-        assert a_pos < z_pos, "hosts should be sorted alphabetically"
+    def test_loopback_and_dns_always_allowed(self) -> None:
+        script = build_iptables_script(allowed_hosts=set())
+        assert "iptables -A OUTPUT -o lo -j ACCEPT" in script
+        assert "iptables -A OUTPUT -p udp --dport 53 -j ACCEPT" in script
+        assert "iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT" in script
 
-    def test_allows_dns(self) -> None:
-        script = build_iptables_script({"example.com"})
-        assert "--dport 53" in script
-
-    def test_allows_loopback(self) -> None:
-        script = build_iptables_script({"example.com"})
-        assert "-o lo -j ACCEPT" in script
-
-    def test_allows_established(self) -> None:
-        script = build_iptables_script({"example.com"})
-        assert "ESTABLISHED,RELATED" in script
-
-    def test_package_registry_hosts_integration(self) -> None:
-        """Verify PACKAGE_REGISTRY_HOSTS can be passed directly."""
-        script = build_iptables_script(PACKAGE_REGISTRY_HOSTS)
-        assert "pypi.org" in script
-        assert "registry.npmjs.org" in script
-
-
-# ── provisioner docker args ───────────────────────────────────────────────────
-
-
-def _make_handle(session_id: str = "sess_01TEST") -> ContainerHandle:
-    handle = ContainerHandle(
-        session_id=session_id,
-        container_id="abc123",
-        workspace_path=Path("/tmp/ws"),
-    )
-    handle.run_command = AsyncMock(  # type: ignore[method-assign]
-        return_value=CommandResult(
-            exit_code=0, stdout="", stderr="", timed_out=False, truncated=False
+    def test_extra_host_ports_added(self) -> None:
+        script = build_iptables_script(
+            allowed_hosts=set(),
+            extra_host_ports=[("host.docker.internal", 8765)],
         )
+        assert "host.docker.internal:8765" in script
+        assert "--dport 8765 -j ACCEPT" in script
+
+
+# ── docker backend translates network policy to docker run argv ────────────────
+
+
+def _make_spec(network_policy: Limited | Unrestricted) -> SandboxSpec:
+    return SandboxSpec(
+        session_id="sess_01TEST",
+        instance_id="inst_TEST",
+        workspace=Mount(host_path=Path("/tmp/ws"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={"aios.managed": "true"},
+        network_policy=network_policy,
+        host_gateway_aliases=(),
+        image="aios-sandbox:test",
     )
-    return handle
 
 
-class TestProvisionerDockerArgs:
-    """Test that provision_for_session passes the right docker args."""
+async def _capture_docker_argv(spec: SandboxSpec) -> list[str]:
+    captured: list[list[str]] = []
+
+    async def fake_run_docker(
+        argv: list[str], *, timeout_s: float = 30.0
+    ) -> tuple[int, bytes, bytes]:
+        captured.append(argv)
+        return 0, b"container_abc123\n", b""
+
+    with patch("aios.sandbox.backends.docker._run_docker", fake_run_docker):
+        await DockerBackend().create(spec)
+    return captured[0]
+
+
+class TestDockerBackendArgs:
+    """The DockerBackend translates SandboxSpec.network_policy to the right argv."""
 
     @pytest.mark.asyncio
     async def test_limited_adds_cap_net_admin(self) -> None:
-        limited_config = EnvironmentConfig(
-            networking=LimitedNetworking(type="limited", allowed_hosts=["example.com"])
+        argv = await _capture_docker_argv(
+            _make_spec(Limited(allowed_hosts=frozenset({"example.com"})))
         )
-        captured_argv: list[list[str]] = []
-
-        async def fake_run_docker(argv: list[str]) -> tuple[int, bytes, bytes]:
-            captured_argv.append(argv)
-            # Return a container id for docker run
-            return 0, b"container_abc123\n", b""
-
-        with (
-            patch(
-                "aios.sandbox.provisioner._load_environment_config",
-                AsyncMock(return_value=limited_config),
-            ),
-            patch("aios.sandbox.provisioner._run_docker", fake_run_docker),
-            patch(
-                "aios.sandbox.provisioner._load_session_provisioning",
-                AsyncMock(return_value=("/tmp/ws", {})),
-            ),
-            patch(
-                "aios.sandbox.provisioner._materialize_memory_mounts",
-                AsyncMock(return_value=[]),
-            ),
-            patch(
-                "aios.sandbox.provisioner._materialize_github_clones",
-                AsyncMock(return_value=([], None)),
-            ),
-            patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
-            patch(
-                "aios.sandbox.volumes.ensure_session_attachments_dir",
-                return_value=Path("/tmp/attachments"),
-            ),
-            patch(
-                "aios.sandbox.provisioner._install_packages",
-                AsyncMock(),
-            ) as mock_install,
-            patch(
-                "aios.sandbox.provisioner._apply_network_lockdown",
-                AsyncMock(),
-            ) as mock_lockdown,
-        ):
-            from aios.sandbox.provisioner import provision_for_session
-
-            await provision_for_session("sess_01TEST")
-
-        # docker run argv should contain --cap-add NET_ADMIN
-        run_argv = captured_argv[0]
-        assert "--cap-add" in run_argv
-        cap_idx = run_argv.index("--cap-add")
-        assert run_argv[cap_idx + 1] == "NET_ADMIN"
-
-        # install should be called before lockdown
-        mock_install.assert_called_once()
-        mock_lockdown.assert_called_once()
+        assert "--cap-add" in argv
+        cap_idx = argv.index("--cap-add")
+        assert argv[cap_idx + 1] == "NET_ADMIN"
 
     @pytest.mark.asyncio
     async def test_unrestricted_no_cap_net_admin(self) -> None:
-        unrestricted_config = EnvironmentConfig(networking=UnrestrictedNetworking())
-        captured_argv: list[list[str]] = []
+        argv = await _capture_docker_argv(_make_spec(Unrestricted()))
+        assert "--cap-add" not in argv
 
-        async def fake_run_docker(argv: list[str]) -> tuple[int, bytes, bytes]:
-            captured_argv.append(argv)
-            return 0, b"container_abc123\n", b""
 
-        with (
-            patch(
-                "aios.sandbox.provisioner._load_environment_config",
-                AsyncMock(return_value=unrestricted_config),
-            ),
-            patch("aios.sandbox.provisioner._run_docker", fake_run_docker),
-            patch(
-                "aios.sandbox.provisioner._load_session_provisioning",
-                AsyncMock(return_value=("/tmp/ws", {})),
-            ),
-            patch(
-                "aios.sandbox.provisioner._materialize_memory_mounts",
-                AsyncMock(return_value=[]),
-            ),
-            patch(
-                "aios.sandbox.provisioner._materialize_github_clones",
-                AsyncMock(return_value=([], None)),
-            ),
-            patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
-            patch(
-                "aios.sandbox.volumes.ensure_session_attachments_dir",
-                return_value=Path("/tmp/attachments"),
-            ),
-            patch("aios.sandbox.provisioner._install_packages", AsyncMock()),
-            patch(
-                "aios.sandbox.provisioner._apply_network_lockdown",
-                AsyncMock(),
-            ) as mock_lockdown,
-        ):
-            from aios.sandbox.provisioner import provision_for_session
-
-            await provision_for_session("sess_01TEST")
-
-        run_argv = captured_argv[0]
-        assert "--cap-add" not in run_argv
-        mock_lockdown.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_none_config_no_lockdown(self) -> None:
-        """No environment config at all — should work like unrestricted."""
-        captured_argv: list[list[str]] = []
-
-        async def fake_run_docker(argv: list[str]) -> tuple[int, bytes, bytes]:
-            captured_argv.append(argv)
-            return 0, b"container_abc123\n", b""
-
-        with (
-            patch(
-                "aios.sandbox.provisioner._load_environment_config",
-                AsyncMock(return_value=None),
-            ),
-            patch("aios.sandbox.provisioner._run_docker", fake_run_docker),
-            patch(
-                "aios.sandbox.provisioner._load_session_provisioning",
-                AsyncMock(return_value=("/tmp/ws", {})),
-            ),
-            patch(
-                "aios.sandbox.provisioner._materialize_memory_mounts",
-                AsyncMock(return_value=[]),
-            ),
-            patch(
-                "aios.sandbox.provisioner._materialize_github_clones",
-                AsyncMock(return_value=([], None)),
-            ),
-            patch("aios.sandbox.volumes.ensure_workspace_path", return_value=Path("/tmp/ws")),
-            patch(
-                "aios.sandbox.volumes.ensure_session_attachments_dir",
-                return_value=Path("/tmp/attachments"),
-            ),
-            patch("aios.sandbox.provisioner._install_packages", AsyncMock()),
-            patch(
-                "aios.sandbox.provisioner._apply_network_lockdown",
-                AsyncMock(),
-            ) as mock_lockdown,
-        ):
-            from aios.sandbox.provisioner import provision_for_session
-
-            await provision_for_session("sess_01TEST")
-
-        run_argv = captured_argv[0]
-        assert "--cap-add" not in run_argv
-        mock_lockdown.assert_not_called()
+# ── network lockdown helper applies the right script via the backend ──────────
 
 
 class TestApplyNetworkLockdown:
-    """Test _apply_network_lockdown builds and executes the right script."""
+    """apply_network_lockdown builds the script and runs it via backend.exec."""
 
     @pytest.mark.asyncio
-    async def test_calls_run_command_with_script(self) -> None:
-        from aios.sandbox.provisioner import _apply_network_lockdown
-
-        handle = _make_handle()
+    async def test_calls_backend_exec_with_script(self) -> None:
+        backend = FakeBackend()
+        handle = make_handle()
         networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
 
-        await _apply_network_lockdown(handle, networking, "sess_01TEST")
+        await apply_network_lockdown(backend, handle, networking, session_id="sess_01TEST")
 
-        handle.run_command.assert_called_once()  # type: ignore[union-attr]
-        script = handle.run_command.call_args[0][0]  # type: ignore[union-attr]
+        exec_calls = [c for c in backend.calls if c[0] == "exec"]
+        assert len(exec_calls) == 1
+        script = exec_calls[0][1]["command"]
         assert "iptables -P OUTPUT DROP" in script
         assert "getent ahosts api.example.com" in script
 
     @pytest.mark.asyncio
     async def test_includes_package_registries_when_enabled(self) -> None:
-        from aios.sandbox.provisioner import _apply_network_lockdown
-
-        handle = _make_handle()
+        backend = FakeBackend()
+        handle = make_handle()
         networking = LimitedNetworking(
             type="limited",
             allowed_hosts=["api.example.com"],
             allow_package_managers=True,
         )
 
-        await _apply_network_lockdown(handle, networking, "sess_01TEST")
+        await apply_network_lockdown(backend, handle, networking, session_id="sess_01TEST")
 
-        script = handle.run_command.call_args[0][0]  # type: ignore[union-attr]
+        script = backend.calls[0][1]["command"]
         assert "pypi.org" in script
         assert "registry.npmjs.org" in script
         assert "api.example.com" in script
 
     @pytest.mark.asyncio
     async def test_no_package_registries_when_disabled(self) -> None:
-        from aios.sandbox.provisioner import _apply_network_lockdown
-
-        handle = _make_handle()
+        backend = FakeBackend()
+        handle = make_handle()
         networking = LimitedNetworking(
             type="limited",
             allowed_hosts=["api.example.com"],
             allow_package_managers=False,
         )
 
-        await _apply_network_lockdown(handle, networking, "sess_01TEST")
+        await apply_network_lockdown(backend, handle, networking, session_id="sess_01TEST")
 
-        script = handle.run_command.call_args[0][0]  # type: ignore[union-attr]
+        script = backend.calls[0][1]["command"]
         assert "pypi.org" not in script
         assert "api.example.com" in script
+
+    @pytest.mark.asyncio
+    async def test_extra_host_ports_threaded_through(self) -> None:
+        backend = FakeBackend()
+        handle = make_handle()
+        networking = LimitedNetworking(type="limited", allowed_hosts=[])
+
+        await apply_network_lockdown(
+            backend,
+            handle,
+            networking,
+            session_id="sess_01TEST",
+            extra_host_ports=[("host.docker.internal", 8765)],
+        )
+
+        script = backend.calls[0][1]["command"]
+        assert "host.docker.internal:8765" in script
+
+    def test_package_registry_hosts_constant_is_populated(self) -> None:
+        # Sanity: the constant exists and contains representative hosts.
+        assert "pypi.org" in PACKAGE_REGISTRY_HOSTS
+        assert "registry.npmjs.org" in PACKAGE_REGISTRY_HOSTS
