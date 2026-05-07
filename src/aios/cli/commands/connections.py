@@ -13,13 +13,7 @@ from typing import Annotated, Any
 
 import typer
 
-from aios.cli.commands._shared import (
-    fetch_all_sdk,
-    render_list,
-    render_sdk_list,
-    render_single,
-    unwrap,
-)
+from aios.cli.commands._shared import render_list, render_paginated, render_single, unwrap
 from aios.cli.files import PayloadError, load_json_object, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -42,25 +36,11 @@ from aios.sdk._generated.models.connection_attach import ConnectionAttach
 from aios.sdk._generated.models.connection_configure_per_chat import ConnectionConfigurePerChat
 from aios.sdk._generated.models.connection_create import ConnectionCreate
 from aios.sdk._generated.models.list_connections_mode_type_0 import ListConnectionsModeType0
-from aios.sdk._generated.types import UNSET, Unset
 
 app = typer.Typer(name="connections", help="Manage connector connections.", no_args_is_help=True)
 
 _COLS = ("id", "connector", "account", "session_id", "session_template_id", "updated_at")
 _MAXW = {"connector": 20, "account": 40, "session_id": 24, "session_template_id": 24}
-
-
-def _coerce_mode(mode: str | None) -> ListConnectionsModeType0 | Unset:
-    """Accept the typer-side string and project to the typed SDK enum.
-
-    The SDK generates a per-operation enum (``ListConnectionsModeType0``)
-    rather than reusing :class:`aios.models.connections.ConnectionMode`,
-    so the surface here looks awkward — that's a generator artifact, not
-    a contract decision.
-    """
-    if mode is None:
-        return UNSET
-    return ListConnectionsModeType0(mode)
 
 
 @app.command("list")
@@ -69,38 +49,26 @@ def list_(
     connector: Annotated[str | None, typer.Option("--connector")] = None,
     session_id: Annotated[str | None, typer.Option("--session-id")] = None,
     mode: Annotated[
-        str | None,
-        typer.Option("--mode", help="Filter by routing mode: detached, single_session, per_chat."),
+        ListConnectionsModeType0 | None,
+        typer.Option("--mode", help="Filter by routing mode."),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
     after: Annotated[str | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
-        state = get_state(ctx)
-        sdk_mode = _coerce_mode(mode)
-        with state.sdk_client() as client:
-            if all_:
-                items = fetch_all_sdk(
-                    list_connections.sync_detailed,
-                    client=client,
-                    connector=connector,
-                    session_id=session_id,
-                    mode=sdk_mode,
-                )
-                render_sdk_list(state.output_format, items, columns=_COLS, max_widths=_MAXW)
-                return
-            page = unwrap(
-                list_connections.sync_detailed(
-                    client=client,
-                    connector=connector,
-                    session_id=session_id,
-                    mode=sdk_mode,
-                    limit=limit,
-                    after=after,
-                )
-            )
-            render_list(state.output_format, page.to_dict(), columns=_COLS, max_widths=_MAXW)
+        render_paginated(
+            ctx,
+            list_connections.sync_detailed,
+            columns=_COLS,
+            max_widths=_MAXW,
+            all_=all_,
+            limit=limit,
+            after=after,
+            connector=connector,
+            session_id=session_id,
+            mode=mode,
+        )
 
     run_or_die(_run)
 

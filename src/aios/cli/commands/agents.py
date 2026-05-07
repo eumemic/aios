@@ -1,10 +1,4 @@
-"""``aios agents ...`` — CRUD + versions.
-
-Hand-written CLI on top of the typed SDK at :mod:`aios.sdk._generated`.
-Each subcommand declares its own typer signature, calls the matching SDK
-operation module, and routes the parsed result through the shared
-renderers.
-"""
+"""``aios agents ...`` — CRUD + versions."""
 
 from __future__ import annotations
 
@@ -13,13 +7,7 @@ from typing import Annotated, Any
 
 import typer
 
-from aios.cli.commands._shared import (
-    fetch_all_sdk,
-    render_list,
-    render_sdk_list,
-    render_single,
-    unwrap,
-)
+from aios.cli.commands._shared import render_paginated, render_single, unwrap
 from aios.cli.files import PayloadError, load_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -51,14 +39,15 @@ def list_(
     ] = False,
 ) -> None:
     def _run() -> None:
-        state = get_state(ctx)
-        with state.sdk_client() as client:
-            if all_:
-                items = fetch_all_sdk(list_agents.sync_detailed, client=client)
-                render_sdk_list(state.output_format, items, columns=_COLS, max_widths=_MAXW)
-                return
-            page = unwrap(list_agents.sync_detailed(client=client, limit=limit, after=after))
-            render_list(state.output_format, page.to_dict(), columns=_COLS, max_widths=_MAXW)
+        render_paginated(
+            ctx,
+            list_agents.sync_detailed,
+            columns=_COLS,
+            max_widths=_MAXW,
+            all_=all_,
+            limit=limit,
+            after=after,
+        )
 
     run_or_die(_run)
 
@@ -136,24 +125,17 @@ def versions(
     after: Annotated[int | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
-    cols = ("version", "model", "created_at")
-    widths = {"model": 40}
-
     def _run() -> None:
-        state = get_state(ctx)
-        with state.sdk_client() as client:
-            if all_:
-                items = fetch_all_sdk(
-                    list_agent_versions.sync_detailed, client=client, agent_id=agent_id
-                )
-                render_sdk_list(state.output_format, items, columns=cols, max_widths=widths)
-                return
-            page = unwrap(
-                list_agent_versions.sync_detailed(
-                    client=client, agent_id=agent_id, limit=limit, after=after
-                )
-            )
-            render_list(state.output_format, page.to_dict(), columns=cols, max_widths=widths)
+        render_paginated(
+            ctx,
+            list_agent_versions.sync_detailed,
+            columns=("version", "model", "created_at"),
+            max_widths={"model": 40},
+            all_=all_,
+            limit=limit,
+            after=after,
+            agent_id=agent_id,
+        )
 
     run_or_die(_run)
 

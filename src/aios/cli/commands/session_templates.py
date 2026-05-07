@@ -7,13 +7,7 @@ from typing import Annotated, Any
 
 import typer
 
-from aios.cli.commands._shared import (
-    fetch_all_sdk,
-    render_list,
-    render_sdk_list,
-    render_single,
-    unwrap,
-)
+from aios.cli.commands._shared import render_paginated, render_single, unwrap
 from aios.cli.files import PayloadError, load_json_object, load_payload, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -45,16 +39,15 @@ def list_(
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
-        state = get_state(ctx)
-        with state.sdk_client() as client:
-            if all_:
-                items = fetch_all_sdk(list_session_templates.sync_detailed, client=client)
-                render_sdk_list(state.output_format, items, columns=_COLS, max_widths=_MAXW)
-                return
-            page = unwrap(
-                list_session_templates.sync_detailed(client=client, limit=limit, after=after)
-            )
-            render_list(state.output_format, page.to_dict(), columns=_COLS, max_widths=_MAXW)
+        render_paginated(
+            ctx,
+            list_session_templates.sync_detailed,
+            columns=_COLS,
+            max_widths=_MAXW,
+            all_=all_,
+            limit=limit,
+            after=after,
+        )
 
     run_or_die(_run)
 

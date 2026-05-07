@@ -7,13 +7,7 @@ from typing import Annotated, Any
 
 import typer
 
-from aios.cli.commands._shared import (
-    fetch_all_sdk,
-    render_list,
-    render_sdk_list,
-    render_single,
-    unwrap,
-)
+from aios.cli.commands._shared import render_paginated, render_single, unwrap
 from aios.cli.files import PayloadError, load_payload, walk_skill_dir
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -42,14 +36,14 @@ def list_(
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
-        state = get_state(ctx)
-        with state.sdk_client() as client:
-            if all_:
-                items = fetch_all_sdk(list_skills.sync_detailed, client=client)
-                render_sdk_list(state.output_format, items, columns=_COLS)
-                return
-            page = unwrap(list_skills.sync_detailed(client=client, limit=limit, after=after))
-            render_list(state.output_format, page.to_dict(), columns=_COLS)
+        render_paginated(
+            ctx,
+            list_skills.sync_detailed,
+            columns=_COLS,
+            all_=all_,
+            limit=limit,
+            after=after,
+        )
 
     run_or_die(_run)
 
@@ -112,24 +106,17 @@ def versions(
     after: Annotated[int | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
-    cols = ("version", "name", "description", "created_at")
-    widths = {"description": 60, "name": 32}
-
     def _run() -> None:
-        state = get_state(ctx)
-        with state.sdk_client() as client:
-            if all_:
-                items = fetch_all_sdk(
-                    list_skill_versions.sync_detailed, client=client, skill_id=skill_id
-                )
-                render_sdk_list(state.output_format, items, columns=cols, max_widths=widths)
-                return
-            page = unwrap(
-                list_skill_versions.sync_detailed(
-                    client=client, skill_id=skill_id, limit=limit, after=after
-                )
-            )
-            render_list(state.output_format, page.to_dict(), columns=cols, max_widths=widths)
+        render_paginated(
+            ctx,
+            list_skill_versions.sync_detailed,
+            columns=("version", "name", "description", "created_at"),
+            max_widths={"description": 60, "name": 32},
+            all_=all_,
+            limit=limit,
+            after=after,
+            skill_id=skill_id,
+        )
 
     run_or_die(_run)
 

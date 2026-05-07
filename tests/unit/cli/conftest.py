@@ -99,47 +99,30 @@ def mocked_cli(monkeypatch: pytest.MonkeyPatch) -> MockedCli:
     return MockedCli(captured=captured, response_queue=responses)
 
 
-# ── full-shape response factories for SDK-backed CLI tests ───────────────────
-#
-# The CLI now parses responses through the typed SDK (``aios.sdk._generated``).
-# The SDK's ``<Model>.from_dict`` is strict about required fields, so tests
-# whose only goal is to assert the *request* shape still need to feed back a
-# minimally-complete response payload — otherwise the SDK parser raises before
-# the command's exit-code path runs.
+# Minimally-complete response payloads for SDK-backed CLI tests. The SDK's
+# ``<Model>.from_dict`` is strict about required fields, so tests asserting
+# only request shape still need a complete response to keep the parser from
+# raising before the exit-code assertion runs.
 
 _FIXED_TS = "2024-01-01T00:00:00+00:00"
 
-
-def connection_response(**overrides: Any) -> dict[str, Any]:
-    """Minimally-valid ``Connection`` JSON suitable for SDK parsing."""
-    base = {
+_RESOURCE_BASES: dict[str, dict[str, Any]] = {
+    "connection": {
         "id": "conn_01",
         "connector": "signal",
         "account": "acct-1",
         "metadata": {},
         "created_at": _FIXED_TS,
         "updated_at": _FIXED_TS,
-    }
-    base.update(overrides)
-    return base
-
-
-def vault_response(**overrides: Any) -> dict[str, Any]:
-    """Minimally-valid ``Vault`` JSON."""
-    base = {
+    },
+    "vault": {
         "id": "vlt_1",
         "display_name": "test",
         "metadata": {},
         "created_at": _FIXED_TS,
         "updated_at": _FIXED_TS,
-    }
-    base.update(overrides)
-    return base
-
-
-def vault_credential_response(**overrides: Any) -> dict[str, Any]:
-    """Minimally-valid ``VaultCredential`` JSON."""
-    base = {
+    },
+    "vault_credential": {
         "id": "cred_1",
         "vault_id": "vlt_1",
         "display_name": "test-cred",
@@ -148,6 +131,10 @@ def vault_credential_response(**overrides: Any) -> dict[str, Any]:
         "metadata": {},
         "created_at": _FIXED_TS,
         "updated_at": _FIXED_TS,
-    }
-    base.update(overrides)
-    return base
+    },
+}
+
+
+def resource_response(kind: str, **overrides: Any) -> dict[str, Any]:
+    """Return a minimally-valid SDK response payload for the given resource kind."""
+    return {**_RESOURCE_BASES[kind], **overrides}
