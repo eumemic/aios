@@ -108,6 +108,7 @@ from aios.harness.attachment_staging import (
 from aios.harness.wake import defer_wake
 from aios.logging import get_logger
 from aios.mcp.client import MAX_TOOLS_PER_SERVER, shape_call_result
+from aios.mcp.schema import make_function_tool
 from aios.mcp.stdio_transport import open_connector_session
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services import sessions as sessions_service
@@ -461,16 +462,7 @@ class ConnectorSubprocessRegistry:
                 if qualified in seen:
                     continue
                 seen.add(qualified)
-                tools.append(
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": qualified,
-                            "description": tool.description or "",
-                            "parameters": tool.inputSchema,
-                        },
-                    }
-                )
+                tools.append(make_function_tool(qualified, tool))
         return tools
 
     async def get_session(self, connector: str, instance: str) -> ClientSession:

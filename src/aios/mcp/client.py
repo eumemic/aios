@@ -28,6 +28,7 @@ from mcp.types import InitializeResult
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.logging import get_logger
+from aios.mcp.schema import make_function_tool
 from aios.services.vaults import is_expiring, refresh_credential
 
 log = get_logger("aios.mcp.client")
@@ -169,18 +170,10 @@ async def discover_mcp_tools(
                 limit=MAX_TOOLS_PER_SERVER,
             )
 
-        tools: list[dict[str, Any]] = []
-        for tool in result.tools[:MAX_TOOLS_PER_SERVER]:
-            tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": f"mcp__{server_name}__{tool.name}",
-                        "description": tool.description or "",
-                        "parameters": tool.inputSchema,
-                    },
-                }
-            )
+        tools: list[dict[str, Any]] = [
+            make_function_tool(f"mcp__{server_name}__{tool.name}", tool)
+            for tool in result.tools[:MAX_TOOLS_PER_SERVER]
+        ]
         return tools, init_result.instructions
 
     except Exception:
