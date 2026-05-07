@@ -20,7 +20,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/app/.venv
 
-# OS deps shared by both targets. curl is for the api healthcheck.
+# OS deps shared by both targets. curl is the api healthcheck client at
+# runtime AND the worker uses it at build time to fetch the docker apt
+# keyring; ca-certificates is needed for both.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -82,11 +84,15 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends docker-ce-cli \
  && rm -rf /var/lib/apt/lists/*
 
-# Worker runs as root to access the bind-mounted docker socket without
-# needing the host's docker GID baked into the image (which differs by host
-# OS — 0 on Docker Desktop, 999/998 on most Linux). Inside the container,
-# any UID can read /var/run/docker.sock when running as root. The sandbox
-# containers it spawns run their own non-root UIDs.
-USER root
+# Worker runs as root because the bind-mounted /var/run/docker.sock is
+# owned by the host's docker group, whose GID isn't predictable across
+# host OSes (0 on Docker Desktop, 999 or 998 on most Linux distros).
+# Adding the `aios` user to a fixed-GID group inside the image would
+# work on one host class and silently break on another; root sidesteps
+# that by virtue of being root. The sandbox containers root spawns are
+# the actual workload-execution surface — they run inside their own
+# host-level docker namespaces and inherit the sandbox image's runtime
+# user (currently root from `python:3.13-slim`; tightening that is
+# tracked separately).
 
 CMD ["aios", "worker"]

@@ -105,7 +105,7 @@ patterns are already proven.
 - **Hetzner Cloud account** with a payment method.
 - **Cloudflare account** with `eumemic.ai` already configured (used by
   ant-proxy).
-- **GitHub access** to `github.com/eumemic/aios` (private).
+- **GitHub access** to `github.com/eumemic/aios`.
 - **Coolify control plane already deployed** on Server A
   (`coolify.eumemic.ai`) — see `~/code/ant-proxy/DEPLOY.md` if not.
 - **Local tooling**: `ssh`, `scp`, `~/code/aios/.venv/` with the `aios`
@@ -222,8 +222,7 @@ aios needs two host paths that pre-exist before the first deploy:
 # Workspace root — bind-mounted into the worker at the same path so
 # the worker doesn't have to translate sandbox `-v` paths.
 sudo mkdir -p /srv/aios/workspaces
-sudo chown -R 1000:1000 /srv/aios/workspaces
-sudo chmod 750 /srv/aios/workspaces
+sudo chmod 700 /srv/aios/workspaces
 
 # Postgres data dir is managed by Coolify's Database resource; nothing
 # to prep here.
@@ -233,14 +232,17 @@ sudo mkdir -p /var/backups/aios
 sudo chown tom:tom /var/backups/aios
 ```
 
-UID 1000 matches the `aios` user the api image runs as. The worker
-runs as root inside its container (it needs /var/run/docker.sock access),
-but the sandbox containers it spawns shouldn't write through the
-workspace bind as root — sandbox UIDs are inherited from the
-`aios-sandbox:latest` image, which uses the default `python:3.13-slim`
-root user. Workspace files end up owned root inside the sandbox; on
-the host, root inside a container is uid 0 outside too unless userns is
-on (it isn't here). This is fine for single-tenant.
+The workspace dir's ownership doesn't need an explicit `chown`: the
+worker runs as root inside its container, and the sandbox containers
+it spawns also run as root (the `aios-sandbox:latest` image inherits
+the default `python:3.13-slim` root user; tightening that is tracked
+separately). Both writers are uid 0, so workspace contents end up
+root-owned regardless of how the directory starts. The `chmod 700`
+keeps the dir from being world-readable while still letting root
+descend into it. Note the override of `AIOS_WORKSPACE_ROOT` from the
+in-tree default (`/var/lib/aios/workspaces` per `src/aios/config.py`)
+to `/srv/aios/workspaces` is deliberate — `/srv/` is the conventional
+location for service data on a deployment host.
 
 ---
 
@@ -263,9 +265,12 @@ docker images | grep aios-sandbox
 ```
 
 You can delete `~/build/aios` after — the image stays in the docker
-cache. This is a one-shot; rebuilds only happen when
-`docker/Dockerfile.sandbox` changes (rare). When it does change, the
-deploy doc's Step 14 "what's next" section has a recipe for rebuilding.
+cache. Rebuilds happen whenever `docker/Dockerfile.sandbox` changes
+(realistically: ~monthly on this codebase, e.g. when iptables or
+package-manager support gets added). The "What's next" section
+mentions an eventual move to CI + GHCR so this stops being a
+manual-on-host step; until then, when the upstream Dockerfile.sandbox
+changes, re-run this step on Server B before the next deploy.
 
 ---
 
@@ -406,10 +411,16 @@ Mark `AIOS_API_KEY` and `AIOS_VAULT_KEY` as **Is Secret**.
 aios migrate
 ```
 
-This runs inside the new image before traffic swaps. Idempotent (alembic
-checks the version table) so a second deploy is a no-op. The api is the
-only Application that runs this — the worker doesn't need to migrate
-since it shares the DB.
+Runs inside the new image before traffic swaps. `aios migrate` does
+three things in `src/aios/cli/commands/ops.py`: alembic
+`upgrade head` (idempotent via the version table), one-shot install of
+the procrastinate job-queue schema if missing (gated by a
+`to_regclass(procrastinate_jobs)` check), and a `DROP TRIGGER IF
+EXISTS … CREATE TRIGGER …` for a procrastinate lock-release helper.
+The trigger DDL re-runs every deploy but is safe (drop + recreate is
+atomic in Postgres). Net behavior on a healthy second deploy:
+fast no-op, no failures. The api is the only Application that runs
+this — the worker doesn't need to migrate since it shares the DB.
 
 **No persistent storage on the api Application.** It's stateless.
 
@@ -516,30 +527,43 @@ export AIOS_API_KEY=<LAPTOP_KEY from step 6>
 uv run aios status
 # → server reachable, version=..., backend=docker
 
-# Drive a real session through the bash tool
-uv run aios agents create --file - <<'JSON'
+# Drive a real session through the bash tool. We need an environment
+# (sandbox config) AND an agent; the chat command refuses to start a
+# new session without --environment-id (chat.py:_resolve_session_id).
+
+ENV_ID=$(uv run aios envs create --data '{"name": "smoke-env"}' \
+    | jq -r '.id')
+
+AGENT_ID=$(uv run aios agents create --file - <<'JSON' | jq -r '.id'
 {
   "name": "smoke-bash",
   "description": "smoke test agent",
-  "system_prompt": "You are a shell agent. Use the bash tool.",
-  "tools": ["bash"],
+  "system": "You are a shell agent. Use the bash tool.",
+  "tools": [{"type": "bash"}],
   "model": "anthropic/claude-haiku-4-5"
 }
 JSON
+)
 
-# Get the agent_id from the output, then:
-uv run aios chat --agent <agent_id> -m "echo 'hello from server B' && hostname && pwd"
+uv run aios chat --agent "$AGENT_ID" --environment-id "$ENV_ID" \
+    -m "echo 'hello from server B' && hostname && pwd"
 ```
 
 You should see a live SSE stream with the model's reply, a tool_call
 to bash, and the bash tool's output (`hello from server B / aios-worker-...
 / /workspace`).
 
-On Server B, verify a sandbox container was actually spawned:
+On Server B, verify a sandbox container was actually spawned. The
+orphan-reaper filters on both `aios.managed=true` AND
+`aios.instance_id=<settings.instance_id>` (default `default`); if you
+ever override `AIOS_INSTANCE_ID` per-deployment, swap that label below
+to match.
 
 ```bash
 ssh tom@aios.eumemic.ai
-docker ps --filter label=aios.managed=true
+docker ps \
+    --filter label=aios.managed=true \
+    --filter label=aios.instance_id=default
 # → one running container, image aios-sandbox:latest, ~30-second age
 ls /srv/aios/workspaces/
 # → one session_id directory matching the chat session
@@ -549,8 +573,9 @@ After ~5 minutes of idle (the default
 `AIOS_CONTAINER_IDLE_TIMEOUT_SECONDS=300`), the sandbox auto-releases:
 
 ```bash
-docker ps --filter label=aios.managed=true   # → empty
-ls /srv/aios/workspaces/                      # → still there
+docker ps --filter label=aios.managed=true \
+          --filter label=aios.instance_id=default   # → empty
+ls /srv/aios/workspaces/                            # → still there
 ```
 
 Workspace files persist across container lifetimes. The next message in
