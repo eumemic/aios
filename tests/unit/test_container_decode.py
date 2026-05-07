@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from aios.sandbox.container import _decode_and_truncate
+from aios.sandbox.backends.docker import _decode_and_truncate
 
 
 class TestDecodeAndTruncate:

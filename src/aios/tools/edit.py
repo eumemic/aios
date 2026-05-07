@@ -147,7 +147,8 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
         precondition_sha: str | None = existing.content_sha256
         memory_id = existing.id
     else:
-        read_result = await handle.run_command(
+        read_result = await sandbox.exec(
+            handle,
             f"cat -- {quoted_path}",
             timeout_seconds=settings.bash_default_timeout_seconds,
             max_output_bytes=settings.bash_max_output_bytes,
@@ -231,7 +232,8 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     b64 = base64.b64encode(modified_bytes).decode("ascii")
     write_cmd = f"base64 -d <<< '{b64}' > {quoted_path}"
 
-    write_result = await handle.run_command(
+    write_result = await sandbox.exec(
+        handle,
         write_cmd,
         timeout_seconds=settings.bash_default_timeout_seconds,
         max_output_bytes=settings.bash_max_output_bytes,

@@ -1,6 +1,6 @@
 """Unit tests for the write tool handler.
 
-Mocks ContainerHandle.run_command and inspects the shell command the
+Mocks SandboxHandle.run_command and inspects the shell command the
 handler constructs to verify base64 encoding, parent-dir creation, and
 path quoting.
 """
@@ -15,47 +15,53 @@ from unittest.mock import AsyncMock
 import pytest
 
 from aios.harness import runtime
-from aios.sandbox.container import CommandResult, ContainerHandle
+from aios.sandbox.backends.base import CommandResult, SandboxHandle
 from aios.tools.write import WriteArgumentError, write_handler
 
 
 class _StubRegistry:
-    def __init__(self, handle: ContainerHandle) -> None:
-        self._handle = handle
+    """Minimal stand-in for SandboxRegistry used by handler tests."""
 
-    async def get_or_provision(self, session_id: str, **_kwargs: Any) -> ContainerHandle:
+    def __init__(self, handle: SandboxHandle, result: CommandResult) -> None:
+        self._handle = handle
+        self.exec = AsyncMock(return_value=result)
+
+    async def get_or_provision(self, session_id: str, **_kwargs: Any) -> SandboxHandle:
         return self._handle
 
 
 @pytest.fixture
-def stub_handle() -> ContainerHandle:
-    handle = ContainerHandle(
+def stub_handle() -> SandboxHandle:
+    handle = SandboxHandle(
         session_id="sess_01TEST",
-        container_id="container_abc",
+        sandbox_id="container_abc",
         workspace_path=Path("/tmp/aios-test"),
-    )
-    handle.run_command = AsyncMock(  # type: ignore[method-assign]
-        return_value=CommandResult(
-            exit_code=0,
-            stdout="",
-            stderr="",
-            timed_out=False,
-            truncated=False,
-        )
     )
     return handle
 
 
 @pytest.fixture
-def stub_registry(stub_handle: ContainerHandle) -> Any:
+def canned_result() -> CommandResult:
+    return CommandResult(
+        exit_code=0,
+        stdout="",
+        stderr="",
+        timed_out=False,
+        truncated=False,
+    )
+
+
+@pytest.fixture
+def stub_registry(stub_handle: SandboxHandle, canned_result: CommandResult) -> Any:
     from unittest.mock import MagicMock
 
     prev_registry = runtime.sandbox_registry
     prev_pool = runtime.pool
-    runtime.sandbox_registry = _StubRegistry(stub_handle)  # type: ignore[assignment]
+    stub = _StubRegistry(stub_handle, canned_result)
+    runtime.sandbox_registry = stub  # type: ignore[assignment]
     runtime.pool = MagicMock()
     try:
-        yield
+        yield stub
     finally:
         runtime.sandbox_registry = prev_registry
         runtime.pool = prev_pool
@@ -77,7 +83,7 @@ class TestArguments:
 
 class TestHappyPath:
     async def test_returns_bytes_written(
-        self, stub_registry: Any, stub_handle: ContainerHandle
+        self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         result = await write_handler(
             "sess_01TEST", {"path": "/workspace/a.txt", "content": "hello"}
@@ -85,7 +91,7 @@ class TestHappyPath:
         assert result == {"path": "/workspace/a.txt", "bytes_written": 5}
 
     async def test_bytes_written_counts_utf8_bytes_not_chars(
-        self, stub_registry: Any, stub_handle: ContainerHandle
+        self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         # "héllo" is 6 bytes in UTF-8 (é is 2 bytes) but 5 chars.
         result = await write_handler(
@@ -94,38 +100,38 @@ class TestHappyPath:
         assert result["bytes_written"] == 6
 
     async def test_command_base64_encodes_content(
-        self, stub_registry: Any, stub_handle: ContainerHandle
+        self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         content = "hello world\n"
         await write_handler("sess_01TEST", {"path": "/workspace/a.txt", "content": content})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         expected_b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
         assert f"base64 -d <<< '{expected_b64}'" in cmd
 
     async def test_command_creates_parent_dirs(
-        self, stub_registry: Any, stub_handle: ContainerHandle
+        self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         await write_handler("sess_01TEST", {"path": "/workspace/a/b/c.txt", "content": "hi"})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         # shlex.quote leaves simple paths unquoted; assert mkdir + dirname + path.
         assert "mkdir -p --" in cmd
         assert "dirname --" in cmd
         assert "/workspace/a/b/c.txt" in cmd
 
     async def test_command_redirects_to_quoted_path(
-        self, stub_registry: Any, stub_handle: ContainerHandle
+        self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         await write_handler("sess_01TEST", {"path": "/workspace/a file.txt", "content": "hi"})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert "> '/workspace/a file.txt'" in cmd
 
     async def test_handles_special_characters_in_content(
-        self, stub_registry: Any, stub_handle: ContainerHandle
+        self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         # Content containing quotes, newlines, shell metacharacters.
         tricky = "line with 'quotes' and \"doubles\" and $vars\nand newlines"
         await write_handler("sess_01TEST", {"path": "/workspace/a.txt", "content": tricky})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         # Base64 is quote-safe so no escaping gymnastics.
         expected_b64 = base64.b64encode(tricky.encode("utf-8")).decode("ascii")
         assert expected_b64 in cmd
@@ -136,9 +142,9 @@ class TestHappyPath:
 
 class TestErrorPath:
     async def test_nonzero_exit_returns_error_dict(
-        self, stub_registry: Any, stub_handle: ContainerHandle
+        self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_handle.run_command = AsyncMock(  # type: ignore[method-assign]
+        stub_registry.exec = AsyncMock(  # type: ignore[method-assign]
             return_value=CommandResult(
                 exit_code=1,
                 stdout="",

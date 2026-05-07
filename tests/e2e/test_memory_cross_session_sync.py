@@ -341,7 +341,7 @@ class TestMountUpdateRecyclesContainer:
         session = await _start_session_with_store(docker_harness, store_id)
         sandbox = runtime.require_sandbox_registry()
         await sandbox.get_or_provision(session.id, pool=docker_harness._pool)
-        original_container_id = sandbox.peek(session.id).container_id  # type: ignore[union-attr]
+        original_container_id = sandbox.peek(session.id).sandbox_id  # type: ignore[union-attr]
 
         await sessions_service.update_session(
             docker_harness._pool,
@@ -356,7 +356,7 @@ class TestMountUpdateRecyclesContainer:
 
         cached = sandbox.peek(session.id)
         assert cached is not None
-        assert cached.container_id == original_container_id
+        assert cached.sandbox_id == original_container_id
 
         result = await bash_handler(
             session.id, {"command": "ls -d /mnt/memory/idem-mount && echo OK"}

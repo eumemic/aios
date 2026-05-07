@@ -1,6 +1,6 @@
 """Unit tests for the grep tool handler.
 
-Stubs the sandbox registry and mocks ContainerHandle.run_command so the
+Stubs the sandbox registry and mocks SandboxHandle.run_command so the
 tests don't touch Docker. The same pattern as test_read_handler.
 """
 
@@ -13,47 +13,53 @@ from unittest.mock import AsyncMock
 import pytest
 
 from aios.harness import runtime
-from aios.sandbox.container import CommandResult, ContainerHandle
+from aios.sandbox.backends.base import CommandResult, SandboxHandle
 from aios.tools.grep import GrepArgumentError, grep_handler
 
 
 class _StubRegistry:
-    def __init__(self, handle: ContainerHandle) -> None:
-        self._handle = handle
+    """Minimal stand-in for SandboxRegistry used by handler tests."""
 
-    async def get_or_provision(self, session_id: str, **_kwargs: Any) -> ContainerHandle:
+    def __init__(self, handle: SandboxHandle, result: CommandResult) -> None:
+        self._handle = handle
+        self.exec = AsyncMock(return_value=result)
+
+    async def get_or_provision(self, session_id: str, **_kwargs: Any) -> SandboxHandle:
         return self._handle
 
 
 @pytest.fixture
-def stub_handle() -> ContainerHandle:
-    handle = ContainerHandle(
+def stub_handle() -> SandboxHandle:
+    handle = SandboxHandle(
         session_id="sess_01TEST",
-        container_id="container_abc",
+        sandbox_id="container_abc",
         workspace_path=Path("/tmp/aios-test"),
-    )
-    handle.run_command = AsyncMock(  # type: ignore[method-assign]
-        return_value=CommandResult(
-            exit_code=0,
-            stdout="/workspace/foo.py:10:def hello():\n/workspace/bar.py:3:import os\n",
-            stderr="",
-            timed_out=False,
-            truncated=False,
-        )
     )
     return handle
 
 
 @pytest.fixture
-def stub_registry(stub_handle: ContainerHandle) -> Any:
+def canned_result() -> CommandResult:
+    return CommandResult(
+        exit_code=0,
+        stdout="/workspace/foo.py:10:def hello():\n/workspace/bar.py:3:import os\n",
+        stderr="",
+        timed_out=False,
+        truncated=False,
+    )
+
+
+@pytest.fixture
+def stub_registry(stub_handle: SandboxHandle, canned_result: CommandResult) -> Any:
     from unittest.mock import MagicMock
 
     prev_registry = runtime.sandbox_registry
     prev_pool = runtime.pool
-    runtime.sandbox_registry = _StubRegistry(stub_handle)  # type: ignore[assignment]
+    stub = _StubRegistry(stub_handle, canned_result)
+    runtime.sandbox_registry = stub  # type: ignore[assignment]
     runtime.pool = MagicMock()
     try:
-        yield
+        yield stub
     finally:
         runtime.sandbox_registry = prev_registry
         runtime.pool = prev_pool
@@ -82,28 +88,28 @@ class TestArguments:
 
 
 class TestHappyPath:
-    async def test_returns_matches(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+    async def test_returns_matches(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         result = await grep_handler("sess_01TEST", {"pattern": "hello"})
         assert result == {
             "matches": "/workspace/foo.py:10:def hello():\n/workspace/bar.py:3:import os\n",
         }
 
-    async def test_default_path(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+    async def test_default_path(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello"})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert cmd.startswith("rg")
         assert "/workspace" in cmd
 
-    async def test_include_flag(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+    async def test_include_flag(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "include": "*.py"})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert "--glob" in cmd
         assert "*.py" in cmd
 
     async def test_no_matches_returns_empty_string(
-        self, stub_registry: Any, stub_handle: ContainerHandle
+        self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_handle.run_command = AsyncMock(  # type: ignore[method-assign]
+        stub_registry.exec = AsyncMock(  # type: ignore[method-assign]
             return_value=CommandResult(
                 exit_code=1,
                 stdout="",
@@ -118,75 +124,73 @@ class TestHappyPath:
 
 class TestOutputModes:
     async def test_files_with_matches_mode(
-        self, stub_registry: Any, stub_handle: ContainerHandle
+        self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "output_mode": "files_with_matches"})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert " -l " in cmd
 
-    async def test_count_mode(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+    async def test_count_mode(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "output_mode": "count"})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert " -c " in cmd
 
     async def test_content_mode_has_line_numbers(
-        self, stub_registry: Any, stub_handle: ContainerHandle
+        self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "output_mode": "content"})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert " -n " in cmd
 
 
 class TestAdvancedFlags:
-    async def test_context_lines(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+    async def test_context_lines(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "context": 3})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert "-C 3" in cmd
 
-    async def test_case_insensitive(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+    async def test_case_insensitive(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "case_insensitive": True})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert " -i " in cmd
 
-    async def test_multiline(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+    async def test_multiline(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "multiline": True})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert "-U" in cmd
         assert "--multiline-dotall" in cmd
 
-    async def test_file_type_filter(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+    async def test_file_type_filter(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "file_type": "py"})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert "--type" in cmd
         assert "py" in cmd
 
-    async def test_custom_limit(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+    async def test_custom_limit(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "limit": 100})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert "head -100" in cmd
 
-    async def test_default_limit_250(
-        self, stub_registry: Any, stub_handle: ContainerHandle
-    ) -> None:
+    async def test_default_limit_250(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello"})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert "head -250" in cmd
 
-    async def test_max_columns_flag(self, stub_registry: Any, stub_handle: ContainerHandle) -> None:
+    async def test_max_columns_flag(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello"})
-        cmd: str = stub_handle.run_command.await_args.args[0]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
         assert "--max-columns=500" in cmd
 
 
 class TestErrorPath:
     async def test_grep_failure_returns_error_dict(
-        self, stub_registry: Any, stub_handle: ContainerHandle
+        self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_handle.run_command = AsyncMock(  # type: ignore[method-assign]
+        stub_registry.exec = AsyncMock(  # type: ignore[method-assign]
             return_value=CommandResult(
                 exit_code=2,
                 stdout="",
-                stderr="grep: invalid regex\n",
+                stderr="grep: invalid regex\\n",
                 timed_out=False,
                 truncated=False,
             )

@@ -159,7 +159,8 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
     # single quote. `mkdir -p "$(dirname ...)"` creates parent dirs.
     cmd = f"mkdir -p -- \"$(dirname -- {quoted_path})\" && base64 -d <<< '{b64}' > {quoted_path}"
 
-    result = await handle.run_command(
+    result = await sandbox.exec(
+        handle,
         cmd,
         timeout_seconds=settings.bash_default_timeout_seconds,
         max_output_bytes=settings.bash_max_output_bytes,

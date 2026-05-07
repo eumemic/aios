@@ -152,7 +152,8 @@ async def grep_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
 
     cmd = " ".join(parts)
 
-    result = await handle.run_command(
+    result = await sandbox.exec(
+        handle,
         cmd,
         timeout_seconds=settings.bash_default_timeout_seconds,
         max_output_bytes=settings.bash_max_output_bytes,

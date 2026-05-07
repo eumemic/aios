@@ -23,7 +23,7 @@ from aios.harness.vision import (
     make_image_url_part,
     supports_vision,
 )
-from aios.sandbox.container import ContainerHandle
+from aios.sandbox.backends.base import SandboxHandle
 from aios.sandbox.volumes import resolve_to_host_path
 from aios.services import sessions as sessions_service
 from aios.tools.memory_intercept import resolve_memory_target
@@ -121,7 +121,8 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
             f"cat -n -- {quoted_path} | sed -n {sed_arg}"
         )
 
-    result = await handle.run_command(
+    result = await sandbox.exec(
+        handle,
         cmd,
         timeout_seconds=settings.bash_default_timeout_seconds,
         max_output_bytes=settings.bash_max_output_bytes,
@@ -149,7 +150,7 @@ async def _read_image(
     *,
     session_id: str,
     path: str,
-    handle: ContainerHandle,
+    handle: SandboxHandle,
     pool: Any,
 ) -> ToolResult:
     mime = _EXT_TO_MIME[os.path.splitext(path)[1].lower()]
@@ -195,7 +196,7 @@ async def _read_image(
     )
 
 
-async def _stat_and_read_via_exec(handle: ContainerHandle, path: str) -> tuple[bytes, int] | None:
+async def _stat_and_read_via_exec(handle: SandboxHandle, path: str) -> tuple[bytes, int] | None:
     """Fetch ``(bytes, size)`` for non-bind-mount image paths via one docker-exec.
 
     Returns ``None`` on any read failure (missing path, exec error,
@@ -203,9 +204,11 @@ async def _stat_and_read_via_exec(handle: ContainerHandle, path: str) -> tuple[b
     we don't pay two docker-exec round-trips.
     """
     settings = get_settings()
+    sandbox = runtime.require_sandbox_registry()
     quoted = shlex.quote(path)
     cmd = f"stat -c %s -- {quoted} && base64 -w0 -- {quoted}"
-    result = await handle.run_command(
+    result = await sandbox.exec(
+        handle,
         cmd,
         timeout_seconds=settings.bash_default_timeout_seconds,
         max_output_bytes=settings.bash_max_output_bytes,

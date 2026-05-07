@@ -130,6 +130,13 @@ class Settings(BaseSettings):
     )
 
     # ── sandbox ────────────────────────────────────────────────────────────
+    sandbox_backend: Literal["docker"] = Field(
+        default="docker",
+        description="Which sandbox backend the worker uses to provision and run "
+        "session sandboxes. Today only 'docker' is implemented; future backends "
+        "(e.g. host-subprocess for environments without a Docker daemon) will "
+        "extend this enum without changing call sites.",
+    )
     docker_image: str = Field(
         default="aios-sandbox:latest",
         description="Container image used for all v1 sessions. Build via "
