@@ -210,7 +210,11 @@ async def attach(
     return await service.attach_connection(pool, connection_id, session_id=body.session_id)
 
 
-@router.post("/{connection_id}/detach", operation_id="detach_connection")
+@router.post(
+    "/{connection_id}/detach",
+    operation_id="detach_connection",
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
+)
 async def detach(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connection:
     """Detach a single_session connection back to detached mode.
 
@@ -239,7 +243,11 @@ async def configure_per_chat(
     )
 
 
-@router.post("/{connection_id}/unconfigure", operation_id="unconfigure_connection")
+@router.post(
+    "/{connection_id}/unconfigure",
+    operation_id="unconfigure_connection",
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
+)
 async def unconfigure(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connection:
     """Return a per_chat connection to detached mode.
 

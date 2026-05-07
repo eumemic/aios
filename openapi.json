@@ -1371,7 +1371,7 @@
           "sessions"
         ],
         "summary": "Archive",
-        "operationId": "archive_v1_sessions__session_id__archive_post",
+        "operationId": "archive_session",
         "parameters": [
           {
             "name": "session_id",
@@ -1419,6 +1419,11 @@
                 }
               }
             }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
           }
         }
       }
@@ -2909,6 +2914,11 @@
               }
             }
           }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
         }
       }
     },
@@ -3332,6 +3342,11 @@
               }
             }
           }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
         }
       }
     },
@@ -3694,6 +3709,11 @@
                 }
               }
             }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
           }
         }
       }
@@ -4287,6 +4307,11 @@
               }
             }
           }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
         }
       }
     },
@@ -4711,6 +4736,11 @@
               }
             }
           }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
         }
       }
     },
@@ -4838,6 +4868,11 @@
                 }
               }
             }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
           }
         }
       }

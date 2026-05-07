@@ -8,7 +8,7 @@ operate the management plane via the same Bearer auth as the HTTP API.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -94,6 +94,23 @@ def create_app() -> FastAPI:
     return app
 
 
+MCP_INSTRUCTIONS = """\
+aios is a Postgres-backed agent runtime. The management plane is organized
+around five resource types: agents (versioned config), sessions (live
+execution contexts), environments (sandbox templates), memory stores
+(shared file-like memory), and vaults (encrypted credentials). Resources
+attach to sessions to grant agent read/write access.
+
+Conventions:
+- ``archive`` is reversible soft-removal preserving audit history;
+  ``delete`` is hard-removal, no audit trail. Prefer archive unless you
+  specifically need rows gone.
+- Listed resources exclude archived by default unless ``include_archived``
+  is supported on the operation.
+- Mutations marked ``destructiveHint`` should be confirmed before invoking.
+"""
+
+
 def _mount_mcp(app: FastAPI) -> None:
     """Mount fastapi-mcp at ``/mcp`` after all routers are registered.
 
@@ -118,7 +135,72 @@ def _mount_mcp(app: FastAPI) -> None:
         exclude_operations=_compute_mcp_excluded_operations(app),
         auth_config=AuthConfig(dependencies=[Depends(require_bearer_auth)]),
     )
+    _apply_mcp_polish(app, mcp, instructions=MCP_INSTRUCTIONS)
     mcp.mount_http(mount_path="/mcp")
+
+
+def _iter_operations(app: FastAPI) -> Iterator[tuple[str, str, dict[str, Any]]]:
+    """Yield ``(operation_id, http_verb, x_codegen_dict)`` for every operation.
+
+    Skips path-level keys that aren't HTTP methods (parameters, summary,
+    description, ...) and operations without an ``operationId``. The
+    ``x_codegen_dict`` is the raw ``x-codegen`` extension content (or
+    ``{}`` if absent); each caller projects out the sub-key it needs.
+    """
+    for path_obj in app.openapi()["paths"].values():
+        for verb, method_obj in path_obj.items():
+            if not isinstance(method_obj, dict):
+                continue
+            op_id = method_obj.get("operationId")
+            if not isinstance(op_id, str):
+                continue
+            yield op_id, verb.lower(), method_obj.get("x-codegen", {})
+
+
+def _verb_default_annotations(verb: str) -> dict[str, bool]:
+    """Map HTTP verb to default MCP tool annotation hints.
+
+    POST is the asymmetric case: REST convention says POST is additive, but
+    operations like ``.../archive`` and ``.../detach`` are POST-but-destructive
+    and override via ``x-codegen.mcp`` per route — hence the empty default
+    rather than a destructive one.
+    """
+    if verb == "get":
+        return {"readOnlyHint": True}
+    if verb == "delete":
+        return {"destructiveHint": True}
+    if verb == "put":
+        return {"destructiveHint": True, "idempotentHint": True}
+    return {}
+
+
+def _apply_mcp_polish(app: FastAPI, mcp: Any, *, instructions: str) -> None:
+    """Post-construction patch: per-tool annotations + server instructions.
+
+    fastapi-mcp 0.4 doesn't infer annotations from HTTP verbs and exposes
+    no construction-time hook for them, so we walk the spec, build verb-
+    based defaults, layer the route's ``x-codegen.mcp`` overrides on top,
+    and assign the result to each ``mcp.tools[i].annotations``. Also sets
+    ``mcp.server.instructions`` (the MCP handshake field, inlined into the
+    calling LLM's system prompt by clients that respect it).
+    """
+    from mcp.types import ToolAnnotations
+
+    op_meta: dict[str, tuple[str, dict[str, Any]]] = {
+        op_id: (verb, codegen.get("mcp", {})) for op_id, verb, codegen in _iter_operations(app)
+    }
+
+    for tool in mcp.tools:
+        # Direct lookup, not .get + None-skip: mcp.tools is built from the
+        # same app.openapi() that op_meta walks, so every tool.name must be
+        # an operationId we've seen. A KeyError here is a real invariant
+        # break worth surfacing, not a silent annotation dropout.
+        verb, overrides = op_meta[tool.name]
+        annotations = _verb_default_annotations(verb) | overrides
+        if annotations:
+            tool.annotations = ToolAnnotations(**annotations)
+
+    mcp.server.instructions = instructions
 
 
 def _compute_mcp_excluded_operations(app: FastAPI) -> list[str]:
@@ -128,17 +210,11 @@ def _compute_mcp_excluded_operations(app: FastAPI) -> list[str]:
     every generator target (per the contract documented in #267); only
     explicit ``targets`` lists that omit ``"mcp"`` exclude.
     """
-    excluded: list[str] = []
-    for path_obj in app.openapi()["paths"].values():
-        for method_obj in path_obj.values():
-            # Filter out non-method path-level keys (parameters, summary, ...).
-            if not isinstance(method_obj, dict):
-                continue
-            op_id = method_obj.get("operationId")
-            targets = method_obj.get("x-codegen", {}).get("targets")
-            if op_id and targets is not None and "mcp" not in targets:
-                excluded.append(op_id)
-    return excluded
+    return [
+        op_id
+        for op_id, _verb, codegen in _iter_operations(app)
+        if (targets := codegen.get("targets")) is not None and "mcp" not in targets
+    ]
 
 
 def _redact_dsn(dsn: str) -> str:
