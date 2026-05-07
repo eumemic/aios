@@ -26,6 +26,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sys
+import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
@@ -64,6 +66,14 @@ from aios.sandbox.registry import SandboxRegistry
 # stays in code as documentation of *what* this number means.
 _WORKER_LOCK_KEY_TEXT = "aios_worker_connector_supervisor"
 
+# Path the worker touches periodically to signal liveness; the Dockerfile
+# HEALTHCHECK reads its mtime. tmpfs in containers, so touch/unlink are
+# sub-microsecond and don't justify ``asyncio.to_thread`` (which would
+# add more latency than it saves) — that's why the call sites suppress
+# the async-blocking-pathlib lint with a per-line ignore.
+_HEARTBEAT_FILE = Path("/var/run/aios-worker-alive")
+_HEARTBEAT_INTERVAL_SECONDS = 15
+
 
 def _make_worker_id() -> str:
     from ulid import ULID
@@ -101,6 +111,7 @@ async def worker_main() -> None:
     procrastinate_opened = False
     sweep_task: asyncio.Task[None] | None = None
     interrupt_task: asyncio.Task[None] | None = None
+    heartbeat_task: asyncio.Task[None] | None = None
 
     try:
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
@@ -185,6 +196,17 @@ async def worker_main() -> None:
             name="interrupt_listener",
         )
 
+        # Start liveness heartbeat AFTER all critical resources are up,
+        # so the healthcheck can't go green until the worker is fully
+        # operational. Touch once now for an immediate green signal,
+        # then the task takes over the periodic refresh.
+        with contextlib.suppress(OSError):
+            _HEARTBEAT_FILE.touch()  # noqa: ASYNC240
+        heartbeat_task = asyncio.create_task(
+            _periodic_heartbeat(interval=_HEARTBEAT_INTERVAL_SECONDS),
+            name="heartbeat",
+        )
+
         await procrastinate_app.run_worker_async(
             queues=["sessions", "connectors"],
             concurrency=settings.worker_concurrency,
@@ -193,6 +215,16 @@ async def worker_main() -> None:
         )
     finally:
         log.info("worker.shutdown")
+        # Drop the heartbeat file BEFORE other teardown so the healthcheck
+        # flips to unhealthy as soon as shutdown begins — orchestrators
+        # (Coolify, k8s) get the right liveness signal during the
+        # potentially-slow drain that follows.
+        with contextlib.suppress(OSError):
+            _HEARTBEAT_FILE.unlink(missing_ok=True)  # noqa: ASYNC240
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
         if sweep_task is not None:
             sweep_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -223,13 +255,27 @@ async def worker_main() -> None:
         runtime.connector_subprocess_registry = None
 
 
-async def _acquire_worker_lock(db_url: str, log: Any) -> asyncpg.Connection[Any] | None:
-    """Try to grab the single-worker advisory lock on a dedicated connection.
+async def _acquire_worker_lock(
+    db_url: str,
+    log: Any,
+    *,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 0.5,
+) -> asyncpg.Connection[Any] | None:
+    """Try to grab the single-worker advisory lock, waiting up to
+    ``timeout_seconds`` for an existing holder to release.
 
-    Returns the held connection on success (caller must keep it alive),
-    or ``None`` when another worker already owns the lock.  Postgres
-    releases session-scoped advisory locks on connection close, so the
-    caller's only obligation is to close the connection on shutdown.
+    Returns the held connection on success, or ``None`` after timeout.
+    The caller exits the process on ``None`` per the single-instance
+    invariant. Postgres releases session-scoped advisory locks on
+    connection close, so the caller's only obligation is to close the
+    connection on shutdown.
+
+    The wait handles rolling deploys: the previous worker is still
+    shutting down when the new one starts, and a few seconds of
+    polling is plenty of time for the old container to release. The
+    timeout cap distinguishes "normal handoff" (resolves in seconds)
+    from "stuck holder" (real bug, fail fast so it surfaces).
 
     The connection is dedicated — never returned to the pool — because
     pool reset would issue ``DISCARD ALL``, which releases advisory
@@ -237,22 +283,59 @@ async def _acquire_worker_lock(db_url: str, log: Any) -> asyncpg.Connection[Any]
     """
     dsn = normalize_dsn(db_url)
     conn = await asyncpg.connect(dsn)
+    deadline = time.monotonic() + timeout_seconds
+    waiting_logged = False
     try:
-        held: bool = await conn.fetchval(
-            "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
-            _WORKER_LOCK_KEY_TEXT,
-        )
+        while True:
+            held: bool = await conn.fetchval(
+                "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
+                _WORKER_LOCK_KEY_TEXT,
+            )
+            if held:
+                return conn
+            if time.monotonic() >= deadline:
+                log.error(
+                    "worker.duplicate_instance_refused",
+                    lock_key=_WORKER_LOCK_KEY_TEXT,
+                    waited_seconds=timeout_seconds,
+                )
+                await conn.close()
+                return None
+            if not waiting_logged:
+                log.info(
+                    "worker.lock_busy.waiting",
+                    lock_key=_WORKER_LOCK_KEY_TEXT,
+                    timeout_seconds=timeout_seconds,
+                )
+                waiting_logged = True
+            await asyncio.sleep(poll_interval_seconds)
     except Exception:
         await conn.close()
         raise
-    if not held:
-        log.error(
-            "worker.duplicate_instance_refused",
-            lock_key=_WORKER_LOCK_KEY_TEXT,
-        )
-        await conn.close()
-        return None
-    return conn
+
+
+async def _periodic_heartbeat(*, interval: int = _HEARTBEAT_INTERVAL_SECONDS) -> None:
+    """Background task: touch the heartbeat file so the container's
+    HEALTHCHECK can detect a hung or crashed worker.
+
+    Started inside the worker's main try block, so it only runs after
+    every other resource is up — the lock is held, the pool is open,
+    procrastinate is consuming jobs. A worker that's stuck in startup
+    (lock contention, pool DNS failure, etc.) does NOT touch the file
+    and thus reports unhealthy after the threshold elapses, which is
+    the behavior we want.
+    """
+    log = get_logger("aios.worker.heartbeat")
+    while True:
+        try:
+            _HEARTBEAT_FILE.touch()  # noqa: ASYNC240
+        except OSError as e:
+            # tmpfs unavailable / permission denied — surface but don't
+            # crash the worker; a missing heartbeat file simply means
+            # the healthcheck reports unhealthy, which an operator
+            # can investigate.
+            log.warning("heartbeat.touch_failed", path=str(_HEARTBEAT_FILE), error=str(e))
+        await asyncio.sleep(interval)
 
 
 async def _periodic_sweep(
