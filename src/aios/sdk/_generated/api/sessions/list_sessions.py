@@ -1,25 +1,22 @@
 from http import HTTPStatus
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
-from ...models.list_events_v1_sessions_session_id_events_get_kind_type_0 import (
-    ListEventsV1SessionsSessionIdEventsGetKindType0,
-)
-from ...models.list_response_event import ListResponseEvent
+from ...models.list_response_session import ListResponseSession
+from ...models.list_sessions_status_type_0 import ListSessionsStatusType0
 from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
-    session_id: str,
     *,
-    after_seq: int | Unset = 0,
-    kind: ListEventsV1SessionsSessionIdEventsGetKindType0 | None | Unset = UNSET,
-    limit: int | Unset = 200,
+    agent_id: None | str | Unset = UNSET,
+    status: ListSessionsStatusType0 | None | Unset = UNSET,
+    limit: int | Unset = 50,
+    after: None | str | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -28,26 +25,36 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
-    params["after_seq"] = after_seq
-
-    json_kind: None | str | Unset
-    if isinstance(kind, Unset):
-        json_kind = UNSET
-    elif isinstance(kind, ListEventsV1SessionsSessionIdEventsGetKindType0):
-        json_kind = kind.value
+    json_agent_id: None | str | Unset
+    if isinstance(agent_id, Unset):
+        json_agent_id = UNSET
     else:
-        json_kind = kind
-    params["kind"] = json_kind
+        json_agent_id = agent_id
+    params["agent_id"] = json_agent_id
+
+    json_status: None | str | Unset
+    if isinstance(status, Unset):
+        json_status = UNSET
+    elif isinstance(status, ListSessionsStatusType0):
+        json_status = status.value
+    else:
+        json_status = status
+    params["status"] = json_status
 
     params["limit"] = limit
+
+    json_after: None | str | Unset
+    if isinstance(after, Unset):
+        json_after = UNSET
+    else:
+        json_after = after
+    params["after"] = json_after
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
     _kwargs: dict[str, Any] = {
         "method": "get",
-        "url": "/v1/sessions/{session_id}/events".format(
-            session_id=quote(str(session_id), safe=""),
-        ),
+        "url": "/v1/sessions",
         "params": params,
     }
 
@@ -57,9 +64,9 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> HTTPValidationError | ListResponseEvent | None:
+) -> HTTPValidationError | ListResponseSession | None:
     if response.status_code == 200:
-        response_200 = ListResponseEvent.from_dict(response.json())
+        response_200 = ListResponseSession.from_dict(response.json())
 
         return response_200
 
@@ -76,7 +83,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[HTTPValidationError | ListResponseEvent]:
+) -> Response[HTTPValidationError | ListResponseSession]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -86,21 +93,21 @@ def _build_response(
 
 
 def sync_detailed(
-    session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after_seq: int | Unset = 0,
-    kind: ListEventsV1SessionsSessionIdEventsGetKindType0 | None | Unset = UNSET,
-    limit: int | Unset = 200,
+    agent_id: None | str | Unset = UNSET,
+    status: ListSessionsStatusType0 | None | Unset = UNSET,
+    limit: int | Unset = 50,
+    after: None | str | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | ListResponseEvent]:
-    """List Events
+) -> Response[HTTPValidationError | ListResponseSession]:
+    """List
 
     Args:
-        session_id (str):
-        after_seq (int | Unset):  Default: 0.
-        kind (ListEventsV1SessionsSessionIdEventsGetKindType0 | None | Unset):
-        limit (int | Unset):  Default: 200.
+        agent_id (None | str | Unset):
+        status (ListSessionsStatusType0 | None | Unset):
+        limit (int | Unset):  Default: 50.
+        after (None | str | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -108,14 +115,14 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | ListResponseEvent]
+        Response[HTTPValidationError | ListResponseSession]
     """
 
     kwargs = _get_kwargs(
-        session_id=session_id,
-        after_seq=after_seq,
-        kind=kind,
+        agent_id=agent_id,
+        status=status,
         limit=limit,
+        after=after,
         authorization=authorization,
     )
 
@@ -127,21 +134,21 @@ def sync_detailed(
 
 
 def sync(
-    session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after_seq: int | Unset = 0,
-    kind: ListEventsV1SessionsSessionIdEventsGetKindType0 | None | Unset = UNSET,
-    limit: int | Unset = 200,
+    agent_id: None | str | Unset = UNSET,
+    status: ListSessionsStatusType0 | None | Unset = UNSET,
+    limit: int | Unset = 50,
+    after: None | str | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | ListResponseEvent | None:
-    """List Events
+) -> HTTPValidationError | ListResponseSession | None:
+    """List
 
     Args:
-        session_id (str):
-        after_seq (int | Unset):  Default: 0.
-        kind (ListEventsV1SessionsSessionIdEventsGetKindType0 | None | Unset):
-        limit (int | Unset):  Default: 200.
+        agent_id (None | str | Unset):
+        status (ListSessionsStatusType0 | None | Unset):
+        limit (int | Unset):  Default: 50.
+        after (None | str | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -149,35 +156,35 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | ListResponseEvent
+        HTTPValidationError | ListResponseSession
     """
 
     return sync_detailed(
-        session_id=session_id,
         client=client,
-        after_seq=after_seq,
-        kind=kind,
+        agent_id=agent_id,
+        status=status,
         limit=limit,
+        after=after,
         authorization=authorization,
     ).parsed
 
 
 async def asyncio_detailed(
-    session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after_seq: int | Unset = 0,
-    kind: ListEventsV1SessionsSessionIdEventsGetKindType0 | None | Unset = UNSET,
-    limit: int | Unset = 200,
+    agent_id: None | str | Unset = UNSET,
+    status: ListSessionsStatusType0 | None | Unset = UNSET,
+    limit: int | Unset = 50,
+    after: None | str | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | ListResponseEvent]:
-    """List Events
+) -> Response[HTTPValidationError | ListResponseSession]:
+    """List
 
     Args:
-        session_id (str):
-        after_seq (int | Unset):  Default: 0.
-        kind (ListEventsV1SessionsSessionIdEventsGetKindType0 | None | Unset):
-        limit (int | Unset):  Default: 200.
+        agent_id (None | str | Unset):
+        status (ListSessionsStatusType0 | None | Unset):
+        limit (int | Unset):  Default: 50.
+        after (None | str | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -185,14 +192,14 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | ListResponseEvent]
+        Response[HTTPValidationError | ListResponseSession]
     """
 
     kwargs = _get_kwargs(
-        session_id=session_id,
-        after_seq=after_seq,
-        kind=kind,
+        agent_id=agent_id,
+        status=status,
         limit=limit,
+        after=after,
         authorization=authorization,
     )
 
@@ -202,21 +209,21 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after_seq: int | Unset = 0,
-    kind: ListEventsV1SessionsSessionIdEventsGetKindType0 | None | Unset = UNSET,
-    limit: int | Unset = 200,
+    agent_id: None | str | Unset = UNSET,
+    status: ListSessionsStatusType0 | None | Unset = UNSET,
+    limit: int | Unset = 50,
+    after: None | str | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | ListResponseEvent | None:
-    """List Events
+) -> HTTPValidationError | ListResponseSession | None:
+    """List
 
     Args:
-        session_id (str):
-        after_seq (int | Unset):  Default: 0.
-        kind (ListEventsV1SessionsSessionIdEventsGetKindType0 | None | Unset):
-        limit (int | Unset):  Default: 200.
+        agent_id (None | str | Unset):
+        status (ListSessionsStatusType0 | None | Unset):
+        limit (int | Unset):  Default: 50.
+        after (None | str | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -224,16 +231,16 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | ListResponseEvent
+        HTTPValidationError | ListResponseSession
     """
 
     return (
         await asyncio_detailed(
-            session_id=session_id,
             client=client,
-            after_seq=after_seq,
-            kind=kind,
+            agent_id=agent_id,
+            status=status,
             limit=limit,
+            after=after,
             authorization=authorization,
         )
     ).parsed

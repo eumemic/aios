@@ -1,7 +1,7 @@
 from enum import Enum
 
 
-class ListV1SessionsGetStatusType0(str, Enum):
+class ListSessionsStatusType0(str, Enum):
     IDLE = "idle"
     PENDING = "pending"
     RESCHEDULING = "rescheduling"

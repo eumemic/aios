@@ -1,7 +1,7 @@
 from enum import Enum
 
 
-class ListEventsV1SessionsSessionIdEventsGetKindType0(str, Enum):
+class ListSessionEventsKindType0(str, Enum):
     INTERRUPT = "interrupt"
     LIFECYCLE = "lifecycle"
     MESSAGE = "message"

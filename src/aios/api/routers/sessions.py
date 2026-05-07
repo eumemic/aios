@@ -56,7 +56,7 @@ from aios.services import sessions as service
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post("", operation_id="create_session", status_code=status.HTTP_201_CREATED)
 async def create(
     body: SessionCreate,
     pool: PoolDep,
@@ -84,7 +84,7 @@ async def create(
     return session
 
 
-@router.get("")
+@router.get("", operation_id="list_sessions")
 async def list_(
     pool: PoolDep,
     _auth: AuthDep,
@@ -106,12 +106,12 @@ async def list_(
     )
 
 
-@router.get("/{session_id}")
+@router.get("/{session_id}", operation_id="get_session")
 async def get(session_id: str, pool: PoolDep, _auth: AuthDep) -> Session:
     return await service.get_session(pool, session_id)
 
 
-@router.put("/{session_id}")
+@router.put("/{session_id}", operation_id="update_session")
 async def update(
     session_id: str,
     body: SessionUpdate,
@@ -136,7 +136,7 @@ async def update(
     )
 
 
-@router.get("/{session_id}/resources")
+@router.get("/{session_id}/resources", operation_id="list_session_resources")
 async def list_resources(
     session_id: str, pool: PoolDep, _auth: AuthDep
 ) -> ListResponse[SessionResourceEcho]:
@@ -153,7 +153,7 @@ async def list_resources(
     return ListResponse[SessionResourceEcho](data=session.resources)
 
 
-@router.get("/{session_id}/resources/{resource_id}")
+@router.get("/{session_id}/resources/{resource_id}", operation_id="get_session_resource")
 async def get_resource(
     session_id: str, resource_id: str, pool: PoolDep, _auth: AuthDep
 ) -> GithubRepositoryResourceEcho:
@@ -167,7 +167,7 @@ async def get_resource(
     return await github_repo_service.get_resource(pool, session_id, resource_id)
 
 
-@router.post("/{session_id}/resources/{resource_id}")
+@router.post("/{session_id}/resources/{resource_id}", operation_id="update_session_resource")
 async def update_resource(
     session_id: str,
     resource_id: str,
@@ -232,7 +232,11 @@ async def archive(session_id: str, pool: PoolDep, _auth: AuthDep) -> Session:
     return await service.archive_session(pool, session_id)
 
 
-@router.post("/{session_id}/clone", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{session_id}/clone",
+    operation_id="clone_session",
+    status_code=status.HTTP_201_CREATED,
+)
 async def clone(
     session_id: str,
     body: SessionCloneRequest,
@@ -250,12 +254,20 @@ async def clone(
     return await service.clone_session(pool, session_id, workspace_path=body.workspace_path)
 
 
-@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{session_id}",
+    operation_id="delete_session",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 async def delete(session_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     await service.delete_session(pool, session_id)
 
 
-@router.post("/{session_id}/messages", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{session_id}/messages",
+    operation_id="send_message",
+    status_code=status.HTTP_201_CREATED,
+)
 async def post_message(
     session_id: str,
     body: SessionUserMessage,
@@ -280,7 +292,7 @@ async def post_message(
     return event
 
 
-@router.post("/{session_id}/interrupt")
+@router.post("/{session_id}/interrupt", operation_id="interrupt_session")
 async def interrupt(
     session_id: str,
     body: SessionInterruptRequest,
@@ -300,7 +312,11 @@ async def interrupt(
     return await service.get_session(pool, session_id)
 
 
-@router.post("/{session_id}/tool-results", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{session_id}/tool-results",
+    operation_id="submit_tool_result",
+    status_code=status.HTTP_201_CREATED,
+)
 async def submit_tool_result(
     session_id: str,
     body: ToolResultRequest,
@@ -333,7 +349,11 @@ async def submit_tool_result(
     return event
 
 
-@router.post("/{session_id}/tool-confirmations", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{session_id}/tool-confirmations",
+    operation_id="submit_tool_confirmation",
+    status_code=status.HTTP_201_CREATED,
+)
 async def submit_tool_confirmation(
     session_id: str,
     body: ToolConfirmationRequest,
@@ -355,7 +375,7 @@ async def submit_tool_confirmation(
     return event
 
 
-@router.get("/{session_id}/events")
+@router.get("/{session_id}/events", operation_id="list_session_events")
 async def list_events(
     session_id: str,
     pool: PoolDep,
@@ -372,7 +392,7 @@ async def list_events(
     )
 
 
-@router.get("/{session_id}/context")
+@router.get("/{session_id}/context", operation_id="get_session_context")
 async def get_context(
     session_id: str,
     pool: PoolDep,
