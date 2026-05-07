@@ -146,3 +146,14 @@ All aios settings use the `AIOS_` prefix (Pydantic settings with `env_prefix="AI
 - `AIOS_TAVILY_API_KEY` — for web_fetch/web_search tools
 
 Model provider keys use standard LiteLLM env vars (no `AIOS_` prefix): `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.
+
+## Deployment operations
+
+Operational knowledge for the deployed aios stack (api, worker, postgres, sandbox host) lives in the `eumemic-ops` repo at `~/code/eumemic-ops/`. Before making changes that affect the deployed environment — Coolify config edits, env-var changes, deploy triggers, incident recovery — read:
+
+- `~/code/eumemic-ops/skills/aios-ops/SKILL.md` — api/worker/db-specific procedures (lock collision, postgres scheme, sandbox model, recovery).
+- `~/code/eumemic-ops/skills/coolify-api/SKILL.md` — generic Coolify v4 quirks (GET/PATCH asymmetries, env-var dedup, custom_labels base64, healthcheck override).
+
+Source `~/code/eumemic-ops/scripts/_env.sh` to load credentials (`COOLIFY_TOKEN`, `CLOUDFLARE_API_TOKEN`, `AIOS_API_KEY`, etc.) from that repo's gitignored `.env`. Use the wrappers in `~/code/eumemic-ops/scripts/` (`coolify`, `cf`, `deploy`) rather than raw curl when possible.
+
+The aios repo's `DEPLOY.md` is the user-facing onboarding doc; eumemic-ops is the operator-facing skill set. Different audiences, same source-of-truth refs.
