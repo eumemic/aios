@@ -13,6 +13,8 @@ import pytest
 
 from aios.harness import vision
 
+from .conftest import gif_b64, jpeg_b64, png_b64
+
 
 @pytest.fixture(autouse=True)
 def _clear_vision_overrides() -> Any:
@@ -123,6 +125,39 @@ class TestMakeImageUrlPart:
             "type": "image_url",
             "image_url": {"url": "data:image/png;base64,ZmFrZQ=="},
         }
+
+    def test_sniff_corrects_mismatched_declared_type(self) -> None:
+        part = vision.make_image_url_part(content_type="image/png", data_b64=jpeg_b64())
+        assert part["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+    def test_unrecognized_magic_passes_through(self) -> None:
+        part = vision.make_image_url_part(content_type="image/png", data_b64="ZmFrZQ==")
+        assert part["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+class TestSniffImageMime:
+    def test_png(self) -> None:
+        assert vision.sniff_image_mime(png_b64()) == "image/png"
+
+    def test_jpeg(self) -> None:
+        assert vision.sniff_image_mime(jpeg_b64()) == "image/jpeg"
+
+    def test_gif87(self) -> None:
+        assert vision.sniff_image_mime(gif_b64(version=b"87a")) == "image/gif"
+
+    def test_gif89(self) -> None:
+        assert vision.sniff_image_mime(gif_b64(version=b"89a")) == "image/gif"
+
+    def test_unknown_returns_none(self) -> None:
+        import base64
+
+        assert vision.sniff_image_mime(base64.b64encode(b"\x00" * 32).decode()) is None
+
+    def test_short_input_returns_none(self) -> None:
+        assert vision.sniff_image_mime("") is None
+
+    def test_invalid_base64_returns_none(self) -> None:
+        assert vision.sniff_image_mime("!!!!not-base64!!!!") is None
 
 
 class TestTextMarker:

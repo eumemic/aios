@@ -33,6 +33,7 @@ import litellm
 
 from aios.harness.vision import (
     can_inline_image,
+    correct_image_mime,
     make_image_url_part,
     text_marker,
 )
@@ -52,9 +53,10 @@ _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
     "system": frozenset({"role", "content", "name"}),
 }
 
-# Anthropic's contract: thinking blocks must be preserved across turns
-# for the model to use them as continuation context.
-_THINKING_FIELDS: frozenset[str] = frozenset({"thinking_blocks", "reasoning_content"})
+# Anthropic's continuation handle.  ``reasoning_content`` is a LiteLLM
+# cross-provider abstraction that Anthropic's /v1/messages rejects; it
+# is not in this set.
+_THINKING_FIELDS: frozenset[str] = frozenset({"thinking_blocks"})
 
 # Notification markers truncate the source content to this many chars
 # (plus an ellipsis when truncated) so a busy non-focal channel
@@ -352,7 +354,7 @@ def _strip_to_spec(
     """Return a copy of *msg* with only chat-completions spec fields.
 
     When ``target_supports_thinking``, also preserve ``thinking_blocks``
-    and ``reasoning_content`` on assistant turns.
+    on assistant turns.
     """
     role = msg.get("role", "")
     allowed = _ALLOWED_FIELDS.get(role, frozenset())
@@ -362,6 +364,32 @@ def _strip_to_spec(
     if out.get("tool_calls"):
         out["tool_calls"] = _sanitize_tool_calls(out["tool_calls"])
     return out
+
+
+def _correct_image_data_url_mimes(messages: list[dict[str, Any]]) -> None:
+    """Rewrite mismatched mime declarations on ``data:<mime>;base64,...``
+    image URLs already in the persisted event log.  Mutates in place.
+    """
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            if not isinstance(image_url, dict):
+                continue
+            url = image_url.get("url")
+            if not isinstance(url, str) or not url.startswith("data:"):
+                continue
+            head, sep, data_b64 = url.partition(",")
+            if not sep or ";base64" not in head:
+                continue
+            declared = head.removeprefix("data:").split(";", 1)[0]
+            corrected = correct_image_mime(declared, data_b64)
+            if corrected != declared:
+                image_url["url"] = f"data:{corrected};base64,{data_b64}"
 
 
 # ─── build_messages ──────────────────────────────────────────────────────────
@@ -548,6 +576,8 @@ def build_messages(
     if system_prompt:
         messages.insert(0, {"role": "system", "content": system_prompt})
 
+    _correct_image_data_url_mimes(messages)
+
     target_supports_thinking = bool(model) and litellm.supports_reasoning(model)
     return ContextResult(
         messages=[
@@ -601,29 +631,6 @@ def _prune_leading_orphans(messages: list[dict[str, Any]]) -> list[dict[str, Any
         start += 1
 
     return messages[start:]
-
-
-def stub_missing_reasoning_content(
-    messages: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Ensure every assistant message carries ``reasoning_content``.
-
-    Thinking-mode models (DeepSeek V4 Flash, etc.) reject transcripts
-    whose assistant turns lack this field: ``The reasoning_content in the
-    thinking mode must be passed back to the API``.  Non-thinking models
-    (Anthropic / OpenAI / Gemini / Llama / DeepSeek v3 — all probed)
-    ignore the field entirely, so setting an empty stub unconditionally
-    costs nothing and lets cross-model sessions use thinking models for
-    a single turn without poisoning their replay on other providers.
-
-    Mutates messages in place and returns the list for chaining.  Skips
-    messages that already have a reasoning_content set (from a prior
-    thinking-model turn whose output we preserved opaquely in the log).
-    """
-    for msg in messages:
-        if msg.get("role") == "assistant" and "reasoning_content" not in msg:
-            msg["reasoning_content"] = ""
-    return messages
 
 
 def separate_adjacent_user_messages(

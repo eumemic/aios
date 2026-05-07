@@ -5,6 +5,7 @@ Uses lightweight FakeEvent objects to avoid touching the DB.
 
 from __future__ import annotations
 
+import base64
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -13,9 +14,10 @@ from aios.harness.channels import build_channels_tail_block
 from aios.harness.context import (
     build_messages,
     separate_adjacent_user_messages,
-    stub_missing_reasoning_content,
 )
 from aios.models.events import Event
+
+from .conftest import gif_b64, jpeg_b64, png_b64
 
 
 def _full_pipeline(
@@ -725,7 +727,8 @@ class TestThinkingBlockPreservation:
             {"type": "thinking", "thinking": "user said hi", "signature": "abc"}
         ]
 
-    def test_reasoning_content_preserved_for_thinking_capable_target(self) -> None:
+    def test_reasoning_content_stripped_even_for_thinking_capable_target(self) -> None:
+        # Anthropic /v1/messages rejects ``reasoning_content`` (extra_forbid).
         events = [
             _evt(1, "user", content="hi"),
             _evt(2, "assistant", content="hey"),
@@ -734,7 +737,7 @@ class TestThinkingBlockPreservation:
         msgs = build_messages(
             events, system_prompt=None, model="anthropic/claude-haiku-4-5"
         ).messages
-        assert msgs[1]["reasoning_content"] == "deep thoughts about hi"
+        assert "reasoning_content" not in msgs[1]
 
     def test_thinking_blocks_stripped_for_non_thinking_target(self) -> None:
         events = [
@@ -1094,6 +1097,60 @@ class TestFocalRendering:
         assert msgs[1]["content"].startswith(f"[channel={self._CHAN_A}")
 
 
+class TestImageMimeCorrection:
+    """``build_messages`` rewrites mismatched mime declarations on
+    image data URLs (Anthropic 400s when the declared mime disagrees
+    with the actual bytes).
+    """
+
+    def _msg(self, declared: str, b64: str) -> dict[str, Any]:
+        return {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{declared};base64,{b64}"},
+                },
+            ],
+        }
+
+    def _build_url(self, declared: str, b64: str) -> str:
+        ev = _evt(1, "user", content=self._msg(declared, b64)["content"])
+        msgs = build_messages([ev], system_prompt=None).messages
+        return str(msgs[0]["content"][1]["image_url"]["url"])
+
+    def test_jpeg_bytes_with_png_declaration_corrected(self) -> None:
+        assert self._build_url("image/png", jpeg_b64()).startswith("data:image/jpeg;base64,")
+
+    def test_png_bytes_with_jpeg_declaration_corrected(self) -> None:
+        assert self._build_url("image/jpeg", png_b64()).startswith("data:image/png;base64,")
+
+    def test_matching_mime_unchanged(self) -> None:
+        assert self._build_url("image/png", png_b64()).startswith("data:image/png;base64,")
+
+    def test_gif_bytes_corrected(self) -> None:
+        assert self._build_url("image/png", gif_b64()).startswith("data:image/gif;base64,")
+
+    def test_unrecognized_magic_leaves_declared_alone(self) -> None:
+        random_b64 = base64.b64encode(b"\x00" * 32).decode()
+        assert self._build_url("image/png", random_b64).startswith("data:image/png;base64,")
+
+    def test_non_data_url_unchanged(self) -> None:
+        ev = _evt(
+            1,
+            "user",
+            content=[
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/cat.png"},
+                }
+            ],
+        )
+        msgs = build_messages([ev], system_prompt=None).messages
+        assert msgs[0]["content"][0]["image_url"]["url"] == "https://example.com/cat.png"
+
+
 class TestSeparateAdjacentUserMessages:
     def test_inserts_empty_assistant_between_two_users(self) -> None:
         msgs = [
@@ -1153,58 +1210,6 @@ class TestSeparateAdjacentUserMessages:
             {"role": "assistant", "content": ""},
             {"role": "user", "content": "two"},
         ]
-
-
-class TestStubMissingReasoningContent:
-    def test_adds_empty_stub_to_assistant_without_reasoning(self) -> None:
-        msgs = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-        ]
-        stub_missing_reasoning_content(msgs)
-        assert msgs[1] == {"role": "assistant", "content": "hello", "reasoning_content": ""}
-
-    def test_preserves_existing_reasoning_content(self) -> None:
-        msgs = [
-            {"role": "assistant", "content": "ok", "reasoning_content": "deep thoughts"},
-        ]
-        stub_missing_reasoning_content(msgs)
-        assert msgs[0]["reasoning_content"] == "deep thoughts"
-
-    def test_ignores_user_messages(self) -> None:
-        msgs = [{"role": "user", "content": "hi"}]
-        stub_missing_reasoning_content(msgs)
-        assert msgs[0] == {"role": "user", "content": "hi"}
-
-    def test_ignores_tool_messages(self) -> None:
-        msgs = [{"role": "tool", "tool_call_id": "x", "content": "result"}]
-        stub_missing_reasoning_content(msgs)
-        assert msgs[0] == {"role": "tool", "tool_call_id": "x", "content": "result"}
-
-    def test_stubs_empty_assistant_separator(self) -> None:
-        """The empty-assistant separator inserted by
-        :func:`separate_adjacent_user_messages` is still an assistant
-        message and must also carry the stub."""
-        msgs = [
-            {"role": "user", "content": "a"},
-            {"role": "assistant", "content": ""},
-            {"role": "user", "content": "b"},
-        ]
-        stub_missing_reasoning_content(msgs)
-        assert msgs[1] == {"role": "assistant", "content": "", "reasoning_content": ""}
-
-    def test_mutates_in_place_and_returns(self) -> None:
-        msgs = [{"role": "assistant", "content": "x"}]
-        returned = stub_missing_reasoning_content(msgs)
-        assert returned is msgs
-
-    def test_handles_tool_call_assistants(self) -> None:
-        msgs = [
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
-        ]
-        stub_missing_reasoning_content(msgs)
-        assert msgs[0]["reasoning_content"] == ""
-        assert msgs[0]["tool_calls"] == [{"id": "a"}]
 
 
 class TestSeparateAdjacentUserMessagesPipeline:

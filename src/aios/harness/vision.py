@@ -8,6 +8,8 @@ recoverable.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from typing import Any
 
 import litellm
@@ -19,6 +21,44 @@ log = get_logger("aios.harness.vision")
 INLINE_SIZE_CAP_BYTES = 2 * 1024 * 1024
 
 _VISION_OVERRIDES: dict[str, bool] = {}
+
+# Anthropic's ``/v1/messages`` validates declared mime against actual
+# magic bytes and 400s on mismatch.  WebP needs offset 8-11 (RIFF/WEBP)
+# rather than a leading prefix — add it if it ever shows up in the wild.
+_IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def sniff_image_mime(data_b64: str) -> str | None:
+    """Return the actual mime of the base64-encoded image, or ``None``
+    when the magic bytes don't match a known format.  Decodes only the
+    first ~16 bytes (24 base64 chars).
+    """
+    head_b64 = data_b64[:24]
+    pad = (-len(head_b64)) % 4
+    try:
+        head = base64.b64decode(head_b64 + "=" * pad)
+    except binascii.Error:
+        return None
+    for sig, mime in _IMAGE_MAGIC:
+        if head.startswith(sig):
+            return mime
+    return None
+
+
+def correct_image_mime(declared: str, data_b64: str) -> str:
+    """Return the magic-byte-detected mime, or ``declared`` unchanged
+    when sniffing yields nothing recognizable.  Logs the substitution.
+    """
+    actual = sniff_image_mime(data_b64)
+    if actual is None or actual == declared:
+        return declared
+    log.warning("vision.image_mime_corrected", declared=declared, actual=actual)
+    return actual
 
 
 def supports_vision(model: str) -> bool:
@@ -61,7 +101,14 @@ def can_inline_image(*, model: str, content_type: str, size_bytes: int) -> bool:
 
 
 def make_image_url_part(*, content_type: str, data_b64: str) -> dict[str, Any]:
-    """Build a chat-completions ``image_url`` content part."""
+    """Build a chat-completions ``image_url`` content part.
+
+    The declared ``content_type`` is reconciled against the actual magic
+    bytes; inbound platform metadata and extension-based guesses both
+    occasionally lie.  ``_correct_image_data_url_mimes`` in context.py
+    fixes the same mismatch on historical events at replay time.
+    """
+    content_type = correct_image_mime(content_type, data_b64)
     return {
         "type": "image_url",
         "image_url": {"url": f"data:{content_type};base64,{data_b64}"},
