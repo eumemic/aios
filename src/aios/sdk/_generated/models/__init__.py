@@ -53,9 +53,6 @@ from .list_accounts_v1_connectors_connector_instance_accounts_get_response_list_
     ListAccountsV1ConnectorsConnectorInstanceAccountsGetResponseListAccountsV1ConnectorsConnectorInstanceAccountsGet,
 )
 from .list_connections_mode_type_0 import ListConnectionsModeType0
-from .list_events_v1_sessions_session_id_events_get_kind_type_0 import (
-    ListEventsV1SessionsSessionIdEventsGetKindType0,
-)
 from .list_for_connector_v1_connectors_connector_get_response_list_for_connector_v1_connectors_connector_get import (
     ListForConnectorV1ConnectorsConnectorGetResponseListForConnectorV1ConnectorsConnectorGet,
 )
@@ -80,13 +77,14 @@ from .list_response_union_memory_memory_prefix import (
 )
 from .list_response_vault import ListResponseVault
 from .list_response_vault_credential import ListResponseVaultCredential
+from .list_session_events_kind_type_0 import ListSessionEventsKindType0
+from .list_sessions_status_type_0 import ListSessionsStatusType0
 from .list_tools_v1_connectors_connector_instance_tools_get_response_list_tools_v1_connectors_connector_instance_tools_get import (
     ListToolsV1ConnectorsConnectorInstanceToolsGetResponseListToolsV1ConnectorsConnectorInstanceToolsGet,
 )
 from .list_v1_connectors_get_response_list_v1_connectors_get import (
     ListV1ConnectorsGetResponseListV1ConnectorsGet,
 )
-from .list_v1_sessions_get_status_type_0 import ListV1SessionsGetStatusType0
 from .mcp_permission_policy import McpPermissionPolicy
 from .mcp_permission_policy_type import McpPermissionPolicyType
 from .mcp_server_spec import McpServerSpec
@@ -217,7 +215,6 @@ __all__ = (
     "LimitedNetworking",
     "ListAccountsV1ConnectorsConnectorInstanceAccountsGetResponseListAccountsV1ConnectorsConnectorInstanceAccountsGet",
     "ListConnectionsModeType0",
-    "ListEventsV1SessionsSessionIdEventsGetKindType0",
     "ListForConnectorV1ConnectorsConnectorGetResponseListForConnectorV1ConnectorsConnectorGet",
     "ListResponseAgent",
     "ListResponseAgentVersion",
@@ -236,9 +233,10 @@ __all__ = (
     "ListResponseUnionMemoryMemoryPrefix",
     "ListResponseVault",
     "ListResponseVaultCredential",
+    "ListSessionEventsKindType0",
+    "ListSessionsStatusType0",
     "ListToolsV1ConnectorsConnectorInstanceToolsGetResponseListToolsV1ConnectorsConnectorInstanceToolsGet",
     "ListV1ConnectorsGetResponseListV1ConnectorsGet",
-    "ListV1SessionsGetStatusType0",
     "McpPermissionPolicy",
     "McpPermissionPolicyType",
     "McpServerSpec",

@@ -824,7 +824,7 @@
           "sessions"
         ],
         "summary": "Create",
-        "operationId": "create_v1_sessions_post",
+        "operationId": "create_session",
         "parameters": [
           {
             "name": "Authorization",
@@ -881,7 +881,7 @@
           "sessions"
         ],
         "summary": "List ",
-        "operationId": "list__v1_sessions_get",
+        "operationId": "list_sessions",
         "parameters": [
           {
             "name": "agent_id",
@@ -995,7 +995,7 @@
           "sessions"
         ],
         "summary": "Get",
-        "operationId": "get_v1_sessions__session_id__get",
+        "operationId": "get_session",
         "parameters": [
           {
             "name": "session_id",
@@ -1051,7 +1051,7 @@
           "sessions"
         ],
         "summary": "Update",
-        "operationId": "update_v1_sessions__session_id__put",
+        "operationId": "update_session",
         "parameters": [
           {
             "name": "session_id",
@@ -1117,7 +1117,7 @@
           "sessions"
         ],
         "summary": "Delete",
-        "operationId": "delete_v1_sessions__session_id__delete",
+        "operationId": "delete_session",
         "parameters": [
           {
             "name": "session_id",
@@ -1169,7 +1169,7 @@
         ],
         "summary": "List Resources",
         "description": "List all resources attached to ``session_id``.\n\nReturns the type-discriminated union of memory store and github\nrepository echoes, ordered by type (memory stores first) and rank.\nEquivalent to reading the ``resources`` field on the full session\nrecord, but cheaper if you don't need anything else.",
-        "operationId": "list_resources_v1_sessions__session_id__resources_get",
+        "operationId": "list_session_resources",
         "parameters": [
           {
             "name": "session_id",
@@ -1228,7 +1228,7 @@
         ],
         "summary": "Get Resource",
         "description": "Fetch a single resource attached to ``session_id`` by its id.\n\nv1 only supports ``github_repository`` (id prefix ``ghrepo_``) since\nmemory store attachments are keyed by ``(session_id, memory_store_id)``\nand don't have a separate attachment id.",
-        "operationId": "get_resource_v1_sessions__session_id__resources__resource_id__get",
+        "operationId": "get_session_resource",
         "parameters": [
           {
             "name": "session_id",
@@ -1294,7 +1294,7 @@
         ],
         "summary": "Update Resource",
         "description": "Rotate the auth token on a github_repository attachment.\n\nThe bumped ``updated_at`` propagates through the mount snapshot, so\nthe next sandbox provision recycles the container and re-clones the\nworking tree with the new token.",
-        "operationId": "update_resource_v1_sessions__session_id__resources__resource_id__post",
+        "operationId": "update_session_resource",
         "parameters": [
           {
             "name": "session_id",
@@ -1435,7 +1435,7 @@
         ],
         "summary": "Clone",
         "description": "Clone a session at its current state into a new session.\n\nThe clone inherits everything that defines the parent's next-step context\n(events, agent binding, vaults, focal channel, status, stop_reason) but\nhas its own session_id and a fresh workspace volume by default.\n\nRefuses if the parent isn't ``idle`` or ``terminated``.",
-        "operationId": "clone_v1_sessions__session_id__clone_post",
+        "operationId": "clone_session",
         "parameters": [
           {
             "name": "session_id",
@@ -1503,7 +1503,7 @@
           "sessions"
         ],
         "summary": "Post Message",
-        "operationId": "post_message_v1_sessions__session_id__messages_post",
+        "operationId": "send_message",
         "parameters": [
           {
             "name": "session_id",
@@ -1572,7 +1572,7 @@
         ],
         "summary": "Interrupt",
         "description": "Interrupt a running session: cancel all in-flight work and idle it.",
-        "operationId": "interrupt_v1_sessions__session_id__interrupt_post",
+        "operationId": "interrupt_session",
         "parameters": [
           {
             "name": "session_id",
@@ -1641,7 +1641,7 @@
         ],
         "summary": "Submit Tool Result",
         "description": "Submit a custom tool result. Appends a tool-role message and wakes the session.\n\nStamps the tool's ``name`` into the event data by looking it up on the\nparent assistant's ``tool_calls`` array \u2014 same source the harness uses\nfor built-in/MCP results \u2014 so the derived ``tool_name`` column stays\npopulated for custom tools too (issue #133).  Returns 404 when the\n``tool_call_id`` has no matching parent assistant tool call, since a\nresult with no parent is a client bug that would leave an orphan row.",
-        "operationId": "submit_tool_result_v1_sessions__session_id__tool_results_post",
+        "operationId": "submit_tool_result",
         "parameters": [
           {
             "name": "session_id",
@@ -1710,7 +1710,7 @@
         ],
         "summary": "Submit Tool Confirmation",
         "description": "Confirm or deny an ``always_ask`` built-in tool call.\n\n``allow`` records a lifecycle event; the worker dispatches the tool on\nits next step.  ``deny`` appends a tool-role error event; the model\nsees the denial message and can adapt.",
-        "operationId": "submit_tool_confirmation_v1_sessions__session_id__tool_confirmations_post",
+        "operationId": "submit_tool_confirmation",
         "parameters": [
           {
             "name": "session_id",
@@ -1778,7 +1778,7 @@
           "sessions"
         ],
         "summary": "List Events",
-        "operationId": "list_events_v1_sessions__session_id__events_get",
+        "operationId": "list_session_events",
         "parameters": [
           {
             "name": "session_id",
@@ -1879,7 +1879,7 @@
         ],
         "summary": "Get Context",
         "description": "Return the chat-completions payload the worker would send next.\n\nDry-run preview for debugging prompt construction.  Reuses the exact\ncomposer the worker's step function uses (:func:`compose_step_context`)\nso the endpoint's output is byte-identical to what the next model\ncall would see \u2014 no divergence.  Side effects (skill provisioning,\nsession-status bumps, event appends) are omitted; the endpoint is\nread-only.",
-        "operationId": "get_context_v1_sessions__session_id__context_get",
+        "operationId": "get_session_context",
         "parameters": [
           {
             "name": "session_id",
