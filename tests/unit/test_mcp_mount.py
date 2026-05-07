@@ -148,3 +148,73 @@ def test_apply_mcp_polish_populates_annotations_and_instructions() -> None:
 
     # Server-level instructions populated
     assert mcp.server.instructions == MCP_INSTRUCTIONS
+
+
+def test_apply_mcp_polish_cleans_schemas() -> None:
+    """End-to-end: the MCP tool list ships with cleaned-up descriptions and inputSchemas.
+
+    Three transforms applied per tool:
+    - The auto-appended ``### Responses:`` example block is gone.
+    - Redundant ``title`` fields (whose value matches the property key) are dropped.
+    - Two-branch ``anyOf: [T, {"type": "null"}]`` is flattened to ``type: [T, "null"]``.
+
+    Verified against representative tools that exercise each transform —
+    plus a deliberate non-target case to confirm complex multi-branch
+    ``anyOf`` schemas are preserved.
+    """
+    from fastapi import Depends
+    from fastapi_mcp import AuthConfig, FastApiMCP
+
+    from aios.api.app import (
+        MCP_INSTRUCTIONS,
+        _apply_mcp_polish,
+        _compute_mcp_excluded_operations,
+        create_app,
+    )
+    from aios.api.deps import require_bearer_auth
+
+    app = create_app()
+    mcp = FastApiMCP(
+        app,
+        name="test",
+        description="test",
+        exclude_operations=_compute_mcp_excluded_operations(app),
+        auth_config=AuthConfig(dependencies=[Depends(require_bearer_auth)]),
+    )
+    _apply_mcp_polish(app, mcp, instructions=MCP_INSTRUCTIONS)
+
+    by_name = {tool.name: tool for tool in mcp.tools}
+
+    # Description-strip: the ``### Responses:`` block + example payload are gone
+    archive = by_name["archive_session"]
+    assert archive.description is not None
+    assert "### Responses:" not in archive.description
+    assert "Example Response" not in archive.description
+    # The route's actual prose ("Archive") survives
+    assert "Archive" in archive.description
+
+    # Title-drop: ``session_id`` property no longer carries a redundant ``title``
+    session_id_prop = archive.inputSchema["properties"]["session_id"]
+    assert "title" not in session_id_prop
+    assert session_id_prop["type"] == "string"
+
+    # Nullable-anyOf flatten: simple nullable string collapses to type-array
+    list_conn = by_name["list_connections"]
+    connector_prop = list_conn.inputSchema["properties"]["connector"]
+    assert "anyOf" not in connector_prop
+    assert connector_prop["type"] == ["string", "null"]
+
+    # Nullable-anyOf with enum: ``mode`` keeps its enum, gains nullable type-array
+    mode_prop = list_conn.inputSchema["properties"]["mode"]
+    assert "anyOf" not in mode_prop
+    assert mode_prop["type"] == ["string", "null"]
+    assert set(mode_prop["enum"]) == {"detached", "single_session", "per_chat"}
+
+    # Preservation: the ``tools[].type`` two-branch enum union (no null branch)
+    # is left alone — flattening it would collapse the BuiltinToolType vs.
+    # custom/mcp_toolset distinction the Pydantic union encodes.
+    tools_type_prop = by_name["create_agent"].inputSchema["properties"]["tools"]["items"][
+        "properties"
+    ]["type"]
+    assert "anyOf" in tools_type_prop
+    assert len(tools_type_prop["anyOf"]) == 2
