@@ -61,7 +61,7 @@ def _make_spec(environment: dict[str, str]) -> SandboxSpec:
         environment=environment,
         labels={"aios.managed": "true"},
         network_policy=Unrestricted(),
-        host_gateway_aliases=(),
+        host_gateway_alias=None,
         image="aios-sandbox:test",
     )
 
@@ -123,7 +123,7 @@ class TestWorkspaceRuntimeDirsSetup:
         backend = FakeBackend()
         handle = make_handle()
 
-        await ensure_workspace_runtime_dirs(backend, handle, session_id=handle.session_id)
+        await ensure_workspace_runtime_dirs(backend, handle)
 
         commands = [c[1]["command"] for c in backend.calls if c[0] == "exec"]
         joined = "\n".join(commands)
@@ -135,7 +135,7 @@ class TestWorkspaceRuntimeDirsSetup:
         backend = FakeBackend()
         handle = make_handle()
 
-        await ensure_workspace_runtime_dirs(backend, handle, session_id=handle.session_id)
+        await ensure_workspace_runtime_dirs(backend, handle)
 
         commands = [c[1]["command"] for c in backend.calls if c[0] == "exec"]
         joined = "\n".join(commands)
@@ -156,4 +156,4 @@ class TestWorkspaceRuntimeDirsSetup:
         handle = make_handle()
 
         # Must not raise.
-        await ensure_workspace_runtime_dirs(backend, handle, session_id=handle.session_id)
+        await ensure_workspace_runtime_dirs(backend, handle)

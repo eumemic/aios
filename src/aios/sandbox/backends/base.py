@@ -26,7 +26,7 @@ stays trivially serializable and can't accumulate hidden state.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -84,6 +84,11 @@ class SandboxSpec:
     workspace directory. Pure data — no live handles to host-side
     services, no DB pool. Anything that needs to outlive the spec (the
     GitProxy, materialized memory-store snapshots) is owned elsewhere.
+
+    ``mount_snapshot`` is a derived value from the same echoes that
+    populated ``extra_mounts``; the backend stamps it onto the handle
+    it returns so the registry's drift detector can compare it against
+    the current echo set on each step.
     """
 
     session_id: str
@@ -93,8 +98,9 @@ class SandboxSpec:
     environment: dict[str, str]
     labels: dict[str, str]
     network_policy: NetworkPolicy
-    host_gateway_aliases: tuple[str, ...]
+    host_gateway_alias: str | None
     image: str
+    mount_snapshot: frozenset[tuple[str, ...]] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,18 +116,12 @@ class SandboxHandle:
     have changed since the sandbox was provisioned (e.g. a memory store
     was attached or detached) — see
     :meth:`SandboxRegistry.release_if_mounts_changed`.
-
-    ``backend_metadata`` is a free-form bag for backend-specific extras
-    that don't fit on the abstract handle (e.g. a Docker network name a
-    future remote-executor backend might track). Most backends leave it
-    empty.
     """
 
     session_id: str
     sandbox_id: str
     workspace_path: Path
     mount_snapshot: frozenset[tuple[str, ...]] = frozenset()
-    backend_metadata: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

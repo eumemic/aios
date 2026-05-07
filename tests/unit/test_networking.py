@@ -146,7 +146,7 @@ def _make_spec(network_policy: Limited | Unrestricted) -> SandboxSpec:
         environment={},
         labels={"aios.managed": "true"},
         network_policy=network_policy,
-        host_gateway_aliases=(),
+        host_gateway_alias=None,
         image="aios-sandbox:test",
     )
 
@@ -195,7 +195,7 @@ class TestApplyNetworkLockdown:
         handle = make_handle()
         networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
 
-        await apply_network_lockdown(backend, handle, networking, session_id="sess_01TEST")
+        await apply_network_lockdown(backend, handle, networking)
 
         exec_calls = [c for c in backend.calls if c[0] == "exec"]
         assert len(exec_calls) == 1
@@ -213,7 +213,7 @@ class TestApplyNetworkLockdown:
             allow_package_managers=True,
         )
 
-        await apply_network_lockdown(backend, handle, networking, session_id="sess_01TEST")
+        await apply_network_lockdown(backend, handle, networking)
 
         script = backend.calls[0][1]["command"]
         assert "pypi.org" in script
@@ -230,7 +230,7 @@ class TestApplyNetworkLockdown:
             allow_package_managers=False,
         )
 
-        await apply_network_lockdown(backend, handle, networking, session_id="sess_01TEST")
+        await apply_network_lockdown(backend, handle, networking)
 
         script = backend.calls[0][1]["command"]
         assert "pypi.org" not in script
@@ -246,7 +246,6 @@ class TestApplyNetworkLockdown:
             backend,
             handle,
             networking,
-            session_id="sess_01TEST",
             extra_host_ports=[("host.docker.internal", 8765)],
         )
 

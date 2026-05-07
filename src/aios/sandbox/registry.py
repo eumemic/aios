@@ -28,7 +28,6 @@ addition to destroying the sandbox.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
@@ -54,11 +53,6 @@ if TYPE_CHECKING:
     from aios.models.memory_stores import MemoryStoreResourceEcho
 
 log = get_logger("aios.sandbox.registry")
-
-
-# Hostname the sandbox uses to reach the host-side credential proxy.
-# Imported here for the network-lockdown extra-host-ports list.
-_PROXY_HOST_ALIAS = "host.docker.internal"
 
 
 class SandboxRegistry:
@@ -157,30 +151,22 @@ class SandboxRegistry:
 
         try:
             handle = await self._backend.create(plan.spec)
-            handle = dataclasses.replace(handle, mount_snapshot=plan.mount_snapshot)
         except BaseException:
             # Spec was built (proxy may be running) but the backend
             # couldn't create the sandbox. Stop the proxy so its port +
             # token map don't leak.
+            self._git_proxies.pop(session_id, None)
             if plan.git_proxy is not None:
-                try:
-                    await plan.git_proxy.stop()
-                except Exception as cleanup_err:
-                    log.warning(
-                        "sandbox.git_proxy_cleanup_after_create_failure",
-                        session_id=session_id,
-                        error=str(cleanup_err),
-                    )
-                self._git_proxies.pop(session_id, None)
+                await self._stop_proxy_silently(plan.git_proxy, session_id)
             raise
 
         # Setup steps after create. If any of these raise, tear the
         # sandbox down so we don't leak an empty container alongside
         # the proxy.
         try:
-            await ensure_workspace_runtime_dirs(self._backend, handle, session_id=session_id)
-            await install_packages(self._backend, handle, plan.env_config, session_id=session_id)
-            await self._maybe_apply_lockdown(handle, plan, session_id)
+            await ensure_workspace_runtime_dirs(self._backend, handle)
+            await install_packages(self._backend, handle, plan.env_config)
+            await self._maybe_apply_lockdown(handle, plan)
         except BaseException:
             await self._destroy_quietly(handle, session_id)
             raise
@@ -195,25 +181,38 @@ class SandboxRegistry:
         )
         return handle
 
-    async def _maybe_apply_lockdown(
-        self, handle: SandboxHandle, plan: ProvisioningPlan, session_id: str
-    ) -> None:
+    async def _maybe_apply_lockdown(self, handle: SandboxHandle, plan: ProvisioningPlan) -> None:
         """Apply network lockdown if the plan calls for it."""
         from aios.models.environments import LimitedNetworking
 
         networking = plan.env_config.networking if plan.env_config else None
         if not isinstance(networking, LimitedNetworking):
             return
-        extra_host_ports: list[tuple[str, int]] = (
-            [(_PROXY_HOST_ALIAS, plan.git_proxy.port)] if plan.git_proxy is not None else []
-        )
+        extra_host_ports: list[tuple[str, int]] = []
+        if plan.git_proxy is not None and plan.spec.host_gateway_alias is not None:
+            extra_host_ports.append((plan.spec.host_gateway_alias, plan.git_proxy.port))
         await apply_network_lockdown(
             self._backend,
             handle,
             networking,
-            session_id=session_id,
             extra_host_ports=extra_host_ports,
         )
+
+    async def _stop_proxy_silently(self, proxy: GitProxy, session_id: str) -> None:
+        """Stop ``proxy``, log + swallow any error.
+
+        Used by every cleanup path; a stuck proxy must never block
+        sandbox teardown or propagate a secondary exception over a
+        primary one.
+        """
+        try:
+            await proxy.stop()
+        except Exception as err:
+            log.warning(
+                "sandbox.git_proxy_stop_failed",
+                session_id=session_id,
+                error=str(err),
+            )
 
     async def _destroy_quietly(self, handle: SandboxHandle, session_id: str) -> None:
         """Tear down the handle's sandbox and stop the session's proxy.
@@ -233,14 +232,7 @@ class SandboxRegistry:
             )
         proxy = self._git_proxies.pop(session_id, None)
         if proxy is not None:
-            try:
-                await proxy.stop()
-            except Exception as err:
-                log.warning(
-                    "sandbox.git_proxy_stop_during_cleanup_failed",
-                    session_id=session_id,
-                    error=str(err),
-                )
+            await self._stop_proxy_silently(proxy, session_id)
 
     async def exec(
         self,
@@ -251,11 +243,7 @@ class SandboxRegistry:
         max_output_bytes: int,
         cwd: str = "/workspace",
     ) -> CommandResult:
-        """Run ``command`` inside ``handle``'s sandbox via the backend.
-
-        Tools call this instead of the deleted ``handle.run_command``;
-        the registry forwards to ``self._backend.exec(...)``.
-        """
+        """Run ``command`` inside ``handle``'s sandbox via the backend."""
         return await self._backend.exec(
             handle,
             command,
@@ -271,17 +259,7 @@ class SandboxRegistry:
         proxy = self._git_proxies.pop(session_id, None)
 
         if proxy is not None:
-            try:
-                await proxy.stop()
-            except Exception as err:
-                # Best-effort cleanup — never let a stuck proxy block
-                # sandbox teardown.
-                log.warning(
-                    "sandbox.git_proxy_stop_failed",
-                    session_id=session_id,
-                    error=str(err),
-                )
-
+            await self._stop_proxy_silently(proxy, session_id)
         if handle is None:
             return
         await self._backend.destroy(handle)
@@ -317,14 +295,7 @@ class SandboxRegistry:
             self._last_used.pop(session_id, None)
             proxy = self._git_proxies.pop(session_id, None)
             if proxy is not None:
-                try:
-                    await proxy.stop()
-                except Exception as err:
-                    log.warning(
-                        "sandbox.git_proxy_stop_failed",
-                        session_id=session_id,
-                        error=str(err),
-                    )
+                await self._stop_proxy_silently(proxy, session_id)
             await self._backend.destroy(handle)
 
     def peek(self, session_id: str) -> SandboxHandle | None:
@@ -345,18 +316,9 @@ class SandboxRegistry:
         # from the next provision pass.
         proxy = self._git_proxies.pop(session_id, None)
         if proxy is not None:
-            # Fire-and-forget — eviction is best-effort cleanup.
-            asyncio.create_task(self._stop_proxy_quietly(proxy, session_id))  # noqa: RUF006
-
-    async def _stop_proxy_quietly(self, proxy: GitProxy, session_id: str) -> None:
-        try:
-            await proxy.stop()
-        except Exception as err:
-            log.warning(
-                "sandbox.git_proxy_stop_after_evict_failed",
-                session_id=session_id,
-                error=str(err),
-            )
+            # Fire-and-forget — eviction is best-effort cleanup; worker
+            # shutdown's ``release_all`` is the authoritative final stop.
+            asyncio.create_task(self._stop_proxy_silently(proxy, session_id))  # noqa: RUF006
 
     async def release_all(self) -> None:
         """Tear down every sandbox + proxy. Called at worker shutdown."""

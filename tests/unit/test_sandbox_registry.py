@@ -139,8 +139,9 @@ class TestReleaseIfMountsChanged:
                 environment={},
                 labels={},
                 network_policy=Unrestricted(),
-                host_gateway_aliases=(),
+                host_gateway_alias=None,
                 image="aios-sandbox:test",
+                mount_snapshot=new_snapshot,
             )
             return ProvisioningPlan(
                 spec=spec,
@@ -148,7 +149,6 @@ class TestReleaseIfMountsChanged:
                 memory_echoes=[],
                 github_echoes=[],
                 git_proxy=None,
-                mount_snapshot=new_snapshot,
             )
 
         # Force a cache miss so get_or_provision contends for the lock.

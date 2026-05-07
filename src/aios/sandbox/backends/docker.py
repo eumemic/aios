@@ -117,12 +117,12 @@ class DockerBackend:
         if isinstance(spec.network_policy, Limited):
             argv.extend(["--cap-add", "NET_ADMIN"])
 
-        # Host gateway aliases — Docker maps each to host-gateway so the
+        # Host gateway alias — Docker maps it to host-gateway so the
         # sandbox can reach host-side services (e.g. the credential proxy).
         # The explicit alias is required on Linux; on Docker Desktop the
         # name auto-resolves but ``--add-host`` is harmless.
-        for alias in spec.host_gateway_aliases:
-            argv.extend(["--add-host", f"{alias}:host-gateway"])
+        if spec.host_gateway_alias is not None:
+            argv.extend(["--add-host", f"{spec.host_gateway_alias}:host-gateway"])
 
         # Keep stdin open so the container doesn't exit on empty stdin.
         argv.append("--interactive")
@@ -148,7 +148,7 @@ class DockerBackend:
             session_id=spec.session_id,
             sandbox_id=container_id,
             workspace_path=spec.workspace.host_path,
-            mount_snapshot=frozenset(),  # registry overlays this from echoes
+            mount_snapshot=spec.mount_snapshot,
         )
 
     async def exec(

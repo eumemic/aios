@@ -68,7 +68,7 @@ class FakeBackend:
             session_id=spec.session_id,
             sandbox_id=self.next_handle_id,
             workspace_path=spec.workspace.host_path,
-            mount_snapshot=frozenset(),
+            mount_snapshot=spec.mount_snapshot,
         )
 
     async def exec(

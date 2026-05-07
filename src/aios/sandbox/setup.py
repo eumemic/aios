@@ -88,9 +88,7 @@ PACKAGE_REGISTRY_HOSTS: frozenset[str] = frozenset(
 )
 
 
-async def ensure_workspace_runtime_dirs(
-    backend: SandboxBackend, handle: SandboxHandle, *, session_id: str
-) -> None:
+async def ensure_workspace_runtime_dirs(backend: SandboxBackend, handle: SandboxHandle) -> None:
     """Idempotently create ``/workspace/.venv`` and ``/workspace/.npm``.
 
     Both live under the workspace bind mount so they survive idle
@@ -101,8 +99,7 @@ async def ensure_workspace_runtime_dirs(
 
     Failures are logged but don't fail the provision — the model can
     still operate without the persistence layer (it just falls back to
-    re-installing tools after each idle release, which is the pre-#227
-    behaviour).
+    re-installing tools after every cold release).
     """
     settings = get_settings()
     cmd = (
@@ -115,7 +112,7 @@ async def ensure_workspace_runtime_dirs(
     if result.exit_code != 0:
         log.warning(
             "sandbox.workspace_runtime_dirs_setup_failed",
-            session_id=session_id,
+            session_id=handle.session_id,
             exit_code=result.exit_code,
             stderr=result.stderr[:500],
         )
@@ -125,8 +122,6 @@ async def install_packages(
     backend: SandboxBackend,
     handle: SandboxHandle,
     env_config: EnvironmentConfig | None,
-    *,
-    session_id: str,
 ) -> None:
     """Install packages from the environment config.
 
@@ -159,7 +154,7 @@ async def install_packages(
         if result.exit_code != 0:
             log.warning(
                 "sandbox.package_install_failed",
-                session_id=session_id,
+                session_id=handle.session_id,
                 manager=manager,
                 exit_code=result.exit_code,
                 stderr=result.stderr[:500],
@@ -232,7 +227,6 @@ async def apply_network_lockdown(
     handle: SandboxHandle,
     networking: LimitedNetworking,
     *,
-    session_id: str,
     extra_host_ports: Sequence[tuple[str, int]] = (),
 ) -> None:
     """Apply iptables rules to restrict outbound traffic.
@@ -255,14 +249,14 @@ async def apply_network_lockdown(
     if result.exit_code != 0:
         log.warning(
             "sandbox.network_lockdown_failed",
-            session_id=session_id,
+            session_id=handle.session_id,
             exit_code=result.exit_code,
             stderr=result.stderr[:500],
         )
     else:
         log.info(
             "sandbox.network_lockdown_applied",
-            session_id=session_id,
+            session_id=handle.session_id,
             allowed_host_count=len(allowed),
             extra_host_port_count=len(extra_host_ports),
         )

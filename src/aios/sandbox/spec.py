@@ -57,8 +57,9 @@ log = get_logger("aios.sandbox.spec")
 # Hostname the sandbox uses to reach the host-side credential proxy.
 # Docker maps this to the host gateway IP via ``--add-host``; on Docker
 # Desktop the name auto-resolves but the explicit alias is required on
-# Linux.
-_PROXY_HOST_ALIAS = "host.docker.internal"
+# Linux. The registry threads the same string through the iptables script
+# so limited-networking sessions can still reach the proxy.
+PROXY_HOST_ALIAS = "host.docker.internal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,13 +70,8 @@ class ProvisioningPlan:
     ``backend.create(plan.spec)`` to bring the sandbox up, (2) run the
     setup steps from :mod:`aios.sandbox.setup` against the resulting
     handle, (3) record ``plan.git_proxy`` (if any) for cleanup at
-    release time.
-
-    ``mount_snapshot`` is computed from the echo lists and is stamped
-    onto the returned handle via ``dataclasses.replace`` so the
-    registry's drift detector
-    (:meth:`SandboxRegistry.release_if_mounts_changed`) can compare it
-    against the current echo set on each step.
+    release time. The mount snapshot used by the drift detector lives
+    on ``plan.spec`` and is stamped onto the handle by the backend.
     """
 
     spec: SandboxSpec
@@ -83,7 +79,6 @@ class ProvisioningPlan:
     memory_echoes: list[MemoryStoreResourceEcho]
     github_echoes: list[GithubRepositoryResourceEcho]
     git_proxy: GitProxy | None
-    mount_snapshot: frozenset[tuple[str, ...]]
 
 
 def mount_snapshot_from_echoes(
@@ -202,7 +197,7 @@ async def _materialize_github_clones(
                 repo_url=echo.url,
                 token=token,
                 cache_dir=cache_dir,
-                proxy_url=proxy.proxy_url(echo.url, host=_PROXY_HOST_ALIAS),
+                proxy_url=proxy.proxy_url(echo.url, host=PROXY_HOST_ALIAS),
                 git_user_name=echo.git_user_name,
                 git_user_email=echo.git_user_email,
             )
@@ -366,8 +361,7 @@ def _assemble_plan(
         SESSION_LABEL_KEY: session_id,
     }
 
-    host_gateway_aliases: tuple[str, ...] = (_PROXY_HOST_ALIAS,) if git_proxy is not None else ()
-
+    snapshot = mount_snapshot_from_echoes(memory_echoes, github_echoes)
     spec = SandboxSpec(
         session_id=session_id,
         instance_id=instance_id,
@@ -376,8 +370,9 @@ def _assemble_plan(
         environment=merged_env,
         labels=labels,
         network_policy=_network_policy_from_config(env_config),
-        host_gateway_aliases=host_gateway_aliases,
+        host_gateway_alias=PROXY_HOST_ALIAS if git_proxy is not None else None,
         image=image,
+        mount_snapshot=snapshot,
     )
 
     return ProvisioningPlan(
@@ -386,5 +381,4 @@ def _assemble_plan(
         memory_echoes=memory_echoes,
         github_echoes=github_echoes,
         git_proxy=git_proxy,
-        mount_snapshot=mount_snapshot_from_echoes(memory_echoes, github_echoes),
     )
