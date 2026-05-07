@@ -37,15 +37,20 @@ RUN useradd --create-home --uid 1000 aios
 
 WORKDIR /app
 
-# Install dependencies first for layer caching. Source comes after.
+# Workspace-package dirs must be present before the first uv sync:
+# pyproject's project deps reference workspace members (aios-connector),
+# and uv resolves them at install time from the on-disk source tree, not
+# from PyPI. Layer caching still works — src/ is what flips on every
+# commit and is copied last; packages/ and connectors/ are leaf dirs
+# that change rarely.
 COPY pyproject.toml uv.lock ./
+COPY packages ./packages
+COPY connectors ./connectors
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Project source. Order: leaf-most-likely-to-change LAST.
 COPY alembic.ini README.md ./
 COPY migrations ./migrations
-COPY connectors ./connectors
-COPY packages ./packages
 COPY src ./src
 RUN uv sync --frozen --no-dev
 
