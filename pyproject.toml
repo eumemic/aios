@@ -48,6 +48,7 @@ dev = [
     "testcontainers[postgres]>=4.8",
     "ruff>=0.8",
     "mypy>=1.13",
+    "openapi-python-client>=0.21",
     # Workspace-installed reference SDK + canonical echo example.  The
     # echo connector exposes the ``aios.connectors`` entry point the
     # supervisor's resolver looks up, so e2e tests exercising the full
@@ -88,6 +89,9 @@ aios-echo = { workspace = true }
 line-length = 100
 target-version = "py313"
 src = ["src", "tests"]
+# Build artifact from scripts/regen-client.sh; lint complaints belong
+# upstream in openapi-python-client, not in this repo.
+extend-exclude = ["src/aios/sdk/_generated"]
 
 [tool.ruff.lint]
 select = [
@@ -143,6 +147,13 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+# Build artifact from scripts/regen-client.sh; type complaints belong
+# upstream in openapi-python-client, not here.
+[[tool.mypy.overrides]]
+module = "aios.sdk._generated.*"
+ignore_errors = true
+follow_imports = "skip"
 
 # ─── pytest ──────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]

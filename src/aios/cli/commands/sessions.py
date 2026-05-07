@@ -22,6 +22,7 @@ from aios.cli.output import cyan, dim, print_error, print_json, print_success
 from aios.cli.profile import compute_profile, profile_to_dict, render_profile
 from aios.cli.runtime import get_state, run_or_die
 from aios.cli.tail_format import iter_formatted_events
+from aios.sdk import stream_session
 
 app = typer.Typer(name="sessions", help="Manage sessions.", no_args_is_help=True)
 
@@ -352,8 +353,8 @@ def stream(
         if pretty:
             tail_session(ctx, session_id, after_seq=after_seq)
             return
-        client = get_state(ctx).client()
-        with client, client.stream_session(session_id, after_seq=after_seq) as messages:
+        client = get_state(ctx).sdk_client()
+        with client, stream_session(client, session_id, after_seq=after_seq) as messages:
             for msg in messages:
                 if raw:
                     sys.stdout.write(json.dumps({"event": msg.event, "data": msg.data}) + "\n")
@@ -383,8 +384,8 @@ def tail(
 
 def tail_session(ctx: typer.Context, session_id: str, *, after_seq: int) -> None:
     """Shared implementation for ``aios sessions tail`` / top-level ``aios tail``."""
-    client = get_state(ctx).client()
-    with client, client.stream_session(session_id, after_seq=after_seq) as messages:
+    client = get_state(ctx).sdk_client()
+    with client, stream_session(client, session_id, after_seq=after_seq) as messages:
         for line in iter_formatted_events(messages):
             sys.stdout.write(line + "\n")
             sys.stdout.flush()

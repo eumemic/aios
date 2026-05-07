@@ -5895,7 +5895,7 @@
           },
           "tools": {
             "items": {
-              "$ref": "#/components/schemas/ToolSpec-Output"
+              "$ref": "#/components/schemas/ToolSpec"
             },
             "type": "array",
             "title": "Tools"
@@ -6007,7 +6007,7 @@
           },
           "tools": {
             "items": {
-              "$ref": "#/components/schemas/ToolSpec-Input"
+              "$ref": "#/components/schemas/ToolSpec"
             },
             "type": "array",
             "title": "Tools"
@@ -6144,7 +6144,7 @@
             "anyOf": [
               {
                 "items": {
-                  "$ref": "#/components/schemas/ToolSpec-Input"
+                  "$ref": "#/components/schemas/ToolSpec"
                 },
                 "type": "array"
               },
@@ -6270,7 +6270,7 @@
           },
           "tools": {
             "items": {
-              "$ref": "#/components/schemas/ToolSpec-Output"
+              "$ref": "#/components/schemas/ToolSpec"
             },
             "type": "array",
             "title": "Tools"
@@ -6767,10 +6767,54 @@
             "type": "object",
             "title": "Data"
           },
+          "cumulative_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cumulative Tokens"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
             "title": "Created At"
+          },
+          "orig_channel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Orig Channel"
+          },
+          "focal_channel_at_arrival": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Focal Channel At Arrival"
+          },
+          "channel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Channel"
           }
         },
         "type": "object",
@@ -9152,135 +9196,7 @@
         "title": "ToolResultRequest",
         "description": "Request body for ``POST /v1/sessions/{id}/tool-results``."
       },
-      "ToolSpec-Input": {
-        "properties": {
-          "type": {
-            "anyOf": [
-              {
-                "type": "string",
-                "enum": [
-                  "bash",
-                  "read",
-                  "write",
-                  "edit",
-                  "glob",
-                  "grep",
-                  "web_fetch",
-                  "web_search",
-                  "search_events",
-                  "cancel",
-                  "schedule_wake"
-                ]
-              },
-              {
-                "type": "string",
-                "enum": [
-                  "custom",
-                  "mcp_toolset"
-                ]
-              }
-            ],
-            "title": "Type"
-          },
-          "name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Name"
-          },
-          "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Description"
-          },
-          "input_schema": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Input Schema"
-          },
-          "enabled": {
-            "type": "boolean",
-            "title": "Enabled",
-            "default": true
-          },
-          "permission": {
-            "anyOf": [
-              {
-                "type": "string",
-                "enum": [
-                  "always_allow",
-                  "always_ask"
-                ]
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Permission"
-          },
-          "mcp_server_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Mcp Server Name"
-          },
-          "default_config": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/McpToolsetConfig"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "configs": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/McpToolConfig"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Configs"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "type"
-        ],
-        "title": "ToolSpec",
-        "description": "One entry in an agent's ``tools`` list.\n\nFor built-in tools, ``type`` is the tool name (``\"bash\"``, ``\"read\"``,\netc.). For custom (client-executed) tools, ``type`` is ``\"custom\"`` and\n``name``, ``description``, and ``input_schema`` are required. For MCP\ntoolsets, ``type`` is ``\"mcp_toolset\"`` and ``mcp_server_name`` is\nrequired.\n\n``enabled`` controls whether the tool is included in the schema sent to\nthe model. Disabled tools are invisible to the model.\n\n``permission`` controls execution policy for built-in tools:\n``None`` or ``\"always_allow\"`` executes immediately (current default);\n``\"always_ask\"`` idles the session with ``requires_action`` until the\nclient confirms or denies."
-      },
-      "ToolSpec-Output": {
+      "ToolSpec": {
         "properties": {
           "type": {
             "anyOf": [
