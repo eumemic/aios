@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import signal
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -63,15 +64,18 @@ def get_state(ctx: typer.Context) -> CliState:
 
 
 def run_or_die(fn: Callable[[], int | None]) -> None:
-    """Execute ``fn`` and translate ``AiosApiError`` into a clean CLI exit.
+    """Execute ``fn`` with the CLI exit conventions: clean status text on
+    ``AiosApiError``, exit 0 on a buffered-stdout ``BrokenPipeError``
+    (issue #116), exit 130 on Ctrl-C.
 
-    Keeps tracebacks hidden and prints the server's error envelope.
-    ``BrokenPipeError`` during output rendering — raised when a downstream
-    consumer (pipe, pager, script) closed its end while we were writing —
-    resolves to a silent ``exit 0``; by the time we're rendering, any
-    server-side mutation has already landed, and we don't want pipe
-    failures to mask that (issue #116).  Non-API exceptions bubble.
+    Also installs SIGPIPE → ``SIG_DFL`` so a piped CLI exits 141 like
+    ``yes | head``.  Server entrypoints don't route through here and
+    keep Python's default ``SIG_IGN`` so a broken upstream socket
+    surfaces as ``BrokenPipeError`` rather than silently killing the
+    process.
     """
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     try:
         rc = fn()
     except AiosApiError as exc:

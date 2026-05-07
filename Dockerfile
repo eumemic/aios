@@ -119,4 +119,7 @@ RUN apt-get update \
 # user (currently root from `python:3.13-slim`; tightening that is
 # tracked separately).
 
+# Crash-only: state is in Postgres, advisory lock self-releases, boot is
+# idempotent.  The orchestrator (Coolify in prod) is responsible for
+# restart on exit; this image bakes no in-image supervisor.
 CMD ["aios", "worker"]
