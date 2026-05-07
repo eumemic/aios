@@ -53,8 +53,14 @@ _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
 }
 
 # Anthropic's contract: thinking blocks must be preserved across turns
-# for the model to use them as continuation context.
-_THINKING_FIELDS: frozenset[str] = frozenset({"thinking_blocks", "reasoning_content"})
+# for the model to use them as continuation context.  Only ``thinking_blocks``
+# is the real continuation handle — Anthropic's ``/v1/messages`` API rejects
+# ``reasoning_content`` outright (``extra_forbid``: "Extra inputs are not
+# permitted"), and direct-Anthropic is the only target whose contract this
+# preservation is for.  ``reasoning_content`` is a LiteLLM cross-provider
+# abstraction; surfacing it back into the next request is provider-specific
+# and currently breaks direct-Anthropic — see #196 / #289.
+_THINKING_FIELDS: frozenset[str] = frozenset({"thinking_blocks"})
 
 # Notification markers truncate the source content to this many chars
 # (plus an ellipsis when truncated) so a busy non-focal channel
@@ -601,29 +607,6 @@ def _prune_leading_orphans(messages: list[dict[str, Any]]) -> list[dict[str, Any
         start += 1
 
     return messages[start:]
-
-
-def stub_missing_reasoning_content(
-    messages: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Ensure every assistant message carries ``reasoning_content``.
-
-    Thinking-mode models (DeepSeek V4 Flash, etc.) reject transcripts
-    whose assistant turns lack this field: ``The reasoning_content in the
-    thinking mode must be passed back to the API``.  Non-thinking models
-    (Anthropic / OpenAI / Gemini / Llama / DeepSeek v3 — all probed)
-    ignore the field entirely, so setting an empty stub unconditionally
-    costs nothing and lets cross-model sessions use thinking models for
-    a single turn without poisoning their replay on other providers.
-
-    Mutates messages in place and returns the list for chaining.  Skips
-    messages that already have a reasoning_content set (from a prior
-    thinking-model turn whose output we preserved opaquely in the log).
-    """
-    for msg in messages:
-        if msg.get("role") == "assistant" and "reasoning_content" not in msg:
-            msg["reasoning_content"] = ""
-    return messages
 
 
 def separate_adjacent_user_messages(

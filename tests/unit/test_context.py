@@ -13,7 +13,6 @@ from aios.harness.channels import build_channels_tail_block
 from aios.harness.context import (
     build_messages,
     separate_adjacent_user_messages,
-    stub_missing_reasoning_content,
 )
 from aios.models.events import Event
 
@@ -725,7 +724,12 @@ class TestThinkingBlockPreservation:
             {"type": "thinking", "thinking": "user said hi", "signature": "abc"}
         ]
 
-    def test_reasoning_content_preserved_for_thinking_capable_target(self) -> None:
+    def test_reasoning_content_stripped_even_for_thinking_capable_target(self) -> None:
+        # reasoning_content is a LiteLLM cross-provider abstraction that
+        # direct-Anthropic rejects with a 400 (extra_forbid).  The real
+        # Anthropic continuation handle is ``thinking_blocks``; preserving
+        # ``reasoning_content`` was the regression that produced the 400
+        # retry loop on factchecker (see #196 / #289 trail).
         events = [
             _evt(1, "user", content="hi"),
             _evt(2, "assistant", content="hey"),
@@ -734,7 +738,7 @@ class TestThinkingBlockPreservation:
         msgs = build_messages(
             events, system_prompt=None, model="anthropic/claude-haiku-4-5"
         ).messages
-        assert msgs[1]["reasoning_content"] == "deep thoughts about hi"
+        assert "reasoning_content" not in msgs[1]
 
     def test_thinking_blocks_stripped_for_non_thinking_target(self) -> None:
         events = [
@@ -1153,58 +1157,6 @@ class TestSeparateAdjacentUserMessages:
             {"role": "assistant", "content": ""},
             {"role": "user", "content": "two"},
         ]
-
-
-class TestStubMissingReasoningContent:
-    def test_adds_empty_stub_to_assistant_without_reasoning(self) -> None:
-        msgs = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-        ]
-        stub_missing_reasoning_content(msgs)
-        assert msgs[1] == {"role": "assistant", "content": "hello", "reasoning_content": ""}
-
-    def test_preserves_existing_reasoning_content(self) -> None:
-        msgs = [
-            {"role": "assistant", "content": "ok", "reasoning_content": "deep thoughts"},
-        ]
-        stub_missing_reasoning_content(msgs)
-        assert msgs[0]["reasoning_content"] == "deep thoughts"
-
-    def test_ignores_user_messages(self) -> None:
-        msgs = [{"role": "user", "content": "hi"}]
-        stub_missing_reasoning_content(msgs)
-        assert msgs[0] == {"role": "user", "content": "hi"}
-
-    def test_ignores_tool_messages(self) -> None:
-        msgs = [{"role": "tool", "tool_call_id": "x", "content": "result"}]
-        stub_missing_reasoning_content(msgs)
-        assert msgs[0] == {"role": "tool", "tool_call_id": "x", "content": "result"}
-
-    def test_stubs_empty_assistant_separator(self) -> None:
-        """The empty-assistant separator inserted by
-        :func:`separate_adjacent_user_messages` is still an assistant
-        message and must also carry the stub."""
-        msgs = [
-            {"role": "user", "content": "a"},
-            {"role": "assistant", "content": ""},
-            {"role": "user", "content": "b"},
-        ]
-        stub_missing_reasoning_content(msgs)
-        assert msgs[1] == {"role": "assistant", "content": "", "reasoning_content": ""}
-
-    def test_mutates_in_place_and_returns(self) -> None:
-        msgs = [{"role": "assistant", "content": "x"}]
-        returned = stub_missing_reasoning_content(msgs)
-        assert returned is msgs
-
-    def test_handles_tool_call_assistants(self) -> None:
-        msgs = [
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
-        ]
-        stub_missing_reasoning_content(msgs)
-        assert msgs[0]["reasoning_content"] == ""
-        assert msgs[0]["tool_calls"] == [{"id": "a"}]
 
 
 class TestSeparateAdjacentUserMessagesPipeline:
