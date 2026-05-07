@@ -8,15 +8,24 @@ from typing import Annotated, Any
 import typer
 
 from aios.cli.commands._shared import (
-    fetch_all,
-    just_client,
+    fetch_all_sdk,
     render_list,
+    render_sdk_list,
     render_single,
-    with_client,
+    unwrap,
 )
 from aios.cli.files import PayloadError, load_json_object, load_payload, resolve_payload
 from aios.cli.output import print_error, print_success
-from aios.cli.runtime import run_or_die
+from aios.cli.runtime import get_state, run_or_die
+from aios.sdk._generated.api.session_templates import (
+    archive_session_template,
+    create_session_template,
+    get_session_template,
+    list_session_templates,
+    update_session_template,
+)
+from aios.sdk._generated.models.session_template_create import SessionTemplateCreate
+from aios.sdk._generated.models.session_template_update import SessionTemplateUpdate
 
 app = typer.Typer(
     name="session-templates",
@@ -36,18 +45,16 @@ def list_(
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
-        with client:
-            envelope = (
-                fetch_all(client, "/v1/session-templates")
-                if all_
-                else client.request(
-                    "GET",
-                    "/v1/session-templates",
-                    params={"limit": limit, "after": after},
-                )
+        state = get_state(ctx)
+        with state.sdk_client() as client:
+            if all_:
+                items = fetch_all_sdk(list_session_templates.sync_detailed, client=client)
+                render_sdk_list(state.output_format, items, columns=_COLS, max_widths=_MAXW)
+                return
+            page = unwrap(
+                list_session_templates.sync_detailed(client=client, limit=limit, after=after)
             )
-        render_list(state.output_format, envelope, columns=_COLS, max_widths=_MAXW)
+            render_list(state.output_format, page.to_dict(), columns=_COLS, max_widths=_MAXW)
 
     run_or_die(_run)
 
@@ -55,10 +62,9 @@ def list_(
 @app.command("get")
 def get(ctx: typer.Context, template_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request("GET", f"/v1/session-templates/{template_id}")
-        render_single(obj)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(get_session_template.sync_detailed(client=client, template_id=template_id))
+        render_single(obj.to_dict())
 
     run_or_die(_run)
 
@@ -111,10 +117,10 @@ def create(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        client = just_client(ctx)
-        with client:
-            obj = client.request("POST", "/v1/session-templates", json_body=payload)
-        render_single(obj)
+        body = SessionTemplateCreate.from_dict(payload)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(create_session_template.sync_detailed(client=client, body=body))
+        render_single(obj.to_dict())
         return None
 
     run_or_die(_run)
@@ -134,10 +140,14 @@ def update(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        client = just_client(ctx)
-        with client:
-            obj = client.request("PUT", f"/v1/session-templates/{template_id}", json_body=payload)
-        render_single(obj)
+        body = SessionTemplateUpdate.from_dict(payload)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                update_session_template.sync_detailed(
+                    client=client, template_id=template_id, body=body
+                )
+            )
+        render_single(obj.to_dict())
         return None
 
     run_or_die(_run)
@@ -146,9 +156,8 @@ def update(
 @app.command("archive", help="Archive a session template (soft-delete, retained for audit).")
 def archive(ctx: typer.Context, template_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            client.request("DELETE", f"/v1/session-templates/{template_id}")
+        with get_state(ctx).sdk_client() as client:
+            unwrap(archive_session_template.sync_detailed(client=client, template_id=template_id))
         print_success("archived", template_id)
 
     run_or_die(_run)

@@ -8,15 +8,33 @@ from typing import Annotated, Any
 import typer
 
 from aios.cli.commands._shared import (
-    fetch_all,
-    just_client,
+    fetch_all_sdk,
     render_list,
+    render_sdk_list,
     render_single,
-    with_client,
+    unwrap,
 )
 from aios.cli.files import PayloadError, load_json_object, load_payload, resolve_payload
 from aios.cli.output import print_error, print_success
-from aios.cli.runtime import run_or_die
+from aios.cli.runtime import get_state, run_or_die
+from aios.sdk._generated.api.vaults import (
+    archive_vault,
+    archive_vault_credential,
+    create_vault,
+    create_vault_credential,
+    delete_vault,
+    delete_vault_credential,
+    get_vault,
+    get_vault_credential,
+    list_vault_credentials,
+    list_vaults,
+    update_vault,
+    update_vault_credential,
+)
+from aios.sdk._generated.models.vault_create import VaultCreate
+from aios.sdk._generated.models.vault_credential_create import VaultCredentialCreate
+from aios.sdk._generated.models.vault_credential_update import VaultCredentialUpdate
+from aios.sdk._generated.models.vault_update import VaultUpdate
 
 app = typer.Typer(name="vaults", help="Manage vaults and credentials.", no_args_is_help=True)
 credentials = typer.Typer(
@@ -41,14 +59,14 @@ def list_(
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
-        with client:
-            envelope = (
-                fetch_all(client, "/v1/vaults")
-                if all_
-                else client.request("GET", "/v1/vaults", params={"limit": limit, "after": after})
-            )
-        render_list(state.output_format, envelope, columns=_VAULT_COLS)
+        state = get_state(ctx)
+        with state.sdk_client() as client:
+            if all_:
+                items = fetch_all_sdk(list_vaults.sync_detailed, client=client)
+                render_sdk_list(state.output_format, items, columns=_VAULT_COLS)
+                return
+            page = unwrap(list_vaults.sync_detailed(client=client, limit=limit, after=after))
+            render_list(state.output_format, page.to_dict(), columns=_VAULT_COLS)
 
     run_or_die(_run)
 
@@ -56,10 +74,9 @@ def list_(
 @app.command("get")
 def get(ctx: typer.Context, vault_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request("GET", f"/v1/vaults/{vault_id}")
-        render_single(obj)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(get_vault.sync_detailed(client=client, vault_id=vault_id))
+        render_single(obj.to_dict())
 
     run_or_die(_run)
 
@@ -97,10 +114,10 @@ def create(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        client = just_client(ctx)
-        with client:
-            obj = client.request("POST", "/v1/vaults", json_body=payload)
-        render_single(obj)
+        body = VaultCreate.from_dict(payload)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(create_vault.sync_detailed(client=client, body=body))
+        render_single(obj.to_dict())
         return None
 
     run_or_die(_run)
@@ -120,10 +137,10 @@ def update(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        client = just_client(ctx)
-        with client:
-            obj = client.request("PUT", f"/v1/vaults/{vault_id}", json_body=payload)
-        render_single(obj)
+        body = VaultUpdate.from_dict(payload)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(update_vault.sync_detailed(client=client, vault_id=vault_id, body=body))
+        render_single(obj.to_dict())
         return None
 
     run_or_die(_run)
@@ -132,10 +149,9 @@ def update(
 @app.command("archive")
 def archive(ctx: typer.Context, vault_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request("POST", f"/v1/vaults/{vault_id}/archive")
-        render_single(obj)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(archive_vault.sync_detailed(client=client, vault_id=vault_id))
+        render_single(obj.to_dict())
 
     run_or_die(_run)
 
@@ -159,9 +175,8 @@ def delete(
                 "(or use `aios vaults archive` for a reversible soft-delete)"
             )
             return 2
-        client = just_client(ctx)
-        with client:
-            client.request("DELETE", f"/v1/vaults/{vault_id}")
+        with get_state(ctx).sdk_client() as client:
+            unwrap(delete_vault.sync_detailed(client=client, vault_id=vault_id))
         print_success("deleted", vault_id)
         return None
 
@@ -180,15 +195,20 @@ def cred_list(
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
-        path = f"/v1/vaults/{vault_id}/credentials"
-        with client:
-            envelope = (
-                fetch_all(client, path)
-                if all_
-                else client.request("GET", path, params={"limit": limit, "after": after})
+        state = get_state(ctx)
+        with state.sdk_client() as client:
+            if all_:
+                items = fetch_all_sdk(
+                    list_vault_credentials.sync_detailed, client=client, vault_id=vault_id
+                )
+                render_sdk_list(state.output_format, items, columns=_CRED_COLS)
+                return
+            page = unwrap(
+                list_vault_credentials.sync_detailed(
+                    client=client, vault_id=vault_id, limit=limit, after=after
+                )
             )
-        render_list(state.output_format, envelope, columns=_CRED_COLS)
+            render_list(state.output_format, page.to_dict(), columns=_CRED_COLS)
 
     run_or_die(_run)
 
@@ -196,10 +216,13 @@ def cred_list(
 @credentials.command("get")
 def cred_get(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request("GET", f"/v1/vaults/{vault_id}/credentials/{credential_id}")
-        render_single(obj)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                get_vault_credential.sync_detailed(
+                    client=client, vault_id=vault_id, credential_id=credential_id
+                )
+            )
+        render_single(obj.to_dict())
 
     run_or_die(_run)
 
@@ -230,10 +253,12 @@ def cred_create(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        client = just_client(ctx)
-        with client:
-            obj = client.request("POST", f"/v1/vaults/{vault_id}/credentials", json_body=payload)
-        render_single(obj)
+        body = VaultCredentialCreate.from_dict(payload)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                create_vault_credential.sync_detailed(client=client, vault_id=vault_id, body=body)
+            )
+        render_single(obj.to_dict())
         return None
 
     run_or_die(_run)
@@ -254,14 +279,14 @@ def cred_update(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        client = just_client(ctx)
-        with client:
-            obj = client.request(
-                "PUT",
-                f"/v1/vaults/{vault_id}/credentials/{credential_id}",
-                json_body=payload,
+        body = VaultCredentialUpdate.from_dict(payload)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                update_vault_credential.sync_detailed(
+                    client=client, vault_id=vault_id, credential_id=credential_id, body=body
+                )
             )
-        render_single(obj)
+        render_single(obj.to_dict())
         return None
 
     run_or_die(_run)
@@ -270,12 +295,13 @@ def cred_update(
 @credentials.command("archive")
 def cred_archive(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request(
-                "POST", f"/v1/vaults/{vault_id}/credentials/{credential_id}/archive"
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                archive_vault_credential.sync_detailed(
+                    client=client, vault_id=vault_id, credential_id=credential_id
+                )
             )
-        render_single(obj)
+        render_single(obj.to_dict())
 
     run_or_die(_run)
 
@@ -300,9 +326,12 @@ def cred_delete(
                 "(or use `aios vaults credentials archive` for a reversible soft-delete)"
             )
             return 2
-        client = just_client(ctx)
-        with client:
-            client.request("DELETE", f"/v1/vaults/{vault_id}/credentials/{credential_id}")
+        with get_state(ctx).sdk_client() as client:
+            unwrap(
+                delete_vault_credential.sync_detailed(
+                    client=client, vault_id=vault_id, credential_id=credential_id
+                )
+            )
         print_success("deleted", credential_id)
         return None
 

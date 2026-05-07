@@ -97,3 +97,57 @@ def mocked_cli(monkeypatch: pytest.MonkeyPatch) -> MockedCli:
     monkeypatch.setenv("AIOS_API_KEY", "test-key")
     monkeypatch.setenv("AIOS_URL", "http://test.invalid")
     return MockedCli(captured=captured, response_queue=responses)
+
+
+# ── full-shape response factories for SDK-backed CLI tests ───────────────────
+#
+# The CLI now parses responses through the typed SDK (``aios.sdk._generated``).
+# The SDK's ``<Model>.from_dict`` is strict about required fields, so tests
+# whose only goal is to assert the *request* shape still need to feed back a
+# minimally-complete response payload — otherwise the SDK parser raises before
+# the command's exit-code path runs.
+
+_FIXED_TS = "2024-01-01T00:00:00+00:00"
+
+
+def connection_response(**overrides: Any) -> dict[str, Any]:
+    """Minimally-valid ``Connection`` JSON suitable for SDK parsing."""
+    base = {
+        "id": "conn_01",
+        "connector": "signal",
+        "account": "acct-1",
+        "metadata": {},
+        "created_at": _FIXED_TS,
+        "updated_at": _FIXED_TS,
+    }
+    base.update(overrides)
+    return base
+
+
+def vault_response(**overrides: Any) -> dict[str, Any]:
+    """Minimally-valid ``Vault`` JSON."""
+    base = {
+        "id": "vlt_1",
+        "display_name": "test",
+        "metadata": {},
+        "created_at": _FIXED_TS,
+        "updated_at": _FIXED_TS,
+    }
+    base.update(overrides)
+    return base
+
+
+def vault_credential_response(**overrides: Any) -> dict[str, Any]:
+    """Minimally-valid ``VaultCredential`` JSON."""
+    base = {
+        "id": "cred_1",
+        "vault_id": "vlt_1",
+        "display_name": "test-cred",
+        "mcp_server_url": "http://example.invalid",
+        "auth_type": "static_bearer",
+        "metadata": {},
+        "created_at": _FIXED_TS,
+        "updated_at": _FIXED_TS,
+    }
+    base.update(overrides)
+    return base

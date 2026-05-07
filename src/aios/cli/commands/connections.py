@@ -14,20 +14,53 @@ from typing import Annotated, Any
 import typer
 
 from aios.cli.commands._shared import (
-    fetch_all,
-    just_client,
+    fetch_all_sdk,
     render_list,
+    render_sdk_list,
     render_single,
-    with_client,
+    unwrap,
 )
 from aios.cli.files import PayloadError, load_json_object, resolve_payload
 from aios.cli.output import print_error, print_success
-from aios.cli.runtime import run_or_die
+from aios.cli.runtime import get_state, run_or_die
+from aios.sdk._generated.api.connections import (
+    archive_connection,
+    attach_connection,
+    bind_chat,
+    configure_connection_per_chat,
+    create_connection,
+    detach_connection,
+    get_connection,
+    list_bound_chats,
+    list_connections,
+    list_recent_chats,
+    unbind_chat,
+    unconfigure_connection,
+)
+from aios.sdk._generated.models.bind_chat_request import BindChatRequest
+from aios.sdk._generated.models.connection_attach import ConnectionAttach
+from aios.sdk._generated.models.connection_configure_per_chat import ConnectionConfigurePerChat
+from aios.sdk._generated.models.connection_create import ConnectionCreate
+from aios.sdk._generated.models.list_connections_mode_type_0 import ListConnectionsModeType0
+from aios.sdk._generated.types import UNSET, Unset
 
 app = typer.Typer(name="connections", help="Manage connector connections.", no_args_is_help=True)
 
 _COLS = ("id", "connector", "account", "session_id", "session_template_id", "updated_at")
 _MAXW = {"connector": 20, "account": 40, "session_id": 24, "session_template_id": 24}
+
+
+def _coerce_mode(mode: str | None) -> ListConnectionsModeType0 | Unset:
+    """Accept the typer-side string and project to the typed SDK enum.
+
+    The SDK generates a per-operation enum (``ListConnectionsModeType0``)
+    rather than reusing :class:`aios.models.connections.ConnectionMode`,
+    so the surface here looks awkward — that's a generator artifact, not
+    a contract decision.
+    """
+    if mode is None:
+        return UNSET
+    return ListConnectionsModeType0(mode)
 
 
 @app.command("list")
@@ -44,23 +77,30 @@ def list_(
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
-        params: dict[str, Any] = {
-            "connector": connector,
-            "session_id": session_id,
-            "mode": mode,
-        }
-        with client:
-            envelope = (
-                fetch_all(client, "/v1/connections", params=params)
-                if all_
-                else client.request(
-                    "GET",
-                    "/v1/connections",
-                    params={**params, "limit": limit, "after": after},
+        state = get_state(ctx)
+        sdk_mode = _coerce_mode(mode)
+        with state.sdk_client() as client:
+            if all_:
+                items = fetch_all_sdk(
+                    list_connections.sync_detailed,
+                    client=client,
+                    connector=connector,
+                    session_id=session_id,
+                    mode=sdk_mode,
+                )
+                render_sdk_list(state.output_format, items, columns=_COLS, max_widths=_MAXW)
+                return
+            page = unwrap(
+                list_connections.sync_detailed(
+                    client=client,
+                    connector=connector,
+                    session_id=session_id,
+                    mode=sdk_mode,
+                    limit=limit,
+                    after=after,
                 )
             )
-        render_list(state.output_format, envelope, columns=_COLS, max_widths=_MAXW)
+            render_list(state.output_format, page.to_dict(), columns=_COLS, max_widths=_MAXW)
 
     run_or_die(_run)
 
@@ -68,10 +108,9 @@ def list_(
 @app.command("get")
 def get(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request("GET", f"/v1/connections/{connection_id}")
-        render_single(obj)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(get_connection.sync_detailed(client=client, connection_id=connection_id))
+        render_single(obj.to_dict())
 
     run_or_die(_run)
 
@@ -111,10 +150,10 @@ def create(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        client = just_client(ctx)
-        with client:
-            obj = client.request("POST", "/v1/connections", json_body=payload)
-        render_single(obj)
+        body = ConnectionCreate.from_dict(payload)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(create_connection.sync_detailed(client=client, body=body))
+        render_single(obj.to_dict())
         return None
 
     run_or_die(_run)
@@ -127,14 +166,14 @@ def attach(
     session_id: Annotated[str, typer.Option("--session-id")],
 ) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request(
-                "POST",
-                f"/v1/connections/{connection_id}/attach",
-                json_body={"session_id": session_id},
+        body = ConnectionAttach(session_id=session_id)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                attach_connection.sync_detailed(
+                    client=client, connection_id=connection_id, body=body
+                )
             )
-        render_single(obj)
+        render_single(obj.to_dict())
 
     run_or_die(_run)
 
@@ -142,10 +181,11 @@ def attach(
 @app.command("detach", help="Drop the single_session binding, leaving the connection detached.")
 def detach(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request("POST", f"/v1/connections/{connection_id}/detach")
-        render_single(obj)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                detach_connection.sync_detailed(client=client, connection_id=connection_id)
+            )
+        render_single(obj.to_dict())
 
     run_or_die(_run)
 
@@ -157,14 +197,14 @@ def configure_per_chat(
     template: Annotated[str, typer.Option("--template", help="Session template id.")],
 ) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request(
-                "POST",
-                f"/v1/connections/{connection_id}/configure-per-chat",
-                json_body={"session_template_id": template},
+        body = ConnectionConfigurePerChat(session_template_id=template)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                configure_connection_per_chat.sync_detailed(
+                    client=client, connection_id=connection_id, body=body
+                )
             )
-        render_single(obj)
+        render_single(obj.to_dict())
 
     run_or_die(_run)
 
@@ -174,10 +214,11 @@ def configure_per_chat(
 )
 def unconfigure(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request("POST", f"/v1/connections/{connection_id}/unconfigure")
-        render_single(obj)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                unconfigure_connection.sync_detailed(client=client, connection_id=connection_id)
+            )
+        render_single(obj.to_dict())
 
     run_or_die(_run)
 
@@ -186,21 +227,19 @@ def unconfigure(ctx: typer.Context, connection_id: str) -> None:
     "bind-chat",
     help="Pre-bind a chat_id on a connection's account to an existing session.",
 )
-def bind_chat(
+def bind_chat_cmd(
     ctx: typer.Context,
     connection_id: str,
     chat_id: Annotated[str, typer.Option("--chat-id", help="Platform-native chat id.")],
     session_id: Annotated[str, typer.Option("--session-id", help="Target session id.")],
 ) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request(
-                "POST",
-                f"/v1/connections/{connection_id}/bind-chat",
-                json_body={"chat_id": chat_id, "session_id": session_id},
+        body = BindChatRequest(chat_id=chat_id, session_id=session_id)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                bind_chat.sync_detailed(client=client, connection_id=connection_id, body=body)
             )
-        render_single(obj)
+        render_single(obj.to_dict())
 
     run_or_die(_run)
 
@@ -209,15 +248,18 @@ def bind_chat(
     "unbind-chat",
     help="Drop a chat → session binding, returning the chat to the connection's mode default.",
 )
-def unbind_chat(
+def unbind_chat_cmd(
     ctx: typer.Context,
     connection_id: str,
     chat_id: Annotated[str, typer.Option("--chat-id")],
 ) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            client.request("DELETE", f"/v1/connections/{connection_id}/bind-chat/{chat_id}")
+        with get_state(ctx).sdk_client() as client:
+            unwrap(
+                unbind_chat.sync_detailed(
+                    client=client, connection_id=connection_id, chat_id=chat_id
+                )
+            )
         print_success("unbound", f"{connection_id}:{chat_id}")
 
     run_or_die(_run)
@@ -229,12 +271,14 @@ def unbind_chat(
 )
 def bound_chats(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
-        with client:
-            envelope = client.request("GET", f"/v1/connections/{connection_id}/bound-chats")
+        state = get_state(ctx)
+        with state.sdk_client() as client:
+            page = unwrap(
+                list_bound_chats.sync_detailed(client=client, connection_id=connection_id)
+            )
         render_list(
             state.output_format,
-            envelope,
+            page.to_dict(),
             columns=("chat_id", "session_id", "created_at"),
             max_widths={"chat_id": 40, "session_id": 24},
         )
@@ -252,16 +296,16 @@ def recent_chats(
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
-        with client:
-            envelope = client.request(
-                "GET",
-                f"/v1/connections/{connection_id}/recent-chats",
-                params={"limit": limit},
+        state = get_state(ctx)
+        with state.sdk_client() as client:
+            page = unwrap(
+                list_recent_chats.sync_detailed(
+                    client=client, connection_id=connection_id, limit=limit
+                )
             )
         render_list(
             state.output_format,
-            envelope,
+            page.to_dict(),
             columns=("chat_id", "last_seen_at"),
             max_widths={"chat_id": 40},
         )
@@ -272,9 +316,8 @@ def recent_chats(
 @app.command("archive", help="Archive a detached connection (soft-delete, retained for audit).")
 def archive(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            client.request("DELETE", f"/v1/connections/{connection_id}")
+        with get_state(ctx).sdk_client() as client:
+            unwrap(archive_connection.sync_detailed(client=client, connection_id=connection_id))
         print_success("archived", connection_id)
 
     run_or_die(_run)

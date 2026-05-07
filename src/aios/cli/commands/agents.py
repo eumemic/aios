@@ -1,22 +1,39 @@
-"""``aios agents ...`` — CRUD + versions."""
+"""``aios agents ...`` — CRUD + versions.
+
+Hand-written CLI on top of the typed SDK at :mod:`aios.sdk._generated`.
+Each subcommand declares its own typer signature, calls the matching SDK
+operation module, and routes the parsed result through the shared
+renderers.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
 from aios.cli.commands._shared import (
-    fetch_all,
-    just_client,
+    fetch_all_sdk,
     render_list,
+    render_sdk_list,
     render_single,
-    with_client,
+    unwrap,
 )
 from aios.cli.files import PayloadError, load_payload
 from aios.cli.output import print_error, print_success
-from aios.cli.runtime import run_or_die
+from aios.cli.runtime import get_state, run_or_die
+from aios.sdk._generated.api.agents import (
+    archive_agent,
+    create_agent,
+    get_agent,
+    get_agent_version,
+    list_agent_versions,
+    list_agents,
+    update_agent,
+)
+from aios.sdk._generated.models.agent_create import AgentCreate
+from aios.sdk._generated.models.agent_update import AgentUpdate
 
 app = typer.Typer(name="agents", help="Manage agents.", no_args_is_help=True)
 
@@ -34,15 +51,14 @@ def list_(
     ] = False,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
-        with client:
+        state = get_state(ctx)
+        with state.sdk_client() as client:
             if all_:
-                envelope = fetch_all(client, "/v1/agents")
-            else:
-                envelope = client.request(
-                    "GET", "/v1/agents", params={"limit": limit, "after": after}
-                )
-        render_list(state.output_format, envelope, columns=_COLS, max_widths=_MAXW)
+                items = fetch_all_sdk(list_agents.sync_detailed, client=client)
+                render_sdk_list(state.output_format, items, columns=_COLS, max_widths=_MAXW)
+                return
+            page = unwrap(list_agents.sync_detailed(client=client, limit=limit, after=after))
+            render_list(state.output_format, page.to_dict(), columns=_COLS, max_widths=_MAXW)
 
     run_or_die(_run)
 
@@ -50,10 +66,9 @@ def list_(
 @app.command("get", help="Fetch a single agent by id.")
 def get(ctx: typer.Context, agent_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            agent = client.request("GET", f"/v1/agents/{agent_id}")
-        render_single(agent)
+        with get_state(ctx).sdk_client() as client:
+            agent = unwrap(get_agent.sync_detailed(client=client, agent_id=agent_id))
+        render_single(agent.to_dict())
 
     run_or_die(_run)
 
@@ -71,10 +86,10 @@ def create(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        client = just_client(ctx)
-        with client:
-            agent = client.request("POST", "/v1/agents", json_body=payload)
-        render_single(agent)
+        body = AgentCreate.from_dict(payload)
+        with get_state(ctx).sdk_client() as client:
+            agent = unwrap(create_agent.sync_detailed(client=client, body=body))
+        render_single(agent.to_dict())
         return None
 
     run_or_die(_run)
@@ -94,10 +109,10 @@ def update(
         except PayloadError as exc:
             print_error(str(exc))
             return 64
-        client = just_client(ctx)
-        with client:
-            agent = client.request("PUT", f"/v1/agents/{agent_id}", json_body=payload)
-        render_single(agent)
+        body = AgentUpdate.from_dict(payload)
+        with get_state(ctx).sdk_client() as client:
+            agent = unwrap(update_agent.sync_detailed(client=client, agent_id=agent_id, body=body))
+        render_single(agent.to_dict())
         return None
 
     run_or_die(_run)
@@ -106,9 +121,8 @@ def update(
 @app.command("archive", help="Archive an agent (soft-delete, retained for audit).")
 def archive(ctx: typer.Context, agent_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            client.request("DELETE", f"/v1/agents/{agent_id}")
+        with get_state(ctx).sdk_client() as client:
+            unwrap(archive_agent.sync_detailed(client=client, agent_id=agent_id))
         print_success("archived", agent_id)
 
     run_or_die(_run)
@@ -119,26 +133,27 @@ def versions(
     ctx: typer.Context,
     agent_id: str,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
-    after: Annotated[str | None, typer.Option("--after")] = None,
+    after: Annotated[int | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
+    cols = ("version", "model", "created_at")
+    widths = {"model": 40}
+
     def _run() -> None:
-        state, client = with_client(ctx)
-        with client:
+        state = get_state(ctx)
+        with state.sdk_client() as client:
             if all_:
-                envelope = fetch_all(client, f"/v1/agents/{agent_id}/versions")
-            else:
-                envelope = client.request(
-                    "GET",
-                    f"/v1/agents/{agent_id}/versions",
-                    params={"limit": limit, "after": after},
+                items = fetch_all_sdk(
+                    list_agent_versions.sync_detailed, client=client, agent_id=agent_id
                 )
-        render_list(
-            state.output_format,
-            envelope,
-            columns=("version", "model", "created_at"),
-            max_widths={"model": 40},
-        )
+                render_sdk_list(state.output_format, items, columns=cols, max_widths=widths)
+                return
+            page = unwrap(
+                list_agent_versions.sync_detailed(
+                    client=client, agent_id=agent_id, limit=limit, after=after
+                )
+            )
+            render_list(state.output_format, page.to_dict(), columns=cols, max_widths=widths)
 
     run_or_die(_run)
 
@@ -146,9 +161,10 @@ def versions(
 @app.command("version", help="Fetch a specific agent version.")
 def version(ctx: typer.Context, agent_id: str, version: int) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request("GET", f"/v1/agents/{agent_id}/versions/{version}")
-        render_single(obj)
+        with get_state(ctx).sdk_client() as client:
+            obj: Any = unwrap(
+                get_agent_version.sync_detailed(client=client, agent_id=agent_id, version=version)
+            )
+        render_single(obj.to_dict())
 
     run_or_die(_run)

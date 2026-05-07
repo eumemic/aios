@@ -6,14 +6,19 @@ the helpers here.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+import json
+from collections.abc import Callable, Sequence
+from typing import Any, Protocol
 
 import typer
+from pydantic import ValidationError
 
-from aios.cli.client import AiosClient
+from aios.cli.client import AiosApiError, AiosClient
 from aios.cli.output import OutputFormat, print_json, print_note, print_table
 from aios.cli.runtime import CliState, get_state
+from aios.models.common import ErrorResponse
+from aios.sdk import Client
+from aios.sdk._generated.types import Response, Unset
 
 
 def with_client(ctx: typer.Context) -> tuple[CliState, AiosClient]:
@@ -93,6 +98,108 @@ def fetch_all(
         if cursor is None:
             break
     return {"data": accumulated, "has_more": False, "next_after": None}
+
+
+class _ListPage(Protocol):
+    """Structural shape of every generated ``ListResponse<T>`` model."""
+
+    data: list[Any]
+    has_more: bool | Unset
+    next_after: None | str | Unset
+
+
+def unwrap(response: Response[Any]) -> Any:
+    """Translate an SDK ``Response`` into its parsed body or :class:`AiosApiError`.
+
+    Mirrors :meth:`AiosClient.request`: 2xx returns the parsed body (or
+    ``None`` for 204); non-2xx is decoded against the server's
+    ``ErrorResponse`` envelope and re-raised so ``run_or_die`` can render
+    the same friendly message regardless of whether the call went through
+    the hand-written client or the typed SDK.
+
+    Returns ``Any`` rather than the caller's ``T`` because the SDK's
+    ``Response[T]`` runs through ``attrs.define + Generic[T]``, a combo
+    mypy widens to ``Any`` anyway — preserving the generic in the helper
+    signature would be theatre. Callers that want the typed view assign
+    the result through a typed local (e.g. ``page: ListResponseAgent =
+    unwrap(...)``).
+    """
+    status = int(response.status_code)
+    if 200 <= status < 300:
+        return response.parsed
+    try:
+        body = json.loads(response.content) if response.content else None
+    except (ValueError, json.JSONDecodeError):
+        body = None
+    if body is None:
+        raise AiosApiError(
+            status_code=status,
+            error_type="http_error",
+            message=response.content.decode(errors="replace") or f"HTTP {status}",
+        )
+    try:
+        envelope = ErrorResponse.model_validate(body)
+    except ValidationError:
+        raise AiosApiError(
+            status_code=status, error_type="http_error", message=json.dumps(body)
+        ) from None
+    raise AiosApiError(
+        status_code=status,
+        error_type=envelope.error.type,
+        message=envelope.error.message,
+        detail=envelope.error.detail,
+    )
+
+
+def fetch_all_sdk(
+    fn: Callable[..., Response[Any]],
+    *,
+    client: Client,
+    page_size: int = 200,
+    **filters: Any,
+) -> list[Any]:
+    """Walk every page of an SDK list endpoint. Returns the accumulated typed items.
+
+    Mirrors :func:`fetch_all` for the SDK path: caller hands in the
+    operation module's ``sync_detailed``, this walker drives the cursor.
+    Filters pass through verbatim, so caller-side typing is preserved.
+    """
+    accumulated: list[Any] = []
+    cursor: str | None = None
+    while True:
+        kwargs: dict[str, Any] = dict(filters)
+        kwargs["limit"] = page_size
+        if cursor is not None:
+            kwargs["after"] = cursor
+        page: _ListPage = unwrap(fn(client=client, **kwargs))
+        accumulated.extend(page.data)
+        if isinstance(page.has_more, Unset) or not page.has_more:
+            break
+        if isinstance(page.next_after, Unset) or page.next_after is None:
+            break
+        cursor = page.next_after
+    return accumulated
+
+
+def render_sdk_list(
+    output_format: OutputFormat,
+    items: list[Any],
+    *,
+    columns: Sequence[str],
+    headers: Sequence[str] | None = None,
+    max_widths: dict[str, int] | None = None,
+    has_more: bool = False,
+    next_after: str | None = None,
+) -> None:
+    """Render a list of typed SDK models. Models are dict-converted at the boundary.
+
+    The renderer below already speaks dicts; this is the join point where
+    SDK types lose their attribute-access affordance — acceptable since the
+    CLI only displays the values, never reads specific fields.
+    """
+    rows = [item.to_dict() for item in items]
+    envelope = {"data": rows, "has_more": has_more, "next_after": next_after}
+    render_list(output_format, envelope, columns=columns, headers=headers, max_widths=max_widths)
 
 
 def fetch_all_events(
