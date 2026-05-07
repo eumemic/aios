@@ -57,3 +57,22 @@ def fake_pool_yielding_conn(conn: Any) -> Any:
     cm.__aexit__ = AsyncMock(return_value=None)
     pool.acquire.return_value = cm
     return pool
+
+
+# ── image magic-byte fixtures (shared across vision + context tests) ──
+
+
+def png_b64(payload: bytes = b"\x00" * 32) -> str:
+    """Base64-encoded PNG with valid magic header followed by *payload*."""
+    return base64.b64encode(b"\x89PNG\r\n\x1a\n" + payload).decode()
+
+
+def jpeg_b64(payload: bytes = b"\x00" * 24) -> str:
+    """Base64-encoded JPEG with a valid SOI + JFIF prefix followed by *payload*."""
+    return base64.b64encode(b"\xff\xd8\xff\xe0\x00\x10JFIF" + payload).decode()
+
+
+def gif_b64(payload: bytes = b"\x00" * 32, *, version: bytes = b"89a") -> str:
+    """Base64-encoded GIF with a valid magic header followed by *payload*."""
+    assert version in (b"87a", b"89a")
+    return base64.b64encode(b"GIF" + version + payload).decode()

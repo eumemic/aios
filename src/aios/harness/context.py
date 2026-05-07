@@ -33,8 +33,8 @@ import litellm
 
 from aios.harness.vision import (
     can_inline_image,
+    correct_image_mime,
     make_image_url_part,
-    sniff_image_mime,
     text_marker,
 )
 from aios.logging import get_logger
@@ -53,14 +53,9 @@ _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
     "system": frozenset({"role", "content", "name"}),
 }
 
-# Anthropic's contract: thinking blocks must be preserved across turns
-# for the model to use them as continuation context.  Only ``thinking_blocks``
-# is the real continuation handle — Anthropic's ``/v1/messages`` API rejects
-# ``reasoning_content`` outright (``extra_forbid``: "Extra inputs are not
-# permitted"), and direct-Anthropic is the only target whose contract this
-# preservation is for.  ``reasoning_content`` is a LiteLLM cross-provider
-# abstraction; surfacing it back into the next request is provider-specific
-# and currently breaks direct-Anthropic — see #196 / #289.
+# Anthropic's continuation handle.  ``reasoning_content`` is a LiteLLM
+# cross-provider abstraction that Anthropic's /v1/messages rejects; it
+# is not in this set.
 _THINKING_FIELDS: frozenset[str] = frozenset({"thinking_blocks"})
 
 # Notification markers truncate the source content to this many chars
@@ -359,7 +354,7 @@ def _strip_to_spec(
     """Return a copy of *msg* with only chat-completions spec fields.
 
     When ``target_supports_thinking``, also preserve ``thinking_blocks``
-    and ``reasoning_content`` on assistant turns.
+    on assistant turns.
     """
     role = msg.get("role", "")
     allowed = _ALLOWED_FIELDS.get(role, frozenset())
@@ -372,19 +367,8 @@ def _strip_to_spec(
 
 
 def _correct_image_data_url_mimes(messages: list[dict[str, Any]]) -> None:
-    """Rewrite ``data:<mime>;base64,...`` URLs whose declared mime conflicts
-    with the actual image bytes.
-
-    Anthropic's ``/v1/messages`` rejects content where the declared mime
-    doesn't match the magic-byte-detected format ("The image was specified
-    using the image/png media type, but the image appears to be a
-    image/jpeg image" — 400 invalid_request_error).  This walks every
-    image_url part (including those nested inside tool messages and
-    user-message content lists) and replaces the declared mime with the
-    sniffed mime when they disagree.  Unrecognized magic leaves the
-    declared mime untouched (callers handle their own fallback).
-
-    Mutates messages in place.
+    """Rewrite mismatched mime declarations on ``data:<mime>;base64,...``
+    image URLs already in the persisted event log.  Mutates in place.
     """
     for msg in messages:
         content = msg.get("content")
@@ -403,15 +387,9 @@ def _correct_image_data_url_mimes(messages: list[dict[str, Any]]) -> None:
             if not sep or ";base64" not in head:
                 continue
             declared = head.removeprefix("data:").split(";", 1)[0]
-            actual = sniff_image_mime(data_b64)
-            if actual is None or actual == declared:
-                continue
-            log.warning(
-                "context.image_mime_corrected",
-                declared=declared,
-                actual=actual,
-            )
-            image_url["url"] = f"data:{actual};base64,{data_b64}"
+            corrected = correct_image_mime(declared, data_b64)
+            if corrected != declared:
+                image_url["url"] = f"data:{corrected};base64,{data_b64}"
 
 
 # ─── build_messages ──────────────────────────────────────────────────────────

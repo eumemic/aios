@@ -17,6 +17,8 @@ from aios.harness.context import (
 )
 from aios.models.events import Event
 
+from .conftest import gif_b64, jpeg_b64, png_b64
+
 
 def _full_pipeline(
     events: list[Event],
@@ -726,11 +728,7 @@ class TestThinkingBlockPreservation:
         ]
 
     def test_reasoning_content_stripped_even_for_thinking_capable_target(self) -> None:
-        # reasoning_content is a LiteLLM cross-provider abstraction that
-        # direct-Anthropic rejects with a 400 (extra_forbid).  The real
-        # Anthropic continuation handle is ``thinking_blocks``; preserving
-        # ``reasoning_content`` was the regression that produced the 400
-        # retry loop on factchecker (see #196 / #289 trail).
+        # Anthropic /v1/messages rejects ``reasoning_content`` (extra_forbid).
         events = [
             _evt(1, "user", content="hi"),
             _evt(2, "assistant", content="hey"),
@@ -1100,17 +1098,12 @@ class TestFocalRendering:
 
 
 class TestImageMimeCorrection:
-    """Anthropic 400s when the declared content-type of an inlined image
-    disagrees with the actual bytes.  ``build_messages`` rewrites the
-    declared mime to the magic-byte-detected one to avoid the rejection.
+    """``build_messages`` rewrites mismatched mime declarations on
+    image data URLs (Anthropic 400s when the declared mime disagrees
+    with the actual bytes).
     """
 
-    # Real magic-byte prefixes for each format, base64-encoded.
-    _PNG_HEAD = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32).decode()
-    _JPEG_HEAD = base64.b64encode(b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 24).decode()
-    _GIF_HEAD = base64.b64encode(b"GIF89a" + b"\x00" * 32).decode()
-
-    def _image_msg(self, declared: str, b64: str) -> dict[str, Any]:
+    def _msg(self, declared: str, b64: str) -> dict[str, Any]:
         return {
             "role": "user",
             "content": [
@@ -1122,36 +1115,26 @@ class TestImageMimeCorrection:
             ],
         }
 
-    def test_jpeg_bytes_with_png_declaration_corrected(self) -> None:
-        ev = _evt(1, "user", content=self._image_msg("image/png", self._JPEG_HEAD)["content"])
+    def _build_url(self, declared: str, b64: str) -> str:
+        ev = _evt(1, "user", content=self._msg(declared, b64)["content"])
         msgs = build_messages([ev], system_prompt=None).messages
-        url = msgs[0]["content"][1]["image_url"]["url"]
-        assert url.startswith("data:image/jpeg;base64,")
+        return str(msgs[0]["content"][1]["image_url"]["url"])
+
+    def test_jpeg_bytes_with_png_declaration_corrected(self) -> None:
+        assert self._build_url("image/png", jpeg_b64()).startswith("data:image/jpeg;base64,")
 
     def test_png_bytes_with_jpeg_declaration_corrected(self) -> None:
-        ev = _evt(1, "user", content=self._image_msg("image/jpeg", self._PNG_HEAD)["content"])
-        msgs = build_messages([ev], system_prompt=None).messages
-        url = msgs[0]["content"][1]["image_url"]["url"]
-        assert url.startswith("data:image/png;base64,")
+        assert self._build_url("image/jpeg", png_b64()).startswith("data:image/png;base64,")
 
     def test_matching_mime_unchanged(self) -> None:
-        ev = _evt(1, "user", content=self._image_msg("image/png", self._PNG_HEAD)["content"])
-        msgs = build_messages([ev], system_prompt=None).messages
-        url = msgs[0]["content"][1]["image_url"]["url"]
-        assert url.startswith("data:image/png;base64,")
+        assert self._build_url("image/png", png_b64()).startswith("data:image/png;base64,")
 
     def test_gif_bytes_corrected(self) -> None:
-        ev = _evt(1, "user", content=self._image_msg("image/png", self._GIF_HEAD)["content"])
-        msgs = build_messages([ev], system_prompt=None).messages
-        url = msgs[0]["content"][1]["image_url"]["url"]
-        assert url.startswith("data:image/gif;base64,")
+        assert self._build_url("image/png", gif_b64()).startswith("data:image/gif;base64,")
 
     def test_unrecognized_magic_leaves_declared_alone(self) -> None:
         random_b64 = base64.b64encode(b"\x00" * 32).decode()
-        ev = _evt(1, "user", content=self._image_msg("image/png", random_b64)["content"])
-        msgs = build_messages([ev], system_prompt=None).messages
-        url = msgs[0]["content"][1]["image_url"]["url"]
-        assert url.startswith("data:image/png;base64,")
+        assert self._build_url("image/png", random_b64).startswith("data:image/png;base64,")
 
     def test_non_data_url_unchanged(self) -> None:
         ev = _evt(

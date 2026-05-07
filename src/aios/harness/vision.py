@@ -9,6 +9,7 @@ recoverable.
 from __future__ import annotations
 
 import base64
+import binascii
 from typing import Any
 
 import litellm
@@ -21,11 +22,9 @@ INLINE_SIZE_CAP_BYTES = 2 * 1024 * 1024
 
 _VISION_OVERRIDES: dict[str, bool] = {}
 
-# Magic-byte signatures for the image formats Anthropic accepts.  Used to
-# correct mismatched ``Content-Type`` declarations that creep in from
-# inbound platform metadata or extension-based guesses (Anthropic's
-# ``/v1/messages`` strictly validates declared mime against actual bytes
-# and 400s on mismatch — see #294 incident).
+# Anthropic's ``/v1/messages`` validates declared mime against actual
+# magic bytes and 400s on mismatch.  WebP needs offset 8-11 (RIFF/WEBP)
+# rather than a leading prefix — add it if it ever shows up in the wild.
 _IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "image/png"),
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -35,24 +34,31 @@ _IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
 
 
 def sniff_image_mime(data_b64: str) -> str | None:
-    """Return the actual mime type of the base64-encoded image, or None.
-
-    Decodes only the first ~16 bytes (24 base64 chars) — enough to
-    discriminate the four formats Anthropic supports.  WebP is not in
-    the magic table because it requires reading offset 8-11; if we hit
-    a real WebP we add it.  Unknown signatures return ``None`` so the
-    caller can leave the declared mime untouched.
+    """Return the actual mime of the base64-encoded image, or ``None``
+    when the magic bytes don't match a known format.  Decodes only the
+    first ~16 bytes (24 base64 chars).
     """
     head_b64 = data_b64[:24]
     pad = (-len(head_b64)) % 4
     try:
         head = base64.b64decode(head_b64 + "=" * pad)
-    except Exception:
+    except binascii.Error:
         return None
     for sig, mime in _IMAGE_MAGIC:
         if head.startswith(sig):
             return mime
     return None
+
+
+def correct_image_mime(declared: str, data_b64: str) -> str:
+    """Return the magic-byte-detected mime, or ``declared`` unchanged
+    when sniffing yields nothing recognizable.  Logs the substitution.
+    """
+    actual = sniff_image_mime(data_b64)
+    if actual is None or actual == declared:
+        return declared
+    log.warning("vision.image_mime_corrected", declared=declared, actual=actual)
+    return actual
 
 
 def supports_vision(model: str) -> bool:
@@ -98,23 +104,11 @@ def make_image_url_part(*, content_type: str, data_b64: str) -> dict[str, Any]:
     """Build a chat-completions ``image_url`` content part.
 
     The declared ``content_type`` is reconciled against the actual magic
-    bytes — inbound platform metadata and extension-based guesses both
-    occasionally lie ("png" extension on a JPEG, Telegram reporting
-    image/jpeg for a PNG photo, etc.).  Anthropic's ``/v1/messages``
-    rejects mismatches outright and that error round-trips into a tight
-    retry loop because the bad mime is baked into the persisted event.
-    Sniffing here means new events carry the correct mime from the
-    start; ``_correct_image_data_url_mimes`` in context.py handles
-    historical events whose mime was already wrong.
+    bytes; inbound platform metadata and extension-based guesses both
+    occasionally lie.  ``_correct_image_data_url_mimes`` in context.py
+    fixes the same mismatch on historical events at replay time.
     """
-    actual = sniff_image_mime(data_b64)
-    if actual is not None and actual != content_type:
-        log.warning(
-            "vision.image_mime_corrected_at_write",
-            declared=content_type,
-            actual=actual,
-        )
-        content_type = actual
+    content_type = correct_image_mime(content_type, data_b64)
     return {
         "type": "image_url",
         "image_url": {"url": f"data:{content_type};base64,{data_b64}"},

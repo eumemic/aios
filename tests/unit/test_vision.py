@@ -13,6 +13,8 @@ import pytest
 
 from aios.harness import vision
 
+from .conftest import gif_b64, jpeg_b64, png_b64
+
 
 @pytest.fixture(autouse=True)
 def _clear_vision_overrides() -> Any:
@@ -125,10 +127,7 @@ class TestMakeImageUrlPart:
         }
 
     def test_sniff_corrects_mismatched_declared_type(self) -> None:
-        import base64
-
-        jpeg = base64.b64encode(b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 24).decode()
-        part = vision.make_image_url_part(content_type="image/png", data_b64=jpeg)
+        part = vision.make_image_url_part(content_type="image/png", data_b64=jpeg_b64())
         assert part["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
     def test_unrecognized_magic_passes_through(self) -> None:
@@ -138,34 +137,21 @@ class TestMakeImageUrlPart:
 
 class TestSniffImageMime:
     def test_png(self) -> None:
-        import base64
-
-        b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20).decode()
-        assert vision.sniff_image_mime(b64) == "image/png"
+        assert vision.sniff_image_mime(png_b64()) == "image/png"
 
     def test_jpeg(self) -> None:
-        import base64
-
-        b64 = base64.b64encode(b"\xff\xd8\xff\xe0\x00\x10JFIF").decode()
-        assert vision.sniff_image_mime(b64) == "image/jpeg"
+        assert vision.sniff_image_mime(jpeg_b64()) == "image/jpeg"
 
     def test_gif87(self) -> None:
-        import base64
-
-        b64 = base64.b64encode(b"GIF87a" + b"\x00" * 20).decode()
-        assert vision.sniff_image_mime(b64) == "image/gif"
+        assert vision.sniff_image_mime(gif_b64(version=b"87a")) == "image/gif"
 
     def test_gif89(self) -> None:
-        import base64
-
-        b64 = base64.b64encode(b"GIF89a" + b"\x00" * 20).decode()
-        assert vision.sniff_image_mime(b64) == "image/gif"
+        assert vision.sniff_image_mime(gif_b64(version=b"89a")) == "image/gif"
 
     def test_unknown_returns_none(self) -> None:
         import base64
 
-        b64 = base64.b64encode(b"\x00" * 32).decode()
-        assert vision.sniff_image_mime(b64) is None
+        assert vision.sniff_image_mime(base64.b64encode(b"\x00" * 32).decode()) is None
 
     def test_short_input_returns_none(self) -> None:
         assert vision.sniff_image_mime("") is None
