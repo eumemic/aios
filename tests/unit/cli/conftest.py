@@ -14,6 +14,7 @@ import pytest
 
 from aios.cli.client import AiosClient
 from aios.cli.runtime import CliState
+from aios.sdk import Client as SdkClient
 
 
 @dataclass
@@ -84,7 +85,15 @@ def mocked_cli(monkeypatch: pytest.MonkeyPatch) -> MockedCli:
             transport=httpx.MockTransport(handler),
         )
 
+    def _sdk_client(self: CliState) -> SdkClient:
+        client = SdkClient(base_url=self.base_url, token=self.api_key or "")
+        client.set_httpx_client(
+            httpx.Client(base_url=self.base_url, transport=httpx.MockTransport(handler))
+        )
+        return client
+
     monkeypatch.setattr(CliState, "client", _client)
+    monkeypatch.setattr(CliState, "sdk_client", _sdk_client)
     monkeypatch.setenv("AIOS_API_KEY", "test-key")
     monkeypatch.setenv("AIOS_URL", "http://test.invalid")
     return MockedCli(captured=captured, response_queue=responses)

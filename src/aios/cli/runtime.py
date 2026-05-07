@@ -12,11 +12,15 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import typer
 
 from aios.cli.client import AiosApiError, AiosClient
 from aios.cli.output import OutputFormat, print_error
+
+if TYPE_CHECKING:
+    from aios.sdk import Client
 
 
 @dataclass(slots=True)
@@ -30,6 +34,19 @@ class CliState:
 
     def client(self) -> AiosClient:
         return AiosClient(base_url=self.base_url, api_key=self.api_key)
+
+    def sdk_client(self) -> Client:
+        """Build a typed SDK ``Client`` from the resolved base_url + api_key.
+
+        Used by the porcelain modules that have migrated off the
+        hand-written ``AiosClient`` (``status``, ``tail``, the streaming
+        subcommands of ``sessions``). The hand-written client stays for
+        the remaining commands (CRUD modules, ``chat``, sessions
+        ``events``) until they migrate too.
+        """
+        from aios.sdk import Client
+
+        return Client(base_url=self.base_url, token=self.api_key or "")
 
 
 def get_state(ctx: typer.Context) -> CliState:
