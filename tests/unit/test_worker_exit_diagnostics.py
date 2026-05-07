@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 import structlog
 
-from aios.harness.worker import install_exit_diagnostics
+from aios.harness.exit_diagnostics import install_exit_diagnostics
 
 
 @pytest.fixture

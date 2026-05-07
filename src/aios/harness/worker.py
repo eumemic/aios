@@ -24,14 +24,11 @@ supervisor, and closes connections.
 from __future__ import annotations
 
 import asyncio
-import atexit
 import contextlib
-import faulthandler
 import sys
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
-import structlog
 
 import aios.tools  # noqa: F401  — side-effect: register built-in tools
 
@@ -49,6 +46,7 @@ from aios.harness.connector_supervisor import (
     instance_label,
     resolve_connector_specs,
 )
+from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.harness.sweep import (
     reap_stalled_jobs,
@@ -71,32 +69,6 @@ def _make_worker_id() -> str:
     from ulid import ULID
 
     return f"worker_{ULID()}"
-
-
-def install_exit_diagnostics(log: structlog.stdlib.BoundLogger) -> None:
-    """Wire faulthandler, asyncio loop exception handler, and atexit so any
-    worker-process exit produces an auditable log line.
-
-    Without these, native crashes, unretrieved task exceptions, and
-    ordinary process exits can all leave zero trace in the structured
-    log stream — exactly the failure shape that made the silent-exit
-    incident undiagnosable.
-    """
-    faulthandler.enable()
-
-    def _on_loop_exception(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
-        exc = context.get("exception")
-        log.error(
-            "worker.task_exception",
-            message=context.get("message"),
-            error_type=type(exc).__name__ if exc is not None else None,
-            error=str(exc) if exc is not None else None,
-            exc_info=exc,
-        )
-
-    asyncio.get_running_loop().set_exception_handler(_on_loop_exception)
-
-    atexit.register(lambda: log.info("worker.exit"))
 
 
 async def worker_main() -> None:
