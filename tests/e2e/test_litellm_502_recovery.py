@@ -19,7 +19,7 @@ from tests.e2e.harness import Harness, assistant, last_assistant_content
 
 def _make_bad_gateway() -> litellm.exceptions.BadGatewayError:
     return litellm.exceptions.BadGatewayError(
-        message="Server error '502 Bad Gateway' for url 'https://ant-proxy.eumemic.ai/v1/messages'",
+        message="Server error '502 Bad Gateway' for url 'https://api.example.com/v1/messages'",
         llm_provider="anthropic",
         model="anthropic/claude-opus-4-7",
     )
