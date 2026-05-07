@@ -75,12 +75,17 @@ CMD ["aios", "api"]
 # Docker, not Docker-in-Docker.
 FROM base AS worker
 
-# Explicitly disable the parent image's healthcheck inheritance. The base
-# stage has no HEALTHCHECK, but Coolify parses the Dockerfile text and
-# treats the api stage's HEALTHCHECK as global, then waits for
-# `.State.Health` on the worker container too. Without this NONE the
-# wait fails with "map has no entry for key Health" on every deploy.
-HEALTHCHECK NONE
+# The worker has no HTTP listener and nothing to liveness-check usefully,
+# but Coolify's deploy job grep-detects ``HEALTHCHECK`` anywhere in the
+# Dockerfile (even a stage we don't target) and unconditionally waits for
+# ``docker inspect --format {{.State.Health.Status}}`` on the resulting
+# container. ``HEALTHCHECK NONE`` here keeps the inspect template happy
+# at the docker level but Coolify's parser still flips
+# ``custom_healthcheck_found=true``, so the wait still runs and there's
+# nothing to read. Give it a trivially-passing check so docker has a
+# Health field for Coolify to read; the worker's actual liveness comes
+# from the procrastinate job heartbeat, not docker.
+HEALTHCHECK --interval=30s --timeout=3s CMD true
 
 USER root
 RUN apt-get update \
