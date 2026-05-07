@@ -43,6 +43,12 @@ class CliState:
         subcommands of ``sessions``). The hand-written client stays for
         the remaining commands (CRUD modules, ``chat``, sessions
         ``events``) until they migrate too.
+
+        Unlike :func:`aios.sdk.client_from_env`, this accepts a missing
+        ``api_key`` and constructs a Client with an empty Bearer token —
+        the ``aios status`` command needs to probe an unauthenticated
+        ``/health`` and report whether ``AIOS_API_KEY`` was set, so a
+        raise-on-missing surface here would be the wrong default.
         """
         from aios.sdk import Client
 
