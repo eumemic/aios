@@ -1,11 +1,7 @@
-"""Telegram connector for aios."""
+"""Telegram connector for aios (#301)."""
 
 from __future__ import annotations
 
-from .config import Settings
 from .connector import TelegramConnector
 
-
-def make_connector() -> TelegramConnector:
-    """Entry point resolved by the aios connector supervisor."""
-    return TelegramConnector(Settings())
+__all__ = ["TelegramConnector"]

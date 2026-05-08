@@ -8,11 +8,19 @@ a network connection.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from telegram import Bot, Message
+
+# HttpConnector reads AIOS_URL / AIOS_CONNECTOR_TOKEN at __init__ time, so
+# every test that constructs a TelegramConnector needs them in env.  Set
+# at import time rather than in a fixture so module-level connector
+# instances also see them.
+os.environ.setdefault("AIOS_URL", "http://test")
+os.environ.setdefault("AIOS_CONNECTOR_TOKEN", "aios_conn_test")
 
 BOT_ID = 99999999
 
