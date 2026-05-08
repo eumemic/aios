@@ -737,6 +737,21 @@ async def set_session_status(
         session_id,
     )
 
+    # Connector-calls fan-out (#301): when a session parks in
+    # ``requires_action`` with pending custom_tools, every connection
+    # bound to this session needs a NOTIFY so its SSE subscriber can
+    # backfill the new pending calls.  Firing here (after stop_reason
+    # is committed) avoids the race where the SSE consumer's query
+    # checks for ``requires_action`` but stop_reason hasn't been written
+    # yet — the case if NOTIFY fired in :func:`append_event`.
+    if (
+        isinstance(stop_reason, dict)
+        and stop_reason.get("type") == "requires_action"
+        and stop_reason.get("custom_tools")
+    ):
+        for cid in await _list_bound_connection_ids(conn, session_id):
+            await conn.execute("SELECT pg_notify($1, $2)", f"connector_calls_{cid}", session_id)
+
 
 async def increment_session_usage(
     conn: asyncpg.Connection[Any],
@@ -1469,23 +1484,6 @@ async def append_event(
     # preserving case, so the two would never match. pg_notify(text, text)
     # treats the channel as a string literal and preserves it byte-for-byte.
     await conn.execute("SELECT pg_notify($1, $2)", f"events_{session_id}", new_id)
-
-    # Connector-calls fan-out (#301): when an assistant message lands with
-    # tool_calls, every connection bound to this session that declares any
-    # custom tool is potentially affected.  The connector container's SSE
-    # subscriber (``GET /v1/connectors/calls``) listens on
-    # ``connector_calls_{connection_id}`` and filters incoming notifications
-    # against the tool names declared on its connection.
-    if (
-        kind == "message"
-        and isinstance(data, dict)
-        and data.get("role") == "assistant"
-        and data.get("tool_calls")
-    ):
-        bound = await _list_bound_connection_ids(conn, session_id)
-        for cid in bound:
-            await conn.execute("SELECT pg_notify($1, $2)", f"connector_calls_{cid}", session_id)
-
     return _row_to_event(row)
 
 
@@ -1686,6 +1684,39 @@ async def _list_bound_connection_ids(conn: asyncpg.Connection[Any], session_id: 
         session_id,
     )
     return [row["id"] for row in rows]
+
+
+async def is_session_bound_to_connection(
+    conn: asyncpg.Connection[Any], *, connection_id: str, session_id: str
+) -> bool:
+    """True iff ``connection_id`` is bound to ``session_id`` via any of the
+    three lineage paths used everywhere connector-session binding matters:
+
+    * single_session attach (``connections.session_id``)
+    * per_chat origin (``sessions.spawned_from_connection_id``)
+    * operator-curated chat binding (``connection_chat_sessions``)
+
+    Centralised so route handlers don't inline the three-branch WHERE
+    clause every time they need to authorize a connector-driven write.
+    """
+    row = await conn.fetchval(
+        """
+        SELECT 1
+          FROM connections c
+          LEFT JOIN sessions s ON s.id = $2
+         WHERE c.id = $1
+           AND c.archived_at IS NULL
+           AND (c.session_id = $2
+                OR c.id = s.spawned_from_connection_id
+                OR EXISTS (SELECT 1 FROM connection_chat_sessions ccs
+                            WHERE ccs.connection_id = c.id
+                              AND ccs.session_id = $2))
+         LIMIT 1
+        """,
+        connection_id,
+        session_id,
+    )
+    return row is not None
 
 
 async def read_events(

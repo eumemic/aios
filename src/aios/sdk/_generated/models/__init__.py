@@ -29,9 +29,22 @@ from .connection_set_tools import ConnectionSetTools
 from .connector_call_body import ConnectorCallBody
 from .connector_call_body_arguments import ConnectorCallBodyArguments
 from .connector_call_body_meta_type_0 import ConnectorCallBodyMetaType0
+from .connector_inbound_request import ConnectorInboundRequest
+from .connector_inbound_request_attachments_type_0_item import (
+    ConnectorInboundRequestAttachmentsType0Item,
+)
+from .connector_inbound_request_metadata_type_0 import (
+    ConnectorInboundRequestMetadataType0,
+)
+from .connector_inbound_request_sender import ConnectorInboundRequestSender
+from .connector_inbound_response import ConnectorInboundResponse
 from .connector_token import ConnectorToken
 from .connector_token_issue import ConnectorTokenIssue
 from .connector_token_issued import ConnectorTokenIssued
+from .connector_tool_result_request import ConnectorToolResultRequest
+from .connector_tool_result_request_content_type_1_item import (
+    ConnectorToolResultRequestContentType1Item,
+)
 from .context_response import ContextResponse
 from .context_response_messages_item import ContextResponseMessagesItem
 from .context_response_tools_item import ContextResponseToolsItem
@@ -202,9 +215,16 @@ __all__ = (
     "ConnectorCallBody",
     "ConnectorCallBodyArguments",
     "ConnectorCallBodyMetaType0",
+    "ConnectorInboundRequest",
+    "ConnectorInboundRequestAttachmentsType0Item",
+    "ConnectorInboundRequestMetadataType0",
+    "ConnectorInboundRequestSender",
+    "ConnectorInboundResponse",
     "ConnectorToken",
     "ConnectorTokenIssue",
     "ConnectorTokenIssued",
+    "ConnectorToolResultRequest",
+    "ConnectorToolResultRequestContentType1Item",
     "ContextResponse",
     "ContextResponseMessagesItem",
     "ContextResponseToolsItem",
