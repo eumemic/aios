@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+import structlog
 from aios_connector_http import HttpConnector, tool
 
 
@@ -268,3 +269,99 @@ class TestFocalChannelInjection:
             }
         )
         assert c.calls == [{"text": "hi"}]
+
+
+class TestLogging:
+    """Structured log records on the SDK's two boundary points.
+
+    The SDK is the only layer that sees every inbound and every tool
+    call — per-connector logging would duplicate this.  Connector authors
+    debugging "did the message arrive?" / "did the tool fire?" should
+    not need to add their own logging to find out.
+    """
+
+    async def test_emit_inbound_logs_one_record(self, probe: _ProbeConnector) -> None:
+        with structlog.testing.capture_logs() as records:
+            await probe.emit_inbound(
+                chat_id="chat-42",
+                sender={"id": 99, "name": "alice"},
+                content="hello world",
+            )
+        events = [r for r in records if r.get("event") == "connector.inbound"]
+        assert len(events) == 1
+        rec = events[0]
+        assert rec["chat_id"] == "chat-42"
+        assert rec["content_len"] == len("hello world")
+        # Sender shape varies per platform (telegram, signal); the SDK
+        # logs the dict opaquely so per-platform identity ends up in
+        # operator logs without the SDK knowing the schema.
+        assert rec["sender"] == {"id": 99, "name": "alice"}
+
+    async def test_emit_inbound_does_not_log_message_content(
+        self, probe: _ProbeConnector
+    ) -> None:
+        """Message bodies are user data — log length, not content."""
+        secret_body = "sensitive-canary-DO-NOT-LOG"
+        with structlog.testing.capture_logs() as records:
+            await probe.emit_inbound(
+                chat_id="c", sender={"id": 1}, content=secret_body
+            )
+        for r in records:
+            for v in r.values():
+                assert secret_body not in str(v), f"content leaked into log field: {r}"
+
+    async def test_dispatch_call_logs_dispatched_then_completed(
+        self, probe: _ProbeConnector
+    ) -> None:
+        with structlog.testing.capture_logs() as records:
+            await probe.dispatch_call(
+                {
+                    "tool_call_id": "call_1",
+                    "session_id": "sess_1",
+                    "name": "shout",
+                    "arguments": json.dumps({"text": "hi"}),
+                }
+            )
+        events = [r["event"] for r in records]
+        assert "connector.tool_call.dispatched" in events
+        assert "connector.tool_call.completed" in events
+        completed = next(r for r in records if r["event"] == "connector.tool_call.completed")
+        assert completed["name"] == "shout"
+        assert completed["tool_call_id"] == "call_1"
+        assert completed["is_error"] is False
+
+    async def test_dispatch_call_logs_failed_on_unknown_tool(
+        self, probe: _ProbeConnector
+    ) -> None:
+        with structlog.testing.capture_logs() as records:
+            await probe.dispatch_call(
+                {
+                    "tool_call_id": "call_x",
+                    "session_id": "sess_x",
+                    "name": "no_such_tool",
+                    "arguments": "{}",
+                }
+            )
+        failed = [r for r in records if r["event"] == "connector.tool_call.failed"]
+        assert len(failed) == 1
+        assert failed[0]["name"] == "no_such_tool"
+        assert failed[0]["reason"] == "unknown_tool"
+
+    async def test_dispatch_call_logs_failed_on_tool_exception(
+        self, probe: _ProbeConnector
+    ) -> None:
+        with structlog.testing.capture_logs() as records:
+            await probe.dispatch_call(
+                {
+                    "tool_call_id": "call_b",
+                    "session_id": "sess_b",
+                    "name": "boom",
+                    "arguments": "{}",
+                }
+            )
+        failed = [r for r in records if r["event"] == "connector.tool_call.failed"]
+        assert len(failed) == 1
+        assert failed[0]["name"] == "boom"
+        assert failed[0]["reason"] == "tool_exception"
+        # The exception message is preserved so operators can grep for it.
+        assert "kaboom" in failed[0]["error"]

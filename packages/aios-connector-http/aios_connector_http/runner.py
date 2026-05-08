@@ -31,12 +31,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
+import structlog
 from ulid import ULID
 
 from .client import AiosClient
 from .sandbox import _SandboxPathMarker, resolve_sandbox_path
 
 ToolFn = Callable[..., Awaitable[Any]]
+
+log: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
 _TOOL_ATTR = "__aios_http_tool__"
 
@@ -153,6 +156,15 @@ class HttpConnector:
         """Forward a platform inbound to aios.  Idempotent on event_id."""
         assert self._client is not None
         eid = event_id or str(ULID())
+        log.info(
+            "connector.inbound",
+            connection_id=self._connection_id,
+            chat_id=chat_id,
+            sender=sender,
+            content_len=len(content),
+            attachment_count=len(attachments or []),
+            event_id=eid,
+        )
         return await self._client.post_inbound(
             event_id=eid,
             chat_id=chat_id,
@@ -229,8 +241,21 @@ class HttpConnector:
         name = call.get("name", "")
         tool_call_id = call.get("tool_call_id", "")
         session_id = call.get("session_id", "")
+        log.info(
+            "connector.tool_call.dispatched",
+            name=name,
+            tool_call_id=tool_call_id,
+            session_id=session_id,
+        )
         meta = self._tools.get(name)
         if meta is None:
+            log.warning(
+                "connector.tool_call.failed",
+                name=name,
+                tool_call_id=tool_call_id,
+                session_id=session_id,
+                reason="unknown_tool",
+            )
             await self._client.post_tool_result(
                 session_id=session_id,
                 tool_call_id=tool_call_id,
@@ -247,6 +272,14 @@ class HttpConnector:
         try:
             args = _resolve_sandbox_paths(meta, args, session_id=session_id)
         except SandboxPathError as exc:
+            log.warning(
+                "connector.tool_call.failed",
+                name=name,
+                tool_call_id=tool_call_id,
+                session_id=session_id,
+                reason="sandbox_path",
+                error=str(exc),
+            )
             await self._client.post_tool_result(
                 session_id=session_id,
                 tool_call_id=tool_call_id,
@@ -257,6 +290,14 @@ class HttpConnector:
         try:
             result = await meta.fn(**args)
         except Exception as exc:
+            log.warning(
+                "connector.tool_call.failed",
+                name=name,
+                tool_call_id=tool_call_id,
+                session_id=session_id,
+                reason="tool_exception",
+                error=str(exc),
+            )
             await self._client.post_tool_result(
                 session_id=session_id,
                 tool_call_id=tool_call_id,
@@ -273,6 +314,13 @@ class HttpConnector:
             session_id=session_id,
             tool_call_id=tool_call_id,
             content=result,
+        )
+        log.info(
+            "connector.tool_call.completed",
+            name=name,
+            tool_call_id=tool_call_id,
+            session_id=session_id,
+            is_error=False,
         )
 
     def _collect_tools(self) -> dict[str, _ToolMeta]:
