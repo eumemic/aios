@@ -28,7 +28,7 @@ import asyncpg
 from sse_starlette import ServerSentEvent
 
 from aios.db import queries
-from aios.db.listen import listen_for_events
+from aios.db.listen import listen_for_connector_calls, listen_for_events
 from aios.logging import get_logger
 
 if TYPE_CHECKING:
@@ -133,6 +133,57 @@ async def sse_event_stream(
             if _is_terminal(event_data):
                 yield ServerSentEvent(data="{}", event="done")
                 return
+
+
+async def connector_calls_stream(
+    db_url: str,
+    pool: asyncpg.Pool[Any],
+    connection_id: str,
+) -> AsyncIterator[ServerSentEvent]:
+    """Yield SSE events for pending custom tool calls owned by ``connection_id``.
+
+    Backfills any pending calls at subscribe time, then tails the
+    ``connector_calls_<connection_id>`` NOTIFY channel.  When NOTIFY
+    fires (with a ``session_id`` payload), looks up that session's
+    pending tool calls and emits one SSE event per call.
+
+    Each emitted event is keyed ``"call"`` with a JSON body shaped::
+
+        {
+            "session_id": "sess_xxx",
+            "tool_call_id": "call_yyy",
+            "name": "telegram_send",
+            "arguments": "{...}",
+            "focal_channel": "telegram/bot1/chat123" | null
+        }
+
+    The connector dedupes by ``tool_call_id`` client-side so SSE
+    reconnects (which replay the backfill) don't double-execute.
+    """
+    import json as _json
+
+    async with listen_for_connector_calls(db_url, connection_id) as queue:
+        emitted: set[str] = set()
+
+        async with pool.acquire() as conn:
+            backfill = await queries.list_pending_calls_for_connection(conn, connection_id)
+        for call in backfill:
+            emitted.add(call["tool_call_id"])
+            yield ServerSentEvent(data=_json.dumps(call), event="call")
+
+        while True:
+            session_id = await queue.get()
+            async with pool.acquire() as conn:
+                pending = await queries.list_pending_calls_for_session_and_connection(
+                    conn,
+                    session_id=session_id,
+                    connection_id=connection_id,
+                )
+            for call in pending:
+                if call["tool_call_id"] in emitted:
+                    continue
+                emitted.add(call["tool_call_id"])
+                yield ServerSentEvent(data=_json.dumps(call), event="call")
 
 
 def _is_terminal(payload: dict[str, Any]) -> bool:

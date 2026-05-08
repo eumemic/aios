@@ -5430,6 +5430,117 @@
         }
       }
     },
+    "/v1/connectors/inbound": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Inbound",
+        "description": "Append an inbound user message to the session bound to the caller's connection.\n\nIdempotent on ``body.event_id`` \u2014 replays return the original\nevent id with ``deduped=True``.  Drops surface as 4xx/5xx with\na body explaining the reason (operator-config issue vs server\nerror vs payload).",
+        "operationId": "post_connector_inbound",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectorInboundRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorInboundResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/calls": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Get Calls",
+        "description": "SSE stream of pending custom tool calls for the caller's connection.\n\nBackfills any pending calls at subscribe time (calls already parked\nin some session's ``stop_reason.custom_tools``), then tails the\n``connector_calls_<connection_id>`` NOTIFY channel.  Each emitted\nevent is keyed ``call`` with a JSON body shaped::\n\n    {\n        \"session_id\": \"...\",\n        \"tool_call_id\": \"...\",\n        \"name\": \"...\",\n        \"arguments\": \"...\",       // JSON string from the model\n        \"focal_channel\": \"...\"\n    }\n\nConnector containers dedupe by ``tool_call_id`` client-side so SSE\nreconnects (which replay the backfill) don't double-execute.",
+        "operationId": "get_calls_v1_connectors_calls_get",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "targets": []
+        }
+      }
+    },
     "/v1/connectors": {
       "get": {
         "tags": [
@@ -6907,6 +7018,114 @@
           "tool"
         ],
         "title": "ConnectorCallBody"
+      },
+      "ConnectorInboundRequest": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id",
+            "description": "Client-supplied dedup key (ULID).  Replays return the original event id."
+          },
+          "chat_id": {
+            "type": "string",
+            "title": "Chat Id"
+          },
+          "sender": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Sender"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "attachments": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachments"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp",
+            "description": "Optional ISO-8601 platform timestamp; stored in event metadata."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "event_id",
+          "chat_id",
+          "content"
+        ],
+        "title": "ConnectorInboundRequest",
+        "description": "Body for ``POST /v1/connectors/inbound``.\n\nAuthenticated via ``ConnectorAuthDep`` so the connection_id is\nserver-resolved from the bearer token \u2014 clients don't pick which\nconnection their inbound lands on."
+      },
+      "ConnectorInboundResponse": {
+        "properties": {
+          "appended_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Appended Event Id"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "deduped": {
+            "type": "boolean",
+            "title": "Deduped"
+          }
+        },
+        "type": "object",
+        "required": [
+          "appended_event_id",
+          "session_id",
+          "deduped"
+        ],
+        "title": "ConnectorInboundResponse",
+        "description": "Response for ``POST /v1/connectors/inbound``."
       },
       "ConnectorToken": {
         "properties": {

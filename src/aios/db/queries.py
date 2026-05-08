@@ -1469,7 +1469,223 @@ async def append_event(
     # preserving case, so the two would never match. pg_notify(text, text)
     # treats the channel as a string literal and preserves it byte-for-byte.
     await conn.execute("SELECT pg_notify($1, $2)", f"events_{session_id}", new_id)
+
+    # Connector-calls fan-out (#301): when an assistant message lands with
+    # tool_calls, every connection bound to this session that declares any
+    # custom tool is potentially affected.  The connector container's SSE
+    # subscriber (``GET /v1/connectors/calls``) listens on
+    # ``connector_calls_{connection_id}`` and filters incoming notifications
+    # against the tool names declared on its connection.
+    if (
+        kind == "message"
+        and isinstance(data, dict)
+        and data.get("role") == "assistant"
+        and data.get("tool_calls")
+    ):
+        bound = await _list_bound_connection_ids(conn, session_id)
+        for cid in bound:
+            await conn.execute("SELECT pg_notify($1, $2)", f"connector_calls_{cid}", session_id)
+
     return _row_to_event(row)
+
+
+async def list_pending_calls_for_connection(
+    conn: asyncpg.Connection[Any], connection_id: str
+) -> list[dict[str, Any]]:
+    """Pending custom tool calls for ``connection_id`` across bound sessions.
+
+    A "pending" call is one referenced in some session's
+    ``stop_reason.custom_tools`` array — i.e. the model called a custom
+    tool and the session is parked in ``requires_action``.  For each
+    such session, this returns one row per tool_call whose ``name``
+    matches a tool declared on the connection.
+
+    Output dict shape::
+
+        {
+            "session_id": "sess_xxx",
+            "tool_call_id": "call_yyy",
+            "name": "telegram_send",
+            "arguments": "{...}",        # JSON string from the model
+            "focal_channel": "telegram/bot1/chat123" | None,
+        }
+
+    Used by the connector calls SSE endpoint at subscribe-time backfill
+    and on each NOTIFY.
+    """
+    # First read the connection's tools and the bound sessions, then walk
+    # session state.  Two SELECTs because postgres can't efficiently fan
+    # one query across the lineage union with a jsonb tool-name filter.
+    conn_row = await conn.fetchrow(
+        "SELECT tools FROM connections WHERE id = $1 AND archived_at IS NULL",
+        connection_id,
+    )
+    if conn_row is None:
+        return []
+    tools_data = _parse_jsonb(conn_row["tools"])
+    tool_names = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
+    if not tool_names:
+        return []
+
+    rows = await conn.fetch(
+        """
+        SELECT s.id AS session_id, s.stop_reason, s.focal_channel
+          FROM sessions s
+         WHERE s.archived_at IS NULL
+           AND s.status = 'idle'
+           AND s.stop_reason->>'type' = 'requires_action'
+           AND EXISTS (
+               SELECT 1 FROM connections c
+                WHERE c.id = $1 AND c.archived_at IS NULL
+                  AND (c.session_id = s.id
+                       OR c.id = s.spawned_from_connection_id
+                       OR EXISTS (SELECT 1 FROM connection_chat_sessions ccs
+                                   WHERE ccs.connection_id = c.id
+                                     AND ccs.session_id = s.id))
+           )
+        """,
+        connection_id,
+    )
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.extend(
+            await _pending_calls_for_session(
+                conn,
+                session_id=row["session_id"],
+                stop_reason=_parse_jsonb(row["stop_reason"]),
+                focal_channel=row["focal_channel"],
+                tool_names=tool_names,
+            )
+        )
+    return out
+
+
+async def list_pending_calls_for_session_and_connection(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    connection_id: str,
+) -> list[dict[str, Any]]:
+    """Same shape as :func:`list_pending_calls_for_connection` but scoped
+    to one session.  Used by the SSE NOTIFY tail to fetch calls only for
+    the session that just emitted, instead of re-scanning all bound
+    sessions.
+    """
+    conn_row = await conn.fetchrow(
+        "SELECT tools FROM connections WHERE id = $1 AND archived_at IS NULL",
+        connection_id,
+    )
+    if conn_row is None:
+        return []
+    tools_data = _parse_jsonb(conn_row["tools"])
+    tool_names = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
+    if not tool_names:
+        return []
+
+    sess_row = await conn.fetchrow(
+        "SELECT stop_reason, status, focal_channel FROM sessions "
+        "WHERE id = $1 AND archived_at IS NULL",
+        session_id,
+    )
+    if sess_row is None:
+        return []
+    if sess_row["status"] != "idle":
+        return []
+    stop_reason = _parse_jsonb(sess_row["stop_reason"])
+    if not isinstance(stop_reason, dict) or stop_reason.get("type") != "requires_action":
+        return []
+
+    return await _pending_calls_for_session(
+        conn,
+        session_id=session_id,
+        stop_reason=stop_reason,
+        focal_channel=sess_row["focal_channel"],
+        tool_names=tool_names,
+    )
+
+
+async def _pending_calls_for_session(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    stop_reason: Any,
+    focal_channel: str | None,
+    tool_names: set[str],
+) -> list[dict[str, Any]]:
+    """Fetch the pending tool_call rows for one ``requires_action`` session."""
+    if not isinstance(stop_reason, dict):
+        return []
+    pending_ids = stop_reason.get("custom_tools") or []
+    if not pending_ids:
+        return []
+
+    # The pending call_ids are referenced in the most recent assistant
+    # event; walk that event's data->'tool_calls' array.  We could scan
+    # all assistant events but the loop only parks on the latest, so the
+    # latest assistant message owns every id in stop_reason.
+    rows = await conn.fetch(
+        """
+        SELECT data
+          FROM events
+         WHERE session_id = $1
+           AND kind = 'message'
+           AND data->>'role' = 'assistant'
+         ORDER BY seq DESC
+         LIMIT 5
+        """,
+        session_id,
+    )
+
+    pending_set = set(pending_ids)
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        data = _parse_jsonb(row["data"])
+        for tc in data.get("tool_calls") or []:
+            tc_id = tc.get("id")
+            if tc_id not in pending_set:
+                continue
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if name not in tool_names:
+                continue
+            out.append(
+                {
+                    "session_id": session_id,
+                    "tool_call_id": tc_id,
+                    "name": name,
+                    "arguments": fn.get("arguments", "{}"),
+                    "focal_channel": focal_channel,
+                }
+            )
+    return out
+
+
+async def _list_bound_connection_ids(conn: asyncpg.Connection[Any], session_id: str) -> list[str]:
+    """IDs of active connections bound to ``session_id``.
+
+    Used by :func:`append_event` to fan an assistant-tool-calls event
+    out to per-connection NOTIFY channels.  Tools-less connections
+    receive notifications and harmlessly no-op them on the consumer
+    side — filtering by ``jsonb_array_length(tools) > 0`` here forces a
+    seq scan (function expressions aren't indexable), so we accept a
+    small amount of cross-connection notification noise instead.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT c.id
+          FROM connections c
+          LEFT JOIN sessions s ON s.id = $1
+         WHERE c.archived_at IS NULL
+           AND (c.session_id = $1
+                OR c.id = s.spawned_from_connection_id
+                OR EXISTS (SELECT 1 FROM connection_chat_sessions ccs
+                            WHERE ccs.connection_id = c.id
+                              AND ccs.session_id = $1))
+        """,
+        session_id,
+    )
+    return [row["id"] for row in rows]
 
 
 async def read_events(
