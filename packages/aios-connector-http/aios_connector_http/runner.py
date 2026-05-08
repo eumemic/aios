@@ -179,7 +179,15 @@ class HttpConnector:
             backoff = min(backoff * 2, 60.0)
 
     async def _dispatch_call(self, call: dict[str, Any]) -> None:
-        """Run the right tool method for ``call`` and POST the result."""
+        """Run the right tool method for ``call`` and POST the result.
+
+        If the tool method's signature accepts ``account`` and/or
+        ``chat_id`` kwargs, the runner parses them out of the call's
+        ``focal_channel`` (shaped ``<connector>/<account>/<chat_id>``)
+        and injects them.  Mirrors the legacy SDK's ``@focal_required``
+        without a separate decorator — declare what you need in the
+        signature and the runner threads it through.
+        """
         assert self._client is not None
         name = call.get("name", "")
         tool_call_id = call.get("tool_call_id", "")
@@ -197,6 +205,8 @@ class HttpConnector:
             args = json.loads(call.get("arguments") or "{}")
         except json.JSONDecodeError:
             args = {}
+        focal_channel = call.get("focal_channel") or ""
+        args = _inject_focal_kwargs(fn, args, focal_channel)
         try:
             result = await fn(**args)
         except Exception as exc:
@@ -226,3 +236,38 @@ class HttpConnector:
                 tool_name: str = getattr(member, _TOOL_ATTR)
                 out[tool_name] = member
         return out
+
+
+_FOCAL_INJECTABLE: frozenset[str] = frozenset({"account", "chat_id"})
+
+
+def _inject_focal_kwargs(
+    fn: ToolFn, args: dict[str, Any], focal_channel: str
+) -> dict[str, Any]:
+    """Inject ``account`` / ``chat_id`` kwargs from ``focal_channel``.
+
+    Returns ``args`` augmented with whichever of ``account`` and
+    ``chat_id`` (a) the tool's signature accepts and (b) the caller
+    didn't already pass explicitly.  ``focal_channel`` is the
+    ``<connector>/<account>/<chat_id>`` form the server stamps onto
+    each call event.
+
+    Mirrors the legacy SDK's ``@focal_required`` injection without
+    requiring a separate decorator: tool authors declare ``account``
+    and/or ``chat_id`` in their signature and the runner threads them
+    through automatically.
+    """
+    if not focal_channel:
+        return args
+    parts = focal_channel.split("/", 2)
+    if len(parts) < 3:
+        return args
+    _connector, account, chat_id = parts
+    sig = inspect.signature(fn)
+    accepted = set(sig.parameters) & _FOCAL_INJECTABLE
+    out = dict(args)
+    if "account" in accepted and "account" not in out:
+        out["account"] = account
+    if "chat_id" in accepted and "chat_id" not in out:
+        out["chat_id"] = chat_id
+    return out

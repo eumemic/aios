@@ -167,3 +167,104 @@ class TestAnsweredDedup:
         else:
             await probe._dispatch_call(call)
         assert probe.calls == []
+
+
+class _FocalConnector(HttpConnector):
+    """Tools that opt into focal-channel injection by signature."""
+
+    def __init__(self) -> None:
+        super().__init__(base_url="http://x", token="aios_conn_x")
+        self.calls: list[dict[str, Any]] = []
+
+    @tool()
+    async def needs_chat(self, *, text: str, chat_id: str) -> str:
+        self.calls.append({"text": text, "chat_id": chat_id})
+        return f"sent to {chat_id}"
+
+    @tool()
+    async def needs_both(self, *, account: str, chat_id: str, text: str) -> str:
+        self.calls.append({"account": account, "chat_id": chat_id, "text": text})
+        return f"{account}:{chat_id}"
+
+    @tool()
+    async def chat_only(self, *, text: str) -> str:
+        """No focal kwargs in signature — runner shouldn't inject."""
+        self.calls.append({"text": text})
+        return text
+
+
+class TestFocalChannelInjection:
+    async def test_injects_chat_id_when_signature_accepts(self) -> None:
+        c = _FocalConnector()
+        c._client = AsyncMock()  # type: ignore[assignment]
+        await c._dispatch_call(
+            {
+                "tool_call_id": "call_f1",
+                "session_id": "s",
+                "name": "needs_chat",
+                "arguments": json.dumps({"text": "hi"}),
+                "focal_channel": "telegram/bot1/chat-123",
+            }
+        )
+        assert c.calls == [{"text": "hi", "chat_id": "chat-123"}]
+
+    async def test_injects_both_account_and_chat_id(self) -> None:
+        c = _FocalConnector()
+        c._client = AsyncMock()  # type: ignore[assignment]
+        await c._dispatch_call(
+            {
+                "tool_call_id": "call_f2",
+                "session_id": "s",
+                "name": "needs_both",
+                "arguments": json.dumps({"text": "hi"}),
+                "focal_channel": "signal/+15551234/group-abc",
+            }
+        )
+        assert c.calls == [{"account": "+15551234", "chat_id": "group-abc", "text": "hi"}]
+
+    async def test_skips_injection_when_signature_doesnt_ask(self) -> None:
+        c = _FocalConnector()
+        c._client = AsyncMock()  # type: ignore[assignment]
+        await c._dispatch_call(
+            {
+                "tool_call_id": "call_f3",
+                "session_id": "s",
+                "name": "chat_only",
+                "arguments": json.dumps({"text": "hi"}),
+                "focal_channel": "telegram/bot1/chat-123",
+            }
+        )
+        # chat_only doesn't accept chat_id; runner mustn't inject (TypeError).
+        assert c.calls == [{"text": "hi"}]
+
+    async def test_explicit_kwarg_wins_over_focal(self) -> None:
+        """The model can override focal injection by passing the kwarg
+        explicitly — useful when a tool needs to act on a non-focal
+        chat (e.g. forward to a different conversation)."""
+        c = _FocalConnector()
+        c._client = AsyncMock()  # type: ignore[assignment]
+        await c._dispatch_call(
+            {
+                "tool_call_id": "call_f4",
+                "session_id": "s",
+                "name": "needs_chat",
+                "arguments": json.dumps({"text": "hi", "chat_id": "explicit"}),
+                "focal_channel": "telegram/bot1/chat-from-focal",
+            }
+        )
+        assert c.calls == [{"text": "hi", "chat_id": "explicit"}]
+
+    async def test_no_focal_channel_is_a_noop(self) -> None:
+        c = _FocalConnector()
+        c._client = AsyncMock()  # type: ignore[assignment]
+        # chat_only doesn't need focal — should still work without one.
+        await c._dispatch_call(
+            {
+                "tool_call_id": "call_f5",
+                "session_id": "s",
+                "name": "chat_only",
+                "arguments": json.dumps({"text": "hi"}),
+                "focal_channel": "",
+            }
+        )
+        assert c.calls == [{"text": "hi"}]
