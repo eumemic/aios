@@ -58,6 +58,7 @@ dev = [
     # discovery → spawn → init pipeline can run. Only needed in dev/test;
     # production uses real connectors (signal, telegram, ...).
     "aios-echo",
+    "aios-echo-http",
 ]
 
 [project.scripts]
@@ -73,9 +74,11 @@ packages = ["src/aios"]
 # ─── uv workspace ────────────────────────────────────────────────────────────
 [tool.uv.workspace]
 members = [
+    "connectors/echo-http",
     "connectors/signal",
     "connectors/telegram",
     "packages/aios-connector",
+    "packages/aios-connector-http",
     "packages/aios-echo",
 ]
 
@@ -85,7 +88,9 @@ members = [
 # so e2e tests that exercise the full discovery pipeline can run.
 [tool.uv.sources]
 aios-connector = { workspace = true }
+aios-connector-http = { workspace = true }
 aios-echo = { workspace = true }
+aios-echo-http = { workspace = true }
 
 # ─── ruff ────────────────────────────────────────────────────────────────────
 [tool.ruff]

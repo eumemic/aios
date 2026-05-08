@@ -31,8 +31,10 @@ from sse_starlette import EventSourceResponse
 from aios.api.connector_rpc import connector_rpc
 from aios.api.deps import AuthDep, ConnectorAuthDep, DbUrlDep, PoolDep
 from aios.api.sse import connector_calls_stream
+from aios.db import queries
 from aios.errors import (
     AiosError,
+    ForbiddenError,
     NotFoundError,
     PayloadTooLargeError,
     ValidationError,
@@ -42,7 +44,9 @@ from aios.harness.connector_tasks import (
     defer_connector_status,
     defer_connector_tools,
 )
+from aios.harness.wake import defer_wake
 from aios.services import inbound as inbound_service
+from aios.services import sessions as sessions_service
 
 router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
 
@@ -133,6 +137,59 @@ async def post_inbound(
         session_id=result.session_id,
         deduped=result.deduped,
     )
+
+
+class ConnectorToolResultRequest(BaseModel):
+    """Body for ``POST /v1/connectors/tool-results``.
+
+    Mirrors the operator-facing :class:`ToolResultRequest` but adds
+    ``session_id`` since connector tokens aren't path-scoped to a
+    session.  The handler validates the session is bound to the
+    caller's connection (preventing a connector from posting results
+    for sessions outside its scope).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    tool_call_id: str
+    content: str | list[dict[str, Any]]
+    is_error: bool = False
+
+
+@router.post(
+    "/tool-results",
+    operation_id="post_connector_tool_result",
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_tool_result(
+    body: ConnectorToolResultRequest,
+    pool: PoolDep,
+    connection_id: ConnectorAuthDep,
+) -> Any:
+    """Submit a custom tool result from a connector container.
+
+    Authorization: the session must be bound to the caller's connection
+    (single_session attach, per_chat origin, or operator-bound chat).
+    Otherwise → 403.
+    """
+    async with pool.acquire() as conn:
+        if not await queries.is_session_bound_to_connection(
+            conn, connection_id=connection_id, session_id=body.session_id
+        ):
+            raise ForbiddenError(
+                "session is not bound to this connection",
+                detail={"session_id": body.session_id, "connection_id": connection_id},
+            )
+        event = await sessions_service.append_tool_result(
+            conn,
+            session_id=body.session_id,
+            tool_call_id=body.tool_call_id,
+            content=body.content,
+            is_error=body.is_error,
+        )
+    await defer_wake(pool, body.session_id, cause="connector_tool_result")
+    return event
 
 
 @router.get("/calls", openapi_extra={"x-codegen": {"targets": []}})

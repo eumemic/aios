@@ -129,11 +129,17 @@ class TestListPendingCalls:
 
 @needs_docker
 class TestConnectorCallsNotify:
-    """Verify ``append_event`` fires ``connector_calls_<cid>`` NOTIFY for
-    bound connections that declare any tool — and ONLY for those.
+    """Verify ``set_session_status`` fires ``connector_calls_<cid>`` NOTIFY
+    when a session parks in ``requires_action`` with pending custom_tools,
+    for every connection bound to that session.
+
+    The NOTIFY fires here (not in :func:`append_event`) so the SSE
+    consumer's lookup query can rely on ``stop_reason`` already being
+    committed.  Otherwise there's a race: assistant event lands → NOTIFY
+    fires → SSE consumer queries → stop_reason still null → empty result.
     """
 
-    async def test_notify_fires_on_bound_assistant_event(self, harness: Harness) -> None:
+    async def test_notify_fires_on_requires_action_park(self, harness: Harness) -> None:
         from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
@@ -173,31 +179,23 @@ class TestConnectorCallsNotify:
 
         settings = get_settings()
         async with listen_for_connector_calls(settings.db_url, conn.id) as queue:
-            await sess_svc.append_event(
+            await sess_svc.set_session_status(
                 harness._pool,
                 session.id,
-                "message",
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "call_n1",
-                            "type": "function",
-                            "function": {
-                                "name": "echo_send",
-                                "arguments": "{}",
-                            },
-                        }
-                    ],
+                "idle",
+                stop_reason={
+                    "type": "requires_action",
+                    "event_ids": ["call_n1"],
+                    "custom_tools": ["call_n1"],
                 },
             )
             payload = await asyncio.wait_for(queue.get(), timeout=5.0)
             assert payload == session.id
 
-    async def test_notify_silent_on_role_user_event(self, harness: Harness) -> None:
-        """User-message events MUST NOT trigger the connector-calls fan-out;
-        otherwise inbound POSTs would echo back as 'work' notifications.
+    async def test_notify_silent_on_non_requires_action_park(self, harness: Harness) -> None:
+        """``end_turn`` and other stop reasons MUST NOT trigger the
+        connector-calls fan-out — only ``requires_action`` with pending
+        ``custom_tools`` represents new work for the connector.
         """
         from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
@@ -238,12 +236,17 @@ class TestConnectorCallsNotify:
 
         settings = get_settings()
         async with listen_for_connector_calls(settings.db_url, conn.id) as queue:
-            await sess_svc.append_user_message(harness._pool, session.id, "hi")
+            await sess_svc.set_session_status(
+                harness._pool,
+                session.id,
+                "idle",
+                stop_reason={"type": "end_turn"},
+            )
             try:
                 payload = await asyncio.wait_for(queue.get(), timeout=0.5)
             except TimeoutError:
                 payload = None
-            assert payload is None, f"unexpected NOTIFY for user event: {payload}"
+            assert payload is None, f"unexpected NOTIFY for end_turn park: {payload}"
 
     async def test_notify_silent_on_unrelated_connection(self, harness: Harness) -> None:
         """An assistant tool_calls event on session A must NOT NOTIFY
@@ -301,22 +304,16 @@ class TestConnectorCallsNotify:
         )
 
         settings = get_settings()
-        # Listen as conn_b but emit on session_a — conn_b shouldn't see it.
+        # Listen as conn_b but park session_a — conn_b shouldn't see it.
         async with listen_for_connector_calls(settings.db_url, conn_b.id) as queue:
-            await sess_svc.append_event(
+            await sess_svc.set_session_status(
                 harness._pool,
                 session_a.id,
-                "message",
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "call_nu1",
-                            "type": "function",
-                            "function": {"name": "x", "arguments": "{}"},
-                        }
-                    ],
+                "idle",
+                stop_reason={
+                    "type": "requires_action",
+                    "event_ids": ["call_nu1"],
+                    "custom_tools": ["call_nu1"],
                 },
             )
             try:
