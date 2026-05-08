@@ -305,11 +305,10 @@ dev = [
 
 [[package]]
 name = "aios-signal"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "connectors/signal" }
 dependencies = [
-    { name = "aios-connector" },
-    { name = "mcp" },
+    { name = "aios-connector-http" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "structlog" },
@@ -326,8 +325,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aios-connector", editable = "packages/aios-connector" },
-    { name = "mcp", specifier = ">=1.20,<2.0" },
+    { name = "aios-connector-http", editable = "packages/aios-connector-http" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "structlog", specifier = ">=24.4" },
