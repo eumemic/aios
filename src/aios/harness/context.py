@@ -88,10 +88,21 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
     sender_uuid = metadata.get("sender_uuid")
     if isinstance(sender_uuid, str) and sender_uuid:
         parts.append(f"sender_uuid={sender_uuid}")
+    sender_id = metadata.get("sender_id")
+    if isinstance(sender_id, int):
+        parts.append(f"sender_id={sender_id}")
     timestamp_ms = metadata.get("timestamp_ms")
     if isinstance(timestamp_ms, int):
         iso = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat(timespec="milliseconds")
         parts.append(f"timestamp_ms={timestamp_ms} ({iso})")
+    message_id = metadata.get("message_id")
+    if isinstance(message_id, int):
+        parts.append(f"message_id={message_id}")
+    if metadata.get("edited") is True:
+        parts.append("edited=true")
+    sticker_emoji = metadata.get("sticker_emoji")
+    if isinstance(sticker_emoji, str) and sticker_emoji:
+        parts.append(f"sticker_emoji={sticker_emoji!r}")
     header = "[" + " · ".join(parts) + "]"
     reaction = metadata.get("reaction")
     if isinstance(reaction, dict):
