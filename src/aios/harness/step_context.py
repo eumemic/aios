@@ -95,7 +95,6 @@ async def compute_step_prelude(
     :func:`compose_step_context` unchanged, so the composed prompt stays
     byte-identical to what it was before the split.
     """
-    from aios.harness import runtime
     from aios.harness.channels import (
         augment_with_focal_paradigm,
         max_tail_block_local,
@@ -119,12 +118,6 @@ async def compute_step_prelude(
         mcp_tools, mcp_instructions = await discover_session_mcp_tools(pool, session_id, agent)
         tools.extend(mcp_tools)
         instructions_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
-
-    # Connector-subprocess (stdio MCP) tools come from the worker-scoped
-    # registry, separate from agent.mcp_servers (HTTP MCP).
-    connector_registry = runtime.connector_subprocess_registry
-    if connector_registry is not None:
-        tools.extend(await connector_registry.list_tools())
 
     # Custom tools declared on connections attached to this session
     # (single_session, per_chat origin, or operator-bound chat).  Each
