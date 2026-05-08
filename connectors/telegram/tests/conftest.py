@@ -22,12 +22,32 @@ from telegram import Bot, Message
 os.environ.setdefault("AIOS_URL", "http://test")
 os.environ.setdefault("AIOS_CONNECTOR_TOKEN", "aios_conn_test")
 
+from aios_telegram.config import Settings
+from aios_telegram.connector import TelegramConnector
+
 BOT_ID = 99999999
 
 
 @pytest.fixture
 def bot_id() -> int:
     return BOT_ID
+
+
+@pytest.fixture
+def connector(bot: Any) -> TelegramConnector:
+    """TelegramConnector wired to the per-test ``bot`` mock.
+
+    Each test file defines its own ``bot`` fixture stubbing the PTB
+    methods that test exercises (send_message + send_photo for
+    test_telegram_send, send_chat_action + edit_message_text + ... for
+    test_telegram_outbound).  This shared fixture wraps that bot in an
+    Application MagicMock and hands back the connector.
+    """
+    cfg = Settings(bot_token="0:test")
+    c = TelegramConnector(cfg)
+    c._application = MagicMock()
+    c._application.bot = bot
+    return c
 
 
 @pytest.fixture

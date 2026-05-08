@@ -20,7 +20,6 @@ import pytest
 from telegram import ReactionTypeEmoji
 from telegram.constants import ChatAction
 
-from aios_telegram.config import Settings
 from aios_telegram.connector import TelegramConnector
 
 
@@ -34,15 +33,6 @@ def bot() -> Any:
     b.delete_message = AsyncMock(return_value=True)
     b.set_message_reaction = AsyncMock(return_value=True)
     return b
-
-
-@pytest.fixture
-def connector(bot: Any) -> TelegramConnector:
-    cfg = Settings(bot_token="0:test")
-    c = TelegramConnector(cfg)
-    c._application = MagicMock()
-    c._application.bot = bot
-    return c
 
 
 # ── telegram_typing ──────────────────────────────────────────────────

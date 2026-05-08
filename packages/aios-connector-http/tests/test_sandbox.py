@@ -160,7 +160,7 @@ def consumer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _PathConsumer:
 
 class TestDispatchSandboxPathResolution:
     async def test_scalar_path_resolved(self, consumer: _PathConsumer) -> None:
-        await consumer._dispatch_call(
+        await consumer.dispatch_call(
             {
                 "tool_call_id": "c1",
                 "session_id": "sess_1",
@@ -174,7 +174,7 @@ class TestDispatchSandboxPathResolution:
         assert resolved.is_file()
 
     async def test_list_paths_each_resolved(self, consumer: _PathConsumer) -> None:
-        await consumer._dispatch_call(
+        await consumer.dispatch_call(
             {
                 "tool_call_id": "c2",
                 "session_id": "sess_1",
@@ -188,7 +188,7 @@ class TestDispatchSandboxPathResolution:
         assert {p.name for p in paths} == {"photo.jpg", "doc.pdf"}
 
     async def test_traversal_rejected_as_error_result(self, consumer: _PathConsumer) -> None:
-        await consumer._dispatch_call(
+        await consumer.dispatch_call(
             {
                 "tool_call_id": "c3",
                 "session_id": "sess_1",
@@ -203,7 +203,7 @@ class TestDispatchSandboxPathResolution:
         assert "outside" in body["error"]
 
     async def test_optional_list_none_passes_through(self, consumer: _PathConsumer) -> None:
-        await consumer._dispatch_call(
+        await consumer.dispatch_call(
             {
                 "tool_call_id": "c4",
                 "session_id": "sess_1",

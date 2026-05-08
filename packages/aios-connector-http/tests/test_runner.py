@@ -47,7 +47,7 @@ def probe() -> _ProbeConnector:
 
 class TestDispatch:
     async def test_routes_call_to_decorated_method(self, probe: _ProbeConnector) -> None:
-        await probe._dispatch_call(
+        await probe.dispatch_call(
             {
                 "tool_call_id": "call_1",
                 "session_id": "sess_1",
@@ -61,7 +61,7 @@ class TestDispatch:
         )
 
     async def test_dict_result_serialized_as_json(self, probe: _ProbeConnector) -> None:
-        await probe._dispatch_call(
+        await probe.dispatch_call(
             {
                 "tool_call_id": "call_2",
                 "session_id": "sess_2",
@@ -75,7 +75,7 @@ class TestDispatch:
         assert kwargs.get("is_error", False) is False
 
     async def test_unknown_tool_returns_error(self, probe: _ProbeConnector) -> None:
-        await probe._dispatch_call(
+        await probe.dispatch_call(
             {
                 "tool_call_id": "call_x",
                 "session_id": "sess_x",
@@ -91,7 +91,7 @@ class TestDispatch:
     async def test_exception_in_tool_becomes_error_result(
         self, probe: _ProbeConnector
     ) -> None:
-        await probe._dispatch_call(
+        await probe.dispatch_call(
             {
                 "tool_call_id": "call_b",
                 "session_id": "sess_b",
@@ -110,7 +110,7 @@ class TestDispatch:
         """The model occasionally emits invalid JSON for arguments; the
         runner shouldn't crash — it dispatches with no kwargs and lets
         the tool method's signature decide whether to accept that."""
-        await probe._dispatch_call(
+        await probe.dispatch_call(
             {
                 "tool_call_id": "call_p",
                 "session_id": "sess_p",
@@ -165,7 +165,7 @@ class TestAnsweredDedup:
         if call["tool_call_id"] in probe._answered:
             pass  # would skip
         else:
-            await probe._dispatch_call(call)
+            await probe.dispatch_call(call)
         assert probe.calls == []
 
 
@@ -197,7 +197,7 @@ class TestFocalChannelInjection:
     async def test_injects_chat_id_when_signature_accepts(self) -> None:
         c = _FocalConnector()
         c._client = AsyncMock()
-        await c._dispatch_call(
+        await c.dispatch_call(
             {
                 "tool_call_id": "call_f1",
                 "session_id": "s",
@@ -211,7 +211,7 @@ class TestFocalChannelInjection:
     async def test_injects_both_account_and_chat_id(self) -> None:
         c = _FocalConnector()
         c._client = AsyncMock()
-        await c._dispatch_call(
+        await c.dispatch_call(
             {
                 "tool_call_id": "call_f2",
                 "session_id": "s",
@@ -225,7 +225,7 @@ class TestFocalChannelInjection:
     async def test_skips_injection_when_signature_doesnt_ask(self) -> None:
         c = _FocalConnector()
         c._client = AsyncMock()
-        await c._dispatch_call(
+        await c.dispatch_call(
             {
                 "tool_call_id": "call_f3",
                 "session_id": "s",
@@ -243,7 +243,7 @@ class TestFocalChannelInjection:
         chat (e.g. forward to a different conversation)."""
         c = _FocalConnector()
         c._client = AsyncMock()
-        await c._dispatch_call(
+        await c.dispatch_call(
             {
                 "tool_call_id": "call_f4",
                 "session_id": "s",
@@ -258,7 +258,7 @@ class TestFocalChannelInjection:
         c = _FocalConnector()
         c._client = AsyncMock()
         # chat_only doesn't need focal — should still work without one.
-        await c._dispatch_call(
+        await c.dispatch_call(
             {
                 "tool_call_id": "call_f5",
                 "session_id": "s",

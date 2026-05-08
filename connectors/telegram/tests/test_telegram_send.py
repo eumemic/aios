@@ -95,15 +95,6 @@ def bot() -> Any:
     return b
 
 
-@pytest.fixture
-def connector(bot: Any) -> TelegramConnector:
-    cfg = Settings(bot_token="0:test")
-    c = TelegramConnector(cfg)
-    c._application = MagicMock()
-    c._application.bot = bot
-    return c
-
-
 # End-to-end tests calling the tool method directly with resolved paths.
 
 
@@ -193,7 +184,7 @@ async def test_telegram_send_dispatch_resolves_sandbox_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Round-trip via _dispatch_call: the SDK should hand the connector a
+    """Round-trip via dispatch_call: the SDK should hand the connector a
     real :class:`Path` for every ``SandboxPath`` argument so PTB's
     upload code can ``open()`` it directly."""
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
@@ -202,7 +193,7 @@ async def test_telegram_send_dispatch_resolves_sandbox_path(
     (ws / "cat.jpg").write_bytes(b"x")
     connector._client = AsyncMock()
 
-    await connector._dispatch_call(
+    await connector.dispatch_call(
         {
             "tool_call_id": "c1",
             "session_id": "sess-1",
