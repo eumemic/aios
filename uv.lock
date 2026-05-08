@@ -10,7 +10,9 @@ resolution-markers = [
 members = [
     "aios",
     "aios-connector",
+    "aios-connector-http",
     "aios-echo",
+    "aios-echo-http",
     "aios-signal",
     "aios-telegram",
 ]
@@ -134,6 +136,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "aios-echo" },
+    { name = "aios-echo-http" },
     { name = "httpx" },
     { name = "mypy" },
     { name = "openapi-python-client" },
@@ -171,6 +174,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "aios-echo", editable = "packages/aios-echo" },
+    { name = "aios-echo-http", editable = "connectors/echo-http" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "openapi-python-client", specifier = ">=0.21" },
@@ -215,6 +219,37 @@ dev = [
 ]
 
 [[package]]
+name = "aios-connector-http"
+version = "0.1.0"
+source = { editable = "packages/aios-connector-http" }
+dependencies = [
+    { name = "httpx" },
+    { name = "python-ulid" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "python-ulid", specifier = ">=3.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.13" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.8" },
+]
+
+[[package]]
 name = "aios-echo"
 version = "0.1.0"
 source = { editable = "packages/aios-echo" }
@@ -232,6 +267,33 @@ dev = [
 
 [package.metadata]
 requires-dist = [{ name = "aios-connector", editable = "packages/aios-connector" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.13" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.8" },
+]
+
+[[package]]
+name = "aios-echo-http"
+version = "0.1.0"
+source = { editable = "connectors/echo-http" }
+dependencies = [
+    { name = "aios-connector-http" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "aios-connector-http", editable = "packages/aios-connector-http" }]
 
 [package.metadata.requires-dev]
 dev = [
