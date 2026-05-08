@@ -15,7 +15,6 @@ from aios_signal.parse import Attachment, InboundMessage
 
 def _make_connector(config_dir: Path) -> SignalConnector:
     cfg = Settings(
-        phone="+15550001",
         config_dir=config_dir,
         cli_bin="/usr/bin/signal-cli",
     )

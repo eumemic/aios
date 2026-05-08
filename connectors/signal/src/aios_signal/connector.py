@@ -55,12 +55,9 @@ class SignalConnector(HttpConnector):
         self._cfg = cfg
         self._daemon: SignalDaemon | None = None
         self._bot_uuid: str | None = None
+        self._phone: str | None = None
         self._contact_names: dict[str, str] = {}
         self._groups: list[GroupInfo] = []
-
-    @property
-    def _phone(self) -> str:
-        return self._cfg.phone
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
@@ -70,21 +67,30 @@ class SignalConnector(HttpConnector):
         signal-cli takes 5+ seconds to come up; the daemon module's
         bounded TCP-readiness loop accommodates this.
         """
+        secrets = await self.secrets()
+        phone = secrets.get("phone")
+        if not phone:
+            raise RuntimeError(
+                "signal connector requires a 'phone' secret on its connection — "
+                "set via `aios connections create --secret phone=<+15551234>` or "
+                "`aios connections set-secrets <id> --secret phone=<+15551234>`."
+            )
+        self._phone = phone
         self._daemon = await SignalDaemon(
-            phones=[self._phone],
+            phones=[phone],
             config_dir=self._cfg.config_dir,
             cli_bin=self._cfg.cli_bin,
             host=self._cfg.daemon_host,
             port=self._cfg.daemon_port,
         ).__aenter__()
         bot_uuids = await self._daemon.discover_bot_uuids()
-        self._bot_uuid = bot_uuids[self._phone]
-        self._contact_names = await self._daemon.list_contacts(account=self._phone)
-        self._groups = await self._daemon.list_groups(account=self._phone)
+        self._bot_uuid = bot_uuids[phone]
+        self._contact_names = await self._daemon.list_contacts(account=phone)
+        self._groups = await self._daemon.list_groups(account=phone)
         log.info(
             "signal.account.ready",
             bot_uuid=self._bot_uuid,
-            phone=self._phone,
+            phone=phone,
             contacts=len(self._contact_names),
             groups=len(self._groups),
         )
@@ -172,6 +178,7 @@ class SignalConnector(HttpConnector):
                 Signal clients render an "edited" indicator.
         """
         assert self._daemon is not None
+        assert self._phone is not None
         host_paths: list[Path] = list(attachments or [])
         member_uuids = await self._group_member_uuids(chat_id)
         params = _build_send_params(
@@ -289,6 +296,7 @@ class SignalConnector(HttpConnector):
             emoji: The reaction emoji.
         """
         assert self._daemon is not None
+        assert self._phone is not None
         params = _build_react_params(
             self._phone, chat_id, target_author_uuid, target_timestamp_ms, emoji
         )
@@ -303,6 +311,7 @@ class SignalConnector(HttpConnector):
 
     async def _refresh_roster(self) -> None:
         assert self._daemon is not None
+        assert self._phone is not None
         self._groups = await self._daemon.list_groups(account=self._phone)
 
     async def _group_member_uuids(self, chat_id: str) -> list[str]:
