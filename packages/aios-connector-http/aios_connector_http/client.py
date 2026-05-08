@@ -104,6 +104,22 @@ class AiosClient:
         connection_id: str = r.json()["connection_id"]
         return connection_id
 
+    async def get_secrets(self) -> dict[str, str]:
+        """Fetch decrypted platform secrets for the caller's connection.
+
+        Operators set these via ``POST /v1/connections`` or
+        ``PUT /v1/connections/{id}/secrets``; this is the only path that
+        returns the decrypted values, scoped to the bearer token's
+        connection.  Returns an empty dict when no secrets are
+        configured — most connector authors should fail loudly in that
+        case (they're missing the bot_token / phone / etc. they need to
+        do their job).
+        """
+        r = await self._http.get("/v1/connectors/secrets")
+        r.raise_for_status()
+        secrets: dict[str, str] = r.json()["secrets"]
+        return secrets
+
     async def stream_calls(self) -> AsyncIterator[dict[str, Any]]:
         """Yield each ``event: call`` payload from the SSE calls stream.
 

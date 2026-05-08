@@ -2605,6 +2605,7 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         session_template_id=row["session_template_id"],
         metadata=metadata,
         tools=tools_data,
+        secrets_set=row["secrets_ciphertext"] is not None,
         created_at=row["created_at"],
         attached_at=row["attached_at"],
         updated_at=row["updated_at"],
@@ -2619,6 +2620,8 @@ async def insert_connection(
     account: str,
     metadata: dict[str, Any],
     tools: list[dict[str, Any]] | None = None,
+    secrets_ciphertext: bytes | None = None,
+    secrets_nonce: bytes | None = None,
 ) -> Connection:
     """Insert a detached connection, idempotent on the active uniqueness key.
 
@@ -2629,6 +2632,11 @@ async def insert_connection(
     re-read the existing active row and hand it back.  The unique index
     is ``(connector, account) WHERE archived_at IS NULL`` — an archived
     row with the same pair will not collide; a fresh insert will land.
+
+    ``secrets_ciphertext`` and ``secrets_nonce`` are passed-through and
+    stored as a paired blob if both are present.  The schema's
+    ``connections_secrets_pair_ck`` enforces pair-or-neither; callers
+    must supply both or neither.
 
     Use ``attach_connection`` or ``configure_per_chat_connection`` to bind
     a routing mode after creation.
@@ -2643,8 +2651,11 @@ async def insert_connection(
     for _ in range(3):
         row = await conn.fetchrow(
             """
-            INSERT INTO connections (id, connector, account, metadata, tools)
-            VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+            INSERT INTO connections (
+                id, connector, account, metadata, tools,
+                secrets_ciphertext, secrets_nonce
+            )
+            VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
             ON CONFLICT (connector, account) WHERE archived_at IS NULL DO NOTHING
             RETURNING *
             """,
@@ -2653,6 +2664,8 @@ async def insert_connection(
             account,
             json.dumps(metadata),
             tools_json,
+            secrets_ciphertext,
+            secrets_nonce,
         )
         if row is not None:
             return _row_to_connection(row)
@@ -2748,6 +2761,72 @@ async def set_connection_tools(
             detail={"id": connection_id},
         )
     return _row_to_connection(row)
+
+
+async def set_connection_secrets(
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    secrets_ciphertext: bytes | None,
+    secrets_nonce: bytes | None,
+) -> Connection:
+    """Replace a connection's encrypted secret blob.  Bumps ``updated_at``.
+
+    Pass ``None``/``None`` to clear secrets; pass paired bytes to set
+    them.  The schema's ``connections_secrets_pair_ck`` enforces that
+    callers supply both halves or neither.
+
+    Refuses on archived rows.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE connections
+           SET secrets_ciphertext = $2,
+               secrets_nonce      = $3,
+               updated_at         = now()
+         WHERE id = $1 AND archived_at IS NULL
+        RETURNING *
+        """,
+        connection_id,
+        secrets_ciphertext,
+        secrets_nonce,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"connection {connection_id} not found or archived",
+            detail={"id": connection_id},
+        )
+    return _row_to_connection(row)
+
+
+async def get_connection_secret_blob(
+    conn: asyncpg.Connection[Any], connection_id: str
+) -> tuple[bytes, bytes] | None:
+    """Read the encrypted ``(ciphertext, nonce)`` pair for a connection.
+
+    Returns ``None`` if the connection has no secrets configured.  Raises
+    :class:`NotFoundError` if the connection itself is missing or archived
+    — connector containers should not see "secrets fetch returned empty"
+    when the underlying connection is gone.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT secrets_ciphertext, secrets_nonce
+          FROM connections
+         WHERE id = $1 AND archived_at IS NULL
+        """,
+        connection_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"connection {connection_id} not found or archived",
+            detail={"id": connection_id},
+        )
+    ciphertext = row["secrets_ciphertext"]
+    nonce = row["secrets_nonce"]
+    if ciphertext is None or nonce is None:
+        return None
+    return ciphertext, nonce
 
 
 async def list_connection_tools_for_session(

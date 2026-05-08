@@ -99,6 +99,7 @@ class HttpConnector:
         self._connection_id: str | None = None
         self._tools: dict[str, _ToolMeta] = self._collect_tools()
         self._answered: set[str] = set()
+        self._secrets_cache: dict[str, str] | None = None
 
     # ─── lifecycle hooks (override as needed) ────────────────────────
 
@@ -124,6 +125,27 @@ class HttpConnector:
         """Override: persist a freshly-answered tool_call_id."""
 
     # ─── connector → aios glue ───────────────────────────────────────
+
+    async def secrets(self, connection_id: str | None = None) -> dict[str, str]:
+        """Decrypted platform secrets for the caller's connection.
+
+        Cached after the first call: secrets don't change without an
+        operator-driven rotation, and a connector that needed them
+        usually needs them on every tool dispatch.
+
+        ``connection_id`` is reserved for the future multi-connection
+        container shape (per #309) — for now it must be ``None`` (or
+        match the implicit single connection bound to this token).
+        """
+        if connection_id is not None and connection_id != self._connection_id:
+            raise ValueError(
+                "explicit connection_id is reserved for future multi-connection "
+                "containers; pass None or this connector's own connection_id"
+            )
+        if self._secrets_cache is None:
+            assert self._client is not None
+            self._secrets_cache = await self._client.get_secrets()
+        return self._secrets_cache
 
     async def emit_inbound(
         self,

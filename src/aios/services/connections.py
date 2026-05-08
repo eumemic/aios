@@ -11,10 +11,12 @@ single_session.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import asyncpg
 
+from aios.crypto.vault import CryptoBox, EncryptedBlob
 from aios.db import queries
 from aios.errors import ConflictError, NotFoundError
 from aios.models.agents import ToolSpec
@@ -26,6 +28,22 @@ from aios.models.connections import (
 )
 
 
+def _encrypt_secrets(
+    secrets: dict[str, str] | None, crypto_box: CryptoBox
+) -> tuple[bytes | None, bytes | None]:
+    """Encrypt a secrets dict, or return (None, None) for the empty case.
+
+    A non-None empty dict still produces a real encrypted blob — that
+    way ``secrets_set`` reflects the operator's intent ("I set secrets,
+    they happen to be empty") faithfully.  ``None`` (the no-op case)
+    leaves both columns NULL.
+    """
+    if secrets is None:
+        return None, None
+    blob = crypto_box.encrypt(json.dumps(secrets))
+    return blob.ciphertext, blob.nonce
+
+
 async def create_connection(
     pool: asyncpg.Pool[Any],
     *,
@@ -33,8 +51,11 @@ async def create_connection(
     account: str,
     metadata: dict[str, Any],
     tools: list[ToolSpec] | None = None,
+    secrets: dict[str, str] | None = None,
+    crypto_box: CryptoBox,
 ) -> Connection:
     tools_payload = [t.model_dump(exclude_none=True) for t in (tools or [])]
+    ciphertext, nonce = _encrypt_secrets(secrets, crypto_box)
     async with pool.acquire() as conn:
         return await queries.insert_connection(
             conn,
@@ -42,6 +63,8 @@ async def create_connection(
             account=account,
             metadata=metadata,
             tools=tools_payload,
+            secrets_ciphertext=ciphertext,
+            secrets_nonce=nonce,
         )
 
 
@@ -57,6 +80,62 @@ async def set_connection_tools(
     payload = [t.model_dump(exclude_none=True) for t in tools]
     async with pool.acquire() as conn:
         return await queries.set_connection_tools(conn, connection_id, tools=payload)
+
+
+async def set_connection_secrets(
+    pool: asyncpg.Pool[Any],
+    connection_id: str,
+    *,
+    secrets: dict[str, str],
+    crypto_box: CryptoBox,
+) -> Connection:
+    """Replace a connection's encrypted secrets dict, wholesale.
+
+    Pass an empty dict to clear secrets (stored as NULL columns —
+    distinguishable from ``{}`` by ``secrets_set: False``).  This makes
+    ``set_connection_secrets(..., secrets={})`` the canonical "clear"
+    operation and removes a footgun where operators set an empty dict
+    expecting it to wipe state.
+    """
+    ciphertext: bytes | None
+    nonce: bytes | None
+    if not secrets:
+        ciphertext, nonce = None, None
+    else:
+        blob = crypto_box.encrypt(json.dumps(secrets))
+        ciphertext, nonce = blob.ciphertext, blob.nonce
+    async with pool.acquire() as conn:
+        return await queries.set_connection_secrets(
+            conn,
+            connection_id,
+            secrets_ciphertext=ciphertext,
+            secrets_nonce=nonce,
+        )
+
+
+async def get_connection_secrets(
+    pool: asyncpg.Pool[Any],
+    connection_id: str,
+    *,
+    crypto_box: CryptoBox,
+) -> dict[str, str]:
+    """Read and decrypt a connection's secrets.
+
+    Returns an empty dict when no secrets are configured.  Raises
+    :class:`NotFoundError` if the connection itself is missing or
+    archived — connector containers shouldn't see "no secrets" when the
+    underlying connection is gone; that's a deployment-state mismatch
+    they should fail loudly on.
+    """
+    async with pool.acquire() as conn:
+        blob = await queries.get_connection_secret_blob(conn, connection_id)
+    if blob is None:
+        return {}
+    plaintext = crypto_box.decrypt(EncryptedBlob(ciphertext=blob[0], nonce=blob[1]))
+    decoded = json.loads(plaintext)
+    if not isinstance(decoded, dict):
+        raise ValueError(f"connection {connection_id} secrets blob did not decode to a dict")
+    return {str(k): str(v) for k, v in decoded.items()}
 
 
 async def list_tools_for_session(pool: asyncpg.Pool[Any], session_id: str) -> list[dict[str, Any]]:

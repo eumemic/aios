@@ -18,7 +18,7 @@ from fastapi import APIRouter, status
 from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette import EventSourceResponse
 
-from aios.api.deps import ConnectorAuthDep, DbUrlDep, PoolDep
+from aios.api.deps import ConnectorAuthDep, CryptoBoxDep, DbUrlDep, PoolDep
 from aios.api.sse import connector_calls_stream
 from aios.db import queries
 from aios.errors import (
@@ -29,6 +29,8 @@ from aios.errors import (
     ValidationError,
 )
 from aios.harness.wake import defer_wake
+from aios.models.connections import ConnectorSecrets
+from aios.services import connections as connections_service
 from aios.services import inbound as inbound_service
 from aios.services import sessions as sessions_service
 
@@ -174,6 +176,30 @@ async def post_tool_result(
         )
     await defer_wake(pool, body.session_id, cause="connector_tool_result")
     return event
+
+
+@router.get("/secrets", operation_id="get_connector_secrets")
+async def get_secrets(
+    pool: PoolDep,
+    crypto_box: CryptoBoxDep,
+    connection_id: ConnectorAuthDep,
+) -> ConnectorSecrets:
+    """Decrypted secrets for the caller's connection.
+
+    The bearer token resolves server-side to one ``connection_id``;
+    operators set secrets on that connection via
+    ``POST /v1/connections`` or ``PUT /v1/connections/{id}/secrets`` and
+    never read them back through the operator surface.  This is the only
+    decryption path.
+
+    Returns ``{"secrets": {}}`` when no secrets are configured — the
+    connector author decides whether that's acceptable (most need at
+    least one credential and should fail loudly).
+    """
+    secrets = await connections_service.get_connection_secrets(
+        pool, connection_id, crypto_box=crypto_box
+    )
+    return ConnectorSecrets(secrets=secrets)
 
 
 @router.get("/calls", openapi_extra={"x-codegen": {"targets": []}})

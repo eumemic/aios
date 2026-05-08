@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
@@ -9,6 +9,7 @@ from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
     from ..models.connection_create_metadata import ConnectionCreateMetadata
+    from ..models.connection_create_secrets_type_0 import ConnectionCreateSecretsType0
     from ..models.tool_spec import ToolSpec
 
 
@@ -35,14 +36,22 @@ class ConnectionCreate:
             account (str):
             metadata (ConnectionCreateMetadata | Unset):
             tools (list[ToolSpec] | Unset):
+            secrets (ConnectionCreateSecretsType0 | None | Unset): Platform credentials (e.g. ``bot_token``).  Encrypted at
+                rest via the server's ``AIOS_VAULT_KEY``; only ever read back via the connector-scoped ``GET
+                /v1/connectors/secrets``.  Operator-facing reads return ``secrets_set: bool`` instead of values.
     """
 
     connector: str
     account: str
     metadata: ConnectionCreateMetadata | Unset = UNSET
     tools: list[ToolSpec] | Unset = UNSET
+    secrets: ConnectionCreateSecretsType0 | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.connection_create_secrets_type_0 import (
+            ConnectionCreateSecretsType0,
+        )
+
         connector = self.connector
 
         account = self.account
@@ -58,6 +67,14 @@ class ConnectionCreate:
                 tools_item = tools_item_data.to_dict()
                 tools.append(tools_item)
 
+        secrets: dict[str, Any] | None | Unset
+        if isinstance(self.secrets, Unset):
+            secrets = UNSET
+        elif isinstance(self.secrets, ConnectionCreateSecretsType0):
+            secrets = self.secrets.to_dict()
+        else:
+            secrets = self.secrets
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -70,12 +87,17 @@ class ConnectionCreate:
             field_dict["metadata"] = metadata
         if tools is not UNSET:
             field_dict["tools"] = tools
+        if secrets is not UNSET:
+            field_dict["secrets"] = secrets
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.connection_create_metadata import ConnectionCreateMetadata
+        from ..models.connection_create_secrets_type_0 import (
+            ConnectionCreateSecretsType0,
+        )
         from ..models.tool_spec import ToolSpec
 
         d = dict(src_dict)
@@ -99,11 +121,29 @@ class ConnectionCreate:
 
                 tools.append(tools_item)
 
+        def _parse_secrets(data: object) -> ConnectionCreateSecretsType0 | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                secrets_type_0 = ConnectionCreateSecretsType0.from_dict(data)
+
+                return secrets_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(ConnectionCreateSecretsType0 | None | Unset, data)
+
+        secrets = _parse_secrets(d.pop("secrets", UNSET))
+
         connection_create = cls(
             connector=connector,
             account=account,
             metadata=metadata,
             tools=tools,
+            secrets=secrets,
         )
 
         return connection_create
