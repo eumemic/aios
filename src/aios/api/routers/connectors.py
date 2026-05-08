@@ -25,17 +25,145 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+from sse_starlette import EventSourceResponse
 
 from aios.api.connector_rpc import connector_rpc
-from aios.api.deps import AuthDep, DbUrlDep
+from aios.api.deps import AuthDep, ConnectorAuthDep, DbUrlDep, PoolDep
+from aios.api.sse import connector_calls_stream
+from aios.errors import (
+    AiosError,
+    NotFoundError,
+    PayloadTooLargeError,
+    ValidationError,
+)
 from aios.harness.connector_tasks import (
     defer_connector_call,
     defer_connector_status,
     defer_connector_tools,
 )
+from aios.services import inbound as inbound_service
 
 router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
+
+
+# ─── connector-facing endpoints (#301) ──────────────────────────────────────
+
+
+class ConnectorInboundRequest(BaseModel):
+    """Body for ``POST /v1/connectors/inbound``.
+
+    Authenticated via ``ConnectorAuthDep`` so the connection_id is
+    server-resolved from the bearer token — clients don't pick which
+    connection their inbound lands on.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(
+        description="Client-supplied dedup key (ULID).  Replays return the original event id.",
+    )
+    chat_id: str
+    sender: dict[str, Any] = Field(default_factory=dict)
+    content: str
+    attachments: list[dict[str, Any]] | None = None
+    metadata: dict[str, Any] | None = None
+    timestamp: str | None = Field(
+        default=None,
+        description="Optional ISO-8601 platform timestamp; stored in event metadata.",
+    )
+
+
+class ConnectorInboundResponse(BaseModel):
+    """Response for ``POST /v1/connectors/inbound``."""
+
+    appended_event_id: str | None
+    session_id: str | None
+    deduped: bool
+
+
+def _inbound_drop_error(drop_reason: str) -> AiosError:
+    """Pick the right :class:`AiosError` subclass for a drop_reason.
+
+    Each drop maps onto an existing error type — preserving HTTP status
+    contracts without inventing a new error_type for every reason.
+    Detail carries ``drop_reason`` so clients can branch on the
+    machine-readable value.
+    """
+    detail = {"drop_reason": drop_reason}
+    msg = f"inbound dropped ({drop_reason})"
+    if drop_reason == "payload_too_large":
+        return PayloadTooLargeError(msg, detail=detail)
+    if drop_reason in ("detached", "archived_template"):
+        return ValidationError(msg, detail=detail)
+    if drop_reason == "session_missing":
+        return NotFoundError(msg, detail=detail)
+    # attachment_staging_failed (and any unrecognised reason) → 500.
+    return AiosError(msg, detail=detail)
+
+
+@router.post("/inbound", operation_id="post_connector_inbound", status_code=status.HTTP_201_CREATED)
+async def post_inbound(
+    body: ConnectorInboundRequest,
+    pool: PoolDep,
+    connection_id: ConnectorAuthDep,
+) -> ConnectorInboundResponse:
+    """Append an inbound user message to the session bound to the caller's connection.
+
+    Idempotent on ``body.event_id`` — replays return the original
+    event id with ``deduped=True``.  Drops surface as 4xx/5xx with
+    a body explaining the reason (operator-config issue vs server
+    error vs payload).
+    """
+    result = await inbound_service.handle_inbound(
+        pool,
+        connection_id=connection_id,
+        event_id=body.event_id,
+        chat_id=body.chat_id,
+        sender=body.sender,
+        content=body.content,
+        attachments=body.attachments,
+        connector_metadata=body.metadata,
+        platform_timestamp=body.timestamp,
+    )
+    if result.drop_reason is not None:
+        raise _inbound_drop_error(result.drop_reason.value)
+    return ConnectorInboundResponse(
+        appended_event_id=result.appended_event_id,
+        session_id=result.session_id,
+        deduped=result.deduped,
+    )
+
+
+@router.get("/calls", openapi_extra={"x-codegen": {"targets": []}})
+async def get_calls(
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    connection_id: ConnectorAuthDep,
+) -> EventSourceResponse:
+    """SSE stream of pending custom tool calls for the caller's connection.
+
+    Backfills any pending calls at subscribe time (calls already parked
+    in some session's ``stop_reason.custom_tools``), then tails the
+    ``connector_calls_<connection_id>`` NOTIFY channel.  Each emitted
+    event is keyed ``call`` with a JSON body shaped::
+
+        {
+            "session_id": "...",
+            "tool_call_id": "...",
+            "name": "...",
+            "arguments": "...",       // JSON string from the model
+            "focal_channel": "..."
+        }
+
+    Connector containers dedupe by ``tool_call_id`` client-side so SSE
+    reconnects (which replay the backfill) don't double-execute.
+    """
+    return EventSourceResponse(
+        connector_calls_stream(db_url, pool, connection_id),
+        ping=15,
+    )
+
 
 _RESULT_TIMEOUT_S = 60.0
 
