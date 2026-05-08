@@ -23,6 +23,7 @@ from unittest import mock
 import pytest
 
 from tests.e2e.harness import Harness
+from tests.helpers.connections import authed_client
 
 
 async def wait_for_predicate(
@@ -275,10 +276,10 @@ async def http_client(aios_env: dict[str, str]) -> AsyncIterator[Any]:
         mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock),
         mock.patch("aios.services.inbound.defer_wake", new_callable=mock.AsyncMock),
     ):
-        async with httpx.AsyncClient(
+        async with authed_client(
+            "http://testserver",
+            aios_env["AIOS_API_KEY"],
             transport=transport,
-            base_url="http://testserver",
-            headers={"Authorization": f"Bearer {aios_env['AIOS_API_KEY']}"},
         ) as client:
             yield client
     await pool.close()

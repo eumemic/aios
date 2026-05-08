@@ -19,10 +19,7 @@ import httpx
 
 from tests.conftest import needs_docker
 from tests.e2e.test_echo_http_connector import live_server  # noqa: F401  fixture re-export
-
-
-def _authed_client(base_url: str, token: str) -> httpx.AsyncClient:
-    return httpx.AsyncClient(base_url=base_url, headers={"Authorization": f"Bearer {token}"})
+from tests.helpers.connections import authed_client
 
 
 async def _create_with_secrets(
@@ -35,14 +32,14 @@ async def _create_with_secrets(
     body: dict[str, object] = {"connector": "echo", "account": account}
     if secrets is not None:
         body["secrets"] = secrets
-    async with _authed_client(base_url, api_key) as c:
+    async with authed_client(base_url, api_key) as c:
         r = await c.post("/v1/connections", json=body)
         r.raise_for_status()
         return str(r.json()["id"])
 
 
 async def _get_connection(api_key: str, base_url: str, connection_id: str) -> dict[str, object]:
-    async with _authed_client(base_url, api_key) as c:
+    async with authed_client(base_url, api_key) as c:
         r = await c.get(f"/v1/connections/{connection_id}")
         r.raise_for_status()
         return dict(r.json())
@@ -51,13 +48,13 @@ async def _get_connection(api_key: str, base_url: str, connection_id: str) -> di
 async def _set_secrets(
     api_key: str, base_url: str, connection_id: str, secrets: dict[str, str]
 ) -> None:
-    async with _authed_client(base_url, api_key) as c:
+    async with authed_client(base_url, api_key) as c:
         r = await c.put(f"/v1/connections/{connection_id}/secrets", json={"secrets": secrets})
         r.raise_for_status()
 
 
 async def _issue_token(api_key: str, base_url: str, connection_id: str) -> str:
-    async with _authed_client(base_url, api_key) as c:
+    async with authed_client(base_url, api_key) as c:
         r = await c.post("/v1/connector-tokens", json={"connection_id": connection_id})
         r.raise_for_status()
         return str(r.json()["plaintext"])
@@ -66,7 +63,7 @@ async def _issue_token(api_key: str, base_url: str, connection_id: str) -> str:
 async def _connector_get_secrets(
     base_url: str, connector_token: str
 ) -> tuple[int, dict[str, object]]:
-    async with _authed_client(base_url, connector_token) as c:
+    async with authed_client(base_url, connector_token) as c:
         r = await c.get("/v1/connectors/secrets")
         # Successful responses always come back as JSON.  4xx/5xx may not —
         # let those callers introspect by status alone.
@@ -234,8 +231,6 @@ class TestConnectionSecretsRoundTrip:
         own bearer token, not for AIOS_API_KEY.
         """
         api_key = aios_env["AIOS_API_KEY"]
-        async with httpx.AsyncClient(
-            base_url=live_server, headers={"Authorization": f"Bearer {api_key}"}
-        ) as c:
+        async with authed_client(live_server, api_key) as c:
             r = await c.get("/v1/connectors/secrets")
         assert r.status_code in (401, 403)

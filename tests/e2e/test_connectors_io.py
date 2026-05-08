@@ -23,6 +23,7 @@ import httpx
 from aios.ids import EVENT, make_id, split_id
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness
+from tests.helpers.connections import bearer
 
 
 def _new_event_id() -> str:
@@ -107,7 +108,7 @@ class TestPostInbound:
 
         r = await http_client.post(
             "/v1/connectors/inbound",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=bearer(token),
             json={
                 "event_id": _new_event_id(),
                 "chat_id": "chat-1",
@@ -162,7 +163,7 @@ class TestPostInbound:
 
         r1 = await http_client.post(
             "/v1/connectors/inbound",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=bearer(token),
             json=body,
         )
         assert r1.status_code == 201
@@ -170,7 +171,7 @@ class TestPostInbound:
 
         r2 = await http_client.post(
             "/v1/connectors/inbound",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=bearer(token),
             json=body,
         )
         assert r2.status_code == 201
@@ -188,7 +189,7 @@ class TestPostInbound:
 
         r = await http_client.post(
             "/v1/connectors/inbound",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=bearer(token),
             json={
                 "event_id": _new_event_id(),
                 "chat_id": "chat-1",
@@ -204,7 +205,7 @@ class TestPostInbound:
     ) -> None:
         r = await http_client.post(
             "/v1/connectors/inbound",
-            headers={"Authorization": f"Bearer {aios_env['AIOS_API_KEY']}"},
+            headers=bearer(aios_env["AIOS_API_KEY"]),
             json={
                 "event_id": "01J00000000000000000000000",
                 "chat_id": "chat-1",

@@ -15,6 +15,8 @@ from unittest import mock
 import httpx
 import pytest
 
+from tests.helpers.connections import authed_client
+
 
 def _uniq() -> str:
     return secrets.token_hex(4)
@@ -46,10 +48,10 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
 
     transport = httpx.ASGITransport(app=app)
     with mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock):
-        async with httpx.AsyncClient(
+        async with authed_client(
+            "http://testserver",
+            aios_env["AIOS_API_KEY"],
             transport=transport,
-            base_url="http://testserver",
-            headers={"Authorization": f"Bearer {aios_env['AIOS_API_KEY']}"},
         ) as client:
             yield client
 
