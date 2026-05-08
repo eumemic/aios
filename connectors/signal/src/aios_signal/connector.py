@@ -71,9 +71,7 @@ class SignalConnector(HttpConnector):
         phone = secrets.get("phone")
         if not phone:
             raise RuntimeError(
-                "signal connector requires a 'phone' secret on its connection — "
-                "set via `aios connections create --secret phone=<+15551234>` or "
-                "`aios connections set-secrets <id> --secret phone=<+15551234>`."
+                "signal connector requires a 'phone' entry in its connection's secrets"
             )
         self._phone = phone
         self._daemon = await SignalDaemon(

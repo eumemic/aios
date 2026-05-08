@@ -117,6 +117,24 @@ class TestConnectionSecretsRoundTrip:
         view = await _get_connection(api_key, live_server, cid)
         assert view["secrets_set"] is False
 
+    async def test_create_with_empty_secrets_dict_equals_no_secrets(
+        self,
+        live_server: str,  # noqa: F811
+        aios_env: dict[str, str],
+    ) -> None:
+        """Regression: ``create(secrets={})`` and ``set_secrets({})`` must
+        produce the same row state.  The earlier draft had divergent
+        semantics (create stored an encrypted-empty-dict blob, set
+        cleared) — which would have made operator intent depend on
+        which endpoint they used.  Both paths now treat empty as clear.
+        """
+        api_key = aios_env["AIOS_API_KEY"]
+        cid = await _create_with_secrets(
+            api_key, live_server, account=f"acct-empty-{id(self)}", secrets={}
+        )
+        view = await _get_connection(api_key, live_server, cid)
+        assert view["secrets_set"] is False
+
     async def test_connector_token_decrypts_own_secrets(
         self,
         live_server: str,  # noqa: F811

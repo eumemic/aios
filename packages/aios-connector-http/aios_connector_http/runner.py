@@ -126,22 +126,14 @@ class HttpConnector:
 
     # ─── connector → aios glue ───────────────────────────────────────
 
-    async def secrets(self, connection_id: str | None = None) -> dict[str, str]:
+    async def secrets(self) -> dict[str, str]:
         """Decrypted platform secrets for the caller's connection.
 
-        Cached after the first call: secrets don't change without an
-        operator-driven rotation, and a connector that needed them
-        usually needs them on every tool dispatch.
-
-        ``connection_id`` is reserved for the future multi-connection
-        container shape (per #309) — for now it must be ``None`` (or
-        match the implicit single connection bound to this token).
+        Cached for the connector's lifetime: rotating secrets via the
+        management API requires restarting the connector container to
+        pick up new values.  Authors who need fresh-on-every-call
+        semantics should call ``self._client.get_secrets()`` directly.
         """
-        if connection_id is not None and connection_id != self._connection_id:
-            raise ValueError(
-                "explicit connection_id is reserved for future multi-connection "
-                "containers; pass None or this connector's own connection_id"
-            )
         if self._secrets_cache is None:
             assert self._client is not None
             self._secrets_cache = await self._client.get_secrets()

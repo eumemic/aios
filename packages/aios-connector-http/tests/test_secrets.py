@@ -39,15 +39,3 @@ class TestSecrets:
         await probe.secrets()
         # Three calls, one fetch — cache holds.
         assert probe._client.get_secrets.await_count == 1
-
-    async def test_explicit_own_connection_id_accepted(self, probe: _Probe) -> None:
-        out = await probe.secrets(connection_id="conn_X")
-        assert out == {"bot_token": "tok"}
-
-    async def test_other_connection_id_rejected(self, probe: _Probe) -> None:
-        """The forward-compat shim refuses any connection_id other than
-        the connector's own — multi-connection containers (per #309)
-        haven't shipped yet, so passing a foreign id is a programming
-        error worth catching loudly."""
-        with pytest.raises(ValueError, match="multi-connection"):
-            await probe.secrets(connection_id="conn_OTHER")

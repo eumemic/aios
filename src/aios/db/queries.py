@@ -2620,8 +2620,7 @@ async def insert_connection(
     account: str,
     metadata: dict[str, Any],
     tools: list[dict[str, Any]] | None = None,
-    secrets_ciphertext: bytes | None = None,
-    secrets_nonce: bytes | None = None,
+    secrets_blob: EncryptedBlob | None = None,
 ) -> Connection:
     """Insert a detached connection, idempotent on the active uniqueness key.
 
@@ -2633,10 +2632,10 @@ async def insert_connection(
     is ``(connector, account) WHERE archived_at IS NULL`` — an archived
     row with the same pair will not collide; a fresh insert will land.
 
-    ``secrets_ciphertext`` and ``secrets_nonce`` are passed-through and
-    stored as a paired blob if both are present.  The schema's
-    ``connections_secrets_pair_ck`` enforces pair-or-neither; callers
-    must supply both or neither.
+    ``secrets_blob`` carries the encrypted credential dict.  ``None``
+    leaves both secret columns NULL; the schema's
+    ``connections_secrets_pair_ck`` keeps the pair-or-neither invariant
+    intact at the storage boundary.
 
     Use ``attach_connection`` or ``configure_per_chat_connection`` to bind
     a routing mode after creation.
@@ -2648,6 +2647,8 @@ async def insert_connection(
     # iterations is enough that exhaustion would mean the system is wedged
     # in a hot insert/archive cycle that no retry strategy can resolve.
     tools_json = json.dumps(tools or [])
+    ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
+    nonce = secrets_blob.nonce if secrets_blob is not None else None
     for _ in range(3):
         row = await conn.fetchrow(
             """
@@ -2664,8 +2665,8 @@ async def insert_connection(
             account,
             json.dumps(metadata),
             tools_json,
-            secrets_ciphertext,
-            secrets_nonce,
+            ciphertext,
+            nonce,
         )
         if row is not None:
             return _row_to_connection(row)
@@ -2767,17 +2768,19 @@ async def set_connection_secrets(
     conn: asyncpg.Connection[Any],
     connection_id: str,
     *,
-    secrets_ciphertext: bytes | None,
-    secrets_nonce: bytes | None,
+    secrets_blob: EncryptedBlob | None,
 ) -> Connection:
     """Replace a connection's encrypted secret blob.  Bumps ``updated_at``.
 
-    Pass ``None``/``None`` to clear secrets; pass paired bytes to set
-    them.  The schema's ``connections_secrets_pair_ck`` enforces that
-    callers supply both halves or neither.
+    ``None`` clears the columns; an :class:`EncryptedBlob` writes its
+    paired ciphertext + nonce.  The schema's
+    ``connections_secrets_pair_ck`` enforces pair-or-neither at the
+    storage boundary.
 
     Refuses on archived rows.
     """
+    ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
+    nonce = secrets_blob.nonce if secrets_blob is not None else None
     row = await conn.fetchrow(
         """
         UPDATE connections
@@ -2788,8 +2791,8 @@ async def set_connection_secrets(
         RETURNING *
         """,
         connection_id,
-        secrets_ciphertext,
-        secrets_nonce,
+        ciphertext,
+        nonce,
     )
     if row is None:
         raise NotFoundError(
@@ -2801,8 +2804,8 @@ async def set_connection_secrets(
 
 async def get_connection_secret_blob(
     conn: asyncpg.Connection[Any], connection_id: str
-) -> tuple[bytes, bytes] | None:
-    """Read the encrypted ``(ciphertext, nonce)`` pair for a connection.
+) -> EncryptedBlob | None:
+    """Read the encrypted secrets blob for a connection.
 
     Returns ``None`` if the connection has no secrets configured.  Raises
     :class:`NotFoundError` if the connection itself is missing or archived
@@ -2826,7 +2829,7 @@ async def get_connection_secret_blob(
     nonce = row["secrets_nonce"]
     if ciphertext is None or nonce is None:
         return None
-    return ciphertext, nonce
+    return EncryptedBlob(ciphertext=ciphertext, nonce=nonce)
 
 
 async def list_connection_tools_for_session(

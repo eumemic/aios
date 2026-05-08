@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 from dataclasses import dataclass
+from typing import Any
 
 from nacl.exceptions import CryptoError
 from nacl.secret import SecretBox
@@ -83,3 +85,18 @@ class CryptoBox:
                 detail={"reason": str(exc)},
             ) from exc
         return plaintext_bytes.decode("utf-8")
+
+    def encrypt_dict(self, payload: dict[str, Any]) -> EncryptedBlob:
+        """Encrypt a JSON-serialisable dict.  Convenience over ``encrypt``."""
+        return self.encrypt(json.dumps(payload))
+
+    def decrypt_dict(self, blob: EncryptedBlob) -> dict[str, Any]:
+        """Decrypt and JSON-decode to a dict.  Raises ``ValueError`` if the
+        decrypted plaintext doesn't shape as a JSON object."""
+        plaintext = self.decrypt(blob)
+        decoded = json.loads(plaintext)
+        if not isinstance(decoded, dict):
+            raise ValueError(
+                f"decrypted blob did not decode to a dict; got {type(decoded).__name__}"
+            )
+        return decoded

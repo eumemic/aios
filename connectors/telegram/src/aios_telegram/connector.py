@@ -98,9 +98,7 @@ class TelegramConnector(HttpConnector):
         bot_token = secrets.get("bot_token")
         if not bot_token:
             raise RuntimeError(
-                "telegram connector requires a 'bot_token' secret on its connection — "
-                "set via `aios connections create --secret bot_token=<token>` or "
-                "`aios connections set-secrets <id> --secret bot_token=<token>`."
+                "telegram connector requires a 'bot_token' entry in its connection's secrets"
             )
         application = Application.builder().token(bot_token).build()
         await application.initialize()

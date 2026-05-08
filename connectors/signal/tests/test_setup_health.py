@@ -96,7 +96,7 @@ async def test_setup_refuses_without_phone_secret(tmp_path: Path) -> None:
     # Empty secrets — connector should refuse.
     c._client = AsyncMock()
     c._client.get_secrets = AsyncMock(return_value={})
-    with pytest.raises(RuntimeError, match="requires a 'phone' secret"):
+    with pytest.raises(RuntimeError, match="requires a 'phone' entry"):
         await c.setup()
 
 
@@ -110,5 +110,5 @@ async def test_setup_refuses_when_phone_secret_empty_string(
         "aios_signal.connector.SignalDaemon",
         MagicMock(return_value=daemon),
     )
-    with pytest.raises(RuntimeError, match="requires a 'phone' secret"):
+    with pytest.raises(RuntimeError, match="requires a 'phone' entry"):
         await connector.setup()
