@@ -120,6 +120,18 @@ class AiosClient:
         secrets: dict[str, str] = r.json()["secrets"]
         return secrets
 
+    async def set_connection_tools(self, tools: list[dict[str, Any]]) -> None:
+        """Replace the connection's tool schemas wholesale.
+
+        The connector container is the source of truth for what tools
+        it serves; the SDK derives JSON Schemas from ``@tool``-decorated
+        methods and publishes them at startup so the model's tool list
+        always matches what the connector is actually willing to
+        execute.  Operators don't hand-write ``tools.json``.
+        """
+        r = await self._http.put("/v1/connectors/tools", json={"tools": tools})
+        r.raise_for_status()
+
     async def stream_calls(self) -> AsyncIterator[dict[str, Any]]:
         """Yield each ``event: call`` payload from the SSE calls stream.
 

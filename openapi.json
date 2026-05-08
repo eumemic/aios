@@ -5669,6 +5669,66 @@
         }
       }
     },
+    "/v1/connectors/tools": {
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Set Tools",
+        "description": "Publish the connector's tool schemas onto its own connection.\n\nThe connector container is the source of truth for what tools it\nserves \u2014 it knows their names, parameter shapes, and docstrings.\nThe SDK derives JSON Schemas from ``@tool``-decorated methods at\nstartup and POSTs them here, replacing whatever was on the\nconnection wholesale.  Operators don't hand-write ``tools.json``.\n\nAuthorization: the bearer token resolves to one ``connection_id``;\na connector can only publish tools for its own connection.  This\nis the connector-scoped twin of operator-scoped\n``PUT /v1/connections/{id}/tools``.",
+        "operationId": "set_connector_tools",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionSetTools"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/calls": {
       "get": {
         "tags": [
