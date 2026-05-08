@@ -1,140 +1,127 @@
 # aios-signal
 
-Signal connector for [aios](../../README.md). Wraps `signal-cli` in
-multi-account daemon mode and surfaces it as an MCP stdio server that
-the aios worker spawns and supervises.  One `signal-cli daemon`
-process serves N registered phones natively (no `-a` flag); every RPC
-call routes via the `account` field in its params.
+Signal connector for [aios](../../README.md).  Built on
+``aios-connector-http``.  Wraps ``signal-cli`` in single-account
+daemon mode: each connector container runs its own ``signal-cli
+daemon`` serving exactly one registered phone, and the container's
+bearer token resolves to that one ``connection_id`` on the management
+API.  Multi-phone deployments use multiple containers.
 
 ## Prerequisites
 
-- Python ≥ 3.13
-- [signal-cli](https://github.com/AsamK/signal-cli) ≥ 0.13.x (the
-  multi-account JSON-RPC daemon mode is documented in
-  `signal-cli-jsonrpc.5.adoc` upstream)
-- A JRE available to signal-cli
-- A running aios worker that includes `signal` (or `signal:<instance>`)
-  in its `connectors_enabled` list
+- A registered Signal phone (the connector's Dockerfile installs
+  ``signal-cli`` itself; registration is a one-time operator action
+  against an existing config dir on the host)
+- A reachable aios api with operator credentials (``AIOS_API_KEY``)
 
 ## Operator walkthrough
 
-### 1. Register the Signal account(s)
-
-```
-signal-cli --config ~/.aios/connectors/signal -a +15551234567 register --captcha signalcaptcha://...
-signal-cli --config ~/.aios/connectors/signal -a +15551234567 verify 123456
-```
-
-Repeat for each phone number you want this connector instance to serve.
-All registered accounts share one `--config` directory.
-
-### 2. Configure the worker's connector instance
-
-In the worker's environment:
+### 1. Register the Signal account on the host
 
 ```bash
-AIOS_CONNECTORS_ENABLED=signal                   # default-instance shape
-AIOS_SIGNAL_PHONES=+15551234567,+15559876543     # CSV — both phones served by one daemon
-AIOS_SIGNAL_CONFIG_DIR=~/.aios/connectors/signal
+signal-cli --config /var/lib/aios/signal -a +15551234567 register --captcha signalcaptcha://...
+signal-cli --config /var/lib/aios/signal -a +15551234567 verify 123456
 ```
 
-For multi-instance deployments (e.g., separate config dirs for
-unrelated bots), use the `<connector>:<instance>` syntax and scope env
-vars by instance:
+The config directory holds the account's encryption keys and is the
+state volume the connector container mounts.  One container = one
+phone = one config directory.
+
+### 2. Provision the connection
 
 ```bash
-AIOS_CONNECTORS_ENABLED=signal:personal,signal:work
-AIOS_SIGNAL_PERSONAL_PHONES=+15551234567
-AIOS_SIGNAL_PERSONAL_CONFIG_DIR=~/.aios/connectors/signal-personal
-AIOS_SIGNAL_WORK_PHONES=+15559876543,+15558887777
-AIOS_SIGNAL_WORK_CONFIG_DIR=~/.aios/connectors/signal-work
+aios connections create \
+    --connector signal \
+    --account <bot_uuid> \
+    --secret phone=+15551234567
+# → returns connection_id
 ```
 
-The supervisor re-exports `AIOS_SIGNAL_<INSTANCE>_*` as
-`AIOS_SIGNAL_*` inside each subprocess so the connector reads its
-config under the standard prefix.
+The bot UUID is the account's ACI UUID (visible via
+``signal-cli listAccounts``).  ``--secret phone=...`` stores the
+phone number encrypted at rest under ``AIOS_VAULT_KEY``; rotate
+later with ``aios connections set-secrets <connection_id> --secret phone=<new>``.
 
-### 3. Restart the worker
+### 3. Issue a connector token
 
-`aios worker` boots, spawns the signal subprocess, runs `signal-cli
-daemon`, and reports the discovered accounts on
-`aios connectors accounts signal`.
-
-### 4. Attach connections to sessions
-
-For each phone the connector serves, attach the auto-created
-`(connector=signal, account=<bot_uuid>)` connection to a session:
-
-```
-aios connections list --connector=signal
-aios connections attach <conn_id> --session=<session_id>
+```bash
+aios connector-tokens issue --connection-id <connection_id> --label <label>
+# → prints the plaintext token ONCE
 ```
 
-Or configure per-chat session spawning via a session template
-(`aios connections configure-per-chat <conn_id> --template=<tpl_id>`).
+### 4. Run the connector container
+
+```bash
+docker run \
+    -e AIOS_URL=https://api.aios.example/ \
+    -e AIOS_CONNECTOR_TOKEN=aios_conn_... \
+    -e AIOS_SIGNAL_CONFIG_DIR=/var/lib/aios/signal \
+    -v /var/lib/aios/signal:/var/lib/aios/signal \
+    -v /var/lib/aios/workspaces:/var/lib/aios/workspaces:ro \
+    aios-signal:latest
+```
+
+The container reads ``AIOS_URL`` and ``AIOS_CONNECTOR_TOKEN`` from
+env, fetches its phone via ``GET /v1/connectors/secrets``, spawns
+``signal-cli daemon`` against the bind-mounted config dir, and
+starts the inbound pump.  The workspace bind-mount is required for
+outbound attachments — paths under ``/workspace/...`` resolve to host
+files under ``$AIOS_WORKSPACE_ROOT/<session_id>/...``.
+
+### 5. Bind the connection to a session (or template)
+
+```bash
+# single_session — every inbound on this phone lands in one session
+aios connections attach <connection_id> --session-id <session_id>
+
+# per_chat — each new chat partner spawns a fresh session via a template
+aios connections configure-per-chat <connection_id> --template <template_id>
+```
 
 #### Operator-curated per-chat bindings
 
-To route a specific chat on a connection's account to a specific
-existing session — the middle case between attach (whole account →
-one session) and configure-per-chat (each chat → fresh template-spawn) —
-pre-populate a binding:
-
-```
-aios connections recent-chats <conn_id>           # find the chat_id
-aios connections bind-chat <conn_id> --chat-id=<id> --session-id=<sess_id>
-aios connections bound-chats <conn_id>            # inspect operator + supervisor rows
-aios connections unbind-chat <conn_id> --chat-id=<id>
+```bash
+aios connections recent-chats <connection_id>           # find the chat_id
+aios connections bind-chat <connection_id> --chat-id <id> --session-id <sess_id>
+aios connections bound-chats <connection_id>
+aios connections unbind-chat <connection_id> --chat-id <id>
 ```
 
-The binding is consulted before the connection's mode-default fallback,
-so it works on top of any mode (single_session, per_chat, or even
-detached). Inbound on bound chats routes to the bound session;
-unbound chats fall back to the connection's default behaviour.
+### 6. Message the phone — the agent replies
 
-### 5. DM the bot — the agent replies
-
-Inbound messages on each phone route to its connection's session.
-The agent's `signal_send` and `signal_react` tools take `account` +
-`chat_id` from the focal channel meta; aios injects them automatically
-when the session has a focal channel set via `switch_channel`.
+Inbound messages route to the bound session.  The agent's
+``signal_send`` and ``signal_react`` tools take ``chat_id`` from the
+focal channel automatically when the session has a focal channel set
+via ``switch_channel``.
 
 ## Configuration reference
 
+The phone is on connection secrets, not env.  The connector reads
+two SDK env vars + four signal-cli deployment-shape vars:
+
 | Env var | Default | Description |
 |---|---|---|
-| `AIOS_SIGNAL_PHONES` | required | CSV of E.164 phone numbers; all must be registered in `AIOS_SIGNAL_CONFIG_DIR` |
-| `AIOS_SIGNAL_CONFIG_DIR` | required | signal-cli config directory; account database lives here |
-| `AIOS_SIGNAL_CLI_BIN` | `signal-cli` | Path to signal-cli binary |
-| `AIOS_SIGNAL_DAEMON_HOST` | `127.0.0.1` | Internal TCP host for signal-cli daemon |
-| `AIOS_SIGNAL_DAEMON_PORT` | `7583` | Internal TCP port for signal-cli daemon |
-
-## Migration from pre-cloister `~/.aios/connectors`
-
-See [`../MIGRATION.md`](../MIGRATION.md#per-instance-cloister-238) — connector
-state moved to `~/.aios/instances/<instance_id>/connectors/<name>/` in #238.
-
-## Migration from single-phone PR3
-
-Pre-this-PR signal connectors used `AIOS_SIGNAL_PHONE` (singular).
-That env var is removed cleanly — set `AIOS_SIGNAL_PHONES=+1...` (a
-one-element CSV) for an equivalent single-phone deployment.  Multi-
-phone setups become `AIOS_SIGNAL_PHONES=+1...,+2...`.
+| ``AIOS_URL`` | required | Base URL of the aios api |
+| ``AIOS_CONNECTOR_TOKEN`` | required | Bearer token from ``aios connector-tokens issue`` |
+| ``AIOS_SIGNAL_CONFIG_DIR`` | required | signal-cli config directory; account database lives here |
+| ``AIOS_SIGNAL_CLI_BIN`` | ``signal-cli`` | Path to signal-cli binary |
+| ``AIOS_SIGNAL_DAEMON_HOST`` | ``127.0.0.1`` | Internal TCP host for signal-cli daemon |
+| ``AIOS_SIGNAL_DAEMON_PORT`` | ``7583`` | Internal TCP port for signal-cli daemon |
 
 ## Attachments
 
 Inbound photos, voice notes, and documents surface to the model as
-`image_url` content parts (vision-capable minds) or text markers,
+``image_url`` content parts (vision-capable minds) or text markers,
 via the harness's vision pipeline.  Each file is staged under
-`<workspace_root>/_attachments/<session>/signal/...` and made
-readable inside the sandbox at `/mnt/attachments/signal/...`.
+``<workspace_root>/_attachments/<session>/signal/...`` and made
+readable inside the sandbox at ``/mnt/attachments/signal/...``.
 
-Outbound: pass an `attachments: list[str]` parameter to
-`signal_send` alongside `text`.  Each path must be under
-`/workspace/` or `/mnt/attachments/` (the latter is read-only, so to
-forward an inbound file `cp` it into `/workspace/` first).
+Outbound: pass an ``attachments: list[str]`` parameter to
+``signal_send`` alongside ``text``.  Each path must be under
+``/workspace/`` or ``/mnt/attachments/`` (the latter is read-only, so
+to forward an inbound file ``cp`` it into ``/workspace/`` first).
 
-## Out of scope for v1
+## Out of scope
 
 - Voice / Say / SoundEffect / Listen tools.
 - Group add/remove members.
@@ -143,11 +130,11 @@ forward an inbound file `cp` it into `/workspace/` first).
 
 ## Development
 
-From `connectors/signal/`:
+From ``connectors/signal/``:
 
 ```
 uv run pytest -q           # unit, ~1.5s, no Docker / no signal-cli
-uv run mypy src tests      # strict
-uv run ruff check src tests
-uv run ruff format --check src tests
+uv run mypy .              # strict
+uv run ruff check .
+uv run ruff format --check .
 ```

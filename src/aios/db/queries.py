@@ -3103,9 +3103,25 @@ async def unconfigure_connection(conn: asyncpg.Connection[Any], connection_id: s
 
 
 async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
+    """Soft-archive a connection AND scrub its encrypted secrets.
+
+    Setting ``secrets_ciphertext = NULL`` / ``secrets_nonce = NULL``
+    on archive matches the property documented on
+    :mod:`aios.crypto.vault` (archived rows do not retain decryptable
+    secrets) so a later DB dump or read on an archived row can't
+    recover platform credentials.  The pair-or-neither check
+    constraint is satisfied because both columns flip together.
+    """
     row = await conn.fetchrow(
-        "UPDATE connections SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        """
+        UPDATE connections
+           SET archived_at        = now(),
+               updated_at         = now(),
+               secrets_ciphertext = NULL,
+               secrets_nonce      = NULL
+         WHERE id = $1 AND archived_at IS NULL
+        RETURNING *
+        """,
         connection_id,
     )
     if row is None:

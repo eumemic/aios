@@ -175,7 +175,12 @@ def set_secrets(
         list[str] | None,
         typer.Option(
             "--secret",
-            help="KEY=VALUE pair, repeatable.  Pass no flags to clear secrets.",
+            help=(
+                "Platform credential as KEY=VALUE (e.g. bot_token=12345:abc). "
+                "Repeatable.  Encrypted at rest server-side; only ever read "
+                "back by the connector container's own bearer token.  Pass "
+                "no flags to clear all secrets on this connection."
+            ),
         ),
     ] = None,
 ) -> None:

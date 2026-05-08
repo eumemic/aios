@@ -1,10 +1,11 @@
-"""Telegram connector built on the aios-connector-http SDK (#301).
+"""Telegram connector built on the aios-connector-http SDK.
 
 Each connector container is one bot: the bearer token resolves to a
 single ``connection_id`` server-side, and a connection is tied to one
 ``(connector, account)`` pair.  Multi-bot deployments run multiple
-containers, each with its own ``AIOS_TELEGRAM_BOT_TOKEN`` and connector
-token.
+containers, each with its own connector token.  The bot token lives
+on the connection record's encrypted secrets and is fetched at
+``setup()`` time via ``self.secrets()``.
 
 Lifecycle:
 

@@ -1,9 +1,11 @@
-"""Signal connector built on the aios-connector-http SDK (#301).
+"""Signal connector built on the aios-connector-http SDK.
 
 Single-phone-per-container: each connector container runs its own
 signal-cli daemon serving one registered phone.  Multi-phone
-deployments use multiple containers, each with its own
-``AIOS_CONNECTOR_TOKEN`` and ``AIOS_SIGNAL_PHONE``.
+deployments use multiple containers, each with its own connector
+token.  The phone (account identity) lives on the connection
+record's encrypted secrets and is fetched at ``setup()`` time via
+``self.secrets()``.
 
 Lifecycle:
 

@@ -16,10 +16,13 @@ across ``CryptoBox`` + queries + service + routes.
 from __future__ import annotations
 
 import httpx
-import pytest
 
 from tests.conftest import needs_docker
 from tests.e2e.test_echo_http_connector import live_server  # noqa: F401  fixture re-export
+
+
+def _authed_client(base_url: str, token: str) -> httpx.AsyncClient:
+    return httpx.AsyncClient(base_url=base_url, headers={"Authorization": f"Bearer {token}"})
 
 
 async def _create_with_secrets(
@@ -29,21 +32,17 @@ async def _create_with_secrets(
     account: str,
     secrets: dict[str, str] | None,
 ) -> str:
-    async with httpx.AsyncClient(
-        base_url=base_url, headers={"Authorization": f"Bearer {api_key}"}
-    ) as c:
-        body: dict[str, object] = {"connector": "echo", "account": account}
-        if secrets is not None:
-            body["secrets"] = secrets
+    body: dict[str, object] = {"connector": "echo", "account": account}
+    if secrets is not None:
+        body["secrets"] = secrets
+    async with _authed_client(base_url, api_key) as c:
         r = await c.post("/v1/connections", json=body)
         r.raise_for_status()
         return str(r.json()["id"])
 
 
 async def _get_connection(api_key: str, base_url: str, connection_id: str) -> dict[str, object]:
-    async with httpx.AsyncClient(
-        base_url=base_url, headers={"Authorization": f"Bearer {api_key}"}
-    ) as c:
+    async with _authed_client(base_url, api_key) as c:
         r = await c.get(f"/v1/connections/{connection_id}")
         r.raise_for_status()
         return dict(r.json())
@@ -52,17 +51,13 @@ async def _get_connection(api_key: str, base_url: str, connection_id: str) -> di
 async def _set_secrets(
     api_key: str, base_url: str, connection_id: str, secrets: dict[str, str]
 ) -> None:
-    async with httpx.AsyncClient(
-        base_url=base_url, headers={"Authorization": f"Bearer {api_key}"}
-    ) as c:
+    async with _authed_client(base_url, api_key) as c:
         r = await c.put(f"/v1/connections/{connection_id}/secrets", json={"secrets": secrets})
         r.raise_for_status()
 
 
 async def _issue_token(api_key: str, base_url: str, connection_id: str) -> str:
-    async with httpx.AsyncClient(
-        base_url=base_url, headers={"Authorization": f"Bearer {api_key}"}
-    ) as c:
+    async with _authed_client(base_url, api_key) as c:
         r = await c.post("/v1/connector-tokens", json={"connection_id": connection_id})
         r.raise_for_status()
         return str(r.json()["plaintext"])
@@ -71,14 +66,13 @@ async def _issue_token(api_key: str, base_url: str, connection_id: str) -> str:
 async def _connector_get_secrets(
     base_url: str, connector_token: str
 ) -> tuple[int, dict[str, object]]:
-    async with httpx.AsyncClient(
-        base_url=base_url, headers={"Authorization": f"Bearer {connector_token}"}
-    ) as c:
+    async with _authed_client(base_url, connector_token) as c:
         r = await c.get("/v1/connectors/secrets")
-        try:
-            return r.status_code, dict(r.json())
-        except Exception:
+        # Successful responses always come back as JSON.  4xx/5xx may not —
+        # let those callers introspect by status alone.
+        if r.status_code >= 400:
             return r.status_code, {}
+        return r.status_code, dict(r.json())
 
 
 @needs_docker
@@ -195,11 +189,17 @@ class TestConnectionSecretsRoundTrip:
         _, body = await _connector_get_secrets(live_server, token)
         assert body == {"secrets": {}}
 
-    async def test_one_token_cannot_read_anothers_secrets(
+    async def test_each_token_sees_only_its_own_secrets(
         self,
         live_server: str,  # noqa: F811
         aios_env: dict[str, str],
     ) -> None:
+        """The route takes no connection_id — the bearer token resolves to
+        one server-side, so cross-token leakage is structurally
+        impossible at the API surface.  The strongest check the surface
+        allows: assert *equality* (not containment) on each token's
+        view, so A returning B's secret would fail the assertion.
+        """
         api_key = aios_env["AIOS_API_KEY"]
         cid_a = await _create_with_secrets(
             api_key, live_server, account=f"acct-a-{id(self)}", secrets={"bot_token": "A"}
@@ -210,7 +210,6 @@ class TestConnectionSecretsRoundTrip:
         token_a = await _issue_token(api_key, live_server, cid_a)
         token_b = await _issue_token(api_key, live_server, cid_b)
 
-        # A's token sees A's secret only.
         _, a_view = await _connector_get_secrets(live_server, token_a)
         assert a_view == {"secrets": {"bot_token": "A"}}
 
@@ -240,7 +239,3 @@ class TestConnectionSecretsRoundTrip:
         ) as c:
             r = await c.get("/v1/connectors/secrets")
         assert r.status_code in (401, 403)
-
-
-# Re-export marker to keep the lint/import clean.
-_ = pytest
