@@ -23,6 +23,7 @@ import json
 
 import httpx
 
+from aios.crypto.vault import CryptoBox
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, last_assistant_content, tool_call
 
@@ -33,7 +34,9 @@ class TestConnectionToolsInPrelude:
     connection is attached to (or originates) the session.
     """
 
-    async def test_attached_connection_tools_visible_to_model(self, harness: Harness) -> None:
+    async def test_attached_connection_tools_visible_to_model(
+        self, harness: Harness, crypto_box: CryptoBox
+    ) -> None:
         from aios.harness.step_context import compute_step_prelude
         from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
@@ -68,6 +71,7 @@ class TestConnectionToolsInPrelude:
             connector="echo",
             account="echo-1",
             metadata={},
+            crypto_box=crypto_box,
             tools=[
                 ToolSpec(
                     type="custom",
@@ -102,7 +106,9 @@ class TestConnectionToolsInPrelude:
         chat_send = next(t for t in prelude.tools if t["function"]["name"] == "chat_send")
         assert chat_send["function"]["parameters"]["properties"]["text"]["type"] == "string"
 
-    async def test_per_chat_origin_connection_tools_visible(self, harness: Harness) -> None:
+    async def test_per_chat_origin_connection_tools_visible(
+        self, harness: Harness, crypto_box: CryptoBox
+    ) -> None:
         """A session spawned by a per_chat connection sees that connection's tools.
 
         This is the lineage path used in production: a Telegram bot in
@@ -146,6 +152,7 @@ class TestConnectionToolsInPrelude:
             connector="echo",
             account="echo-pc",
             metadata={},
+            crypto_box=crypto_box,
             tools=[
                 ToolSpec(
                     type="custom",
@@ -186,7 +193,7 @@ class TestConnectionToolDispatch:
     """Full requires_action round-trip with a connection-sourced tool."""
 
     async def test_model_calls_connection_tool_then_resumes_after_result(
-        self, harness: Harness
+        self, harness: Harness, crypto_box: CryptoBox
     ) -> None:
         from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
@@ -218,6 +225,7 @@ class TestConnectionToolDispatch:
             connector="echo",
             account="echo-d",
             metadata={},
+            crypto_box=crypto_box,
             tools=[
                 ToolSpec(
                     type="custom",
@@ -411,7 +419,9 @@ class TestMultimodalToolResults:
 class TestSetConnectionToolsEndpoint:
     """``PUT /v1/connections/{id}/tools`` replaces the connection's tools."""
 
-    async def test_replaces_tools(self, http_client: httpx.AsyncClient, harness: Harness) -> None:
+    async def test_replaces_tools(
+        self, http_client: httpx.AsyncClient, harness: Harness, crypto_box: CryptoBox
+    ) -> None:
         from aios.services import connections as connections_service
 
         connection = await connections_service.create_connection(
@@ -419,6 +429,7 @@ class TestSetConnectionToolsEndpoint:
             connector="echo",
             account=f"echo-set-{id(self)}",
             metadata={},
+            crypto_box=crypto_box,
         )
         assert connection.tools == []
 
@@ -441,7 +452,7 @@ class TestSetConnectionToolsEndpoint:
         assert body["tools"][0]["name"] == "x_send"
 
     async def test_rejects_non_custom_tool_type(
-        self, http_client: httpx.AsyncClient, harness: Harness
+        self, http_client: httpx.AsyncClient, harness: Harness, crypto_box: CryptoBox
     ) -> None:
         from aios.services import connections as connections_service
 
@@ -450,6 +461,7 @@ class TestSetConnectionToolsEndpoint:
             connector="echo",
             account=f"echo-rej-{id(self)}",
             metadata={},
+            crypto_box=crypto_box,
         )
 
         r = await http_client.put(
