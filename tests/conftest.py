@@ -25,27 +25,20 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _unit_test_env() -> Iterator[None]:
-    """Provide dummy env vars so ``get_settings()`` doesn't crash in unit
-    tests that happen to import tool handlers or other code that reads
-    settings at module level. Without this, fresh checkouts (worktrees,
-    CI runners) fail because there's no ``.env`` file.
-
-    The ``aios_env`` fixture used by e2e/integration tests overrides these
-    with real (testcontainer-backed) values at function scope.
-    """
-    dummy = {
-        "AIOS_API_KEY": "test-key-for-unit-tests",
-        "AIOS_VAULT_KEY": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
-        "AIOS_DB_URL": "postgresql://x:x@localhost:5432/x",
-    }
-    with mock.patch.dict(os.environ, dummy):
-        from aios.config import get_settings
-
-        get_settings.cache_clear()
-        yield
-        get_settings.cache_clear()
+# Set dummy env vars at conftest IMPORT time (i.e. before pytest collection
+# imports any test modules).  Some test modules import production code at
+# module level — e.g. ``test_worker_heartbeat.py`` imports
+# ``aios.harness.worker`` which transitively imports ``procrastinate_app``
+# which calls ``get_settings()`` eagerly.  A session-scoped autouse fixture
+# fires too late; collection has already crashed.
+#
+# ``setdefault`` lets e2e tests override with testcontainer-backed values.
+os.environ.setdefault("AIOS_API_KEY", "test-key-for-unit-tests")
+os.environ.setdefault(
+    "AIOS_VAULT_KEY",
+    base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+)
+os.environ.setdefault("AIOS_DB_URL", "postgresql://x:x@localhost:5432/x")
 
 
 def _docker_available() -> bool:
