@@ -199,9 +199,15 @@ class TestStepPreludeIncludesConnectorTools:
         )
         session = SimpleNamespace(id="sess_x", focal_channel=None)
 
-        with patch(
-            "aios.harness.skills.augment_system_prompt",
-            side_effect=lambda system, _versions: system,
+        with (
+            patch(
+                "aios.harness.skills.augment_system_prompt",
+                side_effect=lambda system, _versions: system,
+            ),
+            patch(
+                "aios.services.connections.list_tools_for_session",
+                new=AsyncMock(return_value=[]),
+            ),
         ):
             prelude = await compute_step_prelude(
                 pool=AsyncMock(),

@@ -13,6 +13,7 @@ from datetime import datetime
 
 import pytest
 
+from aios.models.agents import ToolSpec
 from aios.models.connections import (
     Connection,
     ConnectionAttach,
@@ -53,6 +54,46 @@ class TestConnectionCreate:
                     "account": "acct",
                     "mcp_url": "https://m",  # removed in #200
                 }
+            )
+
+    def test_accepts_tools(self) -> None:
+        """Connections can declare model-facing custom tools (#301)."""
+        body = ConnectionCreate(
+            connector="signal",
+            account="+1",
+            tools=[
+                ToolSpec(
+                    type="custom",
+                    name="signal_send",
+                    description="Send a Signal message",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "chat_id": {"type": "string"},
+                            "text": {"type": "string"},
+                        },
+                        "required": ["chat_id", "text"],
+                    },
+                ),
+            ],
+        )
+        assert len(body.tools) == 1
+        assert body.tools[0].name == "signal_send"
+
+    def test_tools_default_empty(self) -> None:
+        body = ConnectionCreate(connector="signal", account="+1")
+        assert body.tools == []
+
+    def test_rejects_non_custom_tool_types(self) -> None:
+        """Per #301: connection-declared tools are always client-executed.
+        Built-in (e.g. ``bash``) and ``mcp_toolset`` types belong on the
+        agent, not the connection.
+        """
+        with pytest.raises(ValueError, match="custom"):
+            ConnectionCreate(
+                connector="signal",
+                account="+1",
+                tools=[ToolSpec(type="bash")],
             )
 
 
@@ -117,6 +158,37 @@ class TestConnectionReadView:
         )
         assert c.session_id is None
         assert c.session_template_id == "stpl_1"
+
+    def test_tools_default_empty(self) -> None:
+        c = Connection(
+            id="conn_1",
+            connector="signal",
+            account="+1",
+            metadata={},
+            created_at=self._now(),
+            updated_at=self._now(),
+        )
+        assert c.tools == []
+
+    def test_round_trips_tools(self) -> None:
+        c = Connection(
+            id="conn_1",
+            connector="signal",
+            account="+1",
+            metadata={},
+            tools=[
+                ToolSpec(
+                    type="custom",
+                    name="signal_send",
+                    description="Send",
+                    input_schema={"type": "object"},
+                ),
+            ],
+            created_at=self._now(),
+            updated_at=self._now(),
+        )
+        assert len(c.tools) == 1
+        assert c.tools[0].name == "signal_send"
 
 
 class TestSessionTemplateCreate:

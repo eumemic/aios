@@ -37,6 +37,7 @@ from aios.models.connections import (
     ConnectionConfigurePerChat,
     ConnectionCreate,
     ConnectionMode,
+    ConnectionSetTools,
     RecentChat,
 )
 from aios.services import connections as service
@@ -133,7 +134,27 @@ async def create(body: ConnectionCreate, pool: PoolDep, _auth: AuthDep) -> Conne
         connector=body.connector,
         account=body.account,
         metadata=body.metadata,
+        tools=body.tools,
     )
+
+
+@router.put("/{connection_id}/tools", operation_id="set_connection_tools")
+async def set_tools(
+    connection_id: str,
+    body: ConnectionSetTools,
+    pool: PoolDep,
+    _auth: AuthDep,
+) -> Connection:
+    """Replace the connection's tools wholesale (#301).
+
+    Tools declared on a connection become available to the model as
+    ``type="custom"`` entries on every session this connection is
+    attached to (single_session) or that this connection spawned
+    (per_chat).  The model calls them, the session parks in
+    ``requires_action``, the connector executes externally and POSTs the
+    result back via ``/v1/sessions/:id/tool-results``.
+    """
+    return await service.set_connection_tools(pool, connection_id, tools=body.tools)
 
 
 @router.get("", operation_id="list_connections")

@@ -17,6 +17,7 @@ import asyncpg
 
 from aios.db import queries
 from aios.errors import ConflictError, NotFoundError
+from aios.models.agents import ToolSpec
 from aios.models.connections import (
     BoundChat,
     Connection,
@@ -31,14 +32,42 @@ async def create_connection(
     connector: str,
     account: str,
     metadata: dict[str, Any],
+    tools: list[ToolSpec] | None = None,
 ) -> Connection:
+    tools_payload = [t.model_dump(exclude_none=True) for t in (tools or [])]
     async with pool.acquire() as conn:
         return await queries.insert_connection(
             conn,
             connector=connector,
             account=account,
             metadata=metadata,
+            tools=tools_payload,
         )
+
+
+async def set_connection_tools(
+    pool: asyncpg.Pool[Any],
+    connection_id: str,
+    *,
+    tools: list[ToolSpec],
+) -> Connection:
+    """Replace a connection's tools.  Caller validates ToolSpec types via
+    the request model (see :class:`ConnectionSetTools`).
+    """
+    payload = [t.model_dump(exclude_none=True) for t in tools]
+    async with pool.acquire() as conn:
+        return await queries.set_connection_tools(conn, connection_id, tools=payload)
+
+
+async def list_tools_for_session(pool: asyncpg.Pool[Any], session_id: str) -> list[dict[str, Any]]:
+    """Custom tool specs from every active connection bound to ``session_id``.
+
+    Used by :func:`aios.harness.step_context.compute_step_prelude` to
+    surface connection-declared tools to the model alongside agent +
+    MCP + connector-subprocess tools (#301).
+    """
+    async with pool.acquire() as conn:
+        return await queries.list_connection_tools_for_session(conn, session_id)
 
 
 async def get_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Connection:
