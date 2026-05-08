@@ -18,6 +18,7 @@ from aios.api.deps import require_bearer_auth
 from aios.api.routers import (
     agents,
     connections,
+    connector_tokens,
     connectors,
     environments,
     health,
@@ -88,6 +89,7 @@ def create_app() -> FastAPI:
     app.include_router(vaults.router)
     app.include_router(memory_stores.router)
     app.include_router(connections.router)
+    app.include_router(connector_tokens.router)
     app.include_router(connectors.router)
     app.include_router(session_templates.router)
     _mount_mcp(app)

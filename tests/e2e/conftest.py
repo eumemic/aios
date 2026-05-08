@@ -228,3 +228,39 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     await task_reg.shutdown()
     await sandbox_reg.release_all()
     await pool.close()
+
+
+@pytest.fixture
+async def http_client(aios_env: dict[str, str]) -> AsyncIterator[Any]:
+    """In-process API client wired against the testcontainer DB.
+
+    Wakes are mocked out (no worker) so endpoints that ``defer_wake``
+    (POST /messages, POST /tool-results, POST /connectors/inbound) don't
+    trip on the absent procrastinate connector.
+    """
+    import httpx
+
+    from aios.api.app import create_app
+    from aios.config import get_settings
+    from aios.crypto.vault import CryptoBox
+    from aios.db.pool import create_pool
+
+    settings = get_settings()
+    pool = await create_pool(settings.db_url, min_size=1, max_size=4)
+    app = create_app()
+    app.state.pool = pool
+    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
+    app.state.db_url = settings.db_url
+    app.state.procrastinate = mock.MagicMock()
+    transport = httpx.ASGITransport(app=app)
+    with mock.patch(
+        "aios.api.routers.sessions.defer_wake",
+        new_callable=mock.AsyncMock,
+    ):
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+            headers={"Authorization": f"Bearer {aios_env['AIOS_API_KEY']}"},
+        ) as client:
+            yield client
+    await pool.close()
