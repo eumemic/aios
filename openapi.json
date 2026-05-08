@@ -5204,6 +5204,232 @@
         }
       }
     },
+    "/v1/connector-tokens": {
+      "post": {
+        "tags": [
+          "connector-tokens"
+        ],
+        "summary": "Issue",
+        "description": "Mint a new bearer token for ``body.connection_id``.\n\nThe plaintext is included in the response and CANNOT be recovered\nlater \u2014 operators must save it at issue time.  Subsequent ``GET``\non this resource returns the read view without plaintext.",
+        "operationId": "issue_connector_token",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectorTokenIssue"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorTokenIssued"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "connector-tokens"
+        ],
+        "summary": "List ",
+        "description": "All tokens (revoked included) for ``connection_id``, newest first.\n\nRevoked tokens stay in the listing for audit; clients filter by\n``revoked_at IS NULL`` if they only want live tokens.",
+        "operationId": "list_connector_tokens",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_ConnectorToken_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connector-tokens/{token_id}/revoke": {
+      "post": {
+        "tags": [
+          "connector-tokens"
+        ],
+        "summary": "Revoke",
+        "description": "Soft-delete a token.  Idempotent \u2014 re-revoking is a no-op.",
+        "operationId": "revoke_connector_token",
+        "parameters": [
+          {
+            "name": "token_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorToken"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connector-tokens/whoami": {
+      "get": {
+        "tags": [
+          "connector-tokens"
+        ],
+        "summary": "Whoami",
+        "description": "Resolve the bearer token to its ``connection_id``.\n\nSanity check / debugging endpoint for connector containers \u2014 call\nonce at startup to confirm the token is valid and points where the\noperator intended.  Authed by ``ConnectorAuthDep`` (token, NOT\noperator key), so any side-channel access from the operator surface\nis impossible.",
+        "operationId": "connector_token_whoami",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmI"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors": {
       "get": {
         "tags": [
@@ -6682,6 +6908,136 @@
         ],
         "title": "ConnectorCallBody"
       },
+      "ConnectorToken": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "connection_id",
+          "created_at"
+        ],
+        "title": "ConnectorToken",
+        "description": "Read view of a connector token.  Never carries plaintext."
+      },
+      "ConnectorTokenIssue": {
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connection_id"
+        ],
+        "title": "ConnectorTokenIssue",
+        "description": "Request body for ``POST /v1/connector-tokens``."
+      },
+      "ConnectorTokenIssued": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "plaintext": {
+            "type": "string",
+            "title": "Plaintext",
+            "description": "The bearer token value.  Save this \u2014 it cannot be recovered."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "connection_id",
+          "label",
+          "plaintext",
+          "created_at"
+        ],
+        "title": "ConnectorTokenIssued",
+        "description": "Response body for ``POST /v1/connector-tokens``.\n\nIncludes the plaintext token \u2014 this is the ONLY time it's surfaced.\nSubsequent ``GET`` returns the read view without plaintext."
+      },
       "ContextResponse": {
         "properties": {
           "session_id": {
@@ -7347,6 +7703,38 @@
           "data"
         ],
         "title": "ListResponse[Connection]"
+      },
+      "ListResponse_ConnectorToken_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorToken"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          },
+          "next_after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next After"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ListResponse[ConnectorToken]"
       },
       "ListResponse_Environment_": {
         "properties": {
@@ -10069,6 +10457,20 @@
         ],
         "title": "WaitResponse",
         "description": "Response for ``GET /v1/sessions/{id}/wait``."
+      },
+      "WhoAmI": {
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connection_id"
+        ],
+        "title": "WhoAmI",
+        "description": "Response for ``GET /v1/connector-tokens/whoami``."
       }
     }
   }

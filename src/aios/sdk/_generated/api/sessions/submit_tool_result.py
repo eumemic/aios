@@ -90,6 +90,14 @@ def sync_detailed(
         authorization (None | str | Unset):
         body (ToolResultRequest): Request body for ``POST /v1/sessions/{id}/tool-results``.
 
+            ``content`` accepts either a plain string OR a multimodal content
+            array shaped per the OpenAI chat-completions tool-result format
+            (e.g. ``[{"type": "text", "text": "..."}, {"type": "image_url",
+            "image_url": {"url": "..."}}]``).  Built-in tools have always
+            produced multimodal results; this widening lets external clients
+            (#301 — connectors as HTTP clients) do the same when posting
+            custom-tool results.
+
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
@@ -134,6 +142,14 @@ def sync(
         authorization (None | str | Unset):
         body (ToolResultRequest): Request body for ``POST /v1/sessions/{id}/tool-results``.
 
+            ``content`` accepts either a plain string OR a multimodal content
+            array shaped per the OpenAI chat-completions tool-result format
+            (e.g. ``[{"type": "text", "text": "..."}, {"type": "image_url",
+            "image_url": {"url": "..."}}]``).  Built-in tools have always
+            produced multimodal results; this widening lets external clients
+            (#301 — connectors as HTTP clients) do the same when posting
+            custom-tool results.
+
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
@@ -172,6 +188,14 @@ async def asyncio_detailed(
         session_id (str):
         authorization (None | str | Unset):
         body (ToolResultRequest): Request body for ``POST /v1/sessions/{id}/tool-results``.
+
+            ``content`` accepts either a plain string OR a multimodal content
+            array shaped per the OpenAI chat-completions tool-result format
+            (e.g. ``[{"type": "text", "text": "..."}, {"type": "image_url",
+            "image_url": {"url": "..."}}]``).  Built-in tools have always
+            produced multimodal results; this widening lets external clients
+            (#301 — connectors as HTTP clients) do the same when posting
+            custom-tool results.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -214,6 +238,14 @@ async def asyncio(
         session_id (str):
         authorization (None | str | Unset):
         body (ToolResultRequest): Request body for ``POST /v1/sessions/{id}/tool-results``.
+
+            ``content`` accepts either a plain string OR a multimodal content
+            array shaped per the OpenAI chat-completions tool-result format
+            (e.g. ``[{"type": "text", "text": "..."}, {"type": "image_url",
+            "image_url": {"url": "..."}}]``).  Built-in tools have always
+            produced multimodal results; this widening lets external clients
+            (#301 — connectors as HTTP clients) do the same when posting
+            custom-tool results.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

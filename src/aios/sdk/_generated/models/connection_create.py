@@ -9,6 +9,7 @@ from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
     from ..models.connection_create_metadata import ConnectionCreateMetadata
+    from ..models.tool_spec import ToolSpec
 
 
 T = TypeVar("T", bound="ConnectionCreate")
@@ -26,15 +27,20 @@ class ConnectionCreate:
     in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
     and a ``/`` would create ambiguous segment boundaries.
 
+    ``tools`` declares the model-facing custom tools this connection
+    contributes to any session it's attached to (see #301).
+
         Attributes:
             connector (str):
             account (str):
             metadata (ConnectionCreateMetadata | Unset):
+            tools (list[ToolSpec] | Unset):
     """
 
     connector: str
     account: str
     metadata: ConnectionCreateMetadata | Unset = UNSET
+    tools: list[ToolSpec] | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         connector = self.connector
@@ -44,6 +50,13 @@ class ConnectionCreate:
         metadata: dict[str, Any] | Unset = UNSET
         if not isinstance(self.metadata, Unset):
             metadata = self.metadata.to_dict()
+
+        tools: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.tools, Unset):
+            tools = []
+            for tools_item_data in self.tools:
+                tools_item = tools_item_data.to_dict()
+                tools.append(tools_item)
 
         field_dict: dict[str, Any] = {}
 
@@ -55,12 +68,15 @@ class ConnectionCreate:
         )
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
+        if tools is not UNSET:
+            field_dict["tools"] = tools
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.connection_create_metadata import ConnectionCreateMetadata
+        from ..models.tool_spec import ToolSpec
 
         d = dict(src_dict)
         connector = d.pop("connector")
@@ -74,10 +90,20 @@ class ConnectionCreate:
         else:
             metadata = ConnectionCreateMetadata.from_dict(_metadata)
 
+        _tools = d.pop("tools", UNSET)
+        tools: list[ToolSpec] | Unset = UNSET
+        if _tools is not UNSET:
+            tools = []
+            for tools_item_data in _tools:
+                tools_item = ToolSpec.from_dict(tools_item_data)
+
+                tools.append(tools_item)
+
         connection_create = cls(
             connector=connector,
             account=account,
             metadata=metadata,
+            tools=tools,
         )
 
         return connection_create
