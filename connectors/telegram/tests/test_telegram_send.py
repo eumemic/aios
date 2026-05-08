@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aios_connector_http import HttpConnector
 
-from aios_telegram.config import Settings
 from aios_telegram.connector import (
     TelegramConnector,
     _build_media_group,
@@ -64,8 +63,7 @@ def test_build_media_group_voice_demoted_to_document() -> None:
 
 def test_telegram_connector_subclasses_http_connector() -> None:
     """Sanity: the SDK base picks up our @tool methods as a tool registry."""
-    cfg = Settings(bot_token="0:test")
-    c = TelegramConnector(cfg)
+    c = TelegramConnector()
     assert isinstance(c, HttpConnector)
     expected = {
         "telegram_send",

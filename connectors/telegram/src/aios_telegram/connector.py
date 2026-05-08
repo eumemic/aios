@@ -63,7 +63,6 @@ from telegram.ext import (
     filters,
 )
 
-from .config import Settings
 from .format import markdown_to_telegram_html
 from .parse import (
     Attachment,
@@ -84,9 +83,8 @@ _ALLOWED_UPDATES: list[str] = [
 
 
 class TelegramConnector(HttpConnector):
-    def __init__(self, cfg: Settings) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self._cfg = cfg
         self._application: Application | None = None  # type: ignore[type-arg]
         self._bot_id: int | None = None
         self._first_name: str | None = None
@@ -96,7 +94,15 @@ class TelegramConnector(HttpConnector):
     # ── lifecycle ─────────────────────────────────────────────────────
 
     async def setup(self) -> None:
-        application = Application.builder().token(self._cfg.bot_token).build()
+        secrets = await self.secrets()
+        bot_token = secrets.get("bot_token")
+        if not bot_token:
+            raise RuntimeError(
+                "telegram connector requires a 'bot_token' secret on its connection — "
+                "set via `aios connections create --secret bot_token=<token>` or "
+                "`aios connections set-secrets <id> --secret bot_token=<token>`."
+            )
+        application = Application.builder().token(bot_token).build()
         await application.initialize()
         try:
             me = await application.bot.get_me()
