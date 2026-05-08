@@ -102,6 +102,28 @@ async def test_telegram_send_text_only(connector: TelegramConnector, bot: Any) -
     bot.send_message.assert_awaited_once_with(chat_id=123, text="hello", parse_mode=None)
 
 
+async def test_telegram_send_reply_to_message_id_threads_through(
+    connector: TelegramConnector, bot: Any
+) -> None:
+    """``reply_to_message_id`` flows into PTB so the message renders as
+    a native Telegram reply quoting the parent (the client UI shows the
+    quoted message inline above your text).
+    """
+    await connector.telegram_send(text="me too", chat_id="123", reply_to_message_id=99)
+    kwargs = bot.send_message.call_args.kwargs
+    assert kwargs["reply_to_message_id"] == 99
+
+
+async def test_telegram_send_omits_reply_when_none(connector: TelegramConnector, bot: Any) -> None:
+    """The default ``None`` is *not* forwarded to PTB — the kwarg is
+    omitted entirely so the call surface stays clean and PTB picks
+    its own default.
+    """
+    await connector.telegram_send(text="standalone", chat_id="123")
+    kwargs = bot.send_message.call_args.kwargs
+    assert "reply_to_message_id" not in kwargs
+
+
 async def test_telegram_send_single_photo_routes_to_send_photo(
     connector: TelegramConnector,
     bot: Any,
