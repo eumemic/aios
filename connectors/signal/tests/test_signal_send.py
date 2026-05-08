@@ -64,7 +64,7 @@ async def test_signal_send_with_resolved_attachments(
     assert sent_params["attachments"] == [str(photo)]
 
 
-# ── _dispatch_call exercises the SDK SandboxPath resolution end-to-end ─
+# ── dispatch_call exercises the SDK SandboxPath resolution end-to-end ─
 
 
 async def test_signal_send_dispatch_resolves_sandbox_path(
@@ -78,7 +78,7 @@ async def test_signal_send_dispatch_resolves_sandbox_path(
     (ws / "cat.jpg").write_bytes(b"x")
     connector._client = AsyncMock()
 
-    await connector._dispatch_call(
+    await connector.dispatch_call(
         {
             "tool_call_id": "c1",
             "session_id": "sess-1",
@@ -105,7 +105,7 @@ async def test_signal_send_dispatch_traversal_returns_error_result(
     (tmp_path / "sess-1").mkdir()
     connector._client = AsyncMock()
 
-    await connector._dispatch_call(
+    await connector.dispatch_call(
         {
             "tool_call_id": "c2",
             "session_id": "sess-1",

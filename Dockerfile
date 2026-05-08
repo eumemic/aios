@@ -38,11 +38,11 @@ RUN useradd --create-home --uid 1000 aios
 WORKDIR /app
 
 # Workspace-package dirs must be present before the first uv sync:
-# pyproject's project deps reference workspace members (aios-connector),
-# and uv resolves them at install time from the on-disk source tree, not
-# from PyPI. Layer caching still works — src/ is what flips on every
-# commit and is copied last; packages/ and connectors/ are leaf dirs
-# that change rarely.
+# pyproject lists ``packages/aios-connector-http`` as a workspace member,
+# and uv resolves workspace deps at install time from the on-disk
+# source tree (not from PyPI).  Layer caching still works — src/ is
+# what flips on every commit and is copied last.  Connectors live in
+# their own container images and don't ship in the worker image.
 COPY pyproject.toml uv.lock ./
 COPY packages ./packages
 COPY connectors ./connectors

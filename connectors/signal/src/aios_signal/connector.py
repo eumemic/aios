@@ -55,10 +55,6 @@ class SignalConnector(HttpConnector):
         self._cfg = cfg
         self._daemon: SignalDaemon | None = None
         self._bot_uuid: str | None = None
-        # Per-account contacts + groups, but we only ever have one
-        # account per container — the dict keyed by phone is a
-        # holdover that keeps the daemon module's multi-phone shape
-        # intact without refactoring it.
         self._contact_names: dict[str, str] = {}
         self._groups: list[GroupInfo] = []
 
@@ -207,15 +203,11 @@ class SignalConnector(HttpConnector):
             target_timestamp_ms: The Signal timestamp of the message to delete.
         """
         assert self._daemon is not None
-        chat_type, raw_id = decode_chat_id(chat_id)
         params: dict[str, Any] = {
             "account": self._phone,
             "targetTimestamp": target_timestamp_ms,
+            **_recipient_params(chat_id),
         }
-        if chat_type == "group":
-            params["groupId"] = raw_id
-        else:
-            params["recipient"] = [raw_id]
         await self._daemon.rpc.call("remoteDelete", params)
         return {"status": "ok"}
 
@@ -377,6 +369,14 @@ class SignalConnector(HttpConnector):
         return out
 
 
+def _recipient_params(chat_id: str) -> dict[str, Any]:
+    """signal-cli's per-chat addressing: ``groupId`` for groups, ``recipient`` array for DMs."""
+    chat_type, raw_id = decode_chat_id(chat_id)
+    if chat_type == "group":
+        return {"groupId": raw_id}
+    return {"recipient": [raw_id]}
+
+
 def _build_send_params(
     account_phone: str,
     chat_id: str,
@@ -406,7 +406,6 @@ def _build_send_params(
     """
     if (quote_timestamp_ms is None) != (quote_author_uuid is None):
         raise ValueError("quote_timestamp_ms and quote_author_uuid must be set together")
-    chat_type, raw_id = decode_chat_id(chat_id)
     # Mention encoding inserts U+FFFC placeholders; markdown stripping
     # then removes delimiter chars (which can shift placeholder offsets
     # leftward).  Compute Signal's mention offsets against the *final*
@@ -414,15 +413,15 @@ def _build_send_params(
     encoded, ordered_uuids = encode_mentions(text, member_uuids or [])
     stripped, styles = convert_markdown_to_signal_styles(encoded)
     mentions = build_mention_strings(stripped, ordered_uuids)
-    params: dict[str, Any] = {"account": account_phone, "message": stripped}
+    params: dict[str, Any] = {
+        "account": account_phone,
+        "message": stripped,
+        **_recipient_params(chat_id),
+    }
     if styles:
         params["textStyles"] = styles
     if mentions:
         params["mentions"] = mentions
-    if chat_type == "group":
-        params["groupId"] = raw_id
-    else:
-        params["recipient"] = [raw_id]
     if attachments:
         params["attachments"] = [str(p) for p in attachments]
     if quote_timestamp_ms is not None and quote_author_uuid is not None:
@@ -441,18 +440,13 @@ def _build_react_params(
     emoji: str,
 ) -> dict[str, Any]:
     """Translate a react request into signal-cli ``sendReaction`` params."""
-    chat_type, raw_id = decode_chat_id(chat_id)
-    params: dict[str, Any] = {
+    return {
         "account": account_phone,
         "emoji": emoji,
         "targetAuthor": target_author_uuid,
         "targetTimestamp": target_timestamp_ms,
+        **_recipient_params(chat_id),
     }
-    if chat_type == "group":
-        params["groupId"] = raw_id
-    else:
-        params["recipient"] = [raw_id]
-    return params
 
 
 def build_metadata(msg: InboundMessage, chat_id: str, bot_uuid: str) -> dict[str, Any]:
