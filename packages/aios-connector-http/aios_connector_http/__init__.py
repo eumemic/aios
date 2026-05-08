@@ -3,7 +3,17 @@
 from __future__ import annotations
 
 from .client import AiosClient
-from .runner import HttpConnector, tool
+from .runner import HttpConnector, SandboxPathError, tool
+from .sandbox import Attachment, AttachmentError, SandboxPath
 from .spool import SqliteAnsweredSpool
 
-__all__ = ["AiosClient", "HttpConnector", "SqliteAnsweredSpool", "tool"]
+__all__ = [
+    "AiosClient",
+    "Attachment",
+    "AttachmentError",
+    "HttpConnector",
+    "SandboxPath",
+    "SandboxPathError",
+    "SqliteAnsweredSpool",
+    "tool",
+]

@@ -41,7 +41,7 @@ class _ProbeConnector(HttpConnector):
 @pytest.fixture
 def probe() -> _ProbeConnector:
     c = _ProbeConnector()
-    c._client = AsyncMock()  # type: ignore[assignment]
+    c._client = AsyncMock()
     return c
 
 
@@ -196,7 +196,7 @@ class _FocalConnector(HttpConnector):
 class TestFocalChannelInjection:
     async def test_injects_chat_id_when_signature_accepts(self) -> None:
         c = _FocalConnector()
-        c._client = AsyncMock()  # type: ignore[assignment]
+        c._client = AsyncMock()
         await c._dispatch_call(
             {
                 "tool_call_id": "call_f1",
@@ -210,7 +210,7 @@ class TestFocalChannelInjection:
 
     async def test_injects_both_account_and_chat_id(self) -> None:
         c = _FocalConnector()
-        c._client = AsyncMock()  # type: ignore[assignment]
+        c._client = AsyncMock()
         await c._dispatch_call(
             {
                 "tool_call_id": "call_f2",
@@ -224,7 +224,7 @@ class TestFocalChannelInjection:
 
     async def test_skips_injection_when_signature_doesnt_ask(self) -> None:
         c = _FocalConnector()
-        c._client = AsyncMock()  # type: ignore[assignment]
+        c._client = AsyncMock()
         await c._dispatch_call(
             {
                 "tool_call_id": "call_f3",
@@ -242,7 +242,7 @@ class TestFocalChannelInjection:
         explicitly — useful when a tool needs to act on a non-focal
         chat (e.g. forward to a different conversation)."""
         c = _FocalConnector()
-        c._client = AsyncMock()  # type: ignore[assignment]
+        c._client = AsyncMock()
         await c._dispatch_call(
             {
                 "tool_call_id": "call_f4",
@@ -256,7 +256,7 @@ class TestFocalChannelInjection:
 
     async def test_no_focal_channel_is_a_noop(self) -> None:
         c = _FocalConnector()
-        c._client = AsyncMock()  # type: ignore[assignment]
+        c._client = AsyncMock()
         # chat_only doesn't need focal — should still work without one.
         await c._dispatch_call(
             {
