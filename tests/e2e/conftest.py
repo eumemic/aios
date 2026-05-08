@@ -253,9 +253,12 @@ async def http_client(aios_env: dict[str, str]) -> AsyncIterator[Any]:
     app.state.db_url = settings.db_url
     app.state.procrastinate = mock.MagicMock()
     transport = httpx.ASGITransport(app=app)
-    with mock.patch(
-        "aios.api.routers.sessions.defer_wake",
-        new_callable=mock.AsyncMock,
+    # Mock at every call site that imports ``defer_wake`` directly —
+    # patching the source (``aios.harness.wake``) is too late since the
+    # importing modules already captured the unmocked reference.
+    with (
+        mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock),
+        mock.patch("aios.services.inbound.defer_wake", new_callable=mock.AsyncMock),
     ):
         async with httpx.AsyncClient(
             transport=transport,
