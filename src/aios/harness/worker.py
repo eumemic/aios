@@ -43,11 +43,6 @@ from aios.db.listen import listen_for_session_interrupts
 from aios.db.pool import create_pool, normalize_dsn
 from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
-from aios.harness.connector_supervisor import (
-    ConnectorSubprocessRegistry,
-    instance_label,
-    resolve_connector_specs,
-)
 from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.harness.sweep import (
@@ -99,15 +94,12 @@ async def worker_main() -> None:
 
     # Everything below holds resources that need ordered teardown; the
     # try/finally wraps the entire construction so a partial-startup
-    # failure (e.g. ``resolve_connector_specs`` rejecting a bad entry
-    # in ``connectors_enabled``, ``create_pool`` racing a temporarily
-    # unreachable DB) still releases the advisory lock and any
-    # already-built resource.
+    # failure (e.g. ``create_pool`` racing a temporarily unreachable DB)
+    # still releases the advisory lock and any already-built resource.
     pool: asyncpg.Pool[Any] | None = None
     sandbox_registry: SandboxRegistry | None = None
     task_registry: TaskRegistry | None = None
     mcp_session_pool: McpSessionPool | None = None
-    connector_registry: ConnectorSubprocessRegistry | None = None
     procrastinate_opened = False
     sweep_task: asyncio.Task[None] | None = None
     interrupt_task: asyncio.Task[None] | None = None
@@ -119,8 +111,6 @@ async def worker_main() -> None:
         sandbox_registry = SandboxRegistry(backend=make_backend(settings.sandbox_backend))
         task_registry = TaskRegistry()
         mcp_session_pool = McpSessionPool()
-        connector_specs = resolve_connector_specs(settings)
-        connector_registry = ConnectorSubprocessRegistry(connector_specs, settings=settings)
 
         runtime.pool = pool
         runtime.crypto_box = crypto_box
@@ -128,36 +118,23 @@ async def worker_main() -> None:
         runtime.sandbox_registry = sandbox_registry
         runtime.task_registry = task_registry
         runtime.mcp_session_pool = mcp_session_pool
-        runtime.connector_subprocess_registry = connector_registry
 
         await procrastinate_app.open_async()
         procrastinate_opened = True
 
-        # Sweep orphan attachments BEFORE starting the connector
-        # supervisor.  Once ``connector_registry.start()`` returns, spool
-        # entries can flush and ``_handle_inbound`` may stage new files
-        # at any moment.  Those files are visible to the GC sweep as soon
-        # as they hit disk but are still inside the supervisor's dedup
-        # transaction — uncommitted, so the events query reports them as
-        # unreferenced and the sweep would unlink bytes that are about
-        # to commit.  Deferring the sweep to here means there cannot yet
-        # be any in-flight staging on this worker; cross-worker startup
-        # is fine because a freshly-booted worker only sweeps before its
-        # own supervisor opens, and a sibling worker mid-staging has the
-        # transaction already open by the time it stages, so its
-        # commit-happens-before-sweep ordering is governed by Postgres
-        # snapshot isolation rather than wall-clock.
+        # Sweep orphan attachments at startup before any inbound POST can
+        # land.  An attachment-staging write that's in-flight elsewhere
+        # is invisible to the events table until its dedup transaction
+        # commits, so commit-happens-before-sweep ordering is governed
+        # by Postgres snapshot isolation rather than wall-clock.
         deleted_attachments = await sweep_orphan_attachments(pool)
         if deleted_attachments:
             log.info("worker.reaped_orphan_attachments", count=deleted_attachments)
-
-        await connector_registry.start()
 
         log.info(
             "worker.startup",
             worker_id=runtime.worker_id,
             concurrency=settings.worker_concurrency,
-            connector_instances=[instance_label(c, i) for c, i in connector_registry.keys],
         )
 
         # Startup sweep:
@@ -241,8 +218,6 @@ async def worker_main() -> None:
             await sandbox_registry.release_all()
         if mcp_session_pool is not None:
             await mcp_session_pool.close_all()
-        if connector_registry is not None:
-            await connector_registry.shutdown()
         if procrastinate_opened:
             await procrastinate_app.close_async()
         if pool is not None:
@@ -252,7 +227,6 @@ async def worker_main() -> None:
         # would still get refused while we tear down).
         with contextlib.suppress(asyncpg.PostgresError, OSError):
             await lock_conn.close()
-        runtime.connector_subprocess_registry = None
 
 
 async def _acquire_worker_lock(

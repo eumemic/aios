@@ -74,12 +74,16 @@ def sync_detailed(
     body: ConnectionAttach,
     authorization: None | str | Unset = UNSET,
 ) -> Response[Connection | HTTPValidationError]:
-    """Attach
+    r"""Attach
 
-     Attach a connection to a session, after validating the account against the snapshot.
+     Attach a connection to a session.
 
-    The drift check runs BEFORE the DB write so a stale account can't
-    move into ``single_session`` mode and silently swallow inbound.
+    The legacy supervisor's \"live snapshot drift check\" was removed in
+    #301 — the new architecture has connectors as peer services, so the
+    api process can't probe a worker-side account snapshot.  Operators
+    bear the responsibility of attaching to a real account; an inbound
+    referencing an unknown account simply drops at the new
+    ``/v1/connectors/inbound`` boundary.
 
     Args:
         connection_id (str):
@@ -114,12 +118,16 @@ def sync(
     body: ConnectionAttach,
     authorization: None | str | Unset = UNSET,
 ) -> Connection | HTTPValidationError | None:
-    """Attach
+    r"""Attach
 
-     Attach a connection to a session, after validating the account against the snapshot.
+     Attach a connection to a session.
 
-    The drift check runs BEFORE the DB write so a stale account can't
-    move into ``single_session`` mode and silently swallow inbound.
+    The legacy supervisor's \"live snapshot drift check\" was removed in
+    #301 — the new architecture has connectors as peer services, so the
+    api process can't probe a worker-side account snapshot.  Operators
+    bear the responsibility of attaching to a real account; an inbound
+    referencing an unknown account simply drops at the new
+    ``/v1/connectors/inbound`` boundary.
 
     Args:
         connection_id (str):
@@ -149,12 +157,16 @@ async def asyncio_detailed(
     body: ConnectionAttach,
     authorization: None | str | Unset = UNSET,
 ) -> Response[Connection | HTTPValidationError]:
-    """Attach
+    r"""Attach
 
-     Attach a connection to a session, after validating the account against the snapshot.
+     Attach a connection to a session.
 
-    The drift check runs BEFORE the DB write so a stale account can't
-    move into ``single_session`` mode and silently swallow inbound.
+    The legacy supervisor's \"live snapshot drift check\" was removed in
+    #301 — the new architecture has connectors as peer services, so the
+    api process can't probe a worker-side account snapshot.  Operators
+    bear the responsibility of attaching to a real account; an inbound
+    referencing an unknown account simply drops at the new
+    ``/v1/connectors/inbound`` boundary.
 
     Args:
         connection_id (str):
@@ -187,12 +199,16 @@ async def asyncio(
     body: ConnectionAttach,
     authorization: None | str | Unset = UNSET,
 ) -> Connection | HTTPValidationError | None:
-    """Attach
+    r"""Attach
 
-     Attach a connection to a session, after validating the account against the snapshot.
+     Attach a connection to a session.
 
-    The drift check runs BEFORE the DB write so a stale account can't
-    move into ``single_session`` mode and silently swallow inbound.
+    The legacy supervisor's \"live snapshot drift check\" was removed in
+    #301 — the new architecture has connectors as peer services, so the
+    api process can't probe a worker-side account snapshot.  Operators
+    bear the responsibility of attaching to a real account; an inbound
+    referencing an unknown account simply drops at the new
+    ``/v1/connectors/inbound`` boundary.
 
     Args:
         connection_id (str):
