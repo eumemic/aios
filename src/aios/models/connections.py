@@ -24,7 +24,24 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from aios.models.agents import ToolSpec
+
 ConnectionMode = Literal["detached", "single_session", "per_chat"]
+
+
+def _validate_connection_tools(tools: list[ToolSpec]) -> list[ToolSpec]:
+    """Connection-declared tools must be ``type="custom"`` (#301).
+
+    Connections expose model-facing tools that the connector executes
+    externally via the ``requires_action`` flow.  Built-in tools live on
+    the agent; ``mcp_toolset`` is for HTTP MCP servers, not connectors.
+    """
+    for t in tools:
+        if t.type != "custom":
+            raise ValueError(
+                f"connection tools must be type='custom', got type={t.type!r}",
+            )
+    return tools
 
 
 class ConnectionCreate(BaseModel):
@@ -37,6 +54,9 @@ class ConnectionCreate(BaseModel):
     ``connector`` and ``account`` may not contain ``/`` — they're used
     in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
     and a ``/`` would create ambiguous segment boundaries.
+
+    ``tools`` declares the model-facing custom tools this connection
+    contributes to any session it's attached to (see #301).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -44,6 +64,7 @@ class ConnectionCreate(BaseModel):
     connector: str = Field(min_length=1, max_length=64)
     account: str = Field(min_length=1, max_length=256)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    tools: list[ToolSpec] = Field(default_factory=list)
 
     @field_validator("connector", "account")
     @classmethod
@@ -51,6 +72,11 @@ class ConnectionCreate(BaseModel):
         if "/" in v:
             raise ValueError("must not contain '/'")
         return v
+
+    @field_validator("tools")
+    @classmethod
+    def _custom_only(cls, v: list[ToolSpec]) -> list[ToolSpec]:
+        return _validate_connection_tools(v)
 
 
 class ConnectionAttach(BaseModel):
@@ -69,6 +95,23 @@ class ConnectionConfigurePerChat(BaseModel):
     session_template_id: str
 
 
+class ConnectionSetTools(BaseModel):
+    """Request body for ``PUT /v1/connections/{id}/tools`` (#301).
+
+    Replaces the connection's tools array wholesale.  Each entry must
+    be ``type="custom"`` — see :func:`_validate_connection_tools`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tools: list[ToolSpec] = Field(default_factory=list)
+
+    @field_validator("tools")
+    @classmethod
+    def _custom_only(cls, v: list[ToolSpec]) -> list[ToolSpec]:
+        return _validate_connection_tools(v)
+
+
 class Connection(BaseModel):
     """Read view of a connection.
 
@@ -85,6 +128,7 @@ class Connection(BaseModel):
     session_id: str | None = None
     session_template_id: str | None = None
     metadata: dict[str, Any]
+    tools: list[ToolSpec] = Field(default_factory=list)
     created_at: datetime
     attached_at: datetime | None = None
     updated_at: datetime

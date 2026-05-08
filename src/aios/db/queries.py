@@ -2346,8 +2346,8 @@ async def resolve_skill_refs(
 
 
 def _row_to_connection(row: asyncpg.Record) -> Connection:
-    raw_metadata = row["metadata"]
-    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    metadata = _parse_jsonb(row["metadata"])
+    tools_data = _parse_jsonb(row["tools"])
     return Connection(
         id=row["id"],
         connector=row["connector"],
@@ -2355,6 +2355,7 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         session_id=row["session_id"],
         session_template_id=row["session_template_id"],
         metadata=metadata,
+        tools=tools_data,
         created_at=row["created_at"],
         attached_at=row["attached_at"],
         updated_at=row["updated_at"],
@@ -2368,6 +2369,7 @@ async def insert_connection(
     connector: str,
     account: str,
     metadata: dict[str, Any],
+    tools: list[dict[str, Any]] | None = None,
 ) -> Connection:
     """Insert a detached connection, idempotent on the active uniqueness key.
 
@@ -2388,11 +2390,12 @@ async def insert_connection(
     # any realistic contention pattern.  The bound is defensive — three
     # iterations is enough that exhaustion would mean the system is wedged
     # in a hot insert/archive cycle that no retry strategy can resolve.
+    tools_json = json.dumps(tools or [])
     for _ in range(3):
         row = await conn.fetchrow(
             """
-            INSERT INTO connections (id, connector, account, metadata)
-            VALUES ($1, $2, $3, $4::jsonb)
+            INSERT INTO connections (id, connector, account, metadata, tools)
+            VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
             ON CONFLICT (connector, account) WHERE archived_at IS NULL DO NOTHING
             RETURNING *
             """,
@@ -2400,6 +2403,7 @@ async def insert_connection(
             connector,
             account,
             json.dumps(metadata),
+            tools_json,
         )
         if row is not None:
             return _row_to_connection(row)
@@ -2465,6 +2469,71 @@ async def session_authorizes_connector_account(
         account,
     )
     return row is not None
+
+
+async def set_connection_tools(
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    tools: list[dict[str, Any]],
+) -> Connection:
+    """Replace a connection's ``tools`` array.  Bumps ``updated_at``.
+
+    Refuses on archived rows: a tools update against an archived
+    connection is almost certainly a stale operator command.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE connections
+           SET tools = $2::jsonb,
+               updated_at = now()
+         WHERE id = $1 AND archived_at IS NULL
+        RETURNING *
+        """,
+        connection_id,
+        json.dumps(tools),
+    )
+    if row is None:
+        raise NotFoundError(
+            f"connection {connection_id} not found or archived",
+            detail={"id": connection_id},
+        )
+    return _row_to_connection(row)
+
+
+async def list_connection_tools_for_session(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> list[dict[str, Any]]:
+    """Custom tool specs from every active connection bound to ``session_id``.
+
+    Mirrors the three lineage paths in
+    :func:`session_authorizes_connector_account`:
+
+    * ``c.session_id = $1`` — single_session attach
+    * ``c.id = s.spawned_from_connection_id`` — per_chat origin
+    * ``connection_chat_sessions`` — operator-curated chat binding
+
+    Returns the flattened list of ToolSpec dicts (jsonb) ready to feed
+    through :func:`tools.registry.to_openai_tools_custom`.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT c.tools AS tools
+          FROM connections c
+          LEFT JOIN sessions s ON s.id = $1
+         WHERE c.archived_at IS NULL
+           AND (c.session_id = $1
+                OR c.id = s.spawned_from_connection_id
+                OR EXISTS (SELECT 1 FROM connection_chat_sessions ccs
+                            WHERE ccs.connection_id = c.id
+                              AND ccs.session_id = $1))
+        """,
+        session_id,
+    )
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.extend(_parse_jsonb(row["tools"]))
+    return out
 
 
 async def get_connection_for_account(

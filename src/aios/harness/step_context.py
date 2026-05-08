@@ -125,6 +125,18 @@ async def compute_step_prelude(
     if connector_registry is not None:
         tools.extend(await connector_registry.list_tools())
 
+    # Custom tools declared on connections attached to this session
+    # (single_session, per_chat origin, or operator-bound chat).  Each
+    # entry is dispatched via the requires_action / tool-results flow —
+    # the connector executes externally and POSTs the result back (#301).
+    from aios.models.agents import ToolSpec
+    from aios.services import connections as connections_service
+
+    connection_tool_dicts = await connections_service.list_tools_for_session(pool, session_id)
+    if connection_tool_dicts:
+        connection_tools = [ToolSpec.model_validate(d) for d in connection_tool_dicts]
+        tools.extend(to_openai_tools(connection_tools))
+
     skill_versions = (
         await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
     )

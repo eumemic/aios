@@ -240,12 +240,23 @@ class SessionInterruptRequest(BaseModel):
 
 
 class ToolResultRequest(BaseModel):
-    """Request body for ``POST /v1/sessions/{id}/tool-results``."""
+    """Request body for ``POST /v1/sessions/{id}/tool-results``.
+
+    ``content`` accepts either a plain string OR a multimodal content
+    array shaped per the OpenAI chat-completions tool-result format
+    (e.g. ``[{"type": "text", "text": "..."}, {"type": "image_url",
+    "image_url": {"url": "..."}}]``).  Built-in tools have always
+    produced multimodal results; this widening lets external clients
+    (#301 — connectors as HTTP clients) do the same when posting
+    custom-tool results.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     tool_call_id: str = Field(description="The tool_call_id from the assistant's tool_calls.")
-    content: str = Field(description="The result of executing the tool.")
+    content: str | list[dict[str, Any]] = Field(
+        description="The result of executing the tool.  String or multimodal content array.",
+    )
     is_error: bool = Field(default=False, description="True if the tool execution failed.")
 
 
