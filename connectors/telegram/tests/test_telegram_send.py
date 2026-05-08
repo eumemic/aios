@@ -2,13 +2,13 @@
 type-by-extension routing, and the caption-on-first quirk in
 ``send_media_group``.
 
-The PTB ``Bot`` is mocked end-to-end; tests assert that the right
+PTB's ``Bot`` is mocked end-to-end; tests assert that the right
 ``send_*`` method was called with the right ``chat_id`` /
 ``caption`` / ``media`` arguments.
 
-End-to-end tests go through the SDK's ``_invoke_tool`` dispatch
-wrapper — that's the layer where ``SandboxPath`` resolution happens,
-so connector-side tests must exercise it.
+Tools take already-resolved host paths (``Path`` objects) — the SDK's
+``SandboxPath`` resolution happens at dispatch time and is exercised by
+the SDK's own tests.  Connector-side tests focus on PTB routing.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aios_connector.base import ToolDescriptor
+from aios_connector_http import HttpConnector
 
 from aios_telegram.config import Settings
 from aios_telegram.connector import (
@@ -62,176 +62,112 @@ def test_build_media_group_voice_demoted_to_document() -> None:
     assert isinstance(items[0], InputMediaDocument)
 
 
-@pytest.fixture
-def connector() -> TelegramConnector:
+def test_telegram_connector_subclasses_http_connector() -> None:
+    """Sanity: the SDK base picks up our @tool methods as a tool registry."""
     cfg = Settings(bot_token="0:test")
     c = TelegramConnector(cfg)
-    bot = MagicMock()
-    bot.send_message = AsyncMock(return_value=MagicMock(message_id=42))
-    bot.send_photo = AsyncMock(return_value=MagicMock(message_id=43))
-    bot.send_voice = AsyncMock(return_value=MagicMock(message_id=44))
-    bot.send_video = AsyncMock(return_value=MagicMock(message_id=45))
-    bot.send_audio = AsyncMock(return_value=MagicMock(message_id=46))
-    bot.send_document = AsyncMock(return_value=MagicMock(message_id=47))
-    bot.send_media_group = AsyncMock(
+    assert isinstance(c, HttpConnector)
+    expected = {
+        "telegram_send",
+        "telegram_typing",
+        "telegram_edit_message",
+        "telegram_delete_message",
+        "telegram_react",
+    }
+    assert expected <= set(c._tools)
+
+
+@pytest.fixture
+def bot() -> Any:
+    b = MagicMock()
+    b.send_message = AsyncMock(return_value=MagicMock(message_id=42))
+    b.send_photo = AsyncMock(return_value=MagicMock(message_id=43))
+    b.send_voice = AsyncMock(return_value=MagicMock(message_id=44))
+    b.send_video = AsyncMock(return_value=MagicMock(message_id=45))
+    b.send_audio = AsyncMock(return_value=MagicMock(message_id=46))
+    b.send_document = AsyncMock(return_value=MagicMock(message_id=47))
+    b.send_media_group = AsyncMock(
         return_value=[
             MagicMock(message_id=100),
             MagicMock(message_id=101),
         ]
     )
+    return b
+
+
+@pytest.fixture
+def connector(bot: Any) -> TelegramConnector:
+    cfg = Settings(bot_token="0:test")
+    c = TelegramConnector(cfg)
     c._application = MagicMock()
     c._application.bot = bot
     return c
 
 
-def _telegram_send_descriptor(connector: TelegramConnector) -> ToolDescriptor:
-    descriptor = next(d for d in connector._tools if d.name == "telegram_send")
-    assert isinstance(descriptor, ToolDescriptor)
-    return descriptor
+# End-to-end tests calling the tool method directly with resolved paths.
 
 
-def _stub_focal(connector: TelegramConnector, value: str | None) -> None:
-    connector._focal_from_request_meta = lambda: value  # type: ignore[method-assign]
-
-
-def _stub_session_id(connector: TelegramConnector, value: str | None) -> None:
-    connector.current_session_id = lambda: value  # type: ignore[method-assign]
-
-
-def _decode(content_list: list[Any]) -> dict[str, Any]:
-    assert len(content_list) == 1
-    payload = json.loads(content_list[0].text)
-    assert isinstance(payload, dict)
-    return payload
-
-
-# Descriptor-level checks: the schema reaches the model with the right
-# shape and the dispatch wrapper knows which arg to resolve.
-
-
-def test_telegram_send_descriptor_records_sandbox_param(
-    connector: TelegramConnector,
-) -> None:
-    descriptor = _telegram_send_descriptor(connector)
-    assert descriptor.sandbox_params == {"attachments": "list"}
-
-
-def test_telegram_send_schema_publishes_string_array_with_description(
-    connector: TelegramConnector,
-) -> None:
-    descriptor = _telegram_send_descriptor(connector)
-    attachments_schema = descriptor.input_schema["properties"]["attachments"]
-    assert attachments_schema["type"] == "array"
-    assert attachments_schema["items"]["type"] == "string"
-    assert "/workspace/" in attachments_schema["items"]["description"]
-
-
-# End-to-end tests via _invoke_tool (the dispatch wrapper resolves
-# SandboxPath args before the tool body runs).
-
-
-async def test_telegram_send_text_only(connector: TelegramConnector) -> None:
-    _stub_focal(connector, "0/123")
-    _stub_session_id(connector, None)
-    descriptor = _telegram_send_descriptor(connector)
-    result = _decode(await connector._invoke_tool(descriptor, {"text": "hello"}))
+async def test_telegram_send_text_only(connector: TelegramConnector, bot: Any) -> None:
+    result = await connector.telegram_send(text="hello", chat_id="123")
     assert result == {"message_id": 42}
-    connector._application.bot.send_message.assert_awaited_once_with(  # type: ignore[union-attr]
-        chat_id=123, text="hello", parse_mode=None
-    )
+    bot.send_message.assert_awaited_once_with(chat_id=123, text="hello", parse_mode=None)
 
 
 async def test_telegram_send_single_photo_routes_to_send_photo(
     connector: TelegramConnector,
+    bot: Any,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_focal(connector, "0/123")
-    _stub_session_id(connector, "sess-1")
-    monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
-    ws = (tmp_path / "sess-1").resolve()
-    ws.mkdir(parents=True)
-    (ws / "cat.jpg").write_bytes(b"x")
+    photo = tmp_path / "cat.jpg"
+    photo.write_bytes(b"x")
 
-    descriptor = _telegram_send_descriptor(connector)
-    result = _decode(
-        await connector._invoke_tool(
-            descriptor,
-            {"text": "look", "attachments": ["/workspace/cat.jpg"]},
-        )
-    )
+    result = await connector.telegram_send(text="look", attachments=[photo], chat_id="123")
 
     assert result == {"message_id": 43}
-    bot = connector._application.bot  # type: ignore[union-attr]
     bot.send_photo.assert_awaited_once()
     kwargs = bot.send_photo.call_args.kwargs
     assert kwargs["chat_id"] == 123
-    assert kwargs["photo"] == ws / "cat.jpg"
+    assert kwargs["photo"] == photo
     assert kwargs["caption"] == "look"
 
 
 async def test_telegram_send_single_voice_routes_to_send_voice(
     connector: TelegramConnector,
+    bot: Any,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_focal(connector, "0/123")
-    _stub_session_id(connector, "sess-1")
-    monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
-    ws = (tmp_path / "sess-1").resolve()
-    ws.mkdir(parents=True)
-    (ws / "v.ogg").write_bytes(b"x")
-
-    descriptor = _telegram_send_descriptor(connector)
-    await connector._invoke_tool(descriptor, {"text": "", "attachments": ["/workspace/v.ogg"]})
-
-    connector._application.bot.send_voice.assert_awaited_once()  # type: ignore[union-attr]
+    voice = tmp_path / "v.ogg"
+    voice.write_bytes(b"x")
+    await connector.telegram_send(text="", attachments=[voice], chat_id="123")
+    bot.send_voice.assert_awaited_once()
 
 
 async def test_telegram_send_single_document_routes_to_send_document(
     connector: TelegramConnector,
+    bot: Any,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_focal(connector, "0/123")
-    _stub_session_id(connector, "sess-1")
-    monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
-    ws = (tmp_path / "sess-1").resolve()
-    ws.mkdir(parents=True)
-    (ws / "report.pdf").write_bytes(b"x")
-
-    descriptor = _telegram_send_descriptor(connector)
-    await connector._invoke_tool(descriptor, {"text": "", "attachments": ["/workspace/report.pdf"]})
-
-    connector._application.bot.send_document.assert_awaited_once()  # type: ignore[union-attr]
+    doc = tmp_path / "report.pdf"
+    doc.write_bytes(b"x")
+    await connector.telegram_send(text="", attachments=[doc], chat_id="123")
+    bot.send_document.assert_awaited_once()
 
 
 async def test_telegram_send_multi_media_uses_send_media_group(
     connector: TelegramConnector,
+    bot: Any,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_focal(connector, "0/123")
-    _stub_session_id(connector, "sess-1")
-    monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
-    ws = (tmp_path / "sess-1").resolve()
-    ws.mkdir(parents=True)
-    for name in ("a.jpg", "b.jpg"):
-        (ws / name).write_bytes(b"x")
+    a = tmp_path / "a.jpg"
+    b_path = tmp_path / "b.jpg"
+    a.write_bytes(b"x")
+    b_path.write_bytes(b"x")
 
-    descriptor = _telegram_send_descriptor(connector)
-    result = _decode(
-        await connector._invoke_tool(
-            descriptor,
-            {
-                "text": "two pics",
-                "attachments": ["/workspace/a.jpg", "/workspace/b.jpg"],
-            },
-        )
+    result = await connector.telegram_send(
+        text="two pics", attachments=[a, b_path], chat_id="123"
     )
 
     assert result == {"message_ids": [100, 101]}
-    bot = connector._application.bot  # type: ignore[union-attr]
     bot.send_media_group.assert_awaited_once()
     bot.send_photo.assert_not_awaited()
     media = bot.send_media_group.call_args.kwargs["media"]
@@ -240,51 +176,44 @@ async def test_telegram_send_multi_media_uses_send_media_group(
     assert media[1].caption is None
 
 
-async def test_telegram_send_attachment_traversal_rejected(
-    connector: TelegramConnector,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_focal(connector, "0/123")
-    _stub_session_id(connector, "sess-1")
-    monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
-    (tmp_path / "sess-1").mkdir(parents=True)
-
-    descriptor = _telegram_send_descriptor(connector)
-    with pytest.raises(ValueError, match="could not be resolved"):
-        await connector._invoke_tool(
-            descriptor,
-            {"text": "", "attachments": ["/workspace/../escape.jpg"]},
-        )
-
-
-async def test_telegram_send_attachment_disallowed_root_raises(
-    connector: TelegramConnector,
-) -> None:
-    _stub_focal(connector, "0/123")
-    _stub_session_id(connector, "sess-1")
-    descriptor = _telegram_send_descriptor(connector)
-    with pytest.raises(ValueError, match="could not be resolved"):
-        await connector._invoke_tool(descriptor, {"text": "", "attachments": ["/etc/passwd"]})
-
-
-async def test_telegram_send_attachment_without_session_id_raises(
-    connector: TelegramConnector,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_focal(connector, "0/123")
-    _stub_session_id(connector, None)
-    monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
-    descriptor = _telegram_send_descriptor(connector)
-    with pytest.raises(RuntimeError, match=r"aios\.session_id"):
-        await connector._invoke_tool(descriptor, {"text": "", "attachments": ["/workspace/x.jpg"]})
-
-
 async def test_telegram_send_non_int_chat_id_raises(
     connector: TelegramConnector,
 ) -> None:
-    _stub_focal(connector, "0/not-a-number")
-    descriptor = _telegram_send_descriptor(connector)
     with pytest.raises(ValueError, match="must be an integer"):
-        await connector._invoke_tool(descriptor, {"text": "hi"})
+        await connector.telegram_send(text="hi", chat_id="not-a-number")
+
+
+# Integration check: feed the SDK dispatch path with a sandbox path
+# string and verify the connector receives a resolved Path.
+
+
+async def test_telegram_send_dispatch_resolves_sandbox_path(
+    connector: TelegramConnector,
+    bot: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-trip via _dispatch_call: the SDK should hand the connector a
+    real :class:`Path` for every ``SandboxPath`` argument so PTB's
+    upload code can ``open()`` it directly."""
+    monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
+    ws = (tmp_path / "sess-1").resolve()
+    ws.mkdir()
+    (ws / "cat.jpg").write_bytes(b"x")
+    connector._client = AsyncMock()
+
+    await connector._dispatch_call(
+        {
+            "tool_call_id": "c1",
+            "session_id": "sess-1",
+            "name": "telegram_send",
+            "arguments": json.dumps(
+                {"text": "look", "attachments": ["/workspace/cat.jpg"]}
+            ),
+            "focal_channel": "telegram/0/123",
+        }
+    )
+
+    photo_arg: Any = bot.send_photo.call_args.kwargs["photo"]
+    assert isinstance(photo_arg, Path)
+    assert photo_arg == ws / "cat.jpg"
