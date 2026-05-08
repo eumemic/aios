@@ -25,12 +25,15 @@ import asyncio
 import inspect
 import json
 import os
+import types
 from collections.abc import Awaitable, Callable
-from typing import Any
+from pathlib import Path
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from ulid import ULID
 
 from .client import AiosClient
+from .sandbox import _SandboxPathMarker, resolve_sandbox_path
 
 ToolFn = Callable[..., Awaitable[Any]]
 
@@ -208,6 +211,16 @@ class HttpConnector:
         focal_channel = call.get("focal_channel") or ""
         args = _inject_focal_kwargs(fn, args, focal_channel)
         try:
+            args = _resolve_sandbox_paths(fn, args, session_id=session_id)
+        except SandboxPathError as exc:
+            await self._client.post_tool_result(
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                content=json.dumps({"error": str(exc)}),
+                is_error=True,
+            )
+            return
+        try:
             result = await fn(**args)
         except Exception as exc:
             await self._client.post_tool_result(
@@ -239,6 +252,104 @@ class HttpConnector:
 
 
 _FOCAL_INJECTABLE: frozenset[str] = frozenset({"account", "chat_id"})
+
+
+class SandboxPathError(ValueError):
+    """Raised by the dispatcher when a SandboxPath argument escapes
+    ``/workspace/`` or ``/mnt/attachments/``.
+
+    Surfaces to the model as a tool error result so it can self-correct
+    on the next turn (e.g. retry with a path inside ``/workspace/``).
+    """
+
+
+def _resolve_sandbox_paths(
+    fn: ToolFn, args: dict[str, Any], *, session_id: str
+) -> dict[str, Any]:
+    """Translate ``SandboxPath`` argument strings into host :class:`Path`s.
+
+    Inspects the tool's signature; for each parameter annotated with
+    :data:`~aios_connector_http.SandboxPath` (or ``list[SandboxPath]``,
+    optionally ``| None``), maps the model-supplied in-sandbox path
+    string against ``<workspace_root>/<session_id>``.  Out-of-tree or
+    unmapped paths raise :class:`SandboxPathError` so the dispatcher
+    can return an error result instead of silently dropping the value.
+    """
+    try:
+        hints = get_type_hints(fn, include_extras=True)
+    except Exception:
+        return args
+    if not session_id:
+        return args
+    out = dict(args)
+    for param_name, hint in hints.items():
+        if param_name not in out:
+            continue
+        kind = _sandbox_path_kind(hint)
+        if kind is None:
+            continue
+        value = out[param_name]
+        if kind == "scalar":
+            out[param_name] = _resolve_one(value, session_id=session_id, name=param_name)
+        else:
+            if not isinstance(value, list):
+                raise SandboxPathError(
+                    f"{param_name!r} must be a list of in-sandbox paths"
+                )
+            out[param_name] = [
+                _resolve_one(v, session_id=session_id, name=param_name) for v in value
+            ]
+    return out
+
+
+def _resolve_one(value: Any, *, session_id: str, name: str) -> Path:
+    if not isinstance(value, str):
+        raise SandboxPathError(f"{name!r} must be an in-sandbox path string; got {value!r}")
+    resolved = resolve_sandbox_path(session_id=session_id, sandbox_path=value)
+    if resolved is None:
+        raise SandboxPathError(
+            f"{name!r}: path {value!r} is outside /workspace/ and /mnt/attachments/"
+        )
+    return resolved
+
+
+def _sandbox_path_kind(hint: Any) -> str | None:
+    """Return ``'scalar'`` / ``'list'`` / ``None`` for a type hint.
+
+    Recognises ``SandboxPath``, ``list[SandboxPath]``, and either with
+    ``| None`` (handy for optional attachment params).  Anything else
+    returns ``None``.
+    """
+    inner = _strip_optional(hint)
+    if _is_sandbox_path(inner):
+        return "scalar"
+    origin = get_origin(inner)
+    if origin in (list, tuple):
+        elems = get_args(inner)
+        if elems and _is_sandbox_path(elems[0]):
+            return "list"
+    return None
+
+
+def _strip_optional(hint: Any) -> Any:
+    """``T | None`` → ``T``; everything else passes through unchanged.
+
+    Only collapses ``Union``/PEP-604 ``X | Y`` types — leaves
+    parameterised generics like ``list[T]`` alone.
+    """
+    origin = get_origin(hint)
+    if origin not in (Union, types.UnionType):
+        return hint
+    args = [a for a in get_args(hint) if a is not type(None)]
+    return args[0] if len(args) == 1 else hint
+
+
+def _is_sandbox_path(hint: Any) -> bool:
+    """Detect ``Annotated[Path, SANDBOX_PATH_MARKER]`` regardless of nesting."""
+    return any(
+        isinstance(meta, _SandboxPathMarker)
+        for meta in getattr(hint, "__metadata__", ())
+    )
 
 
 def _inject_focal_kwargs(
