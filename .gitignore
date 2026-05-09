@@ -42,6 +42,7 @@ venv/
 # aios runtime state
 /var/lib/aios/
 workspaces/
+/.aios/
 
 # smoke-test runtime artifacts
 .logs/

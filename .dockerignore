@@ -1,0 +1,62 @@
+# Files excluded from the build context for every image (api, worker,
+# echo-http, telegram, signal — all use the repo root as context).
+#
+# Without this file, `docker compose build` ships hundreds of MB of
+# `.git`, `.venv`, caches, and runtime artifacts on every build.
+
+# Version control
+.git
+.github
+
+# Python build / cache artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.tox
+.coverage
+htmlcov
+dist
+build
+
+# Virtualenvs / uv
+.venv
+venv
+.uv-cache
+
+# Local secrets / env (.env.example is needed by docs but harmless either way;
+# .env.example is whitelisted because it's referenced from CLAUDE.md and may be
+# read by future bootstrap tooling).
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editors
+.idea
+.vscode
+*.swp
+*.swo
+
+# aios runtime state (host-side compose volumes / lean-mode artifacts)
+.aios
+.logs
+spool.sqlite*
+/var/lib/aios
+
+# Claude Code session state — not part of aios source.
+.claude
+
+# Tests don't ship in production images.
+tests
+
+# Generated SDK source — not consumed at runtime; FastAPI builds OpenAPI
+# in-memory.
+openapi.json
+
+# Documentation (Dockerfile copies README.md; everything else is excluded).
+*.md
+!README.md
