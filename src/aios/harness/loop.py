@@ -631,9 +631,6 @@ def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, str]) -> bo
     waiting on a confirmation that would dispatch into
     ``mcp_tool.server_not_found`` anyway.
     """
-    registry = runtime.connector_subprocess_registry
-    if registry is not None and registry.states_for_connector(server_name):
-        return True
     return server_name in mcp_server_map
 
 
