@@ -25,12 +25,16 @@ import asyncio
 import inspect
 import json
 import os
+import types
 from collections.abc import Awaitable, Callable
-from typing import Any
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from ulid import ULID
 
 from .client import AiosClient
+from .sandbox import _SandboxPathMarker, resolve_sandbox_path
 
 ToolFn = Callable[..., Awaitable[Any]]
 
@@ -60,6 +64,22 @@ def tool(
     return _wrap
 
 
+@dataclass(frozen=True, slots=True)
+class _ToolMeta:
+    """Per-tool reflection cache populated once at construction.
+
+    Holds the bound method plus the precomputed bits dispatch needs:
+    which params accept focal-channel injection, and which params
+    carry :data:`SandboxPath` annotations (and whether scalar or list).
+    Storing these as a frozen dataclass on ``self._tools`` keeps the
+    per-call hot path free of ``inspect`` and ``get_type_hints`` calls.
+    """
+
+    fn: ToolFn
+    focal_params: frozenset[str]
+    sandbox_params: tuple[tuple[str, str], ...]  # (param_name, "scalar" | "list")
+
+
 class HttpConnector:
     """Base class for HTTP-client connectors.
 
@@ -77,7 +97,7 @@ class HttpConnector:
         self._token = token or os.environ["AIOS_CONNECTOR_TOKEN"]
         self._client: AiosClient | None = None
         self._connection_id: str | None = None
-        self._tools = self._collect_tools()
+        self._tools: dict[str, _ToolMeta] = self._collect_tools()
         self._answered: set[str] = set()
 
     # ─── lifecycle hooks (override as needed) ────────────────────────
@@ -163,7 +183,7 @@ class HttpConnector:
                     tool_call_id = call.get("tool_call_id", "")
                     if not tool_call_id or tool_call_id in self._answered:
                         continue
-                    await self._dispatch_call(call)
+                    await self.dispatch_call(call)
                     self._answered.add(tool_call_id)
                     await self.save_answered(tool_call_id)
             except asyncio.CancelledError:
@@ -178,22 +198,25 @@ class HttpConnector:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
 
-    async def _dispatch_call(self, call: dict[str, Any]) -> None:
-        """Run the right tool method for ``call`` and POST the result.
+    async def dispatch_call(self, call: dict[str, Any]) -> None:
+        """Run the tool method for ``call`` and POST the result.
 
         If the tool method's signature accepts ``account`` and/or
         ``chat_id`` kwargs, the runner parses them out of the call's
         ``focal_channel`` (shaped ``<connector>/<account>/<chat_id>``)
-        and injects them.  Mirrors the legacy SDK's ``@focal_required``
-        without a separate decorator — declare what you need in the
-        signature and the runner threads it through.
+        and injects them.  ``SandboxPath``-annotated params get their
+        in-sandbox path strings resolved to host :class:`Path`s before
+        the tool body runs.
+
+        Public surface so tests can drive dispatch without going
+        through SSE — the production path is :meth:`_tool_loop`.
         """
         assert self._client is not None
         name = call.get("name", "")
         tool_call_id = call.get("tool_call_id", "")
         session_id = call.get("session_id", "")
-        fn = self._tools.get(name)
-        if fn is None:
+        meta = self._tools.get(name)
+        if meta is None:
             await self._client.post_tool_result(
                 session_id=session_id,
                 tool_call_id=tool_call_id,
@@ -206,9 +229,19 @@ class HttpConnector:
         except json.JSONDecodeError:
             args = {}
         focal_channel = call.get("focal_channel") or ""
-        args = _inject_focal_kwargs(fn, args, focal_channel)
+        args = _inject_focal_kwargs(meta, args, focal_channel)
         try:
-            result = await fn(**args)
+            args = _resolve_sandbox_paths(meta, args, session_id=session_id)
+        except SandboxPathError as exc:
+            await self._client.post_tool_result(
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                content=json.dumps({"error": str(exc)}),
+                is_error=True,
+            )
+            return
+        try:
+            result = await meta.fn(**args)
         except Exception as exc:
             await self._client.post_tool_result(
                 session_id=session_id,
@@ -228,21 +261,129 @@ class HttpConnector:
             content=result,
         )
 
-    def _collect_tools(self) -> dict[str, ToolFn]:
-        """Walk ``self`` and pick up every method tagged with @tool."""
-        out: dict[str, ToolFn] = {}
+    def _collect_tools(self) -> dict[str, _ToolMeta]:
+        """Walk ``self``, pick up every method tagged with @tool, and
+        precompute the reflection bits ``dispatch_call`` needs."""
+        out: dict[str, _ToolMeta] = {}
         for _, member in inspect.getmembers(self):
-            if callable(member) and hasattr(member, _TOOL_ATTR):
-                tool_name: str = getattr(member, _TOOL_ATTR)
-                out[tool_name] = member
+            if not (callable(member) and hasattr(member, _TOOL_ATTR)):
+                continue
+            tool_name: str = getattr(member, _TOOL_ATTR)
+            out[tool_name] = _build_tool_meta(member)
         return out
 
 
 _FOCAL_INJECTABLE: frozenset[str] = frozenset({"account", "chat_id"})
 
 
+def _build_tool_meta(fn: ToolFn) -> _ToolMeta:
+    """Inspect ``fn`` once and freeze the dispatch-time metadata."""
+    sig = inspect.signature(fn)
+    focal = frozenset(set(sig.parameters) & _FOCAL_INJECTABLE)
+    try:
+        hints = get_type_hints(fn, include_extras=True)
+    except Exception:
+        hints = {}
+    sandbox: list[tuple[str, str]] = []
+    for param_name, hint in hints.items():
+        kind = _sandbox_path_kind(hint)
+        if kind is not None:
+            sandbox.append((param_name, kind))
+    return _ToolMeta(fn=fn, focal_params=focal, sandbox_params=tuple(sandbox))
+
+
+class SandboxPathError(ValueError):
+    """Raised by the dispatcher when a SandboxPath argument escapes
+    ``/workspace/`` or ``/mnt/attachments/``.
+
+    Surfaces to the model as a tool error result so it can self-correct
+    on the next turn (e.g. retry with a path inside ``/workspace/``).
+    """
+
+
+def _resolve_sandbox_paths(
+    meta: _ToolMeta, args: dict[str, Any], *, session_id: str
+) -> dict[str, Any]:
+    """Translate ``SandboxPath`` argument strings into host :class:`Path`s.
+
+    For each :data:`~aios_connector_http.SandboxPath` parameter, maps the
+    model-supplied in-sandbox path string against
+    ``<workspace_root>/<session_id>``.  Out-of-tree or unmapped paths
+    raise :class:`SandboxPathError` so the dispatcher can return an
+    error result instead of silently dropping the value.
+    """
+    if not meta.sandbox_params or not session_id:
+        return args
+    out = dict(args)
+    for param_name, kind in meta.sandbox_params:
+        if param_name not in out:
+            continue
+        value = out[param_name]
+        if kind == "scalar":
+            out[param_name] = _resolve_one(value, session_id=session_id, name=param_name)
+        else:
+            if not isinstance(value, list):
+                raise SandboxPathError(
+                    f"{param_name!r} must be a list of in-sandbox paths"
+                )
+            out[param_name] = [
+                _resolve_one(v, session_id=session_id, name=param_name) for v in value
+            ]
+    return out
+
+
+def _resolve_one(value: Any, *, session_id: str, name: str) -> Path:
+    if not isinstance(value, str):
+        raise SandboxPathError(f"{name!r} must be an in-sandbox path string; got {value!r}")
+    resolved = resolve_sandbox_path(session_id=session_id, sandbox_path=value)
+    if resolved is None:
+        raise SandboxPathError(
+            f"{name!r}: path {value!r} is outside /workspace/ and /mnt/attachments/"
+        )
+    return resolved
+
+
+def _sandbox_path_kind(hint: Any) -> str | None:
+    """Return ``'scalar'`` / ``'list'`` / ``None`` for a type hint.
+
+    Recognises ``SandboxPath``, ``list[SandboxPath]``, and either with
+    ``| None`` (handy for optional attachment params).  Anything else
+    returns ``None``.
+    """
+    inner = _strip_optional(hint)
+    if _is_sandbox_path(inner):
+        return "scalar"
+    origin = get_origin(inner)
+    if origin in (list, tuple):
+        elems = get_args(inner)
+        if elems and _is_sandbox_path(elems[0]):
+            return "list"
+    return None
+
+
+def _strip_optional(hint: Any) -> Any:
+    """``T | None`` → ``T``; everything else passes through unchanged.
+
+    Only collapses ``Union``/PEP-604 ``X | Y`` types — leaves
+    parameterised generics like ``list[T]`` alone.
+    """
+    origin = get_origin(hint)
+    if origin not in (Union, types.UnionType):
+        return hint
+    args = [a for a in get_args(hint) if a is not type(None)]
+    return args[0] if len(args) == 1 else hint
+
+
+def _is_sandbox_path(hint: Any) -> bool:
+    """Detect ``Annotated[Path, SANDBOX_PATH_MARKER]`` regardless of nesting."""
+    return any(
+        isinstance(meta, _SandboxPathMarker)
+        for meta in getattr(hint, "__metadata__", ())
+    )
+
+
 def _inject_focal_kwargs(
-    fn: ToolFn, args: dict[str, Any], focal_channel: str
+    meta: _ToolMeta, args: dict[str, Any], focal_channel: str
 ) -> dict[str, Any]:
     """Inject ``account`` / ``chat_id`` kwargs from ``focal_channel``.
 
@@ -251,23 +392,16 @@ def _inject_focal_kwargs(
     didn't already pass explicitly.  ``focal_channel`` is the
     ``<connector>/<account>/<chat_id>`` form the server stamps onto
     each call event.
-
-    Mirrors the legacy SDK's ``@focal_required`` injection without
-    requiring a separate decorator: tool authors declare ``account``
-    and/or ``chat_id`` in their signature and the runner threads them
-    through automatically.
     """
-    if not focal_channel:
+    if not focal_channel or not meta.focal_params:
         return args
     parts = focal_channel.split("/", 2)
     if len(parts) < 3:
         return args
     _connector, account, chat_id = parts
-    sig = inspect.signature(fn)
-    accepted = set(sig.parameters) & _FOCAL_INJECTABLE
     out = dict(args)
-    if "account" in accepted and "account" not in out:
+    if "account" in meta.focal_params and "account" not in out:
         out["account"] = account
-    if "chat_id" in accepted and "chat_id" not in out:
+    if "chat_id" in meta.focal_params and "chat_id" not in out:
         out["chat_id"] = chat_id
     return out

@@ -1,11 +1,7 @@
-"""aios-signal: Signal connector for aios."""
+"""aios-signal: Signal connector for aios (#301)."""
 
 from __future__ import annotations
 
-from .config import Settings
 from .connector import SignalConnector
 
-
-def make_connector() -> SignalConnector:
-    """Entry point resolved by the aios connector supervisor."""
-    return SignalConnector(Settings())
+__all__ = ["SignalConnector"]
