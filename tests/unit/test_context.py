@@ -990,6 +990,61 @@ class TestFocalRendering:
         assert "timestamp_ms=1776401210703" in content
         assert "(2026-04-17T" in content
 
+    def test_focal_match_message_id_inlined(self) -> None:
+        """The ``message_id`` lets the model react/edit/delete the user
+        message via the connector tools — without it, the model has to
+        guess (or refuse).  See #245.
+        """
+        md = {"channel": self._CHAN_A, "message_id": 94}
+        events = [
+            _evt(1, "user", content="show me", metadata=md, focal_channel_at_arrival=self._CHAN_A)
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "message_id=94" in content
+
+    def test_focal_match_sender_id_inlined(self) -> None:
+        """Telegram inbounds carry an integer ``sender_id`` (Telegram's
+        platform-native user id); ``sender_uuid`` is the signal-shape.
+        Both must surface so platform-aware models can use them.
+        """
+        md = {"channel": self._CHAN_A, "sender_id": 1595907265}
+        events = [_evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "sender_id=1595907265" in content
+
+    def test_focal_match_edited_flag(self) -> None:
+        """Edited messages arrive with ``metadata.edited=True``; the model
+        needs to know an edit happened so it can update / re-react / etc.
+        """
+        md = {"channel": self._CHAN_A, "message_id": 7, "edited": True}
+        events = [
+            _evt(
+                1, "user", content="oops, fixed", metadata=md, focal_channel_at_arrival=self._CHAN_A
+            )
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "edited=true" in content
+
+    def test_focal_match_edited_false_omitted(self) -> None:
+        """Most messages aren't edits — don't clutter the header on the
+        common path.  Only emit ``edited=true`` when the flag is actually
+        set; absent / False stays off the header entirely.
+        """
+        md = {"channel": self._CHAN_A, "message_id": 7, "edited": False}
+        events = [_evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "edited" not in content
+
+    def test_focal_match_sticker_emoji(self) -> None:
+        """Stickers arrive with an empty body and a ``sticker_emoji`` in
+        metadata — the model otherwise has no textual cue that something
+        was sent.
+        """
+        md = {"channel": self._CHAN_A, "message_id": 12, "sticker_emoji": "🔥"}
+        events = [_evt(1, "user", content="", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "sticker_emoji='🔥'" in content
+
     def test_focal_match_metadata_stripped_from_wire_message(self) -> None:
         md = {"channel": self._CHAN_A, "sender_uuid": "u1"}
         events = [_evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
