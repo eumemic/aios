@@ -316,6 +316,7 @@ class TelegramConnector(HttpConnector):
         text: str,
         attachments: list[SandboxPath] | None = None,
         parse_mode: Literal["plain", "html"] = "plain",
+        reply_to_message_id: int | None = None,
         *,
         chat_id: str,
     ) -> dict[str, Any]:
@@ -342,6 +343,14 @@ class TelegramConnector(HttpConnector):
                 ``**bold**``, ``*italic*``, ``[label](url)``, fenced
                 code, ``> quotes``, and ``||spoilers||`` render with
                 Telegram's native styling.
+            reply_to_message_id: When set, the message is rendered as a
+                native Telegram reply quoting that message (the
+                client UI shows the parent inline above your text).
+                Pass the id of the message you're replying to —
+                ``message_id`` from a user inbound's metadata header,
+                or ``message_id`` from an earlier ``telegram_send``
+                response.  Default ``None`` sends as a top-level
+                message in the chat.
         """
         assert self._application is not None
         chat_id_int = _coerce_chat_id(chat_id)
@@ -350,11 +359,16 @@ class TelegramConnector(HttpConnector):
         host_paths: list[Path] = list(attachments or [])
         bot = self._application.bot
 
+        reply_kwargs: dict[str, Any] = (
+            {"reply_to_message_id": reply_to_message_id} if reply_to_message_id is not None else {}
+        )
+
         if not host_paths:
             sent = await bot.send_message(
                 chat_id=chat_id_int,
                 text=body,
                 parse_mode=ptb_parse_mode,
+                **reply_kwargs,
             )
             return {"message_id": sent.message_id}
 
@@ -365,12 +379,14 @@ class TelegramConnector(HttpConnector):
                 host_path=host_paths[0],
                 caption=body or None,
                 parse_mode=ptb_parse_mode,
+                reply_to_message_id=reply_to_message_id,
             )
             return {"message_id": single.message_id}
 
         sent_group = await bot.send_media_group(
             chat_id=chat_id_int,
             media=_build_media_group(host_paths, caption=body or None, parse_mode=ptb_parse_mode),
+            **reply_kwargs,
         )
         return {"message_ids": [m.message_id for m in sent_group]}
 
@@ -477,9 +493,12 @@ class TelegramConnector(HttpConnector):
         Args:
             message_id: The id of the message to react to.
             emoji: A single emoji glyph (e.g. ``"👍"``, ``"❤"``, ``"🔥"``).
-                Telegram restricts which emojis bots can use as reactions
-                to a curated allowlist; unsupported emojis are rejected
-                by the API.  Pass ``None`` to clear.
+                Telegram restricts bot reactions to a curated allowlist;
+                unsupported glyphs surface as ``Reaction_invalid`` from
+                the API.  The full current allowlist is published at
+                https://core.telegram.org/bots/api#reactiontypeemoji —
+                check there if a glyph you'd expect to work is rejected.
+                Pass ``None`` to clear the bot's existing reaction.
         """
         assert self._application is not None
         chat_id_int = _coerce_chat_id(chat_id)
@@ -537,6 +556,7 @@ async def _send_single_media(
     host_path: Path,
     caption: str | None,
     parse_mode: str | None = None,
+    reply_to_message_id: int | None = None,
 ) -> Any:
     kind = _classify(host_path)
     sender = {
@@ -551,6 +571,8 @@ async def _send_single_media(
         kwargs["caption"] = caption
         if parse_mode is not None:
             kwargs["parse_mode"] = parse_mode
+    if reply_to_message_id is not None:
+        kwargs["reply_to_message_id"] = reply_to_message_id
     return await sender(**kwargs)
 
 
