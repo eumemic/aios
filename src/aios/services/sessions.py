@@ -203,6 +203,45 @@ async def append_event(
         return await queries.append_event(conn, session_id=session_id, kind=kind, data=data)
 
 
+async def append_tool_result(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    tool_call_id: str,
+    content: str | list[dict[str, Any]],
+    is_error: bool = False,
+) -> Event:
+    """Append a tool-role event for a custom tool call (#133).
+
+    Stamps the tool's ``name`` from the parent assistant's ``tool_calls``
+    array so the derived ``tool_name`` column on ``events`` stays
+    populated for custom tools.  Raises :class:`NotFoundError` if there's
+    no parent — a result with no matching call would leave an orphan row.
+
+    Takes a connection (not a pool) so the caller can group additional
+    work in the same transaction (e.g. a connection-binding auth check
+    in the connector-facing endpoint).  The caller is responsible for
+    deferring the wake afterwards.
+    """
+    from aios.errors import NotFoundError
+
+    name = await queries.lookup_tool_name_by_call_id(conn, session_id, tool_call_id)
+    if name is None:
+        raise NotFoundError(
+            f"tool_call_id {tool_call_id!r} not found",
+            detail={"session_id": session_id, "tool_call_id": tool_call_id},
+        )
+    data: dict[str, Any] = {
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": content,
+        "name": name,
+    }
+    if is_error:
+        data["is_error"] = True
+    return await queries.append_event(conn, session_id=session_id, kind="message", data=data)
+
+
 async def read_events(
     pool: asyncpg.Pool[Any],
     session_id: str,

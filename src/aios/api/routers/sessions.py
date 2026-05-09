@@ -12,7 +12,7 @@ Postgres ``LISTEN``/``NOTIFY``.
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Query, status
 from sse_starlette import EventSourceResponse
@@ -27,7 +27,7 @@ from aios.api.deps import (
 from aios.api.sse import sse_event_stream
 from aios.db import queries
 from aios.db.listen import SESSION_INTERRUPT_CHANNEL, listen_for_events
-from aios.errors import NotFoundError, ValidationError
+from aios.errors import ValidationError
 from aios.harness.wake import defer_wake
 from aios.ids import GITHUB_REPOSITORY, split_id
 from aios.models.common import ListResponse
@@ -333,18 +333,13 @@ async def submit_tool_result(
     result with no parent is a client bug that would leave an orphan row.
     """
     async with pool.acquire() as conn:
-        name = await queries.lookup_tool_name_by_call_id(conn, session_id, body.tool_call_id)
-        if name is None:
-            raise NotFoundError(f"tool_call_id {body.tool_call_id!r} not found")
-        data: dict[str, Any] = {
-            "role": "tool",
-            "tool_call_id": body.tool_call_id,
-            "content": body.content,
-            "name": name,
-        }
-        if body.is_error:
-            data["is_error"] = True
-        event = await queries.append_event(conn, session_id=session_id, kind="message", data=data)
+        event = await service.append_tool_result(
+            conn,
+            session_id=session_id,
+            tool_call_id=body.tool_call_id,
+            content=body.content,
+            is_error=body.is_error,
+        )
     await defer_wake(pool, session_id, cause="custom_tool_result")
     return event
 
