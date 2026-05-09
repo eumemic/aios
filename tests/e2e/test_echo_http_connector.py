@@ -28,6 +28,7 @@ from aios_echo_http import EchoConnector
 
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, last_assistant_content, tool_call
+from tests.helpers.connections import authed_client
 
 
 async def _wait_for_health(url: str, *, deadline_s: float = 5.0) -> None:
@@ -99,18 +100,14 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
 
 
 async def _create_connection(api_key: str, base_url: str, account: str) -> str:
-    async with httpx.AsyncClient(
-        base_url=base_url, headers={"Authorization": f"Bearer {api_key}"}
-    ) as c:
+    async with authed_client(base_url, api_key) as c:
         r = await c.post("/v1/connections", json={"connector": "echo", "account": account})
         r.raise_for_status()
         return str(r.json()["id"])
 
 
 async def _set_tools(api_key: str, base_url: str, connection_id: str) -> None:
-    async with httpx.AsyncClient(
-        base_url=base_url, headers={"Authorization": f"Bearer {api_key}"}
-    ) as c:
+    async with authed_client(base_url, api_key) as c:
         r = await c.put(
             f"/v1/connections/{connection_id}/tools",
             json={
@@ -152,9 +149,7 @@ async def _set_tools(api_key: str, base_url: str, connection_id: str) -> None:
 
 
 async def _issue_token(api_key: str, base_url: str, connection_id: str) -> str:
-    async with httpx.AsyncClient(
-        base_url=base_url, headers={"Authorization": f"Bearer {api_key}"}
-    ) as c:
+    async with authed_client(base_url, api_key) as c:
         r = await c.post("/v1/connector-tokens", json={"connection_id": connection_id})
         r.raise_for_status()
         return str(r.json()["plaintext"])

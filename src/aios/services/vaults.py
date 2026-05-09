@@ -7,7 +7,6 @@ layer validates auth-type-specific fields and enforces limits.
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -108,7 +107,7 @@ async def refresh_credential(
             )
         credential_id, blob = locked
         try:
-            payload: dict[str, Any] = json.loads(crypto_box.decrypt(blob))
+            payload = crypto_box.decrypt_dict(blob)
         except Exception as exc:
             raise OAuthRefreshError(
                 "failed to decrypt stored credential",
@@ -205,7 +204,7 @@ async def refresh_credential(
         if seconds > 0:
             payload["expires_at"] = (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
 
-        new_blob = crypto_box.encrypt(json.dumps(payload))
+        new_blob = crypto_box.encrypt_dict(payload)
         await conn.execute(
             "UPDATE vault_credentials "
             "SET ciphertext = $1, nonce = $2, updated_at = now() "
@@ -343,7 +342,7 @@ async def create_vault_credential(
     body: VaultCredentialCreate,
 ) -> VaultCredential:
     payload = _extract_auth_payload(body)
-    blob = crypto_box.encrypt(json.dumps(payload))
+    blob = crypto_box.encrypt_dict(payload)
     async with pool.acquire() as conn, conn.transaction():
         # Lock the parent vault row to serialize concurrent credential inserts
         # within this vault. Without it, two parallel inserts can both observe
@@ -405,9 +404,9 @@ async def update_vault_credential(
         cred, existing_blob = await queries.get_vault_credential_with_blob(
             conn, vault_id, credential_id
         )
-        existing_payload = json.loads(crypto_box.decrypt(existing_blob))
+        existing_payload = crypto_box.decrypt_dict(existing_blob)
         merged = _merge_auth_payload(existing_payload, body, cred.auth_type)
-        new_blob = crypto_box.encrypt(json.dumps(merged))
+        new_blob = crypto_box.encrypt_dict(merged)
 
         return await queries.update_vault_credential(
             conn,

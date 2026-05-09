@@ -16,6 +16,7 @@ from __future__ import annotations
 import httpx
 
 from tests.conftest import needs_docker
+from tests.helpers.connections import bearer
 
 
 async def _create_connection(http_client: httpx.AsyncClient, account: str) -> str:
@@ -55,7 +56,7 @@ class TestIssueAndResolve:
         # Use the connector token to hit /whoami — it should resolve.
         whoami_r = await http_client.get(
             "/v1/connector-tokens/whoami",
-            headers={"Authorization": f"Bearer {plaintext}"},
+            headers=bearer(plaintext),
         )
         assert whoami_r.status_code == 200, whoami_r.text
         assert whoami_r.json()["connection_id"] == connection_id
@@ -67,7 +68,7 @@ class TestIssueAndResolve:
         reject it.  Otherwise scope is meaningless."""
         r = await http_client.get(
             "/v1/connector-tokens/whoami",
-            headers={"Authorization": f"Bearer {aios_env['AIOS_API_KEY']}"},
+            headers=bearer(aios_env["AIOS_API_KEY"]),
         )
         assert r.status_code == 401, r.text
 
@@ -102,7 +103,7 @@ class TestRevoke:
         # Token works before revoke.
         ok = await http_client.get(
             "/v1/connector-tokens/whoami",
-            headers={"Authorization": f"Bearer {plaintext}"},
+            headers=bearer(plaintext),
         )
         assert ok.status_code == 200
 
@@ -114,7 +115,7 @@ class TestRevoke:
         # Token rejected after revoke.
         denied = await http_client.get(
             "/v1/connector-tokens/whoami",
-            headers={"Authorization": f"Bearer {plaintext}"},
+            headers=bearer(plaintext),
         )
         assert denied.status_code == 401
 
