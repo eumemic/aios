@@ -74,8 +74,8 @@ services:
       AIOS_API_PORT: "8080"
       AIOS_WORKSPACE_ROOT: ${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}
     volumes:
-      # Same path on both sides: services/inbound.py:stage_inbound_attachments
-      # writes to <workspace_root>/_attachments/...; the worker hands those
+      # Same path on both sides: the api process stages inbound attachment
+      # bytes to <workspace_root>/_attachments/...; the worker hands those
       # paths to the host docker daemon when spawning sandboxes, so api +
       # worker + host all see the same string.
       - "${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}:${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}"

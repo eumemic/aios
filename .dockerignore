@@ -26,9 +26,8 @@ build
 venv
 .uv-cache
 
-# Local secrets / env (.env.example is needed by docs but harmless either way;
-# .env.example is whitelisted because it's referenced from CLAUDE.md and may be
-# read by future bootstrap tooling).
+# Local secrets / env.  .env.example is whitelisted because
+# scripts/dev-bootstrap.sh copies it as the seed for new .env files.
 .env
 .env.*
 !.env.example

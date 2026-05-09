@@ -182,10 +182,6 @@ set -a
 source "$ENV_FILE"
 set +a
 
-# Override AIOS_DB_URL for host-side aios CLI calls — postgres is exposed
-# at 5433 in compose.yml, but inside-network services use 5432.  Lean
-# mode's .env default is 5432 (matches host postgres conventions); the
-# override here is host-CLI-only and doesn't get persisted.
 export AIOS_URL="http://localhost:${AIOS_API_PORT:-8080}"
 
 # ── compose: postgres → migrate → api ─────────────────────────────────
@@ -221,31 +217,33 @@ ok "api healthy"
 
 # ── helpers for connection creation ───────────────────────────────────
 # Find the connection id for (connector, account) if one already exists,
-# else echo nothing.  Preserves idempotency on re-runs.
+# else echo nothing.  --connector filters server-side, so the python only
+# matches on account.  Single-quoted -c so account flows via argv (no
+# shell interpolation into the script).
 find_connection_id() {
   local connector="$1" account="$2"
-  uv run aios -f json connections list --connector "$connector" 2>/dev/null \
-    | python3 -c "
+  uv run aios -f json connections list --connector "$connector" \
+    | python3 -c '
 import json, sys
-data = json.load(sys.stdin)
-for c in data.get('data', []):
-    if c.get('connector') == '$connector' and c.get('account') == '$account':
-        print(c.get('id', '')); break
-"
+account = sys.argv[1]
+for c in json.load(sys.stdin).get("data", []):
+    if c.get("account") == account:
+        print(c.get("id", "")); break
+' "$account"
 }
 
 # Resolve telegram bot account from its bot token (Telegram's getMe).
 resolve_telegram_account() {
   local token="$1"
   curl -fsS "https://api.telegram.org/bot${token}/getMe" \
-    | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['result']['id'])"
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])'
 }
 
 create_or_get_connection() {
   local connector="$1" account="$2"
   shift 2
   local existing
-  existing="$(find_connection_id "$connector" "$account" || true)"
+  existing="$(find_connection_id "$connector" "$account")"
   if [[ -n "$existing" ]]; then
     echo "$existing"; return 0
   fi
