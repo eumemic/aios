@@ -20,11 +20,8 @@ This file pins the contract end-to-end with the real harness:
 from __future__ import annotations
 
 import json
-from typing import Any
-from unittest import mock
 
 import httpx
-import pytest
 
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, last_assistant_content, tool_call
@@ -270,35 +267,6 @@ class TestConnectionToolDispatch:
         assert last_assistant_content(events) == "Done."
         s = await harness.session(session.id)
         assert s.stop_reason == {"type": "end_turn"}
-
-
-@pytest.fixture
-async def http_client(aios_env: dict[str, str]) -> Any:
-    """In-process API client.  Wakes are mocked since tests don't run a worker."""
-    from aios.api.app import create_app
-    from aios.config import get_settings
-    from aios.crypto.vault import CryptoBox
-    from aios.db.pool import create_pool
-
-    settings = get_settings()
-    pool = await create_pool(settings.db_url, min_size=1, max_size=4)
-    app = create_app()
-    app.state.pool = pool
-    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    app.state.db_url = settings.db_url
-    app.state.procrastinate = mock.MagicMock()
-    transport = httpx.ASGITransport(app=app)
-    with mock.patch(
-        "aios.api.routers.sessions.defer_wake",
-        new_callable=mock.AsyncMock,
-    ):
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-            headers={"Authorization": f"Bearer {aios_env['AIOS_API_KEY']}"},
-        ) as client:
-            yield client
-    await pool.close()
 
 
 @needs_docker

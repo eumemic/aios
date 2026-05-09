@@ -33,6 +33,7 @@ from aios.errors import (
 from aios.ids import (
     AGENT,
     CONNECTION,
+    CONNECTOR_TOKEN,
     ENVIRONMENT,
     EVENT,
     GITHUB_REPOSITORY,
@@ -48,6 +49,7 @@ from aios.ids import (
 )
 from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
 from aios.models.connections import Connection
+from aios.models.connector_tokens import ConnectorToken
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
 from aios.models.github_repositories import GithubRepositoryResourceEcho
@@ -4029,3 +4031,115 @@ async def delete_session_github_repos(conn: asyncpg.Connection[Any], session_id:
         "DELETE FROM session_github_repositories WHERE session_id = $1",
         session_id,
     )
+
+
+# ─── connector_tokens ────────────────────────────────────────────────────────
+#
+# Per-connection scoped bearer tokens (#301).  The DB stores only a
+# SHA-256 hash; plaintext is returned ONCE on issue.  ``resolve_connector_token``
+# is the single auth lookup — it touches ``last_used_at`` in the same
+# round-trip as the hash match so auth costs one DB call, not two.
+
+
+def _row_to_connector_token(row: asyncpg.Record) -> ConnectorToken:
+    return ConnectorToken(
+        id=row["id"],
+        connection_id=row["connection_id"],
+        label=row["label"],
+        created_at=row["created_at"],
+        last_used_at=row["last_used_at"],
+        revoked_at=row["revoked_at"],
+    )
+
+
+async def insert_connector_token(
+    conn: asyncpg.Connection[Any],
+    *,
+    connection_id: str,
+    label: str | None,
+    token_hash: str,
+) -> ConnectorToken:
+    """Insert a new (unrevoked) token bound to ``connection_id``."""
+    row = await conn.fetchrow(
+        """
+        INSERT INTO connector_tokens (id, connection_id, label, token_hash)
+        VALUES ($1, $2, $3, $4)
+        RETURNING *
+        """,
+        make_id(CONNECTOR_TOKEN),
+        connection_id,
+        label,
+        token_hash,
+    )
+    assert row is not None  # INSERT … RETURNING * always returns the row
+    return _row_to_connector_token(row)
+
+
+async def list_connector_tokens(
+    conn: asyncpg.Connection[Any], connection_id: str
+) -> list[ConnectorToken]:
+    """All tokens (revoked included) for a connection, newest first.
+
+    Revoked tokens stay in the listing so operators can audit who issued
+    what when; clients should filter by ``revoked_at IS NULL`` if they
+    only want live tokens.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT * FROM connector_tokens
+         WHERE connection_id = $1
+         ORDER BY created_at DESC
+        """,
+        connection_id,
+    )
+    return [_row_to_connector_token(r) for r in rows]
+
+
+async def revoke_connector_token(conn: asyncpg.Connection[Any], token_id: str) -> ConnectorToken:
+    """Soft-delete a token by setting ``revoked_at = now()``.
+
+    Idempotent: re-revoking is a SELECT (the WHERE filter excludes
+    already-revoked rows from the UPDATE), and the existing
+    ``revoked_at`` is returned unchanged.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE connector_tokens
+           SET revoked_at = now()
+         WHERE id = $1 AND revoked_at IS NULL
+        RETURNING *
+        """,
+        token_id,
+    )
+    if row is not None:
+        return _row_to_connector_token(row)
+    # Either the token doesn't exist OR it was already revoked.
+    existing = await conn.fetchrow("SELECT * FROM connector_tokens WHERE id = $1", token_id)
+    if existing is None:
+        raise NotFoundError(
+            f"connector_token {token_id} not found",
+            detail={"id": token_id},
+        )
+    return _row_to_connector_token(existing)
+
+
+async def resolve_connector_token(
+    conn: asyncpg.Connection[Any], token_hash: str
+) -> tuple[str, str] | None:
+    """Look up an unrevoked token by hash; touch ``last_used_at`` in one round-trip.
+
+    Returns ``(token_id, connection_id)`` on hit, ``None`` on miss/revoked.
+    Single ``UPDATE … RETURNING`` so auth is one query — not lookup-then-update.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE connector_tokens
+           SET last_used_at = now()
+         WHERE token_hash = $1 AND revoked_at IS NULL
+        RETURNING id, connection_id
+        """,
+        token_hash,
+    )
+    if row is None:
+        return None
+    return (row["id"], row["connection_id"])
