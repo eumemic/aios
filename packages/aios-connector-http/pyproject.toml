@@ -10,6 +10,7 @@ authors = [{ name = "aios contributors" }]
 dependencies = [
     "httpx>=0.27",
     "python-ulid>=3.0",
+    "structlog>=24.1",
 ]
 
 [dependency-groups]
