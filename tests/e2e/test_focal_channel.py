@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.harness.channels import (
     FOCAL_CHANNEL_META_KEY,
@@ -115,7 +116,9 @@ class TestFocalChannelE2E:
         marker = result.data.get("metadata", {}).get(SWITCH_CHANNEL_METADATA_KEY)
         assert marker == {"target": "signal/+1/never-seen", "success": False}
 
-    async def test_per_chat_session_rejects_switch_channel(self, harness: Harness) -> None:
+    async def test_per_chat_session_rejects_switch_channel(
+        self, harness: Harness, crypto_box: CryptoBox
+    ) -> None:
         """A session whose ``spawned_from_connection_id`` is set is bound
         to one chat by construction; ``switch_channel`` rejects every
         attempt regardless of target.
@@ -128,6 +131,7 @@ class TestFocalChannelE2E:
             connector="signal",
             account="+1",
             metadata={},
+            crypto_box=crypto_box,
         )
 
         harness.script_model(

@@ -8,6 +8,7 @@ the resolved state from :class:`typer.Context` via :func:`get_state` in
 
 from __future__ import annotations
 
+import signal
 from typing import Annotated
 
 import typer
@@ -15,6 +16,24 @@ import typer
 from aios.cli.config import resolve_base_url
 from aios.cli.output import OutputFormat
 from aios.cli.runtime import CliState
+
+# Restore the default SIGPIPE disposition so piping the CLI into a
+# consumer that exits early (``aios ... | head``, a scripted pipeline
+# that dies mid-read) terminates the process silently instead of raising
+# a Python BrokenPipeError traceback (issue #116).  The process exits
+# 141 (128 + SIGPIPE) — standard UNIX convention, same as ``yes | head``.
+# The explicit BrokenPipeError catch in :func:`aios.cli.runtime.run_or_die`
+# covers Windows (no SIGPIPE) and any buffered-stdout case where Python
+# observes the broken pipe before SIGPIPE is delivered; that path exits 0.
+#
+# IMPORTANT: this fires at module import.  The API and worker processes
+# (``aios api`` / ``aios worker``) must not import :mod:`aios.cli.app`
+# directly — SIGPIPE terminating the process is correct CLI behavior but
+# would silently kill a long-running server on a broken socket write.
+# Current entrypoints route through :mod:`aios.__main__` which only
+# imports this module for the CLI subcommands.
+if hasattr(signal, "SIGPIPE"):
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
 app = typer.Typer(
     name="aios",

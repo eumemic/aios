@@ -1,9 +1,10 @@
 """Runtime configuration.
 
-``AIOS_SIGNAL_*`` env vars feed pydantic-settings.  In the new
-HTTP-client architecture (#301) each connector container runs one
-account; multi-phone deployments use multiple containers, each with
-its own ``AIOS_CONNECTOR_TOKEN`` and ``AIOS_SIGNAL_PHONE``.
+``AIOS_SIGNAL_*`` env vars feed pydantic-settings.  These are *deployment-shape*
+fields — host paths and ports baked into how the container is wired —
+not credentials.  The phone (the account identity) lives on the
+connection record's encrypted secrets, fetched at ``setup()`` time via
+``HttpConnector.secrets()``.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    phone: str
     config_dir: Path
     cli_bin: str = "signal-cli"
     daemon_host: str = "127.0.0.1"

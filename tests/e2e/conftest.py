@@ -102,6 +102,21 @@ async def real_wake_setup(aios_env: dict[str, str]) -> AsyncIterator[Any]:
 
 
 @pytest.fixture
+def crypto_box(aios_env: dict[str, str]) -> Any:
+    """The :class:`CryptoBox` keyed by the test instance's ``AIOS_VAULT_KEY``.
+
+    Tests that call into ``aios.services.connections.create_connection`` /
+    ``set_connection_secrets`` need this — those services accept a
+    ``CryptoBox`` so the in-process encryption is testable without a
+    running api process.
+    """
+    from aios.config import get_settings
+    from aios.crypto.vault import CryptoBox
+
+    return CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
+
+
+@pytest.fixture
 async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     """Function-scoped harness: real Postgres, scripted model, no Docker."""
     import aios.tools  # noqa: F401  — register built-in tools

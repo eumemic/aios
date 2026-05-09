@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, status
 
-from aios.api.deps import AuthDep, DbUrlDep, PoolDep
+from aios.api.deps import AuthDep, CryptoBoxDep, DbUrlDep, PoolDep
 from aios.models.common import ListResponse
 from aios.models.connections import (
     BindChatRequest,
@@ -32,6 +32,7 @@ from aios.models.connections import (
     ConnectionConfigurePerChat,
     ConnectionCreate,
     ConnectionMode,
+    ConnectionSetSecrets,
     ConnectionSetTools,
     RecentChat,
 )
@@ -41,7 +42,9 @@ router = APIRouter(prefix="/v1/connections", tags=["connections"])
 
 
 @router.post("", operation_id="create_connection", status_code=status.HTTP_201_CREATED)
-async def create(body: ConnectionCreate, pool: PoolDep, _auth: AuthDep) -> Connection:
+async def create(
+    body: ConnectionCreate, pool: PoolDep, crypto_box: CryptoBoxDep, _auth: AuthDep
+) -> Connection:
     """Create a detached connection, **idempotent on ``(connector, account)``**.
 
     Per plan decision #5, this endpoint and the supervisor's
@@ -50,6 +53,12 @@ async def create(body: ConnectionCreate, pool: PoolDep, _auth: AuthDep) -> Conne
     existing row rather than 409.  The ``id`` may differ from a freshly-allocated
     one if a concurrent writer landed first; the response always reflects the
     canonical active row.
+
+    Optional ``secrets`` carry platform credentials (e.g. Telegram
+    ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
+    and only ever read back through the connector-scoped
+    ``GET /v1/connectors/secrets`` route — operator-facing reads return
+    ``secrets_set: bool`` instead of values.
     """
     return await service.create_connection(
         pool,
@@ -57,6 +66,8 @@ async def create(body: ConnectionCreate, pool: PoolDep, _auth: AuthDep) -> Conne
         account=body.account,
         metadata=body.metadata,
         tools=body.tools,
+        secrets=body.secrets,
+        crypto_box=crypto_box,
     )
 
 
@@ -77,6 +88,27 @@ async def set_tools(
     result back via ``/v1/sessions/:id/tool-results``.
     """
     return await service.set_connection_tools(pool, connection_id, tools=body.tools)
+
+
+@router.put("/{connection_id}/secrets", operation_id="set_connection_secrets")
+async def set_secrets(
+    connection_id: str,
+    body: ConnectionSetSecrets,
+    pool: PoolDep,
+    crypto_box: CryptoBoxDep,
+    _auth: AuthDep,
+) -> Connection:
+    """Replace the connection's encrypted secrets dict, wholesale.
+
+    Mirrors ``set_tools`` — the request body fully replaces the stored
+    blob.  Pass ``{"secrets": {}}`` to clear secrets entirely.
+    Operator-facing reads only ever expose ``secrets_set: bool``; the
+    decrypted values are exclusively available to the connector
+    container that holds a connector token resolving to this connection.
+    """
+    return await service.set_connection_secrets(
+        pool, connection_id, secrets=body.secrets, crypto_box=crypto_box
+    )
 
 
 @router.get("", operation_id="list_connections")

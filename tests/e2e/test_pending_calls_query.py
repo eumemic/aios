@@ -19,6 +19,7 @@ import asyncio
 import json
 
 from aios.config import get_settings
+from aios.crypto.vault import CryptoBox
 from aios.db.listen import listen_for_connector_calls
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness
@@ -26,7 +27,9 @@ from tests.e2e.harness import Harness
 
 @needs_docker
 class TestListPendingCalls:
-    async def test_returns_pending_call_for_attached_session(self, harness: Harness) -> None:
+    async def test_returns_pending_call_for_attached_session(
+        self, harness: Harness, crypto_box: CryptoBox
+    ) -> None:
         from aios.db import queries
         from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
@@ -54,6 +57,7 @@ class TestListPendingCalls:
             connector="echo",
             account=f"acct-q-{id(self)}",
             metadata={},
+            crypto_box=crypto_box,
             tools=[
                 ToolSpec(
                     type="custom",
@@ -102,7 +106,9 @@ class TestListPendingCalls:
         assert calls[0]["session_id"] == session.id
         assert json.loads(calls[0]["arguments"]) == {"text": "hi"}
 
-    async def test_returns_empty_for_unrelated_connection(self, harness: Harness) -> None:
+    async def test_returns_empty_for_unrelated_connection(
+        self, harness: Harness, crypto_box: CryptoBox
+    ) -> None:
         from aios.db import queries
         from aios.models.agents import ToolSpec
         from aios.services import connections as connections_service
@@ -113,6 +119,7 @@ class TestListPendingCalls:
             connector="echo",
             account=f"acct-u-{id(self)}",
             metadata={},
+            crypto_box=crypto_box,
             tools=[
                 ToolSpec(
                     type="custom",
@@ -139,7 +146,9 @@ class TestConnectorCallsNotify:
     fires → SSE consumer queries → stop_reason still null → empty result.
     """
 
-    async def test_notify_fires_on_requires_action_park(self, harness: Harness) -> None:
+    async def test_notify_fires_on_requires_action_park(
+        self, harness: Harness, crypto_box: CryptoBox
+    ) -> None:
         from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
@@ -166,6 +175,7 @@ class TestConnectorCallsNotify:
             connector="echo",
             account=f"acct-n-{id(self)}",
             metadata={},
+            crypto_box=crypto_box,
             tools=[
                 ToolSpec(
                     type="custom",
@@ -192,7 +202,9 @@ class TestConnectorCallsNotify:
             payload = await asyncio.wait_for(queue.get(), timeout=5.0)
             assert payload == session.id
 
-    async def test_notify_silent_on_non_requires_action_park(self, harness: Harness) -> None:
+    async def test_notify_silent_on_non_requires_action_park(
+        self, harness: Harness, crypto_box: CryptoBox
+    ) -> None:
         """``end_turn`` and other stop reasons MUST NOT trigger the
         connector-calls fan-out — only ``requires_action`` with pending
         ``custom_tools`` represents new work for the connector.
@@ -223,6 +235,7 @@ class TestConnectorCallsNotify:
             connector="echo",
             account=f"acct-nu-{id(self)}",
             metadata={},
+            crypto_box=crypto_box,
             tools=[
                 ToolSpec(
                     type="custom",
@@ -248,7 +261,9 @@ class TestConnectorCallsNotify:
                 payload = None
             assert payload is None, f"unexpected NOTIFY for end_turn park: {payload}"
 
-    async def test_notify_silent_on_unrelated_connection(self, harness: Harness) -> None:
+    async def test_notify_silent_on_unrelated_connection(
+        self, harness: Harness, crypto_box: CryptoBox
+    ) -> None:
         """An assistant tool_calls event on session A must NOT NOTIFY
         a connection bound to session B.  Scope is the connection's
         bound sessions, not all sessions.
@@ -283,6 +298,7 @@ class TestConnectorCallsNotify:
             connector="echo",
             account=f"acct-nu-A-{id(self)}",
             metadata={},
+            crypto_box=crypto_box,
             tools=[
                 ToolSpec(type="custom", name="x", description="", input_schema={"type": "object"}),
             ],
@@ -292,6 +308,7 @@ class TestConnectorCallsNotify:
             connector="echo",
             account=f"acct-nu-B-{id(self)}",
             metadata={},
+            crypto_box=crypto_box,
             tools=[
                 ToolSpec(type="custom", name="x", description="", input_schema={"type": "object"}),
             ],

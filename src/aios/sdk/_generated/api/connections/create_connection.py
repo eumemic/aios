@@ -80,6 +80,12 @@ def sync_detailed(
     one if a concurrent writer landed first; the response always reflects the
     canonical active row.
 
+    Optional ``secrets`` carry platform credentials (e.g. Telegram
+    ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
+    and only ever read back through the connector-scoped
+    ``GET /v1/connectors/secrets`` route — operator-facing reads return
+    ``secrets_set: bool`` instead of values.
+
     Args:
         authorization (None | str | Unset):
         body (ConnectionCreate): Request body for ``POST /v1/connections``.
@@ -132,6 +138,12 @@ def sync(
     one if a concurrent writer landed first; the response always reflects the
     canonical active row.
 
+    Optional ``secrets`` carry platform credentials (e.g. Telegram
+    ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
+    and only ever read back through the connector-scoped
+    ``GET /v1/connectors/secrets`` route — operator-facing reads return
+    ``secrets_set: bool`` instead of values.
+
     Args:
         authorization (None | str | Unset):
         body (ConnectionCreate): Request body for ``POST /v1/connections``.
@@ -178,6 +190,12 @@ async def asyncio_detailed(
     existing row rather than 409.  The ``id`` may differ from a freshly-allocated
     one if a concurrent writer landed first; the response always reflects the
     canonical active row.
+
+    Optional ``secrets`` carry platform credentials (e.g. Telegram
+    ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
+    and only ever read back through the connector-scoped
+    ``GET /v1/connectors/secrets`` route — operator-facing reads return
+    ``secrets_set: bool`` instead of values.
 
     Args:
         authorization (None | str | Unset):
@@ -228,6 +246,12 @@ async def asyncio(
     existing row rather than 409.  The ``id`` may differ from a freshly-allocated
     one if a concurrent writer landed first; the response always reflects the
     canonical active row.
+
+    Optional ``secrets`` carry platform credentials (e.g. Telegram
+    ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
+    and only ever read back through the connector-scoped
+    ``GET /v1/connectors/secrets`` route — operator-facing reads return
+    ``secrets_set: bool`` instead of values.
 
     Args:
         authorization (None | str | Unset):

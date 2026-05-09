@@ -2605,6 +2605,7 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         session_template_id=row["session_template_id"],
         metadata=metadata,
         tools=tools_data,
+        secrets_set=row["secrets_ciphertext"] is not None,
         created_at=row["created_at"],
         attached_at=row["attached_at"],
         updated_at=row["updated_at"],
@@ -2619,6 +2620,7 @@ async def insert_connection(
     account: str,
     metadata: dict[str, Any],
     tools: list[dict[str, Any]] | None = None,
+    secrets_blob: EncryptedBlob | None = None,
 ) -> Connection:
     """Insert a detached connection, idempotent on the active uniqueness key.
 
@@ -2630,6 +2632,11 @@ async def insert_connection(
     is ``(connector, account) WHERE archived_at IS NULL`` — an archived
     row with the same pair will not collide; a fresh insert will land.
 
+    ``secrets_blob`` carries the encrypted credential dict.  ``None``
+    leaves both secret columns NULL; the schema's
+    ``connections_secrets_pair_ck`` keeps the pair-or-neither invariant
+    intact at the storage boundary.
+
     Use ``attach_connection`` or ``configure_per_chat_connection`` to bind
     a routing mode after creation.
     """
@@ -2640,11 +2647,16 @@ async def insert_connection(
     # iterations is enough that exhaustion would mean the system is wedged
     # in a hot insert/archive cycle that no retry strategy can resolve.
     tools_json = json.dumps(tools or [])
+    ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
+    nonce = secrets_blob.nonce if secrets_blob is not None else None
     for _ in range(3):
         row = await conn.fetchrow(
             """
-            INSERT INTO connections (id, connector, account, metadata, tools)
-            VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+            INSERT INTO connections (
+                id, connector, account, metadata, tools,
+                secrets_ciphertext, secrets_nonce
+            )
+            VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
             ON CONFLICT (connector, account) WHERE archived_at IS NULL DO NOTHING
             RETURNING *
             """,
@@ -2653,6 +2665,8 @@ async def insert_connection(
             account,
             json.dumps(metadata),
             tools_json,
+            ciphertext,
+            nonce,
         )
         if row is not None:
             return _row_to_connection(row)
@@ -2748,6 +2762,74 @@ async def set_connection_tools(
             detail={"id": connection_id},
         )
     return _row_to_connection(row)
+
+
+async def set_connection_secrets(
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    secrets_blob: EncryptedBlob | None,
+) -> Connection:
+    """Replace a connection's encrypted secret blob.  Bumps ``updated_at``.
+
+    ``None`` clears the columns; an :class:`EncryptedBlob` writes its
+    paired ciphertext + nonce.  The schema's
+    ``connections_secrets_pair_ck`` enforces pair-or-neither at the
+    storage boundary.
+
+    Refuses on archived rows.
+    """
+    ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
+    nonce = secrets_blob.nonce if secrets_blob is not None else None
+    row = await conn.fetchrow(
+        """
+        UPDATE connections
+           SET secrets_ciphertext = $2,
+               secrets_nonce      = $3,
+               updated_at         = now()
+         WHERE id = $1 AND archived_at IS NULL
+        RETURNING *
+        """,
+        connection_id,
+        ciphertext,
+        nonce,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"connection {connection_id} not found or archived",
+            detail={"id": connection_id},
+        )
+    return _row_to_connection(row)
+
+
+async def get_connection_secret_blob(
+    conn: asyncpg.Connection[Any], connection_id: str
+) -> EncryptedBlob | None:
+    """Read the encrypted secrets blob for a connection.
+
+    Returns ``None`` if the connection has no secrets configured.  Raises
+    :class:`NotFoundError` if the connection itself is missing or archived
+    — connector containers should not see "secrets fetch returned empty"
+    when the underlying connection is gone.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT secrets_ciphertext, secrets_nonce
+          FROM connections
+         WHERE id = $1 AND archived_at IS NULL
+        """,
+        connection_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"connection {connection_id} not found or archived",
+            detail={"id": connection_id},
+        )
+    ciphertext = row["secrets_ciphertext"]
+    nonce = row["secrets_nonce"]
+    if ciphertext is None or nonce is None:
+        return None
+    return EncryptedBlob(ciphertext=ciphertext, nonce=nonce)
 
 
 async def list_connection_tools_for_session(
@@ -3021,9 +3103,25 @@ async def unconfigure_connection(conn: asyncpg.Connection[Any], connection_id: s
 
 
 async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
+    """Soft-archive a connection AND scrub its encrypted secrets.
+
+    Setting ``secrets_ciphertext = NULL`` / ``secrets_nonce = NULL``
+    on archive matches the property documented on
+    :mod:`aios.crypto.vault` (archived rows do not retain decryptable
+    secrets) so a later DB dump or read on an archived row can't
+    recover platform credentials.  The pair-or-neither check
+    constraint is satisfied because both columns flip together.
+    """
     row = await conn.fetchrow(
-        "UPDATE connections SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        """
+        UPDATE connections
+           SET archived_at        = now(),
+               updated_at         = now(),
+               secrets_ciphertext = NULL,
+               secrets_nonce      = NULL
+         WHERE id = $1 AND archived_at IS NULL
+        RETURNING *
+        """,
         connection_id,
     )
     if row is None:

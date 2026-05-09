@@ -21,7 +21,10 @@ from .connection_attach import ConnectionAttach
 from .connection_configure_per_chat import ConnectionConfigurePerChat
 from .connection_create import ConnectionCreate
 from .connection_create_metadata import ConnectionCreateMetadata
+from .connection_create_secrets_type_0 import ConnectionCreateSecretsType0
 from .connection_metadata import ConnectionMetadata
+from .connection_set_secrets import ConnectionSetSecrets
+from .connection_set_secrets_secrets import ConnectionSetSecretsSecrets
 from .connection_set_tools import ConnectionSetTools
 from .connector_inbound_request import ConnectorInboundRequest
 from .connector_inbound_request_attachments_type_0_item import (
@@ -32,6 +35,8 @@ from .connector_inbound_request_metadata_type_0 import (
 )
 from .connector_inbound_request_sender import ConnectorInboundRequestSender
 from .connector_inbound_response import ConnectorInboundResponse
+from .connector_secrets import ConnectorSecrets
+from .connector_secrets_secrets import ConnectorSecretsSecrets
 from .connector_token import ConnectorToken
 from .connector_token_issue import ConnectorTokenIssue
 from .connector_token_issued import ConnectorTokenIssued
@@ -188,13 +193,18 @@ __all__ = (
     "ConnectionConfigurePerChat",
     "ConnectionCreate",
     "ConnectionCreateMetadata",
+    "ConnectionCreateSecretsType0",
     "ConnectionMetadata",
+    "ConnectionSetSecrets",
+    "ConnectionSetSecretsSecrets",
     "ConnectionSetTools",
     "ConnectorInboundRequest",
     "ConnectorInboundRequestAttachmentsType0Item",
     "ConnectorInboundRequestMetadataType0",
     "ConnectorInboundRequestSender",
     "ConnectorInboundResponse",
+    "ConnectorSecrets",
+    "ConnectorSecretsSecrets",
     "ConnectorToken",
     "ConnectorTokenIssue",
     "ConnectorTokenIssued",

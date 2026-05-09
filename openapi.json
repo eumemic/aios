@@ -4321,7 +4321,7 @@
           "connections"
         ],
         "summary": "Create",
-        "description": "Create a detached connection, **idempotent on ``(connector, account)``**.\n\nPer plan decision #5, this endpoint and the supervisor's\nauto-create-on-first-inbound path race-safely converge on a single row:\nposting twice with the same ``(connector, account)`` returns 201 with the\nexisting row rather than 409.  The ``id`` may differ from a freshly-allocated\none if a concurrent writer landed first; the response always reflects the\ncanonical active row.",
+        "description": "Create a detached connection, **idempotent on ``(connector, account)``**.\n\nPer plan decision #5, this endpoint and the supervisor's\nauto-create-on-first-inbound path race-safely converge on a single row:\nposting twice with the same ``(connector, account)`` returns 201 with the\nexisting row rather than 409.  The ``id`` may differ from a freshly-allocated\none if a concurrent writer landed first; the response always reflects the\ncanonical active row.\n\nOptional ``secrets`` carry platform credentials (e.g. Telegram\n``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``\nand only ever read back through the connector-scoped\n``GET /v1/connectors/secrets`` route \u2014 operator-facing reads return\n``secrets_set: bool`` instead of values.",
         "operationId": "create_connection",
         "parameters": [
           {
@@ -4543,6 +4543,75 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ConnectionSetTools"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connections/{connection_id}/secrets": {
+      "put": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Set Secrets",
+        "description": "Replace the connection's encrypted secrets dict, wholesale.\n\nMirrors ``set_tools`` \u2014 the request body fully replaces the stored\nblob.  Pass ``{\"secrets\": {}}`` to clear secrets entirely.\nOperator-facing reads only ever expose ``secrets_set: bool``; the\ndecrypted values are exclusively available to the connector\ncontainer that holds a connector token resolving to this connection.",
+        "operationId": "set_connection_secrets",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionSetSecrets"
               }
             }
           }
@@ -5550,6 +5619,56 @@
         }
       }
     },
+    "/v1/connectors/secrets": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Get Secrets",
+        "description": "Decrypted secrets for the caller's connection.\n\nThe bearer token resolves server-side to one ``connection_id``;\noperators set secrets on that connection via\n``POST /v1/connections`` or ``PUT /v1/connections/{id}/secrets`` and\nnever read them back through the operator surface.  This is the only\ndecryption path.\n\nReturns ``{\"secrets\": {}}`` when no secrets are configured \u2014 the\nconnector author decides whether that's acceptable (most need at\nleast one credential and should fail loudly).",
+        "operationId": "get_connector_secrets",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorSecrets"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/calls": {
       "get": {
         "tags": [
@@ -6501,6 +6620,11 @@
             "type": "array",
             "title": "Tools"
           },
+          "secrets_set": {
+            "type": "boolean",
+            "title": "Secrets Set",
+            "default": false
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -6546,7 +6670,7 @@
           "updated_at"
         ],
         "title": "Connection",
-        "description": "Read view of a connection.\n\nMode is implicit in the populated field:\n\n* ``session_id`` set \u2192 single_session\n* ``session_template_id`` set \u2192 per_chat\n* neither \u2192 detached"
+        "description": "Read view of a connection.\n\nMode is implicit in the populated field:\n\n* ``session_id`` set \u2192 single_session\n* ``session_template_id`` set \u2192 per_chat\n* neither \u2192 detached\n\nSecrets are *write-only* on the operator surface \u2014 the model carries\n``secrets_set: bool`` rather than the values themselves.  The only\ndecryption path is the connector-scoped ``GET /v1/connectors/secrets``,\nwhich returns the dict for the caller's own connection."
       },
       "ConnectionAttach": {
         "properties": {
@@ -6603,6 +6727,21 @@
             },
             "type": "array",
             "title": "Tools"
+          },
+          "secrets": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secrets",
+            "description": "Platform credentials (e.g. ``bot_token``).  Encrypted at rest via the server's ``AIOS_VAULT_KEY``; only ever read back via the connector-scoped ``GET /v1/connectors/secrets``.  Operator-facing reads return ``secrets_set: bool`` instead of values."
           }
         },
         "additionalProperties": false,
@@ -6613,6 +6752,21 @@
         ],
         "title": "ConnectionCreate",
         "description": "Request body for ``POST /v1/connections``.\n\nCreated in detached mode \u2014 neither ``session_id`` nor\n``session_template_id`` is set.  Use ``POST .../attach`` or\n``POST .../configure-per-chat`` afterward to bind a routing mode.\n\n``connector`` and ``account`` may not contain ``/`` \u2014 they're used\nin the focal-channel address scheme ``{connector}/{account}/{chat_id}``\nand a ``/`` would create ambiguous segment boundaries.\n\n``tools`` declares the model-facing custom tools this connection\ncontributes to any session it's attached to (see #301)."
+      },
+      "ConnectionSetSecrets": {
+        "properties": {
+          "secrets": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secrets"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ConnectionSetSecrets",
+        "description": "Request body for ``PUT /v1/connections/{id}/secrets``.\n\nReplaces the connection's secrets dict wholesale (matches the\n``set_connection_tools`` pattern).  Encrypted at rest server-side via\n``AIOS_VAULT_KEY``; the operator never reads them back.\n\nPass an empty dict to clear secrets."
       },
       "ConnectionSetTools": {
         "properties": {
@@ -6736,6 +6890,20 @@
         ],
         "title": "ConnectorInboundResponse",
         "description": "Response for ``POST /v1/connectors/inbound``."
+      },
+      "ConnectorSecrets": {
+        "properties": {
+          "secrets": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secrets"
+          }
+        },
+        "type": "object",
+        "title": "ConnectorSecrets",
+        "description": "Response shape for ``GET /v1/connectors/secrets``.\n\nOnly the connector container's bearer token (which scopes to one\n``connection_id``) can hit this route.  Returns the decrypted dict\nthe operator stored at create / set-secrets time.  Empty dict when\nthe connection has no secrets configured."
       },
       "ConnectorToken": {
         "properties": {

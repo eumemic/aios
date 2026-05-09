@@ -22,7 +22,6 @@ from telegram import Bot, Message
 os.environ.setdefault("AIOS_URL", "http://test")
 os.environ.setdefault("AIOS_CONNECTOR_TOKEN", "aios_conn_test")
 
-from aios_telegram.config import Settings
 from aios_telegram.connector import TelegramConnector
 
 BOT_ID = 99999999
@@ -43,8 +42,7 @@ def connector(bot: Any) -> TelegramConnector:
     test_telegram_outbound).  This shared fixture wraps that bot in an
     Application MagicMock and hands back the connector.
     """
-    cfg = Settings(bot_token="0:test")
-    c = TelegramConnector(cfg)
+    c = TelegramConnector()
     c._application = MagicMock()
     c._application.bot = bot
     return c

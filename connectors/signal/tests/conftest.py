@@ -38,14 +38,20 @@ def _load(name: str) -> dict[str, Any]:
 
 @pytest.fixture
 def connector(tmp_path: Path) -> SignalConnector:
-    """SignalConnector with a stubbed daemon — tests drive RPC via the mock."""
+    """SignalConnector with a stubbed daemon — tests drive RPC via the mock.
+
+    Phone now lives on the connection's secrets blob (fetched at
+    ``setup()`` time), so tests pre-set ``c._phone`` directly the same
+    way they pre-set ``c._bot_uuid`` — bypassing setup() and the secrets
+    round-trip.
+    """
     cfg = Settings(
-        phone=PHONE,
         config_dir=tmp_path / "cfg",
         cli_bin="/usr/bin/signal-cli",
     )
     c = SignalConnector(cfg)
     c._bot_uuid = "bot-uuid"
+    c._phone = PHONE
     c._daemon = type(
         "Daemon",
         (),
