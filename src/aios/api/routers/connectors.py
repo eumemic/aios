@@ -29,7 +29,7 @@ from aios.errors import (
     ValidationError,
 )
 from aios.harness.wake import defer_wake
-from aios.models.connections import ConnectorSecrets
+from aios.models.connections import Connection, ConnectionSetTools, ConnectorSecrets
 from aios.services import connections as connections_service
 from aios.services import inbound as inbound_service
 from aios.services import sessions as sessions_service
@@ -200,6 +200,28 @@ async def get_secrets(
         pool, connection_id, crypto_box=crypto_box
     )
     return ConnectorSecrets(secrets=secrets)
+
+
+@router.put("/tools", operation_id="set_connector_tools")
+async def set_tools(
+    body: ConnectionSetTools,
+    pool: PoolDep,
+    connection_id: ConnectorAuthDep,
+) -> Connection:
+    """Publish the connector's tool schemas onto its own connection.
+
+    The connector container is the source of truth for what tools it
+    serves — it knows their names, parameter shapes, and docstrings.
+    The SDK derives JSON Schemas from ``@tool``-decorated methods at
+    startup and POSTs them here, replacing whatever was on the
+    connection wholesale.  Operators don't hand-write ``tools.json``.
+
+    Authorization: the bearer token resolves to one ``connection_id``;
+    a connector can only publish tools for its own connection.  This
+    is the connector-scoped twin of operator-scoped
+    ``PUT /v1/connections/{id}/tools``.
+    """
+    return await connections_service.set_connection_tools(pool, connection_id, tools=body.tools)
 
 
 @router.get("/calls", openapi_extra={"x-codegen": {"targets": []}})

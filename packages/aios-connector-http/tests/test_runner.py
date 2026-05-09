@@ -347,6 +347,25 @@ class TestLogging:
         assert failed[0]["name"] == "no_such_tool"
         assert failed[0]["reason"] == "unknown_tool"
 
+    async def test_publish_tool_schemas_derives_and_pushes(
+        self, probe: _ProbeConnector
+    ) -> None:
+        """``_publish_tool_schemas`` is the single SDK call site that
+        keeps the connection's tools list in sync with the connector's
+        Python source.  Verify it (a) derives one ToolSpec per @tool
+        method and (b) PUTs them via ``set_connection_tools``.
+        """
+        probe._connection_id = "conn_test"
+        await probe._publish_tool_schemas()
+        probe._client.set_connection_tools.assert_awaited_once()  # type: ignore[union-attr]
+        published = probe._client.set_connection_tools.call_args.args[0]  # type: ignore[union-attr]
+        names = sorted(spec["name"] for spec in published)
+        assert names == ["boom", "say_struct", "shout"]
+        # Sanity: each spec has the canonical custom-tool shape.
+        for spec in published:
+            assert spec["type"] == "custom"
+            assert spec["input_schema"]["type"] == "object"
+
     async def test_dispatch_call_logs_failed_on_tool_exception(
         self, probe: _ProbeConnector
     ) -> None:

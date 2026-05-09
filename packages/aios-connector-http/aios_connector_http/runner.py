@@ -36,6 +36,7 @@ from ulid import ULID
 
 from .client import AiosClient
 from .sandbox import _SandboxPathMarker, resolve_sandbox_path
+from .schema import derive_tool_spec
 
 ToolFn = Callable[..., Awaitable[Any]]
 
@@ -184,12 +185,31 @@ class HttpConnector:
             self._connection_id = await client.whoami()
             self._answered = await self.load_answered()
             await self.setup()
+            await self._publish_tool_schemas()
             try:
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(self._tool_loop(), name="aios-tool-loop")
                     tg.create_task(self.serve(), name="aios-platform-serve")
             finally:
                 await self.teardown()
+
+    async def _publish_tool_schemas(self) -> None:
+        """Derive a ToolSpec from each ``@tool`` method and publish it.
+
+        Replaces the connection's tools wholesale on every startup, so
+        the model's tool list always matches the running container.
+        Operator-side hand-written ``tools.json`` is deliberately
+        overwritten — the Python source is canonical.
+        """
+        assert self._client is not None
+        specs = [derive_tool_spec(name, meta.fn) for name, meta in self._tools.items()]
+        await self._client.set_connection_tools(specs)
+        log.info(
+            "connector.tools.published",
+            connection_id=self._connection_id,
+            tool_count=len(specs),
+            tool_names=sorted(self._tools.keys()),
+        )
 
     async def _tool_loop(self) -> None:
         """Tail the calls SSE stream and dispatch each call.
