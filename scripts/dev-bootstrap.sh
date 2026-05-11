@@ -172,6 +172,12 @@ fi
 WORKSPACE_HOST_PATH="$(env_get WORKSPACE_HOST_PATH)"
 WORKSPACE_HOST_PATH="${WORKSPACE_HOST_PATH:-./.aios/workspaces}"
 mkdir -p "$WORKSPACE_HOST_PATH"
+# 0777 so every container can write inside regardless of in-container uid:
+# api runs as uid 1000 (USER aios), worker + connectors run as root, and
+# host-uid varies across operator machines (501 on macOS, 1000 on most
+# Linux dev boxes).  No security boundary lives at the workspace root —
+# per-session subdirs are isolated by the sandbox containers themselves.
+chmod 0777 "$WORKSPACE_HOST_PATH"
 WORKSPACE_HOST_PATH="$(cd "$WORKSPACE_HOST_PATH" && pwd)"
 env_set WORKSPACE_HOST_PATH "$WORKSPACE_HOST_PATH"
 say "workspace dir at $WORKSPACE_HOST_PATH"

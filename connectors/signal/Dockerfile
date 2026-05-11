@@ -52,4 +52,9 @@ RUN uv pip install --system --no-cache \
     /app/packages/aios-connector-http \
     /app/connectors/signal
 
-CMD ["python", "-m", "aios_signal"]
+# Entrypoint chowns the shared state dir so the api (uid 1000) can read
+# signal-cli's attachment writes from the same host bind mount.  Worker
+# and connector containers run as root so the chown succeeds; the actual
+# signal-cli process inside aios_signal still runs as root.
+RUN chmod 0755 /app/connectors/signal/entrypoint.sh
+ENTRYPOINT ["/app/connectors/signal/entrypoint.sh"]

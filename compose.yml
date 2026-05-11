@@ -79,6 +79,12 @@ services:
       # paths to the host docker daemon when spawning sandboxes, so api +
       # worker + host all see the same string.
       - "${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}:${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}"
+      # Signal connector writes attachments to its config_dir; api reads
+      # them back via host_path during inbound staging.  The mount needs
+      # to match the signal service's mount path AND be writable: api's
+      # ``os.rename`` falls back to ``shutil.copy2`` + unlink across
+      # filesystems, and the unlink runs on the source side.
+      - signal_state:/var/lib/aios/signal-data
     ports:
       - "${AIOS_API_PORT:-8080}:8080"
     # Healthcheck inherited from Dockerfile (curl http://127.0.0.1:8080/health).
