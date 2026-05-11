@@ -4321,7 +4321,7 @@
           "connections"
         ],
         "summary": "Create",
-        "description": "Create a detached connection, **idempotent on ``(connector, account)``**.\n\nPer plan decision #5, this endpoint and the supervisor's\nauto-create-on-first-inbound path race-safely converge on a single row:\nposting twice with the same ``(connector, account)`` returns 201 with the\nexisting row rather than 409.  The ``id`` may differ from a freshly-allocated\none if a concurrent writer landed first; the response always reflects the\ncanonical active row.",
+        "description": "Create a detached connection, **idempotent on ``(connector, account)``**.\n\nPer plan decision #5, this endpoint and the supervisor's\nauto-create-on-first-inbound path race-safely converge on a single row:\nposting twice with the same ``(connector, account)`` returns 201 with the\nexisting row rather than 409.  The ``id`` may differ from a freshly-allocated\none if a concurrent writer landed first; the response always reflects the\ncanonical active row.\n\nOptional ``secrets`` carry platform credentials (e.g. Telegram\n``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``\nand only ever read back through the connector-scoped\n``GET /v1/connectors/secrets`` route \u2014 operator-facing reads return\n``secrets_set: bool`` instead of values.",
         "operationId": "create_connection",
         "parameters": [
           {
@@ -4502,6 +4502,144 @@
         }
       }
     },
+    "/v1/connections/{connection_id}/tools": {
+      "put": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Set Tools",
+        "description": "Replace the connection's tools wholesale (#301).\n\nTools declared on a connection become available to the model as\n``type=\"custom\"`` entries on every session this connection is\nattached to (single_session) or that this connection spawned\n(per_chat).  The model calls them, the session parks in\n``requires_action``, the connector executes externally and POSTs the\nresult back via ``/v1/sessions/:id/tool-results``.",
+        "operationId": "set_connection_tools",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionSetTools"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connections/{connection_id}/secrets": {
+      "put": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Set Secrets",
+        "description": "Replace the connection's encrypted secrets dict, wholesale.\n\nMirrors ``set_tools`` \u2014 the request body fully replaces the stored\nblob.  Pass ``{\"secrets\": {}}`` to clear secrets entirely.\nOperator-facing reads only ever expose ``secrets_set: bool``; the\ndecrypted values are exclusively available to the connector\ncontainer that holds a connector token resolving to this connection.",
+        "operationId": "set_connection_secrets",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionSetSecrets"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connections/{connection_id}": {
       "get": {
         "tags": [
@@ -4617,7 +4755,7 @@
           "connections"
         ],
         "summary": "Attach",
-        "description": "Attach a connection to a session, after validating the account against the snapshot.\n\nThe drift check runs BEFORE the DB write so a stale account can't\nmove into ``single_session`` mode and silently swallow inbound.",
+        "description": "Attach a connection to a session.\n\nThe legacy supervisor's \"live snapshot drift check\" was removed in\n#301 \u2014 the new architecture has connectors as peer services, so the\napi process can't probe a worker-side account snapshot.  Operators\nbear the responsibility of attaching to a real account; an inbound\nreferencing an unknown account simply drops at the new\n``/v1/connectors/inbound`` boundary.",
         "operationId": "attach_connection",
         "parameters": [
           {
@@ -5135,368 +5273,15 @@
         }
       }
     },
-    "/v1/connectors": {
-      "get": {
-        "tags": [
-          "connectors"
-        ],
-        "summary": "List ",
-        "description": "Snapshot every enabled connector instance.",
-        "operationId": "list__v1_connectors_get",
-        "parameters": [
-          {
-            "name": "Authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response List  V1 Connectors Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
-        "x-codegen": {
-          "targets": []
-        }
-      }
-    },
-    "/v1/connectors/{connector}": {
-      "get": {
-        "tags": [
-          "connectors"
-        ],
-        "summary": "List For Connector",
-        "description": "Snapshot every instance of one connector type.",
-        "operationId": "list_for_connector_v1_connectors__connector__get",
-        "parameters": [
-          {
-            "name": "connector",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Connector"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response List For Connector V1 Connectors  Connector  Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
-        "x-codegen": {
-          "targets": []
-        }
-      }
-    },
-    "/v1/connectors/{connector}/{instance}": {
-      "get": {
-        "tags": [
-          "connectors"
-        ],
-        "summary": "Get Instance",
-        "description": "Snapshot a single ``(connector, instance)`` pair.",
-        "operationId": "get_instance_v1_connectors__connector___instance__get",
-        "parameters": [
-          {
-            "name": "connector",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Connector"
-            }
-          },
-          {
-            "name": "instance",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Instance"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Instance V1 Connectors  Connector   Instance  Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
-        "x-codegen": {
-          "targets": []
-        }
-      }
-    },
-    "/v1/connectors/{connector}/{instance}/accounts": {
-      "get": {
-        "tags": [
-          "connectors"
-        ],
-        "summary": "List Accounts",
-        "operationId": "list_accounts_v1_connectors__connector___instance__accounts_get",
-        "parameters": [
-          {
-            "name": "connector",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Connector"
-            }
-          },
-          {
-            "name": "instance",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Instance"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response List Accounts V1 Connectors  Connector   Instance  Accounts Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
-        "x-codegen": {
-          "targets": []
-        }
-      }
-    },
-    "/v1/connectors/{connector}/{instance}/tools": {
-      "get": {
-        "tags": [
-          "connectors"
-        ],
-        "summary": "List Tools",
-        "operationId": "list_tools_v1_connectors__connector___instance__tools_get",
-        "parameters": [
-          {
-            "name": "connector",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Connector"
-            }
-          },
-          {
-            "name": "instance",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Instance"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response List Tools V1 Connectors  Connector   Instance  Tools Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
-        "x-codegen": {
-          "targets": []
-        }
-      }
-    },
-    "/v1/connectors/{connector}/{instance}/call": {
+    "/v1/connector-tokens": {
       "post": {
         "tags": [
-          "connectors"
+          "connector-tokens"
         ],
-        "summary": "Call",
-        "operationId": "call_v1_connectors__connector___instance__call_post",
+        "summary": "Issue",
+        "description": "Mint a new bearer token for ``body.connection_id``.\n\nThe plaintext is included in the response and CANNOT be recovered\nlater \u2014 operators must save it at issue time.  Subsequent ``GET``\non this resource returns the read view without plaintext.",
+        "operationId": "issue_connector_token",
         "parameters": [
-          {
-            "name": "connector",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Connector"
-            }
-          },
-          {
-            "name": "instance",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Instance"
-            }
-          },
           {
             "name": "Authorization",
             "in": "header",
@@ -5519,7 +5304,403 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ConnectorCallBody"
+                "$ref": "#/components/schemas/ConnectorTokenIssue"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorTokenIssued"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "connector-tokens"
+        ],
+        "summary": "List ",
+        "description": "All tokens (revoked included) for ``connection_id``, newest first.\n\nRevoked tokens stay in the listing for audit; clients filter by\n``revoked_at IS NULL`` if they only want live tokens.",
+        "operationId": "list_connector_tokens",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_ConnectorToken_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connector-tokens/{token_id}/revoke": {
+      "post": {
+        "tags": [
+          "connector-tokens"
+        ],
+        "summary": "Revoke",
+        "description": "Soft-delete a token.  Idempotent \u2014 re-revoking is a no-op.",
+        "operationId": "revoke_connector_token",
+        "parameters": [
+          {
+            "name": "token_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorToken"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connector-tokens/whoami": {
+      "get": {
+        "tags": [
+          "connector-tokens"
+        ],
+        "summary": "Whoami",
+        "description": "Resolve the bearer token to its ``connection_id``.\n\nSanity check / debugging endpoint for connector containers \u2014 call\nonce at startup to confirm the token is valid and points where the\noperator intended.  Authed by ``ConnectorAuthDep`` (token, NOT\noperator key), so any side-channel access from the operator surface\nis impossible.",
+        "operationId": "connector_token_whoami",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmI"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/inbound": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Inbound",
+        "description": "Append an inbound user message to the session bound to the caller's connection.\n\nIdempotent on ``body.event_id`` \u2014 replays return the original\nevent id with ``deduped=True``.  Drops surface as 4xx/5xx with\na body explaining the reason (operator-config issue vs server\nerror vs payload).",
+        "operationId": "post_connector_inbound",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectorInboundRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorInboundResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/tool-results": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Tool Result",
+        "description": "Submit a custom tool result from a connector container.\n\nAuthorization: the session must be bound to the caller's connection\n(single_session attach, per_chat origin, or operator-bound chat).\nOtherwise \u2192 403.",
+        "operationId": "post_connector_tool_result",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectorToolResultRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Post Connector Tool Result"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/secrets": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Get Secrets",
+        "description": "Decrypted secrets for the caller's connection.\n\nThe bearer token resolves server-side to one ``connection_id``;\noperators set secrets on that connection via\n``POST /v1/connections`` or ``PUT /v1/connections/{id}/secrets`` and\nnever read them back through the operator surface.  This is the only\ndecryption path.\n\nReturns ``{\"secrets\": {}}`` when no secrets are configured \u2014 the\nconnector author decides whether that's acceptable (most need at\nleast one credential and should fail loudly).",
+        "operationId": "get_connector_secrets",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorSecrets"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/tools": {
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Set Tools",
+        "description": "Publish the connector's tool schemas onto its own connection.\n\nThe connector container is the source of truth for what tools it\nserves \u2014 it knows their names, parameter shapes, and docstrings.\nThe SDK derives JSON Schemas from ``@tool``-decorated methods at\nstartup and POSTs them here, replacing whatever was on the\nconnection wholesale.  Operators don't hand-write ``tools.json``.\n\nAuthorization: the bearer token resolves to one ``connection_id``;\na connector can only publish tools for its own connection.  This\nis the connector-scoped twin of operator-scoped\n``PUT /v1/connections/{id}/tools``.",
+        "operationId": "set_connector_tools",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionSetTools"
               }
             }
           }
@@ -5530,10 +5711,56 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Call V1 Connectors  Connector   Instance  Call Post"
+                  "$ref": "#/components/schemas/Connection"
                 }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/calls": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Get Calls",
+        "description": "SSE stream of pending custom tool calls for the caller's connection.\n\nBackfills any pending calls at subscribe time (calls already parked\nin some session's ``stop_reason.custom_tools``), then tails the\n``connector_calls_<connection_id>`` NOTIFY channel.  Each emitted\nevent is keyed ``call`` with a JSON body shaped::\n\n    {\n        \"session_id\": \"...\",\n        \"tool_call_id\": \"...\",\n        \"name\": \"...\",\n        \"arguments\": \"...\",       // JSON string from the model\n        \"focal_channel\": \"...\"\n    }\n\nConnector containers dedupe by ``tool_call_id`` client-side so SSE\nreconnects (which replay the backfill) don't double-execute.",
+        "operationId": "get_calls_v1_connectors_calls_get",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           },
@@ -6446,6 +6673,18 @@
             "type": "object",
             "title": "Metadata"
           },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "type": "array",
+            "title": "Tools"
+          },
+          "secrets_set": {
+            "type": "boolean",
+            "title": "Secrets Set",
+            "default": false
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -6491,7 +6730,7 @@
           "updated_at"
         ],
         "title": "Connection",
-        "description": "Read view of a connection.\n\nMode is implicit in the populated field:\n\n* ``session_id`` set \u2192 single_session\n* ``session_template_id`` set \u2192 per_chat\n* neither \u2192 detached"
+        "description": "Read view of a connection.\n\nMode is implicit in the populated field:\n\n* ``session_id`` set \u2192 single_session\n* ``session_template_id`` set \u2192 per_chat\n* neither \u2192 detached\n\nSecrets are *write-only* on the operator surface \u2014 the model carries\n``secrets_set: bool`` rather than the values themselves.  The only\ndecryption path is the connector-scoped ``GET /v1/connectors/secrets``,\nwhich returns the dict for the caller's own connection."
       },
       "ConnectionAttach": {
         "properties": {
@@ -6541,6 +6780,28 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Metadata"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "type": "array",
+            "title": "Tools"
+          },
+          "secrets": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secrets",
+            "description": "Platform credentials (e.g. ``bot_token``).  Encrypted at rest via the server's ``AIOS_VAULT_KEY``; only ever read back via the connector-scoped ``GET /v1/connectors/secrets``.  Operator-facing reads return ``secrets_set: bool`` instead of values."
           }
         },
         "additionalProperties": false,
@@ -6550,21 +6811,74 @@
           "account"
         ],
         "title": "ConnectionCreate",
-        "description": "Request body for ``POST /v1/connections``.\n\nCreated in detached mode \u2014 neither ``session_id`` nor\n``session_template_id`` is set.  Use ``POST .../attach`` or\n``POST .../configure-per-chat`` afterward to bind a routing mode.\n\n``connector`` and ``account`` may not contain ``/`` \u2014 they're used\nin the focal-channel address scheme ``{connector}/{account}/{chat_id}``\nand a ``/`` would create ambiguous segment boundaries."
+        "description": "Request body for ``POST /v1/connections``.\n\nCreated in detached mode \u2014 neither ``session_id`` nor\n``session_template_id`` is set.  Use ``POST .../attach`` or\n``POST .../configure-per-chat`` afterward to bind a routing mode.\n\n``connector`` and ``account`` may not contain ``/`` \u2014 they're used\nin the focal-channel address scheme ``{connector}/{account}/{chat_id}``\nand a ``/`` would create ambiguous segment boundaries.\n\n``tools`` declares the model-facing custom tools this connection\ncontributes to any session it's attached to (see #301)."
       },
-      "ConnectorCallBody": {
+      "ConnectionSetSecrets": {
         "properties": {
-          "tool": {
+          "secrets": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secrets"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ConnectionSetSecrets",
+        "description": "Request body for ``PUT /v1/connections/{id}/secrets``.\n\nReplaces the connection's secrets dict wholesale (matches the\n``set_connection_tools`` pattern).  Encrypted at rest server-side via\n``AIOS_VAULT_KEY``; the operator never reads them back.\n\nPass an empty dict to clear secrets."
+      },
+      "ConnectionSetTools": {
+        "properties": {
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "type": "array",
+            "title": "Tools"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ConnectionSetTools",
+        "description": "Request body for ``PUT /v1/connections/{id}/tools`` (#301).\n\nReplaces the connection's tools array wholesale.  Each entry must\nbe ``type=\"custom\"`` \u2014 see :func:`_validate_connection_tools`."
+      },
+      "ConnectorInboundRequest": {
+        "properties": {
+          "event_id": {
             "type": "string",
-            "title": "Tool"
+            "title": "Event Id",
+            "description": "Client-supplied dedup key (ULID).  Replays return the original event id."
           },
-          "arguments": {
+          "chat_id": {
+            "type": "string",
+            "title": "Chat Id"
+          },
+          "sender": {
             "additionalProperties": true,
             "type": "object",
-            "title": "Arguments",
-            "default": {}
+            "title": "Sender"
           },
-          "meta": {
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "attachments": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachments"
+          },
+          "metadata": {
             "anyOf": [
               {
                 "additionalProperties": true,
@@ -6574,15 +6888,253 @@
                 "type": "null"
               }
             ],
-            "title": "Meta"
+            "title": "Metadata"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp",
+            "description": "Optional ISO-8601 platform timestamp; stored in event metadata."
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "tool"
+          "event_id",
+          "chat_id",
+          "content"
         ],
-        "title": "ConnectorCallBody"
+        "title": "ConnectorInboundRequest",
+        "description": "Body for ``POST /v1/connectors/inbound``.\n\nAuthenticated via ``ConnectorAuthDep`` so the connection_id is\nserver-resolved from the bearer token \u2014 clients don't pick which\nconnection their inbound lands on."
+      },
+      "ConnectorInboundResponse": {
+        "properties": {
+          "appended_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Appended Event Id"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "deduped": {
+            "type": "boolean",
+            "title": "Deduped"
+          }
+        },
+        "type": "object",
+        "required": [
+          "appended_event_id",
+          "session_id",
+          "deduped"
+        ],
+        "title": "ConnectorInboundResponse",
+        "description": "Response for ``POST /v1/connectors/inbound``."
+      },
+      "ConnectorSecrets": {
+        "properties": {
+          "secrets": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secrets"
+          }
+        },
+        "type": "object",
+        "title": "ConnectorSecrets",
+        "description": "Response shape for ``GET /v1/connectors/secrets``.\n\nOnly the connector container's bearer token (which scopes to one\n``connection_id``) can hit this route.  Returns the decrypted dict\nthe operator stored at create / set-secrets time.  Empty dict when\nthe connection has no secrets configured."
+      },
+      "ConnectorToken": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "connection_id",
+          "created_at"
+        ],
+        "title": "ConnectorToken",
+        "description": "Read view of a connector token.  Never carries plaintext."
+      },
+      "ConnectorTokenIssue": {
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connection_id"
+        ],
+        "title": "ConnectorTokenIssue",
+        "description": "Request body for ``POST /v1/connector-tokens``."
+      },
+      "ConnectorTokenIssued": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "plaintext": {
+            "type": "string",
+            "title": "Plaintext",
+            "description": "The bearer token value.  Save this \u2014 it cannot be recovered."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "connection_id",
+          "label",
+          "plaintext",
+          "created_at"
+        ],
+        "title": "ConnectorTokenIssued",
+        "description": "Response body for ``POST /v1/connector-tokens``.\n\nIncludes the plaintext token \u2014 this is the ONLY time it's surfaced.\nSubsequent ``GET`` returns the read view without plaintext."
+      },
+      "ConnectorToolResultRequest": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "tool_call_id": {
+            "type": "string",
+            "title": "Tool Call Id"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            ],
+            "title": "Content"
+          },
+          "is_error": {
+            "type": "boolean",
+            "title": "Is Error",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "session_id",
+          "tool_call_id",
+          "content"
+        ],
+        "title": "ConnectorToolResultRequest",
+        "description": "Body for ``POST /v1/connectors/tool-results``.\n\nMirrors the operator-facing :class:`ToolResultRequest` but adds\n``session_id`` since connector tokens aren't path-scoped to a\nsession.  The handler validates the session is bound to the\ncaller's connection (preventing a connector from posting results\nfor sessions outside its scope)."
       },
       "ContextResponse": {
         "properties": {
@@ -7249,6 +7801,38 @@
           "data"
         ],
         "title": "ListResponse[Connection]"
+      },
+      "ListResponse_ConnectorToken_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorToken"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          },
+          "next_after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next After"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ListResponse[ConnectorToken]"
       },
       "ListResponse_Environment_": {
         "properties": {
@@ -9211,9 +9795,20 @@
             "description": "The tool_call_id from the assistant's tool_calls."
           },
           "content": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            ],
             "title": "Content",
-            "description": "The result of executing the tool."
+            "description": "The result of executing the tool.  String or multimodal content array."
           },
           "is_error": {
             "type": "boolean",
@@ -9229,7 +9824,7 @@
           "content"
         ],
         "title": "ToolResultRequest",
-        "description": "Request body for ``POST /v1/sessions/{id}/tool-results``."
+        "description": "Request body for ``POST /v1/sessions/{id}/tool-results``.\n\n``content`` accepts either a plain string OR a multimodal content\narray shaped per the OpenAI chat-completions tool-result format\n(e.g. ``[{\"type\": \"text\", \"text\": \"...\"}, {\"type\": \"image_url\",\n\"image_url\": {\"url\": \"...\"}}]``).  Built-in tools have always\nproduced multimodal results; this widening lets external clients\n(#301 \u2014 connectors as HTTP clients) do the same when posting\ncustom-tool results."
       },
       "ToolSpec": {
         "properties": {
@@ -9960,6 +10555,20 @@
         ],
         "title": "WaitResponse",
         "description": "Response for ``GET /v1/sessions/{id}/wait``."
+      },
+      "WhoAmI": {
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connection_id"
+        ],
+        "title": "WhoAmI",
+        "description": "Response for ``GET /v1/connector-tokens/whoami``."
       }
     }
   }

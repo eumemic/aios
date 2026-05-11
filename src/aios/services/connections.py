@@ -15,8 +15,10 @@ from typing import Any
 
 import asyncpg
 
+from aios.crypto.vault import CryptoBox, EncryptedBlob
 from aios.db import queries
 from aios.errors import ConflictError, NotFoundError
+from aios.models.agents import ToolSpec
 from aios.models.connections import (
     BoundChat,
     Connection,
@@ -25,20 +27,106 @@ from aios.models.connections import (
 )
 
 
+def _encrypt_secrets(secrets: dict[str, str] | None, crypto_box: CryptoBox) -> EncryptedBlob | None:
+    """Encrypt a secrets dict, or ``None`` if the dict is missing or empty.
+
+    Empty / missing → no blob → schema columns NULL → ``secrets_set: False``.
+    The operator surface treats ``None`` and ``{}`` identically (both
+    "clear secrets") so create + PUT produce the same row state.
+    """
+    if not secrets:
+        return None
+    return crypto_box.encrypt_dict(secrets)
+
+
 async def create_connection(
     pool: asyncpg.Pool[Any],
     *,
     connector: str,
     account: str,
     metadata: dict[str, Any],
+    tools: list[ToolSpec] | None = None,
+    secrets: dict[str, str] | None = None,
+    crypto_box: CryptoBox,
 ) -> Connection:
+    tools_payload = [t.model_dump(exclude_none=True) for t in (tools or [])]
     async with pool.acquire() as conn:
         return await queries.insert_connection(
             conn,
             connector=connector,
             account=account,
             metadata=metadata,
+            tools=tools_payload,
+            secrets_blob=_encrypt_secrets(secrets, crypto_box),
         )
+
+
+async def set_connection_tools(
+    pool: asyncpg.Pool[Any],
+    connection_id: str,
+    *,
+    tools: list[ToolSpec],
+) -> Connection:
+    """Replace a connection's tools.  Caller validates ToolSpec types via
+    the request model (see :class:`ConnectionSetTools`).
+    """
+    payload = [t.model_dump(exclude_none=True) for t in tools]
+    async with pool.acquire() as conn:
+        return await queries.set_connection_tools(conn, connection_id, tools=payload)
+
+
+async def set_connection_secrets(
+    pool: asyncpg.Pool[Any],
+    connection_id: str,
+    *,
+    secrets: dict[str, str],
+    crypto_box: CryptoBox,
+) -> Connection:
+    """Replace a connection's encrypted secrets dict, wholesale.
+
+    Pass an empty dict to clear secrets (columns go NULL, ``secrets_set``
+    flips back to ``False``).  Running connector containers cache the
+    decrypted dict at startup — restart them to pick up rotated values.
+    """
+    async with pool.acquire() as conn:
+        return await queries.set_connection_secrets(
+            conn,
+            connection_id,
+            secrets_blob=_encrypt_secrets(secrets, crypto_box),
+        )
+
+
+async def get_connection_secrets(
+    pool: asyncpg.Pool[Any],
+    connection_id: str,
+    *,
+    crypto_box: CryptoBox,
+) -> dict[str, str]:
+    """Read and decrypt a connection's secrets.
+
+    Returns an empty dict when no secrets are configured.  Raises
+    :class:`NotFoundError` if the connection itself is missing or
+    archived — connector containers shouldn't see "no secrets" when the
+    underlying connection is gone; that's a deployment-state mismatch
+    they should fail loudly on.
+    """
+    async with pool.acquire() as conn:
+        blob = await queries.get_connection_secret_blob(conn, connection_id)
+    if blob is None:
+        return {}
+    decoded = crypto_box.decrypt_dict(blob)
+    return {str(k): str(v) for k, v in decoded.items()}
+
+
+async def list_tools_for_session(pool: asyncpg.Pool[Any], session_id: str) -> list[dict[str, Any]]:
+    """Custom tool specs from every active connection bound to ``session_id``.
+
+    Used by :func:`aios.harness.step_context.compute_step_prelude` to
+    surface connection-declared tools to the model alongside agent +
+    MCP + connector-subprocess tools (#301).
+    """
+    async with pool.acquire() as conn:
+        return await queries.list_connection_tools_for_session(conn, session_id)
 
 
 async def get_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Connection:

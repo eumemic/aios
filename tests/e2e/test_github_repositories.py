@@ -36,6 +36,7 @@ from aios.services import agents as agents_service
 from aios.services import environments as environments_service
 from aios.services import github_repositories as github_service
 from aios.services import sessions as sessions_service
+from tests.helpers.connections import authed_client
 
 _OCTOCAT_REPO = "https://github.com/octocat/Hello-World"
 
@@ -85,10 +86,10 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
     app.state.procrastinate = mock.MagicMock()
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(
+    async with authed_client(
+        "http://testserver",
+        aios_env["AIOS_API_KEY"],
         transport=transport,
-        base_url="http://testserver",
-        headers={"Authorization": f"Bearer {aios_env['AIOS_API_KEY']}"},
     ) as client:
         yield client
 

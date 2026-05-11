@@ -403,106 +403,11 @@ async def _execute_mcp_tool_async(
         if suffix is not None:
             meta[FOCAL_CHANNEL_META_KEY] = suffix
 
-        # Connector subprocesses (stdio MCP children of the worker) take
-        # precedence over agent-declared HTTP MCP servers: the model
-        # sees both as ``mcp__<name>__<tool>`` so a name collision with
-        # an agent's ``mcp_servers`` entry would be ambiguous.  We
-        # resolve in favor of the connector — connectors are first-class
-        # in the redesign (#200), HTTP MCP servers are agent-scoped.
-        #
-        # This is the one in-process call site that imports the
-        # supervisor registry directly (rather than going through a
-        # procrastinate task in ``aios.harness.connector_tasks``).
-        # Justified because every outbound MCP tool call is hot-path:
-        # the procrastinate round-trip would add ~50-200ms per call.
-        # New supervisor consumers should NOT add direct-import call
-        # sites here — define a task in ``connector_tasks.py`` and
-        # dispatch through it.  Same behaviour today, one less site
-        # to migrate the day the supervisor splits into a separate
-        # ``aios connectors`` process (see ``connector_supervisor``
-        # module docstring's "Architectural constraint" section).
-        connector_registry = runtime.connector_subprocess_registry
-        connector_instances = (
-            connector_registry.states_for_connector(server_name)
-            if connector_registry is not None
-            else []
-        )
-        if connector_registry is not None and connector_instances:
-            # Resolve which account the call is targeting.  Tools that
-            # take ``account`` as an explicit arg (cross-chat ops like
-            # ``list_chats``) get it from there; focal-required tools
-            # (``signal_send``, ``telegram_send``) get it from the
-            # focal-channel ``_meta`` suffix's first segment.
-            account_arg = arguments.get("account")
-            if isinstance(account_arg, str):
-                account_for_routing: str | None = account_arg
-            elif suffix is not None:
-                account_for_routing = suffix.partition("/")[0] or None
-            else:
-                account_for_routing = None
-
-            # Authorize the call regardless of how the account was
-            # resolved.  The pre-fix version only ran this check for
-            # the explicit-arg path; focal-routed dispatch sailed
-            # through unauthorized, letting any session that could
-            # ``switch_channel`` to a connector's chat send via that
-            # connector — see PR #214 #39.
-            if account_for_routing is not None:
-                from aios.services import connections as connections_service
-
-                authorized = await connections_service.validate_account_for_session(
-                    pool, session_id, connector=server_name, account=account_for_routing
-                )
-                if not authorized:
-                    bound_log.warning(
-                        "mcp_tool.account_not_authorized",
-                        server_name=server_name,
-                        account=account_for_routing,
-                    )
-                    is_error = True
-                    await _append_tool_result(
-                        pool,
-                        session_id,
-                        call_id,
-                        name,
-                        error=(
-                            f"account {account_for_routing!r} on connector "
-                            f"{server_name!r} is not attached to this session "
-                            "or one that spawned it"
-                        ),
-                    )
-                    return
-
-            if account_for_routing is not None:
-                result = await connector_registry.dispatch_call_for_account(
-                    server_name, account_for_routing, tool_name, arguments, meta=meta
-                )
-            elif len(connector_instances) == 1:
-                result = await connector_registry.dispatch_call(
-                    server_name, connector_instances[0].instance, tool_name, arguments, meta=meta
-                )
-            else:
-                bound_log.warning(
-                    "mcp_tool.connector_instance_ambiguous",
-                    server_name=server_name,
-                    instance_count=len(connector_instances),
-                )
-                is_error = True
-                await _append_tool_result(
-                    pool,
-                    session_id,
-                    call_id,
-                    name,
-                    error=(
-                        f"connector {server_name!r} has multiple instances "
-                        f"({', '.join(s.instance for s in connector_instances)}) "
-                        "and the call provides no routing info (no account arg, "
-                        "no focal channel) — set focal channel via switch_channel "
-                        "or pass account= explicitly"
-                    ),
-                )
-                return
-        else:
+        # Agent-declared HTTP MCP server.  Connector dispatch was the
+        # other branch here historically — connectors now run as peer
+        # services and route via the custom-tool / requires_action flow
+        # (see #301), so this dispatcher only handles HTTP MCP.
+        if True:
             url = mcp_server_map.get(server_name)
             if url is None:
                 bound_log.warning("mcp_tool.server_not_found", server_name=server_name)

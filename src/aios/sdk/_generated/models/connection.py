@@ -12,6 +12,7 @@ from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
     from ..models.connection_metadata import ConnectionMetadata
+    from ..models.tool_spec import ToolSpec
 
 
 T = TypeVar("T", bound="Connection")
@@ -27,6 +28,11 @@ class Connection:
     * ``session_template_id`` set → per_chat
     * neither → detached
 
+    Secrets are *write-only* on the operator surface — the model carries
+    ``secrets_set: bool`` rather than the values themselves.  The only
+    decryption path is the connector-scoped ``GET /v1/connectors/secrets``,
+    which returns the dict for the caller's own connection.
+
         Attributes:
             id (str):
             connector (str):
@@ -36,6 +42,8 @@ class Connection:
             updated_at (datetime.datetime):
             session_id (None | str | Unset):
             session_template_id (None | str | Unset):
+            tools (list[ToolSpec] | Unset):
+            secrets_set (bool | Unset):  Default: False.
             attached_at (datetime.datetime | None | Unset):
             archived_at (datetime.datetime | None | Unset):
     """
@@ -48,6 +56,8 @@ class Connection:
     updated_at: datetime.datetime
     session_id: None | str | Unset = UNSET
     session_template_id: None | str | Unset = UNSET
+    tools: list[ToolSpec] | Unset = UNSET
+    secrets_set: bool | Unset = False
     attached_at: datetime.datetime | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -76,6 +86,15 @@ class Connection:
             session_template_id = UNSET
         else:
             session_template_id = self.session_template_id
+
+        tools: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.tools, Unset):
+            tools = []
+            for tools_item_data in self.tools:
+                tools_item = tools_item_data.to_dict()
+                tools.append(tools_item)
+
+        secrets_set = self.secrets_set
 
         attached_at: None | str | Unset
         if isinstance(self.attached_at, Unset):
@@ -109,6 +128,10 @@ class Connection:
             field_dict["session_id"] = session_id
         if session_template_id is not UNSET:
             field_dict["session_template_id"] = session_template_id
+        if tools is not UNSET:
+            field_dict["tools"] = tools
+        if secrets_set is not UNSET:
+            field_dict["secrets_set"] = secrets_set
         if attached_at is not UNSET:
             field_dict["attached_at"] = attached_at
         if archived_at is not UNSET:
@@ -119,6 +142,7 @@ class Connection:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.connection_metadata import ConnectionMetadata
+        from ..models.tool_spec import ToolSpec
 
         d = dict(src_dict)
         id = d.pop("id")
@@ -152,6 +176,17 @@ class Connection:
         session_template_id = _parse_session_template_id(
             d.pop("session_template_id", UNSET)
         )
+
+        _tools = d.pop("tools", UNSET)
+        tools: list[ToolSpec] | Unset = UNSET
+        if _tools is not UNSET:
+            tools = []
+            for tools_item_data in _tools:
+                tools_item = ToolSpec.from_dict(tools_item_data)
+
+                tools.append(tools_item)
+
+        secrets_set = d.pop("secrets_set", UNSET)
 
         def _parse_attached_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -196,6 +231,8 @@ class Connection:
             updated_at=updated_at,
             session_id=session_id,
             session_template_id=session_template_id,
+            tools=tools,
+            secrets_set=secrets_set,
             attached_at=attached_at,
             archived_at=archived_at,
         )

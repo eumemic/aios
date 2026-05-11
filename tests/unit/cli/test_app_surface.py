@@ -30,7 +30,7 @@ def test_root_help_lists_all_subcommands():
         "skills",
         "vaults",
         "connections",
-        "connectors",
+        "connector-tokens",
         "envs",
     ]:
         assert name in result.stdout, f"missing subcommand {name} in help"

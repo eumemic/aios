@@ -20,14 +20,9 @@ admin-only endpoint is invisible.
 
 from __future__ import annotations
 
-from typing import Any
+from fastapi import APIRouter, status
 
-from fastapi import APIRouter, HTTPException, status
-
-from aios.api.connector_rpc import connector_rpc
-from aios.api.deps import AuthDep, DbUrlDep, PoolDep
-from aios.errors import AccountDriftError
-from aios.harness.connector_tasks import defer_connector_status
+from aios.api.deps import AuthDep, CryptoBoxDep, DbUrlDep, PoolDep
 from aios.models.common import ListResponse
 from aios.models.connections import (
     BindChatRequest,
@@ -37,88 +32,19 @@ from aios.models.connections import (
     ConnectionConfigurePerChat,
     ConnectionCreate,
     ConnectionMode,
+    ConnectionSetSecrets,
+    ConnectionSetTools,
     RecentChat,
 )
 from aios.services import connections as service
 
 router = APIRouter(prefix="/v1/connections", tags=["connections"])
 
-# Snapshot lookup is cheap (worker reads in-memory state and returns) —
-# tighter than the 60s call timeout but generous enough that a busy
-# worker queue doesn't false-positive a drift error on the operator.
-_DRIFT_CHECK_TIMEOUT_S = 10.0
-
-
-async def _assert_account_in_snapshot(db_url: str, *, connector: str, account: str) -> None:
-    """Raise :class:`AccountDriftError` if ``account`` isn't in the connector's snapshot.
-
-    Treats supervisor-down (``not_ready`` / ``circuit_open``) as a
-    distinct condition: those surface as 503, not 409 — the operator
-    should retry once the connector boots, not assume drift.  The
-    ``not_enabled`` envelope from the worker means the connector isn't
-    in ``connectors_enabled`` at all and is also a 503.
-
-    The connector's account snapshot dicts each carry an ``id`` field
-    (per SDK convention via :func:`aios_connector.make_account`); the
-    snapshot match is on that field.
-    """
-    envelope: dict[str, Any] = await connector_rpc(
-        db_url,
-        lambda cid: defer_connector_status(call_id=cid, connector=connector),
-        timeout_s=_DRIFT_CHECK_TIMEOUT_S,
-    )
-    err = envelope.get("error")
-    if err:
-        # Supervisor not running / connector not booted → can't tell
-        # whether the account is valid.  Surface as 503; the caller
-        # should retry rather than assume drift.
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"connector {connector!r} snapshot unavailable: {err}",
-        )
-    # ``connector_status(connector=<c>)`` returns ``{"connectors": [<one
-    # snapshot per instance>]}`` — aggregate across instances so the drift
-    # check works on multi-instance deployments (e.g. ``telegram:support``,
-    # ``telegram:alerts``) without caring which instance owns the account.
-    instances = envelope.get("connectors") or []
-    statuses = {entry.get("status") for entry in instances if isinstance(entry, dict)}
-    if "running" not in statuses:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                f"connector {connector!r} has no running instances "
-                f"(states: {sorted(s for s in statuses if s)}); "
-                "snapshot unavailable — retry once it's running"
-            ),
-        )
-    known_ids: set[Any] = {
-        account_entry.get("id")
-        for entry in instances
-        if isinstance(entry, dict)
-        for account_entry in (entry.get("accounts") or [])
-        if isinstance(account_entry, dict)
-    }
-    if not known_ids:
-        # Boot-window race: supervisor flips ``status = "running"`` after MCP
-        # ``initialize`` returns, but the SDK only emits
-        # ``notifications/aios/accounts`` once the supervisor's
-        # ``notifications/initialized`` has round-tripped — at least one stdio
-        # leg of asymmetry.  An attach during that window must be 503 (retry
-        # shortly), not 409 drift; the inbound handler exempts the same case
-        # at ``connector_supervisor._handle_inbound``.
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(f"connector {connector!r} snapshot not yet populated; retry shortly"),
-        )
-    if account not in known_ids:
-        raise AccountDriftError(
-            f"account {account!r} is not in {connector!r}'s current snapshot",
-            detail={"connector": connector, "account": account},
-        )
-
 
 @router.post("", operation_id="create_connection", status_code=status.HTTP_201_CREATED)
-async def create(body: ConnectionCreate, pool: PoolDep, _auth: AuthDep) -> Connection:
+async def create(
+    body: ConnectionCreate, pool: PoolDep, crypto_box: CryptoBoxDep, _auth: AuthDep
+) -> Connection:
     """Create a detached connection, **idempotent on ``(connector, account)``**.
 
     Per plan decision #5, this endpoint and the supervisor's
@@ -127,12 +53,61 @@ async def create(body: ConnectionCreate, pool: PoolDep, _auth: AuthDep) -> Conne
     existing row rather than 409.  The ``id`` may differ from a freshly-allocated
     one if a concurrent writer landed first; the response always reflects the
     canonical active row.
+
+    Optional ``secrets`` carry platform credentials (e.g. Telegram
+    ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
+    and only ever read back through the connector-scoped
+    ``GET /v1/connectors/secrets`` route — operator-facing reads return
+    ``secrets_set: bool`` instead of values.
     """
     return await service.create_connection(
         pool,
         connector=body.connector,
         account=body.account,
         metadata=body.metadata,
+        tools=body.tools,
+        secrets=body.secrets,
+        crypto_box=crypto_box,
+    )
+
+
+@router.put("/{connection_id}/tools", operation_id="set_connection_tools")
+async def set_tools(
+    connection_id: str,
+    body: ConnectionSetTools,
+    pool: PoolDep,
+    _auth: AuthDep,
+) -> Connection:
+    """Replace the connection's tools wholesale (#301).
+
+    Tools declared on a connection become available to the model as
+    ``type="custom"`` entries on every session this connection is
+    attached to (single_session) or that this connection spawned
+    (per_chat).  The model calls them, the session parks in
+    ``requires_action``, the connector executes externally and POSTs the
+    result back via ``/v1/sessions/:id/tool-results``.
+    """
+    return await service.set_connection_tools(pool, connection_id, tools=body.tools)
+
+
+@router.put("/{connection_id}/secrets", operation_id="set_connection_secrets")
+async def set_secrets(
+    connection_id: str,
+    body: ConnectionSetSecrets,
+    pool: PoolDep,
+    crypto_box: CryptoBoxDep,
+    _auth: AuthDep,
+) -> Connection:
+    """Replace the connection's encrypted secrets dict, wholesale.
+
+    Mirrors ``set_tools`` — the request body fully replaces the stored
+    blob.  Pass ``{"secrets": {}}`` to clear secrets entirely.
+    Operator-facing reads only ever expose ``secrets_set: bool``; the
+    decrypted values are exclusively available to the connector
+    container that holds a connector token resolving to this connection.
+    """
+    return await service.set_connection_secrets(
+        pool, connection_id, secrets=body.secrets, crypto_box=crypto_box
     )
 
 
@@ -198,15 +173,15 @@ async def attach(
     db_url: DbUrlDep,
     _auth: AuthDep,
 ) -> Connection:
-    """Attach a connection to a session, after validating the account against the snapshot.
+    """Attach a connection to a session.
 
-    The drift check runs BEFORE the DB write so a stale account can't
-    move into ``single_session`` mode and silently swallow inbound.
+    The legacy supervisor's "live snapshot drift check" was removed in
+    #301 — the new architecture has connectors as peer services, so the
+    api process can't probe a worker-side account snapshot.  Operators
+    bear the responsibility of attaching to a real account; an inbound
+    referencing an unknown account simply drops at the new
+    ``/v1/connectors/inbound`` boundary.
     """
-    connection = await service.get_connection(pool, connection_id)
-    await _assert_account_in_snapshot(
-        db_url, connector=connection.connector, account=connection.account
-    )
     return await service.attach_connection(pool, connection_id, session_id=body.session_id)
 
 

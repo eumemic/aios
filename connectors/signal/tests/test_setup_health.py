@@ -1,18 +1,24 @@
 """Regression for #223 §3: signal connector startup must surface
-listGroups failure (typically "account not registered") rather than
+``listGroups`` failure (typically "account not registered") rather than
 marking the account ready with empty contacts/groups.
+
+In the new single-phone-per-container model (#301) any setup failure
+propagates from :meth:`SignalConnector.setup` directly — there's no
+multi-account "drop one, keep going" path because each container is
+exactly one account.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from aios_signal.config import Settings
 from aios_signal.connector import SignalConnector
+
+PHONE = "+15551111111"
 
 
 def _stub_daemon() -> MagicMock:
@@ -28,21 +34,25 @@ def _stub_daemon() -> MagicMock:
 @pytest.fixture
 def connector(tmp_path: Path) -> SignalConnector:
     cfg = Settings(
-        phones=["+15551111111"],
         config_dir=tmp_path / "cfg",
         cli_bin="/usr/bin/signal-cli",
     )
-    return SignalConnector(cfg)
+    c = SignalConnector(cfg)
+    # Stub the secrets fetch so setup() can read the phone without an
+    # actual API round-trip.
+    c._secrets_cache = {"phone": PHONE}
+    return c
 
 
-async def test_setup_refuses_when_only_account_unavailable(
+async def test_setup_propagates_list_groups_failure(
     connector: SignalConnector,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One configured phone whose listGroups raises → setup must raise.
-    Operator sees the connector fail to start instead of green-but-dead."""
+    """If signal-cli rejects the boot probe (e.g. unregistered account),
+    setup raises so the operator sees the container fail to start
+    instead of green-but-dead."""
     daemon = _stub_daemon()
-    daemon.discover_bot_uuids.return_value = {"+15551111111": "bot-uuid"}
+    daemon.discover_bot_uuids.return_value = {PHONE: "bot-uuid"}
     daemon.list_contacts.return_value = {}
     daemon.list_groups.side_effect = RuntimeError("Specified account does not exist")
     monkeypatch.setattr(
@@ -50,38 +60,18 @@ async def test_setup_refuses_when_only_account_unavailable(
         MagicMock(return_value=daemon),
     )
 
-    with pytest.raises(RuntimeError, match="no configured account is healthy"):
+    with pytest.raises(RuntimeError, match="Specified account does not exist"):
         await connector.setup()
 
 
-async def test_setup_drops_unavailable_account_when_others_healthy(
-    tmp_path: Path,
+async def test_setup_succeeds_when_account_healthy(
+    connector: SignalConnector,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Multi-account setup: one bad account, one good → connector starts,
-    bad account dropped from discover_accounts."""
-    cfg = Settings(
-        phones=["+15551111111", "+15552222222"],
-        config_dir=tmp_path / "cfg",
-        cli_bin="/usr/bin/signal-cli",
-    )
-    connector = SignalConnector(cfg)
-
     daemon = _stub_daemon()
-    daemon.discover_bot_uuids.return_value = {
-        "+15551111111": "bot-bad",
-        "+15552222222": "bot-good",
-    }
-    daemon.list_contacts.side_effect = lambda account: (
-        {"bot-good": "Good Bot"} if account == "+15552222222" else {}
-    )
-
-    async def _list_groups(account: str) -> list[Any]:
-        if account == "+15551111111":
-            raise RuntimeError("not registered")
-        return []
-
-    daemon.list_groups.side_effect = _list_groups
+    daemon.discover_bot_uuids.return_value = {PHONE: "bot-uuid"}
+    daemon.list_contacts.return_value = {"bot-uuid": "Good Bot"}
+    daemon.list_groups.return_value = []
     monkeypatch.setattr(
         "aios_signal.connector.SignalDaemon",
         MagicMock(return_value=daemon),
@@ -89,7 +79,36 @@ async def test_setup_drops_unavailable_account_when_others_healthy(
 
     await connector.setup()
 
-    accounts = await connector.discover_accounts()
-    assert len(accounts) == 1
-    assert accounts[0]["id"] == "bot-good"
-    assert "+15551111111" in connector._unavailable_accounts
+    assert connector._bot_uuid == "bot-uuid"
+    assert connector._phone == PHONE
+    assert connector._contact_names == {"bot-uuid": "Good Bot"}
+    assert connector._groups == []
+
+
+async def test_setup_refuses_without_phone_secret(tmp_path: Path) -> None:
+    """A connection without a ``phone`` secret can't run the connector;
+    fail loud at setup() rather than handing signal-cli an empty string."""
+    cfg = Settings(
+        config_dir=tmp_path / "cfg",
+        cli_bin="/usr/bin/signal-cli",
+    )
+    c = SignalConnector(cfg)
+    # Empty secrets — connector should refuse.
+    c._client = AsyncMock()
+    c._client.get_secrets = AsyncMock(return_value={})
+    with pytest.raises(RuntimeError, match="requires a 'phone' entry"):
+        await c.setup()
+
+
+async def test_setup_refuses_when_phone_secret_empty_string(
+    connector: SignalConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicitly-empty phone is still missing for our purposes."""
+    connector._secrets_cache = {"phone": ""}
+    daemon = _stub_daemon()
+    monkeypatch.setattr(
+        "aios_signal.connector.SignalDaemon",
+        MagicMock(return_value=daemon),
+    )
+    with pytest.raises(RuntimeError, match="requires a 'phone' entry"):
+        await connector.setup()

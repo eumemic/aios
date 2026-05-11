@@ -1,0 +1,57 @@
+[project]
+name = "aios-connector-http"
+version = "0.1.0"
+description = "Pure-HTTP-client SDK for building aios connectors (#301)"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "aios contributors" }]
+
+dependencies = [
+    "httpx>=0.27",
+    "python-ulid>=3.0",
+    "structlog>=24.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aios_connector_http"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["aios_connector_http", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "TID", "ASYNC"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]

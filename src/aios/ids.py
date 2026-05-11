@@ -29,6 +29,7 @@ VAULT: Final = "vlt"
 VAULT_CREDENTIAL: Final = "vcr"
 SKILL: Final = "skl"
 CONNECTION: Final = "conn"
+CONNECTOR_TOKEN: Final = "ctok"
 SESSION_TEMPLATE: Final = "stpl"
 MEMORY_STORE: Final = "memstore"
 MEMORY: Final = "mem"
@@ -47,6 +48,7 @@ _PREFIXES: Final = frozenset(
         VAULT_CREDENTIAL,
         SKILL,
         CONNECTION,
+        CONNECTOR_TOKEN,
         SESSION_TEMPLATE,
         MEMORY_STORE,
         MEMORY,

@@ -23,6 +23,7 @@ from unittest import mock
 import pytest
 
 from tests.e2e.harness import Harness
+from tests.helpers.connections import authed_client
 
 
 async def wait_for_predicate(
@@ -99,6 +100,21 @@ async def real_wake_setup(aios_env: dict[str, str]) -> AsyncIterator[Any]:
         yield pool
     finally:
         await pool.close()
+
+
+@pytest.fixture
+def crypto_box(aios_env: dict[str, str]) -> Any:
+    """The :class:`CryptoBox` keyed by the test instance's ``AIOS_VAULT_KEY``.
+
+    Tests that call into ``aios.services.connections.create_connection`` /
+    ``set_connection_secrets`` need this — those services accept a
+    ``CryptoBox`` so the in-process encryption is testable without a
+    running api process.
+    """
+    from aios.config import get_settings
+    from aios.crypto.vault import CryptoBox
+
+    return CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
 
 
 @pytest.fixture
@@ -227,4 +243,43 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     ) = prev
     await task_reg.shutdown()
     await sandbox_reg.release_all()
+    await pool.close()
+
+
+@pytest.fixture
+async def http_client(aios_env: dict[str, str]) -> AsyncIterator[Any]:
+    """In-process API client wired against the testcontainer DB.
+
+    Wakes are mocked out (no worker) so endpoints that ``defer_wake``
+    (POST /messages, POST /tool-results, POST /connectors/inbound) don't
+    trip on the absent procrastinate connector.
+    """
+    import httpx
+
+    from aios.api.app import create_app
+    from aios.config import get_settings
+    from aios.crypto.vault import CryptoBox
+    from aios.db.pool import create_pool
+
+    settings = get_settings()
+    pool = await create_pool(settings.db_url, min_size=1, max_size=4)
+    app = create_app()
+    app.state.pool = pool
+    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
+    app.state.db_url = settings.db_url
+    app.state.procrastinate = mock.MagicMock()
+    transport = httpx.ASGITransport(app=app)
+    # Mock at every call site that imports ``defer_wake`` directly —
+    # patching the source (``aios.harness.wake``) is too late since the
+    # importing modules already captured the unmocked reference.
+    with (
+        mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock),
+        mock.patch("aios.services.inbound.defer_wake", new_callable=mock.AsyncMock),
+    ):
+        async with authed_client(
+            "http://testserver",
+            aios_env["AIOS_API_KEY"],
+            transport=transport,
+        ) as client:
+            yield client
     await pool.close()

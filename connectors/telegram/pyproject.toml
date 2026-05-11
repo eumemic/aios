@@ -1,6 +1,6 @@
 [project]
 name = "aios-telegram"
-version = "0.1.0"
+version = "0.2.0"
 description = "Telegram connector for aios"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -8,10 +8,9 @@ license = { text = "MIT" }
 authors = [{ name = "aios contributors" }]
 
 dependencies = [
-    "aios-connector",
+    "aios-connector-http",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "mcp>=1.20,<2.0",
     "structlog>=24.4",
     "python-telegram-bot>=22.6,<23",
 ]
@@ -24,12 +23,6 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
 ]
-
-# Entry point registration for the supervisor's resolver.  ``telegram`` is
-# the connector name aios refers to in its ``connectors_enabled`` config.
-# Resolves to a callable returning a :class:`Connector` instance.
-[project.entry-points."aios.connectors"]
-telegram = "aios_telegram:make_connector"
 
 [build-system]
 requires = ["hatchling"]
@@ -80,10 +73,6 @@ disallow_any_generics = true
 disallow_untyped_defs = true
 no_implicit_optional = true
 plugins = ["pydantic.mypy"]
-
-[[tool.mypy.overrides]]
-module = ["mcp.*"]
-ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "tests.*"

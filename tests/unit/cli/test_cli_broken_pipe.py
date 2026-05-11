@@ -12,28 +12,11 @@ from __future__ import annotations
 import io
 import signal
 import sys
-from collections.abc import Iterator
 
 import pytest
 import typer
 
 from aios.cli.runtime import run_or_die
-
-
-@pytest.fixture(autouse=True)
-def _isolate_sigpipe_handler() -> Iterator[None]:
-    """Force ``SIG_IGN`` before each test and restore after — earlier
-    tests (in this file or elsewhere) can leak ``SIG_DFL`` from
-    ``run_or_die`` into our pre-state."""
-    if not hasattr(signal, "SIGPIPE"):
-        yield
-        return
-    saved = signal.getsignal(signal.SIGPIPE)
-    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-    try:
-        yield
-    finally:
-        signal.signal(signal.SIGPIPE, saved)
 
 
 def test_run_or_die_swallows_brokenpipe_and_exits_clean(
@@ -82,22 +65,26 @@ def test_run_or_die_swallows_brokenpipe_raised_from_stdout_write(
     assert excinfo.value.exit_code == 0
 
 
-def test_run_or_die_installs_sig_dfl_for_client_commands() -> None:
-    """``run_or_die`` is the universal wrapper for client subcommands; it
-    installs ``SIG_DFL`` for SIGPIPE so ``aios sessions stream | head``
-    terminates with the standard UNIX exit-141 contract instead of a
-    Python ``BrokenPipeError`` traceback.  Server commands (``aios api``,
-    ``aios worker``) do NOT route through ``run_or_die`` and therefore
-    keep Python's default ``SIG_IGN`` — broken upstream sockets surface
-    as ``BrokenPipeError`` rather than killing the long-running process.
+def test_sigpipe_handler_installed_at_cli_import() -> None:
+    """Importing the CLI app should restore the default SIGPIPE disposition.
+
+    Python by default turns SIGPIPE into a BrokenPipeError; that's
+    helpful for handling it in Python code, but it means ``aios | head``
+    leaves a BrokenPipeError traceback on stderr once the consumer
+    exits.  Restoring ``SIG_DFL`` lets the kernel kill us silently on
+    SIGPIPE, matching the behavior of standard UNIX tools.
+
+    Note: signal handlers are process-wide; this test is a sanity check
+    on the initial import's effect and does not guarantee isolation
+    from other tests that touch SIGPIPE.  No other code in the project
+    sets a SIGPIPE handler, so ordering flakes would indicate someone
+    added one.
     """
     if not hasattr(signal, "SIGPIPE"):
         pytest.skip("SIGPIPE not available on this platform")
 
-    # Sanity check: the import of aios.cli.app no longer mutates SIGPIPE.
-    # The autouse fixture restored the handler before this test ran.
-    assert signal.getsignal(signal.SIGPIPE) == signal.SIG_IGN
+    # Import for side-effect — this should install the handler.
+    import aios.cli.app  # noqa: F401
 
-    run_or_die(lambda: None)
-
-    assert signal.getsignal(signal.SIGPIPE) == signal.SIG_DFL
+    handler = signal.getsignal(signal.SIGPIPE)
+    assert handler == signal.SIG_DFL

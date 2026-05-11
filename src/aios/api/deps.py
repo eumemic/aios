@@ -17,6 +17,20 @@ from procrastinate import App as ProcrastinateApp
 from aios.config import Settings, get_settings
 from aios.crypto.vault import CryptoBox
 from aios.errors import UnauthorizedError
+from aios.services import connector_tokens as connector_tokens_service
+
+
+def _extract_bearer_token(authorization: str | None) -> str:
+    """Parse a ``Bearer <token>`` header.  Raises 401 on absent / malformed."""
+    if authorization is None:
+        raise UnauthorizedError("missing Authorization header")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="expected `Authorization: Bearer <token>`",
+        )
+    return token
 
 
 def get_pool(request: Request) -> asyncpg.Pool:
@@ -46,23 +60,33 @@ def require_bearer_auth(
     settings: Annotated[Settings, Depends(get_settings_dep)],
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> None:
-    """Verify the request carries a valid bearer token.
+    """Verify the request carries the operator API key.
 
-    Compares the supplied token against ``AIOS_API_KEY`` using a
-    constant-time comparison so the comparison itself doesn't leak timing
+    Constant-time compare so the comparison itself doesn't leak timing
     information about the key.
     """
-    if authorization is None:
-        raise UnauthorizedError("missing Authorization header")
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="expected `Authorization: Bearer <key>`",
-        )
+    token = _extract_bearer_token(authorization)
     expected = settings.api_key.get_secret_value()
     if not secrets.compare_digest(token, expected):
         raise UnauthorizedError("invalid api key")
+
+
+async def require_connector_auth(
+    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> str:
+    """Resolve a bearer connector token to its ``connection_id``.
+
+    Accepts only tokens issued via ``POST /v1/connector-tokens`` — the
+    global ``AIOS_API_KEY`` is operator-scoped and cannot reach
+    connector-facing endpoints (#301).  Routes that take
+    ``ConnectorAuthDep`` receive the resolved ``connection_id``.
+    """
+    token = _extract_bearer_token(authorization)
+    resolved = await connector_tokens_service.resolve(pool, token)
+    if resolved is None:
+        raise UnauthorizedError("invalid or revoked connector token")
+    return resolved.connection_id
 
 
 # Type aliases for clarity at the route definitions.
@@ -73,3 +97,4 @@ CryptoBoxDep = Annotated[CryptoBox, Depends(get_crypto_box)]
 ProcrastinateDep = Annotated[ProcrastinateApp, Depends(get_procrastinate)]
 DbUrlDep = Annotated[str, Depends(get_db_url)]
 AuthDep = Annotated[None, Depends(require_bearer_auth)]
+ConnectorAuthDep = Annotated[str, Depends(require_connector_auth)]

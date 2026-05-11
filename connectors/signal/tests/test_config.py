@@ -1,40 +1,34 @@
 """Tests for signal connector's pydantic Settings.
 
-The ``phones`` field accepts CSV from ``AIOS_SIGNAL_PHONES`` env vars
-via ``Annotated[..., NoDecode]`` + ``mode='before'`` validator;
-without these, pydantic-settings v2 tries to JSON-parse the env value
-and crashes the connector at startup with a ``SettingsError``.
+The phone (account identity) is no longer in env — it lives on the
+connection record's encrypted secrets blob and is fetched at
+``setup()`` time.  Settings now carries only deployment-shape fields:
+the host filesystem path to the signal-cli config dir, the binary,
+and the local TCP daemon address.
 """
 
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from aios_signal.config import Settings
 
 
-def test_csv_env_value_parses(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AIOS_SIGNAL_PHONES", "+15551234567,+15559876543")
+def test_config_dir_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AIOS_SIGNAL_CONFIG_DIR", raising=False)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_constructor_kwarg() -> None:
+    s = Settings(config_dir="/tmp/aios-signal-test")
+    assert s.config_dir.as_posix() == "/tmp/aios-signal-test"
+
+
+def test_defaults_for_optional_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AIOS_SIGNAL_CONFIG_DIR", "/tmp/aios-signal-test")
     s = Settings()
-    assert s.phones == ["+15551234567", "+15559876543"]
-
-
-def test_csv_env_handles_whitespace_and_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AIOS_SIGNAL_PHONES", " +15551234567 , +15559876543 , ")
-    monkeypatch.setenv("AIOS_SIGNAL_CONFIG_DIR", "/tmp/aios-signal-test")
-    s = Settings()
-    assert s.phones == ["+15551234567", "+15559876543"]
-
-
-def test_single_phone_csv_works(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AIOS_SIGNAL_PHONES", "+15551234567")
-    monkeypatch.setenv("AIOS_SIGNAL_CONFIG_DIR", "/tmp/aios-signal-test")
-    s = Settings()
-    assert s.phones == ["+15551234567"]
-
-
-def test_constructor_kwarg_takes_list_directly() -> None:
-    """Constructor kwargs (used by tests) bypass the CSV-split path."""
-    s = Settings(phones=["+15551234567"], config_dir="/tmp/aios-signal-test")  # type: ignore[arg-type]
-    assert s.phones == ["+15551234567"]
+    assert s.cli_bin == "signal-cli"
+    assert s.daemon_host == "127.0.0.1"
+    assert s.daemon_port == 7583

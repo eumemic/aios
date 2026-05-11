@@ -28,6 +28,7 @@ from aios.sdk._generated.api.connections import (
     list_bound_chats,
     list_connections,
     list_recent_chats,
+    set_connection_secrets,
     unbind_chat,
     unconfigure_connection,
 )
@@ -35,6 +36,8 @@ from aios.sdk._generated.models.bind_chat_request import BindChatRequest
 from aios.sdk._generated.models.connection_attach import ConnectionAttach
 from aios.sdk._generated.models.connection_configure_per_chat import ConnectionConfigurePerChat
 from aios.sdk._generated.models.connection_create import ConnectionCreate
+from aios.sdk._generated.models.connection_set_secrets import ConnectionSetSecrets
+from aios.sdk._generated.models.connection_set_secrets_secrets import ConnectionSetSecretsSecrets
 from aios.sdk._generated.models.list_connections_mode_type_0 import ListConnectionsModeType0
 
 app = typer.Typer(name="connections", help="Manage connector connections.", no_args_is_help=True)
@@ -83,6 +86,23 @@ def get(ctx: typer.Context, connection_id: str) -> None:
     run_or_die(_run)
 
 
+def _parse_secret_kvs(values: list[str]) -> dict[str, str]:
+    """Parse repeated ``KEY=VALUE`` ``--secret`` flags into a dict.
+
+    Empty list returns an empty dict; the caller distinguishes that
+    case from "no flag passed at all" before sending to the API.
+    """
+    out: dict[str, str] = {}
+    for raw in values:
+        if "=" not in raw:
+            raise PayloadError(f"--secret expects KEY=VALUE; got {raw!r}")
+        key, _, val = raw.partition("=")
+        if not key:
+            raise PayloadError(f"--secret KEY must be non-empty; got {raw!r}")
+        out[key] = val
+    return out
+
+
 @app.command("create", help="Create a connection in detached mode.")
 def create(
     ctx: typer.Context,
@@ -96,13 +116,24 @@ def create(
         str | None,
         typer.Option("--metadata-json", help="JSON object of connection metadata."),
     ] = None,
+    secret: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--secret",
+            help=(
+                "Platform credential as KEY=VALUE (e.g. bot_token=12345:abc). "
+                "Repeatable.  Encrypted at rest server-side; only ever read "
+                "back by the connector container's own bearer token."
+            ),
+        ),
+    ] = None,
     file: Annotated[Path | None, typer.Option("--file")] = None,
     stdin: Annotated[bool, typer.Option("--stdin")] = False,
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
         ergonomic: dict[str, Any] | None = None
-        if connector is not None or account is not None:
+        if connector is not None or account is not None or secret:
             if connector is None or account is None:
                 print_error("--connector and --account are both required")
                 return 64
@@ -110,6 +141,12 @@ def create(
             if metadata_json is not None:
                 try:
                     ergonomic["metadata"] = load_json_object(metadata_json, "--metadata-json")
+                except PayloadError as exc:
+                    print_error(str(exc))
+                    return 64
+            if secret:
+                try:
+                    ergonomic["secrets"] = _parse_secret_kvs(secret)
                 except PayloadError as exc:
                     print_error(str(exc))
                     return 64
@@ -122,6 +159,46 @@ def create(
         with get_state(ctx).sdk_client() as client:
             obj = unwrap(create_connection.sync_detailed(client=client, body=body))
         render_single(obj.to_dict())
+        return None
+
+    run_or_die(_run)
+
+
+@app.command(
+    "set-secrets",
+    help="Replace the connection's encrypted secrets dict (wholesale).",
+)
+def set_secrets(
+    ctx: typer.Context,
+    connection_id: str,
+    secret: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--secret",
+            help=(
+                "Platform credential as KEY=VALUE (e.g. bot_token=12345:abc). "
+                "Repeatable.  Encrypted at rest server-side; only ever read "
+                "back by the connector container's own bearer token.  Pass "
+                "no flags to clear all secrets on this connection."
+            ),
+        ),
+    ] = None,
+) -> None:
+    def _run() -> int | None:
+        try:
+            kvs = _parse_secret_kvs(secret or [])
+        except PayloadError as exc:
+            print_error(str(exc))
+            return 64
+        body = ConnectionSetSecrets(secrets=ConnectionSetSecretsSecrets.from_dict(kvs))
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                set_connection_secrets.sync_detailed(
+                    client=client, connection_id=connection_id, body=body
+                )
+            )
+        render_single(obj.to_dict())
+        print_success("secrets updated on", connection_id)
         return None
 
     run_or_die(_run)

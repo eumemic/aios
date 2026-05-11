@@ -15,7 +15,6 @@ from aios_signal.parse import Attachment, InboundMessage
 
 def _make_connector(config_dir: Path) -> SignalConnector:
     cfg = Settings(
-        phones=["+15550001"],
         config_dir=config_dir,
         cli_bin="/usr/bin/signal-cli",
     )
@@ -58,11 +57,13 @@ def test_fallback_to_config_dir_when_file_field_omitted(tmp_path: Path) -> None:
         )
     )
 
-    sdk_atts = connector._build_sdk_attachments(msg)
+    records = connector._build_attachment_dicts(msg)
 
-    assert len(sdk_atts) == 1
-    assert sdk_atts[0].host_path == str(expected_path)
-    assert sdk_atts[0].content_type == "image/png"
+    assert len(records) == 1
+    assert records[0]["host_path"] == str(expected_path)
+    assert records[0]["content_type"] == "image/png"
+    assert records[0]["filename"] == "photo.png"
+    assert records[0]["size"] == len(b"fake-png-bytes")
 
 
 def test_fallback_skips_when_file_missing_on_disk(tmp_path: Path) -> None:
@@ -84,8 +85,7 @@ def test_fallback_skips_when_file_missing_on_disk(tmp_path: Path) -> None:
         )
     )
 
-    sdk_atts = connector._build_sdk_attachments(msg)
-    assert sdk_atts == []
+    assert connector._build_attachment_dicts(msg) == []
 
 
 def test_no_id_no_host_path_skips_with_warning(tmp_path: Path) -> None:
@@ -104,7 +104,7 @@ def test_no_id_no_host_path_skips_with_warning(tmp_path: Path) -> None:
         )
     )
 
-    assert connector._build_sdk_attachments(msg) == []
+    assert connector._build_attachment_dicts(msg) == []
 
 
 def test_explicit_host_path_wins_over_id_fallback(tmp_path: Path) -> None:
@@ -127,6 +127,6 @@ def test_explicit_host_path_wins_over_id_fallback(tmp_path: Path) -> None:
         )
     )
 
-    sdk_atts = connector._build_sdk_attachments(msg)
-    assert len(sdk_atts) == 1
-    assert sdk_atts[0].host_path == str(explicit)
+    records = connector._build_attachment_dicts(msg)
+    assert len(records) == 1
+    assert records[0]["host_path"] == str(explicit)

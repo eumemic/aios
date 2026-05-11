@@ -38,11 +38,11 @@ RUN useradd --create-home --uid 1000 aios
 WORKDIR /app
 
 # Workspace-package dirs must be present before the first uv sync:
-# pyproject's project deps reference workspace members (aios-connector),
-# and uv resolves them at install time from the on-disk source tree, not
-# from PyPI. Layer caching still works — src/ is what flips on every
-# commit and is copied last; packages/ and connectors/ are leaf dirs
-# that change rarely.
+# pyproject lists ``packages/aios-connector-http`` as a workspace member,
+# and uv resolves workspace deps at install time from the on-disk
+# source tree (not from PyPI).  Layer caching still works — src/ is
+# what flips on every commit and is copied last.  Connectors live in
+# their own container images and don't ship in the worker image.
 COPY pyproject.toml uv.lock ./
 COPY packages ./packages
 COPY connectors ./connectors
@@ -108,27 +108,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends docker-ce-cli \
  && rm -rf /var/lib/apt/lists/*
 
-# signal-cli for the Signal connector. The connector spawns ``signal-cli
-# daemon`` as a direct subprocess (see connectors/signal/src/aios_signal/
-# daemon.py), so the binary must be on PATH inside this image.
-#
-# We use the upstream GraalVM native-image build: a single self-contained
-# ELF binary, no JRE required. signal-cli isn't packaged in Debian, so
-# upstream tarball is the right source. The native tarball is just the
-# binary (no versioned directory wrapping it), so we install it directly
-# to /usr/local/bin. Pinned via build-arg so version bumps are a one-line
-# diff. Trailing `signal-cli --version` is a build-time smoke test: a
-# broken or glibc-incompatible binary fails the build instead of shipping
-# a quietly-broken image. If the native build ever has glibc trouble on
-# the Debian bookworm base, fall back to the JAR + Temurin JRE 21 path.
-ARG SIGNAL_CLI_VERSION=0.14.3
-RUN curl -fsSL "https://github.com/AsamK/signal-cli/releases/download/v${SIGNAL_CLI_VERSION}/signal-cli-${SIGNAL_CLI_VERSION}-Linux-native.tar.gz" \
-        -o /tmp/signal-cli.tar.gz \
- && tar -xzf /tmp/signal-cli.tar.gz -C /usr/local/bin \
- && chmod 0755 /usr/local/bin/signal-cli \
- && rm /tmp/signal-cli.tar.gz \
- && signal-cli --version
-
 # Worker runs as root because the bind-mounted /var/run/docker.sock is
 # owned by the host's docker group, whose GID isn't predictable across
 # host OSes (0 on Docker Desktop, 999 or 998 on most Linux distros).
@@ -140,7 +119,4 @@ RUN curl -fsSL "https://github.com/AsamK/signal-cli/releases/download/v${SIGNAL_
 # user (currently root from `python:3.13-slim`; tightening that is
 # tracked separately).
 
-# Crash-only: state is in Postgres, advisory lock self-releases, boot is
-# idempotent.  The orchestrator (Coolify in prod) is responsible for
-# restart on exit; this image bakes no in-image supervisor.
 CMD ["aios", "worker"]

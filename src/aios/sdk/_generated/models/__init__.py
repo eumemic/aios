@@ -16,18 +16,34 @@ from .agent_version import AgentVersion
 from .agent_version_litellm_extra import AgentVersionLitellmExtra
 from .bind_chat_request import BindChatRequest
 from .bound_chat import BoundChat
-from .call_v1_connectors_connector_instance_call_post_response_call_v1_connectors_connector_instance_call_post import (
-    CallV1ConnectorsConnectorInstanceCallPostResponseCallV1ConnectorsConnectorInstanceCallPost,
-)
 from .connection import Connection
 from .connection_attach import ConnectionAttach
 from .connection_configure_per_chat import ConnectionConfigurePerChat
 from .connection_create import ConnectionCreate
 from .connection_create_metadata import ConnectionCreateMetadata
+from .connection_create_secrets_type_0 import ConnectionCreateSecretsType0
 from .connection_metadata import ConnectionMetadata
-from .connector_call_body import ConnectorCallBody
-from .connector_call_body_arguments import ConnectorCallBodyArguments
-from .connector_call_body_meta_type_0 import ConnectorCallBodyMetaType0
+from .connection_set_secrets import ConnectionSetSecrets
+from .connection_set_secrets_secrets import ConnectionSetSecretsSecrets
+from .connection_set_tools import ConnectionSetTools
+from .connector_inbound_request import ConnectorInboundRequest
+from .connector_inbound_request_attachments_type_0_item import (
+    ConnectorInboundRequestAttachmentsType0Item,
+)
+from .connector_inbound_request_metadata_type_0 import (
+    ConnectorInboundRequestMetadataType0,
+)
+from .connector_inbound_request_sender import ConnectorInboundRequestSender
+from .connector_inbound_response import ConnectorInboundResponse
+from .connector_secrets import ConnectorSecrets
+from .connector_secrets_secrets import ConnectorSecretsSecrets
+from .connector_token import ConnectorToken
+from .connector_token_issue import ConnectorTokenIssue
+from .connector_token_issued import ConnectorTokenIssued
+from .connector_tool_result_request import ConnectorToolResultRequest
+from .connector_tool_result_request_content_type_1_item import (
+    ConnectorToolResultRequestContentType1Item,
+)
 from .context_response import ContextResponse
 from .context_response_messages_item import ContextResponseMessagesItem
 from .context_response_tools_item import ContextResponseToolsItem
@@ -41,21 +57,12 @@ from .event import Event
 from .event_data import EventData
 from .event_kind import EventKind
 from .get_health_response_get_health import GetHealthResponseGetHealth
-from .get_instance_v1_connectors_connector_instance_get_response_get_instance_v1_connectors_connector_instance_get import (
-    GetInstanceV1ConnectorsConnectorInstanceGetResponseGetInstanceV1ConnectorsConnectorInstanceGet,
-)
 from .github_repository_resource import GithubRepositoryResource
 from .github_repository_resource_echo import GithubRepositoryResourceEcho
 from .github_repository_update import GithubRepositoryUpdate
 from .http_validation_error import HTTPValidationError
 from .limited_networking import LimitedNetworking
-from .list_accounts_v1_connectors_connector_instance_accounts_get_response_list_accounts_v1_connectors_connector_instance_accounts_get import (
-    ListAccountsV1ConnectorsConnectorInstanceAccountsGetResponseListAccountsV1ConnectorsConnectorInstanceAccountsGet,
-)
 from .list_connections_mode_type_0 import ListConnectionsModeType0
-from .list_for_connector_v1_connectors_connector_get_response_list_for_connector_v1_connectors_connector_get import (
-    ListForConnectorV1ConnectorsConnectorGetResponseListForConnectorV1ConnectorsConnectorGet,
-)
 from .list_response_agent import ListResponseAgent
 from .list_response_agent_version import ListResponseAgentVersion
 from .list_response_annotated_union_memory_store_resource_echo_github_repository_resource_echo_field_infoannotation_none_type_required_true_discriminatortype import (
@@ -63,6 +70,7 @@ from .list_response_annotated_union_memory_store_resource_echo_github_repository
 )
 from .list_response_bound_chat import ListResponseBoundChat
 from .list_response_connection import ListResponseConnection
+from .list_response_connector_token import ListResponseConnectorToken
 from .list_response_environment import ListResponseEnvironment
 from .list_response_event import ListResponseEvent
 from .list_response_memory_store import ListResponseMemoryStore
@@ -79,12 +87,6 @@ from .list_response_vault import ListResponseVault
 from .list_response_vault_credential import ListResponseVaultCredential
 from .list_session_events_kind_type_0 import ListSessionEventsKindType0
 from .list_sessions_status_type_0 import ListSessionsStatusType0
-from .list_tools_v1_connectors_connector_instance_tools_get_response_list_tools_v1_connectors_connector_instance_tools_get import (
-    ListToolsV1ConnectorsConnectorInstanceToolsGetResponseListToolsV1ConnectorsConnectorInstanceToolsGet,
-)
-from .list_v1_connectors_get_response_list_v1_connectors_get import (
-    ListV1ConnectorsGetResponseListV1ConnectorsGet,
-)
 from .mcp_permission_policy import McpPermissionPolicy
 from .mcp_permission_policy_type import McpPermissionPolicyType
 from .mcp_server_spec import McpServerSpec
@@ -141,6 +143,7 @@ from .token_endpoint_auth_post import TokenEndpointAuthPost
 from .tool_confirmation_request import ToolConfirmationRequest
 from .tool_confirmation_request_result import ToolConfirmationRequestResult
 from .tool_result_request import ToolResultRequest
+from .tool_result_request_content_type_1_item import ToolResultRequestContentType1Item
 from .tool_spec import ToolSpec
 from .tool_spec_input_schema_type_0 import ToolSpecInputSchemaType0
 from .tool_spec_permission_type_0 import ToolSpecPermissionType0
@@ -166,6 +169,7 @@ from .vault_update_metadata_type_0 import VaultUpdateMetadataType0
 from .wait_response import WaitResponse
 from .wait_response_session_status import WaitResponseSessionStatus
 from .wait_response_session_stop_reason_type_0 import WaitResponseSessionStopReasonType0
+from .who_am_i import WhoAmI
 
 __all__ = (
     "Actor",
@@ -184,16 +188,28 @@ __all__ = (
     "AgentVersionLitellmExtra",
     "BindChatRequest",
     "BoundChat",
-    "CallV1ConnectorsConnectorInstanceCallPostResponseCallV1ConnectorsConnectorInstanceCallPost",
     "Connection",
     "ConnectionAttach",
     "ConnectionConfigurePerChat",
     "ConnectionCreate",
     "ConnectionCreateMetadata",
+    "ConnectionCreateSecretsType0",
     "ConnectionMetadata",
-    "ConnectorCallBody",
-    "ConnectorCallBodyArguments",
-    "ConnectorCallBodyMetaType0",
+    "ConnectionSetSecrets",
+    "ConnectionSetSecretsSecrets",
+    "ConnectionSetTools",
+    "ConnectorInboundRequest",
+    "ConnectorInboundRequestAttachmentsType0Item",
+    "ConnectorInboundRequestMetadataType0",
+    "ConnectorInboundRequestSender",
+    "ConnectorInboundResponse",
+    "ConnectorSecrets",
+    "ConnectorSecretsSecrets",
+    "ConnectorToken",
+    "ConnectorTokenIssue",
+    "ConnectorTokenIssued",
+    "ConnectorToolResultRequest",
+    "ConnectorToolResultRequestContentType1Item",
     "ContextResponse",
     "ContextResponseMessagesItem",
     "ContextResponseToolsItem",
@@ -207,20 +223,18 @@ __all__ = (
     "EventData",
     "EventKind",
     "GetHealthResponseGetHealth",
-    "GetInstanceV1ConnectorsConnectorInstanceGetResponseGetInstanceV1ConnectorsConnectorInstanceGet",
     "GithubRepositoryResource",
     "GithubRepositoryResourceEcho",
     "GithubRepositoryUpdate",
     "HTTPValidationError",
     "LimitedNetworking",
-    "ListAccountsV1ConnectorsConnectorInstanceAccountsGetResponseListAccountsV1ConnectorsConnectorInstanceAccountsGet",
     "ListConnectionsModeType0",
-    "ListForConnectorV1ConnectorsConnectorGetResponseListForConnectorV1ConnectorsConnectorGet",
     "ListResponseAgent",
     "ListResponseAgentVersion",
     "ListResponseAnnotatedUnionMemoryStoreResourceEchoGithubRepositoryResourceEchoFieldInfoannotationNoneTypeRequiredTrueDiscriminatortype",
     "ListResponseBoundChat",
     "ListResponseConnection",
+    "ListResponseConnectorToken",
     "ListResponseEnvironment",
     "ListResponseEvent",
     "ListResponseMemoryStore",
@@ -235,8 +249,6 @@ __all__ = (
     "ListResponseVaultCredential",
     "ListSessionEventsKindType0",
     "ListSessionsStatusType0",
-    "ListToolsV1ConnectorsConnectorInstanceToolsGetResponseListToolsV1ConnectorsConnectorInstanceToolsGet",
-    "ListV1ConnectorsGetResponseListV1ConnectorsGet",
     "McpPermissionPolicy",
     "McpPermissionPolicyType",
     "McpServerSpec",
@@ -293,6 +305,7 @@ __all__ = (
     "ToolConfirmationRequest",
     "ToolConfirmationRequestResult",
     "ToolResultRequest",
+    "ToolResultRequestContentType1Item",
     "ToolSpec",
     "ToolSpecInputSchemaType0",
     "ToolSpecPermissionType0",
@@ -318,4 +331,5 @@ __all__ = (
     "WaitResponse",
     "WaitResponseSessionStatus",
     "WaitResponseSessionStopReasonType0",
+    "WhoAmI",
 )

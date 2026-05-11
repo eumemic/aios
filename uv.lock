@@ -9,8 +9,8 @@ resolution-markers = [
 [manifest]
 members = [
     "aios",
-    "aios-connector",
-    "aios-echo",
+    "aios-connector-http",
+    "aios-echo-http",
     "aios-signal",
     "aios-telegram",
 ]
@@ -110,7 +110,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiodocker" },
-    { name = "aios-connector" },
     { name = "alembic" },
     { name = "asyncpg" },
     { name = "fastapi" },
@@ -133,7 +132,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "aios-echo" },
+    { name = "aios-echo-http" },
     { name = "httpx" },
     { name = "mypy" },
     { name = "openapi-python-client" },
@@ -147,7 +146,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiodocker", specifier = ">=0.23" },
-    { name = "aios-connector", editable = "packages/aios-connector" },
     { name = "alembic", specifier = ">=1.13" },
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "fastapi", specifier = ">=0.115" },
@@ -170,7 +168,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "aios-echo", editable = "packages/aios-echo" },
+    { name = "aios-echo-http", editable = "connectors/echo-http" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "openapi-python-client", specifier = ">=0.21" },
@@ -182,13 +180,13 @@ dev = [
 ]
 
 [[package]]
-name = "aios-connector"
+name = "aios-connector-http"
 version = "0.1.0"
-source = { editable = "packages/aios-connector" }
+source = { editable = "packages/aios-connector-http" }
 dependencies = [
-    { name = "anyio" },
-    { name = "mcp" },
+    { name = "httpx" },
     { name = "python-ulid" },
+    { name = "structlog" },
 ]
 
 [package.dev-dependencies]
@@ -201,9 +199,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.6" },
-    { name = "mcp", specifier = ">=1.20,<2.0" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "python-ulid", specifier = ">=3.0" },
+    { name = "structlog", specifier = ">=24.1" },
 ]
 
 [package.metadata.requires-dev]
@@ -215,11 +213,11 @@ dev = [
 ]
 
 [[package]]
-name = "aios-echo"
+name = "aios-echo-http"
 version = "0.1.0"
-source = { editable = "packages/aios-echo" }
+source = { editable = "connectors/echo-http" }
 dependencies = [
-    { name = "aios-connector" },
+    { name = "aios-connector-http" },
 ]
 
 [package.dev-dependencies]
@@ -231,7 +229,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "aios-connector", editable = "packages/aios-connector" }]
+requires-dist = [{ name = "aios-connector-http", editable = "packages/aios-connector-http" }]
 
 [package.metadata.requires-dev]
 dev = [
@@ -243,11 +241,10 @@ dev = [
 
 [[package]]
 name = "aios-signal"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "connectors/signal" }
 dependencies = [
-    { name = "aios-connector" },
-    { name = "mcp" },
+    { name = "aios-connector-http" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "structlog" },
@@ -264,8 +261,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aios-connector", editable = "packages/aios-connector" },
-    { name = "mcp", specifier = ">=1.20,<2.0" },
+    { name = "aios-connector-http", editable = "packages/aios-connector-http" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "structlog", specifier = ">=24.4" },
@@ -282,11 +278,10 @@ dev = [
 
 [[package]]
 name = "aios-telegram"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "connectors/telegram" }
 dependencies = [
-    { name = "aios-connector" },
-    { name = "mcp" },
+    { name = "aios-connector-http" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-telegram-bot" },
@@ -304,8 +299,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aios-connector", editable = "packages/aios-connector" },
-    { name = "mcp", specifier = ">=1.20,<2.0" },
+    { name = "aios-connector-http", editable = "packages/aios-connector-http" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "python-telegram-bot", specifier = ">=22.6,<23" },

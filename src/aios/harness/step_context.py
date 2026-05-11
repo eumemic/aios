@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 from aios.harness.context import (
     build_messages,
     separate_adjacent_user_messages,
+    stub_missing_reasoning_content,
 )
 from aios.tools.registry import to_openai_tools
 
@@ -94,7 +95,6 @@ async def compute_step_prelude(
     :func:`compose_step_context` unchanged, so the composed prompt stays
     byte-identical to what it was before the split.
     """
-    from aios.harness import runtime
     from aios.harness.channels import (
         augment_with_focal_paradigm,
         max_tail_block_local,
@@ -119,11 +119,17 @@ async def compute_step_prelude(
         tools.extend(mcp_tools)
         instructions_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
 
-    # Connector-subprocess (stdio MCP) tools come from the worker-scoped
-    # registry, separate from agent.mcp_servers (HTTP MCP).
-    connector_registry = runtime.connector_subprocess_registry
-    if connector_registry is not None:
-        tools.extend(await connector_registry.list_tools())
+    # Custom tools declared on connections attached to this session
+    # (single_session, per_chat origin, or operator-bound chat).  Each
+    # entry is dispatched via the requires_action / tool-results flow —
+    # the connector executes externally and POSTs the result back (#301).
+    from aios.models.agents import ToolSpec
+    from aios.services import connections as connections_service
+
+    connection_tool_dicts = await connections_service.list_tools_for_session(pool, session_id)
+    if connection_tool_dicts:
+        connection_tools = [ToolSpec.model_validate(d) for d in connection_tool_dicts]
+        tools.extend(to_openai_tools(connection_tools))
 
     skill_versions = (
         await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
@@ -196,6 +202,12 @@ async def compose_step_context(
     # Block LiteLLM's adjacent-same-role merge on Anthropic so the tail
     # isn't concatenated into the preceding user inbound.
     messages = separate_adjacent_user_messages(ctx.messages)
+
+    # Unblock thinking-mode models: DeepSeek V4 Flash rejects assistant
+    # turns without reasoning_content.  Empty stub is ignored by all
+    # non-thinking providers we've tested (Anthropic, OpenAI, Gemini,
+    # Llama, non-thinking DeepSeek).
+    stub_missing_reasoning_content(messages)
 
     return StepContext(
         model=agent.model,
