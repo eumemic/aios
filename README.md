@@ -172,6 +172,39 @@ uv run aios chat --agent <agent_id> --environment-id <env_id> \
 
 Model API keys are configured via standard LiteLLM environment variables: `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc. For web tools: `AIOS_TAVILY_API_KEY`. For connectors, see each connector's README.
 
+## Run the full stack with Docker Compose
+
+The Quickstart above runs **lean mode**: postgres in a container, api + worker on the host. That's the fastest hot-reload path while iterating on aios itself.
+
+When you need the production-shape topology — every connector in its own container, isolated network namespace, encrypted-at-rest credentials on the connection record — use `compose.yml`:
+
+```bash
+# One-time bootstrap (generates keys, brings up postgres + api,
+# creates the default echo-http connection + token, writes .env).
+./scripts/dev-bootstrap.sh
+
+# Bring up postgres + migrate + api + worker + echo-http.
+docker compose up
+
+# With platform connectors:
+./scripts/dev-bootstrap.sh --connector telegram --bot-token <BOT_TOKEN>
+docker compose --profile telegram up
+
+./scripts/dev-bootstrap.sh --connector signal --phone +15551234567
+docker compose --profile signal up
+```
+
+The bootstrap script is idempotent — re-runs are a no-op once a connector's token is in `.env`. Use `./scripts/dev-bootstrap.sh --reset` to wipe generated keys + tokens and start fresh (useful after rotating credentials or when handing the worktree to another developer).
+
+**Connector tokens are returned ONCE** by `POST /v1/connector-tokens` and never readable thereafter. The bootstrap script captures them into `.env`. If `.env` is lost, run `--reset` to issue new ones.
+
+### Operator notes
+
+- **Workspace path bind-mount.** The worker spawns sibling sandbox containers via the host docker daemon. The host paths it computes (`<workspace_root>/<session_id>`, `<workspace_root>/_attachments/...`) must resolve identically on the host and inside the worker container. `compose.yml` bind-mounts `${WORKSPACE_HOST_PATH}:${WORKSPACE_HOST_PATH}` — the same string on both sides. Default is repo-relative (`./.aios/workspaces`); for prod-shape testing, set `WORKSPACE_HOST_PATH=/var/lib/aios/workspaces` in `.env`. A Docker named volume cannot satisfy this — its host path lives under `/var/lib/docker/volumes/...` which the worker has no way to know.
+- **Apple Silicon.** signal-cli's upstream native build is amd64-only, so the `signal` service declares `platform: linux/amd64` and runs under emulation. Acceptable for local dev.
+- **Lean + full coexist.** Lean mode is the same Quickstart above — preserved unchanged. You can flip between modes (e.g., `docker compose stop api worker; uv run aios api &; uv run aios worker &`) as long as `.env` is consistent.
+- **signal-cli registration.** Bootstrap creates the connection and issues the token, but signal-cli's `register` / `verify` flow against Signal's servers is a separate manual step inside the running container — see `connectors/signal/README.md`.
+
 ### Per-worktree dev instances
 
 Working on aios itself? `aios dev bootstrap` creates an isolated dev instance per git worktree — separate database, free port, scoped Docker labels — so multiple branches can run concurrently without stepping on each other:

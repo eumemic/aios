@@ -11,6 +11,10 @@ dependencies = [
     "httpx>=0.27",
     "python-ulid>=3.0",
     "structlog>=24.1",
+    # python-ulid 3.x imports ``typing_extensions`` at module load but
+    # doesn't declare it; works in the root image (transitive of pydantic
+    # / fastapi) but breaks in bare connector images.
+    "typing-extensions>=4.0",
 ]
 
 [dependency-groups]

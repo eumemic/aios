@@ -1,0 +1,164 @@
+# Local-dev topology for aios.  Two valid runtime modes:
+#
+#   Lean: ``docker compose up -d postgres`` only; api + worker run on the
+#         host via ``uv run python -m aios api/worker``.  Fastest hot-reload
+#         while iterating on aios itself.
+#
+#   Full: ``./scripts/dev-bootstrap.sh && docker compose up`` brings up
+#         postgres + migrate + api + worker + echo-http.  Profile flags add
+#         platform connectors:
+#           docker compose --profile telegram up
+#           docker compose --profile signal up
+#
+# The worker spawns sibling sandbox containers via /var/run/docker.sock,
+# so the workspace dir is bind-mounted at the SAME host path inside both
+# api and worker.  See README → "Run the full stack with Docker Compose"
+# for why a Docker named volume cannot satisfy this.
+
+services:
+  postgres:
+    # 16-alpine matches the README quickstart and existing dev conventions;
+    # postgres:18 changed the in-image data layout from /var/lib/postgresql/data
+    # to /var/lib/postgresql/<major>, which would break existing volumes.
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aios
+      POSTGRES_PASSWORD: aios
+      POSTGRES_DB: aios
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aios -d aios"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Host-side 5433 (default) leaves 5432 free for an OS-installed
+    # postgres; lean mode dials this port via .env's AIOS_DB_URL.
+    # Override POSTGRES_HOST_PORT for parallel smoke stacks.
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+
+  migrate:
+    build:
+      context: .
+      target: api
+    # Direct ``aios`` (not ``uv run aios``) because the image's venv is
+    # baked at build time + PATH-injected; ``uv run`` would attempt a
+    # re-sync that fails as the non-root ``aios`` user.
+    command: ["aios", "migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AIOS_API_KEY: ${AIOS_API_KEY:?AIOS_API_KEY required — run scripts/dev-bootstrap.sh}
+      AIOS_VAULT_KEY: ${AIOS_VAULT_KEY:?AIOS_VAULT_KEY required — run scripts/dev-bootstrap.sh}
+      AIOS_DB_URL: postgresql://aios:aios@postgres:5432/aios
+
+  api:
+    build:
+      context: .
+      target: api
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # env_file pulls everything from .env so model-provider keys, LiteLLM
+    # tunables (LITELLM_LOG, *_API_BASE, AZURE_API_VERSION, AWS_*, …),
+    # and any future tooling vars flow through without compose edits.
+    # ``environment:`` below overrides the few values that differ between
+    # lean mode (.env's localhost-bound defaults) and in-container values.
+    env_file:
+      - .env
+    environment:
+      AIOS_DB_URL: postgresql://aios:aios@postgres:5432/aios
+      AIOS_API_HOST: 0.0.0.0
+      AIOS_API_PORT: "8080"
+      AIOS_WORKSPACE_ROOT: ${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}
+    volumes:
+      # Same path on both sides: the api process stages inbound attachment
+      # bytes to <workspace_root>/_attachments/...; the worker hands those
+      # paths to the host docker daemon when spawning sandboxes, so api +
+      # worker + host all see the same string.
+      - "${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}:${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}"
+    ports:
+      - "${AIOS_API_PORT:-8080}:8080"
+    # Healthcheck inherited from Dockerfile (curl http://127.0.0.1:8080/health).
+
+  worker:
+    build:
+      context: .
+      target: worker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # See note on the api service for why we use env_file.
+    env_file:
+      - .env
+    environment:
+      AIOS_DB_URL: postgresql://aios:aios@postgres:5432/aios
+      AIOS_WORKSPACE_ROOT: ${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}
+    volumes:
+      - "${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}:${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}"
+      # Worker uses the host's docker daemon to spawn sandbox containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Healthcheck inherited from Dockerfile (mtime of /var/run/aios-worker-alive).
+
+  echo-http:
+    build:
+      context: .
+      dockerfile: connectors/echo-http/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      AIOS_URL: http://api:8080
+      # Empty default — populated by ``scripts/dev-bootstrap.sh``.  All
+      # connector services use ``:-`` (not ``:?``) because compose
+      # interpolates every service at config time, and bootstrap brings
+      # up postgres + api BEFORE the connector token exists.  Empty
+      # token surfaces as a 401 from the api at first request.
+      AIOS_CONNECTOR_TOKEN: ${ECHO_HTTP_CONNECTOR_TOKEN:-}
+      AIOS_WORKSPACE_ROOT: ${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}
+    volumes:
+      # :ro because the SDK resolves SandboxPath args against
+      # AIOS_WORKSPACE_ROOT and reads the host file; the connector never
+      # writes back through this mount.
+      - "${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}:${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}:ro"
+
+  telegram:
+    profiles: [telegram]
+    build:
+      context: .
+      dockerfile: connectors/telegram/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      AIOS_URL: http://api:8080
+      AIOS_CONNECTOR_TOKEN: ${TELEGRAM_CONNECTOR_TOKEN:-}
+      AIOS_WORKSPACE_ROOT: ${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}
+    volumes:
+      - "${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}:${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}:ro"
+
+  signal:
+    profiles: [signal]
+    # signal-cli upstream native build is amd64-only; on Apple Silicon
+    # this runs under emulation.  Acceptable for local dev.
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: connectors/signal/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      AIOS_URL: http://api:8080
+      AIOS_CONNECTOR_TOKEN: ${SIGNAL_CONNECTOR_TOKEN:-}
+      AIOS_WORKSPACE_ROOT: ${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}
+      AIOS_SIGNAL_CONFIG_DIR: /var/lib/aios/signal-data
+    volumes:
+      - "${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}:${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path — run scripts/dev-bootstrap.sh}:ro"
+      - signal_state:/var/lib/aios/signal-data
+
+volumes:
+  pgdata:
+  signal_state:
