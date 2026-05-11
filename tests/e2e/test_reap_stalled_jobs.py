@@ -28,9 +28,7 @@ from tests.conftest import needs_docker
 async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
     from aios.config import get_settings
     from aios.db.pool import create_pool
-    from tests.e2e.conftest import ensure_procrastinate_schema
 
-    await ensure_procrastinate_schema(aios_env["AIOS_DB_URL"])
     p = await create_pool(get_settings().db_url, min_size=1, max_size=4)
     yield p
     await p.close()

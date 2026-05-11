@@ -57,44 +57,19 @@ async def _noop_defer_wake(
     pass
 
 
-async def ensure_procrastinate_schema(aios_db_url: str) -> None:
-    """Apply procrastinate's schema if missing, then install the aios
-    lock-release trigger. Mirrors ``aios migrate`` for tests."""
-    import asyncpg
-    from procrastinate import App, PsycopgConnector
-
-    from aios.config import get_settings
-    from aios.db.procrastinate_extensions import LOCK_RELEASE_TRIGGER_DDL
-
-    settings = get_settings()
-    conn = await asyncpg.connect(settings.db_url)
-    try:
-        present = await conn.fetchval("SELECT to_regclass('procrastinate_jobs')")
-        if present is None:
-            conninfo = aios_db_url.replace("postgresql+psycopg://", "postgresql://")
-            tmp_app = App(connector=PsycopgConnector(conninfo=conninfo))
-            await tmp_app.open_async()
-            try:
-                await tmp_app.schema_manager.apply_schema_async()
-            finally:
-                await tmp_app.close_async()
-        await conn.execute(LOCK_RELEASE_TRIGGER_DDL)
-    finally:
-        await conn.close()
-
-
 @pytest.fixture
 async def real_wake_setup(aios_env: dict[str, str]) -> AsyncIterator[Any]:
-    """Real pool + procrastinate schema (with the aios lock-release trigger).
+    """Real pool against the session-migrated DB.
 
     Used by tests that exercise the real ``defer_wake`` and a real
     procrastinate worker — the ``harness`` fixture's ``defer_wake`` is
-    a no-op and so unsuitable here.
+    a no-op and so unsuitable here. The procrastinate schema + aios
+    lock-release trigger are applied once at session start by
+    ``migrated_db_url``; this fixture only needs a fresh pool.
     """
     from aios.config import get_settings
     from aios.db.pool import create_pool
 
-    await ensure_procrastinate_schema(aios_env["AIOS_DB_URL"])
     pool = await create_pool(get_settings().db_url, min_size=1, max_size=8)
     try:
         yield pool
