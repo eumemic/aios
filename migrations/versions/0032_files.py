@@ -1,19 +1,5 @@
 """Session-scoped file uploads (#324).
 
-Records bytes uploaded via ``POST /v1/sessions/<id>/files``.  The file row
-holds enough metadata to (a) locate the bytes on the api's filesystem
-(``host_path``), (b) tell the model where to find them inside the sandbox
-(``in_sandbox_path``), and (c) verify integrity (``sha256``).
-
-``ON DELETE CASCADE`` ties row lifetime to the session — when a session is
-hard-deleted, its uploads disappear too.  Cleanup of the host directory is
-handled out-of-band (same policy as ``_attachments``: workspace cleanup is
-a separate sweep).
-
-The ``(session_id, created_at DESC)`` index supports a future
-``GET /v1/sessions/<id>/files`` listing endpoint without a full scan; it's
-cheap to maintain on the write path since uploads are not high-frequency.
-
 Revision ID: 0032
 Revises: 0031
 Create Date: 2026-05-11

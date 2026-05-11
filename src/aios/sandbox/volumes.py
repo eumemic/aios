@@ -14,9 +14,38 @@ dirs is a Phase 6 polish item.
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 
 from aios.config import get_settings
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^\w.\-]")
+_MAX_FILENAME_LEN = 200
+_FILENAME_FALLBACK = "unnamed"
+
+
+def safe_filename(name: str | None) -> str:
+    """Sanitize ``name`` for use as a path leaf.
+
+    Strips directory separators (defeats ``../`` traversal), maps
+    unsupported characters to ``_``, falls back to ``"unnamed"`` for
+    None / empty / all-dot inputs, and caps length so a pathological
+    filename combined with a per-file id prefix can't exhaust the
+    host FS's per-component limit.
+
+    Unicode-aware: Python's ``\\w`` matches the full Unicode word class
+    by default, so non-ASCII letters are preserved (e.g.
+    ``café.jpg``, ``图片.png``). Only structurally unsafe punctuation
+    and whitespace get rewritten.
+    """
+    if not name:
+        return _FILENAME_FALLBACK
+    base = os.path.basename(name)
+    cleaned = _UNSAFE_FILENAME_CHARS.sub("_", base)
+    if not cleaned or cleaned.replace(".", "") == "":
+        return _FILENAME_FALLBACK
+    return cleaned[:_MAX_FILENAME_LEN]
 
 
 def workspace_dir_for(session_id: str) -> Path:

@@ -7504,13 +7504,11 @@
         "properties": {
           "file_id": {
             "type": "string",
-            "title": "File Id",
-            "description": "Stable id of the uploaded file."
+            "title": "File Id"
           },
           "in_sandbox_path": {
             "type": "string",
-            "title": "In Sandbox Path",
-            "description": "Path inside the sandbox container where the model sees the file."
+            "title": "In Sandbox Path"
           },
           "filename": {
             "type": "string",
@@ -7539,7 +7537,7 @@
           "sha256"
         ],
         "title": "FileUploadResponse",
-        "description": "Wire shape returned from ``POST /v1/sessions/<id>/files``.\n\nThe ``file_id`` name (rather than the internal ``id``) matches the\ncontract in #324 so callers can reference the file in future inbound\nattachment payloads without rebinding."
+        "description": "Wire shape returned from ``POST /v1/sessions/<id>/files``.\n\n``file_id`` rather than ``id`` matches the #324 contract so callers can\nreference the file in future inbound attachment payloads without rebinding."
       },
       "GithubRepositoryResource": {
         "properties": {

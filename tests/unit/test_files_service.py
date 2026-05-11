@@ -1,4 +1,8 @@
-"""Unit coverage for the multipart upload service."""
+"""Unit coverage for the multipart upload service.
+
+Filename sanitisation lives in ``volumes.safe_filename`` and is covered by
+``test_attachment_staging.TestSafeFilename`` — not duplicated here.
+"""
 
 from __future__ import annotations
 
@@ -14,63 +18,8 @@ import pytest
 from aios.config import get_settings
 from aios.errors import NotFoundError, PayloadTooLargeError
 from aios.models.files import File
-from aios.services.files import sanitize_filename, stage_upload
-
-
-class TestSanitizeFilename:
-    """``sanitize_filename`` strips path components and unsafe characters
-    while preserving unicode word characters (issue #324 v1 stance)."""
-
-    def test_basic_name_preserved(self) -> None:
-        assert sanitize_filename("photo.png") == "photo.png"
-
-    def test_unicode_word_chars_preserved(self) -> None:
-        # Chinese / Cyrillic / accented filenames survive — \w matches
-        # the full unicode word category in Python 3.
-        assert sanitize_filename("图片.png") == "图片.png"
-        assert sanitize_filename("файл.txt") == "файл.txt"
-        assert sanitize_filename("naïve.md") == "naïve.md"
-
-    def test_path_components_stripped(self) -> None:
-        assert sanitize_filename("/etc/passwd") == "passwd"
-        assert sanitize_filename("../../escape.sh") == "escape.sh"
-
-    def test_unsafe_chars_replaced(self) -> None:
-        assert sanitize_filename("file with spaces.txt") == "file_with_spaces.txt"
-        assert sanitize_filename("weird?<>|.png") == "weird____.png"
-        assert sanitize_filename("a/b/c.txt") == "c.txt"  # path-strip happens first
-
-    def test_none_falls_back(self) -> None:
-        assert sanitize_filename(None) == "upload.bin"
-
-    def test_empty_falls_back(self) -> None:
-        assert sanitize_filename("") == "upload.bin"
-
-    def test_path_only_falls_back(self) -> None:
-        # ``.`` and ``..`` survive ``Path(...).name``; we reject them
-        # explicitly so we can't end up writing to a parent dir.
-        assert sanitize_filename(".") == "upload.bin"
-        assert sanitize_filename("..") == "upload.bin"
-        # ``Path('/').name`` is the empty string, which falls back via
-        # the ``cleaned or _DEFAULT_FILENAME`` guard.
-        assert sanitize_filename("/") == "upload.bin"
-
-
-class _FakeAcquireCM:
-    def __init__(self, conn: object) -> None:
-        self._conn = conn
-
-    async def __aenter__(self) -> object:
-        return self._conn
-
-    async def __aexit__(self, *_args: object) -> None:
-        return None
-
-
-def _fake_pool() -> Any:
-    pool = MagicMock()
-    pool.acquire = MagicMock(side_effect=lambda: _FakeAcquireCM(MagicMock()))
-    return pool
+from aios.services.files import stage_upload
+from tests.unit.conftest import fake_pool_yielding_conn
 
 
 class _FakeUpload:
@@ -136,7 +85,7 @@ class TestStageUploadHappyPath:
         data = b"hello world\nthis is a test upload"
         upload = _FakeUpload(data, filename="hello.txt", content_type="text/plain")
         captured: dict[str, Any] = {}
-        pool = cast("asyncpg.Pool[Any]", _fake_pool())
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
 
         with _patch_session_get(), _patch_insert_file(captured):
             result = await stage_upload(pool, session_id="sess_x", upload=upload)
@@ -154,7 +103,7 @@ class TestStageUploadHappyPath:
 
     async def test_empty_file_accepted(self, _workspace: Path) -> None:
         upload = _FakeUpload(b"", filename="empty.bin")
-        pool = cast("asyncpg.Pool[Any]", _fake_pool())
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
         with _patch_session_get(), _patch_insert_file({}):
             result = await stage_upload(pool, session_id="sess_x", upload=upload)
         assert result.size == 0
@@ -163,14 +112,14 @@ class TestStageUploadHappyPath:
 
     async def test_content_type_defaults_to_octet_stream(self, _workspace: Path) -> None:
         upload = _FakeUpload(b"x", filename="anon", content_type=None)
-        pool = cast("asyncpg.Pool[Any]", _fake_pool())
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
         with _patch_session_get(), _patch_insert_file({}):
             result = await stage_upload(pool, session_id="sess_x", upload=upload)
         assert result.content_type == "application/octet-stream"
 
     async def test_unicode_filename_preserved_on_disk(self, _workspace: Path) -> None:
         upload = _FakeUpload(b"hi", filename="图片.png", content_type="image/png")
-        pool = cast("asyncpg.Pool[Any]", _fake_pool())
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
         with _patch_session_get(), _patch_insert_file({}):
             result = await stage_upload(pool, session_id="sess_x", upload=upload)
         assert result.filename == "图片.png"
@@ -184,7 +133,7 @@ class TestStageUploadOversize:
         settings = get_settings()
         monkeypatch.setattr(settings, "upload_max_size_bytes", 64)
         upload = _FakeUpload(b"a" * 256, filename="big.bin")
-        pool = cast("asyncpg.Pool[Any]", _fake_pool())
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
         with (
             _patch_session_get(),
             _patch_insert_file({}),
@@ -203,7 +152,7 @@ class TestStageUploadOversize:
         settings = get_settings()
         monkeypatch.setattr(settings, "upload_max_size_bytes", 64)
         upload = _FakeUpload(b"a" * 4096, filename="big.bin")
-        pool = cast("asyncpg.Pool[Any]", _fake_pool())
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
         with (
             _patch_session_get(),
             _patch_insert_file({}),
@@ -221,7 +170,7 @@ class TestStageUploadOversize:
         settings = get_settings()
         monkeypatch.setattr(settings, "upload_max_size_bytes", 64)
         upload = _FakeUpload(b"a" * 256, filename="big.bin")
-        pool = cast("asyncpg.Pool[Any]", _fake_pool())
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
         with (
             _patch_session_get(),
             _patch_insert_file({}),
@@ -238,7 +187,7 @@ class TestStageUploadOversize:
 class TestStageUploadSessionNotFound:
     async def test_nonexistent_session_propagates_404(self, _workspace: Path) -> None:
         upload = _FakeUpload(b"x", filename="ok.bin")
-        pool = cast("asyncpg.Pool[Any]", _fake_pool())
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
         with _patch_session_not_found(), pytest.raises(NotFoundError):
             await stage_upload(pool, session_id="sess_x", upload=upload)
         # Short-circuited before any disk activity.

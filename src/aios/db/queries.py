@@ -4552,27 +4552,3 @@ async def insert_file(
         ) from exc
     assert row is not None
     return _row_to_file(row)
-
-
-async def get_file(conn: asyncpg.Connection[Any], file_id: str) -> File:
-    row = await conn.fetchrow("SELECT * FROM files WHERE id = $1", file_id)
-    if row is None:
-        raise NotFoundError(f"file {file_id} not found", detail={"id": file_id})
-    return _row_to_file(row)
-
-
-async def list_session_files(conn: asyncpg.Connection[Any], session_id: str) -> list[File]:
-    """Return all files for ``session_id`` newest-first.
-
-    Used by tests today; the eventual ``GET /v1/sessions/<id>/files``
-    listing endpoint will share this query.
-    """
-    rows = await conn.fetch(
-        """
-        SELECT * FROM files
-         WHERE session_id = $1
-         ORDER BY created_at DESC
-        """,
-        session_id,
-    )
-    return [_row_to_file(r) for r in rows]

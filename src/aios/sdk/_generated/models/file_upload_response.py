@@ -13,13 +13,12 @@ T = TypeVar("T", bound="FileUploadResponse")
 class FileUploadResponse:
     """Wire shape returned from ``POST /v1/sessions/<id>/files``.
 
-    The ``file_id`` name (rather than the internal ``id``) matches the
-    contract in #324 so callers can reference the file in future inbound
-    attachment payloads without rebinding.
+    ``file_id`` rather than ``id`` matches the #324 contract so callers can
+    reference the file in future inbound attachment payloads without rebinding.
 
         Attributes:
-            file_id (str): Stable id of the uploaded file.
-            in_sandbox_path (str): Path inside the sandbox container where the model sees the file.
+            file_id (str):
+            in_sandbox_path (str):
             filename (str):
             size (int):
             content_type (str):

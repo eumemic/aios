@@ -366,7 +366,6 @@ async def upload_file(
     """
     mode, connection_id = auth
     if mode == "connector":
-        # connection_id is non-None on the connector branch (see deps.py).
         assert connection_id is not None
         async with pool.acquire() as conn:
             bound = await queries.is_session_bound_to_connection(
