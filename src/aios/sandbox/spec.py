@@ -309,6 +309,7 @@ def _assemble_plan(
     """Pure assembly of the plan from already-materialized inputs."""
     from aios.sandbox.volumes import (
         ensure_session_attachments_dir,
+        ensure_session_uploads_dir,
         memory_store_host_dir,
         session_repo_working_tree_dir,
     )
@@ -319,16 +320,18 @@ def _assemble_plan(
         **session_env,
     }
 
-    # Bind the per-session attachments dir at every provision so an
-    # inbound landing during a running step is visible to the live
-    # sandbox.  Docker doesn't update binds in place; this works
-    # because the bind exposes the *directory* (not a file snapshot),
-    # and any new file the supervisor stages into it appears through
-    # the existing kernel namespace bind without re-mounting.
+    # Bind the per-session attachments and uploads dirs at every provision
+    # so an inbound landing — or a ``POST /v1/sessions/<id>/files`` arriving
+    # — during a running step is visible to the live sandbox.  Docker doesn't
+    # update binds in place; this works because the bind exposes the
+    # *directory* (not a file snapshot), and any new file staged into it
+    # appears through the existing kernel namespace bind without re-mounting.
     attachments_path = ensure_session_attachments_dir(session_id)
+    uploads_path = ensure_session_uploads_dir(session_id)
 
     extra_mounts: list[Mount] = [
         Mount(host_path=attachments_path, sandbox_path="/mnt/attachments", read_only=True),
+        Mount(host_path=uploads_path, sandbox_path="/mnt/uploads", read_only=True),
     ]
 
     # Bind-mount each attached memory store. Read-only attaches make the

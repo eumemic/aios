@@ -52,6 +52,7 @@ from aios.models.connections import Connection
 from aios.models.connector_tokens import ConnectorToken
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
+from aios.models.files import File
 from aios.models.github_repositories import GithubRepositoryResourceEcho
 from aios.models.memory_stores import (
     Actor,
@@ -4488,3 +4489,90 @@ async def resolve_connector_token(
     if row is None:
         return None
     return (row["id"], row["connection_id"])
+
+
+# ─── files ───────────────────────────────────────────────────────────────────
+
+
+def _row_to_file(row: asyncpg.Record) -> File:
+    return File(
+        id=row["id"],
+        session_id=row["session_id"],
+        filename=row["filename"],
+        host_path=row["host_path"],
+        in_sandbox_path=row["in_sandbox_path"],
+        size=row["size"],
+        content_type=row["content_type"],
+        sha256=row["sha256"],
+        created_at=row["created_at"],
+    )
+
+
+async def insert_file(
+    conn: asyncpg.Connection[Any],
+    *,
+    file_id: str,
+    session_id: str,
+    filename: str,
+    host_path: str,
+    in_sandbox_path: str,
+    size: int,
+    content_type: str,
+    sha256: str,
+) -> File:
+    """Insert a row for an already-staged upload.
+
+    Caller has already written the bytes to ``host_path`` and computed
+    ``sha256`` + ``size`` during streaming. Raises :class:`NotFoundError`
+    if ``session_id`` doesn't exist (FK violation).
+    """
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO files (
+                id, session_id, filename, host_path, in_sandbox_path,
+                size, content_type, sha256
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *
+            """,
+            file_id,
+            session_id,
+            filename,
+            host_path,
+            in_sandbox_path,
+            size,
+            content_type,
+            sha256,
+        )
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise NotFoundError(
+            f"session {session_id} not found",
+            detail={"session_id": session_id},
+        ) from exc
+    assert row is not None
+    return _row_to_file(row)
+
+
+async def get_file(conn: asyncpg.Connection[Any], file_id: str) -> File:
+    row = await conn.fetchrow("SELECT * FROM files WHERE id = $1", file_id)
+    if row is None:
+        raise NotFoundError(f"file {file_id} not found", detail={"id": file_id})
+    return _row_to_file(row)
+
+
+async def list_session_files(conn: asyncpg.Connection[Any], session_id: str) -> list[File]:
+    """Return all files for ``session_id`` newest-first.
+
+    Used by tests today; the eventual ``GET /v1/sessions/<id>/files``
+    listing endpoint will share this query.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT * FROM files
+         WHERE session_id = $1
+         ORDER BY created_at DESC
+        """,
+        session_id,
+    )
+    return [_row_to_file(r) for r in rows]

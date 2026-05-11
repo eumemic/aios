@@ -103,6 +103,14 @@ class Settings(BaseSettings):
         description="Maximum bytes of stdout+stderr returned from a bash tool call. "
         "Output beyond this is truncated with a [truncated] marker.",
     )
+    upload_max_size_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        ge=1,
+        description="Maximum size of a single file uploaded via "
+        "``POST /v1/sessions/<id>/files``. Overflow is rejected with 413 "
+        "after the multipart body is drained so the client sees a clean "
+        "response rather than a transport reset.",
+    )
 
     # ── worker ─────────────────────────────────────────────────────────────
     worker_concurrency: int = Field(
