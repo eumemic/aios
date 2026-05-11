@@ -14,24 +14,26 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, File, Query, UploadFile, status
 from sse_starlette import EventSourceResponse
 
 from aios.api.deps import (
     AuthDep,
     CryptoBoxDep,
     DbUrlDep,
+    OperatorOrConnectorAuthDep,
     PoolDep,
     ProcrastinateDep,
 )
 from aios.api.sse import sse_event_stream
 from aios.db import queries
 from aios.db.listen import SESSION_INTERRUPT_CHANNEL, listen_for_events
-from aios.errors import ValidationError
+from aios.errors import ForbiddenError, ValidationError
 from aios.harness.wake import defer_wake
 from aios.ids import GITHUB_REPOSITORY, split_id
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
+from aios.models.files import FileUploadResponse
 from aios.models.github_repositories import (
     GithubRepositoryResourceEcho,
     GithubRepositoryUpdate,
@@ -50,6 +52,7 @@ from aios.models.sessions import (
     ToolResultRequest,
     WaitResponse,
 )
+from aios.services import files as files_service
 from aios.services import github_repositories as github_repo_service
 from aios.services import sessions as service
 
@@ -342,6 +345,46 @@ async def submit_tool_result(
         )
     await defer_wake(pool, session_id, cause="custom_tool_result")
     return event
+
+
+@router.post(
+    "/{session_id}/files",
+    operation_id="upload_session_file",
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_file(
+    session_id: str,
+    pool: PoolDep,
+    auth: OperatorOrConnectorAuthDep,
+    file: Annotated[UploadFile, File(description="Bytes to upload into the session workspace.")],
+) -> FileUploadResponse:
+    """Upload a single file into the session's workspace (#324).
+
+    Accepts either the operator API key or a connector token bound to
+    this session.  Files land at a stable host path; the model sees
+    them inside the sandbox at ``/mnt/uploads/<file_id>/<filename>``.
+    """
+    mode, connection_id = auth
+    if mode == "connector":
+        assert connection_id is not None
+        async with pool.acquire() as conn:
+            bound = await queries.is_session_bound_to_connection(
+                conn, connection_id=connection_id, session_id=session_id
+            )
+        if not bound:
+            raise ForbiddenError(
+                "session is not bound to this connection",
+                detail={"session_id": session_id, "connection_id": connection_id},
+            )
+    record = await files_service.stage_upload(pool, session_id=session_id, upload=file)
+    return FileUploadResponse(
+        file_id=record.id,
+        in_sandbox_path=record.in_sandbox_path,
+        filename=record.filename,
+        size=record.size,
+        content_type=record.content_type,
+        sha256=record.sha256,
+    )
 
 
 @router.post(

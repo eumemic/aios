@@ -35,6 +35,7 @@ MEMORY_STORE: Final = "memstore"
 MEMORY: Final = "mem"
 MEMORY_VERSION: Final = "memver"
 GITHUB_REPOSITORY: Final = "ghrepo"
+FILE: Final = "file"
 
 _PREFIXES: Final = frozenset(
     {
@@ -54,6 +55,7 @@ _PREFIXES: Final = frozenset(
         MEMORY,
         MEMORY_VERSION,
         GITHUB_REPOSITORY,
+        FILE,
     }
 )
 

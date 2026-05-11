@@ -15,6 +15,7 @@ from .agent_update_metadata_type_0 import AgentUpdateMetadataType0
 from .agent_version import AgentVersion
 from .agent_version_litellm_extra import AgentVersionLitellmExtra
 from .bind_chat_request import BindChatRequest
+from .body_upload_session_file import BodyUploadSessionFile
 from .bound_chat import BoundChat
 from .connection import Connection
 from .connection_attach import ConnectionAttach
@@ -56,6 +57,7 @@ from .environment_update import EnvironmentUpdate
 from .event import Event
 from .event_data import EventData
 from .event_kind import EventKind
+from .file_upload_response import FileUploadResponse
 from .get_health_response_get_health import GetHealthResponseGetHealth
 from .github_repository_resource import GithubRepositoryResource
 from .github_repository_resource_echo import GithubRepositoryResourceEcho
@@ -187,6 +189,7 @@ __all__ = (
     "AgentVersion",
     "AgentVersionLitellmExtra",
     "BindChatRequest",
+    "BodyUploadSessionFile",
     "BoundChat",
     "Connection",
     "ConnectionAttach",
@@ -222,6 +225,7 @@ __all__ = (
     "Event",
     "EventData",
     "EventKind",
+    "FileUploadResponse",
     "GetHealthResponseGetHealth",
     "GithubRepositoryResource",
     "GithubRepositoryResourceEcho",

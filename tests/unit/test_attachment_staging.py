@@ -18,9 +18,9 @@ import pytest
 from aios.config import get_settings
 from aios.harness.attachment_staging import (
     AttachmentStagingError,
-    _safe_filename,
     stage_inbound_attachments,
 )
+from aios.sandbox.volumes import safe_filename
 
 
 @pytest.fixture
@@ -52,22 +52,22 @@ def _make_temp_attachment(tmp_path: Path, name: str, payload: bytes) -> dict[str
 class TestSafeFilename:
     def test_strips_path_separators(self) -> None:
         # Defeats ``../../etc/passwd`` style traversal attempts.
-        assert _safe_filename("../../etc/passwd") == "passwd"
+        assert safe_filename("../../etc/passwd") == "passwd"
 
     def test_replaces_unsafe_chars(self) -> None:
-        assert _safe_filename("hello world!.jpg") == "hello_world_.jpg"
+        assert safe_filename("hello world!.jpg") == "hello_world_.jpg"
 
     def test_preserves_dots_and_dashes(self) -> None:
-        assert _safe_filename("photo-2026.05.04.jpg") == "photo-2026.05.04.jpg"
+        assert safe_filename("photo-2026.05.04.jpg") == "photo-2026.05.04.jpg"
 
     def test_empty_falls_back_to_unnamed(self) -> None:
-        assert _safe_filename("") == "unnamed"
+        assert safe_filename("") == "unnamed"
 
     def test_all_dots_falls_back_to_unnamed(self) -> None:
-        assert _safe_filename("...") == "unnamed"
+        assert safe_filename("...") == "unnamed"
 
     def test_caps_length(self) -> None:
-        result = _safe_filename("a" * 500)
+        result = safe_filename("a" * 500)
         assert len(result) <= 200
 
 

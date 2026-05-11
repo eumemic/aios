@@ -8,7 +8,7 @@ exposed here as typed accessors.
 from __future__ import annotations
 
 import secrets
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 
 import asyncpg
 from fastapi import Depends, Header, HTTPException, Request, status
@@ -89,6 +89,33 @@ async def require_connector_auth(
     return resolved.connection_id
 
 
+async def require_operator_or_connector_auth(
+    settings: Annotated[Settings, Depends(get_settings_dep)],
+    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> tuple[Literal["operator", "connector"], str | None]:
+    """Accept either the operator API key or a connector token.
+
+    Returns ``("operator", None)`` for the operator key and
+    ``("connector", connection_id)`` for a valid connector token.
+    Raises :class:`UnauthorizedError` (401) when the header is missing,
+    malformed, or doesn't match either credential.
+
+    The operator-key path is checked first via constant-time compare so
+    requests carrying the operator key never hit the DB.  Routes that
+    take ``OperatorOrConnectorAuthDep`` are responsible for any
+    session-level scope check on the ``connector`` branch (typically
+    ``queries.is_session_bound_to_connection``).
+    """
+    token = _extract_bearer_token(authorization)
+    if secrets.compare_digest(token, settings.api_key.get_secret_value()):
+        return ("operator", None)
+    resolved = await connector_tokens_service.resolve(pool, token)
+    if resolved is None:
+        raise UnauthorizedError("invalid api key or connector token")
+    return ("connector", resolved.connection_id)
+
+
 # Type aliases for clarity at the route definitions.
 # Note: asyncpg.Pool isn't subscriptable at runtime, so we annotate with the
 # bare class. FastAPI's dependency injection ignores generic parameters.
@@ -98,3 +125,7 @@ ProcrastinateDep = Annotated[ProcrastinateApp, Depends(get_procrastinate)]
 DbUrlDep = Annotated[str, Depends(get_db_url)]
 AuthDep = Annotated[None, Depends(require_bearer_auth)]
 ConnectorAuthDep = Annotated[str, Depends(require_connector_auth)]
+OperatorOrConnectorAuthDep = Annotated[
+    tuple[Literal["operator", "connector"], str | None],
+    Depends(require_operator_or_connector_auth),
+]

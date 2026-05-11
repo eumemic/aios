@@ -21,42 +21,16 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
-import re
 import shutil
 from pathlib import Path
 from typing import Any
 
-from aios.sandbox.volumes import ensure_session_attachments_dir
+from aios.sandbox.volumes import ensure_session_attachments_dir, safe_filename
 
 
 class AttachmentStagingError(Exception):
     """Per-attachment staging failure.  Caller drops the inbound with
     the canonical ``attachment_staging_failed`` reason."""
-
-
-_UNSAFE_FILENAME_CHARS = re.compile(r"[^\w.\-]")
-_MAX_FILENAME_LEN = 200
-
-
-def _safe_filename(name: str) -> str:
-    """Sanitize ``name`` for use as a path leaf.
-
-    Strips directory separators (defeats ``../`` traversal), maps
-    unsupported characters to ``_``, falls back to ``"unnamed"`` for
-    empty or all-dot inputs, and caps length so a pathological
-    filename combined with the ULID prefix can't exhaust the host
-    FS's per-component limit.
-
-    Unicode-aware: Python's ``\\w`` matches the full Unicode word class
-    by default, so non-ASCII letters are preserved (e.g.
-    ``café.jpg`` → ``café.jpg``). Only structurally unsafe punctuation
-    and whitespace get rewritten.
-    """
-    base = os.path.basename(name)
-    cleaned = _UNSAFE_FILENAME_CHARS.sub("_", base)
-    if not cleaned or cleaned.replace(".", "") == "":
-        return "unnamed"
-    return cleaned[:_MAX_FILENAME_LEN]
 
 
 def stage_inbound_attachments(
@@ -134,7 +108,7 @@ def stage_inbound_attachments(
                     f"{{host_path, filename, content_type, size}}: {raw!r}"
                 )
 
-            target_name = f"{event_id}-{_safe_filename(filename)}"
+            target_name = f"{event_id}-{safe_filename(filename)}"
             if target_name in target_names_seen:
                 raise AttachmentStagingError(
                     f"two attachments in inbound {event_id!r} sanitize to the "
