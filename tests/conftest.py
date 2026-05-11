@@ -1,9 +1,12 @@
 """Shared pytest fixtures for aios tests.
 
-* ``postgres_container`` — module-scoped testcontainer running Postgres 16
-* ``migrated_db_url`` — runs alembic upgrade head against the testcontainer
-* ``app_env`` — sets the env vars the FastAPI app needs (api key, vault key, db url)
-* ``test_client`` — a FastAPI test client wired against a fresh app + the migrated DB
+* ``postgres_container`` — session-scoped testcontainer running Postgres 16
+* ``migrated_db_url`` — runs alembic upgrade head + applies the procrastinate
+  schema and aios lock-release trigger against the testcontainer
+* ``_reset_db_state`` — function-scoped: TRUNCATEs all public-schema tables
+  before each test so the session-scoped DB stays isolated between tests
+* ``aios_env`` — sets the env vars the FastAPI app needs (api key, vault key,
+  db url) and depends on ``_reset_db_state``
 
 Tests that need Docker are marked ``integration``; pytest -m "not integration"
 runs only the unit tests, which is what most local dev iterations use.
@@ -83,7 +86,7 @@ needs_docker = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def postgres_container() -> Iterator[Any]:
     if not _docker_available():
         pytest.skip("Docker not available")
@@ -93,7 +96,7 @@ def postgres_container() -> Iterator[Any]:
         yield pg
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def db_url(postgres_container: Any) -> str:
     host = postgres_container.get_container_host_ip()
     port = postgres_container.get_exposed_port(5432)
@@ -103,32 +106,43 @@ def db_url(postgres_container: Any) -> str:
     return f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
 
-def run_alembic_upgrade(db_url: str, target: str = "head") -> None:
-    """Run ``alembic upgrade <target>`` against ``db_url`` via subprocess."""
-    env = {**os.environ, "AIOS_DB_URL": db_url}
-    result = subprocess.run(
-        ["uv", "run", "alembic", "upgrade", target],
-        cwd=PROJECT_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"alembic upgrade {target} failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-        )
-
-
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def migrated_db_url(db_url: str) -> str:
-    """Run alembic upgrade head against the testcontainer DB and return its URL."""
-    run_alembic_upgrade(db_url, "head")
+    """Run alembic upgrade head against the testcontainer, then apply the
+    procrastinate schema and the aios lock-release trigger. Returns the URL."""
+    import asyncio
+
+    from aios.db.migrations import apply_procrastinate_schema, upgrade_to_head
+
+    upgrade_to_head(db_url)
+    asyncio.run(apply_procrastinate_schema(db_url))
     return db_url
 
 
 @pytest.fixture
-def aios_env(migrated_db_url: str, tmp_path: Path) -> Iterator[dict[str, str]]:
+async def _reset_db_state(migrated_db_url: str) -> None:
+    """TRUNCATE every public-schema table before each test.
+
+    Restores the cross-test isolation that module-scoped Postgres used to
+    provide.  ``TRUNCATE`` is metadata-only in Postgres, so this is O(tables)
+    regardless of row count.
+    """
+    import asyncpg
+
+    conn = await asyncpg.connect(migrated_db_url)
+    try:
+        rows = await conn.fetch("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+        if rows:
+            quoted = ", ".join(f'"{r["tablename"]}"' for r in rows)
+            await conn.execute(f"TRUNCATE {quoted} RESTART IDENTITY CASCADE")
+    finally:
+        await conn.close()
+
+
+@pytest.fixture
+def aios_env(
+    migrated_db_url: str, _reset_db_state: None, tmp_path: Path
+) -> Iterator[dict[str, str]]:
     """Set the env vars the FastAPI app needs."""
     env_vars = {
         "AIOS_API_KEY": secrets.token_urlsafe(32),
