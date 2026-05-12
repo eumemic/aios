@@ -4549,8 +4549,7 @@ async def notify_connection_change(
     generator parses this into an ``added``/``removed`` event. Caller
     runs this on a pool-acquired (autocommit) connection OUTSIDE any
     transaction so subscribers never see a payload for an uncommitted
-    row.  Introduced in #328 PR 5 to feed the runtime container's
-    connection-discovery loop.
+    row.
     """
     await conn.execute(
         "SELECT pg_notify($1, $2)",

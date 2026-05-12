@@ -328,20 +328,27 @@ class HttpConnector:
     ) -> None:
         """Fetch secrets, then spawn ``serve_connection`` in its own task.
 
-        A 4xx/5xx from the secrets endpoint or a malformed body raises,
-        which propagates through the discovery loop's reconnect-on-
-        Exception path. Recovery-by-reconnect is the only sane posture
-        — silently dropping a connection that just came online would
-        leave it invisible to the runtime until the next SSE drop.
+        Transient 5xx raises :class:`httpx.HTTPStatusError` so the
+        discovery loop's ``except httpx.HTTPError`` retries with
+        backoff; a permanent 4xx or malformed body raises
+        :class:`RuntimeError` so the container crashes and the operator
+        sees the bug.
         """
         if connection_id in self._connections:
             # Replay from backfill after reconnect — already running.
             return
         client = self._require_client()
         response = await _get_runtime_secrets(client=client, connection_id=connection_id)
+        if response.status_code >= 500:
+            raise httpx.HTTPStatusError(
+                f"secrets fetch 5xx for connection {connection_id!r}: "
+                f"{response.status_code} {response.content!r}",
+                request=httpx.Request("GET", "/v1/connectors/runtime/secrets"),
+                response=httpx.Response(response.status_code, content=response.content),
+            )
         if response.status_code >= 400:
             raise RuntimeError(
-                f"secrets fetch failed for connection {connection_id!r}: "
+                f"secrets fetch 4xx for connection {connection_id!r}: "
                 f"{response.status_code} {response.content!r}"
             )
         body = response.parsed

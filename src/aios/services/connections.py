@@ -156,31 +156,22 @@ async def list_connections(
         )
 
 
-async def _notify_connection_change(
-    pool: asyncpg.Pool[Any], connection: Connection, *, event: str
-) -> None:
-    """Thin wrapper acquiring a fresh pool connection for the NOTIFY emit.
-
-    Runs OUTSIDE the caller's transaction (the txn that just committed
-    the attach/archive) so a subscriber never sees a payload for an
-    uncommitted row.
-    """
+async def attach_connection(
+    pool: asyncpg.Pool[Any], connection_id: str, *, session_id: str
+) -> Connection:
+    async with pool.acquire() as conn:
+        connection = await queries.attach_connection(conn, connection_id, session_id=session_id)
+    # Second acquire so the NOTIFY fires OUTSIDE the attach query's
+    # implicit transaction — subscribers must never see a payload for
+    # an uncommitted row.
     async with pool.acquire() as conn:
         await queries.notify_connection_change(
             conn,
             connector=connection.connector,
             connection_id=connection.id,
             account=connection.account,
-            event=event,
+            event="added",
         )
-
-
-async def attach_connection(
-    pool: asyncpg.Pool[Any], connection_id: str, *, session_id: str
-) -> Connection:
-    async with pool.acquire() as conn:
-        connection = await queries.attach_connection(conn, connection_id, session_id=session_id)
-    await _notify_connection_change(pool, connection, event="added")
     return connection
 
 
@@ -303,5 +294,12 @@ async def archive_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Con
                 detail={"id": connection_id, "mode": mode},
             )
         archived = await queries.archive_connection(conn, connection_id)
-    await _notify_connection_change(pool, archived, event="removed")
+    async with pool.acquire() as conn:
+        await queries.notify_connection_change(
+            conn,
+            connector=archived.connector,
+            connection_id=archived.id,
+            account=archived.account,
+            event="removed",
+        )
     return archived
