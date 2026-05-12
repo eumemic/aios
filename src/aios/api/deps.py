@@ -18,6 +18,7 @@ from aios.config import Settings, get_settings
 from aios.crypto.vault import CryptoBox
 from aios.errors import UnauthorizedError
 from aios.services import connector_tokens as connector_tokens_service
+from aios.services import runtime_tokens as runtime_tokens_service
 
 
 def _extract_bearer_token(authorization: str | None) -> str:
@@ -89,6 +90,24 @@ async def require_connector_auth(
     return resolved.connection_id
 
 
+async def require_runtime_auth(
+    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> tuple[str, str]:
+    """Resolve a bearer runtime token to ``(runtime_token_id, connector)``.
+
+    Accepts only tokens issued via ``POST /v1/runtime-tokens`` (#328 PR 5).
+    Routes that take ``RuntimeAuthDep`` receive the resolved tuple — the
+    ``connector`` half is used to scope the runtime-facing routes
+    (``/connectors/runtime/...`` family) to one connector type.
+    """
+    token = _extract_bearer_token(authorization)
+    resolved = await runtime_tokens_service.resolve(pool, token)
+    if resolved is None:
+        raise UnauthorizedError("invalid or revoked runtime token")
+    return (resolved.token_id, resolved.connector)
+
+
 async def require_operator_or_connector_auth(
     settings: Annotated[Settings, Depends(get_settings_dep)],
     pool: Annotated[asyncpg.Pool, Depends(get_pool)],
@@ -125,6 +144,7 @@ ProcrastinateDep = Annotated[ProcrastinateApp, Depends(get_procrastinate)]
 DbUrlDep = Annotated[str, Depends(get_db_url)]
 AuthDep = Annotated[None, Depends(require_bearer_auth)]
 ConnectorAuthDep = Annotated[str, Depends(require_connector_auth)]
+RuntimeAuthDep = Annotated[tuple[str, str], Depends(require_runtime_auth)]
 OperatorOrConnectorAuthDep = Annotated[
     tuple[Literal["operator", "connector"], str | None],
     Depends(require_operator_or_connector_auth),

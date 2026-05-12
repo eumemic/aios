@@ -19,8 +19,18 @@ from fastapi import APIRouter, File, Form, UploadFile, status
 from pydantic import BaseModel, ConfigDict
 from sse_starlette import EventSourceResponse
 
-from aios.api.deps import ConnectorAuthDep, CryptoBoxDep, DbUrlDep, PoolDep
-from aios.api.sse import connector_calls_stream
+from aios.api.deps import (
+    ConnectorAuthDep,
+    CryptoBoxDep,
+    DbUrlDep,
+    PoolDep,
+    RuntimeAuthDep,
+)
+from aios.api.sse import (
+    connection_discovery_stream,
+    connector_calls_stream,
+    runtime_connector_calls_stream,
+)
 from aios.db import queries
 from aios.errors import (
     AiosError,
@@ -289,5 +299,273 @@ async def get_calls(
     """
     return EventSourceResponse(
         connector_calls_stream(db_url, pool, connection_id),
+        ping=15,
+    )
+
+
+# ─── runtime-scoped endpoints (#328 PR 5) ────────────────────────────────────
+#
+# These mirror the per-connection routes above but accept a ``runtime``
+# bearer token that scopes the caller to one ``connector`` type and N
+# of its connections.  The legacy per-connection routes stay alive
+# alongside these until PR 7 cuts them; PR 8 drops the table.
+
+
+class ToolsSchemaUpdate(BaseModel):
+    """Body for ``PUT /v1/connectors/{connector}/tools_schema``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tools: list[dict[str, Any]]
+
+
+class RuntimeToolResultRequest(BaseModel):
+    """Body for ``POST /v1/connectors/runtime/tool-results``.
+
+    Like :class:`ConnectorToolResultRequest` but carries ``connection_id``
+    explicitly — the bearer scopes the caller to a connector *type*,
+    not to one connection.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connection_id: str
+    session_id: str
+    tool_call_id: str
+    content: str | list[dict[str, Any]]
+    is_error: bool = False
+
+
+def _check_runtime_scope(auth_connector: str, connection_connector: str) -> None:
+    """Raise 403 if a runtime bearer reaches outside its connector type."""
+    if auth_connector != connection_connector:
+        raise ForbiddenError(
+            "runtime token scoped to a different connector type",
+            detail={
+                "auth_connector": auth_connector,
+                "connection_connector": connection_connector,
+            },
+        )
+
+
+@router.put(
+    "/{connector}/tools_schema",
+    operation_id="put_connector_tools_schema",
+)
+async def put_tools_schema(
+    connector: str,
+    body: ToolsSchemaUpdate,
+    pool: PoolDep,
+    auth: RuntimeAuthDep,
+) -> None:
+    """Publish the runtime container's tool catalog for a connector type.
+
+    The runtime container is the source of truth for what tools it
+    serves — it knows their names, parameter shapes, and docstrings.
+    The SDK derives JSON Schemas from ``@tool``-decorated methods at
+    startup and calls this once, replacing whatever was on the
+    ``connectors.tools_schema`` row wholesale.  Operators don't
+    hand-write the schema.
+
+    Authorization: the runtime bearer's ``connector`` must match the
+    path's ``connector``.
+    """
+    _, auth_connector = auth
+    if auth_connector != connector:
+        raise ForbiddenError(
+            "runtime token scoped to a different connector type",
+            detail={"auth_connector": auth_connector, "path_connector": connector},
+        )
+    async with pool.acquire() as conn:
+        await queries.update_connector_tools_schema(conn, connector, tools_schema=body.tools)
+
+
+@router.get(
+    "/connections",
+    openapi_extra={"x-codegen": {"targets": []}},
+)
+async def get_connection_discovery(
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    auth: RuntimeAuthDep,
+) -> EventSourceResponse:
+    """SSE stream of ``added`` / ``removed`` connection events for the
+    runtime container's connector type (#328 PR 5).
+
+    Backfills every active connection of the caller's ``connector``
+    type at subscribe time as ``added`` events, then tails the
+    ``connections_<connector>`` NOTIFY channel.  Each event is keyed
+    ``connection`` with a JSON body shaped::
+
+        {"event": "added" | "removed", "connection_id": "...", "account": "..."}
+
+    The runtime container subscribes once per ``connector`` type and
+    fans out to per-connection workers on ``added``; tears them down
+    on ``removed``.
+    """
+    _, connector = auth
+    return EventSourceResponse(
+        connection_discovery_stream(db_url, pool, connector),
+        ping=15,
+    )
+
+
+@router.post(
+    "/runtime/inbound",
+    operation_id="post_connector_runtime_inbound",
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_runtime_inbound(
+    pool: PoolDep,
+    auth: RuntimeAuthDep,
+    connection_id: Annotated[str, Form(description="The connection this inbound belongs to.")],
+    event_id: Annotated[str, Form(description="Client-supplied dedup key (ULID).")],
+    chat_id: Annotated[str, Form()],
+    content: Annotated[str, Form()],
+    sender: Annotated[
+        str | None,
+        Form(description='JSON-encoded sender dict (e.g. {"display_name": "Alice"}).'),
+    ] = None,
+    metadata: Annotated[
+        str | None,
+        Form(description="JSON-encoded connector metadata dict."),
+    ] = None,
+    timestamp: Annotated[
+        str | None,
+        Form(description="Optional ISO-8601 platform timestamp; stored in event metadata."),
+    ] = None,
+    attachments: Annotated[
+        list[UploadFile] | None,
+        File(description="One file part per attachment; filename + content-type read from each."),
+    ] = None,
+) -> ConnectorInboundResponse:
+    """Append an inbound user message to ``connection_id``'s session.
+
+    Runtime-scoped twin of :func:`post_inbound`: the bearer authenticates
+    the caller as one connector *type*; ``connection_id`` rides as a
+    form field and must belong to that type.  Same multipart shape, same
+    dedup-on-``event_id`` semantics, same drop_reason → HTTP mapping.
+    """
+    _, auth_connector = auth
+    async with pool.acquire() as conn:
+        connection = await queries.get_connection(conn, connection_id)
+    _check_runtime_scope(auth_connector, connection.connector)
+    sender_dict: dict[str, Any] = _parse_form_json("sender", sender, default={}) or {}
+    metadata_dict: dict[str, Any] | None = _parse_form_json("metadata", metadata)
+    inbound_attachments = [
+        InboundAttachment(
+            stream=upload,
+            filename=upload.filename or "",
+            content_type=upload.content_type or _DEFAULT_ATTACHMENT_CONTENT_TYPE,
+        )
+        for upload in (attachments or [])
+    ]
+    result = await inbound_service.handle_inbound(
+        pool,
+        connection_id=connection_id,
+        event_id=event_id,
+        chat_id=chat_id,
+        sender=sender_dict,
+        content=content,
+        attachments=inbound_attachments,
+        connector_metadata=metadata_dict,
+        platform_timestamp=timestamp,
+    )
+    if result.drop_reason is not None:
+        raise _inbound_drop_error(result.drop_reason.value)
+    return ConnectorInboundResponse(
+        appended_event_id=result.appended_event_id,
+        session_id=result.session_id,
+        deduped=result.deduped,
+    )
+
+
+@router.post(
+    "/runtime/tool-results",
+    operation_id="post_connector_runtime_tool_result",
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_runtime_tool_result(
+    body: RuntimeToolResultRequest,
+    pool: PoolDep,
+    auth: RuntimeAuthDep,
+) -> Any:
+    """Submit a custom tool result from a runtime container.
+
+    Authorization: the bearer's connector must match ``body.connection_id``'s
+    connector, and the session must be bound to that connection.
+    """
+    _, auth_connector = auth
+    async with pool.acquire() as conn:
+        connection = await queries.get_connection(conn, body.connection_id)
+        _check_runtime_scope(auth_connector, connection.connector)
+        if not await queries.is_session_bound_to_connection(
+            conn,
+            connection_id=body.connection_id,
+            session_id=body.session_id,
+        ):
+            raise ForbiddenError(
+                "session is not bound to this connection",
+                detail={
+                    "session_id": body.session_id,
+                    "connection_id": body.connection_id,
+                },
+            )
+        event = await sessions_service.append_tool_result(
+            conn,
+            session_id=body.session_id,
+            tool_call_id=body.tool_call_id,
+            content=body.content,
+            is_error=body.is_error,
+        )
+    await defer_wake(pool, body.session_id, cause="connector_tool_result")
+    return event
+
+
+@router.get(
+    "/runtime/secrets",
+    operation_id="get_connector_runtime_secrets",
+)
+async def get_runtime_secrets(
+    connection_id: str,
+    pool: PoolDep,
+    crypto_box: CryptoBoxDep,
+    auth: RuntimeAuthDep,
+) -> ConnectorSecrets:
+    """Decrypted secrets for ``connection_id``.
+
+    Runtime-scoped twin of :func:`get_secrets`.  The bearer's connector
+    must match the connection's connector type.
+    """
+    _, auth_connector = auth
+    async with pool.acquire() as conn:
+        connection = await queries.get_connection(conn, connection_id)
+    _check_runtime_scope(auth_connector, connection.connector)
+    secrets = await connections_service.get_connection_secrets(
+        pool, connection_id, crypto_box=crypto_box
+    )
+    return ConnectorSecrets(secrets=secrets)
+
+
+@router.get(
+    "/runtime/calls",
+    openapi_extra={"x-codegen": {"targets": []}},
+)
+async def get_runtime_calls(
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    auth: RuntimeAuthDep,
+) -> EventSourceResponse:
+    """SSE stream of pending custom tool calls across every active
+    connection of the caller's connector type.
+
+    Backfills at subscribe time, then tails ``connector_calls_<connector>``.
+    Each event is keyed ``call`` with the same payload as
+    :func:`get_calls` plus an explicit ``connection_id`` field so the
+    runtime container can fan out to its per-connection workers.
+    """
+    _, connector = auth
+    return EventSourceResponse(
+        runtime_connector_calls_stream(db_url, pool, connector),
         ping=15,
     )

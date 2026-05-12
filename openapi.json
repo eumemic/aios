@@ -5568,6 +5568,182 @@
         }
       }
     },
+    "/v1/runtime-tokens": {
+      "post": {
+        "tags": [
+          "runtime-tokens"
+        ],
+        "summary": "Issue",
+        "description": "Mint a new bearer token scoped to ``body.connector``.\n\nThe plaintext is included in the response and CANNOT be recovered\nlater \u2014 operators must save it at issue time.",
+        "operationId": "issue_runtime_token",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeTokenIssue"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeTokenIssued"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "runtime-tokens"
+        ],
+        "summary": "List ",
+        "description": "All tokens (revoked included) for ``connector``, newest first.",
+        "operationId": "list_runtime_tokens",
+        "parameters": [
+          {
+            "name": "connector",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_RuntimeToken_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runtime-tokens/{token_id}/revoke": {
+      "post": {
+        "tags": [
+          "runtime-tokens"
+        ],
+        "summary": "Revoke",
+        "description": "Soft-delete a token.  Idempotent \u2014 re-revoking is a no-op.",
+        "operationId": "revoke_runtime_token",
+        "parameters": [
+          {
+            "name": "token_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeToken"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/inbound": {
       "post": {
         "tags": [
@@ -5806,6 +5982,354 @@
         "summary": "Get Calls",
         "description": "SSE stream of pending custom tool calls for the caller's connection.\n\nBackfills any pending calls at subscribe time (calls already parked\nin some session's ``stop_reason.custom_tools``), then tails the\n``connector_calls_<connection_id>`` NOTIFY channel.  Each emitted\nevent is keyed ``call`` with a JSON body shaped::\n\n    {\n        \"session_id\": \"...\",\n        \"tool_call_id\": \"...\",\n        \"name\": \"...\",\n        \"arguments\": \"...\",       // JSON string from the model\n        \"focal_channel\": \"...\"\n    }\n\nConnector containers dedupe by ``tool_call_id`` client-side so SSE\nreconnects (which replay the backfill) don't double-execute.",
         "operationId": "get_calls_v1_connectors_calls_get",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "targets": []
+        }
+      }
+    },
+    "/v1/connectors/{connector}/tools_schema": {
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Put Tools Schema",
+        "description": "Publish the runtime container's tool catalog for a connector type.\n\nThe runtime container is the source of truth for what tools it\nserves \u2014 it knows their names, parameter shapes, and docstrings.\nThe SDK derives JSON Schemas from ``@tool``-decorated methods at\nstartup and calls this once, replacing whatever was on the\n``connectors.tools_schema`` row wholesale.  Operators don't\nhand-write the schema.\n\nAuthorization: the runtime bearer's ``connector`` must match the\npath's ``connector``.",
+        "operationId": "put_connector_tools_schema",
+        "parameters": [
+          {
+            "name": "connector",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolsSchemaUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/connections": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Get Connection Discovery",
+        "description": "SSE stream of ``added`` / ``removed`` connection events for the\nruntime container's connector type (#328 PR 5).\n\nBackfills every active connection of the caller's ``connector``\ntype at subscribe time as ``added`` events, then tails the\n``connections_<connector>`` NOTIFY channel.  Each event is keyed\n``connection`` with a JSON body shaped::\n\n    {\"event\": \"added\" | \"removed\", \"connection_id\": \"...\", \"account\": \"...\"}\n\nThe runtime container subscribes once per ``connector`` type and\nfans out to per-connection workers on ``added``; tears them down\non ``removed``.",
+        "operationId": "get_connection_discovery_v1_connectors_connections_get",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "targets": []
+        }
+      }
+    },
+    "/v1/connectors/runtime/inbound": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Runtime Inbound",
+        "description": "Append an inbound user message to ``connection_id``'s session.\n\nRuntime-scoped twin of :func:`post_inbound`: the bearer authenticates\nthe caller as one connector *type*; ``connection_id`` rides as a\nform field and must belong to that type.  Same multipart shape, same\ndedup-on-``event_id`` semantics, same drop_reason \u2192 HTTP mapping.",
+        "operationId": "post_connector_runtime_inbound",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_post_connector_runtime_inbound"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorInboundResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/runtime/tool-results": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Runtime Tool Result",
+        "description": "Submit a custom tool result from a runtime container.\n\nAuthorization: the bearer's connector must match ``body.connection_id``'s\nconnector, and the session must be bound to that connection.",
+        "operationId": "post_connector_runtime_tool_result",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeToolResultRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Post Connector Runtime Tool Result"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/runtime/secrets": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Get Runtime Secrets",
+        "description": "Decrypted secrets for ``connection_id``.\n\nRuntime-scoped twin of :func:`get_secrets`.  The bearer's connector\nmust match the connection's connector type.",
+        "operationId": "get_connector_runtime_secrets",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorSecrets"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/runtime/calls": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Get Runtime Calls",
+        "description": "SSE stream of pending custom tool calls across every active\nconnection of the caller's connector type.\n\nBackfills at subscribe time, then tails ``connector_calls_<connector>``.\nEach event is keyed ``call`` with the same payload as\n:func:`get_calls` plus an explicit ``connection_id`` field so the\nruntime container can fan out to its per-connection workers.",
+        "operationId": "get_runtime_calls_v1_connectors_runtime_calls_get",
         "parameters": [
           {
             "name": "Authorization",
@@ -6751,6 +7275,88 @@
           "content"
         ],
         "title": "Body_post_connector_inbound"
+      },
+      "Body_post_connector_runtime_inbound": {
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id",
+            "description": "The connection this inbound belongs to."
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id",
+            "description": "Client-supplied dedup key (ULID)."
+          },
+          "chat_id": {
+            "type": "string",
+            "title": "Chat Id"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "sender": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sender",
+            "description": "JSON-encoded sender dict (e.g. {\"display_name\": \"Alice\"})."
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata",
+            "description": "JSON-encoded connector metadata dict."
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp",
+            "description": "Optional ISO-8601 platform timestamp; stored in event metadata."
+          },
+          "attachments": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "contentMediaType": "application/octet-stream"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachments",
+            "description": "One file part per attachment; filename + content-type read from each."
+          }
+        },
+        "type": "object",
+        "required": [
+          "connection_id",
+          "event_id",
+          "chat_id",
+          "content"
+        ],
+        "title": "Body_post_connector_runtime_inbound"
       },
       "Body_upload_session_file": {
         "properties": {
@@ -8123,6 +8729,38 @@
         ],
         "title": "ListResponse[RecentChat]"
       },
+      "ListResponse_RuntimeToken_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/RuntimeToken"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          },
+          "next_after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next After"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ListResponse[RuntimeToken]"
+      },
       "ListResponse_SessionTemplate_": {
         "properties": {
           "data": {
@@ -8993,6 +9631,182 @@
         ],
         "title": "RecentChat",
         "description": "Distinct chat_id observed on a connection's account, with the\nmost-recent inbound timestamp.\n\nReturned by ``GET /v1/connections/{id}/recent-chats`` so operators\ncan find the chat_id for a specific peer without digging through\nevent logs before calling ``bind-chat``."
+      },
+      "RuntimeToken": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "connector": {
+            "type": "string",
+            "title": "Connector"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "connector",
+          "created_at"
+        ],
+        "title": "RuntimeToken",
+        "description": "Read view of a runtime token.  Never carries plaintext."
+      },
+      "RuntimeTokenIssue": {
+        "properties": {
+          "connector": {
+            "type": "string",
+            "title": "Connector"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connector"
+        ],
+        "title": "RuntimeTokenIssue",
+        "description": "Request body for ``POST /v1/runtime-tokens``."
+      },
+      "RuntimeTokenIssued": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "connector": {
+            "type": "string",
+            "title": "Connector"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "plaintext": {
+            "type": "string",
+            "title": "Plaintext",
+            "description": "The bearer token value.  Save this \u2014 it cannot be recovered."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "connector",
+          "label",
+          "plaintext",
+          "created_at"
+        ],
+        "title": "RuntimeTokenIssued",
+        "description": "Response body for ``POST /v1/runtime-tokens``.\n\nIncludes the plaintext token \u2014 this is the ONLY time it's surfaced.\nSubsequent ``GET`` returns the read view without plaintext."
+      },
+      "RuntimeToolResultRequest": {
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "tool_call_id": {
+            "type": "string",
+            "title": "Tool Call Id"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            ],
+            "title": "Content"
+          },
+          "is_error": {
+            "type": "boolean",
+            "title": "Is Error",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connection_id",
+          "session_id",
+          "tool_call_id",
+          "content"
+        ],
+        "title": "RuntimeToolResultRequest",
+        "description": "Body for ``POST /v1/connectors/runtime/tool-results``.\n\nLike :class:`ConnectorToolResultRequest` but carries ``connection_id``\nexplicitly \u2014 the bearer scopes the caller to a connector *type*,\nnot to one connection."
       },
       "Session": {
         "properties": {
@@ -10098,6 +10912,25 @@
         ],
         "title": "ToolSpec",
         "description": "One entry in an agent's ``tools`` list.\n\nFor built-in tools, ``type`` is the tool name (``\"bash\"``, ``\"read\"``,\netc.). For custom (client-executed) tools, ``type`` is ``\"custom\"`` and\n``name``, ``description``, and ``input_schema`` are required. For MCP\ntoolsets, ``type`` is ``\"mcp_toolset\"`` and ``mcp_server_name`` is\nrequired.\n\n``enabled`` controls whether the tool is included in the schema sent to\nthe model. Disabled tools are invisible to the model.\n\n``permission`` controls execution policy for built-in tools:\n``None`` or ``\"always_allow\"`` executes immediately (current default);\n``\"always_ask\"`` idles the session with ``requires_action`` until the\nclient confirms or denies."
+      },
+      "ToolsSchemaUpdate": {
+        "properties": {
+          "tools": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Tools"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "tools"
+        ],
+        "title": "ToolsSchemaUpdate",
+        "description": "Body for ``PUT /v1/connectors/{connector}/tools_schema``."
       },
       "UnrestrictedNetworking": {
         "properties": {

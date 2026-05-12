@@ -23,6 +23,7 @@ from aios.api.routers import (
     environments,
     health,
     memory_stores,
+    runtime_tokens,
     session_templates,
     sessions,
     skills,
@@ -97,6 +98,7 @@ def create_app() -> FastAPI:
     app.include_router(memory_stores.router)
     app.include_router(connections.router)
     app.include_router(connector_tokens.router)
+    app.include_router(runtime_tokens.router)
     app.include_router(connectors.router)
     app.include_router(session_templates.router)
     _mount_mcp(app)

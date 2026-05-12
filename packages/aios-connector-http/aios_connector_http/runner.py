@@ -405,9 +405,7 @@ def _resolve_sandbox_paths(
             out[param_name] = _resolve_one(value, session_id=session_id, name=param_name)
         else:
             if not isinstance(value, list):
-                raise SandboxPathError(
-                    f"{param_name!r} must be a list of in-sandbox paths"
-                )
+                raise SandboxPathError(f"{param_name!r} must be a list of in-sandbox paths")
             out[param_name] = [
                 _resolve_one(v, session_id=session_id, name=param_name) for v in value
             ]
@@ -458,10 +456,7 @@ def _strip_optional(hint: Any) -> Any:
 
 def _is_sandbox_path(hint: Any) -> bool:
     """Detect ``Annotated[Path, SANDBOX_PATH_MARKER]`` regardless of nesting."""
-    return any(
-        isinstance(meta, _SandboxPathMarker)
-        for meta in getattr(hint, "__metadata__", ())
-    )
+    return any(isinstance(meta, _SandboxPathMarker) for meta in getattr(hint, "__metadata__", ()))
 
 
 def _inject_focal_kwargs(

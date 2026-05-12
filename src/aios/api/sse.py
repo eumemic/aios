@@ -28,7 +28,12 @@ import asyncpg
 from sse_starlette import ServerSentEvent
 
 from aios.db import queries
-from aios.db.listen import listen_for_connector_calls, listen_for_events
+from aios.db.listen import (
+    listen_for_connection_discovery,
+    listen_for_connector_calls,
+    listen_for_connector_calls_by_type,
+    listen_for_events,
+)
 from aios.logging import get_logger
 
 if TYPE_CHECKING:
@@ -184,6 +189,116 @@ async def connector_calls_stream(
                     continue
                 emitted.add(call["tool_call_id"])
                 yield ServerSentEvent(data=_json.dumps(call), event="call")
+
+
+async def runtime_connector_calls_stream(
+    db_url: str,
+    pool: asyncpg.Pool[Any],
+    connector: str,
+) -> AsyncIterator[ServerSentEvent]:
+    """Yield SSE events for pending custom tool calls across every active
+    connection of ``connector`` type (#328 PR 5).
+
+    Counterpart to :func:`connector_calls_stream`: that one is scoped to
+    a single ``connection_id`` (legacy per-connection auth); this one is
+    scoped to a connector *type* and the emitted payload includes a
+    ``connection_id`` field so the runtime container can fan out to its
+    per-connection workers client-side.
+
+    Backfills any pending calls at subscribe time, then tails the
+    ``connector_calls_<connector>`` NOTIFY channel.
+    """
+    import json as _json
+
+    async with listen_for_connector_calls_by_type(db_url, connector) as queue:
+        emitted: set[str] = set()
+
+        async with pool.acquire() as conn:
+            backfill = await queries.list_pending_calls_for_connector(conn, connector)
+        for call in backfill:
+            emitted.add(call["tool_call_id"])
+            yield ServerSentEvent(data=_json.dumps(call), event="call")
+
+        while True:
+            payload = await queue.get()
+            # Payload format: "<session_id>|<connection_id>".
+            session_id, _, connection_id = payload.partition("|")
+            if not connection_id:
+                log.warning("sse.runtime_calls.malformed_payload", payload=payload)
+                continue
+            async with pool.acquire() as conn:
+                pending = await queries.list_pending_calls_for_session_and_connection(
+                    conn,
+                    session_id=session_id,
+                    connection_id=connection_id,
+                )
+            for call in pending:
+                if call["tool_call_id"] in emitted:
+                    continue
+                emitted.add(call["tool_call_id"])
+                call["connection_id"] = connection_id
+                yield ServerSentEvent(data=_json.dumps(call), event="call")
+
+
+async def connection_discovery_stream(
+    db_url: str,
+    pool: asyncpg.Pool[Any],
+    connector: str,
+) -> AsyncIterator[ServerSentEvent]:
+    """Yield ``added`` SSE events backfilling every active connection of
+    ``connector`` type, then ``added`` / ``removed`` events as connections
+    are attached or archived (#328 PR 5).
+
+    Backs the runtime container's connection-discovery loop: it
+    subscribes once, walks the ``added`` events to spawn per-connection
+    workers, and tears workers down on ``removed`` events.  The emit
+    side lives in :mod:`aios.services.connections.attach_connection` /
+    ``archive_connection``.
+    """
+    import json as _json
+
+    async with listen_for_connection_discovery(db_url, connector) as queue:
+        emitted_added: set[str] = set()
+
+        async with pool.acquire() as conn:
+            backfill = await queries.list_connections(conn, connector=connector)
+        for connection in backfill:
+            emitted_added.add(connection.id)
+            yield ServerSentEvent(
+                data=_json.dumps(
+                    {
+                        "event": "added",
+                        "connection_id": connection.id,
+                        "account": connection.account,
+                    }
+                ),
+                event="connection",
+            )
+
+        while True:
+            payload = await queue.get()
+            # Payload format: "<event>|<connection_id>|<account>".
+            parts = payload.split("|", 2)
+            if len(parts) != 3:
+                log.warning("sse.discovery.malformed_payload", payload=payload)
+                continue
+            event, connection_id, account = parts
+            if event == "added" and connection_id in emitted_added:
+                continue
+            if event == "added":
+                emitted_added.add(connection_id)
+            elif event == "removed":
+                emitted_added.discard(connection_id)
+            yield ServerSentEvent(
+                data=_json.dumps(
+                    {
+                        "event": event,
+                        "connection_id": connection_id,
+                        "account": account,
+                    }
+                ),
+                event="connection",
+            )
 
 
 def _is_terminal(payload: dict[str, Any]) -> bool:

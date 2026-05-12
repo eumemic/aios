@@ -171,10 +171,7 @@ def _split_optional(hint: Any) -> tuple[Any, bool]:
 
 def _is_sandbox_path(hint: Any) -> bool:
     """Detect ``Annotated[Path, _SandboxPathMarker]`` regardless of nesting."""
-    return any(
-        isinstance(meta, _SandboxPathMarker)
-        for meta in getattr(hint, "__metadata__", ())
-    )
+    return any(isinstance(meta, _SandboxPathMarker) for meta in getattr(hint, "__metadata__", ()))
 
 
 # ─── docstring parsing ────────────────────────────────────────────────
@@ -212,7 +209,9 @@ def _parse_docstring(doc: str | None) -> tuple[str, dict[str, str]]:
 
     # Args section: only meaningful when we hit one explicitly.
     param_docs: dict[str, str] = {}
-    if cursor < len(lines) and lines[cursor].rstrip().startswith(("Args", "Arguments", "Parameters")):
+    if cursor < len(lines) and lines[cursor].rstrip().startswith(
+        ("Args", "Arguments", "Parameters")
+    ):
         cursor += 1  # skip the header itself
         param_docs = _parse_args_section(lines[cursor:])
     return description, param_docs
@@ -241,8 +240,10 @@ def _parse_args_section(lines: list[str]) -> dict[str, str]:
             break
         match = _PARAM_LINE_RE.match(stripped.strip())
         # Indented continuation: append to the current param's lines.
-        if (raw.startswith(" ") or raw.startswith("\t")) and current_name is not None and not (
-            match and len(stripped) - len(stripped.lstrip()) <= 4
+        if (
+            (raw.startswith(" ") or raw.startswith("\t"))
+            and current_name is not None
+            and not (match and len(stripped) - len(stripped.lstrip()) <= 4)
         ):
             # Heuristic: a deeply-indented "name: ..." line in some
             # docstrings is just continuation prose.  Only treat

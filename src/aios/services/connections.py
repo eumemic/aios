@@ -156,11 +156,30 @@ async def list_connections(
         )
 
 
+async def _notify_connection_change(
+    pool: asyncpg.Pool[Any], connection: Connection, *, event: str
+) -> None:
+    """Emit a ``connections_<connector>`` NOTIFY for discovery SSE consumers.
+
+    Payload: ``"<event>|<connection_id>|<account>"`` — the SSE
+    generator parses this into an ``added``/``removed`` event.  Fires
+    outside any transaction so subscribers never see a payload for an
+    uncommitted row.  Introduced in #328 PR 5 to feed the runtime
+    container's connection-discovery loop.
+    """
+    payload = f"{event}|{connection.id}|{connection.account}"
+    channel = f"connections_{connection.connector}"
+    async with pool.acquire() as conn:
+        await conn.execute("SELECT pg_notify($1, $2)", channel, payload)
+
+
 async def attach_connection(
     pool: asyncpg.Pool[Any], connection_id: str, *, session_id: str
 ) -> Connection:
     async with pool.acquire() as conn:
-        return await queries.attach_connection(conn, connection_id, session_id=session_id)
+        connection = await queries.attach_connection(conn, connection_id, session_id=session_id)
+    await _notify_connection_change(pool, connection, event="added")
+    return connection
 
 
 async def detach_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Connection:
@@ -281,4 +300,6 @@ async def archive_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Con
                 f"detach or unconfigure before archiving",
                 detail={"id": connection_id, "mode": mode},
             )
-        return await queries.archive_connection(conn, connection_id)
+        archived = await queries.archive_connection(conn, connection_id)
+    await _notify_connection_change(pool, archived, event="removed")
+    return archived

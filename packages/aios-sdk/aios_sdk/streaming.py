@@ -1,23 +1,27 @@
-"""Hand-written SSE consumer for the aios session-event stream.
+"""Hand-written SSE consumers for aios's Server-Sent Event endpoints.
 
 The generated SDK at ``aios_sdk._generated`` covers JSON request/response
-operations only — the session-event stream endpoint
-(``GET /v1/sessions/{id}/stream``) is annotated
+operations only — SSE endpoints are annotated
 ``x-codegen.targets: []`` because Server-Sent Events don't fit
 ``openapi-python-client``'s response-shape model. This module provides
 the streaming surface as a companion to the generated client.
 
-Three event names are emitted on the wire:
+Three SSE endpoints are wrapped here:
 
-* ``event``  — a full event row (``{"id","session_id","seq","kind","data",...}``)
-* ``delta``  — a streaming text chunk for an in-progress assistant message
-  (``{"delta": "..."}``)
-* ``done``   — session-terminated marker; stream will close after this
+* :func:`stream_session` — session events (``GET /v1/sessions/{id}/stream``).
+* :func:`stream_connector_calls` — runtime container's pending tool calls
+  across N connections of one ``connector`` type
+  (``GET /v1/connectors/runtime/calls``); each event is keyed ``"call"``
+  with the call payload including ``connection_id`` (#328 PR 5).
+* :func:`stream_connection_discovery` — runtime container's ``added`` /
+  ``removed`` events for connections of one ``connector`` type
+  (``GET /v1/connectors/connections``); each event is keyed
+  ``"connection"`` (#328 PR 5).
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -84,6 +88,84 @@ def parse_sse_lines(lines: Iterable[str]) -> Iterator[SseMessage]:
             continue
         if raw.startswith(":"):
             # Comment / keep-alive ping.
+            continue
+        field, _, value = raw.partition(":")
+        if value.startswith(" "):
+            value = value[1:]
+        if field == "event":
+            event = value
+        elif field == "data":
+            data_parts.append(value)
+
+    if data_parts:
+        yield SseMessage(event=event, data="\n".join(data_parts))
+
+
+async def stream_connector_calls(
+    httpx_client: httpx.AsyncClient,
+    connector: str,
+) -> AsyncIterator[SseMessage]:
+    """Yield SSE messages from ``GET /v1/connectors/runtime/calls`` (#328 PR 5).
+
+    The caller's runtime token (carried in ``httpx_client``'s default
+    headers) scopes the stream to one connector *type*; the SDK fans
+    out each emitted call to its per-connection worker by the
+    ``connection_id`` field on the JSON payload.
+
+    ``connector`` is passed only for the route's path/log keys —
+    authentication happens via the bearer in the headers.
+    """
+    del connector  # carried implicitly via the runtime bearer token
+    async with httpx_client.stream(
+        "GET",
+        "/v1/connectors/runtime/calls",
+        headers={"Accept": "text/event-stream"},
+        timeout=httpx.Timeout(60.0, read=None),
+    ) as response:
+        response.raise_for_status()
+        async for msg in _aiter_sse(response):
+            yield msg
+
+
+async def stream_connection_discovery(
+    httpx_client: httpx.AsyncClient,
+    connector: str,
+) -> AsyncIterator[SseMessage]:
+    """Yield SSE messages from ``GET /v1/connectors/connections`` (#328 PR 5).
+
+    Emits one ``"connection"`` event per backfilled active connection at
+    subscribe time, then live ``added`` / ``removed`` events.  See
+    :func:`stream_connector_calls` for the auth model.
+    """
+    del connector  # carried implicitly via the runtime bearer token
+    async with httpx_client.stream(
+        "GET",
+        "/v1/connectors/connections",
+        headers={"Accept": "text/event-stream"},
+        timeout=httpx.Timeout(60.0, read=None),
+    ) as response:
+        response.raise_for_status()
+        async for msg in _aiter_sse(response):
+            yield msg
+
+
+async def _aiter_sse(response: httpx.Response) -> AsyncIterator[SseMessage]:
+    """Parse an httpx async streaming response into :class:`SseMessage` values.
+
+    Mirrors :func:`parse_sse_lines` for the async path — same field-by-
+    field state machine, same blank-line-flushes-message semantics.
+    """
+    event: str = "message"
+    data_parts: list[str] = []
+
+    async for raw in response.aiter_lines():
+        if raw == "":
+            if data_parts:
+                yield SseMessage(event=event, data="\n".join(data_parts))
+            event = "message"
+            data_parts = []
+            continue
+        if raw.startswith(":"):
             continue
         field, _, value = raw.partition(":")
         if value.startswith(" "):

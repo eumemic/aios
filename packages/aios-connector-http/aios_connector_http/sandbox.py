@@ -140,9 +140,7 @@ class Attachment:
                 f"attachment host_path does not exist: {self.host_path!r}"
             ) from err
         if not stat.S_ISREG(st.st_mode):
-            raise AttachmentError(
-                f"attachment host_path is not a regular file: {self.host_path!r}"
-            )
+            raise AttachmentError(f"attachment host_path is not a regular file: {self.host_path!r}")
         if st.st_size > _MAX_ATTACHMENT_BYTES:
             raise AttachmentError(
                 f"attachment {self.filename!r} is {st.st_size} bytes; "
