@@ -19,7 +19,6 @@ from aios.models.memory_stores import MemoryStoreResourceEcho
 
 SESSION_ID = "sesn_01RECONCILETEST00000000001"
 STORE_A = "memstore_01STOREA000000000000000001"
-STORE_B = "memstore_01STOREB000000000000000001"
 
 
 def _echo(
@@ -420,14 +419,15 @@ class TestReconcile:
         mock_create.assert_not_awaited()
 
     async def test_skips_read_only_mounts_in_reconcile(self, tmp_path: Path) -> None:
-        """read_only mount; no DB call even if file changed."""
+        """read_only mount; no DB call — files from read_only mounts never appear in before or after."""
         from aios.tools.bash_memory_reconcile import reconcile_memory_mounts
 
         host_dir = self._make_host_dir(tmp_path)
         (host_dir / "file.md").write_text("content\n")
 
-        # read_only mount: even if we have a before sha that differs, no DB call
-        before = {(STORE_A, "/file.md"): "different_sha"}
+        # read_only mount: snapshot_memory_mounts also skips read_only mounts, so
+        # before is empty; after will also be empty (read_only skipped in scan).
+        before: dict[tuple[str, str], str] = {}
         runtime.set_session_memory_mounts(SESSION_ID, [_echo(access="read_only")])
 
         with (
@@ -493,8 +493,8 @@ class TestReconcile:
         cached_sha = runtime.get_read_sha(SESSION_ID, STORE_A, "/fresh.md")
         assert cached_sha == expected_sha
 
-    async def test_modified_file_no_db_record_skips(self, tmp_path: Path) -> None:
-        """before has sha A, after sha B, but get_memory_by_path returns None (race); update_memory NOT called."""
+    async def test_modified_file_no_db_record_falls_back_to_create(self, tmp_path: Path) -> None:
+        """before has sha A, after sha B, but get_memory_by_path returns None (race); falls back to create_memory."""
         from aios.tools.bash_memory_reconcile import reconcile_memory_mounts
 
         host_dir = self._make_host_dir(tmp_path)

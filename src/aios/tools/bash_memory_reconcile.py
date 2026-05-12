@@ -36,15 +36,6 @@ log = get_logger("aios.tools.bash_memory_reconcile")
 _Snapshot = dict[tuple[str, str], str]
 
 
-def _sha256_of_content(content: str) -> str:
-    """sha256 over UTF-8 bytes of content.
-
-    Mirrors memory_stores._sha256_hex; avoids calling the private
-    memory_stores._sha256_hex across module boundaries.
-    """
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
 def _bytes_map_to_sha_map(
     bytes_map: dict[tuple[str, str], bytes],
 ) -> _Snapshot:
@@ -58,7 +49,8 @@ def _bytes_map_to_sha_map(
     for (store_id, store_path), raw in bytes_map.items():
         try:
             content = raw.decode("utf-8")
-            sha = _sha256_of_content(content)
+            # sha256 over UTF-8 bytes of content — mirrors memory_stores._sha256_hex
+            sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
         except UnicodeDecodeError:
             sha = hashlib.sha256(raw).hexdigest()
         result[(store_id, store_path)] = sha
@@ -89,20 +81,17 @@ def _walk_store_files(host_dir: Path) -> list[tuple[Path, str]]:
 
 def _snapshot_with_bytes(
     session_id: str,
-) -> tuple[dict[tuple[str, str], bytes], dict[str, Path]]:
-    """Return raw bytes and host-dir map for all eligible writable materialized mounts.
+) -> dict[tuple[str, str], bytes]:
+    """Return raw bytes for all eligible writable materialized mounts.
 
     Called internally by both ``snapshot_memory_mounts`` (which only needs
-    sha digests) and ``reconcile_memory_mounts`` (which needs both to avoid a
-    second scan).
+    sha digests) and ``reconcile_memory_mounts`` (which needs bytes to avoid
+    a second scan).
 
-    Returns a 2-tuple:
-    - ``bytes_map``: ``(store_id, store_path) -> raw_bytes``
-    - ``host_dirs``: ``store_id -> host_dir`` (writable, materialized stores only)
+    Returns ``bytes_map``: ``(store_id, store_path) -> raw_bytes``.
     """
     echoes = runtime.get_session_memory_mounts(session_id)
     bytes_map: dict[tuple[str, str], bytes] = {}
-    host_dirs: dict[str, Path] = {}
 
     for echo in echoes:
         if echo.access == "read_only":
@@ -115,7 +104,6 @@ def _snapshot_with_bytes(
         if not marker.exists():
             continue
 
-        host_dirs[store_id] = host_dir
         for fpath, store_path in _walk_store_files(host_dir):
             try:
                 raw = fpath.read_bytes()
@@ -123,7 +111,7 @@ def _snapshot_with_bytes(
                 continue
             bytes_map[(store_id, store_path)] = raw
 
-    return bytes_map, host_dirs
+    return bytes_map
 
 
 def snapshot_memory_mounts(session_id: str) -> _Snapshot:
@@ -139,7 +127,7 @@ def snapshot_memory_mounts(session_id: str) -> _Snapshot:
     - Stores whose host directory does not exist yet.
     - Stores that have not been materialized (marker file absent).
     """
-    by_bytes, _host_dirs = _snapshot_with_bytes(session_id)
+    by_bytes = _snapshot_with_bytes(session_id)
     return _bytes_map_to_sha_map(by_bytes)
 
 
@@ -202,8 +190,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
     """
     # Build after snapshot as (store_id, store_path) -> bytes in one pass.
     # Using bytes avoids re-reading files during the create/modify loops.
-    # host_dirs comes from the same scan — no second get_session_memory_mounts call.
-    after_bytes, host_dirs = _snapshot_with_bytes(session_id)
+    after_bytes = _snapshot_with_bytes(session_id)
     pool = runtime.require_pool()
     actor = SessionActor(session_id=session_id)
     warnings: list[str] = []
@@ -307,8 +294,6 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
     for store_id, store_path in before:
         if (store_id, store_path) in after:
             continue  # still exists
-        if store_id not in host_dirs:
-            continue
         existing = await memory_service.get_memory_by_path(
             pool, store_id, store_path, include_content=False
         )

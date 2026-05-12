@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -154,3 +154,29 @@ class TestTimeoutCapping:
         )
         kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
         assert kwargs["timeout_seconds"] == 5
+
+
+class TestExecRaisedReconcileSuppression:
+    """When exec raises, reconcile exceptions are suppressed so the original propagates."""
+
+    async def test_exec_exception_propagates_not_reconcile_exception(
+        self, stub_registry: _StubRegistry
+    ) -> None:
+        """sandbox.exec raises; reconcile also raises; original exec exception propagates."""
+        exec_error = RuntimeError("container died")
+        reconcile_error = RuntimeError("reconcile failed too")
+
+        stub_registry.exec.side_effect = exec_error  # type: ignore[attr-defined]
+
+        with (
+            patch(
+                "aios.tools.bash.reconcile_memory_mounts",
+                new_callable=AsyncMock,
+                side_effect=reconcile_error,
+            ) as mock_reconcile,
+            pytest.raises(RuntimeError, match="container died"),
+        ):
+            await bash_handler("sess_01TEST", {"command": "true"})
+
+        # reconcile was still attempted despite exec raising
+        mock_reconcile.assert_awaited_once()
