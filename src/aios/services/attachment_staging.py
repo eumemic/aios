@@ -77,8 +77,9 @@ def stage_inbound_attachments(
     other attachment's bytes corrupts ``metadata.attachments``. The
     realistic trigger (e.g. Telegram album with two ``image.jpg``
     files) is the platform's responsibility to disambiguate via the
-    SDK; the supervisor drops the inbound and the operator sees the
-    canonical ``attachment_staging_failed`` reason.
+    SDK; on collision this function raises :class:`AttachmentStagingError`,
+    the inbound is dropped, and the operator sees the canonical
+    ``attachment_staging_failed`` reason.
     """
     if not isinstance(raw_attachments, list) or not raw_attachments:
         return [], []
