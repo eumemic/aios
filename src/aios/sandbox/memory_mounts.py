@@ -13,8 +13,8 @@ marker file. Subsequent provisioning sees the marker and is a no-op.
 
 Tool/API writes after materialization keep the host dir in sync via the
 atomic mirror helpers in :mod:`aios.sandbox.atomic_mirror`. Bash writes
-hit the host dir directly — visible cross-session, but not synced to DB
-(documented v2 limitation).
+hit the host dir directly and are reconciled back to the DB by the
+post-exec hook in :mod:`aios.tools.bash_memory_reconcile`.
 """
 
 from __future__ import annotations

@@ -22,16 +22,15 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-import structlog
-
 from aios.harness import runtime
+from aios.logging import get_logger
 from aios.models.memory_stores import MAX_CONTENT_BYTES
 from aios.sandbox.memory_mounts import MATERIALIZED_MARKER
 from aios.sandbox.volumes import memory_store_host_dir
 from aios.services import memory_stores as memory_service
 from aios.services.memory_stores import SessionActor
 
-log = structlog.get_logger("aios.tools.bash_memory_reconcile")
+log = get_logger("aios.tools.bash_memory_reconcile")
 
 # Snapshot type: (store_id, store_path) -> sha256_hex
 _Snapshot = dict[tuple[str, str], str]
@@ -252,8 +251,6 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
             continue  # deleted — handled below
         if after_sha == before_sha:
             continue  # unchanged
-        if store_id not in host_dirs:
-            continue
         raw = after_bytes[(store_id, store_path)]
         maybe_content = _read_utf8_content(
             store_id,

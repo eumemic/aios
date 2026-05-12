@@ -493,6 +493,50 @@ class TestReconcile:
         cached_sha = runtime.get_read_sha(SESSION_ID, STORE_A, "/fresh.md")
         assert cached_sha == expected_sha
 
+    async def test_modified_file_no_db_record_skips(self, tmp_path: Path) -> None:
+        """before has sha A, after sha B, but get_memory_by_path returns None (race); update_memory NOT called."""
+        from aios.tools.bash_memory_reconcile import reconcile_memory_mounts
+
+        host_dir = self._make_host_dir(tmp_path)
+        new_content = "new content after race\n"
+        (host_dir / "race.md").write_text(new_content)
+
+        old_sha = _sha256("old content\n")
+        before = {(STORE_A, "/race.md"): old_sha}
+        runtime.set_session_memory_mounts(SESSION_ID, [_echo()])
+
+        fake_created = MagicMock()
+        fake_created.content_sha256 = _sha256(new_content)
+
+        with (
+            patch("aios.tools.bash_memory_reconcile.memory_store_host_dir", return_value=host_dir),
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.create_memory",
+                new_callable=AsyncMock,
+                return_value=fake_created,
+            ) as mock_create,
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.get_memory_by_path",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.update_memory",
+                new_callable=AsyncMock,
+            ) as mock_update,
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.delete_memory",
+                new_callable=AsyncMock,
+            ),
+        ):
+            warnings = await reconcile_memory_mounts(SESSION_ID, before=before)
+
+        # No crash; update_memory is not called (create_memory is used instead)
+        mock_update.assert_not_awaited()
+        mock_create.assert_awaited_once()
+        # No warning for this path — it is handled gracefully as a create
+        assert warnings == []
+
     async def test_read_sha_updated_after_update(self, tmp_path: Path) -> None:
         """runtime.set_read_sha called after update_memory."""
         from aios.tools.bash_memory_reconcile import reconcile_memory_mounts
