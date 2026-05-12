@@ -21,6 +21,8 @@ def test_generated_client_matches_committed(tmp_path: Path) -> None:
 
     subprocess.run(
         [
+            "uv",
+            "run",
             "openapi-python-client",
             "generate",
             "--path",
