@@ -2703,6 +2703,15 @@ async def insert_connection(
     tools_json = json.dumps(tools or [])
     ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
     nonce = secrets_blob.nonce if secrets_blob is not None else None
+    # Upsert into the connectors catalog so the runtime_tokens /
+    # runtimes FK to ``connectors(connector)`` resolves for this type.
+    # Migration 0033 backfilled rows for types active at migration time;
+    # creating a connection of a fresh type after migration needs this
+    # path (#328 PR 5).
+    await conn.execute(
+        "INSERT INTO connectors (connector) VALUES ($1) ON CONFLICT DO NOTHING",
+        connector,
+    )
     for _ in range(3):
         row = await conn.fetchrow(
             """

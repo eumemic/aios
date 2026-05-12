@@ -1,17 +1,40 @@
-"""Base class connector authors subclass.
+"""Base class for runtime-container connector authors.
 
-Subclass :class:`HttpConnector`, decorate methods with :func:`tool`,
-implement any platform-specific lifecycle by overriding :meth:`setup`,
-:meth:`teardown`, or :meth:`serve`.  Then::
+One container, one ``connector`` *type* (e.g. ``"telegram"``), N
+connections discovered at runtime via SSE.  Subclass
+:class:`HttpConnector`, set ``connector``, decorate methods with
+:func:`tool`, implement :meth:`serve_connection` if your platform pushes
+inbound from each connection (e.g. signal/telegram polling)::
+
+    class MyConnector(HttpConnector):
+        connector = "myplatform"
+
+        async def serve_connection(self, connection_id, secrets):
+            async with platform.client(secrets["bot_token"]) as plat:
+                async for inbound in plat.poll():
+                    await self.emit_inbound(
+                        connection_id=connection_id,
+                        chat_id=inbound.chat_id,
+                        sender={"display_name": inbound.sender},
+                        content=inbound.text,
+                    )
 
     if __name__ == "__main__":
         import asyncio
         asyncio.run(MyConnector().run())
 
-The runner reads ``AIOS_URL`` and ``AIOS_CONNECTOR_TOKEN`` from env,
-spins an :class:`AiosClient`, and runs an SSE-tail loop that dispatches
-incoming tool-call events to your decorated methods.  Inbound is
-emitted by your code calling :meth:`emit_inbound`.
+The runner reads ``AIOS_URL`` and ``AIOS_RUNTIME_TOKEN`` from env, opens
+an :class:`aios_sdk.Client`, publishes the tool catalog for the
+connector type once, then races three jobs concurrently:
+
+1. ``GET /v1/connectors/connections`` — discovery SSE.  Each ``added``
+   triggers ``serve_connection(connection_id, secrets)`` in its own task.
+   Each ``removed`` cancels the matching task.
+2. ``GET /v1/connectors/runtime/calls`` — calls SSE.  Each event is
+   dispatched to its ``@tool`` method; ``connection_id`` is one of the
+   focal-injectable kwargs.
+3. The per-connection ``serve_connection`` tasks themselves, supervised
+   in a :class:`asyncio.TaskGroup` for clean shutdown.
 
 The runner tracks answered ``tool_call_id``s in memory so SSE
 reconnects (which replay the backfill) don't double-execute.  For
@@ -27,14 +50,31 @@ import json
 import os
 import types
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
+import httpx
 import structlog
+from aios_sdk import Client, stream_connection_discovery, stream_connector_calls
+from aios_sdk._generated.api.connectors.get_connector_runtime_secrets import (
+    asyncio_detailed as _get_runtime_secrets,
+)
+from aios_sdk._generated.api.connectors.post_connector_runtime_tool_result import (
+    asyncio_detailed as _post_runtime_tool_result,
+)
+from aios_sdk._generated.api.connectors.put_connector_tools_schema import (
+    asyncio_detailed as _put_tools_schema,
+)
+from aios_sdk._generated.models.runtime_tool_result_request import (
+    RuntimeToolResultRequest,
+)
+from aios_sdk._generated.models.tools_schema_update import ToolsSchemaUpdate
+from aios_sdk._generated.models.tools_schema_update_tools_item import (
+    ToolsSchemaUpdateToolsItem,
+)
 from ulid import ULID
 
-from .client import AiosClient
 from .sandbox import _SandboxPathMarker, resolve_sandbox_path
 from .schema import derive_tool_spec
 
@@ -56,9 +96,9 @@ def tool(
     arguments, parsed as JSON and passed as kwargs.  The method's
     return value is the tool result string the session log stores.
 
-    The connector container must POST a matching ``ConnectionSetTools``
-    body to ``PUT /v1/connections/{id}/tools`` so the model's tool list
-    includes this tool — the SDK doesn't auto-publish schemas in v1.
+    The runner publishes a derived JSON Schema for every ``@tool`` once
+    at startup via ``PUT /v1/connectors/{connector}/tools_schema``;
+    individual connections inherit it from the type catalog.
     """
 
     def _wrap(f: ToolFn) -> ToolFn:
@@ -70,26 +110,33 @@ def tool(
 
 @dataclass(frozen=True, slots=True)
 class _ToolMeta:
-    """Per-tool reflection cache populated once at construction.
-
-    Holds the bound method plus the precomputed bits dispatch needs:
-    which params accept focal-channel injection, and which params
-    carry :data:`SandboxPath` annotations (and whether scalar or list).
-    Storing these as a frozen dataclass on ``self._tools`` keeps the
-    per-call hot path free of ``inspect`` and ``get_type_hints`` calls.
-    """
+    """Per-tool reflection cache populated once at construction."""
 
     fn: ToolFn
     focal_params: frozenset[str]
     sandbox_params: tuple[tuple[str, str], ...]  # (param_name, "scalar" | "list")
 
 
-class HttpConnector:
-    """Base class for HTTP-client connectors.
+@dataclass
+class _ConnectionState:
+    """Per-connection runtime state.  One row per active connection."""
 
-    Subclass and decorate methods with :func:`tool`.  Override the
-    lifecycle hooks if you need them.
+    connection_id: str
+    account: str
+    secrets: dict[str, str] = field(default_factory=dict)
+    worker: asyncio.Task[None] | None = None
+
+
+class HttpConnector:
+    """Base class for runtime-container connectors (#328 PR 5).
+
+    Set ``connector`` on the subclass to the platform type (e.g.
+    ``"telegram"``).  Decorate methods with :func:`tool`.  Override
+    :meth:`serve_connection` to do per-connection platform work.
     """
+
+    # Subclasses MUST set this — the connector type the container serves.
+    connector: str = ""
 
     def __init__(
         self,
@@ -97,29 +144,39 @@ class HttpConnector:
         base_url: str | None = None,
         token: str | None = None,
     ) -> None:
+        if not self.connector:
+            raise RuntimeError(
+                f"{type(self).__name__} must set ``connector`` class attribute "
+                "(e.g. ``connector = 'telegram'``)"
+            )
         self._base_url = base_url or os.environ["AIOS_URL"]
-        self._token = token or os.environ["AIOS_CONNECTOR_TOKEN"]
-        self._client: AiosClient | None = None
-        self._connection_id: str | None = None
+        self._token = token or os.environ["AIOS_RUNTIME_TOKEN"]
+        self._client: Client | None = None
         self._tools: dict[str, _ToolMeta] = self._collect_tools()
         self._answered: set[str] = set()
-        self._secrets_cache: dict[str, str] | None = None
+        self._connections: dict[str, _ConnectionState] = {}
 
     # ─── lifecycle hooks (override as needed) ────────────────────────
 
-    async def setup(self) -> None:
-        """Override: open platform connections, start polling, etc."""
+    async def serve_connection(
+        self, connection_id: str, secrets: dict[str, str]
+    ) -> None:
+        """Override: per-connection long-running platform task.
+
+        Spawned when the discovery SSE emits ``added`` for this
+        ``connection_id``; cancelled when ``removed``.  The default
+        is a no-op block — connectors that only respond to outbound
+        tool calls (no inbound platform feed) leave it as-is.
+
+        ``secrets`` is the per-connection decrypted credentials dict.
+        Cached at spawn time — if operators rotate secrets, the
+        operator restarts the runtime container to pick them up.
+        """
+        del connection_id, secrets
+        await asyncio.Event().wait()  # block forever
 
     async def teardown(self) -> None:
-        """Override: close platform connections cleanly."""
-
-    async def serve(self) -> None:
-        """Override: long-running platform task that emits inbounds.
-
-        Default is a no-op — connectors that only respond to outbound
-        tool calls (no inbound) leave this empty.
-        """
-        await asyncio.Event().wait()  # block forever
+        """Override: cleanup before the runner exits."""
 
     async def load_answered(self) -> set[str]:
         """Override: persisted tool_call_ids from a previous lifetime."""
@@ -130,102 +187,212 @@ class HttpConnector:
 
     # ─── connector → aios glue ───────────────────────────────────────
 
-    async def secrets(self) -> dict[str, str]:
-        """Decrypted platform secrets for the caller's connection.
-
-        Cached for the connector's lifetime: rotating secrets via the
-        management API requires restarting the connector container to
-        pick up new values.  Authors who need fresh-on-every-call
-        semantics should call ``self._client.get_secrets()`` directly.
-        """
-        if self._secrets_cache is None:
-            assert self._client is not None
-            self._secrets_cache = await self._client.get_secrets()
-        return self._secrets_cache
-
     async def emit_inbound(
         self,
         *,
+        connection_id: str,
         chat_id: str,
         sender: dict[str, Any],
         content: str,
-        attachments: list[dict[str, Any]] | None = None,
+        attachments: list[tuple[str, bytes, str]] | None = None,
         metadata: dict[str, Any] | None = None,
         timestamp: str | None = None,
         event_id: str | None = None,
     ) -> dict[str, Any]:
-        """Forward a platform inbound to aios.  Idempotent on event_id."""
-        assert self._client is not None
+        """Forward a platform inbound to aios for ``connection_id``.
+
+        Idempotent on ``event_id``.  ``attachments`` is a list of
+        ``(filename, bytes, content_type)`` tuples that ride as
+        multipart parts.
+        """
+        client = self._require_client()
         eid = event_id or str(ULID())
         log.info(
             "connector.inbound",
-            connection_id=self._connection_id,
+            connector=self.connector,
+            connection_id=connection_id,
             chat_id=chat_id,
             sender=sender,
             content_len=len(content),
             attachment_count=len(attachments or []),
             event_id=eid,
         )
-        return await self._client.post_inbound(
-            event_id=eid,
-            chat_id=chat_id,
-            sender=sender,
-            content=content,
-            attachments=attachments,
-            metadata=metadata,
-            timestamp=timestamp,
+        # Hand-rolled multipart: the generated body's ``attachments``
+        # field shape ``list[str]`` from the openapi spec (FastAPI's
+        # ``UploadFile`` parts don't survive the schema round-trip),
+        # so we POST directly via the underlying httpx client.
+        files: list[tuple[str, tuple[str | None, bytes, str]]] = [
+            ("connection_id", (None, connection_id.encode(), "text/plain")),
+            ("event_id", (None, eid.encode(), "text/plain")),
+            ("chat_id", (None, chat_id.encode(), "text/plain")),
+            ("content", (None, content.encode(), "text/plain")),
+            ("sender", (None, json.dumps(sender).encode(), "text/plain")),
+        ]
+        if metadata is not None:
+            files.append(
+                ("metadata", (None, json.dumps(metadata).encode(), "text/plain"))
+            )
+        if timestamp is not None:
+            files.append(("timestamp", (None, timestamp.encode(), "text/plain")))
+        for filename, blob, content_type in attachments or []:
+            files.append(("attachments", (filename, blob, content_type)))
+
+        response = await client.get_async_httpx_client().post(
+            "/v1/connectors/runtime/inbound",
+            files=files,
         )
+        response.raise_for_status()
+        return dict(response.json())
 
     # ─── runner ──────────────────────────────────────────────────────
 
     async def run(self) -> None:
-        """Open the client, run setup → serve + tool-loop, then teardown."""
-        async with AiosClient(self._base_url, self._token) as client:
+        """Open the client, publish tools, race discovery + tool loops."""
+        async with Client(base_url=self._base_url, token=self._token) as client:
             self._client = client
-            self._connection_id = await client.whoami()
             self._answered = await self.load_answered()
-            await self.setup()
-            await self._publish_tool_schemas()
+            await self._publish_tools_schema()
             try:
                 async with asyncio.TaskGroup() as tg:
+                    tg.create_task(self._discovery_loop(tg), name="aios-discovery")
                     tg.create_task(self._tool_loop(), name="aios-tool-loop")
-                    tg.create_task(self.serve(), name="aios-platform-serve")
             finally:
+                # Cancel any per-connection workers still alive when the
+                # TaskGroup exits (e.g. on outer cancellation).  The TG
+                # itself cancels them already; this is a belt-only
+                # noop in the happy path but guards manual run() exits.
+                await self._cancel_all_connection_workers()
                 await self.teardown()
 
-    async def _publish_tool_schemas(self) -> None:
-        """Derive a ToolSpec from each ``@tool`` method and publish it.
+    async def _publish_tools_schema(self) -> None:
+        """Derive a ToolSpec from each ``@tool`` method and PUT the catalog.
 
-        Replaces the connection's tools wholesale on every startup, so
-        the model's tool list always matches the running container.
-        Operator-side hand-written ``tools.json`` is deliberately
-        overwritten — the Python source is canonical.
+        Replaces ``connectors.tools_schema`` for this type wholesale on
+        every startup — the runtime container is the source of truth.
         """
-        assert self._client is not None
+        client = self._require_client()
         specs = [derive_tool_spec(name, meta.fn) for name, meta in self._tools.items()]
-        await self._client.set_connection_tools(specs)
+        body = ToolsSchemaUpdate(
+            tools=[ToolsSchemaUpdateToolsItem.from_dict(spec) for spec in specs]
+        )
+        response = await _put_tools_schema(
+            client=client, connector=self.connector, body=body
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"failed to publish tools schema: {response.status_code} {response.content!r}"
+            )
         log.info(
             "connector.tools.published",
-            connection_id=self._connection_id,
+            connector=self.connector,
             tool_count=len(specs),
             tool_names=sorted(self._tools.keys()),
         )
 
-    async def _tool_loop(self) -> None:
-        """Tail the calls SSE stream and dispatch each call.
-
-        Wraps the stream in exponential-backoff reconnect: a transient
-        network blip drops the SSE iterator, but doesn't kill the
-        connector.  The next reconnect's backfill replays any pending
-        calls, and the answered-id set deduplicates so we never
-        double-execute.
-        """
-        assert self._client is not None
+    async def _discovery_loop(self, tg: asyncio.TaskGroup) -> None:
+        """Tail the connection-discovery SSE; spawn / cancel workers."""
+        client = self._require_client()
         backoff = 1.0
         while True:
             try:
-                async for call in self._client.stream_calls():
-                    backoff = 1.0  # reset on first successful event
+                async for msg in stream_connection_discovery(
+                    client.get_async_httpx_client(), self.connector
+                ):
+                    backoff = 1.0
+                    if msg.event != "connection":
+                        continue
+                    payload = json.loads(msg.data)
+                    event = payload.get("event")
+                    connection_id = payload.get("connection_id", "")
+                    account = payload.get("account", "")
+                    if event == "added":
+                        await self._on_connection_added(tg, connection_id, account)
+                    elif event == "removed":
+                        await self._on_connection_removed(connection_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning(
+                    "connector.discovery.stream_error",
+                    error=str(exc),
+                    backoff=backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
+                continue
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60.0)
+
+    async def _on_connection_added(
+        self, tg: asyncio.TaskGroup, connection_id: str, account: str
+    ) -> None:
+        """Fetch secrets, then spawn ``serve_connection`` in its own task."""
+        if connection_id in self._connections:
+            # Replay from backfill after reconnect — already running.
+            return
+        client = self._require_client()
+        response = await _get_runtime_secrets(client=client, connection_id=connection_id)
+        if response.status_code >= 400:
+            log.warning(
+                "connector.discovery.secrets_fetch_failed",
+                connection_id=connection_id,
+                status=response.status_code,
+            )
+            return
+        body = response.parsed
+        secrets_map: dict[str, str] = {}
+        if body is not None and hasattr(body, "secrets"):
+            raw_secrets = body.secrets
+            if hasattr(raw_secrets, "additional_properties"):
+                secrets_map = {
+                    str(k): str(v) for k, v in raw_secrets.additional_properties.items()
+                }
+        state = _ConnectionState(
+            connection_id=connection_id, account=account, secrets=secrets_map
+        )
+        state.worker = tg.create_task(
+            self.serve_connection(connection_id, secrets_map),
+            name=f"aios-conn-{connection_id}",
+        )
+        self._connections[connection_id] = state
+        log.info(
+            "connector.connection.added",
+            connector=self.connector,
+            connection_id=connection_id,
+            account=account,
+        )
+
+    async def _on_connection_removed(self, connection_id: str) -> None:
+        """Cancel the worker task for a vanished connection."""
+        state = self._connections.pop(connection_id, None)
+        if state is None or state.worker is None:
+            return
+        state.worker.cancel()
+        log.info(
+            "connector.connection.removed",
+            connector=self.connector,
+            connection_id=connection_id,
+        )
+
+    async def _cancel_all_connection_workers(self) -> None:
+        for state in list(self._connections.values()):
+            if state.worker is not None and not state.worker.done():
+                state.worker.cancel()
+        self._connections.clear()
+
+    async def _tool_loop(self) -> None:
+        """Tail the per-type calls SSE and dispatch each call."""
+        client = self._require_client()
+        backoff = 1.0
+        while True:
+            try:
+                async for msg in stream_connector_calls(
+                    client.get_async_httpx_client(), self.connector
+                ):
+                    backoff = 1.0
+                    if msg.event != "call":
+                        continue
+                    call = json.loads(msg.data)
                     tool_call_id = call.get("tool_call_id", "")
                     if not tool_call_id or tool_call_id in self._answered:
                         continue
@@ -234,38 +401,44 @@ class HttpConnector:
                     await self.save_answered(tool_call_id)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                # Stream dropped; backoff and reconnect.
+            except Exception as exc:
+                log.warning(
+                    "connector.tool_loop.stream_error",
+                    error=str(exc),
+                    backoff=backoff,
+                )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
                 continue
-            # Stream returned cleanly (server closed without error) — also
-            # reconnect, but with a small delay to avoid a tight loop.
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
 
     async def dispatch_call(self, call: dict[str, Any]) -> None:
         """Run the tool method for ``call`` and POST the result.
 
-        If the tool method's signature accepts ``account`` and/or
-        ``chat_id`` kwargs, the runner parses them out of the call's
-        ``focal_channel`` (shaped ``<connector>/<account>/<chat_id>``)
-        and injects them.  ``SandboxPath``-annotated params get their
-        in-sandbox path strings resolved to host :class:`Path`s before
-        the tool body runs.
+        Tool method signatures may accept any subset of the
+        focal-injectable kwargs: ``connection_id``, ``account``,
+        ``chat_id``.  ``connection_id`` comes from the call payload;
+        ``account`` and ``chat_id`` are parsed out of
+        ``focal_channel`` (``<connector>/<account>/<chat_id>``).
+
+        ``SandboxPath``-annotated params get their in-sandbox path
+        strings resolved to host :class:`Path`s before the body runs.
 
         Public surface so tests can drive dispatch without going
         through SSE — the production path is :meth:`_tool_loop`.
         """
-        assert self._client is not None
+        client = self._require_client()
         name = call.get("name", "")
         tool_call_id = call.get("tool_call_id", "")
         session_id = call.get("session_id", "")
+        connection_id = call.get("connection_id", "")
         log.info(
             "connector.tool_call.dispatched",
             name=name,
             tool_call_id=tool_call_id,
             session_id=session_id,
+            connection_id=connection_id,
         )
         meta = self._tools.get(name)
         if meta is None:
@@ -276,7 +449,9 @@ class HttpConnector:
                 session_id=session_id,
                 reason="unknown_tool",
             )
-            await self._client.post_tool_result(
+            await self._post_tool_result(
+                client,
+                connection_id=connection_id,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
                 content=json.dumps({"error": f"unknown tool {name!r}"}),
@@ -288,7 +463,7 @@ class HttpConnector:
         except json.JSONDecodeError:
             args = {}
         focal_channel = call.get("focal_channel") or ""
-        args = _inject_focal_kwargs(meta, args, focal_channel)
+        args = _inject_focal_kwargs(meta, args, focal_channel, connection_id)
         try:
             args = _resolve_sandbox_paths(meta, args, session_id=session_id)
         except SandboxPathError as exc:
@@ -300,7 +475,9 @@ class HttpConnector:
                 reason="sandbox_path",
                 error=str(exc),
             )
-            await self._client.post_tool_result(
+            await self._post_tool_result(
+                client,
+                connection_id=connection_id,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
                 content=json.dumps({"error": str(exc)}),
@@ -318,19 +495,20 @@ class HttpConnector:
                 reason="tool_exception",
                 error=str(exc),
             )
-            await self._client.post_tool_result(
+            await self._post_tool_result(
+                client,
+                connection_id=connection_id,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
                 content=json.dumps({"error": str(exc)}),
                 is_error=True,
             )
             return
-        # Tool-result schema accepts ``str`` or a multimodal content array
-        # (``list[dict]``).  Ints, dicts, etc. JSON-serialize to a string —
-        # convenient for tool methods that return rich Python values.
         if not isinstance(result, str | list):
             result = json.dumps(result)
-        await self._client.post_tool_result(
+        await self._post_tool_result(
+            client,
+            connection_id=connection_id,
             session_id=session_id,
             tool_call_id=tool_call_id,
             content=result,
@@ -343,9 +521,37 @@ class HttpConnector:
             is_error=False,
         )
 
+    @staticmethod
+    async def _post_tool_result(
+        client: Client,
+        *,
+        connection_id: str,
+        session_id: str,
+        tool_call_id: str,
+        content: str | list[dict[str, Any]],
+        is_error: bool = False,
+    ) -> None:
+        """POST one tool result via the generated runtime op."""
+        body = RuntimeToolResultRequest(
+            connection_id=connection_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            content=content,  # type: ignore[arg-type]
+            is_error=is_error,
+        )
+        response = await _post_runtime_tool_result(client=client, body=body)
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"tool result POST failed: {response.status_code} {response.content!r}"
+            )
+
+    def _require_client(self) -> Client:
+        if self._client is None:
+            raise RuntimeError("connector client not opened — call run() first")
+        return self._client
+
     def _collect_tools(self) -> dict[str, _ToolMeta]:
-        """Walk ``self``, pick up every method tagged with @tool, and
-        precompute the reflection bits ``dispatch_call`` needs."""
+        """Walk ``self``, pick up every method tagged with @tool."""
         out: dict[str, _ToolMeta] = {}
         for _, member in inspect.getmembers(self):
             if not (callable(member) and hasattr(member, _TOOL_ATTR)):
@@ -355,7 +561,7 @@ class HttpConnector:
         return out
 
 
-_FOCAL_INJECTABLE: frozenset[str] = frozenset({"account", "chat_id"})
+_FOCAL_INJECTABLE: frozenset[str] = frozenset({"connection_id", "account", "chat_id"})
 
 
 def _build_tool_meta(fn: ToolFn) -> _ToolMeta:
@@ -386,14 +592,7 @@ class SandboxPathError(ValueError):
 def _resolve_sandbox_paths(
     meta: _ToolMeta, args: dict[str, Any], *, session_id: str
 ) -> dict[str, Any]:
-    """Translate ``SandboxPath`` argument strings into host :class:`Path`s.
-
-    For each :data:`~aios_connector_http.SandboxPath` parameter, maps the
-    model-supplied in-sandbox path string against
-    ``<workspace_root>/<session_id>``.  Out-of-tree or unmapped paths
-    raise :class:`SandboxPathError` so the dispatcher can return an
-    error result instead of silently dropping the value.
-    """
+    """Translate ``SandboxPath`` argument strings into host :class:`Path`s."""
     if not meta.sandbox_params or not session_id:
         return args
     out = dict(args)
@@ -424,12 +623,7 @@ def _resolve_one(value: Any, *, session_id: str, name: str) -> Path:
 
 
 def _sandbox_path_kind(hint: Any) -> str | None:
-    """Return ``'scalar'`` / ``'list'`` / ``None`` for a type hint.
-
-    Recognises ``SandboxPath``, ``list[SandboxPath]``, and either with
-    ``| None`` (handy for optional attachment params).  Anything else
-    returns ``None``.
-    """
+    """Return ``'scalar'`` / ``'list'`` / ``None`` for a type hint."""
     inner = _strip_optional(hint)
     if _is_sandbox_path(inner):
         return "scalar"
@@ -442,11 +636,7 @@ def _sandbox_path_kind(hint: Any) -> str | None:
 
 
 def _strip_optional(hint: Any) -> Any:
-    """``T | None`` → ``T``; everything else passes through unchanged.
-
-    Only collapses ``Union``/PEP-604 ``X | Y`` types — leaves
-    parameterised generics like ``list[T]`` alone.
-    """
+    """``T | None`` → ``T``; everything else passes through unchanged."""
     origin = get_origin(hint)
     if origin not in (Union, types.UnionType):
         return hint
@@ -460,25 +650,38 @@ def _is_sandbox_path(hint: Any) -> bool:
 
 
 def _inject_focal_kwargs(
-    meta: _ToolMeta, args: dict[str, Any], focal_channel: str
+    meta: _ToolMeta,
+    args: dict[str, Any],
+    focal_channel: str,
+    connection_id: str,
 ) -> dict[str, Any]:
-    """Inject ``account`` / ``chat_id`` kwargs from ``focal_channel``.
+    """Inject ``connection_id`` / ``account`` / ``chat_id`` kwargs.
 
-    Returns ``args`` augmented with whichever of ``account`` and
-    ``chat_id`` (a) the tool's signature accepts and (b) the caller
-    didn't already pass explicitly.  ``focal_channel`` is the
-    ``<connector>/<account>/<chat_id>`` form the server stamps onto
-    each call event.
+    The runtime SSE payload includes ``connection_id`` directly;
+    ``account`` and ``chat_id`` are parsed out of ``focal_channel``
+    (``<connector>/<account>/<chat_id>``).  Each is injected only when
+    the tool's signature accepts it AND the caller didn't already
+    pass it explicitly.
     """
-    if not focal_channel or not meta.focal_params:
-        return args
-    parts = focal_channel.split("/", 2)
-    if len(parts) < 3:
-        return args
-    _connector, account, chat_id = parts
     out = dict(args)
-    if "account" in meta.focal_params and "account" not in out:
-        out["account"] = account
-    if "chat_id" in meta.focal_params and "chat_id" not in out:
-        out["chat_id"] = chat_id
+    if (
+        connection_id
+        and "connection_id" in meta.focal_params
+        and "connection_id" not in out
+    ):
+        out["connection_id"] = connection_id
+    if focal_channel and meta.focal_params & {"account", "chat_id"}:
+        parts = focal_channel.split("/", 2)
+        if len(parts) >= 3:
+            _connector, account, chat_id = parts
+            if "account" in meta.focal_params and "account" not in out:
+                out["account"] = account
+            if "chat_id" in meta.focal_params and "chat_id" not in out:
+                out["chat_id"] = chat_id
     return out
+
+
+# Suppress unused-import warning — httpx is the transport the SDK uses, kept
+# here as a "still-a-direct-dependency" pin since emit_inbound bypasses the
+# generated op for binary multipart.
+_ = httpx

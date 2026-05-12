@@ -122,10 +122,13 @@ class TestAttachmentParams:
 class _PathConsumer(HttpConnector):
     """Tools that take SandboxPath args — exercises dispatcher resolution."""
 
+    connector = "test"
+
     def __init__(self, root: Path) -> None:
-        super().__init__(base_url="http://x", token="aios_conn_x")
+        super().__init__(base_url="http://x", token="aios_runtime_x")
         self._root = root
         self.calls: list[dict[str, Any]] = []
+        self.tool_results: list[dict[str, Any]] = []
 
     @tool()
     async def send_one(self, *, path: SandboxPath) -> str:
@@ -145,6 +148,27 @@ class _PathConsumer(HttpConnector):
     async def send_optional(self, *, paths: list[SandboxPath] | None = None) -> str:
         self.calls.append({"paths": paths})
         return "ok"
+
+    async def _post_tool_result(  # type: ignore[override]
+        self,
+        client: Any,
+        *,
+        connection_id: str,
+        session_id: str,
+        tool_call_id: str,
+        content: Any,
+        is_error: bool = False,
+    ) -> None:
+        del client
+        self.tool_results.append(
+            {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "tool_call_id": tool_call_id,
+                "content": content,
+                "is_error": is_error,
+            }
+        )
 
 
 @pytest.fixture
@@ -197,9 +221,10 @@ class TestDispatchSandboxPathResolution:
             }
         )
         assert consumer.calls == []  # tool body never ran
-        kwargs = consumer._client.post_tool_result.call_args.kwargs  # type: ignore[union-attr]
-        assert kwargs["is_error"] is True
-        body = json.loads(kwargs["content"])
+        assert len(consumer.tool_results) == 1
+        result = consumer.tool_results[0]
+        assert result["is_error"] is True
+        body = json.loads(result["content"])
         assert "outside" in body["error"]
 
     async def test_optional_list_none_passes_through(self, consumer: _PathConsumer) -> None:

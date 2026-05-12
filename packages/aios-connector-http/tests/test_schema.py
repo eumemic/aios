@@ -26,8 +26,10 @@ class _DummyForBindings(HttpConnector):
     sees the bound method exactly as production runtime would.
     """
 
+    connector = "test"
+
     def __init__(self) -> None:
-        super().__init__(base_url="http://x", token="aios_conn_x")
+        super().__init__(base_url="http://x", token="aios_runtime_x")
 
 
 class TestPrimitiveTypes:

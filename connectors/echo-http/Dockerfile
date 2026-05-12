@@ -13,11 +13,15 @@ RUN pip install --no-cache-dir uv
 
 WORKDIR /app
 
-# Copy the SDK package first so it's a stable layer; then the connector.
+# Copy the SDK packages first so they're stable layers; then the connector.
+# aios-connector-http depends on aios-sdk (the workspace-published typed SDK
+# regenerated from openapi.json).
+COPY packages/aios-sdk /app/packages/aios-sdk
 COPY packages/aios-connector-http /app/packages/aios-connector-http
 COPY connectors/echo-http /app/connectors/echo-http
 
 RUN uv pip install --system --no-cache \
+    /app/packages/aios-sdk \
     /app/packages/aios-connector-http \
     /app/connectors/echo-http
 
