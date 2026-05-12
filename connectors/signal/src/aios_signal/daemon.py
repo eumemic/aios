@@ -1,9 +1,16 @@
 """signal-cli subprocess lifecycle.
 
-Spawns ``signal-cli daemon``, drains its stdio, waits for TCP readiness via
-``listAccounts``, and exposes ``discover_bot_uuid``. Crash-is-fatal: an
-unexpected subprocess exit raises :class:`DaemonCrashError` through
-``crashed()``, which app.py feeds into its TaskGroup.
+Spawns ``signal-cli daemon``, drains its stdio, waits for TCP readiness
+via ``version``, and exposes :meth:`verify_phone` for the multi-connection
+:class:`aios_signal.connector.SignalConnector` to validate each
+connection's phone against ``accounts.json``.
+
+Crash-is-fatal: an unexpected subprocess exit sets
+:class:`DaemonCrashError` on :meth:`crashed`.  The connector's inbound
+dispatcher (spawned under the runner's TaskGroup) observes this
+indirectly via ``RpcListener.messages()`` failing once the subprocess
+dies, and the resulting exception propagates through the TaskGroup —
+tearing the container down so the operator restarts.
 """
 
 from __future__ import annotations
@@ -271,12 +278,13 @@ class SignalDaemon:
         """Return the bot's group memberships via signal-cli ``listGroups``.
 
         Raises ``RpcError`` / ``RpcTimeoutError`` on RPC failure — the
-        boot-time caller in :meth:`SignalConnector.setup` uses the raise
-        to refuse marking the account ready when signal-cli reports
-        e.g. ``Specified account does not exist`` (the operator
-        forgot to register it, or the registration expired).  The
-        supervisor surfaces the resulting setup failure to ``aios
-        connectors list`` so the operator sees red instead of green.
+        per-connection caller in
+        :meth:`SignalConnector.serve_connection` uses the raise to
+        refuse marking the account ready when signal-cli reports e.g.
+        ``Specified account does not exist`` (the operator forgot to
+        register it, or the registration expired).  The exception
+        propagates out of the runner's discovery loop, tearing the
+        container down so the operator sees red instead of green.
 
         Group IDs are re-encoded into URL-safe base64 so the caller
         can use them directly as channel-path suffixes

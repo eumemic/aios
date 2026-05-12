@@ -287,7 +287,7 @@ class TestSignalMultiConnection:
             assert not any("hello-A" in (e.data.get("content") or "") for e in events_b)
         finally:
             connector_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, BaseExceptionGroup):
+            with contextlib.suppress(asyncio.CancelledError):
                 await connector_task
 
     async def test_outbound_send_routes_to_correct_phone(
@@ -385,5 +385,5 @@ class TestSignalMultiConnection:
             assert last_assistant_content(events) == "done"
         finally:
             connector_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, BaseExceptionGroup):
+            with contextlib.suppress(asyncio.CancelledError):
                 await connector_task

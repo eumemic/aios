@@ -281,5 +281,5 @@ class TestTelegramMultiConnection:
             assert last_assistant_content(events) == "done"
         finally:
             connector_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, BaseExceptionGroup):
+            with contextlib.suppress(asyncio.CancelledError):
                 await connector_task

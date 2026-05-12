@@ -319,7 +319,7 @@ class TestEchoHttpConnectorEndToEnd:
             assert json.loads(tool_event.data["content"]) == {"text": "hello"}
         finally:
             connector_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, BaseExceptionGroup):
+            with contextlib.suppress(asyncio.CancelledError):
                 await connector_task
 
     async def test_trigger_inbound_synthesizes_event(
@@ -401,5 +401,5 @@ class TestEchoHttpConnectorEndToEnd:
                 await asyncio.sleep(0.1)
         finally:
             connector_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, BaseExceptionGroup):
+            with contextlib.suppress(asyncio.CancelledError):
                 await connector_task

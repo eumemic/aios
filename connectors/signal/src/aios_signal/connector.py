@@ -17,8 +17,9 @@ Lifecycle:
   registered, resolve its bot UUID, load contacts + groups, then
   drain the per-account queue and forward each parsed envelope via
   :meth:`emit_inbound` with the connection_id stamped on it.
-* :meth:`teardown` closes the daemon (which cancels dispatcher +
-  drain tasks transitively).
+* :meth:`teardown` closes the daemon subprocess.  The dispatcher
+  + per-connection drain loops live in the runner's TaskGroup and
+  are cancelled by it on exit.
 
 Tool methods take ``connection_id`` and ``chat_id`` from the call's
 ``focal_channel`` / payload automatically — declare them as kwargs
@@ -30,7 +31,6 @@ connection's phone + bot UUID + caches via
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -87,11 +87,10 @@ class SignalConnector(HttpConnector):
         # first — there's a natural race between an inbound arriving
         # and the connection's serve loop coming online).
         self._inbound_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
-        self._dispatcher_task: asyncio.Task[None] | None = None
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
-    async def setup(self) -> None:
+    async def setup(self, tg: asyncio.TaskGroup) -> None:
         """Open the shared signal-cli daemon + start the inbound dispatcher.
 
         signal-cli serves every account registered in
@@ -99,6 +98,10 @@ class SignalConnector(HttpConnector):
         connection's :meth:`serve_connection` verifies its own phone
         is registered before reading the dispatcher's per-account
         queue.
+
+        The dispatcher task is spawned under the runner's TaskGroup so
+        an unhandled exception mid-loop tears the container down (fail
+        hard) instead of silently stalling inbound delivery.
         """
         self._daemon = await SignalDaemon(
             phones=[],
@@ -107,16 +110,12 @@ class SignalConnector(HttpConnector):
             host=self._cfg.daemon_host,
             port=self._cfg.daemon_port,
         ).__aenter__()
-        self._dispatcher_task = asyncio.create_task(
-            self._inbound_dispatcher(), name="signal-inbound-dispatcher"
-        )
+        tg.create_task(self._inbound_dispatcher(), name="signal-inbound-dispatcher")
 
     async def teardown(self) -> None:
-        if self._dispatcher_task is not None:
-            self._dispatcher_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._dispatcher_task
-            self._dispatcher_task = None
+        # The dispatcher task lives in the runner's TaskGroup and is
+        # cancelled by it on exit; only the daemon subprocess is
+        # ours to close here.
         if self._daemon is not None:
             await self._daemon.__aexit__(None, None, None)
             self._daemon = None
@@ -173,9 +172,17 @@ class SignalConnector(HttpConnector):
     # ── inbound plumbing ──────────────────────────────────────────────
 
     def _queue_for(self, phone: str) -> asyncio.Queue[dict[str, Any]]:
-        """Per-account inbound queue, created on first use."""
+        """Per-account inbound queue, created on first use.
+
+        Unbounded: a bounded queue with silent-drop-on-full would lose
+        real user messages under a slow ``emit_inbound`` round-trip.
+        Back-pressure to signal-cli is the fail-hard alternative — the
+        listener's queue ``put`` blocks, signal-cli's stdout drain
+        buffer fills, and the operator notices via the resulting RPC
+        timeout instead of by users missing replies.
+        """
         if phone not in self._inbound_queues:
-            self._inbound_queues[phone] = asyncio.Queue(maxsize=1000)
+            self._inbound_queues[phone] = asyncio.Queue()
         return self._inbound_queues[phone]
 
     async def _inbound_dispatcher(self) -> None:
@@ -183,10 +190,7 @@ class SignalConnector(HttpConnector):
         assert self._daemon is not None
         async for account, envelope in self._daemon.listener.messages():
             queue = self._queue_for(account.strip())
-            try:
-                queue.put_nowait(envelope)
-            except asyncio.QueueFull:
-                log.warning("signal.inbound.queue_full_drop", account=account)
+            await queue.put(envelope)
 
     async def _handle_envelope(
         self,
@@ -218,6 +222,12 @@ class SignalConnector(HttpConnector):
         )
         await self.emit_inbound(
             connection_id=connection_id,
+            # Signal's (sender_uuid, timestamp_ms) pair is the platform's
+            # canonical message identity; feeding it as ``event_id`` lets
+            # aios's ``inbound_acks`` dedupe a redelivered envelope after
+            # a runtime restart (the inbound dispatcher's queue can hold
+            # up to ``maxsize`` envelopes that signal-cli would replay).
+            event_id=f"signal-{msg.sender_uuid}-{msg.timestamp_ms}",
             chat_id=chat_id,
             sender=sender_payload,
             content=build_content_text(msg),

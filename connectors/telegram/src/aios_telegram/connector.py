@@ -237,6 +237,12 @@ class TelegramConnector(HttpConnector):
         attachments = await self._download_attachments(state, msg.attachments)
         await self.emit_inbound(
             connection_id=connection_id,
+            # Telegram's (chat_id, message_id) pair is the platform's
+            # canonical message identity; feeding it as ``event_id``
+            # lets aios's ``inbound_acks`` dedupe a redelivered update
+            # after a runtime restart (PTB's offset rewinds replay
+            # unread updates the new container also sees).
+            event_id=f"telegram-{msg.chat_id}-{msg.message_id}",
             chat_id=str(msg.chat_id),
             sender=sender_payload,
             content=msg.text,
@@ -272,6 +278,15 @@ class TelegramConnector(HttpConnector):
             metadata["chat_name"] = reaction.chat_name
         await self.emit_inbound(
             connection_id=connection_id,
+            # Reactions key by (target_message_id, sender_id) since
+            # the same user can re-react after clearing — pair with
+            # timestamp_ms to discriminate edit waves of the same
+            # target.  Stable across restarts since Telegram redelivers
+            # the same MessageReactionUpdated payload via PTB's offset.
+            event_id=(
+                f"telegram-react-{reaction.chat_id}-{reaction.target_message_id}"
+                f"-{reaction.sender_id}-{reaction.timestamp_ms}"
+            ),
             chat_id=str(reaction.chat_id),
             sender=sender_payload,
             content="",
