@@ -53,6 +53,7 @@ from typing import Any
 from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
+from aios.tools.bash_memory_reconcile import reconcile_memory_mounts, snapshot_memory_mounts
 from aios.tools.registry import registry
 
 
@@ -124,6 +125,8 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     sandbox = runtime.require_sandbox_registry()
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
+    before = snapshot_memory_mounts(session_id)
+
     result = await sandbox.exec(
         handle,
         command,
@@ -131,10 +134,17 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
         max_output_bytes=settings.bash_max_output_bytes,
     )
 
+    warnings = await reconcile_memory_mounts(session_id, before)
+
+    stderr = result.stderr
+    if warnings:
+        suffix = "\n[memory-reconcile] " + "; ".join(warnings)
+        stderr = stderr + suffix
+
     return {
         "exit_code": result.exit_code,
         "stdout": result.stdout,
-        "stderr": result.stderr,
+        "stderr": stderr,
         "timed_out": result.timed_out,
         "truncated": result.truncated,
     }
