@@ -589,22 +589,25 @@ async def insert_session(
     ``spawned_from_connection_id`` + ``focal_channel`` are written
     atomically with the row insert so the focal-locked invariant (see
     ``switch_channel``'s rejection of mutations on per_chat sessions)
-    holds from creation.
+    holds from creation. ``focal_locked`` is derived in the same
+    statement: any session that was spawned for a single chat starts
+    its life locked.
     """
     from aios.config import get_settings
 
     new_id = make_id(SESSION)
     if workspace_path is None:
         workspace_path = str(get_settings().workspace_root / new_id)
+    focal_locked = spawned_from_connection_id is not None
     try:
         row = await conn.fetchrow(
             """
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 status, workspace_volume_path, env,
-                spawned_from_connection_id, focal_channel
+                spawned_from_connection_id, focal_channel, focal_locked
             )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10, $11)
             RETURNING *
             """,
             new_id,
@@ -617,6 +620,7 @@ async def insert_session(
             json.dumps(env or {}),
             spawned_from_connection_id,
             focal_channel,
+            focal_locked,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
