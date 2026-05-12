@@ -71,6 +71,7 @@ def test_playbook_content_when_stores_attached() -> None:
     block = build_memory_stores_block([_echo("scratch")])
     assert "Check memory first" in block
     assert "Write early, write often" in block
+    assert "What not to bother saving" in block
     assert "Never save" in block
     assert "memory_precondition_failed_error" in block
     assert "content_sha256" in block
@@ -80,6 +81,8 @@ def test_playbook_content_when_stores_attached() -> None:
     assert "`write`" in block
     assert "`edit`" in block
     assert "version log" in block
+    assert "Re-check memory when you get stuck" in block
+    assert "instructions on those points" in block
 
 
 def test_playbook_appears_after_per_mount_sections() -> None:

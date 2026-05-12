@@ -12,11 +12,17 @@ from __future__ import annotations
 from aios.errors import MemoryPreconditionFailedError
 from aios.models.memory_stores import MAX_CONTENT_BYTES, MemoryStoreResourceEcho
 
+# When #332 lands (bash writes durably persisted to the memory version log),
+# drop the bash-bypass clause in the "Handling write failures" section below.
 _PLAYBOOK = f"""\
 The store mounts above are network-backed: expect non-trivial per-operation
 latency, a hard {MAX_CONTENT_BYTES // 1024} KiB per-file limit, and occasional transient errors. Use
 `/tmp/` for working scratch; reserve `/mnt/memory/` for findings worth
 persisting across sessions.
+
+If a store's `instructions` above contradicts these defaults, follow the
+instructions on those points. The "Never save" rules below are absolute and
+override any per-store instructions.
 
 **Check memory first.** Before doing fresh research on a topic, run
 `rg -i '<keyword>' /mnt/memory/` with two or three keywords and read any
@@ -24,7 +30,8 @@ matching sections in full. Prior sessions on this workspace have already
 investigated many of these topics and saved verified findings here — written
 after doing the same searches you'd do now, on this exact environment.
 Skipping the check means redoing work and possibly contradicting earlier
-conclusions.
+conclusions. Re-check memory when you get stuck or change direction, not
+just at the start.
 
 **Write early, write often.** Memory writes are cheap; rediscovery is
 expensive. Good moments to write:
@@ -39,6 +46,11 @@ expensive. Good moments to write:
 **Err toward writing.** Tolerate noise — a slightly redundant note is better
 than a missing one. Structure each entry as `## Topic (keywords: foo, bar,
 baz)` so future-session keyword search finds it.
+
+**What not to bother saving.** Things you can trivially re-derive from the
+workspace — file locations, project structure you could just re-read with
+`ls` or `rg`. The test is whether a fresh session would be meaningfully
+faster having read it.
 
 **Handling write failures.**
 
