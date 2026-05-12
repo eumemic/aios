@@ -101,9 +101,11 @@ def upgrade() -> None:
         "ON bindings (session_template_id) WHERE archived_at IS NULL"
     )
 
-    # ``gen_random_uuid()`` is built into PG 13+; the prefix matches
-    # ``aios.ids.BINDING`` so backfilled rows interop with future
-    # ``make_id(BINDING)``-generated rows as plain text PKs.
+    # ``gen_random_uuid()`` is built into PG 13+; the ``bnd_`` prefix
+    # matches ``aios.ids.BINDING`` for log readability. The body is hex
+    # rather than a Crockford-ULID — pure-SQL ULID generation isn't
+    # worth the complexity here, and no current code path runs
+    # ``split_id`` on a binding id. See note on ``BINDING`` in ids.py.
     op.execute(
         """
         INSERT INTO bindings (id, connection_id, mode, session_id,

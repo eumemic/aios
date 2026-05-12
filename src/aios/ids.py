@@ -31,9 +31,13 @@ SKILL: Final = "skl"
 CONNECTION: Final = "conn"
 CONNECTOR_TOKEN: Final = "ctok"
 SESSION_TEMPLATE: Final = "stpl"
-# Connector subsystem (#328 PR 2+). The aios_connectors module reads
-# these to mint ids; the PR 2 migration backfills bindings with the
-# same ``bnd_`` prefix verbatim so the two id sources stay coherent.
+# Connector subsystem (#328 PR 2+). The aios_connectors module uses
+# these prefixes to mint ids via ``make_id``; the PR 2 migration
+# also backfills binding ids prefixed with ``bnd_`` (but with a
+# random-hex body, not a ULID) — backfilled rows are valid ``text``
+# PKs that won't survive ``split_id`` parsing.  No current call site
+# does that on a binding id; if one is added later, generate ULIDs
+# in the migration or relax ``split_id``.
 BINDING: Final = "bnd"
 RUNTIME: Final = "rt"
 RUNTIME_TOKEN: Final = "rtk"
