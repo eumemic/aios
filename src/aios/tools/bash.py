@@ -48,7 +48,6 @@ use absolute paths.
 
 from __future__ import annotations
 
-import contextlib
 from typing import Any
 
 from aios.config import get_settings
@@ -127,7 +126,9 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
     before = snapshot_memory_mounts(session_id)
-    warnings: list[str] = []
+    has_mounts = bool(runtime.get_session_memory_mounts(session_id))
+    reconcile_warnings: list[str] = []
+    exec_raised = False
 
     try:
         result = await sandbox.exec(
@@ -136,18 +137,25 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
             timeout_seconds=timeout,
             max_output_bytes=settings.bash_max_output_bytes,
         )
+    except Exception:
+        exec_raised = True
+        raise
     finally:
-        # Reconcile even when exec raises (e.g. container death) so that
-        # partial writes made before the crash are captured in the DB.
-        # Reconcile errors are suppressed here — the exec exception (if any)
-        # is the primary signal and must not be shadowed.
-        if before:
-            with contextlib.suppress(Exception):
-                warnings = await reconcile_memory_mounts(session_id, before)
+        # Reconcile whenever there are writable mounts — even when exec raises
+        # (e.g. container death) so that partial writes made before the crash
+        # are captured in the DB.  When exec succeeded, reconcile errors
+        # propagate; when exec already raised, we suppress them so the original
+        # exception is not shadowed.
+        if has_mounts:
+            try:
+                reconcile_warnings = await reconcile_memory_mounts(session_id, before)
+            except Exception:
+                if not exec_raised:
+                    raise  # fail hard when exec succeeded
 
     stderr = result.stderr
-    if warnings:
-        suffix = "\n[memory-reconcile] " + "; ".join(warnings)
+    if reconcile_warnings:
+        suffix = "\n[memory-reconcile] " + "; ".join(reconcile_warnings)
         stderr = stderr + suffix
 
     return {

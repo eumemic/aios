@@ -38,8 +38,31 @@ _Snapshot = dict[tuple[str, str], str]
 
 
 def _sha256_of_content(content: str) -> str:
-    """sha256 over UTF-8 bytes of content — matches memory_stores._sha256_hex."""
+    """sha256 over UTF-8 bytes of content.
+
+    # mirrors memory_stores._sha256_hex; kept local to avoid cross-layer import
+    """
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _bytes_map_to_sha_map(
+    bytes_map: dict[tuple[str, str], bytes],
+) -> _Snapshot:
+    """Convert a raw-bytes map to a sha256-hex map.
+
+    For UTF-8 decodable bytes, sha is over the decoded string (matching the
+    memory_stores convention).  For binary blobs, sha is over the raw bytes —
+    this allows change detection even though binary files cannot be stored.
+    """
+    result: _Snapshot = {}
+    for (store_id, store_path), raw in bytes_map.items():
+        try:
+            content = raw.decode("utf-8")
+            sha = _sha256_of_content(content)
+        except UnicodeDecodeError:
+            sha = hashlib.sha256(raw).hexdigest()
+        result[(store_id, store_path)] = sha
+    return result
 
 
 def _walk_store_files(host_dir: Path) -> list[tuple[Path, str]]:
@@ -117,17 +140,7 @@ def snapshot_memory_mounts(session_id: str) -> _Snapshot:
     - Stores that have not been materialized (marker file absent).
     """
     by_bytes, _host_dirs = _snapshot_with_bytes(session_id)
-    result: _Snapshot = {}
-    for (store_id, store_path), raw in by_bytes.items():
-        try:
-            content = raw.decode("utf-8")
-            sha = _sha256_of_content(content)
-        except UnicodeDecodeError:
-            # Binary file — still snapshot with raw-bytes sha so we can detect
-            # changes, but reconcile will skip it with a warning.
-            sha = hashlib.sha256(raw).hexdigest()
-        result[(store_id, store_path)] = sha
-    return result
+    return _bytes_map_to_sha_map(by_bytes)
 
 
 def _read_utf8_content(
@@ -196,14 +209,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
     warnings: list[str] = []
 
     # Compute sha for after entries (needed for equality checks).
-    after: _Snapshot = {}
-    for (store_id, store_path), raw in after_bytes.items():
-        try:
-            content = raw.decode("utf-8")
-            sha = _sha256_of_content(content)
-        except UnicodeDecodeError:
-            sha = hashlib.sha256(raw).hexdigest()
-        after[(store_id, store_path)] = sha
+    after: _Snapshot = _bytes_map_to_sha_map(after_bytes)
 
     # ── New files (created by bash) ─────────────────────────────────────────
     for (store_id, store_path), _sha in after.items():
