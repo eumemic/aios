@@ -75,9 +75,11 @@ class Settings(BaseSettings):
         "extend this enum without changing call sites.",
     )
     docker_image: str = Field(
-        default="aios-sandbox:latest",
-        description="Container image used for all v1 sessions. Build via "
-        "`docker build -t aios-sandbox:latest -f docker/Dockerfile.sandbox docker/`.",
+        default="ghcr.io/eumemic/aios-sandbox:latest",
+        description="Container image used for all v1 sessions. Published from "
+        "`docker/Dockerfile.sandbox` to GHCR by the build-sandbox workflow. "
+        "Override to a local tag for development "
+        "(`docker build -t aios-sandbox:latest -f docker/Dockerfile.sandbox docker/`).",
     )
     workspace_root: Path = Field(
         default=Path("/var/lib/aios/workspaces"),

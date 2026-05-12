@@ -132,8 +132,11 @@ docker run -d --name aios-pg -p 5433:5432 \
   -e POSTGRES_USER=aios -e POSTGRES_PASSWORD=aios -e POSTGRES_DB=aios \
   postgres:16-alpine
 
-# Build the sandbox image
-docker build -t aios-sandbox:latest -f docker/Dockerfile.sandbox docker/
+# Sandbox image: pulled from GHCR on first session by default.  For local
+# changes to docker/Dockerfile.sandbox, build locally and point
+# AIOS_DOCKER_IMAGE at the local tag:
+#   docker build -t aios-sandbox:latest -f docker/Dockerfile.sandbox docker/
+#   export AIOS_DOCKER_IMAGE=aios-sandbox:latest
 
 # Configure
 cat > .env << 'EOF'
@@ -371,7 +374,7 @@ All aios settings use the `AIOS_` prefix (Pydantic settings):
 | `AIOS_DB_URL` | Postgres connection string (required) |
 | `AIOS_API_HOST` / `AIOS_API_PORT` | API bind address (default `127.0.0.1:8080`) |
 | `AIOS_INSTANCE_ID` | Distinguishes concurrent deployments on a shared host (e.g. dev worktrees) |
-| `AIOS_DOCKER_IMAGE` | Sandbox image (default `aios-sandbox:latest`) |
+| `AIOS_DOCKER_IMAGE` | Sandbox image (default `ghcr.io/eumemic/aios-sandbox:latest`) |
 | `AIOS_WORKSPACE_ROOT` | Host directory bind-mounted as `/workspace` per session |
 | `AIOS_SANDBOX_NETWORK_MODE` | `bridge` / `none` / `host` |
 | `AIOS_WORKER_CONCURRENCY` | Concurrent session steps per worker (default 4) |
