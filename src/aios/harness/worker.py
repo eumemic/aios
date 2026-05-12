@@ -113,9 +113,11 @@ async def worker_main() -> None:
         mcp_session_pool = McpSessionPool()
 
         # Register the connector subsystem's ToolProvider impl against the
-        # Protocol slot from PR 3 (#328). Core never imports
-        # ``aios_connectors`` outside this single registration site — the
-        # rest of the harness calls against ``runtime.require_tool_provider()``.
+        # Protocol slot from PR 3 (#328). The harness reaches the
+        # subsystem via this registration plus a function-scoped import in
+        # ``services/inbound.handle_inbound`` for the resolver; see
+        # ``aios_connectors/__init__.py`` for the full module-boundary
+        # contract.
         from aios_connectors.providers import SubsystemToolProvider
 
         runtime.pool = pool

@@ -34,6 +34,7 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
     from aios.config import get_settings
     from aios.crypto.vault import CryptoBox
     from aios.harness import runtime
+    from aios_connectors.providers import SubsystemToolProvider
 
     settings = get_settings()
     crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
@@ -43,8 +44,13 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
     app.state.db_url = settings.db_url
     app.state.procrastinate = mock.MagicMock()
 
+    # The fixture skips the API lifespan (httpx ASGITransport doesn't
+    # fire startup/shutdown), so mirror the lifespan's runtime
+    # registrations explicitly — see ``aios.api.app.create_app``.
     prev_crypto = runtime.crypto_box
+    prev_tool_provider = runtime.tool_provider
     runtime.crypto_box = crypto_box
+    runtime.tool_provider = SubsystemToolProvider()
     try:
         transport = httpx.ASGITransport(app=app)
         async with authed_client(
@@ -55,6 +61,7 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
             yield client
     finally:
         runtime.crypto_box = prev_crypto
+        runtime.tool_provider = prev_tool_provider
 
 
 @pytest.fixture
