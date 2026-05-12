@@ -54,6 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
+import httpx
 import structlog
 from aios_sdk import Client, stream_connection_discovery, stream_connector_calls
 from aios_sdk._generated.api.connectors.get_connector_runtime_secrets import (
@@ -305,9 +306,12 @@ class HttpConnector:
                         await self._on_connection_added(tg, connection_id, account)
                     elif event == "removed":
                         await self._on_connection_removed(connection_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
+            # Only retry on transport-level errors (timeouts, dropped
+            # connections, server restarts). Application-level exceptions
+            # — including secrets-fetch failures from
+            # :meth:`_on_connection_added` and programmer bugs — propagate
+            # to the TaskGroup so the operator sees the failure.
+            except httpx.HTTPError as exc:
                 log.warning(
                     "connector.discovery.stream_error",
                     error=str(exc),
@@ -322,26 +326,29 @@ class HttpConnector:
     async def _on_connection_added(
         self, tg: asyncio.TaskGroup, connection_id: str, account: str
     ) -> None:
-        """Fetch secrets, then spawn ``serve_connection`` in its own task."""
+        """Fetch secrets, then spawn ``serve_connection`` in its own task.
+
+        A 4xx/5xx from the secrets endpoint or a malformed body raises,
+        which propagates through the discovery loop's reconnect-on-
+        Exception path. Recovery-by-reconnect is the only sane posture
+        — silently dropping a connection that just came online would
+        leave it invisible to the runtime until the next SSE drop.
+        """
         if connection_id in self._connections:
             # Replay from backfill after reconnect — already running.
             return
         client = self._require_client()
         response = await _get_runtime_secrets(client=client, connection_id=connection_id)
         if response.status_code >= 400:
-            log.warning(
-                "connector.discovery.secrets_fetch_failed",
-                connection_id=connection_id,
-                status=response.status_code,
+            raise RuntimeError(
+                f"secrets fetch failed for connection {connection_id!r}: "
+                f"{response.status_code} {response.content!r}"
             )
-            return
         body = response.parsed
         if body is None or isinstance(body, HTTPValidationError):
-            log.warning(
-                "connector.discovery.secrets_unparseable",
-                connection_id=connection_id,
+            raise RuntimeError(
+                f"unparseable secrets response for connection {connection_id!r}"
             )
-            return
         raw_secrets = body.secrets
         if isinstance(raw_secrets, Unset):
             secrets_map: dict[str, str] = {}
@@ -395,9 +402,13 @@ class HttpConnector:
                     await self.dispatch_call(call)
                     self._answered.add(tool_call_id)
                     await self.save_answered(tool_call_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
+            # Same retry posture as ``_discovery_loop`` — only catch transport
+            # errors; let ``_post_tool_result`` RuntimeErrors and other
+            # application bugs propagate. A persistent 4xx/5xx on tool-result
+            # POST would otherwise loop forever (the answered set is only
+            # updated after a successful dispatch, so backfill replays the
+            # same call_id on every reconnect).
+            except httpx.HTTPError as exc:
                 log.warning(
                     "connector.tool_loop.stream_error",
                     error=str(exc),

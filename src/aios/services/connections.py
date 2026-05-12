@@ -159,18 +159,20 @@ async def list_connections(
 async def _notify_connection_change(
     pool: asyncpg.Pool[Any], connection: Connection, *, event: str
 ) -> None:
-    """Emit a ``connections_<connector>`` NOTIFY for discovery SSE consumers.
+    """Thin wrapper acquiring a fresh pool connection for the NOTIFY emit.
 
-    Payload: ``"<event>|<connection_id>|<account>"`` — the SSE
-    generator parses this into an ``added``/``removed`` event.  Fires
-    outside any transaction so subscribers never see a payload for an
-    uncommitted row.  Introduced in #328 PR 5 to feed the runtime
-    container's connection-discovery loop.
+    Runs OUTSIDE the caller's transaction (the txn that just committed
+    the attach/archive) so a subscriber never sees a payload for an
+    uncommitted row.
     """
-    payload = f"{event}|{connection.id}|{connection.account}"
-    channel = f"connections_{connection.connector}"
     async with pool.acquire() as conn:
-        await conn.execute("SELECT pg_notify($1, $2)", channel, payload)
+        await queries.notify_connection_change(
+            conn,
+            connector=connection.connector,
+            connection_id=connection.id,
+            account=connection.account,
+            event=event,
+        )
 
 
 async def attach_connection(

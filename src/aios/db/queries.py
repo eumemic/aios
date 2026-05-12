@@ -4535,35 +4535,56 @@ async def resolve_connector_token(
 # ─── connectors (type catalog) ───────────────────────────────────────────────
 
 
+async def notify_connection_change(
+    conn: asyncpg.Connection[Any],
+    *,
+    connector: str,
+    connection_id: str,
+    account: str,
+    event: str,
+) -> None:
+    """Emit a ``connections_<connector>`` NOTIFY for discovery SSE consumers.
+
+    Payload: ``"<event>|<connection_id>|<account>"`` — the SSE
+    generator parses this into an ``added``/``removed`` event. Caller
+    runs this on a pool-acquired (autocommit) connection OUTSIDE any
+    transaction so subscribers never see a payload for an uncommitted
+    row.  Introduced in #328 PR 5 to feed the runtime container's
+    connection-discovery loop.
+    """
+    await conn.execute(
+        "SELECT pg_notify($1, $2)",
+        f"connections_{connector}",
+        f"{event}|{connection_id}|{account}",
+    )
+
+
 async def update_connector_tools_schema(
     conn: asyncpg.Connection[Any],
     connector: str,
     *,
     tools_schema: list[dict[str, Any]],
 ) -> None:
-    """Replace ``connectors.tools_schema`` for ``connector`` wholesale.
+    """Upsert ``connectors.tools_schema`` for ``connector`` wholesale.
 
     The runtime container (one per connector type) publishes its full
     tool catalog at startup via ``PUT /v1/connectors/{connector}/tools_schema``.
-    On a fresh deployment the row pre-exists from migration 0033's
-    catalog backfill; raises :class:`NotFoundError` only if the
-    connector type has been dropped from the catalog.
+    A brand-new connector type — one not present at migration 0033's
+    backfill time and not yet referenced by any ``insert_connection``
+    upsert — can publish its schema before the operator creates its
+    first connection.
     """
-    result = await conn.execute(
+    await conn.execute(
         """
-        UPDATE connectors
-           SET tools_schema = $2::jsonb,
+        INSERT INTO connectors (connector, tools_schema, created_at, updated_at)
+        VALUES ($1, $2::jsonb, now(), now())
+        ON CONFLICT (connector) DO UPDATE
+           SET tools_schema = EXCLUDED.tools_schema,
                updated_at   = now()
-         WHERE connector = $1
         """,
         connector,
         json.dumps(tools_schema),
     )
-    if result == "UPDATE 0":
-        raise NotFoundError(
-            f"connector {connector!r} not in catalog",
-            detail={"connector": connector},
-        )
 
 
 # ─── runtime_tokens ──────────────────────────────────────────────────────────
