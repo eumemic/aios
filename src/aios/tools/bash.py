@@ -48,6 +48,7 @@ use absolute paths.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from aios.config import get_settings
@@ -126,15 +127,23 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
     before = snapshot_memory_mounts(session_id)
+    warnings: list[str] = []
 
-    result = await sandbox.exec(
-        handle,
-        command,
-        timeout_seconds=timeout,
-        max_output_bytes=settings.bash_max_output_bytes,
-    )
-
-    warnings = await reconcile_memory_mounts(session_id, before)
+    try:
+        result = await sandbox.exec(
+            handle,
+            command,
+            timeout_seconds=timeout,
+            max_output_bytes=settings.bash_max_output_bytes,
+        )
+    finally:
+        # Reconcile even when exec raises (e.g. container death) so that
+        # partial writes made before the crash are captured in the DB.
+        # Reconcile errors are suppressed here — the exec exception (if any)
+        # is the primary signal and must not be shadowed.
+        if before:
+            with contextlib.suppress(Exception):
+                warnings = await reconcile_memory_mounts(session_id, before)
 
     stderr = result.stderr
     if warnings:

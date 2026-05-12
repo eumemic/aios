@@ -64,15 +64,22 @@ def _walk_store_files(host_dir: Path) -> list[tuple[Path, str]]:
     return results
 
 
-def _snapshot_with_bytes(session_id: str) -> dict[tuple[str, str], bytes]:
-    """Return raw bytes for all eligible files across writable materialized mounts.
+def _snapshot_with_bytes(
+    session_id: str,
+) -> tuple[dict[tuple[str, str], bytes], dict[str, Path]]:
+    """Return raw bytes and host-dir map for all eligible writable materialized mounts.
 
     Called internally by both ``snapshot_memory_mounts`` (which only needs
-    sha digests) and ``reconcile_memory_mounts`` (which needs the bytes to
-    avoid a second read).  Returns ``(store_id, store_path) -> raw_bytes``.
+    sha digests) and ``reconcile_memory_mounts`` (which needs both to avoid a
+    second scan).
+
+    Returns a 2-tuple:
+    - ``bytes_map``: ``(store_id, store_path) -> raw_bytes``
+    - ``host_dirs``: ``store_id -> host_dir`` (writable, materialized stores only)
     """
     echoes = runtime.get_session_memory_mounts(session_id)
-    result: dict[tuple[str, str], bytes] = {}
+    bytes_map: dict[tuple[str, str], bytes] = {}
+    host_dirs: dict[str, Path] = {}
 
     for echo in echoes:
         if echo.access == "read_only":
@@ -85,14 +92,15 @@ def _snapshot_with_bytes(session_id: str) -> dict[tuple[str, str], bytes]:
         if not marker.exists():
             continue
 
+        host_dirs[store_id] = host_dir
         for fpath, store_path in _walk_store_files(host_dir):
             try:
                 raw = fpath.read_bytes()
             except OSError:
                 continue
-            result[(store_id, store_path)] = raw
+            bytes_map[(store_id, store_path)] = raw
 
-    return result
+    return bytes_map, host_dirs
 
 
 def snapshot_memory_mounts(session_id: str) -> _Snapshot:
@@ -108,7 +116,7 @@ def snapshot_memory_mounts(session_id: str) -> _Snapshot:
     - Stores whose host directory does not exist yet.
     - Stores that have not been materialized (marker file absent).
     """
-    by_bytes = _snapshot_with_bytes(session_id)
+    by_bytes, _host_dirs = _snapshot_with_bytes(session_id)
     result: _Snapshot = {}
     for (store_id, store_path), raw in by_bytes.items():
         try:
@@ -123,7 +131,6 @@ def snapshot_memory_mounts(session_id: str) -> _Snapshot:
 
 
 def _read_utf8_content(
-    fpath: Path,
     store_id: str,
     store_path: str,
     warnings: list[str],
@@ -182,20 +189,11 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
     """
     # Build after snapshot as (store_id, store_path) -> bytes in one pass.
     # Using bytes avoids re-reading files during the create/modify loops.
-    after_bytes = _snapshot_with_bytes(session_id)
+    # host_dirs comes from the same scan — no second get_session_memory_mounts call.
+    after_bytes, host_dirs = _snapshot_with_bytes(session_id)
     pool = runtime.require_pool()
     actor = SessionActor(session_id=session_id)
     warnings: list[str] = []
-
-    # Build store_id -> host_dir from mounts (single iteration, no re-scan).
-    echoes = runtime.get_session_memory_mounts(session_id)
-    host_dirs: dict[str, Path] = {}
-    for echo in echoes:
-        if echo.access == "read_only":
-            continue
-        hd = memory_store_host_dir(echo.memory_store_id)
-        if hd.exists() and (hd / MATERIALIZED_MARKER).exists():
-            host_dirs[echo.memory_store_id] = hd
 
     # Compute sha for after entries (needed for equality checks).
     after: _Snapshot = {}
@@ -215,7 +213,6 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
             continue
         raw = after_bytes[(store_id, store_path)]
         maybe_content = _read_utf8_content(
-            host_dirs[store_id] / store_path.lstrip("/"),
             store_id,
             store_path,
             warnings,
@@ -252,7 +249,6 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
             continue
         raw = after_bytes[(store_id, store_path)]
         maybe_content = _read_utf8_content(
-            host_dirs[store_id] / store_path.lstrip("/"),
             store_id,
             store_path,
             warnings,
@@ -284,7 +280,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
                 store_id=store_id,
                 memory_id=existing.id,
                 new_content=content,
-                precondition_sha256=before_sha,
+                precondition_sha256=existing.content_sha256,
                 actor=actor,
             )
             runtime.set_read_sha(session_id, store_id, store_path, memory.content_sha256)

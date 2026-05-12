@@ -221,7 +221,7 @@ class TestReconcile:
         assert call_kwargs["content"] == content
 
     async def test_modified_file_calls_update_memory(self, tmp_path: Path) -> None:
-        """before has sha A, after sha B; update_memory called with precondition_sha256=sha_A."""
+        """before has sha A, after sha B; update_memory called with precondition_sha256=existing.content_sha256."""
         from aios.tools.bash_memory_reconcile import reconcile_memory_mounts
 
         host_dir = self._make_host_dir(tmp_path)
@@ -230,12 +230,13 @@ class TestReconcile:
         (host_dir / "mod.md").write_text(new_content)
 
         old_sha = _sha256(old_content)
+        db_sha = _sha256("db-current\n")  # DB's sha may differ from before_sha
         before = {(STORE_A, "/mod.md"): old_sha}
         runtime.set_session_memory_mounts(SESSION_ID, [_echo()])
 
         fake_memory = MagicMock()
         fake_memory.id = "mem_01FAKE0000000000000000001"
-        fake_memory.content_sha256 = _sha256(new_content)
+        fake_memory.content_sha256 = db_sha
 
         with (
             patch("aios.tools.bash_memory_reconcile.memory_store_host_dir", return_value=host_dir),
@@ -263,7 +264,7 @@ class TestReconcile:
         assert warnings == []
         mock_update.assert_awaited_once()
         call_kwargs = mock_update.await_args.kwargs
-        assert call_kwargs["precondition_sha256"] == old_sha
+        assert call_kwargs["precondition_sha256"] == db_sha
         assert call_kwargs["new_content"] == new_content
 
     async def test_deleted_file_calls_delete_memory(self, tmp_path: Path) -> None:
