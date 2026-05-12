@@ -104,6 +104,56 @@ def _parse_form_json(field: str, raw: str | None, *, default: Any = None) -> Any
         ) from err
 
 
+async def _do_inbound(
+    pool: Any,
+    *,
+    connection_id: str,
+    event_id: str,
+    chat_id: str,
+    content: str,
+    sender_json: str | None,
+    metadata_json: str | None,
+    timestamp: str | None,
+    attachments: list[UploadFile] | None,
+) -> ConnectorInboundResponse:
+    """Shared body for the per-connection and runtime inbound handlers.
+
+    The two handlers diverge only on auth (one trusts the bearer's
+    ``connection_id``; the other accepts it as a form field after a
+    runtime-scope check).  Everything after that — JSON-form parsing,
+    attachment shaping, the handle_inbound call, drop-reason mapping
+    — is identical.
+    """
+    sender_dict: dict[str, Any] = _parse_form_json("sender", sender_json, default={}) or {}
+    metadata_dict: dict[str, Any] | None = _parse_form_json("metadata", metadata_json)
+    inbound_attachments = [
+        InboundAttachment(
+            stream=upload,
+            filename=upload.filename or "",
+            content_type=upload.content_type or _DEFAULT_ATTACHMENT_CONTENT_TYPE,
+        )
+        for upload in (attachments or [])
+    ]
+    result = await inbound_service.handle_inbound(
+        pool,
+        connection_id=connection_id,
+        event_id=event_id,
+        chat_id=chat_id,
+        sender=sender_dict,
+        content=content,
+        attachments=inbound_attachments,
+        connector_metadata=metadata_dict,
+        platform_timestamp=timestamp,
+    )
+    if result.drop_reason is not None:
+        raise _inbound_drop_error(result.drop_reason.value)
+    return ConnectorInboundResponse(
+        appended_event_id=result.appended_event_id,
+        session_id=result.session_id,
+        deduped=result.deduped,
+    )
+
+
 @router.post(
     "/inbound",
     operation_id="post_connector_inbound",
@@ -144,33 +194,16 @@ async def post_inbound(
     explaining the reason (operator-config issue vs server error vs
     payload).
     """
-    sender_dict: dict[str, Any] = _parse_form_json("sender", sender, default={}) or {}
-    metadata_dict: dict[str, Any] | None = _parse_form_json("metadata", metadata)
-    inbound_attachments = [
-        InboundAttachment(
-            stream=upload,
-            filename=upload.filename or "",
-            content_type=upload.content_type or _DEFAULT_ATTACHMENT_CONTENT_TYPE,
-        )
-        for upload in (attachments or [])
-    ]
-    result = await inbound_service.handle_inbound(
+    return await _do_inbound(
         pool,
         connection_id=connection_id,
         event_id=event_id,
         chat_id=chat_id,
-        sender=sender_dict,
         content=content,
-        attachments=inbound_attachments,
-        connector_metadata=metadata_dict,
-        platform_timestamp=timestamp,
-    )
-    if result.drop_reason is not None:
-        raise _inbound_drop_error(result.drop_reason.value)
-    return ConnectorInboundResponse(
-        appended_event_id=result.appended_event_id,
-        session_id=result.session_id,
-        deduped=result.deduped,
+        sender_json=sender,
+        metadata_json=metadata,
+        timestamp=timestamp,
+        attachments=attachments,
     )
 
 
@@ -336,14 +369,14 @@ class RuntimeToolResultRequest(BaseModel):
     is_error: bool = False
 
 
-def _check_runtime_scope(auth_connector: str, connection_connector: str) -> None:
+def _check_runtime_scope(auth_connector: str, target_connector: str) -> None:
     """Raise 403 if a runtime bearer reaches outside its connector type."""
-    if auth_connector != connection_connector:
+    if auth_connector != target_connector:
         raise ForbiddenError(
             "runtime token scoped to a different connector type",
             detail={
                 "auth_connector": auth_connector,
-                "connection_connector": connection_connector,
+                "target_connector": target_connector,
             },
         )
 
@@ -371,11 +404,7 @@ async def put_tools_schema(
     path's ``connector``.
     """
     _, auth_connector = auth
-    if auth_connector != connector:
-        raise ForbiddenError(
-            "runtime token scoped to a different connector type",
-            detail={"auth_connector": auth_connector, "path_connector": connector},
-        )
+    _check_runtime_scope(auth_connector, connector)
     async with pool.acquire() as conn:
         await queries.update_connector_tools_schema(conn, connector, tools_schema=body.tools)
 
@@ -450,33 +479,16 @@ async def post_runtime_inbound(
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, connection_id)
     _check_runtime_scope(auth_connector, connection.connector)
-    sender_dict: dict[str, Any] = _parse_form_json("sender", sender, default={}) or {}
-    metadata_dict: dict[str, Any] | None = _parse_form_json("metadata", metadata)
-    inbound_attachments = [
-        InboundAttachment(
-            stream=upload,
-            filename=upload.filename or "",
-            content_type=upload.content_type or _DEFAULT_ATTACHMENT_CONTENT_TYPE,
-        )
-        for upload in (attachments or [])
-    ]
-    result = await inbound_service.handle_inbound(
+    return await _do_inbound(
         pool,
         connection_id=connection_id,
         event_id=event_id,
         chat_id=chat_id,
-        sender=sender_dict,
         content=content,
-        attachments=inbound_attachments,
-        connector_metadata=metadata_dict,
-        platform_timestamp=timestamp,
-    )
-    if result.drop_reason is not None:
-        raise _inbound_drop_error(result.drop_reason.value)
-    return ConnectorInboundResponse(
-        appended_event_id=result.appended_event_id,
-        session_id=result.session_id,
-        deduped=result.deduped,
+        sender_json=sender,
+        metadata_json=metadata,
+        timestamp=timestamp,
+        attachments=attachments,
     )
 
 

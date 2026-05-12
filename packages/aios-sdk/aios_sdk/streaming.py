@@ -112,19 +112,12 @@ async def stream_connector_calls(
     out each emitted call to its per-connection worker by the
     ``connection_id`` field on the JSON payload.
 
-    ``connector`` is passed only for the route's path/log keys —
+    ``connector`` is passed only for the route's log keys —
     authentication happens via the bearer in the headers.
     """
     del connector  # carried implicitly via the runtime bearer token
-    async with httpx_client.stream(
-        "GET",
-        "/v1/connectors/runtime/calls",
-        headers={"Accept": "text/event-stream"},
-        timeout=httpx.Timeout(60.0, read=None),
-    ) as response:
-        response.raise_for_status()
-        async for msg in _aiter_sse(response):
-            yield msg
+    async for msg in _stream_sse(httpx_client, "/v1/connectors/runtime/calls"):
+        yield msg
 
 
 async def stream_connection_discovery(
@@ -138,9 +131,17 @@ async def stream_connection_discovery(
     :func:`stream_connector_calls` for the auth model.
     """
     del connector  # carried implicitly via the runtime bearer token
+    async for msg in _stream_sse(httpx_client, "/v1/connectors/connections"):
+        yield msg
+
+
+async def _stream_sse(
+    httpx_client: httpx.AsyncClient, path: str
+) -> AsyncIterator[SseMessage]:
+    """Open an SSE stream against ``path`` and yield parsed messages."""
     async with httpx_client.stream(
         "GET",
-        "/v1/connectors/connections",
+        path,
         headers={"Accept": "text/event-stream"},
         timeout=httpx.Timeout(60.0, read=None),
     ) as response:

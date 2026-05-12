@@ -22,6 +22,7 @@ CancelledError; let it propagate.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
@@ -48,8 +49,6 @@ def _event_to_sse(event_dict: dict[str, Any]) -> ServerSentEvent:
     The data field is JSON. The SSE event name is just "event" — clients
     can branch on the inner ``kind`` field.
     """
-    import json
-
     return ServerSentEvent(data=json.dumps(event_dict), event="event")
 
 
@@ -60,8 +59,6 @@ def _serialize_event(row: asyncpg.Record) -> dict[str, Any]:
     (e.g. the ``aios tail`` CLI) can tag user messages and spot
     wrong-channel sends without re-querying.
     """
-    import json
-
     raw_data = row["data"]
     parsed = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
     return {
@@ -165,8 +162,6 @@ async def connector_calls_stream(
     The connector dedupes by ``tool_call_id`` client-side so SSE
     reconnects (which replay the backfill) don't double-execute.
     """
-    import json as _json
-
     async with listen_for_connector_calls(db_url, connection_id) as queue:
         emitted: set[str] = set()
 
@@ -174,7 +169,7 @@ async def connector_calls_stream(
             backfill = await queries.list_pending_calls_for_connection(conn, connection_id)
         for call in backfill:
             emitted.add(call["tool_call_id"])
-            yield ServerSentEvent(data=_json.dumps(call), event="call")
+            yield ServerSentEvent(data=json.dumps(call), event="call")
 
         while True:
             session_id = await queue.get()
@@ -188,7 +183,7 @@ async def connector_calls_stream(
                 if call["tool_call_id"] in emitted:
                     continue
                 emitted.add(call["tool_call_id"])
-                yield ServerSentEvent(data=_json.dumps(call), event="call")
+                yield ServerSentEvent(data=json.dumps(call), event="call")
 
 
 async def runtime_connector_calls_stream(
@@ -208,8 +203,6 @@ async def runtime_connector_calls_stream(
     Backfills any pending calls at subscribe time, then tails the
     ``connector_calls_<connector>`` NOTIFY channel.
     """
-    import json as _json
-
     async with listen_for_connector_calls_by_type(db_url, connector) as queue:
         emitted: set[str] = set()
 
@@ -217,7 +210,7 @@ async def runtime_connector_calls_stream(
             backfill = await queries.list_pending_calls_for_connector(conn, connector)
         for call in backfill:
             emitted.add(call["tool_call_id"])
-            yield ServerSentEvent(data=_json.dumps(call), event="call")
+            yield ServerSentEvent(data=json.dumps(call), event="call")
 
         while True:
             payload = await queue.get()
@@ -237,7 +230,7 @@ async def runtime_connector_calls_stream(
                     continue
                 emitted.add(call["tool_call_id"])
                 call["connection_id"] = connection_id
-                yield ServerSentEvent(data=_json.dumps(call), event="call")
+                yield ServerSentEvent(data=json.dumps(call), event="call")
 
 
 async def connection_discovery_stream(
@@ -255,25 +248,33 @@ async def connection_discovery_stream(
     side lives in :mod:`aios.services.connections.attach_connection` /
     ``archive_connection``.
     """
-    import json as _json
-
     async with listen_for_connection_discovery(db_url, connector) as queue:
         emitted_added: set[str] = set()
 
-        async with pool.acquire() as conn:
-            backfill = await queries.list_connections(conn, connector=connector)
-        for connection in backfill:
-            emitted_added.add(connection.id)
-            yield ServerSentEvent(
-                data=_json.dumps(
-                    {
-                        "event": "added",
-                        "connection_id": connection.id,
-                        "account": connection.account,
-                    }
-                ),
-                event="connection",
-            )
+        # Page through all active connections of this type; the default
+        # ``list_connections`` limit (50) would silently under-fanout for
+        # runtimes with more than 50 active connections.
+        cursor: str | None = None
+        while True:
+            async with pool.acquire() as conn:
+                page = await queries.list_connections(
+                    conn, connector=connector, limit=200, after=cursor
+                )
+            for connection in page:
+                emitted_added.add(connection.id)
+                yield ServerSentEvent(
+                    data=json.dumps(
+                        {
+                            "event": "added",
+                            "connection_id": connection.id,
+                            "account": connection.account,
+                        }
+                    ),
+                    event="connection",
+                )
+            if len(page) < 200:
+                break
+            cursor = page[-1].id
 
         while True:
             payload = await queue.get()
@@ -290,7 +291,7 @@ async def connection_discovery_stream(
             elif event == "removed":
                 emitted_added.discard(connection_id)
             yield ServerSentEvent(
-                data=_json.dumps(
+                data=json.dumps(
                     {
                         "event": event,
                         "connection_id": connection_id,

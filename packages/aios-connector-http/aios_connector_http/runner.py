@@ -54,7 +54,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
-import httpx
 import structlog
 from aios_sdk import Client, stream_connection_discovery, stream_connector_calls
 from aios_sdk._generated.api.connectors.get_connector_runtime_secrets import (
@@ -66,6 +65,7 @@ from aios_sdk._generated.api.connectors.post_connector_runtime_tool_result impor
 from aios_sdk._generated.api.connectors.put_connector_tools_schema import (
     asyncio_detailed as _put_tools_schema,
 )
+from aios_sdk._generated.models.http_validation_error import HTTPValidationError
 from aios_sdk._generated.models.runtime_tool_result_request import (
     RuntimeToolResultRequest,
 )
@@ -73,6 +73,7 @@ from aios_sdk._generated.models.tools_schema_update import ToolsSchemaUpdate
 from aios_sdk._generated.models.tools_schema_update_tools_item import (
     ToolsSchemaUpdateToolsItem,
 )
+from aios_sdk._generated.types import Unset
 from ulid import ULID
 
 from .sandbox import _SandboxPathMarker, resolve_sandbox_path
@@ -257,11 +258,6 @@ class HttpConnector:
                     tg.create_task(self._discovery_loop(tg), name="aios-discovery")
                     tg.create_task(self._tool_loop(), name="aios-tool-loop")
             finally:
-                # Cancel any per-connection workers still alive when the
-                # TaskGroup exits (e.g. on outer cancellation).  The TG
-                # itself cancels them already; this is a belt-only
-                # noop in the happy path but guards manual run() exits.
-                await self._cancel_all_connection_workers()
                 await self.teardown()
 
     async def _publish_tools_schema(self) -> None:
@@ -340,13 +336,19 @@ class HttpConnector:
             )
             return
         body = response.parsed
-        secrets_map: dict[str, str] = {}
-        if body is not None and hasattr(body, "secrets"):
-            raw_secrets = body.secrets
-            if hasattr(raw_secrets, "additional_properties"):
-                secrets_map = {
-                    str(k): str(v) for k, v in raw_secrets.additional_properties.items()
-                }
+        if body is None or isinstance(body, HTTPValidationError):
+            log.warning(
+                "connector.discovery.secrets_unparseable",
+                connection_id=connection_id,
+            )
+            return
+        raw_secrets = body.secrets
+        if isinstance(raw_secrets, Unset):
+            secrets_map: dict[str, str] = {}
+        else:
+            secrets_map = {
+                str(k): str(v) for k, v in raw_secrets.additional_properties.items()
+            }
         state = _ConnectionState(
             connection_id=connection_id, account=account, secrets=secrets_map
         )
@@ -373,12 +375,6 @@ class HttpConnector:
             connector=self.connector,
             connection_id=connection_id,
         )
-
-    async def _cancel_all_connection_workers(self) -> None:
-        for state in list(self._connections.values()):
-            if state.worker is not None and not state.worker.done():
-                state.worker.cancel()
-        self._connections.clear()
 
     async def _tool_loop(self) -> None:
         """Tail the per-type calls SSE and dispatch each call."""
@@ -681,7 +677,3 @@ def _inject_focal_kwargs(
     return out
 
 
-# Suppress unused-import warning — httpx is the transport the SDK uses, kept
-# here as a "still-a-direct-dependency" pin since emit_inbound bypasses the
-# generated op for binary multipart.
-_ = httpx
