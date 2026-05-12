@@ -5,7 +5,7 @@ import httpx
 
 from ... import errors
 from ...client import AuthenticatedClient, Client
-from ...models.connector_inbound_request import ConnectorInboundRequest
+from ...models.body_post_connector_inbound import BodyPostConnectorInbound
 from ...models.connector_inbound_response import ConnectorInboundResponse
 from ...models.http_validation_error import HTTPValidationError
 from ...types import UNSET, Response, Unset
@@ -13,7 +13,7 @@ from ...types import UNSET, Response, Unset
 
 def _get_kwargs(
     *,
-    body: ConnectorInboundRequest,
+    body: BodyPostConnectorInbound,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -25,9 +25,7 @@ def _get_kwargs(
         "url": "/v1/connectors/inbound",
     }
 
-    _kwargs["json"] = body.to_dict()
-
-    headers["Content-Type"] = "application/json"
+    _kwargs["files"] = body.to_multipart()
 
     _kwargs["headers"] = headers
     return _kwargs
@@ -66,25 +64,26 @@ def _build_response(
 def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
-    body: ConnectorInboundRequest,
+    body: BodyPostConnectorInbound,
     authorization: None | str | Unset = UNSET,
 ) -> Response[ConnectorInboundResponse | HTTPValidationError]:
     """Post Inbound
 
      Append an inbound user message to the session bound to the caller's connection.
 
-    Idempotent on ``body.event_id`` — replays return the original
-    event id with ``deduped=True``.  Drops surface as 4xx/5xx with
-    a body explaining the reason (operator-config issue vs server
-    error vs payload).
+    Multipart form: the message text + IDs ride as form fields; any
+    attachments ride as ``UploadFile`` parts whose bytes the handler
+    streams into the per-session attachment dir (no shared-filesystem
+    coupling, closes #322 P1).
+
+    Idempotent on ``event_id`` — replays return the original event id
+    with ``deduped=True``. Drops surface as 4xx/5xx with a body
+    explaining the reason (operator-config issue vs server error vs
+    payload).
 
     Args:
         authorization (None | str | Unset):
-        body (ConnectorInboundRequest): Body for ``POST /v1/connectors/inbound``.
-
-            Authenticated via ``ConnectorAuthDep`` so the connection_id is
-            server-resolved from the bearer token — clients don't pick which
-            connection their inbound lands on.
+        body (BodyPostConnectorInbound):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -109,25 +108,26 @@ def sync_detailed(
 def sync(
     *,
     client: AuthenticatedClient | Client,
-    body: ConnectorInboundRequest,
+    body: BodyPostConnectorInbound,
     authorization: None | str | Unset = UNSET,
 ) -> ConnectorInboundResponse | HTTPValidationError | None:
     """Post Inbound
 
      Append an inbound user message to the session bound to the caller's connection.
 
-    Idempotent on ``body.event_id`` — replays return the original
-    event id with ``deduped=True``.  Drops surface as 4xx/5xx with
-    a body explaining the reason (operator-config issue vs server
-    error vs payload).
+    Multipart form: the message text + IDs ride as form fields; any
+    attachments ride as ``UploadFile`` parts whose bytes the handler
+    streams into the per-session attachment dir (no shared-filesystem
+    coupling, closes #322 P1).
+
+    Idempotent on ``event_id`` — replays return the original event id
+    with ``deduped=True``. Drops surface as 4xx/5xx with a body
+    explaining the reason (operator-config issue vs server error vs
+    payload).
 
     Args:
         authorization (None | str | Unset):
-        body (ConnectorInboundRequest): Body for ``POST /v1/connectors/inbound``.
-
-            Authenticated via ``ConnectorAuthDep`` so the connection_id is
-            server-resolved from the bearer token — clients don't pick which
-            connection their inbound lands on.
+        body (BodyPostConnectorInbound):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -147,25 +147,26 @@ def sync(
 async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
-    body: ConnectorInboundRequest,
+    body: BodyPostConnectorInbound,
     authorization: None | str | Unset = UNSET,
 ) -> Response[ConnectorInboundResponse | HTTPValidationError]:
     """Post Inbound
 
      Append an inbound user message to the session bound to the caller's connection.
 
-    Idempotent on ``body.event_id`` — replays return the original
-    event id with ``deduped=True``.  Drops surface as 4xx/5xx with
-    a body explaining the reason (operator-config issue vs server
-    error vs payload).
+    Multipart form: the message text + IDs ride as form fields; any
+    attachments ride as ``UploadFile`` parts whose bytes the handler
+    streams into the per-session attachment dir (no shared-filesystem
+    coupling, closes #322 P1).
+
+    Idempotent on ``event_id`` — replays return the original event id
+    with ``deduped=True``. Drops surface as 4xx/5xx with a body
+    explaining the reason (operator-config issue vs server error vs
+    payload).
 
     Args:
         authorization (None | str | Unset):
-        body (ConnectorInboundRequest): Body for ``POST /v1/connectors/inbound``.
-
-            Authenticated via ``ConnectorAuthDep`` so the connection_id is
-            server-resolved from the bearer token — clients don't pick which
-            connection their inbound lands on.
+        body (BodyPostConnectorInbound):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -188,25 +189,26 @@ async def asyncio_detailed(
 async def asyncio(
     *,
     client: AuthenticatedClient | Client,
-    body: ConnectorInboundRequest,
+    body: BodyPostConnectorInbound,
     authorization: None | str | Unset = UNSET,
 ) -> ConnectorInboundResponse | HTTPValidationError | None:
     """Post Inbound
 
      Append an inbound user message to the session bound to the caller's connection.
 
-    Idempotent on ``body.event_id`` — replays return the original
-    event id with ``deduped=True``.  Drops surface as 4xx/5xx with
-    a body explaining the reason (operator-config issue vs server
-    error vs payload).
+    Multipart form: the message text + IDs ride as form fields; any
+    attachments ride as ``UploadFile`` parts whose bytes the handler
+    streams into the per-session attachment dir (no shared-filesystem
+    coupling, closes #322 P1).
+
+    Idempotent on ``event_id`` — replays return the original event id
+    with ``deduped=True``. Drops surface as 4xx/5xx with a body
+    explaining the reason (operator-config issue vs server error vs
+    payload).
 
     Args:
         authorization (None | str | Unset):
-        body (ConnectorInboundRequest): Body for ``POST /v1/connectors/inbound``.
-
-            Authenticated via ``ConnectorAuthDep`` so the connection_id is
-            server-resolved from the bearer token — clients don't pick which
-            connection their inbound lands on.
+        body (BodyPostConnectorInbound):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

@@ -3212,6 +3212,33 @@ async def list_chat_sessions_for_connection(
     return [(r["chat_id"], r["session_id"], r["created_at"]) for r in rows]
 
 
+# ─── routing_rules (#328 PR 2/4 — per-binding prefix demux) ─────────────────
+
+
+async def list_routing_rules_for_connection(
+    conn: asyncpg.Connection[Any], connection_id: str
+) -> list[tuple[str, str, str]]:
+    """Return ``(prefix, target_type, target_id)`` rules for the active binding.
+
+    Walks ``bindings`` → ``routing_rules`` for the given connection,
+    filtered to the one active binding (``WHERE archived_at IS NULL``).
+    Empty list if no binding or no rules. The resolver iterates these
+    in arbitrary order — at v1 scale operators are expected to keep
+    prefix sets disjoint per binding; first-match-wins.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT rr.prefix, rr.target_type, rr.target_id
+          FROM routing_rules rr
+          JOIN bindings b ON b.id = rr.binding_id
+         WHERE b.connection_id = $1
+           AND b.archived_at IS NULL
+        """,
+        connection_id,
+    )
+    return [(row["prefix"], row["target_type"], row["target_id"]) for row in rows]
+
+
 async def list_recent_chat_ids(
     conn: asyncpg.Connection[Any], connector: str, account: str, *, limit: int
 ) -> list[tuple[str, datetime]]:

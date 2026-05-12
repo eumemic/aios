@@ -15,6 +15,7 @@ from .agent_update_metadata_type_0 import AgentUpdateMetadataType0
 from .agent_version import AgentVersion
 from .agent_version_litellm_extra import AgentVersionLitellmExtra
 from .bind_chat_request import BindChatRequest
+from .body_post_connector_inbound import BodyPostConnectorInbound
 from .body_upload_session_file import BodyUploadSessionFile
 from .bound_chat import BoundChat
 from .connection import Connection
@@ -27,14 +28,6 @@ from .connection_metadata import ConnectionMetadata
 from .connection_set_secrets import ConnectionSetSecrets
 from .connection_set_secrets_secrets import ConnectionSetSecretsSecrets
 from .connection_set_tools import ConnectionSetTools
-from .connector_inbound_request import ConnectorInboundRequest
-from .connector_inbound_request_attachments_type_0_item import (
-    ConnectorInboundRequestAttachmentsType0Item,
-)
-from .connector_inbound_request_metadata_type_0 import (
-    ConnectorInboundRequestMetadataType0,
-)
-from .connector_inbound_request_sender import ConnectorInboundRequestSender
 from .connector_inbound_response import ConnectorInboundResponse
 from .connector_secrets import ConnectorSecrets
 from .connector_secrets_secrets import ConnectorSecretsSecrets
@@ -189,6 +182,7 @@ __all__ = (
     "AgentVersion",
     "AgentVersionLitellmExtra",
     "BindChatRequest",
+    "BodyPostConnectorInbound",
     "BodyUploadSessionFile",
     "BoundChat",
     "Connection",
@@ -201,10 +195,6 @@ __all__ = (
     "ConnectionSetSecrets",
     "ConnectionSetSecretsSecrets",
     "ConnectionSetTools",
-    "ConnectorInboundRequest",
-    "ConnectorInboundRequestAttachmentsType0Item",
-    "ConnectorInboundRequestMetadataType0",
-    "ConnectorInboundRequestSender",
     "ConnectorInboundResponse",
     "ConnectorSecrets",
     "ConnectorSecretsSecrets",

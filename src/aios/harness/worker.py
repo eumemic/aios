@@ -112,12 +112,19 @@ async def worker_main() -> None:
         task_registry = TaskRegistry()
         mcp_session_pool = McpSessionPool()
 
+        # Register the connector subsystem's ToolProvider impl against the
+        # Protocol slot from PR 3 (#328). Core never imports
+        # ``aios_connectors`` outside this single registration site — the
+        # rest of the harness calls against ``runtime.require_tool_provider()``.
+        from aios_connectors.providers import SubsystemToolProvider
+
         runtime.pool = pool
         runtime.crypto_box = crypto_box
         runtime.worker_id = _make_worker_id()
         runtime.sandbox_registry = sandbox_registry
         runtime.task_registry = task_registry
         runtime.mcp_session_pool = mcp_session_pool
+        runtime.tool_provider = SubsystemToolProvider()
 
         await procrastinate_app.open_async()
         procrastinate_opened = True

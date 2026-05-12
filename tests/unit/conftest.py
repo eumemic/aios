@@ -36,6 +36,29 @@ def _unit_env() -> Iterator[None]:
         get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _unit_runtime_tool_provider() -> Iterator[None]:
+    """Register a no-op ``ToolProvider`` on ``runtime`` for unit tests.
+
+    ``compute_step_prelude`` calls ``runtime.require_tool_provider()`` to
+    merge connector-declared tools; without a registered impl the helper
+    raises (its load-bearing behavior for production). Unit tests don't
+    exercise the provider — they patch ``compose_step_context`` or stop
+    short of the model call — so a returns-empty stub is enough.
+    """
+    from aios.harness import runtime
+
+    class _NoopToolProvider:
+        async def list_tools_for_session(self, pool: Any, session_id: str) -> list[Any]:
+            return []
+
+    runtime.tool_provider = _NoopToolProvider()
+    try:
+        yield
+    finally:
+        runtime.tool_provider = None
+
+
 @pytest.fixture
 async def in_memory_app() -> AsyncIterator[App]:
     """Patch the aios procrastinate app to use an in-memory connector.
