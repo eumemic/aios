@@ -6,10 +6,16 @@
 # grep/glob tools. No languages beyond Python; no package manager state at
 # runtime (apt lists are cleaned).
 #
-# Build with:
+# Published as ``ghcr.io/eumemic/aios-sandbox`` by
+# ``.github/workflows/build-sandbox.yml`` on every change to this file.
+# Deploy targets pull from GHCR via the worker's ``AIOS_DOCKER_IMAGE``
+# env var — no manual on-host build required.
+#
+# Local dev:
 #   docker build -t aios-sandbox:latest -f docker/Dockerfile.sandbox docker/
 # or simply:
 #   uv run python -m aios build-image
+# then point ``AIOS_DOCKER_IMAGE`` at the local tag.
 #
 # The image is labelled `aios.managed=true` at runtime (not build time) via
 # `docker run --label`, so the worker's orphan reaper can find containers
