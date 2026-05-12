@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 
-from aios.sdk._generated import AuthenticatedClient
-from aios.sdk.config import resolve_base_url
+from aios_sdk._generated import AuthenticatedClient
+from aios_sdk.config import resolve_base_url
 
 
 def client_from_env() -> AuthenticatedClient:
@@ -13,7 +13,7 @@ def client_from_env() -> AuthenticatedClient:
 
     URL resolution mirrors the CLI: explicit env > ``http://127.0.0.1:{AIOS_API_PORT}``
     > ``http://127.0.0.1:8080``. The SDK and the CLI share
-    :func:`aios.sdk.config.resolve_base_url` so they never disagree about
+    :func:`aios_sdk.config.resolve_base_url` so they never disagree about
     the resolved base URL.
 
     Raises ``RuntimeError`` if ``AIOS_API_KEY`` isn't set — the SDK uses

@@ -20,7 +20,7 @@ from aios.cli.client import AiosApiError, AiosClient
 from aios.cli.output import OutputFormat, print_error
 
 if TYPE_CHECKING:
-    from aios.sdk import Client
+    from aios_sdk import Client
 
 
 @dataclass(slots=True)
@@ -44,13 +44,13 @@ class CliState:
         the remaining commands (CRUD modules, ``chat``, sessions
         ``events``) until they migrate too.
 
-        Unlike :func:`aios.sdk.client_from_env`, this accepts a missing
+        Unlike :func:`aios_sdk.client_from_env`, this accepts a missing
         ``api_key`` and constructs a Client with an empty Bearer token —
         the ``aios status`` command needs to probe an unauthenticated
         ``/health`` and report whether ``AIOS_API_KEY`` was set, so a
         raise-on-missing surface here would be the wrong default.
         """
-        from aios.sdk import Client
+        from aios_sdk import Client
 
         return Client(base_url=self.base_url, token=self.api_key or "")
 

@@ -37,6 +37,9 @@ dependencies = [
     "typer>=0.12",
     # Observability
     "structlog>=24.4",
+    # Split into its own package so connector containers can depend on the
+    # SDK without dragging in fastapi/asyncpg/procrastinate/etc.
+    "aios-sdk",
 ]
 
 [dependency-groups]
@@ -71,6 +74,7 @@ members = [
     "connectors/signal",
     "connectors/telegram",
     "packages/aios-connector-http",
+    "packages/aios-sdk",
 ]
 
 # Install the SDK + reference connector in editable mode for development
@@ -78,6 +82,7 @@ members = [
 [tool.uv.sources]
 aios-connector-http = { workspace = true }
 aios-echo-http = { workspace = true }
+aios-sdk = { workspace = true }
 
 # ─── ruff ────────────────────────────────────────────────────────────────────
 [tool.ruff]
@@ -86,7 +91,7 @@ target-version = "py313"
 src = ["src", "tests"]
 # Build artifact from scripts/regen-client.sh; lint complaints belong
 # upstream in openapi-python-client, not in this repo.
-extend-exclude = ["src/aios/sdk/_generated"]
+extend-exclude = ["packages/aios-sdk/aios_sdk/_generated"]
 
 [tool.ruff.lint]
 select = [
@@ -109,6 +114,12 @@ ignore = [
 "tests/**/*.py" = [
     "B011",       # allow asserts in tests
 ]
+
+[tool.ruff.lint.isort]
+# Workspace packages are first-party from the linter's perspective even
+# though they're separate distributions.  Without this hint ruff groups
+# them with third-party imports and complains about import order.
+known-first-party = ["aios", "aios_sdk", "aios_connector_http"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -146,7 +157,7 @@ disallow_untyped_defs = false
 # Build artifact from scripts/regen-client.sh; type complaints belong
 # upstream in openapi-python-client, not here.
 [[tool.mypy.overrides]]
-module = "aios.sdk._generated.*"
+module = "aios_sdk._generated.*"
 ignore_errors = true
 follow_imports = "skip"
 

@@ -10,9 +10,9 @@ import typer
 
 from aios.cli.output import cyan, green, print_json, red, yellow
 from aios.cli.runtime import CliState, get_state, run_or_die
-from aios.sdk import Client
-from aios.sdk._generated.api.agents import list_agents
-from aios.sdk._generated.api.default import get_health
+from aios_sdk import Client
+from aios_sdk._generated.api.agents import list_agents
+from aios_sdk._generated.api.default import get_health
 
 
 def register(app: typer.Typer) -> None:

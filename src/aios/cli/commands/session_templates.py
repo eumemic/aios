@@ -11,15 +11,15 @@ from aios.cli.commands._shared import render_paginated, render_single, unwrap
 from aios.cli.files import PayloadError, load_json_object, load_payload, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
-from aios.sdk._generated.api.session_templates import (
+from aios_sdk._generated.api.session_templates import (
     archive_session_template,
     create_session_template,
     get_session_template,
     list_session_templates,
     update_session_template,
 )
-from aios.sdk._generated.models.session_template_create import SessionTemplateCreate
-from aios.sdk._generated.models.session_template_update import SessionTemplateUpdate
+from aios_sdk._generated.models.session_template_create import SessionTemplateCreate
+from aios_sdk._generated.models.session_template_update import SessionTemplateUpdate
 
 app = typer.Typer(
     name="session-templates",

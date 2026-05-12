@@ -11,7 +11,7 @@ from aios.cli.commands._shared import render_paginated, render_single, unwrap
 from aios.cli.files import PayloadError, load_json_object, load_payload, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
-from aios.sdk._generated.api.vaults import (
+from aios_sdk._generated.api.vaults import (
     archive_vault,
     archive_vault_credential,
     create_vault,
@@ -25,10 +25,10 @@ from aios.sdk._generated.api.vaults import (
     update_vault,
     update_vault_credential,
 )
-from aios.sdk._generated.models.vault_create import VaultCreate
-from aios.sdk._generated.models.vault_credential_create import VaultCredentialCreate
-from aios.sdk._generated.models.vault_credential_update import VaultCredentialUpdate
-from aios.sdk._generated.models.vault_update import VaultUpdate
+from aios_sdk._generated.models.vault_create import VaultCreate
+from aios_sdk._generated.models.vault_credential_create import VaultCredentialCreate
+from aios_sdk._generated.models.vault_credential_update import VaultCredentialUpdate
+from aios_sdk._generated.models.vault_update import VaultUpdate
 
 app = typer.Typer(name="vaults", help="Manage vaults and credentials.", no_args_is_help=True)
 credentials = typer.Typer(

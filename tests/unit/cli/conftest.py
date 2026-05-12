@@ -14,7 +14,7 @@ import pytest
 
 from aios.cli.client import AiosClient
 from aios.cli.runtime import CliState
-from aios.sdk import Client as SdkClient
+from aios_sdk import Client as SdkClient
 
 
 @dataclass

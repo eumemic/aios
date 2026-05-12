@@ -11,7 +11,7 @@ from aios.cli.commands._shared import render_paginated, render_single, unwrap
 from aios.cli.files import PayloadError, load_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
-from aios.sdk._generated.api.agents import (
+from aios_sdk._generated.api.agents import (
     archive_agent,
     create_agent,
     get_agent,
@@ -20,8 +20,8 @@ from aios.sdk._generated.api.agents import (
     list_agents,
     update_agent,
 )
-from aios.sdk._generated.models.agent_create import AgentCreate
-from aios.sdk._generated.models.agent_update import AgentUpdate
+from aios_sdk._generated.models.agent_create import AgentCreate
+from aios_sdk._generated.models.agent_update import AgentUpdate
 
 app = typer.Typer(name="agents", help="Manage agents.", no_args_is_help=True)
 

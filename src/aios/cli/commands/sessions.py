@@ -22,7 +22,7 @@ from aios.cli.output import cyan, dim, print_error, print_json, print_success
 from aios.cli.profile import compute_profile, profile_to_dict, render_profile
 from aios.cli.runtime import get_state, run_or_die
 from aios.cli.tail_format import iter_formatted_events
-from aios.sdk import stream_session
+from aios_sdk import stream_session
 
 app = typer.Typer(name="sessions", help="Manage sessions.", no_args_is_help=True)
 

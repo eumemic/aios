@@ -11,15 +11,15 @@ from aios.cli.commands._shared import render_paginated, render_single, unwrap
 from aios.cli.files import PayloadError, load_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
-from aios.sdk._generated.api.environments import (
+from aios_sdk._generated.api.environments import (
     archive_environment,
     create_environment,
     get_environment,
     list_environments,
     update_environment,
 )
-from aios.sdk._generated.models.environment_create import EnvironmentCreate
-from aios.sdk._generated.models.environment_update import EnvironmentUpdate
+from aios_sdk._generated.models.environment_create import EnvironmentCreate
+from aios_sdk._generated.models.environment_update import EnvironmentUpdate
 
 app = typer.Typer(name="envs", help="Manage environments (sandbox configs).", no_args_is_help=True)
 
