@@ -1,20 +1,25 @@
 """Connection resource — the unified routing primitive.
 
-A *connection* is a registered ``(connector, account)`` pair plus an
-optional routing-mode binding.  The schema enforces three valid shapes
-via :sql:`connections_one_mode_ck`:
+A *connection* is a registered ``(connector, account)`` pair, optionally
+attached to a routing target via the ``bindings`` table.  Three valid
+shapes derived from the active binding:
 
-* **detached** — ``session_id`` and ``session_template_id`` are both
-  NULL.  Inbound messages drop with a counter increment.
-* **single_session** — ``session_id`` populated.  Every inbound for this
-  account appends to that one session.
-* **per_chat** — ``session_template_id`` populated.  Each new chat
-  partner spawns a fresh session via the template; the ``chat_id`` →
-  ``session_id`` map lives in ``connection_chat_sessions``.
+* **detached** — no active binding row.  Inbound messages drop with a
+  counter increment.
+* **single_session** — active binding with ``mode='single_session'`` and
+  ``session_id`` populated.  Every inbound for this account appends to
+  that one session.
+* **per_chat** — active binding with ``mode='per_chat'`` and
+  ``session_template_id`` populated.  Each new chat partner spawns a
+  fresh session via the template; the ``chat_id`` → ``session_id`` map
+  lives in ``chat_sessions``.
 
 The active-row uniqueness on ``(connector, account)`` enforces
 "one session per account" by schema — operators can't accidentally
-double-bind a phone number to two sessions.
+double-bind a phone number to two sessions.  The
+``bindings_connection_active_uniq`` partial-unique index gives the same
+guarantee at the binding level (at most one active binding per
+connection).
 """
 
 from __future__ import annotations
@@ -178,11 +183,10 @@ class ConnectorSecrets(BaseModel):
 class BindChatRequest(BaseModel):
     """Request body for ``POST /v1/connections/{id}/bind-chat``.
 
-    Pre-populates a ``connection_chat_sessions`` row so inbound on
-    ``chat_id`` routes to ``session_id`` regardless of the connection's
-    mode-default fallback (#215).  Operators use this to point
-    different chats on a single account at different operator-curated
-    existing sessions.
+    Pre-populates a ``chat_sessions`` row so inbound on ``chat_id``
+    routes to ``session_id`` regardless of the connection's mode-default
+    fallback (#215).  Operators use this to point different chats on a
+    single account at different operator-curated existing sessions.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -192,10 +196,10 @@ class BindChatRequest(BaseModel):
 
 
 class BoundChat(BaseModel):
-    """Read view of one ``connection_chat_sessions`` row.
+    """Read view of one ``chat_sessions`` row.
 
     Returned by ``GET /v1/connections/{id}/bound-chats``.  Operator-bound
-    rows and supervisor-spawned rows are returned together — the table
+    rows and per-chat-spawned rows are returned together — the table
     doesn't tag the writer.
     """
 

@@ -69,11 +69,10 @@ def sync_detailed(
 
      Archive a connection (DELETE soft-archives, only on detached connections).
 
-    The service layer rejects archive attempts on ``single_session`` or
-    ``per_chat`` connections — archiving those would silently break
-    inbound delivery for live sessions or orphan
-    ``spawned_from_connection_id`` pointers on per_chat-spawned sessions.
-    Detach or unconfigure first, then archive.
+    The service layer rejects archive attempts while an active binding
+    exists — archiving those would silently break inbound delivery for
+    live sessions or strand the template a per_chat binding spawns
+    from. Detach or unconfigure first, then archive.
 
     Args:
         connection_id (str):
@@ -109,11 +108,10 @@ def sync(
 
      Archive a connection (DELETE soft-archives, only on detached connections).
 
-    The service layer rejects archive attempts on ``single_session`` or
-    ``per_chat`` connections — archiving those would silently break
-    inbound delivery for live sessions or orphan
-    ``spawned_from_connection_id`` pointers on per_chat-spawned sessions.
-    Detach or unconfigure first, then archive.
+    The service layer rejects archive attempts while an active binding
+    exists — archiving those would silently break inbound delivery for
+    live sessions or strand the template a per_chat binding spawns
+    from. Detach or unconfigure first, then archive.
 
     Args:
         connection_id (str):
@@ -144,11 +142,10 @@ async def asyncio_detailed(
 
      Archive a connection (DELETE soft-archives, only on detached connections).
 
-    The service layer rejects archive attempts on ``single_session`` or
-    ``per_chat`` connections — archiving those would silently break
-    inbound delivery for live sessions or orphan
-    ``spawned_from_connection_id`` pointers on per_chat-spawned sessions.
-    Detach or unconfigure first, then archive.
+    The service layer rejects archive attempts while an active binding
+    exists — archiving those would silently break inbound delivery for
+    live sessions or strand the template a per_chat binding spawns
+    from. Detach or unconfigure first, then archive.
 
     Args:
         connection_id (str):
@@ -182,11 +179,10 @@ async def asyncio(
 
      Archive a connection (DELETE soft-archives, only on detached connections).
 
-    The service layer rejects archive attempts on ``single_session`` or
-    ``per_chat`` connections — archiving those would silently break
-    inbound delivery for live sessions or orphan
-    ``spawned_from_connection_id`` pointers on per_chat-spawned sessions.
-    Detach or unconfigure first, then archive.
+    The service layer rejects archive attempts while an active binding
+    exists — archiving those would silently break inbound delivery for
+    live sessions or strand the template a per_chat binding spawns
+    from. Detach or unconfigure first, then archive.
 
     Args:
         connection_id (str):

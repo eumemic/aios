@@ -119,20 +119,11 @@ class TestFocalChannelE2E:
     async def test_per_chat_session_rejects_switch_channel(
         self, harness: Harness, crypto_box: CryptoBox
     ) -> None:
-        """A session whose ``spawned_from_connection_id`` is set is bound
-        to one chat by construction; ``switch_channel`` rejects every
-        attempt regardless of target.
+        """A session created with ``focal_locked=True`` is bound to one
+        chat by construction; ``switch_channel`` rejects every attempt
+        regardless of target.
         """
-        # Build a connection so we have a real id to point spawned_from at.
-        from aios.services import connections as connections_service
-
-        conn_row = await connections_service.create_connection(
-            harness._pool,
-            connector="signal",
-            account="+1",
-            metadata={},
-            crypto_box=crypto_box,
-        )
+        del crypto_box  # focal-lock check needs no connection lineage.
 
         harness.script_model(
             [
@@ -170,8 +161,8 @@ class TestFocalChannelE2E:
             environment_id=harness._env_id,
             title="per-chat",
             metadata={},
-            spawned_from_connection_id=conn_row.id,
             focal_channel="signal/+1/chat-a",
+            focal_locked=True,
         )
         await sessions_service.append_user_message(
             harness._pool,

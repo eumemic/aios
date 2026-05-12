@@ -4772,7 +4772,7 @@
           "connections"
         ],
         "summary": "Delete",
-        "description": "Archive a connection (DELETE soft-archives, only on detached connections).\n\nThe service layer rejects archive attempts on ``single_session`` or\n``per_chat`` connections \u2014 archiving those would silently break\ninbound delivery for live sessions or orphan\n``spawned_from_connection_id`` pointers on per_chat-spawned sessions.\nDetach or unconfigure first, then archive.",
+        "description": "Archive a connection (DELETE soft-archives, only on detached connections).\n\nThe service layer rejects archive attempts while an active binding\nexists \u2014 archiving those would silently break inbound delivery for\nlive sessions or strand the template a per_chat binding spawns\nfrom. Detach or unconfigure first, then archive.",
         "operationId": "archive_connection",
         "parameters": [
           {
@@ -4824,7 +4824,7 @@
           "connections"
         ],
         "summary": "Attach",
-        "description": "Attach a connection to a session.\n\nThe legacy supervisor's \"live snapshot drift check\" was removed in\n#301 \u2014 the new architecture has connectors as peer services, so the\napi process can't probe a worker-side account snapshot.  Operators\nbear the responsibility of attaching to a real account; an inbound\nreferencing an unknown account simply drops at the new\n``/v1/connectors/inbound`` boundary.",
+        "description": "Attach a connection to a session (single_session mode).\n\nInserts an active ``bindings`` row.  Operators bear the\nresponsibility of binding a connection to a real, ongoing session;\nan inbound referencing an unknown account simply drops at the\ninbound boundary.",
         "operationId": "attach_connection",
         "parameters": [
           {
@@ -5090,7 +5090,7 @@
           "connections"
         ],
         "summary": "Bind Chat",
-        "description": "Operator-curate a chat \u2192 session mapping (#215).\n\nA row in ``connection_chat_sessions`` overrides the connection's\nmode-default fallback for that ``chat_id``.  Operators use this to\npoint different chats on a single account at different existing\nsessions \u2014 the middle case the unified ``connections`` shape didn't\ncover after #205.\n\nIdempotent on ``(connection_id, chat_id)``: a second call with the\nsame chat returns the existing row (its ``session_id`` may differ\nfrom the requested one if a concurrent writer landed first or the\nsupervisor pre-populated it via per_chat spawn).",
+        "description": "Operator-curate a chat \u2192 session mapping (#215).\n\nA row in ``chat_sessions`` overrides the connection's\nmode-default fallback for that ``chat_id``.  Operators use this to\npoint different chats on a single account at different existing\nsessions \u2014 the middle case the unified ``connections`` shape didn't\ncover after #205.\n\nIdempotent on ``(connection_id, chat_id)``: a second call with the\nsame chat returns the existing row (its ``session_id`` may differ\nfrom the requested one if a concurrent writer landed first or the\nsupervisor pre-populated it via per_chat spawn).",
         "operationId": "bind_chat",
         "parameters": [
           {
@@ -7198,7 +7198,7 @@
           "session_id"
         ],
         "title": "BindChatRequest",
-        "description": "Request body for ``POST /v1/connections/{id}/bind-chat``.\n\nPre-populates a ``connection_chat_sessions`` row so inbound on\n``chat_id`` routes to ``session_id`` regardless of the connection's\nmode-default fallback (#215).  Operators use this to point\ndifferent chats on a single account at different operator-curated\nexisting sessions."
+        "description": "Request body for ``POST /v1/connections/{id}/bind-chat``.\n\nPre-populates a ``chat_sessions`` row so inbound on ``chat_id``\nroutes to ``session_id`` regardless of the connection's mode-default\nfallback (#215).  Operators use this to point different chats on a\nsingle account at different operator-curated existing sessions."
       },
       "Body_post_connector_inbound": {
         "properties": {
@@ -7396,7 +7396,7 @@
           "created_at"
         ],
         "title": "BoundChat",
-        "description": "Read view of one ``connection_chat_sessions`` row.\n\nReturned by ``GET /v1/connections/{id}/bound-chats``.  Operator-bound\nrows and supervisor-spawned rows are returned together \u2014 the table\ndoesn't tag the writer."
+        "description": "Read view of one ``chat_sessions`` row.\n\nReturned by ``GET /v1/connections/{id}/bound-chats``.  Operator-bound\nrows and per-chat-spawned rows are returned together \u2014 the table\ndoesn't tag the writer."
       },
       "Connection": {
         "properties": {

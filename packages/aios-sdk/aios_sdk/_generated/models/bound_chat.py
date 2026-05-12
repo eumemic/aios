@@ -13,10 +13,10 @@ T = TypeVar("T", bound="BoundChat")
 
 @_attrs_define
 class BoundChat:
-    """Read view of one ``connection_chat_sessions`` row.
+    """Read view of one ``chat_sessions`` row.
 
     Returned by ``GET /v1/connections/{id}/bound-chats``.  Operator-bound
-    rows and supervisor-spawned rows are returned together — the table
+    rows and per-chat-spawned rows are returned together — the table
     doesn't tag the writer.
 
         Attributes:

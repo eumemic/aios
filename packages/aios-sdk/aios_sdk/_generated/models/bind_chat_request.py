@@ -12,11 +12,10 @@ T = TypeVar("T", bound="BindChatRequest")
 class BindChatRequest:
     """Request body for ``POST /v1/connections/{id}/bind-chat``.
 
-    Pre-populates a ``connection_chat_sessions`` row so inbound on
-    ``chat_id`` routes to ``session_id`` regardless of the connection's
-    mode-default fallback (#215).  Operators use this to point
-    different chats on a single account at different operator-curated
-    existing sessions.
+    Pre-populates a ``chat_sessions`` row so inbound on ``chat_id``
+    routes to ``session_id`` regardless of the connection's mode-default
+    fallback (#215).  Operators use this to point different chats on a
+    single account at different operator-curated existing sessions.
 
         Attributes:
             chat_id (str):

@@ -24,6 +24,7 @@ import json
 import httpx
 
 from aios.crypto.vault import CryptoBox
+from aios.db import queries as db_queries
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, last_assistant_content, tool_call
 
@@ -166,15 +167,24 @@ class TestConnectionToolsInPrelude:
             harness._pool, connection.id, session_template_id=template.id
         )
 
-        # Spawn a session as if from inbound, recording the connection lineage.
+        # Spawn a session as if from inbound, then stamp the chat_sessions
+        # ledger so the connection→session lineage is queryable via the
+        # binding-derived path.
         session = await sess_svc.create_session(
             harness._pool,
             agent_id=agent.id,
             environment_id=env.id,
             title="spawned",
             metadata={},
-            spawned_from_connection_id=connection.id,
+            focal_locked=True,
         )
+        async with harness._pool.acquire() as db_conn:
+            await db_queries.insert_chat_session(
+                db_conn,
+                connection_id=connection.id,
+                chat_id="chat_seed",
+                session_id=session.id,
+            )
 
         prelude = await compute_step_prelude(
             pool=harness._pool,
