@@ -40,7 +40,8 @@ _Snapshot = dict[tuple[str, str], str]
 def _sha256_of_content(content: str) -> str:
     """sha256 over UTF-8 bytes of content.
 
-    Mirrors memory_stores._sha256_hex; kept local to avoid cross-layer import.
+    Mirrors memory_stores._sha256_hex; avoids calling the private
+    memory_stores._sha256_hex across module boundaries.
     """
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
@@ -215,8 +216,6 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
     for (store_id, store_path), _sha in after.items():
         if (store_id, store_path) in before:
             continue  # will be handled as modify or unchanged
-        if store_id not in host_dirs:
-            continue
         raw = after_bytes[(store_id, store_path)]
         maybe_content = _read_utf8_content(
             store_id,
@@ -287,9 +286,10 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
             # update_memory calls _mirror_to_host internally, which rewrites the same
             # bytes bash just wrote. This is redundant I/O but harmless and unavoidable
             # without adding a skip_mirror parameter to the service layer.
-            # Precondition is always satisfied at this point (we just read the DB sha).
-            # This is intentional: bash is authoritative for what the filesystem contains;
-            # we record the write unconditionally.
+            # Passing existing.content_sha256 as precondition guards against concurrent writes
+            # from another session: if a peer session wrote between our get_memory_by_path and
+            # this update, the precondition fails and MemoryPreconditionFailedError propagates
+            # as a tool-result error, which the model can handle.
             memory = await memory_service.update_memory(
                 pool,
                 store_id=store_id,
