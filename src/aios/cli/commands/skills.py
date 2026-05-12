@@ -11,7 +11,7 @@ from aios.cli.commands._shared import render_paginated, render_single, unwrap
 from aios.cli.files import PayloadError, load_payload, walk_skill_dir
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
-from aios.sdk._generated.api.skills import (
+from aios_sdk._generated.api.skills import (
     archive_skill,
     create_skill,
     create_skill_version,
@@ -20,8 +20,8 @@ from aios.sdk._generated.api.skills import (
     list_skill_versions,
     list_skills,
 )
-from aios.sdk._generated.models.skill_create import SkillCreate
-from aios.sdk._generated.models.skill_version_create import SkillVersionCreate
+from aios_sdk._generated.models.skill_create import SkillCreate
+from aios_sdk._generated.models.skill_version_create import SkillVersionCreate
 
 app = typer.Typer(name="skills", help="Manage skills.", no_args_is_help=True)
 

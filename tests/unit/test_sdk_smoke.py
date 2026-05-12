@@ -16,7 +16,7 @@ import pytest
 
 
 def test_curated_public_surface_imports() -> None:
-    from aios.sdk import (
+    from aios_sdk import (
         Client,
         SseMessage,
         UnexpectedStatus,
@@ -34,7 +34,7 @@ def test_curated_public_surface_imports() -> None:
 
 
 def test_client_constructs_with_base_url_and_token() -> None:
-    from aios.sdk import Client
+    from aios_sdk import Client
 
     client = Client(base_url="http://example.test", token="t")
     assert client._base_url == "http://example.test"
@@ -42,8 +42,8 @@ def test_client_constructs_with_base_url_and_token() -> None:
 
 
 def test_get_health_operation_against_mocked_transport() -> None:
-    from aios.sdk import Client
-    from aios.sdk._generated.api.default import get_health
+    from aios_sdk import Client
+    from aios_sdk._generated.api.default import get_health
 
     payload = {"status": "ok", "version": "0.1.0"}
 
@@ -61,7 +61,7 @@ def test_get_health_operation_against_mocked_transport() -> None:
 
 
 def test_client_from_env_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    from aios.sdk import client_from_env
+    from aios_sdk import client_from_env
 
     monkeypatch.delenv("AIOS_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="AIOS_API_KEY"):
@@ -69,7 +69,7 @@ def test_client_from_env_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_client_from_env_succeeds_when_api_key_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    from aios.sdk import client_from_env
+    from aios_sdk import client_from_env
 
     monkeypatch.setenv("AIOS_API_KEY", "test-key")
     monkeypatch.setenv("AIOS_URL", "http://example.test")

@@ -17,7 +17,7 @@ from aios.cli.commands._shared import render_list, render_paginated, render_sing
 from aios.cli.files import PayloadError, load_json_object, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
-from aios.sdk._generated.api.connections import (
+from aios_sdk._generated.api.connections import (
     archive_connection,
     attach_connection,
     bind_chat,
@@ -32,13 +32,13 @@ from aios.sdk._generated.api.connections import (
     unbind_chat,
     unconfigure_connection,
 )
-from aios.sdk._generated.models.bind_chat_request import BindChatRequest
-from aios.sdk._generated.models.connection_attach import ConnectionAttach
-from aios.sdk._generated.models.connection_configure_per_chat import ConnectionConfigurePerChat
-from aios.sdk._generated.models.connection_create import ConnectionCreate
-from aios.sdk._generated.models.connection_set_secrets import ConnectionSetSecrets
-from aios.sdk._generated.models.connection_set_secrets_secrets import ConnectionSetSecretsSecrets
-from aios.sdk._generated.models.list_connections_mode_type_0 import ListConnectionsModeType0
+from aios_sdk._generated.models.bind_chat_request import BindChatRequest
+from aios_sdk._generated.models.connection_attach import ConnectionAttach
+from aios_sdk._generated.models.connection_configure_per_chat import ConnectionConfigurePerChat
+from aios_sdk._generated.models.connection_create import ConnectionCreate
+from aios_sdk._generated.models.connection_set_secrets import ConnectionSetSecrets
+from aios_sdk._generated.models.connection_set_secrets_secrets import ConnectionSetSecretsSecrets
+from aios_sdk._generated.models.list_connections_mode_type_0 import ListConnectionsModeType0
 
 app = typer.Typer(name="connections", help="Manage connector connections.", no_args_is_help=True)
 

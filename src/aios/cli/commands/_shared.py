@@ -13,7 +13,7 @@ from aios.cli.client import AiosApiError, AiosClient
 from aios.cli.output import OutputFormat, print_json, print_note, print_table
 from aios.cli.runtime import CliState, get_state
 from aios.models.common import ErrorResponse
-from aios.sdk._generated.types import Response, Unset
+from aios_sdk._generated.types import Response, Unset
 
 
 def with_client(ctx: typer.Context) -> tuple[CliState, AiosClient]:

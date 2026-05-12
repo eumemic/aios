@@ -11,6 +11,7 @@ members = [
     "aios",
     "aios-connector-http",
     "aios-echo-http",
+    "aios-sdk",
     "aios-signal",
     "aios-telegram",
 ]
@@ -110,6 +111,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiodocker" },
+    { name = "aios-sdk" },
     { name = "alembic" },
     { name = "asyncpg" },
     { name = "fastapi" },
@@ -146,6 +148,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiodocker", specifier = ">=0.23" },
+    { name = "aios-sdk", editable = "packages/aios-sdk" },
     { name = "alembic", specifier = ">=1.13" },
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "fastapi", specifier = ">=0.115" },
@@ -238,6 +241,37 @@ dev = [
     { name = "mypy", specifier = ">=1.13" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.8" },
+]
+
+[[package]]
+name = "aios-sdk"
+version = "0.1.0"
+source = { editable = "packages/aios-sdk" }
+dependencies = [
+    { name = "attrs" },
+    { name = "httpx" },
+    { name = "python-dateutil" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "attrs", specifier = ">=24.0" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "python-dateutil", specifier = ">=2.9" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.13" },
+    { name = "pytest", specifier = ">=8.3" },
     { name = "ruff", specifier = ">=0.8" },
 ]
 

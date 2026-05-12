@@ -182,12 +182,11 @@ class TestSdkAgainstLiveServer:
         aios_env: dict[str, str],
     ) -> None:
         """Pre-seed a pending call → open SSE → confirm we receive it."""
-        from aios_connector_http import AiosClient
-
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
         from aios.services import environments as env_svc
         from aios.services import sessions as sess_svc
+        from aios_connector_http import AiosClient
 
         agent = await agents_service.create_agent(
             harness._pool,

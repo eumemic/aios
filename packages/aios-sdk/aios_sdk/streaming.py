@@ -1,6 +1,6 @@
 """Hand-written SSE consumer for the aios session-event stream.
 
-The generated SDK at ``aios.sdk._generated`` covers JSON request/response
+The generated SDK at ``aios_sdk._generated`` covers JSON request/response
 operations only — the session-event stream endpoint
 (``GET /v1/sessions/{id}/stream``) is annotated
 ``x-codegen.targets: []`` because Server-Sent Events don't fit
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from aios.sdk._generated import AuthenticatedClient
+from aios_sdk._generated import AuthenticatedClient
 
 
 @dataclass(frozen=True, slots=True)

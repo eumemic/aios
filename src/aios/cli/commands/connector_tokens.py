@@ -14,12 +14,12 @@ import typer
 
 from aios.cli.commands._shared import render_list, render_single, unwrap
 from aios.cli.runtime import get_state, run_or_die
-from aios.sdk._generated.api.connector_tokens import (
+from aios_sdk._generated.api.connector_tokens import (
     issue_connector_token,
     list_connector_tokens,
     revoke_connector_token,
 )
-from aios.sdk._generated.models.connector_token_issue import ConnectorTokenIssue
+from aios_sdk._generated.models.connector_token_issue import ConnectorTokenIssue
 
 app = typer.Typer(
     name="connector-tokens", help="Manage connector bearer tokens.", no_args_is_help=True
