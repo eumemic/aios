@@ -40,7 +40,7 @@ _Snapshot = dict[tuple[str, str], str]
 def _sha256_of_content(content: str) -> str:
     """sha256 over UTF-8 bytes of content.
 
-    # mirrors memory_stores._sha256_hex; kept local to avoid cross-layer import
+    Mirrors memory_stores._sha256_hex; kept local to avoid cross-layer import.
     """
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
@@ -228,7 +228,9 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
         if maybe_content is None:
             continue
         content = maybe_content
-        # _mirror_to_host will no-op: bash already wrote the file (content identical).
+        # create_memory calls _mirror_to_host internally, which rewrites the same
+        # bytes bash just wrote. This is redundant I/O but harmless and unavoidable
+        # without adding a skip_mirror parameter to the service layer.
         memory = await memory_service.create_memory(
             pool,
             store_id=store_id,
@@ -270,7 +272,9 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
         if existing is None:
             # Race: was in before snapshot but no DB record (e.g. previously skipped binary).
             # Treat as a new create.
-            # _mirror_to_host will no-op: bash already wrote the file (content identical).
+            # create_memory calls _mirror_to_host internally, which rewrites the same
+            # bytes bash just wrote. This is redundant I/O but harmless and unavoidable
+            # without adding a skip_mirror parameter to the service layer.
             memory = await memory_service.create_memory(
                 pool,
                 store_id=store_id,
@@ -280,7 +284,12 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
             )
             runtime.set_read_sha(session_id, store_id, store_path, memory.content_sha256)
         else:
-            # _mirror_to_host will no-op: bash already wrote the file (content identical).
+            # update_memory calls _mirror_to_host internally, which rewrites the same
+            # bytes bash just wrote. This is redundant I/O but harmless and unavoidable
+            # without adding a skip_mirror parameter to the service layer.
+            # Precondition is always satisfied at this point (we just read the DB sha).
+            # This is intentional: bash is authoritative for what the filesystem contains;
+            # we record the write unconditionally.
             memory = await memory_service.update_memory(
                 pool,
                 store_id=store_id,
@@ -308,7 +317,8 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
         )
         if existing is None:
             continue  # already gone from DB; nothing to do
-        # _mirror_delete_from_host will no-op: bash already deleted the file (missing_ok=True).
+        # delete_memory calls _mirror_delete_from_host internally, which tries to unlink
+        # a file bash already deleted. Since missing_ok=True it is harmless.
         await memory_service.delete_memory(
             pool,
             store_id=store_id,

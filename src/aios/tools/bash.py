@@ -126,7 +126,6 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
     before = snapshot_memory_mounts(session_id)
-    has_mounts = bool(runtime.get_session_memory_mounts(session_id))
     reconcile_warnings: list[str] = []
     exec_raised = False
 
@@ -141,17 +140,17 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
         exec_raised = True
         raise
     finally:
-        # Reconcile whenever there are writable mounts — even when exec raises
-        # (e.g. container death) so that partial writes made before the crash
-        # are captured in the DB.  When exec succeeded, reconcile errors
-        # propagate; when exec already raised, we suppress them so the original
-        # exception is not shadowed.
-        if has_mounts:
-            try:
-                reconcile_warnings = await reconcile_memory_mounts(session_id, before)
-            except Exception:
-                if not exec_raised:
-                    raise  # fail hard when exec succeeded
+        # Reconcile unconditionally — even when exec raises (e.g. container death)
+        # so that partial writes made before the crash are captured in the DB.
+        # reconcile_memory_mounts returns [] immediately when there are no mounts,
+        # so this is a cheap no-op in the common case.
+        # When exec succeeded, reconcile errors propagate; when exec already raised,
+        # we suppress them so the original exception is not shadowed.
+        try:
+            reconcile_warnings = await reconcile_memory_mounts(session_id, before)
+        except Exception:
+            if not exec_raised:
+                raise  # fail hard when exec succeeded
 
     stderr = result.stderr
     if reconcile_warnings:
