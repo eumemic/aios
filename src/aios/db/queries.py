@@ -561,6 +561,8 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
         focal_channel=row["focal_channel"],
+        focal_locked=row["focal_locked"],
+        owner_id=row["owner_id"],
     )
 
 
@@ -658,15 +660,35 @@ async def get_session_focal_channel(conn: asyncpg.Connection[Any], session_id: s
 async def get_session_spawn_origin(conn: asyncpg.Connection[Any], session_id: str) -> str | None:
     """Return the session's ``spawned_from_connection_id`` (or NULL).
 
-    A non-null value indicates a per_chat-spawned session whose focal
-    channel is locked at creation; ``switch_channel`` rejects mutations
-    on those sessions.
+    Retained as the source of truth for per_chat lineage queries until
+    PR 7 (#328) reshapes the connector tables. The ``switch_channel``
+    gate has moved to :func:`is_session_focal_locked`.
     """
     val: str | None = await conn.fetchval(
         "SELECT spawned_from_connection_id FROM sessions WHERE id = $1",
         session_id,
     )
     return val
+
+
+async def is_session_focal_locked(conn: asyncpg.Connection[Any], session_id: str) -> bool:
+    """Return whether the session's focal channel is locked.
+
+    The flag is set at session creation by per_chat-mode spawns (and any
+    future spawner that wants to pin a session to a single channel).
+    ``switch_channel`` rejects any mutation when this returns ``True``.
+
+    Raises :class:`NotFoundError` if the session row doesn't exist —
+    callers in the harness should never reach this with an invalid
+    session id, so a missing row is a real bug, not a permission state.
+    """
+    locked: bool | None = await conn.fetchval(
+        "SELECT focal_locked FROM sessions WHERE id = $1",
+        session_id,
+    )
+    if locked is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    return locked
 
 
 async def set_session_focal_channel(

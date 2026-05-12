@@ -111,14 +111,15 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
     # was misleading weak models into treating the quoted past as new
     # stimulus.
     async with pool.acquire() as conn, conn.transaction():
-        # Per_chat sessions are bound to a single chat by construction —
-        # focal is set at session-spawn time and switching it would
-        # contradict the "one session per chat partner" invariant.
-        if await queries.get_session_spawn_origin(conn, session_id) is not None:
+        # Focal-locked sessions are bound to a single chat by construction
+        # — focal is set at session-spawn time and switching it would
+        # contradict the "one session per chat partner" invariant. Today
+        # the connector subsystem sets ``focal_locked`` on per_chat-mode
+        # spawns (#328).
+        if await queries.is_session_focal_locked(conn, session_id):
             return ToolResult(
                 content=(
-                    "switch_channel is unavailable on this session: it was "
-                    "spawned for a single chat by a per_chat connection."
+                    "switch_channel is unavailable on this session: its focal channel is locked."
                 ),
                 metadata={
                     SWITCH_CHANNEL_METADATA_KEY: {"target": target, "success": False},

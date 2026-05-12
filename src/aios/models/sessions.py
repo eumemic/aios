@@ -194,6 +194,8 @@ class Session(BaseModel):
     updated_at: datetime
     archived_at: datetime | None = None
     focal_channel: str | None = None
+    focal_locked: bool = False
+    owner_id: str | None = None
 
 
 class SessionCloneRequest(BaseModel):
