@@ -40,7 +40,7 @@ with ``aios connections set-secrets <connection_id> --secret bot_token=<new>``.
 ### 3. Issue a connector token
 
 ```bash
-aios connector-tokens issue --connection-id <connection_id> --label <label>
+aios runtime-tokens issue --connection-id <connection_id> --label <label>
 # → prints the plaintext token ONCE
 ```
 
@@ -52,15 +52,16 @@ it you must issue a new one.
 ```bash
 docker run \
     -e AIOS_URL=https://api.aios.example/ \
-    -e AIOS_CONNECTOR_TOKEN=aios_conn_... \
+    -e AIOS_RUNTIME_TOKEN=aios_runtime_... \
     -v /var/lib/aios/workspaces:/var/lib/aios/workspaces:ro \
     aios-telegram:latest
 ```
 
-The container reads ``AIOS_URL`` and ``AIOS_CONNECTOR_TOKEN`` from env,
-calls ``GET /v1/connector-tokens/whoami`` to resolve its connection,
-fetches the bot token via ``GET /v1/connectors/secrets``, and starts
-PTB long-polling.  The workspace bind-mount is required for outbound
+The container reads ``AIOS_URL`` and ``AIOS_RUNTIME_TOKEN`` from env,
+subscribes to ``GET /v1/connectors/connections`` to discover every
+active connection of type ``"telegram"``, fetches each connection's
+bot token via ``GET /v1/connectors/runtime/secrets``, and starts a
+PTB long-polling loop per bot.  The workspace bind-mount is required for outbound
 attachments — paths under ``/workspace/...`` resolve to host files
 under ``$AIOS_WORKSPACE_ROOT/<session_id>/...``.
 
@@ -110,7 +111,7 @@ The connector container reads two env vars (both supplied by
 | Env var | Default | Description |
 |---|---|---|
 | ``AIOS_URL`` | required | Base URL of the aios api |
-| ``AIOS_CONNECTOR_TOKEN`` | required | Bearer token from ``aios connector-tokens issue`` |
+| ``AIOS_RUNTIME_TOKEN`` | required | Bearer token from ``aios runtime-tokens issue`` |
 
 The bot token lives on the connection's encrypted secrets and is not
 read from env.

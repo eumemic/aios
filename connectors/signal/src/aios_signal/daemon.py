@@ -181,19 +181,13 @@ class SignalDaemon:
             f"signal-cli daemon never became ready on {self.host}:{self.port}: {last_error!r}"
         )
 
-    async def discover_bot_uuids(self) -> dict[str, str]:
-        """Return a ``{phone: uuid}`` map for every configured phone.
+    def _read_accounts_index(self) -> dict[str, str]:
+        """Parse signal-cli's on-disk ``accounts.json`` into ``{phone: uuid}``.
 
-        Reads signal-cli's on-disk account index rather than RPCing —
-        ``listAccounts`` works in multi-account daemon mode but
-        accounts.json is the same source of truth and avoids a network
-        round-trip during startup.
-
-        Raises :class:`BotAccountNotFoundError` if any configured phone
-        lacks a registered account.  Operators must register every
-        phone in ``self.phones`` (via ``signal-cli -a <phone> register``)
-        before launching the connector — surfacing the missing entry at
-        startup beats discovering it on first inbound.
+        Used by both :meth:`verify_phone` (single-phone lookup) and
+        :meth:`discover_bot_uuids` (bulk lookup over ``self.phones``).
+        Raises :class:`BotAccountNotFoundError` if the file is missing
+        or malformed.
         """
         import json as _json
 
@@ -216,6 +210,46 @@ class SignalDaemon:
             uuid = entry.get("uuid")
             if number and isinstance(uuid, str) and uuid:
                 registered[number] = uuid
+        return registered
+
+    async def verify_phone(self, phone: str) -> str:
+        """Return the bot UUID for ``phone``, or raise.
+
+        Per-phone counterpart to :meth:`discover_bot_uuids`. The
+        multi-connection :class:`SignalConnector` calls this once per
+        connection at ``serve_connection`` time; if the operator
+        forgot to register the phone via
+        ``signal-cli -a <phone> register``, the resulting
+        :class:`BotAccountNotFoundError` propagates out and crashes
+        the runtime container with the missing-account name in the
+        traceback.
+        """
+        target = phone.strip()
+        registered = self._read_accounts_index()
+        uuid = registered.get(target)
+        if uuid is None:
+            accounts_json = self.config_dir / "data" / "accounts.json"
+            raise BotAccountNotFoundError(
+                f"signal-cli has no account for {target!r} in {accounts_json}. "
+                f"Run `signal-cli -a {target} register` first."
+            )
+        return uuid
+
+    async def discover_bot_uuids(self) -> dict[str, str]:
+        """Return a ``{phone: uuid}`` map for every phone in ``self.phones``.
+
+        Reads signal-cli's on-disk account index rather than RPCing —
+        ``listAccounts`` works in multi-account daemon mode but
+        accounts.json is the same source of truth and avoids a network
+        round-trip during startup.
+
+        Raises :class:`BotAccountNotFoundError` if any configured phone
+        lacks a registered account.  Operators must register every
+        phone in ``self.phones`` (via ``signal-cli -a <phone> register``)
+        before launching the connector — surfacing the missing entry at
+        startup beats discovering it on first inbound.
+        """
+        registered = self._read_accounts_index()
         out: dict[str, str] = {}
         missing: list[str] = []
         for phone in self.phones:
@@ -226,6 +260,7 @@ class SignalDaemon:
             else:
                 out[target] = uuid
         if missing:
+            accounts_json = self.config_dir / "data" / "accounts.json"
             raise BotAccountNotFoundError(
                 f"signal-cli has no account for {missing!r} in {accounts_json}. "
                 f"Run `signal-cli -a <phone> register` for each missing number first."

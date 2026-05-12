@@ -39,7 +39,7 @@ def _make_msg(attachments: tuple[Attachment, ...]) -> InboundMessage:
 def test_fallback_to_config_dir_when_file_field_omitted(tmp_path: Path) -> None:
     """The daemon's JSON-RPC envelope omits ``file`` but ``id``
     points at ``<config_dir>/attachments/<id>``.  Plant the file
-    there and assert the SDK Attachment surfaces with that path."""
+    there and assert the runtime tuple surfaces with the file's bytes."""
     config_dir = tmp_path / "signal-cfg"
     (config_dir / "attachments").mkdir(parents=True)
     expected_path = config_dir / "attachments" / "xyz-789"
@@ -57,13 +57,9 @@ def test_fallback_to_config_dir_when_file_field_omitted(tmp_path: Path) -> None:
         )
     )
 
-    records = connector._build_attachment_dicts(msg)
+    tuples = connector._build_attachment_tuples(msg)
 
-    assert len(records) == 1
-    assert records[0]["host_path"] == str(expected_path)
-    assert records[0]["content_type"] == "image/png"
-    assert records[0]["filename"] == "photo.png"
-    assert records[0]["size"] == len(b"fake-png-bytes")
+    assert tuples == [("photo.png", b"fake-png-bytes", "image/png")]
 
 
 def test_fallback_skips_when_file_missing_on_disk(tmp_path: Path) -> None:
@@ -85,7 +81,7 @@ def test_fallback_skips_when_file_missing_on_disk(tmp_path: Path) -> None:
         )
     )
 
-    assert connector._build_attachment_dicts(msg) == []
+    assert connector._build_attachment_tuples(msg) is None
 
 
 def test_no_id_no_host_path_skips_with_warning(tmp_path: Path) -> None:
@@ -104,7 +100,7 @@ def test_no_id_no_host_path_skips_with_warning(tmp_path: Path) -> None:
         )
     )
 
-    assert connector._build_attachment_dicts(msg) == []
+    assert connector._build_attachment_tuples(msg) is None
 
 
 def test_explicit_host_path_wins_over_id_fallback(tmp_path: Path) -> None:
@@ -127,6 +123,5 @@ def test_explicit_host_path_wins_over_id_fallback(tmp_path: Path) -> None:
         )
     )
 
-    records = connector._build_attachment_dicts(msg)
-    assert len(records) == 1
-    assert records[0]["host_path"] == str(explicit)
+    tuples = connector._build_attachment_tuples(msg)
+    assert tuples == [("photo.png", b"x", "image/png")]

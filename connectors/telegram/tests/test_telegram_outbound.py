@@ -21,6 +21,7 @@ from telegram import ReactionTypeEmoji
 from telegram.constants import ChatAction
 
 from aios_telegram.connector import TelegramConnector
+from tests.conftest import CONNECTION_ID
 
 
 @pytest.fixture
@@ -41,7 +42,7 @@ def bot() -> Any:
 async def test_telegram_typing_default_action(
     connector: TelegramConnector, bot: Any
 ) -> None:
-    result = await connector.telegram_typing(chat_id="123")
+    result = await connector.telegram_typing(chat_id="123", connection_id=CONNECTION_ID)
     assert result == {"status": "ok"}
     bot.send_chat_action.assert_awaited_once_with(chat_id=123, action=ChatAction.TYPING)
 
@@ -49,7 +50,7 @@ async def test_telegram_typing_default_action(
 async def test_telegram_typing_upload_photo_action(
     connector: TelegramConnector, bot: Any
 ) -> None:
-    await connector.telegram_typing(action="upload_photo", chat_id="123")
+    await connector.telegram_typing(action="upload_photo", chat_id="123", connection_id=CONNECTION_ID)
     bot.send_chat_action.assert_awaited_once_with(
         chat_id=123, action=ChatAction.UPLOAD_PHOTO
     )
@@ -61,7 +62,7 @@ async def test_telegram_typing_upload_photo_action(
 async def test_telegram_edit_message_plain(
     connector: TelegramConnector, bot: Any
 ) -> None:
-    result = await connector.telegram_edit_message(message_id=99, text="fixed", chat_id="123")
+    result = await connector.telegram_edit_message(message_id=99, text="fixed", chat_id="123", connection_id=CONNECTION_ID)
     assert result == {"message_id": 99}
     bot.edit_message_text.assert_awaited_once_with(
         chat_id=123, message_id=99, text="fixed", parse_mode=None
@@ -72,7 +73,11 @@ async def test_telegram_edit_message_html_mode_converts_markdown(
     connector: TelegramConnector, bot: Any
 ) -> None:
     await connector.telegram_edit_message(
-        message_id=99, text="**bold**", parse_mode="html", chat_id="123"
+        message_id=99,
+        text="**bold**",
+        parse_mode="html",
+        chat_id="123",
+        connection_id=CONNECTION_ID,
     )
     kwargs = bot.edit_message_text.call_args.kwargs
     assert kwargs["text"] == "<b>bold</b>"
@@ -84,7 +89,7 @@ async def test_telegram_edit_message_inline_returns_status_ok(
 ) -> None:
     """Editing an inline-bot message returns True from PTB; we surface status only."""
     bot.edit_message_text = AsyncMock(return_value=True)
-    result = await connector.telegram_edit_message(message_id=99, text="hi", chat_id="123")
+    result = await connector.telegram_edit_message(message_id=99, text="hi", chat_id="123", connection_id=CONNECTION_ID)
     assert result == {"status": "ok"}
 
 
@@ -94,7 +99,7 @@ async def test_telegram_edit_message_inline_returns_status_ok(
 async def test_telegram_delete_message(
     connector: TelegramConnector, bot: Any
 ) -> None:
-    result = await connector.telegram_delete_message(message_id=50, chat_id="123")
+    result = await connector.telegram_delete_message(message_id=50, chat_id="123", connection_id=CONNECTION_ID)
     assert result == {"status": "ok"}
     bot.delete_message.assert_awaited_once_with(chat_id=123, message_id=50)
 
@@ -105,7 +110,7 @@ async def test_telegram_delete_message(
 async def test_telegram_react_with_emoji(
     connector: TelegramConnector, bot: Any
 ) -> None:
-    result = await connector.telegram_react(message_id=50, emoji="👍", chat_id="123")
+    result = await connector.telegram_react(message_id=50, emoji="👍", chat_id="123", connection_id=CONNECTION_ID)
     assert result == {"status": "ok"}
     kwargs = bot.set_message_reaction.call_args.kwargs
     assert kwargs["chat_id"] == 123
@@ -119,7 +124,7 @@ async def test_telegram_react_with_emoji(
 async def test_telegram_react_clear(
     connector: TelegramConnector, bot: Any
 ) -> None:
-    await connector.telegram_react(message_id=50, emoji=None, chat_id="123")
+    await connector.telegram_react(message_id=50, emoji=None, chat_id="123", connection_id=CONNECTION_ID)
     kwargs = bot.set_message_reaction.call_args.kwargs
     assert kwargs["reaction"] is None
 
@@ -130,7 +135,7 @@ async def test_telegram_react_clear(
 async def test_telegram_send_html_mode_converts_markdown(
     connector: TelegramConnector, bot: Any
 ) -> None:
-    await connector.telegram_send(text="**hi** _there_", parse_mode="html", chat_id="123")
+    await connector.telegram_send(text="**hi** _there_", parse_mode="html", chat_id="123", connection_id=CONNECTION_ID)
     kwargs = bot.send_message.call_args.kwargs
     assert kwargs["text"] == "<b>hi</b> <i>there</i>"
     assert kwargs["parse_mode"] == "HTML"
@@ -139,7 +144,7 @@ async def test_telegram_send_html_mode_converts_markdown(
 async def test_telegram_send_plain_mode_passes_through(
     connector: TelegramConnector, bot: Any
 ) -> None:
-    await connector.telegram_send(text="**not bold**", chat_id="123")
+    await connector.telegram_send(text="**not bold**", chat_id="123", connection_id=CONNECTION_ID)
     kwargs = bot.send_message.call_args.kwargs
     assert kwargs["text"] == "**not bold**"
     assert kwargs["parse_mode"] is None

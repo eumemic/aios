@@ -160,6 +160,17 @@ class HttpConnector:
 
     # ─── lifecycle hooks (override as needed) ────────────────────────
 
+    async def setup(self) -> None:
+        """Override: container-wide init before connection discovery starts.
+
+        Called once inside :meth:`run` after the SDK client opens and
+        after :meth:`_publish_tools_schema`, before the TaskGroup
+        spawning the discovery + tool loops is entered.  Use this for
+        per-container resources whose lifetime spans every connection
+        (e.g. a shared signal-cli daemon serving multiple accounts).
+        Default is a no-op.
+        """
+
     async def serve_connection(
         self, connection_id: str, secrets: dict[str, str]
     ) -> None:
@@ -254,6 +265,7 @@ class HttpConnector:
             self._client = client
             self._answered = await self.load_answered()
             await self._publish_tools_schema()
+            await self.setup()
             try:
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(self._discovery_loop(tg), name="aios-discovery")

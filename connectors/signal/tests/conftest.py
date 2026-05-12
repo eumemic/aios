@@ -10,17 +10,18 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-# HttpConnector reads AIOS_URL / AIOS_CONNECTOR_TOKEN at __init__ time.
+# HttpConnector reads AIOS_URL / AIOS_RUNTIME_TOKEN at __init__ time.
 os.environ.setdefault("AIOS_URL", "http://test")
-os.environ.setdefault("AIOS_CONNECTOR_TOKEN", "aios_conn_test")
+os.environ.setdefault("AIOS_RUNTIME_TOKEN", "aios_runtime_test")
 
 from aios_signal.config import Settings
-from aios_signal.connector import SignalConnector
+from aios_signal.connector import SignalConnector, _SignalConnectionState
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 BOT_UUID = "99999999-8888-7777-6666-555555555555"
 PHONE = "+15550001"
+CONNECTION_ID = "conn_test"
 
 # Sample identities used across send/delete/groups tests.
 ALICE_UUID = "11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -38,31 +39,34 @@ def _load(name: str) -> dict[str, Any]:
 
 @pytest.fixture
 def connector(tmp_path: Path) -> SignalConnector:
-    """SignalConnector with a stubbed daemon — tests drive RPC via the mock.
+    """SignalConnector with a stubbed daemon + one pre-registered connection.
 
-    Phone now lives on the connection's secrets blob (fetched at
-    ``setup()`` time), so tests pre-set ``c._phone`` directly the same
-    way they pre-set ``c._bot_uuid`` — bypassing setup() and the secrets
-    round-trip.
+    The connection state is pre-populated under ``CONNECTION_ID`` so
+    tool tests can call ``dispatch_call`` (or invoke tool methods
+    directly) without running ``serve_connection`` first.  RPC calls
+    are captured on the mock; tests assert the right phone landed in
+    the params.
     """
     cfg = Settings(
         config_dir=tmp_path / "cfg",
         cli_bin="/usr/bin/signal-cli",
     )
     c = SignalConnector(cfg)
-    c._bot_uuid = "bot-uuid"
-    c._phone = PHONE
     c._daemon = type(
         "Daemon",
         (),
         {
             "rpc": type("Rpc", (), {"call": AsyncMock(return_value=None)})(),
-            # signal_create_group refreshes the roster cache via
-            # list_groups post-create; tests that don't care can leave
-            # the default ``[]``.
             "list_groups": AsyncMock(return_value=[]),
+            "verify_phone": AsyncMock(return_value="bot-uuid"),
         },
     )()
+    c._conn_state[CONNECTION_ID] = _SignalConnectionState(
+        phone=PHONE,
+        bot_uuid="bot-uuid",
+        contact_names={},
+        groups=[],
+    )
     return c
 
 

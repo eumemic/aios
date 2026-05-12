@@ -15,16 +15,17 @@ from unittest.mock import MagicMock
 import pytest
 from telegram import Bot, Message
 
-# HttpConnector reads AIOS_URL / AIOS_CONNECTOR_TOKEN at __init__ time, so
+# HttpConnector reads AIOS_URL / AIOS_RUNTIME_TOKEN at __init__ time, so
 # every test that constructs a TelegramConnector needs them in env.  Set
 # at import time rather than in a fixture so module-level connector
 # instances also see them.
 os.environ.setdefault("AIOS_URL", "http://test")
-os.environ.setdefault("AIOS_CONNECTOR_TOKEN", "aios_conn_test")
+os.environ.setdefault("AIOS_RUNTIME_TOKEN", "aios_runtime_test")
 
-from aios_telegram.connector import TelegramConnector
+from aios_telegram.connector import TelegramConnector, _TelegramConnectionState
 
 BOT_ID = 99999999
+CONNECTION_ID = "conn_test"
 
 
 @pytest.fixture
@@ -34,17 +35,25 @@ def bot_id() -> int:
 
 @pytest.fixture
 def connector(bot: Any) -> TelegramConnector:
-    """TelegramConnector wired to the per-test ``bot`` mock.
+    """TelegramConnector with one pre-registered connection wired to ``bot``.
 
     Each test file defines its own ``bot`` fixture stubbing the PTB
-    methods that test exercises (send_message + send_photo for
-    test_telegram_send, send_chat_action + edit_message_text + ... for
-    test_telegram_outbound).  This shared fixture wraps that bot in an
-    Application MagicMock and hands back the connector.
+    methods that test exercises.  The per-connection state is
+    pre-populated under ``CONNECTION_ID`` so tool tests can call the
+    methods directly without running ``serve_connection`` first.
     """
+    import asyncio as _asyncio
+
     c = TelegramConnector()
-    c._application = MagicMock()
-    c._application.bot = bot
+    application = MagicMock()
+    application.bot = bot
+    c._conn_state[CONNECTION_ID] = _TelegramConnectionState(
+        application=application,
+        bot_id=BOT_ID,
+        first_name="TestBot",
+        username="testbot",
+        inbound_queue=_asyncio.Queue(),
+    )
     return c
 
 

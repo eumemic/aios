@@ -26,6 +26,7 @@ from aios_telegram.connector import (
     _build_media_group,
     _classify,
 )
+from tests.conftest import CONNECTION_ID
 
 
 def test_classify_extensions() -> None:
@@ -97,7 +98,7 @@ def bot() -> Any:
 
 
 async def test_telegram_send_text_only(connector: TelegramConnector, bot: Any) -> None:
-    result = await connector.telegram_send(text="hello", chat_id="123")
+    result = await connector.telegram_send(text="hello", chat_id="123", connection_id=CONNECTION_ID)
     assert result == {"message_id": 42}
     bot.send_message.assert_awaited_once_with(chat_id=123, text="hello", parse_mode=None)
 
@@ -109,7 +110,12 @@ async def test_telegram_send_reply_to_message_id_threads_through(
     a native Telegram reply quoting the parent (the client UI shows the
     quoted message inline above your text).
     """
-    await connector.telegram_send(text="me too", chat_id="123", reply_to_message_id=99)
+    await connector.telegram_send(
+        text="me too",
+        chat_id="123",
+        reply_to_message_id=99,
+        connection_id=CONNECTION_ID,
+    )
     kwargs = bot.send_message.call_args.kwargs
     assert kwargs["reply_to_message_id"] == 99
 
@@ -119,7 +125,7 @@ async def test_telegram_send_omits_reply_when_none(connector: TelegramConnector,
     omitted entirely so the call surface stays clean and PTB picks
     its own default.
     """
-    await connector.telegram_send(text="standalone", chat_id="123")
+    await connector.telegram_send(text="standalone", chat_id="123", connection_id=CONNECTION_ID)
     kwargs = bot.send_message.call_args.kwargs
     assert "reply_to_message_id" not in kwargs
 
@@ -132,7 +138,7 @@ async def test_telegram_send_single_photo_routes_to_send_photo(
     photo = tmp_path / "cat.jpg"
     photo.write_bytes(b"x")
 
-    result = await connector.telegram_send(text="look", attachments=[photo], chat_id="123")
+    result = await connector.telegram_send(text="look", attachments=[photo], chat_id="123", connection_id=CONNECTION_ID)
 
     assert result == {"message_id": 43}
     bot.send_photo.assert_awaited_once()
@@ -149,7 +155,7 @@ async def test_telegram_send_single_voice_routes_to_send_voice(
 ) -> None:
     voice = tmp_path / "v.ogg"
     voice.write_bytes(b"x")
-    await connector.telegram_send(text="", attachments=[voice], chat_id="123")
+    await connector.telegram_send(text="", attachments=[voice], chat_id="123", connection_id=CONNECTION_ID)
     bot.send_voice.assert_awaited_once()
 
 
@@ -160,7 +166,7 @@ async def test_telegram_send_single_document_routes_to_send_document(
 ) -> None:
     doc = tmp_path / "report.pdf"
     doc.write_bytes(b"x")
-    await connector.telegram_send(text="", attachments=[doc], chat_id="123")
+    await connector.telegram_send(text="", attachments=[doc], chat_id="123", connection_id=CONNECTION_ID)
     bot.send_document.assert_awaited_once()
 
 
@@ -175,7 +181,10 @@ async def test_telegram_send_multi_media_uses_send_media_group(
     b_path.write_bytes(b"x")
 
     result = await connector.telegram_send(
-        text="two pics", attachments=[a, b_path], chat_id="123"
+        text="two pics",
+        attachments=[a, b_path],
+        chat_id="123",
+        connection_id=CONNECTION_ID,
     )
 
     assert result == {"message_ids": [100, 101]}
@@ -191,7 +200,7 @@ async def test_telegram_send_non_int_chat_id_raises(
     connector: TelegramConnector,
 ) -> None:
     with pytest.raises(ValueError, match="must be an integer"):
-        await connector.telegram_send(text="hi", chat_id="not-a-number")
+        await connector.telegram_send(text="hi", chat_id="not-a-number", connection_id=CONNECTION_ID)
 
 
 # Integration check: feed the SDK dispatch path with a sandbox path
@@ -213,8 +222,14 @@ async def test_telegram_send_dispatch_resolves_sandbox_path(
     (ws / "cat.jpg").write_bytes(b"x")
     connector._client = AsyncMock()
 
+    async def _noop_result(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(connector, "_post_tool_result", _noop_result)
+
     await connector.dispatch_call(
         {
+            "connection_id": CONNECTION_ID,
             "tool_call_id": "c1",
             "session_id": "sess-1",
             "name": "telegram_send",

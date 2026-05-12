@@ -1,31 +1,37 @@
 """Signal connector built on the aios-connector-http SDK.
 
-Single-phone-per-container: each connector container runs its own
-signal-cli daemon serving one registered phone.  Multi-phone
-deployments use multiple containers, each with its own connector
-token.  The phone (account identity) lives on the connection
-record's encrypted secrets and is fetched at ``setup()`` time via
-``self.secrets()``.
+Multi-connection runtime container: one container can serve N
+connections of type ``"signal"``, each bound to a registered phone.
+A single signal-cli daemon (launched without ``-a``) serves every
+phone the operator has registered in ``config_dir/data/accounts.json``;
+the connector class fans inbound envelopes out to per-connection
+serve loops by the daemon's ``params.account`` field.
 
 Lifecycle:
 
-* :meth:`setup` opens :class:`SignalDaemon` (a one-element phones list
-  is the unchanged contract with the daemon module), discovers the
-  bot UUID, and loads contacts + groups.
-* :meth:`serve` drains envelopes from ``daemon.listener``, parses
-  each, and forwards to :meth:`emit_inbound`.
-* :meth:`teardown` closes the daemon.
+* :meth:`setup` spawns the shared :class:`SignalDaemon` and a
+  dispatcher task that consumes ``daemon.listener.messages()`` and
+  routes each ``(account, envelope)`` to a per-account
+  :class:`asyncio.Queue`.
+* :meth:`serve_connection` per connection: verify the phone is
+  registered, resolve its bot UUID, load contacts + groups, then
+  drain the per-account queue and forward each parsed envelope via
+  :meth:`emit_inbound` with the connection_id stamped on it.
+* :meth:`teardown` closes the daemon (which cancels dispatcher +
+  drain tasks transitively).
 
-The two model-facing tools take ``chat_id`` from the call's
-``focal_channel`` automatically — declare it as a kwarg and the SDK
-threads it through.  ``account`` (the bot's signal UUID) is implicit:
-each container is one account, so tool methods read ``self._bot_uuid``
-directly rather than receiving it.
+Tool methods take ``connection_id`` and ``chat_id`` from the call's
+``focal_channel`` / payload automatically — declare them as kwargs
+and the SDK threads them through.  Each method looks up its
+connection's phone + bot UUID + caches via
+``self._conn_state[connection_id]``.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
+import asyncio
+import contextlib
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -51,99 +57,169 @@ from .parse import InboundMessage, build_content_text, is_group_update_envelope,
 log = structlog.get_logger(__name__)
 
 
+@dataclass
+class _SignalConnectionState:
+    """Per-connection state: identity + per-phone roster caches.
+
+    ``contact_names`` / ``groups`` are loaded once at
+    :meth:`SignalConnector.serve_connection` startup; ``groups`` is
+    refreshed on inbound group-update envelopes and on outbound
+    mention-cache-miss in :meth:`SignalConnector._group_member_uuids`.
+    """
+
+    phone: str
+    bot_uuid: str
+    contact_names: dict[str, str] = field(default_factory=dict)
+    groups: list[GroupInfo] = field(default_factory=list)
+
+
 class SignalConnector(HttpConnector):
+    connector = "signal"
+
     def __init__(self, cfg: Settings) -> None:
         super().__init__()
         self._cfg = cfg
         self._daemon: SignalDaemon | None = None
-        self._bot_uuid: str | None = None
-        self._phone: str | None = None
-        self._contact_names: dict[str, str] = {}
-        self._groups: list[GroupInfo] = []
+        self._conn_state: dict[str, _SignalConnectionState] = {}
+        # Per-account inbound queues populated by the dispatcher task;
+        # created on demand the first time the dispatcher sees that
+        # phone OR ``serve_connection`` registers it (whichever comes
+        # first — there's a natural race between an inbound arriving
+        # and the connection's serve loop coming online).
+        self._inbound_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        self._dispatcher_task: asyncio.Task[None] | None = None
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
     async def setup(self) -> None:
-        """Open the signal-cli daemon and load the bot's contacts + groups.
+        """Open the shared signal-cli daemon + start the inbound dispatcher.
 
-        signal-cli takes 5+ seconds to come up; the daemon module's
-        bounded TCP-readiness loop accommodates this.
+        signal-cli serves every account registered in
+        ``config_dir/data/accounts.json``; we don't pass ``-a``.  Each
+        connection's :meth:`serve_connection` verifies its own phone
+        is registered before reading the dispatcher's per-account
+        queue.
         """
-        secrets = await self.secrets()
-        phone = secrets.get("phone")
-        if not phone:
-            raise RuntimeError(
-                "signal connector requires a 'phone' entry in its connection's secrets"
-            )
-        self._phone = phone
         self._daemon = await SignalDaemon(
-            phones=[phone],
+            phones=[],
             config_dir=self._cfg.config_dir,
             cli_bin=self._cfg.cli_bin,
             host=self._cfg.daemon_host,
             port=self._cfg.daemon_port,
         ).__aenter__()
-        bot_uuids = await self._daemon.discover_bot_uuids()
-        self._bot_uuid = bot_uuids[phone]
-        self._contact_names = await self._daemon.list_contacts(account=phone)
-        self._groups = await self._daemon.list_groups(account=phone)
-        log.info(
-            "signal.account.ready",
-            bot_uuid=self._bot_uuid,
-            phone=phone,
-            contacts=len(self._contact_names),
-            groups=len(self._groups),
+        self._dispatcher_task = asyncio.create_task(
+            self._inbound_dispatcher(), name="signal-inbound-dispatcher"
         )
 
     async def teardown(self) -> None:
+        if self._dispatcher_task is not None:
+            self._dispatcher_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._dispatcher_task
+            self._dispatcher_task = None
         if self._daemon is not None:
             await self._daemon.__aexit__(None, None, None)
             self._daemon = None
 
-    async def serve(self) -> None:
-        """Drain envelopes from signal-cli and emit each as an aios inbound.
+    async def serve_connection(
+        self, connection_id: str, secrets: dict[str, str]
+    ) -> None:
+        """Verify the phone, load roster, drain its inbound queue.
 
-        signal-cli stamps every receive notification with ``account``
-        (the phone).  Since this daemon serves only our phone, every
-        notification's account matches ``self._phone``; envelopes for
-        other accounts shouldn't appear, but we filter anyway.
+        ``secrets["phone"]`` is the account this connection owns.
+        Missing → raise (the operator misconfigured this connection's
+        secrets and the container should refuse to serve it; per
+        ``HttpConnector``'s discovery loop the bad connection's
+        ``serve_connection`` task crashes the TaskGroup, which is
+        the failure mode we want).
         """
-        assert self._daemon is not None, "setup() must run before serve()"
-        assert self._bot_uuid is not None
+        phone = secrets.get("phone")
+        if not phone:
+            raise RuntimeError(
+                f"signal connection {connection_id!r} requires a 'phone' entry in its secrets"
+            )
+        assert self._daemon is not None, "setup() must run before serve_connection()"
+        bot_uuid = await self._daemon.verify_phone(phone)
+        contact_names = await self._daemon.list_contacts(account=phone)
+        groups = await self._daemon.list_groups(account=phone)
+        state = _SignalConnectionState(
+            phone=phone,
+            bot_uuid=bot_uuid,
+            contact_names=contact_names,
+            groups=groups,
+        )
+        self._conn_state[connection_id] = state
+        queue = self._queue_for(phone)
+        log.info(
+            "signal.connection.ready",
+            connection_id=connection_id,
+            phone=phone,
+            bot_uuid=bot_uuid,
+            contacts=len(contact_names),
+            groups=len(groups),
+        )
+        try:
+            while True:
+                envelope = await queue.get()
+                await self._handle_envelope(connection_id, state, envelope)
+        finally:
+            self._conn_state.pop(connection_id, None)
+
+    # ── inbound plumbing ──────────────────────────────────────────────
+
+    def _queue_for(self, phone: str) -> asyncio.Queue[dict[str, Any]]:
+        """Per-account inbound queue, created on first use."""
+        if phone not in self._inbound_queues:
+            self._inbound_queues[phone] = asyncio.Queue(maxsize=1000)
+        return self._inbound_queues[phone]
+
+    async def _inbound_dispatcher(self) -> None:
+        """Fan ``daemon.listener.messages()`` out to per-account queues."""
+        assert self._daemon is not None
         async for account, envelope in self._daemon.listener.messages():
-            if account.strip() != self._phone:
-                log.warning("signal.inbound.unknown_account", account=account)
-                continue
-            await self._maybe_refresh_roster(envelope)
-            msg = parse_envelope(envelope, bot_account_uuid=self._bot_uuid)
-            if msg is None:
-                continue
-            if msg.sender_name is None:
-                resolved = self._contact_names.get(msg.sender_uuid)
-                if resolved:
-                    msg = replace(msg, sender_name=resolved)
-            chat_id = encode_chat_id(msg.raw_chat_id, msg.chat_type)
-            sender_payload: dict[str, Any] = {
-                "uuid": msg.sender_uuid,
-                "display_name": msg.sender_name or msg.sender_uuid,
-            }
-            attachments = self._build_attachment_dicts(msg)
-            # Signal envelope timestamps are ms since epoch.  Render as
-            # ISO-8601 UTC so operators reading event logs see absolute
-            # times rather than connector-source unix-ms.
-            timestamp_iso = (
-                datetime.fromtimestamp(msg.timestamp_ms / 1000, tz=UTC).isoformat()
-                if msg.timestamp_ms
-                else None
-            )
-            await self.emit_inbound(
-                chat_id=chat_id,
-                sender=sender_payload,
-                content=build_content_text(msg),
-                attachments=attachments or None,
-                metadata=build_metadata(msg, chat_id, self._bot_uuid),
-                timestamp=timestamp_iso,
-            )
+            queue = self._queue_for(account.strip())
+            try:
+                queue.put_nowait(envelope)
+            except asyncio.QueueFull:
+                log.warning("signal.inbound.queue_full_drop", account=account)
+
+    async def _handle_envelope(
+        self,
+        connection_id: str,
+        state: _SignalConnectionState,
+        envelope: dict[str, Any],
+    ) -> None:
+        await self._maybe_refresh_roster(state, envelope)
+        msg = parse_envelope(envelope, bot_account_uuid=state.bot_uuid)
+        if msg is None:
+            return
+        if msg.sender_name is None:
+            resolved = state.contact_names.get(msg.sender_uuid)
+            if resolved:
+                msg = replace(msg, sender_name=resolved)
+        chat_id = encode_chat_id(msg.raw_chat_id, msg.chat_type)
+        sender_payload: dict[str, Any] = {
+            "uuid": msg.sender_uuid,
+            "display_name": msg.sender_name or msg.sender_uuid,
+        }
+        attachments = self._build_attachment_tuples(msg)
+        # Signal envelope timestamps are ms since epoch.  Render as
+        # ISO-8601 UTC so operators reading event logs see absolute
+        # times rather than connector-source unix-ms.
+        timestamp_iso = (
+            datetime.fromtimestamp(msg.timestamp_ms / 1000, tz=UTC).isoformat()
+            if msg.timestamp_ms
+            else None
+        )
+        await self.emit_inbound(
+            connection_id=connection_id,
+            chat_id=chat_id,
+            sender=sender_payload,
+            content=build_content_text(msg),
+            attachments=attachments,
+            metadata=build_metadata(msg, chat_id, state.bot_uuid),
+            timestamp=timestamp_iso,
+        )
 
     # ── model-facing tools ────────────────────────────────────────────
 
@@ -156,12 +232,13 @@ class SignalConnector(HttpConnector):
         quote_author_uuid: str | None = None,
         edit_timestamp_ms: int | None = None,
         *,
+        connection_id: str,
         chat_id: str,
     ) -> dict[str, Any]:
         """Send a Signal message to your focal chat, optionally with attachments.
 
-        The chat id is taken implicitly from your focal channel — the
-        SDK injects it from the call's ``focal_channel``.
+        Both the connection and chat id are taken implicitly from your
+        focal channel — the SDK injects them from the call payload.
 
         Args:
             text: Message body.  Markdown is converted to Signal text styles.
@@ -173,16 +250,15 @@ class SignalConnector(HttpConnector):
                 quoting.  Must be set together with ``quote_author_uuid``;
                 passing only one raises ``ValueError``.
             quote_author_uuid: ``sender_uuid`` of the message you're quoting.
-            edit_timestamp_ms: ``sent_at_ms`` of a prior message FROM this
+            edit_timestamp_ms: ``sent_at_ms`` of a prior message from this
                 account to rewrite.  The new ``text`` replaces the old one;
                 Signal clients render an "edited" indicator.
         """
-        assert self._daemon is not None
-        assert self._phone is not None
+        state = self._require_state(connection_id)
         host_paths: list[Path] = list(attachments or [])
-        member_uuids = await self._group_member_uuids(chat_id)
+        member_uuids = await self._group_member_uuids(state, chat_id)
         params = _build_send_params(
-            self._phone,
+            state.phone,
             chat_id,
             text,
             attachments=host_paths,
@@ -191,6 +267,7 @@ class SignalConnector(HttpConnector):
             quote_author_uuid=quote_author_uuid,
             edit_timestamp_ms=edit_timestamp_ms,
         )
+        assert self._daemon is not None
         result = await self._daemon.rpc.call("send", params)
         ts = _extract_timestamp(result)
         return {"sent_at_ms": ts} if ts is not None else {"status": "ok"}
@@ -200,6 +277,7 @@ class SignalConnector(HttpConnector):
         self,
         target_timestamp_ms: int,
         *,
+        connection_id: str,
         chat_id: str,
     ) -> dict[str, Any]:
         """Delete-for-everyone a prior message in your focal Signal chat.
@@ -209,9 +287,10 @@ class SignalConnector(HttpConnector):
         Args:
             target_timestamp_ms: The Signal timestamp of the message to delete.
         """
+        state = self._require_state(connection_id)
         assert self._daemon is not None
         params: dict[str, Any] = {
-            "account": self._phone,
+            "account": state.phone,
             "targetTimestamp": target_timestamp_ms,
             **_recipient_params(chat_id),
         }
@@ -224,9 +303,10 @@ class SignalConnector(HttpConnector):
         name: str,
         member_uuids: list[str],
         *,
+        connection_id: str,
         chat_id: str,
     ) -> dict[str, Any]:
-        """Create a new Signal group on this account.
+        """Create a new Signal group on your account.
 
         ``chat_id`` is passed through by the focal protocol but ignored
         here — the new group has no chat_id yet.
@@ -236,16 +316,15 @@ class SignalConnector(HttpConnector):
             member_uuids: ACI UUIDs of the members to add (excluding this
                 account, which is added implicitly as the creator).
         """
+        state = self._require_state(connection_id)
         assert self._daemon is not None
         result = await self._daemon.rpc.call(
             "updateGroup",
-            {"account": self._phone, "name": name, "members": member_uuids},
+            {"account": state.phone, "name": name, "members": member_uuids},
         )
         if not isinstance(result, dict) or not result.get("groupId"):
             raise RuntimeError(f"signal-cli updateGroup did not return a groupId; got {result!r}")
-        # Refresh roster so an immediate signal_send into the new group
-        # can resolve ``@<uuid_prefix>`` mentions against its members.
-        await self._refresh_roster()
+        await self._refresh_roster(state)
         return {"group_id": result["groupId"]}
 
     @tool()
@@ -253,6 +332,7 @@ class SignalConnector(HttpConnector):
         self,
         name: str,
         *,
+        connection_id: str,
         chat_id: str,
     ) -> dict[str, Any]:
         """Rename your focal Signal group.
@@ -262,13 +342,14 @@ class SignalConnector(HttpConnector):
         Args:
             name: The new group name.
         """
+        state = self._require_state(connection_id)
         assert self._daemon is not None
         chat_type, raw_id = decode_chat_id(chat_id)
         if chat_type != "group":
             raise ValueError("signal_rename_group: focal channel is a DM, not a group")
         await self._daemon.rpc.call(
             "updateGroup",
-            {"account": self._phone, "groupId": raw_id, "name": name},
+            {"account": state.phone, "groupId": raw_id, "name": name},
         )
         return {"status": "ok"}
 
@@ -279,6 +360,7 @@ class SignalConnector(HttpConnector):
         target_timestamp_ms: int,
         emoji: str,
         *,
+        connection_id: str,
         chat_id: str,
     ) -> dict[str, Any]:
         """React to a message in your focal Signal chat with an emoji.
@@ -295,60 +377,77 @@ class SignalConnector(HttpConnector):
             target_timestamp_ms: ``timestamp_ms`` of the target message.
             emoji: The reaction emoji.
         """
+        state = self._require_state(connection_id)
         assert self._daemon is not None
-        assert self._phone is not None
         params = _build_react_params(
-            self._phone, chat_id, target_author_uuid, target_timestamp_ms, emoji
+            state.phone, chat_id, target_author_uuid, target_timestamp_ms, emoji
         )
         await self._daemon.rpc.call("sendReaction", params)
         return {"status": "ok"}
 
     # ── helpers ───────────────────────────────────────────────────────
 
-    async def _maybe_refresh_roster(self, envelope: dict[str, Any]) -> None:
+    def _require_state(self, connection_id: str) -> _SignalConnectionState:
+        state = self._conn_state.get(connection_id)
+        if state is None:
+            raise RuntimeError(
+                f"signal connection {connection_id!r} not ready — "
+                "serve_connection has not registered its state"
+            )
+        return state
+
+    async def _maybe_refresh_roster(
+        self, state: _SignalConnectionState, envelope: dict[str, Any]
+    ) -> None:
         if is_group_update_envelope(envelope):
-            await self._refresh_roster()
+            await self._refresh_roster(state)
 
-    async def _refresh_roster(self) -> None:
+    async def _refresh_roster(self, state: _SignalConnectionState) -> None:
         assert self._daemon is not None
-        assert self._phone is not None
-        self._groups = await self._daemon.list_groups(account=self._phone)
+        state.groups = await self._daemon.list_groups(account=state.phone)
 
-    async def _group_member_uuids(self, chat_id: str) -> list[str]:
+    async def _group_member_uuids(
+        self, state: _SignalConnectionState, chat_id: str
+    ) -> list[str]:
         """Member UUIDs of the focal group, or ``[]`` for a DM.
 
         On cache miss, refreshes the roster once via ``listGroups`` and
         re-checks — signal-cli sometimes returns an empty group list at
         boot before the account's group state has finished loading from
         disk; without refresh-on-miss, mentions stay broken for the
-        connector's lifetime.  Refreshing on miss also picks up groups
+        connection's lifetime.  Refreshing on miss also picks up groups
         joined after boot.
         """
         chat_type, _ = decode_chat_id(chat_id)
         if chat_type != "group":
             return []
-        cached = self._lookup_group_members(chat_id)
+        cached = self._lookup_group_members(state, chat_id)
         if cached is not None:
             return cached
-        await self._refresh_roster()
-        return self._lookup_group_members(chat_id) or []
+        await self._refresh_roster(state)
+        return self._lookup_group_members(state, chat_id) or []
 
-    def _lookup_group_members(self, chat_id: str) -> list[str] | None:
-        for group in self._groups:
+    def _lookup_group_members(
+        self, state: _SignalConnectionState, chat_id: str
+    ) -> list[str] | None:
+        for group in state.groups:
             if group.id == chat_id:
                 return list(group.member_uuids)
         return None
 
-    def _build_attachment_dicts(self, msg: InboundMessage) -> list[dict[str, Any]]:
-        """Build wire-shape attachment records, logging+skipping any rejected.
+    def _build_attachment_tuples(
+        self, msg: InboundMessage
+    ) -> list[tuple[str, bytes, str]] | None:
+        """Read each attachment's bytes for multipart upload to aios.
 
         signal-cli's JSON-RPC daemon mode (0.14.x) auto-downloads
         attachment bytes but omits the ``file`` field — we fall back to
         the storage-layout convention ``<config_dir>/attachments/<id>``
-        for envelopes without a ``host_path``.  SDK ``as_params``
-        validates the file exists and is under the 5 MiB cap.
+        for envelopes without a ``host_path``.  SDK :class:`Attachment`'s
+        ``as_params`` validates size + existence; we then read the bytes
+        for the runtime-multipart ``emit_inbound`` shape.
         """
-        out: list[dict[str, Any]] = []
+        out: list[tuple[str, bytes, str]] = []
         for att in msg.attachments:
             host_path = att.host_path
             if host_path is None and att.id is not None:
@@ -360,22 +459,35 @@ class SignalConnector(HttpConnector):
                     filename=att.filename,
                 )
                 continue
+            filename = att.filename or "unnamed"
             candidate = SDKAttachment(
                 host_path=host_path,
-                filename=att.filename or "unnamed",
+                filename=filename,
                 content_type=att.content_type,
             )
             try:
-                out.append(candidate.as_params())
+                candidate.as_params()  # validate (size, existence)
             except AttachmentError as err:
                 log.warning(
                     "signal.inbound.attachment_rejected",
                     host_path=host_path,
-                    filename=att.filename,
+                    filename=filename,
                     error=str(err),
                 )
                 continue
-        return out
+            try:
+                with open(host_path, "rb") as f:
+                    blob = f.read()
+            except OSError as err:
+                log.warning(
+                    "signal.inbound.attachment_read_failed",
+                    host_path=host_path,
+                    filename=filename,
+                    error=str(err),
+                )
+                continue
+            out.append((filename, blob, att.content_type))
+        return out or None
 
 
 def _recipient_params(chat_id: str) -> dict[str, Any]:
