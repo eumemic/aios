@@ -22,28 +22,13 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 
-import httpx
 import pytest
 import uvicorn
 from aios_echo_http import EchoConnector
 
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, last_assistant_content, tool_call
-from tests.helpers.connections import authed_client
-
-
-async def _wait_for_health(url: str, *, deadline_s: float = 5.0) -> None:
-    """Poll the health endpoint until it responds."""
-    deadline = asyncio.get_running_loop().time() + deadline_s
-    async with httpx.AsyncClient() as client:
-        while True:
-            with contextlib.suppress(httpx.HTTPError):
-                r = await client.get(f"{url}/v1/health", timeout=0.5)
-                if r.status_code < 500:
-                    return
-            if asyncio.get_running_loop().time() >= deadline:
-                raise TimeoutError(f"server at {url} not ready in {deadline_s}s")
-            await asyncio.sleep(0.05)
+from tests.helpers.connections import authed_client, issue_runtime_token, wait_for_health
 
 
 @pytest.fixture
@@ -91,7 +76,7 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
         serve_task = asyncio.create_task(_serve())
         try:
             url = f"http://127.0.0.1:{port}"
-            await _wait_for_health(url)
+            await wait_for_health(url)
             yield url
         finally:
             server.should_exit = True
@@ -149,14 +134,6 @@ async def _set_tools(api_key: str, base_url: str, connection_id: str) -> None:
         r.raise_for_status()
 
 
-async def _issue_runtime_token(api_key: str, base_url: str, connector: str) -> str:
-    """Mint a runtime token scoped to ``connector`` type (#328 PR 5)."""
-    async with authed_client(base_url, api_key) as c:
-        r = await c.post("/v1/runtime-tokens", json={"connector": connector})
-        r.raise_for_status()
-        return str(r.json()["plaintext"])
-
-
 @needs_docker
 class TestSdkAgainstLiveServer:
     """Smoke test: SDK SSE round-trip against the uvicorn fixture."""
@@ -199,7 +176,7 @@ class TestSdkAgainstLiveServer:
             harness._pool, connection_id, session_id=session.id
         )
         await _set_tools(api_key, live_server, connection_id)
-        token = await _issue_runtime_token(api_key, live_server, "echo")
+        token = await issue_runtime_token(api_key, live_server, "echo")
 
         # Pre-seed a pending call so backfill has something to deliver.
         await sess_svc.append_event(
@@ -285,7 +262,7 @@ class TestEchoHttpConnectorEndToEnd:
             harness._pool, connection_id, session_id=session.id
         )
         await _set_tools(api_key, live_server, connection_id)
-        token = await _issue_runtime_token(api_key, live_server, "echo")
+        token = await issue_runtime_token(api_key, live_server, "echo")
 
         connector = EchoConnector(base_url=live_server, token=token)
 
@@ -380,7 +357,7 @@ class TestEchoHttpConnectorEndToEnd:
             harness._pool, connection_id, session_id=session.id
         )
         await _set_tools(api_key, live_server, connection_id)
-        token = await _issue_runtime_token(api_key, live_server, "echo")
+        token = await issue_runtime_token(api_key, live_server, "echo")
 
         connector = EchoConnector(base_url=live_server, token=token)
 

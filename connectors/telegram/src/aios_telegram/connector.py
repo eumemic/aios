@@ -394,7 +394,7 @@ class TelegramConnector(HttpConnector):
                 from an earlier ``telegram_send`` response.  Default
                 ``None`` sends as a top-level message in the chat.
         """
-        state = self._require_state(connection_id)
+        state = self._conn_state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
 
         body, ptb_parse_mode = _prepare_text(text, parse_mode)
@@ -455,7 +455,7 @@ class TelegramConnector(HttpConnector):
                 ``"record_voice"`` / ``"upload_voice"`` /
                 ``"upload_document"`` make sense before sending media.
         """
-        state = self._require_state(connection_id)
+        state = self._conn_state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
         await state.application.bot.send_chat_action(
             chat_id=chat_id_int, action=ChatAction(action)
@@ -487,7 +487,7 @@ class TelegramConnector(HttpConnector):
                 ``text`` through the same Markdown→Telegram-HTML
                 converter as ``telegram_send``.
         """
-        state = self._require_state(connection_id)
+        state = self._conn_state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
         body, ptb_parse_mode = _prepare_text(text, parse_mode)
         edited = await state.application.bot.edit_message_text(
@@ -519,7 +519,7 @@ class TelegramConnector(HttpConnector):
         Args:
             message_id: The id of the message to delete.
         """
-        state = self._require_state(connection_id)
+        state = self._conn_state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
         await state.application.bot.delete_message(
             chat_id=chat_id_int, message_id=message_id
@@ -550,7 +550,7 @@ class TelegramConnector(HttpConnector):
                 check there if a glyph you'd expect to work is rejected.
                 Pass ``None`` to clear the bot's existing reaction.
         """
-        state = self._require_state(connection_id)
+        state = self._conn_state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
         reaction = [ReactionTypeEmoji(emoji=emoji)] if emoji is not None else None
         await state.application.bot.set_message_reaction(
@@ -559,17 +559,6 @@ class TelegramConnector(HttpConnector):
             reaction=reaction,
         )
         return {"status": "ok"}
-
-    # ── helpers ───────────────────────────────────────────────────────
-
-    def _require_state(self, connection_id: str) -> _TelegramConnectionState:
-        state = self._conn_state.get(connection_id)
-        if state is None:
-            raise RuntimeError(
-                f"telegram connection {connection_id!r} not ready — "
-                "serve_connection has not registered its state"
-            )
-        return state
 
 
 _PHOTO_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})

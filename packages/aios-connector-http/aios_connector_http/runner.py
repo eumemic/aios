@@ -130,7 +130,7 @@ class _ConnectionState:
 
 
 class HttpConnector:
-    """Base class for runtime-container connectors (#328 PR 5).
+    """Base class for runtime-container connectors.
 
     Set ``connector`` on the subclass to the platform type (e.g.
     ``"telegram"``).  Decorate methods with :func:`tool`.  Override

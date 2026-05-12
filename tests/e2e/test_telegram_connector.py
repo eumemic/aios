@@ -24,31 +24,17 @@ from collections.abc import AsyncIterator
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
 import pytest
 import uvicorn
 
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, last_assistant_content, tool_call
-from tests.helpers.connections import authed_client
+from tests.helpers.connections import authed_client, issue_runtime_token, wait_for_health
 
 BOT_TOKEN_A = "11111:tokenA"
 BOT_TOKEN_B = "22222:tokenB"
 BOT_ID_A = 111
 BOT_ID_B = 222
-
-
-async def _wait_for_health(url: str, *, deadline_s: float = 5.0) -> None:
-    deadline = asyncio.get_running_loop().time() + deadline_s
-    async with httpx.AsyncClient() as client:
-        while True:
-            with contextlib.suppress(httpx.HTTPError):
-                r = await client.get(f"{url}/v1/health", timeout=0.5)
-                if r.status_code < 500:
-                    return
-            if asyncio.get_running_loop().time() >= deadline:
-                raise TimeoutError(f"server at {url} not ready in {deadline_s}s")
-            await asyncio.sleep(0.05)
 
 
 @pytest.fixture
@@ -87,7 +73,7 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
         serve_task = asyncio.create_task(_serve())
         try:
             url = f"http://127.0.0.1:{port}"
-            await _wait_for_health(url)
+            await wait_for_health(url)
             yield url
         finally:
             server.should_exit = True
@@ -128,13 +114,6 @@ async def _set_telegram_tools(api_key: str, base_url: str, connection_id: str) -
             },
         )
         r.raise_for_status()
-
-
-async def _issue_runtime_token(api_key: str, base_url: str, connector: str) -> str:
-    async with authed_client(base_url, api_key) as c:
-        r = await c.post("/v1/runtime-tokens", json={"connector": connector})
-        r.raise_for_status()
-        return str(r.json()["plaintext"])
 
 
 @pytest.fixture
@@ -247,7 +226,7 @@ class TestTelegramMultiConnection:
         await connections_service.attach_connection(harness._pool, conn_b, session_id=session_b.id)
         await _set_telegram_tools(api_key, live_server, conn_a)
         await _set_telegram_tools(api_key, live_server, conn_b)
-        token = await _issue_runtime_token(api_key, live_server, "telegram")
+        token = await issue_runtime_token(api_key, live_server, "telegram")
 
         connector = TelegramConnector()
         connector._base_url = live_server

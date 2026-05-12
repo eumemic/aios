@@ -139,9 +139,14 @@ class SignalConnector(HttpConnector):
                 f"signal connection {connection_id!r} requires a 'phone' entry in its secrets"
             )
         assert self._daemon is not None, "setup() must run before serve_connection()"
-        bot_uuid = await self._daemon.verify_phone(phone)
-        contact_names = await self._daemon.list_contacts(account=phone)
-        groups = await self._daemon.list_groups(account=phone)
+        # Three independent reads against signal-cli: parallelize to cut
+        # connection-bring-up latency by two RPC round-trips.  verify_phone
+        # is a local file read; list_contacts / list_groups are JSON-RPCs.
+        bot_uuid, contact_names, groups = await asyncio.gather(
+            self._daemon.verify_phone(phone),
+            self._daemon.list_contacts(account=phone),
+            self._daemon.list_groups(account=phone),
+        )
         state = _SignalConnectionState(
             phone=phone,
             bot_uuid=bot_uuid,
@@ -202,7 +207,7 @@ class SignalConnector(HttpConnector):
             "uuid": msg.sender_uuid,
             "display_name": msg.sender_name or msg.sender_uuid,
         }
-        attachments = self._build_attachment_tuples(msg)
+        attachments = await self._build_attachment_tuples(msg)
         # Signal envelope timestamps are ms since epoch.  Render as
         # ISO-8601 UTC so operators reading event logs see absolute
         # times rather than connector-source unix-ms.
@@ -254,7 +259,7 @@ class SignalConnector(HttpConnector):
                 account to rewrite.  The new ``text`` replaces the old one;
                 Signal clients render an "edited" indicator.
         """
-        state = self._require_state(connection_id)
+        state = self._conn_state[connection_id]
         host_paths: list[Path] = list(attachments or [])
         member_uuids = await self._group_member_uuids(state, chat_id)
         params = _build_send_params(
@@ -287,7 +292,7 @@ class SignalConnector(HttpConnector):
         Args:
             target_timestamp_ms: The Signal timestamp of the message to delete.
         """
-        state = self._require_state(connection_id)
+        state = self._conn_state[connection_id]
         assert self._daemon is not None
         params: dict[str, Any] = {
             "account": state.phone,
@@ -316,7 +321,7 @@ class SignalConnector(HttpConnector):
             member_uuids: ACI UUIDs of the members to add (excluding this
                 account, which is added implicitly as the creator).
         """
-        state = self._require_state(connection_id)
+        state = self._conn_state[connection_id]
         assert self._daemon is not None
         result = await self._daemon.rpc.call(
             "updateGroup",
@@ -342,7 +347,7 @@ class SignalConnector(HttpConnector):
         Args:
             name: The new group name.
         """
-        state = self._require_state(connection_id)
+        state = self._conn_state[connection_id]
         assert self._daemon is not None
         chat_type, raw_id = decode_chat_id(chat_id)
         if chat_type != "group":
@@ -377,7 +382,7 @@ class SignalConnector(HttpConnector):
             target_timestamp_ms: ``timestamp_ms`` of the target message.
             emoji: The reaction emoji.
         """
-        state = self._require_state(connection_id)
+        state = self._conn_state[connection_id]
         assert self._daemon is not None
         params = _build_react_params(
             state.phone, chat_id, target_author_uuid, target_timestamp_ms, emoji
@@ -386,15 +391,6 @@ class SignalConnector(HttpConnector):
         return {"status": "ok"}
 
     # ── helpers ───────────────────────────────────────────────────────
-
-    def _require_state(self, connection_id: str) -> _SignalConnectionState:
-        state = self._conn_state.get(connection_id)
-        if state is None:
-            raise RuntimeError(
-                f"signal connection {connection_id!r} not ready — "
-                "serve_connection has not registered its state"
-            )
-        return state
 
     async def _maybe_refresh_roster(
         self, state: _SignalConnectionState, envelope: dict[str, Any]
@@ -435,7 +431,7 @@ class SignalConnector(HttpConnector):
                 return list(group.member_uuids)
         return None
 
-    def _build_attachment_tuples(
+    async def _build_attachment_tuples(
         self, msg: InboundMessage
     ) -> list[tuple[str, bytes, str]] | None:
         """Read each attachment's bytes for multipart upload to aios.
@@ -445,9 +441,11 @@ class SignalConnector(HttpConnector):
         the storage-layout convention ``<config_dir>/attachments/<id>``
         for envelopes without a ``host_path``.  SDK :class:`Attachment`'s
         ``as_params`` validates size + existence; we then read the bytes
-        for the runtime-multipart ``emit_inbound`` shape.
+        off the event loop (multi-MiB photo+video attachments would
+        block the inbound dispatcher otherwise) for the runtime-multipart
+        ``emit_inbound`` shape.
         """
-        out: list[tuple[str, bytes, str]] = []
+        validated: list[tuple[str, str, str]] = []
         for att in msg.attachments:
             host_path = att.host_path
             if host_path is None and att.id is not None:
@@ -460,13 +458,12 @@ class SignalConnector(HttpConnector):
                 )
                 continue
             filename = att.filename or "unnamed"
-            candidate = SDKAttachment(
-                host_path=host_path,
-                filename=filename,
-                content_type=att.content_type,
-            )
             try:
-                candidate.as_params()  # validate (size, existence)
+                SDKAttachment(
+                    host_path=host_path,
+                    filename=filename,
+                    content_type=att.content_type,
+                ).as_params()  # validate size + existence
             except AttachmentError as err:
                 log.warning(
                     "signal.inbound.attachment_rejected",
@@ -475,18 +472,28 @@ class SignalConnector(HttpConnector):
                     error=str(err),
                 )
                 continue
-            try:
-                with open(host_path, "rb") as f:
-                    blob = f.read()
-            except OSError as err:
+            validated.append((host_path, filename, att.content_type))
+
+        if not validated:
+            return None
+
+        blobs = await asyncio.gather(
+            *(asyncio.to_thread(Path(p).read_bytes) for p, _, _ in validated),
+            return_exceptions=True,
+        )
+        out: list[tuple[str, bytes, str]] = []
+        for (host_path, filename, content_type), blob in zip(
+            validated, blobs, strict=True
+        ):
+            if isinstance(blob, BaseException):
                 log.warning(
                     "signal.inbound.attachment_read_failed",
                     host_path=host_path,
                     filename=filename,
-                    error=str(err),
+                    error=str(blob),
                 )
                 continue
-            out.append((filename, blob, att.content_type))
+            out.append((filename, blob, content_type))
         return out or None
 
 

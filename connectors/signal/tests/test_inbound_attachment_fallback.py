@@ -36,7 +36,7 @@ def _make_msg(attachments: tuple[Attachment, ...]) -> InboundMessage:
     )
 
 
-def test_fallback_to_config_dir_when_file_field_omitted(tmp_path: Path) -> None:
+async def test_fallback_to_config_dir_when_file_field_omitted(tmp_path: Path) -> None:
     """The daemon's JSON-RPC envelope omits ``file`` but ``id``
     points at ``<config_dir>/attachments/<id>``.  Plant the file
     there and assert the runtime tuple surfaces with the file's bytes."""
@@ -57,12 +57,12 @@ def test_fallback_to_config_dir_when_file_field_omitted(tmp_path: Path) -> None:
         )
     )
 
-    tuples = connector._build_attachment_tuples(msg)
+    tuples = await connector._build_attachment_tuples(msg)
 
     assert tuples == [("photo.png", b"fake-png-bytes", "image/png")]
 
 
-def test_fallback_skips_when_file_missing_on_disk(tmp_path: Path) -> None:
+async def test_fallback_skips_when_file_missing_on_disk(tmp_path: Path) -> None:
     """If the file isn't where we'd expect (signal-cli didn't auto-download
     or the daemon's storage layout differs), as_params rejects and the
     attachment is logged + skipped."""
@@ -81,10 +81,10 @@ def test_fallback_skips_when_file_missing_on_disk(tmp_path: Path) -> None:
         )
     )
 
-    assert connector._build_attachment_tuples(msg) is None
+    assert await connector._build_attachment_tuples(msg) is None
 
 
-def test_no_id_no_host_path_skips_with_warning(tmp_path: Path) -> None:
+async def test_no_id_no_host_path_skips_with_warning(tmp_path: Path) -> None:
     """Records that have neither host_path nor id (shouldn't happen, but
     a malformed daemon could produce it) get logged + skipped, not
     crashed on."""
@@ -100,10 +100,10 @@ def test_no_id_no_host_path_skips_with_warning(tmp_path: Path) -> None:
         )
     )
 
-    assert connector._build_attachment_tuples(msg) is None
+    assert await connector._build_attachment_tuples(msg) is None
 
 
-def test_explicit_host_path_wins_over_id_fallback(tmp_path: Path) -> None:
+async def test_explicit_host_path_wins_over_id_fallback(tmp_path: Path) -> None:
     """When the envelope DOES include ``file`` (legacy CLI shape), the
     explicit host_path is used and the id-based fallback isn't consulted."""
     config_dir = tmp_path / "signal-cfg"
@@ -123,5 +123,5 @@ def test_explicit_host_path_wins_over_id_fallback(tmp_path: Path) -> None:
         )
     )
 
-    tuples = connector._build_attachment_tuples(msg)
+    tuples = await connector._build_attachment_tuples(msg)
     assert tuples == [("photo.png", b"x", "image/png")]
