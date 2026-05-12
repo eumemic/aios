@@ -25,10 +25,10 @@ def _job_rows(app: App) -> list[dict]:
 
 class TestDeferWakeLockValues:
     async def test_lock_is_session_id(self, in_memory_app: App) -> None:
-        from aios.harness.wake import defer_wake
+        from aios.services.wake import defer_wake
 
         pool = MagicMock()
-        with patch("aios.harness.wake.sessions_service.append_event", AsyncMock()):
+        with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
             await defer_wake(pool, "sess_alpha", cause="message")
 
         rows = _job_rows(in_memory_app)
@@ -36,10 +36,10 @@ class TestDeferWakeLockValues:
         assert rows[0]["lock"] == "sess_alpha"
 
     async def test_queueing_lock_is_session_id(self, in_memory_app: App) -> None:
-        from aios.harness.wake import defer_wake
+        from aios.services.wake import defer_wake
 
         pool = MagicMock()
-        with patch("aios.harness.wake.sessions_service.append_event", AsyncMock()):
+        with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
             await defer_wake(pool, "sess_beta", cause="message")
 
         rows = _job_rows(in_memory_app)
@@ -47,10 +47,10 @@ class TestDeferWakeLockValues:
         assert rows[0]["queueing_lock"] == "sess_beta"
 
     async def test_reschedule_defer_wake_uses_session_id_lock(self, in_memory_app: App) -> None:
-        from aios.harness.wake import defer_wake
+        from aios.services.wake import defer_wake
 
         pool = MagicMock()
-        with patch("aios.harness.wake.sessions_service.append_event", AsyncMock()):
+        with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
             await defer_wake(pool, "sess_gamma", cause="reschedule", delay_seconds=2)
 
         rows = _job_rows(in_memory_app)
@@ -67,12 +67,12 @@ class TestDeferWakeCrossSessionIsolation:
         the original bug wouldn't raise — it would surface as fewer
         queued jobs than sessions.
         """
-        from aios.harness.wake import defer_wake
+        from aios.services.wake import defer_wake
 
         pool = MagicMock()
         n = 5
 
-        with patch("aios.harness.wake.sessions_service.append_event", AsyncMock()):
+        with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
             for i in range(n):
                 await defer_wake(pool, f"sess_{i}", cause="message")
 
@@ -87,11 +87,11 @@ class TestDeferWakeCrossSessionIsolation:
         completion + sweep) collapse into a single wake; the queued
         wake handles all events that arrived since it was deferred.
         """
-        from aios.harness.wake import defer_wake
+        from aios.services.wake import defer_wake
 
         pool = MagicMock()
 
-        with patch("aios.harness.wake.sessions_service.append_event", AsyncMock()):
+        with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
             await defer_wake(pool, "sess_x", cause="message")
             await defer_wake(pool, "sess_x", cause="sweep")
             await defer_wake(pool, "sess_x", cause="tool_confirmation")

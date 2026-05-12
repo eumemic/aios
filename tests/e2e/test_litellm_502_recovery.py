@@ -41,7 +41,7 @@ class TestLiteLLMBadGatewayRecovery:
             return harness._pop_response(**kwargs)
 
         # ``loop.py`` binds ``defer_wake`` via ``from … import …``, so the
-        # conftest's patch on ``aios.harness.wake.defer_wake`` doesn't reach
+        # conftest's patch on ``aios.services.wake.defer_wake`` doesn't reach
         # the loop-level call site.  Patch the loop binding directly.
         async def _noop_defer_wake(*args: Any, **kwargs: Any) -> None:
             return None

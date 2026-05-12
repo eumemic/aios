@@ -1,14 +1,12 @@
-"""Inbound message handling for connector containers (#301).
+"""Inbound message handling for connector containers (#301, #318).
 
-The new ``POST /v1/connectors/inbound`` endpoint calls
+The ``POST /v1/connectors/inbound`` endpoint calls
 :func:`handle_inbound`, which wraps the dedup / attachment-staging /
-session-resolution logic that today also lives in
-``connector_supervisor._handle_inbound``.  Both paths share the same
-DB primitives (``try_record_inbound_ack``, ``append_event``,
-``stage_inbound_attachments``) so the supervisor and the new HTTP path
-produce indistinguishable event-log state.
-
-In PR 6 the supervisor is deleted and this is the only inbound path.
+session-resolution logic shared with the peer HTTP-client connector
+architecture introduced in #318. Built on
+:func:`aios.db.queries.try_record_inbound_ack`,
+:func:`aios.services.sessions.append_event`, and
+:func:`aios.services.attachment_staging.stage_inbound_attachments`.
 """
 
 from __future__ import annotations
@@ -21,14 +19,14 @@ import asyncpg
 
 from aios.db import queries
 from aios.errors import NotFoundError
-from aios.harness.attachment_staging import (
-    AttachmentStagingError,
-    stage_inbound_attachments,
-)
-from aios.harness.wake import defer_wake
 from aios.models.connections import Connection
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services import sessions as sessions_service
+from aios.services.attachment_staging import (
+    AttachmentStagingError,
+    stage_inbound_attachments,
+)
+from aios.services.wake import defer_wake
 
 
 class _DedupRollback(Exception):

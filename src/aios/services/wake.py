@@ -18,7 +18,7 @@ from aios.services import sessions as sessions_service
 if TYPE_CHECKING:
     import asyncpg
 
-log = get_logger("aios.harness.wake")
+log = get_logger("aios.services.wake")
 
 
 async def defer_wake(

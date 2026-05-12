@@ -180,29 +180,6 @@ async def unconfigure_connection(pool: asyncpg.Pool[Any], connection_id: str) ->
         return await queries.unconfigure_connection(conn, connection_id)
 
 
-async def validate_account_for_session(
-    pool: asyncpg.Pool[Any],
-    session_id: str,
-    *,
-    connector: str,
-    account: str,
-) -> bool:
-    """Return True iff ``session_id`` is allowed to act on ``(connector, account)``.
-
-    Authorization model: a session may invoke connector tools targeted
-    at accounts that are either bound to it via ``connections.session_id``
-    (single_session attach), spawned it via
-    ``sessions.spawned_from_connection_id`` (per_chat origin), or
-    operator-curated to it via a row in ``connection_chat_sessions``
-    (#215).  Used by the outbound MCP dispatch — see
-    :mod:`aios.harness.tool_dispatch`.
-    """
-    async with pool.acquire() as conn:
-        return await queries.session_authorizes_connector_account(
-            conn, session_id, connector, account
-        )
-
-
 async def bind_chat_to_session(
     pool: asyncpg.Pool[Any],
     connection_id: str,

@@ -28,9 +28,9 @@ if TYPE_CHECKING:
     from aios.models.agents import ToolSpec
 
 from aios.harness.task_registry import TaskRegistry
-from aios.harness.wake import defer_wake
 from aios.logging import get_logger
 from aios.services import sessions as sessions_service
+from aios.services.wake import defer_wake
 
 log = get_logger("aios.harness.sweep")
 

@@ -3,22 +3,20 @@
 ``aios serve worker`` runs :func:`worker_main` in an asyncio event loop. It:
 
 1. Configures structlog
-2. Opens the asyncpg pool
-3. Acquires a Postgres advisory lock to refuse a duplicate worker
+2. Acquires a Postgres advisory lock to refuse a duplicate worker
+3. Opens the asyncpg pool
 4. Constructs the libsodium CryptoBox
 5. Creates the SandboxRegistry, TaskRegistry, and McpSessionPool
-6. Resolves and starts the connector subprocess supervisor
-7. Stashes globals on :mod:`aios.harness.runtime`
-8. Opens the procrastinate connector
-9. Recovers orphaned sessions (re-enqueue stuck ones)
-10. Reaps orphaned sandbox containers
-11. Starts the container idle-TTL reaper
-12. Starts ``app.run_worker_async`` which blocks until SIGTERM/SIGINT
+6. Stashes globals on :mod:`aios.harness.runtime`
+7. Opens the procrastinate connector
+8. Sweeps orphan attachments, reaps stalled jobs, wakes sessions needing inference
+9. Reaps orphaned sandbox containers
+10. Starts the container idle-TTL reaper, periodic sweep, interrupt listener, and liveness heartbeat
+11. Starts ``app.run_worker_async`` which blocks until SIGTERM/SIGINT
 
 Shutdown: procrastinate's signal handlers stop accepting new jobs and wait
 for in-flight jobs. The ``finally`` block then cancels in-flight tool tasks,
-releases all containers, closes MCP sessions, stops the connector
-supervisor, and closes connections.
+releases all containers, closes MCP sessions, and closes connections.
 """
 
 from __future__ import annotations
@@ -55,11 +53,11 @@ from aios.mcp.pool import McpSessionPool
 from aios.sandbox.backends import make_backend
 from aios.sandbox.registry import SandboxRegistry
 
-# 64-bit hash of the lock identifier; stable across processes / restarts.
-# Generated once via Postgres ``hashtextextended('aios_worker_connector_supervisor', 0)``
-# and inlined so we don't burn a query just to compute it.  The text key
-# stays in code as documentation of *what* this number means.
-_WORKER_LOCK_KEY_TEXT = "aios_worker_connector_supervisor"
+# Hashed (via Postgres ``hashtextextended($1, 0)``) into the 64-bit
+# advisory-lock key enforcing the worker-process singleton. The string
+# is a historical magic value, preserved verbatim so a rolling deploy
+# computes the same lock number across old and new workers.
+_WORKER_SINGLETON_LOCK_KEY_TEXT = "aios_worker_connector_supervisor"
 
 # Path the worker touches periodically to signal liveness; the Dockerfile
 # HEALTHCHECK reads its mtime. tmpfs in containers, so touch/unlink are
@@ -83,11 +81,13 @@ async def worker_main() -> None:
     install_exit_diagnostics(log)
 
     # Single-instance guard.  Two `aios worker` processes against the same
-    # database would race for connector subprocess ownership (signal-cli's
-    # local socket, telegram's bot session, etc.) so we refuse to boot a
-    # second worker by holding a session-scoped advisory lock on a
-    # dedicated connection.  Pool-borrowed connections release the lock
-    # on return, so the lock conn is intentionally NOT in the pool.
+    # database would compete over per-worker state that procrastinate's
+    # session-scoped job lock doesn't cover — in-memory sandbox container
+    # stewardship, attachment-staging atomicity, the startup orphan sweep.
+    # So we refuse to boot a second worker by holding a session-scoped
+    # advisory lock on a dedicated connection.  Pool-borrowed connections
+    # release the lock on return, so the lock conn is intentionally NOT
+    # in the pool.
     lock_conn = await _acquire_worker_lock(settings.db_url, log)
     if lock_conn is None:
         sys.exit(1)
@@ -263,14 +263,14 @@ async def _acquire_worker_lock(
         while True:
             held: bool = await conn.fetchval(
                 "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
-                _WORKER_LOCK_KEY_TEXT,
+                _WORKER_SINGLETON_LOCK_KEY_TEXT,
             )
             if held:
                 return conn
             if time.monotonic() >= deadline:
                 log.error(
                     "worker.duplicate_instance_refused",
-                    lock_key=_WORKER_LOCK_KEY_TEXT,
+                    lock_key=_WORKER_SINGLETON_LOCK_KEY_TEXT,
                     waited_seconds=timeout_seconds,
                 )
                 await conn.close()
@@ -278,7 +278,7 @@ async def _acquire_worker_lock(
             if not waiting_logged:
                 log.info(
                     "worker.lock_busy.waiting",
-                    lock_key=_WORKER_LOCK_KEY_TEXT,
+                    lock_key=_WORKER_SINGLETON_LOCK_KEY_TEXT,
                     timeout_seconds=timeout_seconds,
                 )
                 waiting_logged = True

@@ -177,7 +177,8 @@ def attachments_root() -> Path:
     Each session subdir is bind-mounted read-only into its container at
     ``/mnt/attachments`` (see :mod:`aios.sandbox.provisioner`). Inbound
     binary blobs (Signal photos, Telegram voice notes, etc.) are staged
-    here by :mod:`aios.harness.connector_supervisor` before the inbound
+    here by :mod:`aios.services.attachment_staging` from
+    :func:`aios.services.inbound.handle_inbound` before the inbound
     event is appended; the model sees them at stable in-sandbox paths
     of the form ``/mnt/attachments/<connector>/<event-ulid>-<filename>``.
     """

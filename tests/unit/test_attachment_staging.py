@@ -1,4 +1,4 @@
-"""Unit coverage for :mod:`aios.harness.attachment_staging`.
+"""Unit coverage for :mod:`aios.services.attachment_staging`.
 
 Exercises the rename/copy/cleanup state machine with a temp
 ``workspace_root`` so we never touch the production attachments
@@ -16,11 +16,11 @@ from typing import Any
 import pytest
 
 from aios.config import get_settings
-from aios.harness.attachment_staging import (
+from aios.sandbox.volumes import safe_filename
+from aios.services.attachment_staging import (
     AttachmentStagingError,
     stage_inbound_attachments,
 )
-from aios.sandbox.volumes import safe_filename
 
 
 @pytest.fixture

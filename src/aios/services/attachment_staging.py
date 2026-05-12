@@ -1,8 +1,9 @@
 """Inbound attachment staging.
 
-The connector hands the SDK a host path it owns; bytes never
-traverse stdio. The supervisor renames each attachment into a
-stable per-session location before appending the inbound event::
+Connector containers POST inbound messages with attachment host
+paths to ``POST /v1/connectors/inbound``; this module renames each
+attachment into a stable per-session location before the inbound
+event is appended::
 
     <workspace_root>/_attachments/<session_id>/<connector>/<event-ulid>-<filename>
 

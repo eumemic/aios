@@ -112,9 +112,9 @@ class TestDeferWakeExtension:
         from procrastinate.testing import InMemoryConnector
 
         from aios.harness.procrastinate_app import app
-        from aios.harness.wake import defer_wake
+        from aios.services.wake import defer_wake
 
-        monkeypatch.setattr("aios.harness.wake.sessions_service.append_event", AsyncMock())
+        monkeypatch.setattr("aios.services.wake.sessions_service.append_event", AsyncMock())
 
         patched: App
         with app.replace_connector(InMemoryConnector()) as patched:
@@ -145,9 +145,9 @@ class TestDeferWakeExtension:
         from procrastinate.testing import InMemoryConnector
 
         from aios.harness.procrastinate_app import app
-        from aios.harness.wake import defer_wake
+        from aios.services.wake import defer_wake
 
-        monkeypatch.setattr("aios.harness.wake.sessions_service.append_event", AsyncMock())
+        monkeypatch.setattr("aios.services.wake.sessions_service.append_event", AsyncMock())
 
         with app.replace_connector(InMemoryConnector()) as patched:
             await defer_wake(MagicMock(), "sess_x", cause="message")
