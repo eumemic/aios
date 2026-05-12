@@ -49,7 +49,7 @@ baz)` so future-session keyword search finds it.
   Split the content across linked files rather than truncating.
 - Other or repeated errors: surface them in your reply rather than retrying in a loop.
 - Prefer the `write` and `edit` tools for `/mnt/memory/` paths. Bash redirects
-  to mount paths are visible cross-session but bypass the memory version log (see #332).
+  to mount paths are visible cross-session but bypass the memory version log.
 
 **Maintain it.** When you discover a saved memory is wrong or out of date,
 correct it immediately. Stale memory is worse than no memory — it leads future

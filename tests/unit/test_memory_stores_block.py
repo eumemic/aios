@@ -69,23 +69,17 @@ def test_augment_with_empty_base() -> None:
 
 def test_playbook_content_when_stores_attached() -> None:
     block = build_memory_stores_block([_echo("scratch")])
-    # Section headers — load-bearing structure the agent navigates by.
     assert "Check memory first" in block
     assert "Write early, write often" in block
     assert "Never save" in block
-    # Precondition-error recovery: the agent must know the error name and how
-    # to retry; without these the playbook fails its core job.
     assert "memory_precondition_failed_error" in block
     assert "content_sha256" in block
-    # Size cap surfaced so 4xx-on-size has an actionable response.
     assert "100 KiB" in block
-    # Guardrails.
     assert "Secrets" in block
     assert "credentials" in block
-    # Bash durability gap (#332) and tool preference.
     assert "`write`" in block
     assert "`edit`" in block
-    assert "#332" in block
+    assert "version log" in block
 
 
 def test_playbook_appears_after_per_mount_sections() -> None:
