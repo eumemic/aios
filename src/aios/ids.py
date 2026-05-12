@@ -31,6 +31,13 @@ SKILL: Final = "skl"
 CONNECTION: Final = "conn"
 CONNECTOR_TOKEN: Final = "ctok"
 SESSION_TEMPLATE: Final = "stpl"
+# Connector subsystem (#328 PR 2+). The aios_connectors module reads
+# these to mint ids; the PR 2 migration backfills bindings with the
+# same ``bnd_`` prefix verbatim so the two id sources stay coherent.
+BINDING: Final = "bnd"
+RUNTIME: Final = "rt"
+RUNTIME_TOKEN: Final = "rtk"
+ROUTING_RULE: Final = "rule"
 MEMORY_STORE: Final = "memstore"
 MEMORY: Final = "mem"
 MEMORY_VERSION: Final = "memver"
@@ -56,6 +63,10 @@ _PREFIXES: Final = frozenset(
         MEMORY_VERSION,
         GITHUB_REPOSITORY,
         FILE,
+        BINDING,
+        RUNTIME,
+        RUNTIME_TOKEN,
+        ROUTING_RULE,
     }
 )
 

@@ -78,6 +78,15 @@ def test_migration_creates_all_tables(postgres: object) -> None:
                 "sessions",
                 "events",
                 "alembic_version",
+                # Subsystem tables (0033, #328 PR 2/8) live alongside today's
+                # connector tables until the code switch in PR 4.
+                "connectors",
+                "bindings",
+                "chat_sessions",
+                "routing_rules",
+                "runtimes",
+                "runtime_tokens",
+                "inbound_acks",
             } <= names, f"missing tables: {names}"
 
             # Spot-check a few critical indexes
@@ -91,6 +100,8 @@ def test_migration_creates_all_tables(postgres: object) -> None:
                 "events_session_seq_idx",
                 "events_session_message_seq_idx",
                 "events_model_request_end_calibration_idx",
+                "bindings_connection_active_uniq",
+                "runtime_tokens_connector_idx",
             ):
                 assert required in index_names, f"missing index {required}"
         finally:
