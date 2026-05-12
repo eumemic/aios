@@ -1,15 +1,9 @@
 """Runtime-token issue → use → revoke roundtrip (#328 PR 5).
 
-Runtime tokens are the per-connector-type successor to per-connection
-:mod:`connector_tokens`; this file exercises the operator surface (issue,
-list, revoke) plus the runtime-scoped routes that the tokens
-authenticate, asserting:
-
-* A freshly-issued runtime token authenticates the runtime-scoped routes
-  for its connector type.
-* A runtime token does NOT authenticate the legacy per-connection
-  routes (and vice versa) — the two auth deps are isolated.
-* Revoked tokens 401.
+Runtime tokens are the per-connector-type bearer that authenticates the
+``/v1/connectors/runtime/*`` family. This file exercises the operator
+surface (issue, list, revoke) plus the runtime-scoped routes the tokens
+authenticate.
 """
 
 from __future__ import annotations
@@ -26,15 +20,6 @@ async def _issue_runtime_token(http_client: object, connector: str) -> tuple[str
     r.raise_for_status()
     body = r.json()
     return str(body["id"]), str(body["plaintext"])
-
-
-async def _issue_connector_token(http_client: object, connection_id: str) -> str:
-    """Plaintext for a fresh legacy per-connection token."""
-    r = await http_client.post(  # type: ignore[attr-defined]
-        "/v1/connector-tokens", json={"connection_id": connection_id}
-    )
-    r.raise_for_status()
-    return str(r.json()["plaintext"])
 
 
 @needs_docker
@@ -62,50 +47,6 @@ class TestRuntimeTokensRoundtrip:
         items = r.json()["data"]
         revoked = next(t for t in items if t["id"] == token_id)
         assert revoked["revoked_at"] is not None
-
-    async def test_runtime_token_rejects_legacy_route(
-        self,
-        http_client: object,
-        aios_env: dict[str, str],
-    ) -> None:
-        """A runtime bearer must NOT authenticate ``GET /v1/connectors/secrets``
-        (the legacy per-connection route).  The two auth deps share no
-        token namespace; cross-pollination would be a privilege widening."""
-        # Pre-create a connection so the legacy route has something to scope to.
-        r = await http_client.post(  # type: ignore[attr-defined]
-            "/v1/connections", json={"connector": "echo", "account": "acct-iso"}
-        )
-        r.raise_for_status()
-
-        _token_id, plaintext = await _issue_runtime_token(http_client, "echo")
-        # Per-request bearer override so we reuse ``http_client``'s ASGI
-        # transport — building a fresh client against ``base_url`` would
-        # try real DNS resolution on the in-process ``testserver`` host.
-        r = await http_client.get(  # type: ignore[attr-defined]
-            "/v1/connectors/secrets", headers=bearer(plaintext)
-        )
-        assert r.status_code == 401
-
-    async def test_legacy_token_rejects_runtime_route(
-        self,
-        http_client: object,
-        aios_env: dict[str, str],
-    ) -> None:
-        """And the reverse: a per-connection token can't reach the
-        runtime-scoped routes."""
-        r = await http_client.post(  # type: ignore[attr-defined]
-            "/v1/connections", json={"connector": "echo", "account": "acct-iso2"}
-        )
-        r.raise_for_status()
-        connection_id = r.json()["id"]
-        plaintext = await _issue_connector_token(http_client, connection_id)
-
-        r = await http_client.get(  # type: ignore[attr-defined]
-            "/v1/connectors/runtime/secrets",
-            params={"connection_id": connection_id},
-            headers=bearer(plaintext),
-        )
-        assert r.status_code == 401
 
     async def test_revoked_runtime_token_401s(
         self,

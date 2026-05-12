@@ -36,6 +36,8 @@ if __name__ == "__main__":
     asyncio.run(MyConnector().run())
 ```
 
-The connector reads `AIOS_URL` and `AIOS_CONNECTOR_TOKEN` from env to
-locate and authenticate to the aios API. Platform credentials are read
-from connector-specific env vars (e.g. `TELEGRAM_BOT_TOKEN`).
+The runner reads `AIOS_URL` and `AIOS_RUNTIME_TOKEN` from env to locate
+and authenticate to the aios API. The runtime token scopes the
+container to one `connector` type; per-connection platform credentials
+are fetched at runtime via the SDK and live on each connection's
+encrypted-at-rest secrets dict.

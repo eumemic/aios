@@ -34,7 +34,6 @@ from aios.ids import (
     AGENT,
     BINDING,
     CONNECTION,
-    CONNECTOR_TOKEN,
     ENVIRONMENT,
     EVENT,
     GITHUB_REPOSITORY,
@@ -51,7 +50,6 @@ from aios.ids import (
 )
 from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
 from aios.models.connections import Connection
-from aios.models.connector_tokens import ConnectorToken
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
 from aios.models.files import File
@@ -750,22 +748,19 @@ async def set_session_status(
         session_id,
     )
 
-    # Connector-calls fan-out (#301, #328 PR 5): when a session parks in
-    # ``requires_action`` with pending custom_tools, NOTIFY two channels
-    # per bound connection — the legacy per-connection channel (used by
-    # the old per-connection SSE until PR 7 retires it) and the new
-    # per-type channel (used by the runtime SSE that fans out to N
-    # connections of one connector type client-side).  Firing here
-    # (after stop_reason is committed) avoids the race where the SSE
-    # consumer's query checks for ``requires_action`` but stop_reason
-    # hasn't been written yet.
+    # Connector-calls fan-out (#328 PR 5): when a session parks in
+    # ``requires_action`` with pending custom_tools, NOTIFY the per-type
+    # channel for each bound connection's connector type — the runtime
+    # SSE subscribes once per connector type and fans out to its N
+    # connections client-side.  Firing here (after stop_reason is
+    # committed) avoids the race where the SSE consumer's query checks
+    # for ``requires_action`` but stop_reason hasn't been written yet.
     if (
         isinstance(stop_reason, dict)
         and stop_reason.get("type") == "requires_action"
         and stop_reason.get("custom_tools")
     ):
         for cid, connector in await _list_bound_connection_ids(conn, session_id):
-            await conn.execute("SELECT pg_notify($1, $2)", f"connector_calls_{cid}", session_id)
             await conn.execute(
                 "SELECT pg_notify($1, $2)",
                 f"connector_calls_{connector}",
@@ -1507,16 +1502,17 @@ async def append_event(
     return _row_to_event(row)
 
 
-async def list_pending_calls_for_connection(
-    conn: asyncpg.Connection[Any], connection_id: str
+async def list_pending_calls_for_connector(
+    conn: asyncpg.Connection[Any], connector: str
 ) -> list[dict[str, Any]]:
-    """Pending custom tool calls for ``connection_id`` across bound sessions.
+    """Pending custom tool calls across every active connection of ``connector`` type.
 
+    Used by the runtime SSE (#328 PR 5) at subscribe-time backfill.
     A "pending" call is one referenced in some session's
-    ``stop_reason.custom_tools`` array — i.e. the model called a custom
-    tool and the session is parked in ``requires_action``.  For each
-    such session, this returns one row per tool_call whose ``name``
-    matches a tool declared on the connection.
+    ``stop_reason.custom_tools`` array — i.e. the model called a
+    custom tool and the session is parked in ``requires_action``.
+    Each emitted record carries ``connection_id`` so the runtime can
+    fan out to the right per-connection worker.
 
     Output dict shape::
 
@@ -1524,90 +1520,55 @@ async def list_pending_calls_for_connection(
             "session_id": "sess_xxx",
             "tool_call_id": "call_yyy",
             "name": "telegram_send",
-            "arguments": "{...}",        # JSON string from the model
+            "arguments": "{...}",       # JSON string from the model
             "focal_channel": "telegram/bot1/chat123" | None,
+            "connection_id": "conn_zzz",
         }
-
-    Used by the connector calls SSE endpoint at subscribe-time backfill
-    and on each NOTIFY.
     """
-    # Read the connector-type tools schema + the bound sessions, then walk
-    # session state.  Two SELECTs because postgres can't efficiently fan one
-    # query across the lineage union with a jsonb tool-name filter.
-    conn_row = await conn.fetchrow(
-        """
-        SELECT cat.tools_schema AS tools
-          FROM connections c
-          JOIN connectors cat ON cat.connector = c.connector
-         WHERE c.id = $1 AND c.archived_at IS NULL
-        """,
-        connection_id,
+    # The connector type's tool schema gates which tool_calls we surface.
+    cat_row = await conn.fetchrow(
+        "SELECT tools_schema AS tools FROM connectors WHERE connector = $1",
+        connector,
     )
-    if conn_row is None:
+    if cat_row is None:
         return []
-    tools_data = _parse_jsonb(conn_row["tools"])
+    tools_data = _parse_jsonb(cat_row["tools"])
     tool_names = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
     if not tool_names:
         return []
 
     rows = await conn.fetch(
         """
-        SELECT s.id AS session_id, s.stop_reason, s.focal_channel
-          FROM sessions s
-         WHERE s.archived_at IS NULL
+        SELECT c.id AS connection_id,
+               s.id AS session_id, s.stop_reason, s.focal_channel
+          FROM connections c
+          JOIN sessions s
+            ON s.archived_at IS NULL
            AND s.status = 'idle'
            AND s.stop_reason->>'type' = 'requires_action'
-           AND EXISTS (
-               SELECT 1 FROM connections c
-                WHERE c.id = $1 AND c.archived_at IS NULL
-                  AND (EXISTS (SELECT 1 FROM bindings b
-                                WHERE b.connection_id = c.id
-                                  AND b.archived_at IS NULL
-                                  AND b.session_id = s.id)
-                       OR EXISTS (SELECT 1 FROM chat_sessions cs
-                                   WHERE cs.connection_id = c.id
-                                     AND cs.session_id = s.id))
-           )
-        """,
-        connection_id,
-    )
-
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        out.extend(
-            await _pending_calls_for_session(
-                conn,
-                session_id=row["session_id"],
-                stop_reason=_parse_jsonb(row["stop_reason"]),
-                focal_channel=row["focal_channel"],
-                tool_names=tool_names,
-            )
-        )
-    return out
-
-
-async def list_pending_calls_for_connector(
-    conn: asyncpg.Connection[Any], connector: str
-) -> list[dict[str, Any]]:
-    """Pending custom tool calls across every active connection of ``connector`` type.
-
-    Used by the runtime SSE (#328 PR 5) at subscribe-time backfill.
-    Each emitted record carries ``connection_id`` so the runtime can
-    fan out to the right per-connection worker; payload shape is
-    otherwise identical to :func:`list_pending_calls_for_connection`.
-    """
-    rows = await conn.fetch(
-        """
-        SELECT id FROM connections
-         WHERE connector = $1 AND archived_at IS NULL
+           AND (EXISTS (SELECT 1 FROM bindings b
+                         WHERE b.connection_id = c.id
+                           AND b.archived_at IS NULL
+                           AND b.session_id = s.id)
+                OR EXISTS (SELECT 1 FROM chat_sessions cs
+                            WHERE cs.connection_id = c.id
+                              AND cs.session_id = s.id))
+         WHERE c.connector = $1 AND c.archived_at IS NULL
         """,
         connector,
     )
+
     out: list[dict[str, Any]] = []
     for row in rows:
-        cid = row["id"]
-        for call in await list_pending_calls_for_connection(conn, cid):
-            call["connection_id"] = cid
+        calls = await _pending_calls_for_session(
+            conn,
+            session_id=row["session_id"],
+            stop_reason=_parse_jsonb(row["stop_reason"]),
+            focal_channel=row["focal_channel"],
+            tool_names=tool_names,
+        )
+        for call in calls:
+            call["connection_id"] = row["connection_id"]
             out.append(call)
     return out
 
@@ -1723,12 +1684,9 @@ async def _list_bound_connection_ids(
     """``(connection_id, connector)`` pairs for active connections bound to ``session_id``.
 
     Used by :func:`set_session_status` to fan an assistant-tool-calls
-    event out to BOTH the legacy per-connection NOTIFY channel
-    (``connector_calls_<connection_id>``, #301) AND the per-type
-    channel (``connector_calls_<connector>``, #328 PR 5) — the runtime
-    container subscribes to one type-channel for all its connections.
-    Tools-less connections receive notifications and harmlessly no-op
-    them on the consumer side.
+    event out on the per-type ``connector_calls_<connector>`` NOTIFY
+    channel (#328 PR 5).  Tools-less connections receive notifications
+    and harmlessly no-op them on the consumer side.
     """
     rows = await conn.fetch(
         """
@@ -4468,118 +4426,6 @@ async def delete_session_github_repos(conn: asyncpg.Connection[Any], session_id:
         "DELETE FROM session_github_repositories WHERE session_id = $1",
         session_id,
     )
-
-
-# ─── connector_tokens ────────────────────────────────────────────────────────
-#
-# Per-connection scoped bearer tokens (#301).  The DB stores only a
-# SHA-256 hash; plaintext is returned ONCE on issue.  ``resolve_connector_token``
-# is the single auth lookup — it touches ``last_used_at`` in the same
-# round-trip as the hash match so auth costs one DB call, not two.
-
-
-def _row_to_connector_token(row: asyncpg.Record) -> ConnectorToken:
-    return ConnectorToken(
-        id=row["id"],
-        connection_id=row["connection_id"],
-        label=row["label"],
-        created_at=row["created_at"],
-        last_used_at=row["last_used_at"],
-        revoked_at=row["revoked_at"],
-    )
-
-
-async def insert_connector_token(
-    conn: asyncpg.Connection[Any],
-    *,
-    connection_id: str,
-    label: str | None,
-    token_hash: str,
-) -> ConnectorToken:
-    """Insert a new (unrevoked) token bound to ``connection_id``."""
-    row = await conn.fetchrow(
-        """
-        INSERT INTO connector_tokens (id, connection_id, label, token_hash)
-        VALUES ($1, $2, $3, $4)
-        RETURNING *
-        """,
-        make_id(CONNECTOR_TOKEN),
-        connection_id,
-        label,
-        token_hash,
-    )
-    assert row is not None  # INSERT … RETURNING * always returns the row
-    return _row_to_connector_token(row)
-
-
-async def list_connector_tokens(
-    conn: asyncpg.Connection[Any], connection_id: str
-) -> list[ConnectorToken]:
-    """All tokens (revoked included) for a connection, newest first.
-
-    Revoked tokens stay in the listing so operators can audit who issued
-    what when; clients should filter by ``revoked_at IS NULL`` if they
-    only want live tokens.
-    """
-    rows = await conn.fetch(
-        """
-        SELECT * FROM connector_tokens
-         WHERE connection_id = $1
-         ORDER BY created_at DESC
-        """,
-        connection_id,
-    )
-    return [_row_to_connector_token(r) for r in rows]
-
-
-async def revoke_connector_token(conn: asyncpg.Connection[Any], token_id: str) -> ConnectorToken:
-    """Soft-delete a token by setting ``revoked_at = now()``.
-
-    Idempotent: re-revoking is a SELECT (the WHERE filter excludes
-    already-revoked rows from the UPDATE), and the existing
-    ``revoked_at`` is returned unchanged.
-    """
-    row = await conn.fetchrow(
-        """
-        UPDATE connector_tokens
-           SET revoked_at = now()
-         WHERE id = $1 AND revoked_at IS NULL
-        RETURNING *
-        """,
-        token_id,
-    )
-    if row is not None:
-        return _row_to_connector_token(row)
-    # Either the token doesn't exist OR it was already revoked.
-    existing = await conn.fetchrow("SELECT * FROM connector_tokens WHERE id = $1", token_id)
-    if existing is None:
-        raise NotFoundError(
-            f"connector_token {token_id} not found",
-            detail={"id": token_id},
-        )
-    return _row_to_connector_token(existing)
-
-
-async def resolve_connector_token(
-    conn: asyncpg.Connection[Any], token_hash: str
-) -> tuple[str, str] | None:
-    """Look up an unrevoked token by hash; touch ``last_used_at`` in one round-trip.
-
-    Returns ``(token_id, connection_id)`` on hit, ``None`` on miss/revoked.
-    Single ``UPDATE … RETURNING`` so auth is one query — not lookup-then-update.
-    """
-    row = await conn.fetchrow(
-        """
-        UPDATE connector_tokens
-           SET last_used_at = now()
-         WHERE token_hash = $1 AND revoked_at IS NULL
-        RETURNING id, connection_id
-        """,
-        token_hash,
-    )
-    if row is None:
-        return None
-    return (row["id"], row["connection_id"])
 
 
 # ─── connectors (type catalog) ───────────────────────────────────────────────

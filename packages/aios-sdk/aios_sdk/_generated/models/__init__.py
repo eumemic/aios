@@ -15,7 +15,6 @@ from .agent_update_metadata_type_0 import AgentUpdateMetadataType0
 from .agent_version import AgentVersion
 from .agent_version_litellm_extra import AgentVersionLitellmExtra
 from .bind_chat_request import BindChatRequest
-from .body_post_connector_inbound import BodyPostConnectorInbound
 from .body_post_connector_runtime_inbound import BodyPostConnectorRuntimeInbound
 from .body_upload_session_file import BodyUploadSessionFile
 from .bound_chat import BoundChat
@@ -32,13 +31,6 @@ from .connection_set_tools import ConnectionSetTools
 from .connector_inbound_response import ConnectorInboundResponse
 from .connector_secrets import ConnectorSecrets
 from .connector_secrets_secrets import ConnectorSecretsSecrets
-from .connector_token import ConnectorToken
-from .connector_token_issue import ConnectorTokenIssue
-from .connector_token_issued import ConnectorTokenIssued
-from .connector_tool_result_request import ConnectorToolResultRequest
-from .connector_tool_result_request_content_type_1_item import (
-    ConnectorToolResultRequestContentType1Item,
-)
 from .context_response import ContextResponse
 from .context_response_messages_item import ContextResponseMessagesItem
 from .context_response_tools_item import ContextResponseToolsItem
@@ -66,7 +58,6 @@ from .list_response_annotated_union_memory_store_resource_echo_github_repository
 )
 from .list_response_bound_chat import ListResponseBoundChat
 from .list_response_connection import ListResponseConnection
-from .list_response_connector_token import ListResponseConnectorToken
 from .list_response_environment import ListResponseEnvironment
 from .list_response_event import ListResponseEvent
 from .list_response_memory_store import ListResponseMemoryStore
@@ -175,7 +166,6 @@ from .vault_update_metadata_type_0 import VaultUpdateMetadataType0
 from .wait_response import WaitResponse
 from .wait_response_session_status import WaitResponseSessionStatus
 from .wait_response_session_stop_reason_type_0 import WaitResponseSessionStopReasonType0
-from .who_am_i import WhoAmI
 
 __all__ = (
     "Actor",
@@ -193,7 +183,6 @@ __all__ = (
     "AgentVersion",
     "AgentVersionLitellmExtra",
     "BindChatRequest",
-    "BodyPostConnectorInbound",
     "BodyPostConnectorRuntimeInbound",
     "BodyUploadSessionFile",
     "BoundChat",
@@ -210,11 +199,6 @@ __all__ = (
     "ConnectorInboundResponse",
     "ConnectorSecrets",
     "ConnectorSecretsSecrets",
-    "ConnectorToken",
-    "ConnectorTokenIssue",
-    "ConnectorTokenIssued",
-    "ConnectorToolResultRequest",
-    "ConnectorToolResultRequestContentType1Item",
     "ContextResponse",
     "ContextResponseMessagesItem",
     "ContextResponseToolsItem",
@@ -240,7 +224,6 @@ __all__ = (
     "ListResponseAnnotatedUnionMemoryStoreResourceEchoGithubRepositoryResourceEchoFieldInfoannotationNoneTypeRequiredTrueDiscriminatortype",
     "ListResponseBoundChat",
     "ListResponseConnection",
-    "ListResponseConnectorToken",
     "ListResponseEnvironment",
     "ListResponseEvent",
     "ListResponseMemoryStore",
@@ -345,5 +328,4 @@ __all__ = (
     "WaitResponse",
     "WaitResponseSessionStatus",
     "WaitResponseSessionStopReasonType0",
-    "WhoAmI",
 )

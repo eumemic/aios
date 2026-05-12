@@ -96,7 +96,6 @@ def _root(
 from aios.cli.commands import agents as _agents  # noqa: E402
 from aios.cli.commands import chat as _chat  # noqa: E402
 from aios.cli.commands import connections as _connections  # noqa: E402
-from aios.cli.commands import connector_tokens as _connector_tokens  # noqa: E402
 from aios.cli.commands import dev as _dev  # noqa: E402
 from aios.cli.commands import envs as _envs  # noqa: E402
 from aios.cli.commands import ops as _ops  # noqa: E402
@@ -113,7 +112,6 @@ app.add_typer(_session_templates.app, name="session-templates")
 app.add_typer(_skills.app, name="skills")
 app.add_typer(_vaults.app, name="vaults")
 app.add_typer(_connections.app, name="connections")
-app.add_typer(_connector_tokens.app, name="connector-tokens")
 app.add_typer(_envs.app, name="envs")
 app.add_typer(_dev.app, name="dev")
 
