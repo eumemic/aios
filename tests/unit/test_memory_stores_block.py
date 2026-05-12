@@ -65,3 +65,28 @@ def test_augment_appends_with_double_newline() -> None:
 def test_augment_with_empty_base() -> None:
     out = augment_with_memory_stores("", [_echo("a")])
     assert out.startswith("## Memory stores")
+
+
+def test_playbook_content_when_stores_attached() -> None:
+    block = build_memory_stores_block([_echo("scratch")])
+    assert "Check memory first" in block
+    assert "Write early, write often" in block
+    assert "What not to bother saving" in block
+    assert "Never save" in block
+    assert "memory_precondition_failed_error" in block
+    assert "content_sha256" in block
+    assert "100 KiB" in block
+    assert "Secrets" in block
+    assert "credentials" in block
+    assert "`write`" in block
+    assert "`edit`" in block
+    assert "version log" in block
+    assert "Re-check memory when you get stuck" in block
+    assert "instructions on those points" in block
+
+
+def test_playbook_appears_after_per_mount_sections() -> None:
+    block = build_memory_stores_block([_echo("scratch"), _echo("notes")])
+    last_mount = block.rindex("/mnt/memory/notes")
+    playbook_start = block.index("Check memory first")
+    assert last_mount < playbook_start
