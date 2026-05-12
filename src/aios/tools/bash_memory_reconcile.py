@@ -26,7 +26,7 @@ import structlog
 
 from aios.harness import runtime
 from aios.models.memory_stores import MAX_CONTENT_BYTES
-from aios.sandbox.memory_mounts import _MATERIALIZED_MARKER
+from aios.sandbox.memory_mounts import MATERIALIZED_MARKER
 from aios.sandbox.volumes import memory_store_host_dir
 from aios.services import memory_stores as memory_service
 from aios.services.memory_stores import SessionActor
@@ -54,7 +54,7 @@ def _walk_store_files(host_dir: Path) -> list[tuple[Path, str]]:
         if fpath.is_dir():
             continue
         name = fpath.name
-        if name == _MATERIALIZED_MARKER:
+        if name == MATERIALIZED_MARKER:
             continue
         if name.startswith(".tmp."):
             continue
@@ -62,6 +62,37 @@ def _walk_store_files(host_dir: Path) -> list[tuple[Path, str]]:
         store_path = "/" + str(rel).replace("\\", "/")
         results.append((fpath, store_path))
     return results
+
+
+def _snapshot_with_bytes(session_id: str) -> dict[tuple[str, str], bytes]:
+    """Return raw bytes for all eligible files across writable materialized mounts.
+
+    Called internally by both ``snapshot_memory_mounts`` (which only needs
+    sha digests) and ``reconcile_memory_mounts`` (which needs the bytes to
+    avoid a second read).  Returns ``(store_id, store_path) -> raw_bytes``.
+    """
+    echoes = runtime.get_session_memory_mounts(session_id)
+    result: dict[tuple[str, str], bytes] = {}
+
+    for echo in echoes:
+        if echo.access == "read_only":
+            continue
+        store_id = echo.memory_store_id
+        host_dir = memory_store_host_dir(store_id)
+        if not host_dir.exists():
+            continue
+        marker = host_dir / MATERIALIZED_MARKER
+        if not marker.exists():
+            continue
+
+        for fpath, store_path in _walk_store_files(host_dir):
+            try:
+                raw = fpath.read_bytes()
+            except OSError:
+                continue
+            result[(store_id, store_path)] = raw
+
+    return result
 
 
 def snapshot_memory_mounts(session_id: str) -> _Snapshot:
@@ -77,37 +108,62 @@ def snapshot_memory_mounts(session_id: str) -> _Snapshot:
     - Stores whose host directory does not exist yet.
     - Stores that have not been materialized (marker file absent).
     """
-    echoes = runtime.get_session_memory_mounts(session_id)
+    by_bytes = _snapshot_with_bytes(session_id)
     result: _Snapshot = {}
-
-    for echo in echoes:
-        if echo.access == "read_only":
-            continue
-        store_id = echo.memory_store_id
-        host_dir = memory_store_host_dir(store_id)
-        if not host_dir.exists():
-            continue
-        marker = host_dir / _MATERIALIZED_MARKER
-        if not marker.exists():
-            continue
-
-        for fpath, store_path in _walk_store_files(host_dir):
-            try:
-                raw = fpath.read_bytes()
-            except OSError:
-                continue
-            # sha256 over UTF-8 decoded content bytes to stay consistent with
-            # _sha256_hex in memory_stores service (which hashes content.encode("utf-8"))
-            try:
-                content = raw.decode("utf-8")
-                sha = _sha256_of_content(content)
-            except UnicodeDecodeError:
-                # Binary file — still snapshot with raw-bytes sha so we can detect
-                # changes, but reconcile will skip it with a warning.
-                sha = hashlib.sha256(raw).hexdigest()
-            result[(store_id, store_path)] = sha
-
+    for (store_id, store_path), raw in by_bytes.items():
+        try:
+            content = raw.decode("utf-8")
+            sha = _sha256_of_content(content)
+        except UnicodeDecodeError:
+            # Binary file — still snapshot with raw-bytes sha so we can detect
+            # changes, but reconcile will skip it with a warning.
+            sha = hashlib.sha256(raw).hexdigest()
+        result[(store_id, store_path)] = sha
     return result
+
+
+def _read_utf8_content(
+    fpath: Path,
+    store_id: str,
+    store_path: str,
+    warnings: list[str],
+    session_id: str,
+    raw: bytes,
+) -> str | None:
+    """Decode ``raw`` as UTF-8 and enforce the size limit.
+
+    Returns the decoded string on success, or ``None`` if the bytes cannot be
+    decoded or exceed ``MAX_CONTENT_BYTES``.  In the rejection case a human-
+    readable entry is appended to ``warnings`` and a structured warning is
+    emitted via the logger.
+    """
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        warnings.append(
+            f"skipped {store_path!r} in store {store_id}: binary file cannot be stored as memory"
+        )
+        log.warning(
+            "memory_reconcile.binary_file_skipped",
+            session_id=session_id,
+            store_id=store_id,
+            store_path=store_path,
+        )
+        return None
+    if len(raw) > MAX_CONTENT_BYTES:
+        warnings.append(
+            f"skipped {store_path!r} in store {store_id}: "
+            f"file size {len(raw)} exceeds {MAX_CONTENT_BYTES}-byte limit"
+        )
+        log.warning(
+            "memory_reconcile.oversized_file_skipped",
+            session_id=session_id,
+            store_id=store_id,
+            store_path=store_path,
+            size=len(raw),
+        )
+        return None
+    return content
 
 
 async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[str]:
@@ -124,59 +180,52 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
     warning string (collected and returned).  DB errors propagate — they are
     the session's problem to recover from through the normal error channel.
     """
-    after = snapshot_memory_mounts(session_id)
+    # Build after snapshot as (store_id, store_path) -> bytes in one pass.
+    # Using bytes avoids re-reading files during the create/modify loops.
+    after_bytes = _snapshot_with_bytes(session_id)
     pool = runtime.require_pool()
     actor = SessionActor(session_id=session_id)
     warnings: list[str] = []
 
-    # Build store_id -> host_dir mapping for quick lookup during reconcile.
+    # Build store_id -> host_dir from mounts (single iteration, no re-scan).
     echoes = runtime.get_session_memory_mounts(session_id)
     host_dirs: dict[str, Path] = {}
     for echo in echoes:
         if echo.access == "read_only":
             continue
         hd = memory_store_host_dir(echo.memory_store_id)
-        if hd.exists() and (hd / _MATERIALIZED_MARKER).exists():
+        if hd.exists() and (hd / MATERIALIZED_MARKER).exists():
             host_dirs[echo.memory_store_id] = hd
+
+    # Compute sha for after entries (needed for equality checks).
+    after: _Snapshot = {}
+    for (store_id, store_path), raw in after_bytes.items():
+        try:
+            content = raw.decode("utf-8")
+            sha = _sha256_of_content(content)
+        except UnicodeDecodeError:
+            sha = hashlib.sha256(raw).hexdigest()
+        after[(store_id, store_path)] = sha
 
     # ── New files (created by bash) ─────────────────────────────────────────
     for (store_id, store_path), _sha in after.items():
         if (store_id, store_path) in before:
             continue  # will be handled as modify or unchanged
-        host_dir = host_dirs.get(store_id)
-        if host_dir is None:
+        if store_id not in host_dirs:
             continue
-        fpath = host_dir / store_path.lstrip("/")
-        try:
-            raw = fpath.read_bytes()
-        except OSError:
+        raw = after_bytes[(store_id, store_path)]
+        maybe_content = _read_utf8_content(
+            host_dirs[store_id] / store_path.lstrip("/"),
+            store_id,
+            store_path,
+            warnings,
+            session_id,
+            raw,
+        )
+        if maybe_content is None:
             continue
-        try:
-            content = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            warnings.append(
-                f"skipped {store_path!r} in store {store_id}: binary file cannot be stored as memory"
-            )
-            log.warning(
-                "memory_reconcile.binary_file_skipped",
-                session_id=session_id,
-                store_id=store_id,
-                store_path=store_path,
-            )
-            continue
-        if len(raw) > MAX_CONTENT_BYTES:
-            warnings.append(
-                f"skipped {store_path!r} in store {store_id}: "
-                f"file size {len(raw)} exceeds {MAX_CONTENT_BYTES}-byte limit"
-            )
-            log.warning(
-                "memory_reconcile.oversized_file_skipped",
-                session_id=session_id,
-                store_id=store_id,
-                store_path=store_path,
-                size=len(raw),
-            )
-            continue
+        content = maybe_content
+        # _mirror_to_host will no-op: bash already wrote the file (content identical).
         memory = await memory_service.create_memory(
             pool,
             store_id=store_id,
@@ -199,46 +248,27 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
             continue  # deleted — handled below
         if after_sha == before_sha:
             continue  # unchanged
-        host_dir = host_dirs.get(store_id)
-        if host_dir is None:
+        if store_id not in host_dirs:
             continue
-        fpath = host_dir / store_path.lstrip("/")
-        try:
-            raw = fpath.read_bytes()
-        except OSError:
+        raw = after_bytes[(store_id, store_path)]
+        maybe_content = _read_utf8_content(
+            host_dirs[store_id] / store_path.lstrip("/"),
+            store_id,
+            store_path,
+            warnings,
+            session_id,
+            raw,
+        )
+        if maybe_content is None:
             continue
-        try:
-            content = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            warnings.append(
-                f"skipped {store_path!r} in store {store_id}: binary file cannot be stored as memory"
-            )
-            log.warning(
-                "memory_reconcile.binary_file_skipped",
-                session_id=session_id,
-                store_id=store_id,
-                store_path=store_path,
-            )
-            continue
-        if len(raw) > MAX_CONTENT_BYTES:
-            warnings.append(
-                f"skipped {store_path!r} in store {store_id}: "
-                f"file size {len(raw)} exceeds {MAX_CONTENT_BYTES}-byte limit"
-            )
-            log.warning(
-                "memory_reconcile.oversized_file_skipped",
-                session_id=session_id,
-                store_id=store_id,
-                store_path=store_path,
-                size=len(raw),
-            )
-            continue
+        content = maybe_content
         existing = await memory_service.get_memory_by_path(
             pool, store_id, store_path, include_content=False
         )
         if existing is None:
             # Race: was in before snapshot but no DB record (e.g. previously skipped binary).
             # Treat as a new create.
+            # _mirror_to_host will no-op: bash already wrote the file (content identical).
             memory = await memory_service.create_memory(
                 pool,
                 store_id=store_id,
@@ -248,6 +278,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
             )
             runtime.set_read_sha(session_id, store_id, store_path, memory.content_sha256)
         else:
+            # _mirror_to_host will no-op: bash already wrote the file (content identical).
             memory = await memory_service.update_memory(
                 pool,
                 store_id=store_id,
@@ -275,6 +306,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
         )
         if existing is None:
             continue  # already gone from DB; nothing to do
+        # _mirror_delete_from_host will no-op: bash already deleted the file (missing_ok=True).
         await memory_service.delete_memory(
             pool,
             store_id=store_id,

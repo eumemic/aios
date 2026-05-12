@@ -31,7 +31,7 @@ from aios.sandbox.volumes import memory_store_host_dir, memory_store_lock_path
 
 log = get_logger("aios.sandbox.memory_mounts")
 
-_MATERIALIZED_MARKER = ".materialized"
+MATERIALIZED_MARKER = ".materialized"
 
 
 async def materialize_store_to_host(
@@ -48,7 +48,7 @@ async def materialize_store_to_host(
     not by re-materialization.
     """
     host_dir = memory_store_host_dir(store_id)
-    marker = host_dir / _MATERIALIZED_MARKER
+    marker = host_dir / MATERIALIZED_MARKER
     if marker.exists():
         return
 
