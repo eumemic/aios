@@ -1,21 +1,12 @@
 """Pluggable per-session tool source for the harness prelude.
 
-The per-step prelude (``aios.harness.step_context.compute_step_prelude``)
-needs to merge session-scoped custom tools into the model's tool list
-every turn. Today those tools come from the connector-area
-``services.connections.list_tools_for_session`` query directly. After
-#328 PR 4 they'll come from the new ``aios_connectors`` subsystem
-instead.
-
-The point of this Protocol is to keep core code from importing
-subsystem code: core calls against ``ToolProvider``; the subsystem
-registers an implementation at worker startup via
-``aios.harness.runtime.tool_provider``. The arrow only ever points
-core → interface ← subsystem.
-
-PR 3 just lands the contract. The slot in ``runtime`` is reserved but
-nothing registers against it yet; the rewire of ``step_context.py`` is
-PR 4's job, atomically with the subsystem impl.
+The per-step prelude in ``aios.harness.step_context`` needs to merge
+session-scoped custom tools into the model's tool list every turn.
+Defining the source as a Protocol keeps core code from importing the
+subsystem that provides those tools: core calls against
+``ToolProvider``, the subsystem registers an implementation at worker
+startup via ``aios.harness.runtime.tool_provider``. The dependency
+arrow only ever points core → interface ← subsystem.
 """
 
 from __future__ import annotations

@@ -657,20 +657,6 @@ async def get_session_focal_channel(conn: asyncpg.Connection[Any], session_id: s
     return focal
 
 
-async def get_session_spawn_origin(conn: asyncpg.Connection[Any], session_id: str) -> str | None:
-    """Return the session's ``spawned_from_connection_id`` (or NULL).
-
-    Retained as the source of truth for per_chat lineage queries until
-    PR 7 (#328) reshapes the connector tables. The ``switch_channel``
-    gate has moved to :func:`is_session_focal_locked`.
-    """
-    val: str | None = await conn.fetchval(
-        "SELECT spawned_from_connection_id FROM sessions WHERE id = $1",
-        session_id,
-    )
-    return val
-
-
 async def is_session_focal_locked(conn: asyncpg.Connection[Any], session_id: str) -> bool:
     """Return whether the session's focal channel is locked.
 
