@@ -77,6 +77,24 @@ However, the timestamp *does* arrive on the receive stream as a self-echo envelo
 
 Fix: `signal_send` for groups pre-registers an `asyncio.Future` in a per-`(phone, chat_id)` FIFO before issuing the RPC, then waits up to 2s for the matching echo.  `_maybe_resolve_self_echo` runs in `_handle_envelope`'s `msg is None` branch, pops the head future, sets the timestamp.  On timeout we degrade to `{"status": "ok"}` so a slow network doesn't hang the tool call.  DMs untouched — signal-cli already returns the timestamp inline.  Locked with seven tests covering match / prune / non-bot-sender / DM-skip + signal_send end-to-end (echo → sent_at_ms, timeout → status:ok, DM skips registration entirely).
 
+### Open — surfaced post-fixup
+
+**12. Per-connection `serve_connection` failure crashes the entire connector container**
+
+Adjacent to #4's failure-isolation theme but on the bring-up path rather than the inbound path.  When the discovery SSE emits `added` for a connection whose `serve_connection` raises — most commonly when signal-cli has no `accounts.json` entry for the phone, so `daemon.verify_phone` raises `BotAccountNotFoundError` — the exception propagates out of the spawned task into the runner's `TaskGroup`, which cancels every sibling worker (every healthy connection of this connector type) and exits the container.
+
+Concretely: an operator types a typo in a new signal connection's `phone` secret, or attaches a connection for a phone they haven't yet `signal-cli register`-ed.  The discovery loop sees the new row, spawns `serve_connection(connection_id, secrets)`, the task raises before it ever drains its inbound queue, and the TaskGroup tears down the whole process.  Every other connection in that container loses its in-flight inbound queue.
+
+This was theoretical during PR 8 smoke (we registered both phones before attaching) but surfaced in the post-fix architecture pass: it's the same "one bad envelope shouldn't kill every other connection" principle as #4, applied to connection lifecycle instead of inbound dispatch.
+
+Recommended scope:
+
+- Wrap each per-connection task body in a `try/except` that catches non-`CancelledError` exceptions, logs `signal.connection.bringup_failed` with the connection_id + error class + traceback, and ends the task cleanly.
+- Optionally: POST a `connector_error` event back to aios so the api can mark the connection's binding as errored, surfacing the bad connection to operators via the existing connection-status reads instead of via container restart logs.
+- Keep `CancelledError` propagating so `_on_connection_removed` continues to work (the runner cancels the task on `removed` events).
+
+The same wrap applies to `telegram_connector.serve_connection` — a bad bot token currently has the same blast radius.
+
 ### Pre-existing, not stack-related
 
 **7. ARM64 sandbox image missing** (`ghcr.io/eumemic/aios-sandbox:latest` has no `linux/arm64/v8` manifest)
@@ -146,7 +164,8 @@ Both qwen3.6-flash and Haiku 4.5 frequently emitted `INTERNAL_MONOLOGUE_NOT_SEEN
 | 8 | Scrub orphaned `mcp_toolset` entries on pre-PR-5 agents | data migration or CLI | open (separate one-off) |
 | 10 | Daemon process-group ownership + SIGTERM trap | small fix | ✅ `5f6a0e5` |
 | 11 | Telegram attachment Path → bytes for PTB upload | small fix | ✅ `02b4ac5` |
+| 12 | Per-connection `serve_connection` failure isolation (same shape as #4 but for bring-up) | small fix | open (separate PR) |
 | (env) | `aios dev bootstrap` discoverability / harder-to-source-wrong-.env | DX | open |
 | (env) | Runtime token connection-subset scope | feature | open |
 
-All numbered code-path findings (4, 5, 6, 10, 11) landed in the `refactor/328-fixup-smoke` follow-up branch.  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene unrelated to PR 8's scope.  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.
+All numbered code-path findings (4, 5, 6, 10, 11) landed in the `refactor/328-fixup-smoke` follow-up branch.  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene unrelated to PR 8's scope.  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.  #12 is a follow-up surfaced when reasoning about the post-fixup architecture and deserves its own targeted PR.
