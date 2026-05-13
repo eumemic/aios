@@ -373,6 +373,14 @@ class TestSignalMultiConnection:
         connector_task = asyncio.create_task(connector.run())
         rpc_call: AsyncMock = mocked_signal_daemon["rpc_call"]
         try:
+            # Let discovery + serve_connection populate ``_conn_state``
+            # before driving the tool call — without this, the calls-SSE
+            # backfill can dispatch ``signal_send`` before
+            # ``serve_connection`` populates ``_conn_state`` and the
+            # handler ``KeyError``s on the connection_id (CI loses this
+            # race; local dev usually wins it).
+            await asyncio.sleep(0.5)
+
             await harness.run_step(session_a.id)
 
             async def _signal_send_called() -> bool:
