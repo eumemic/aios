@@ -95,6 +95,25 @@ Recommended scope:
 
 The same wrap applies to `telegram_connector.serve_connection` — a bad bot token currently has the same blast radius.
 
+**13. SDK lifecycle hardening: duplication between signal + telegram that should live on `HttpConnector`**
+
+Surfaced when reading the post-fixup connectors side-by-side.  Three of the smoke fixes (#4 4xx drop-and-continue, #10 SIGTERM trap, the recommended #12 per-connection failure isolation) landed in signal-specific code paths, which means **telegram inherits none of the hardening**.  Same footguns, same blast radius — `pkill -f aios_telegram` leaves the PTB updater's `getUpdates` long-poll holding the bot token against Telegram's API until the dead poll times out, and a 422 on any single inbound envelope still tears down the whole telegram container.
+
+Per-connector duplication that should be hoisted to the SDK base:
+
+| Item | Currently | Should be |
+|---|---|---|
+| SIGINT / SIGTERM trap + cancel-on-stop helper | `aios_signal/__main__.py` (telegram is unhardened) | `HttpConnector.run_until_stopped()` or a `runner.serve(connector)` wrapper; both `__main__.py` files collapse to one line |
+| 4xx drop-and-continue on `emit_inbound` | `aios_signal/connector.py:_handle_envelope` (telegram is unhardened) | `HttpConnector.emit_inbound` directly, with a `raise_on_4xx=True` escape hatch for callers that genuinely want fatal-on-4xx |
+| Per-connection `serve_connection` failure isolation (#12) | nowhere yet — both connectors crash the container on a bad bring-up | `HttpConnector._on_connection_added`'s task wrapper catches non-`CancelledError`, logs structured failure, optionally POSTs a `connector_error` back to aios |
+| `_conn_state` dict + finally-pop boilerplate; focal channel `f"{connector}/{account}/{chat_id}"` string | reimplemented inline in every connector | generic state slot via `set_connection_state` / `get_connection_state`; `self.focal_channel(account, chat_id)` helper |
+
+Correctly per-connector (do NOT hoist): `event_id` construction (platform-specific identity tuples), `build_metadata` content (signal has mentions / quote / reaction; telegram has message_id / old_emojis / new_emojis), inbound parsing, long-lived per-platform plumbing (signal-cli daemon vs PTB Application), tool method implementations.
+
+After the refactor: telegram inherits #4 / #10 / #12 hardening for free; the next connector author gets the safety rails by default; each connector shrinks by ~30-50 LOC.
+
+Note: changing `emit_inbound`'s default to swallow 4xx is a behavior change.  Either (a) signal removes its wrap when the SDK gets one, or (b) the SDK adds the wrap as opt-in (`raise_on_4xx=False` default, but with a strict mode for callers that depend on the raise).  Sign-off needed on the default before landing.
+
 ### Pre-existing, not stack-related
 
 **7. ARM64 sandbox image missing** (`ghcr.io/eumemic/aios-sandbox:latest` has no `linux/arm64/v8` manifest)
@@ -165,7 +184,8 @@ Both qwen3.6-flash and Haiku 4.5 frequently emitted `INTERNAL_MONOLOGUE_NOT_SEEN
 | 10 | Daemon process-group ownership + SIGTERM trap | small fix | ✅ `5f6a0e5` |
 | 11 | Telegram attachment Path → bytes for PTB upload | small fix | ✅ `02b4ac5` |
 | 12 | Per-connection `serve_connection` failure isolation (same shape as #4 but for bring-up) | small fix | open (separate PR) |
+| 13 | SDK lifecycle hardening — hoist #4 / #10 / #12 + state/focal-channel boilerplate onto `HttpConnector` so telegram inherits the safety rails | medium refactor | open (separate PR) |
 | (env) | `aios dev bootstrap` discoverability / harder-to-source-wrong-.env | DX | open |
 | (env) | Runtime token connection-subset scope | feature | open |
 
-All numbered code-path findings (4, 5, 6, 10, 11) landed in the `refactor/328-fixup-smoke` follow-up branch.  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene unrelated to PR 8's scope.  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.  #12 is a follow-up surfaced when reasoning about the post-fixup architecture and deserves its own targeted PR.
+All numbered code-path findings (4, 5, 6, 10, 11) landed in the `refactor/328-fixup-smoke` follow-up branch.  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene unrelated to PR 8's scope.  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.  #12 + #13 are architectural follow-ups surfaced when reasoning about the post-fixup connector boundary and deserve their own targeted PRs.
