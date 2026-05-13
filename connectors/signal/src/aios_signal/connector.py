@@ -514,6 +514,11 @@ class SignalConnector(HttpConnector):
         signal-cli's send blocks until the network round-trip
         completes, so echoes to the same chat arrive in send order.
 
+        Edits use a different envelope shape — ``editMessage.dataMessage``
+        nested one level deeper, with the new edit's timestamp at the
+        envelope root.  We accept both so an edit-send-then-edit-again
+        flow (model wants the new timestamp for chained edits) works.
+
         DM echoes are silently dropped — signal-cli's DM send returns
         the timestamp inline, so the future-registration path in
         ``signal_send`` is groups-only.
@@ -522,7 +527,11 @@ class SignalConnector(HttpConnector):
             return
         data = envelope.get("dataMessage")
         if not isinstance(data, dict):
-            return
+            edit = envelope.get("editMessage")
+            if isinstance(edit, dict):
+                data = edit.get("dataMessage")
+            if not isinstance(data, dict):
+                return
         group_info = data.get("groupInfo")
         if not isinstance(group_info, dict):
             return

@@ -121,6 +121,41 @@ async def test_maybe_resolve_self_echo_ignores_non_bot_sender(
     assert not fut.done()
 
 
+async def test_maybe_resolve_self_echo_handles_edit_envelope(
+    connector: SignalConnector,
+) -> None:
+    """Edits arrive on the receive stream wrapped as
+    ``envelope.editMessage.dataMessage`` (nested one level deeper than
+    a normal send), with the new edit timestamp at the envelope root.
+    Match should still fire so chained edits get their new sent_at_ms
+    back from the tool result."""
+    fut: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    connector._pending_echoes[(PHONE, GROUP_CHAT_ID)] = deque([fut])
+
+    # Build a synthetic edit envelope matching the shape captured from
+    # signal-cli 0.14.2 during PR 8 smoke: top-level ``editMessage``
+    # with the original message's ``targetSentTimestamp`` and a nested
+    # ``dataMessage`` carrying the new content + groupInfo.
+    edit_envelope: dict[str, Any] = {
+        "source": BOT_UUID,
+        "sourceUuid": BOT_UUID,
+        "timestamp": 555,
+        "editMessage": {
+            "targetSentTimestamp": 111,
+            "dataMessage": {
+                "timestamp": 555,
+                "message": "✅ Edited",
+                "groupInfo": {"groupId": GROUP_RAW_ID, "groupName": "QA"},
+            },
+        },
+    }
+
+    connector._maybe_resolve_self_echo(_state(), edit_envelope)
+
+    assert fut.done()
+    assert fut.result() == 555
+
+
 async def test_maybe_resolve_self_echo_ignores_dm_echo(connector: SignalConnector) -> None:
     """DM self-echoes carry no ``groupInfo``; the DM send path is
     already getting its timestamp from the RPC return, so we skip."""
