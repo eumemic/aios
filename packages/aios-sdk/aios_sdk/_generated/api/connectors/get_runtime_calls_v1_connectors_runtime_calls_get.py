@@ -60,15 +60,25 @@ def sync_detailed(
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
 ) -> Response[Any | HTTPValidationError]:
-    """Get Runtime Calls
+    r"""Get Runtime Calls
 
      SSE stream of pending custom tool calls across every active
     connection of the caller's connector type.
 
     Backfills at subscribe time, then tails ``connector_calls_<connector>``.
-    Each event is keyed ``call`` with the same payload as
-    :func:`get_calls` plus an explicit ``connection_id`` field so the
-    runtime container can fan out to its per-connection workers.
+    Each event is keyed ``call`` with a JSON body shaped::
+
+        {
+            \"session_id\": \"...\",
+            \"tool_call_id\": \"...\",
+            \"name\": \"...\",
+            \"arguments\": \"...\",       // JSON string from the model
+            \"focal_channel\": \"...\",
+            \"connection_id\": \"...\"
+        }
+
+    The ``connection_id`` field lets the runtime container fan out to
+    its per-connection workers client-side.
 
     Args:
         authorization (None | str | Unset):
@@ -97,15 +107,25 @@ def sync(
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
 ) -> Any | HTTPValidationError | None:
-    """Get Runtime Calls
+    r"""Get Runtime Calls
 
      SSE stream of pending custom tool calls across every active
     connection of the caller's connector type.
 
     Backfills at subscribe time, then tails ``connector_calls_<connector>``.
-    Each event is keyed ``call`` with the same payload as
-    :func:`get_calls` plus an explicit ``connection_id`` field so the
-    runtime container can fan out to its per-connection workers.
+    Each event is keyed ``call`` with a JSON body shaped::
+
+        {
+            \"session_id\": \"...\",
+            \"tool_call_id\": \"...\",
+            \"name\": \"...\",
+            \"arguments\": \"...\",       // JSON string from the model
+            \"focal_channel\": \"...\",
+            \"connection_id\": \"...\"
+        }
+
+    The ``connection_id`` field lets the runtime container fan out to
+    its per-connection workers client-side.
 
     Args:
         authorization (None | str | Unset):
@@ -129,15 +149,25 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
 ) -> Response[Any | HTTPValidationError]:
-    """Get Runtime Calls
+    r"""Get Runtime Calls
 
      SSE stream of pending custom tool calls across every active
     connection of the caller's connector type.
 
     Backfills at subscribe time, then tails ``connector_calls_<connector>``.
-    Each event is keyed ``call`` with the same payload as
-    :func:`get_calls` plus an explicit ``connection_id`` field so the
-    runtime container can fan out to its per-connection workers.
+    Each event is keyed ``call`` with a JSON body shaped::
+
+        {
+            \"session_id\": \"...\",
+            \"tool_call_id\": \"...\",
+            \"name\": \"...\",
+            \"arguments\": \"...\",       // JSON string from the model
+            \"focal_channel\": \"...\",
+            \"connection_id\": \"...\"
+        }
+
+    The ``connection_id`` field lets the runtime container fan out to
+    its per-connection workers client-side.
 
     Args:
         authorization (None | str | Unset):
@@ -164,15 +194,25 @@ async def asyncio(
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
 ) -> Any | HTTPValidationError | None:
-    """Get Runtime Calls
+    r"""Get Runtime Calls
 
      SSE stream of pending custom tool calls across every active
     connection of the caller's connector type.
 
     Backfills at subscribe time, then tails ``connector_calls_<connector>``.
-    Each event is keyed ``call`` with the same payload as
-    :func:`get_calls` plus an explicit ``connection_id`` field so the
-    runtime container can fan out to its per-connection workers.
+    Each event is keyed ``call`` with a JSON body shaped::
+
+        {
+            \"session_id\": \"...\",
+            \"tool_call_id\": \"...\",
+            \"name\": \"...\",
+            \"arguments\": \"...\",       // JSON string from the model
+            \"focal_channel\": \"...\",
+            \"connection_id\": \"...\"
+        }
+
+    The ``connection_id`` field lets the runtime container fan out to
+    its per-connection workers client-side.
 
     Args:
         authorization (None | str | Unset):

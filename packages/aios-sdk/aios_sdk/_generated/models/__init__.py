@@ -27,7 +27,6 @@ from .connection_create_secrets_type_0 import ConnectionCreateSecretsType0
 from .connection_metadata import ConnectionMetadata
 from .connection_set_secrets import ConnectionSetSecrets
 from .connection_set_secrets_secrets import ConnectionSetSecretsSecrets
-from .connection_set_tools import ConnectionSetTools
 from .connector_inbound_response import ConnectorInboundResponse
 from .connector_secrets import ConnectorSecrets
 from .connector_secrets_secrets import ConnectorSecretsSecrets
@@ -195,7 +194,6 @@ __all__ = (
     "ConnectionMetadata",
     "ConnectionSetSecrets",
     "ConnectionSetSecretsSecrets",
-    "ConnectionSetTools",
     "ConnectorInboundResponse",
     "ConnectorSecrets",
     "ConnectorSecretsSecrets",

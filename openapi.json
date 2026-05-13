@@ -4571,75 +4571,6 @@
         }
       }
     },
-    "/v1/connections/{connection_id}/tools": {
-      "put": {
-        "tags": [
-          "connections"
-        ],
-        "summary": "Set Tools",
-        "description": "Replace the connection's tools wholesale (#301).\n\nTools declared on a connection become available to the model as\n``type=\"custom\"`` entries on every session this connection is\nattached to (single_session) or that this connection spawned\n(per_chat).  The model calls them, the session parks in\n``requires_action``, the connector executes externally and POSTs the\nresult back via ``/v1/sessions/:id/tool-results``.",
-        "operationId": "set_connection_tools",
-        "parameters": [
-          {
-            "name": "connection_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Connection Id"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConnectionSetTools"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Connection"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/connections/{connection_id}/secrets": {
       "put": {
         "tags": [
@@ -5642,7 +5573,7 @@
           "connectors"
         ],
         "summary": "Post Runtime Inbound",
-        "description": "Append an inbound user message to ``connection_id``'s session.\n\nRuntime-scoped twin of :func:`post_inbound`: the bearer authenticates\nthe caller as one connector *type*; ``connection_id`` rides as a\nform field and must belong to that type.  Same multipart shape, same\ndedup-on-``event_id`` semantics, same drop_reason \u2192 HTTP mapping.",
+        "description": "Append an inbound user message to ``connection_id``'s session.\n\nThe bearer authenticates the caller as one connector *type*;\n``connection_id`` rides as a form field and must belong to that\ntype.  Idempotent on ``event_id``; drops surface as 4xx/5xx with\na body explaining the reason (operator-config issue vs server\nerror vs payload).",
         "operationId": "post_connector_runtime_inbound",
         "parameters": [
           {
@@ -5762,7 +5693,7 @@
           "connectors"
         ],
         "summary": "Get Runtime Secrets",
-        "description": "Decrypted secrets for ``connection_id``.\n\nRuntime-scoped twin of :func:`get_secrets`.  The bearer's connector\nmust match the connection's connector type.",
+        "description": "Decrypted secrets for ``connection_id``.\n\nThe bearer's connector must match the connection's connector\ntype.  Returns ``{\"secrets\": {}}`` when none are configured \u2014\ncallers decide whether that's acceptable.",
         "operationId": "get_connector_runtime_secrets",
         "parameters": [
           {
@@ -5821,7 +5752,7 @@
           "connectors"
         ],
         "summary": "Get Runtime Calls",
-        "description": "SSE stream of pending custom tool calls across every active\nconnection of the caller's connector type.\n\nBackfills at subscribe time, then tails ``connector_calls_<connector>``.\nEach event is keyed ``call`` with the same payload as\n:func:`get_calls` plus an explicit ``connection_id`` field so the\nruntime container can fan out to its per-connection workers.",
+        "description": "SSE stream of pending custom tool calls across every active\nconnection of the caller's connector type.\n\nBackfills at subscribe time, then tails ``connector_calls_<connector>``.\nEach event is keyed ``call`` with a JSON body shaped::\n\n    {\n        \"session_id\": \"...\",\n        \"tool_call_id\": \"...\",\n        \"name\": \"...\",\n        \"arguments\": \"...\",       // JSON string from the model\n        \"focal_channel\": \"...\",\n        \"connection_id\": \"...\"\n    }\n\nThe ``connection_id`` field lets the runtime container fan out to\nits per-connection workers client-side.",
         "operationId": "get_runtime_calls_v1_connectors_runtime_calls_get",
         "parameters": [
           {
@@ -6913,7 +6844,7 @@
           "updated_at"
         ],
         "title": "Connection",
-        "description": "Read view of a connection.\n\nMode is implicit in the populated field:\n\n* ``session_id`` set \u2192 single_session\n* ``session_template_id`` set \u2192 per_chat\n* neither \u2192 detached\n\nSecrets are *write-only* on the operator surface \u2014 the model carries\n``secrets_set: bool`` rather than the values themselves.  The only\ndecryption path is the connector-scoped ``GET /v1/connectors/secrets``,\nwhich returns the dict for the caller's own connection."
+        "description": "Read view of a connection.\n\nMode is implicit in the populated field:\n\n* ``session_id`` set \u2192 single_session\n* ``session_template_id`` set \u2192 per_chat\n* neither \u2192 detached\n\n``session_id`` / ``session_template_id`` / ``attached_at`` are\nprojected from the connection's active binding row at read time.\n``attached_at`` is \"when did the active binding land,\" not \"when\nwas this connection first attached,\" so detach+re-attach moves\nit forward \u2014 operator dashboards keying off the timestamp see\nthat motion.\n\nSecrets are *write-only* on the operator surface \u2014 the model carries\n``secrets_set: bool`` rather than the values themselves.  The only\ndecryption path is the runtime-scoped\n``GET /v1/connectors/runtime/secrets``, which returns the dict\nfor a connection of the caller's connector type."
       },
       "ConnectionAttach": {
         "properties": {
@@ -7009,22 +6940,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "ConnectionSetSecrets",
-        "description": "Request body for ``PUT /v1/connections/{id}/secrets``.\n\nReplaces the connection's secrets dict wholesale (matches the\n``set_connection_tools`` pattern).  Encrypted at rest server-side via\n``AIOS_VAULT_KEY``; the operator never reads them back.\n\nPass an empty dict to clear secrets."
-      },
-      "ConnectionSetTools": {
-        "properties": {
-          "tools": {
-            "items": {
-              "$ref": "#/components/schemas/ToolSpec"
-            },
-            "type": "array",
-            "title": "Tools"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "title": "ConnectionSetTools",
-        "description": "Request body for ``PUT /v1/connections/{id}/tools`` (#301).\n\nReplaces the connection's tools array wholesale.  Each entry must\nbe ``type=\"custom\"`` \u2014 see :func:`_validate_connection_tools`."
+        "description": "Request body for ``PUT /v1/connections/{id}/secrets``.\n\nReplaces the connection's secrets dict wholesale.  Encrypted at\nrest server-side via ``AIOS_VAULT_KEY``; the operator never reads\nthem back.\n\nPass an empty dict to clear secrets."
       },
       "ConnectorInboundResponse": {
         "properties": {
@@ -9020,7 +8936,7 @@
           "content"
         ],
         "title": "RuntimeToolResultRequest",
-        "description": "Body for ``POST /v1/connectors/runtime/tool-results``.\n\nLike :class:`ConnectorToolResultRequest` but carries ``connection_id``\nexplicitly \u2014 the bearer scopes the caller to a connector *type*,\nnot to one connection."
+        "description": "Body for ``POST /v1/connectors/runtime/tool-results``.\n\nCarries ``connection_id`` explicitly \u2014 the bearer scopes the\ncaller to a connector *type*, not to one connection, so the body\nhas to name the target connection."
       },
       "Session": {
         "properties": {

@@ -28,10 +28,18 @@ class Connection:
     * ``session_template_id`` set → per_chat
     * neither → detached
 
+    ``session_id`` / ``session_template_id`` / ``attached_at`` are
+    projected from the connection's active binding row at read time.
+    ``attached_at`` is "when did the active binding land," not "when
+    was this connection first attached," so detach+re-attach moves
+    it forward — operator dashboards keying off the timestamp see
+    that motion.
+
     Secrets are *write-only* on the operator surface — the model carries
     ``secrets_set: bool`` rather than the values themselves.  The only
-    decryption path is the connector-scoped ``GET /v1/connectors/secrets``,
-    which returns the dict for the caller's own connection.
+    decryption path is the runtime-scoped
+    ``GET /v1/connectors/runtime/secrets``, which returns the dict
+    for a connection of the caller's connector type.
 
         Attributes:
             id (str):

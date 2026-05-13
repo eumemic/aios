@@ -177,9 +177,9 @@ class ToolsSchemaUpdate(BaseModel):
 class RuntimeToolResultRequest(BaseModel):
     """Body for ``POST /v1/connectors/runtime/tool-results``.
 
-    Like :class:`ConnectorToolResultRequest` but carries ``connection_id``
-    explicitly — the bearer scopes the caller to a connector *type*,
-    not to one connection.
+    Carries ``connection_id`` explicitly — the bearer scopes the
+    caller to a connector *type*, not to one connection, so the body
+    has to name the target connection.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -292,10 +292,11 @@ async def post_runtime_inbound(
 ) -> ConnectorInboundResponse:
     """Append an inbound user message to ``connection_id``'s session.
 
-    Runtime-scoped twin of :func:`post_inbound`: the bearer authenticates
-    the caller as one connector *type*; ``connection_id`` rides as a
-    form field and must belong to that type.  Same multipart shape, same
-    dedup-on-``event_id`` semantics, same drop_reason → HTTP mapping.
+    The bearer authenticates the caller as one connector *type*;
+    ``connection_id`` rides as a form field and must belong to that
+    type.  Idempotent on ``event_id``; drops surface as 4xx/5xx with
+    a body explaining the reason (operator-config issue vs server
+    error vs payload).
     """
     _, auth_connector = auth
     async with pool.acquire() as conn:
@@ -368,8 +369,9 @@ async def get_runtime_secrets(
 ) -> ConnectorSecrets:
     """Decrypted secrets for ``connection_id``.
 
-    Runtime-scoped twin of :func:`get_secrets`.  The bearer's connector
-    must match the connection's connector type.
+    The bearer's connector must match the connection's connector
+    type.  Returns ``{"secrets": {}}`` when none are configured —
+    callers decide whether that's acceptable.
     """
     _, auth_connector = auth
     async with pool.acquire() as conn:
@@ -394,9 +396,19 @@ async def get_runtime_calls(
     connection of the caller's connector type.
 
     Backfills at subscribe time, then tails ``connector_calls_<connector>``.
-    Each event is keyed ``call`` with the same payload as
-    :func:`get_calls` plus an explicit ``connection_id`` field so the
-    runtime container can fan out to its per-connection workers.
+    Each event is keyed ``call`` with a JSON body shaped::
+
+        {
+            "session_id": "...",
+            "tool_call_id": "...",
+            "name": "...",
+            "arguments": "...",       // JSON string from the model
+            "focal_channel": "...",
+            "connection_id": "..."
+        }
+
+    The ``connection_id`` field lets the runtime container fan out to
+    its per-connection workers client-side.
     """
     _, connector = auth
     return EventSourceResponse(

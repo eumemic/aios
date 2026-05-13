@@ -2956,39 +2956,6 @@ async def get_connection(conn: asyncpg.Connection[Any], connection_id: str) -> C
     return _row_to_connection(row)
 
 
-async def set_connection_tools(
-    conn: asyncpg.Connection[Any],
-    connection_id: str,
-    *,
-    tools: list[dict[str, Any]],
-) -> Connection:
-    """Replace a connection's ``tools`` array.  Bumps ``updated_at``.
-
-    Refuses on archived rows: a tools update against an archived
-    connection is almost certainly a stale operator command.
-    """
-    row = await conn.fetchrow(
-        f"""
-        WITH updated AS (
-            UPDATE connections
-               SET tools = $2::jsonb,
-                   updated_at = now()
-             WHERE id = $1 AND archived_at IS NULL
-            RETURNING *
-        )
-        {_CONNECTION_UPDATE_CTE_TAIL}
-        """,
-        connection_id,
-        json.dumps(tools),
-    )
-    if row is None:
-        raise NotFoundError(
-            f"connection {connection_id} not found or archived",
-            detail={"id": connection_id},
-        )
-    return _row_to_connection(row)
-
-
 async def set_connection_secrets(
     conn: asyncpg.Connection[Any],
     connection_id: str,

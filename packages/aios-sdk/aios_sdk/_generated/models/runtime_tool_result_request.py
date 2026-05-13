@@ -20,9 +20,9 @@ T = TypeVar("T", bound="RuntimeToolResultRequest")
 class RuntimeToolResultRequest:
     """Body for ``POST /v1/connectors/runtime/tool-results``.
 
-    Like :class:`ConnectorToolResultRequest` but carries ``connection_id``
-    explicitly — the bearer scopes the caller to a connector *type*,
-    not to one connection.
+    Carries ``connection_id`` explicitly — the bearer scopes the
+    caller to a connector *type*, not to one connection, so the body
+    has to name the target connection.
 
         Attributes:
             connection_id (str):

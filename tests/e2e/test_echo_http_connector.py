@@ -93,46 +93,48 @@ async def _create_connection(api_key: str, base_url: str, account: str) -> str:
         return str(r.json()["id"])
 
 
-async def _set_tools(api_key: str, base_url: str, connection_id: str) -> None:
-    async with authed_client(base_url, api_key) as c:
-        r = await c.put(
-            f"/v1/connections/{connection_id}/tools",
-            json={
-                "tools": [
-                    {
-                        "type": "custom",
-                        "name": "ping",
-                        "description": "ping",
-                        "input_schema": {"type": "object"},
+async def _publish_echo_tools_schema(harness: Harness) -> None:
+    """Stamp ``connectors.tools_schema`` for the echo connector type
+    (post-PR-7 source of truth for what the model sees)."""
+    from aios.db import queries as db_queries
+
+    async with harness._pool.acquire() as db_conn:
+        await db_queries.update_connector_tools_schema(
+            db_conn,
+            "echo",
+            tools_schema=[
+                {
+                    "type": "custom",
+                    "name": "ping",
+                    "description": "ping",
+                    "input_schema": {"type": "object"},
+                },
+                {
+                    "type": "custom",
+                    "name": "echo",
+                    "description": "echo",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
                     },
-                    {
-                        "type": "custom",
-                        "name": "echo",
-                        "description": "echo",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"text": {"type": "string"}},
-                            "required": ["text"],
+                },
+                {
+                    "type": "custom",
+                    "name": "trigger_inbound",
+                    "description": "synth inbound",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "chat_id": {"type": "string"},
+                            "sender_name": {"type": "string"},
+                            "content": {"type": "string"},
                         },
+                        "required": ["chat_id", "sender_name", "content"],
                     },
-                    {
-                        "type": "custom",
-                        "name": "trigger_inbound",
-                        "description": "synth inbound",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "chat_id": {"type": "string"},
-                                "sender_name": {"type": "string"},
-                                "content": {"type": "string"},
-                            },
-                            "required": ["chat_id", "sender_name", "content"],
-                        },
-                    },
-                ]
-            },
+                },
+            ],
         )
-        r.raise_for_status()
 
 
 @needs_docker
@@ -176,7 +178,7 @@ class TestSdkAgainstLiveServer:
         await connections_service.attach_connection(
             harness._pool, connection_id, session_id=session.id
         )
-        await _set_tools(api_key, live_server, connection_id)
+        await _publish_echo_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "echo")
 
         # Pre-seed a pending call so backfill has something to deliver.
@@ -262,7 +264,7 @@ class TestEchoHttpConnectorEndToEnd:
         await connections_service.attach_connection(
             harness._pool, connection_id, session_id=session.id
         )
-        await _set_tools(api_key, live_server, connection_id)
+        await _publish_echo_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "echo")
 
         connector = EchoConnector(base_url=live_server, token=token)
@@ -357,7 +359,7 @@ class TestEchoHttpConnectorEndToEnd:
         await connections_service.attach_connection(
             harness._pool, connection_id, session_id=session.id
         )
-        await _set_tools(api_key, live_server, connection_id)
+        await _publish_echo_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "echo")
 
         connector = EchoConnector(base_url=live_server, token=token)

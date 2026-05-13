@@ -113,23 +113,6 @@ class ConnectionConfigurePerChat(BaseModel):
     session_template_id: str
 
 
-class ConnectionSetTools(BaseModel):
-    """Request body for ``PUT /v1/connections/{id}/tools`` (#301).
-
-    Replaces the connection's tools array wholesale.  Each entry must
-    be ``type="custom"`` — see :func:`_validate_connection_tools`.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    tools: list[ToolSpec] = Field(default_factory=list)
-
-    @field_validator("tools")
-    @classmethod
-    def _custom_only(cls, v: list[ToolSpec]) -> list[ToolSpec]:
-        return _validate_connection_tools(v)
-
-
 class Connection(BaseModel):
     """Read view of a connection.
 
@@ -139,10 +122,18 @@ class Connection(BaseModel):
     * ``session_template_id`` set → per_chat
     * neither → detached
 
+    ``session_id`` / ``session_template_id`` / ``attached_at`` are
+    projected from the connection's active binding row at read time.
+    ``attached_at`` is "when did the active binding land," not "when
+    was this connection first attached," so detach+re-attach moves
+    it forward — operator dashboards keying off the timestamp see
+    that motion.
+
     Secrets are *write-only* on the operator surface — the model carries
     ``secrets_set: bool`` rather than the values themselves.  The only
-    decryption path is the connector-scoped ``GET /v1/connectors/secrets``,
-    which returns the dict for the caller's own connection.
+    decryption path is the runtime-scoped
+    ``GET /v1/connectors/runtime/secrets``, which returns the dict
+    for a connection of the caller's connector type.
     """
 
     id: str
@@ -162,9 +153,9 @@ class Connection(BaseModel):
 class ConnectionSetSecrets(BaseModel):
     """Request body for ``PUT /v1/connections/{id}/secrets``.
 
-    Replaces the connection's secrets dict wholesale (matches the
-    ``set_connection_tools`` pattern).  Encrypted at rest server-side via
-    ``AIOS_VAULT_KEY``; the operator never reads them back.
+    Replaces the connection's secrets dict wholesale.  Encrypted at
+    rest server-side via ``AIOS_VAULT_KEY``; the operator never reads
+    them back.
 
     Pass an empty dict to clear secrets.
     """

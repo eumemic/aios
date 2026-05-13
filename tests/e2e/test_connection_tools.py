@@ -19,8 +19,6 @@ This file pins the contract end-to-end with the real harness:
 
 from __future__ import annotations
 
-import json
-
 import httpx
 
 from aios.crypto.vault import CryptoBox
@@ -438,60 +436,3 @@ class TestMultimodalToolResults:
         )
         assert r.status_code == 201, r.text
         assert r.json()["data"]["content"] == "plain string"
-
-
-@needs_docker
-class TestSetConnectionToolsEndpoint:
-    """``PUT /v1/connections/{id}/tools`` replaces the connection's tools."""
-
-    async def test_replaces_tools(
-        self, http_client: httpx.AsyncClient, harness: Harness, crypto_box: CryptoBox
-    ) -> None:
-        from aios.services import connections as connections_service
-
-        connection = await connections_service.create_connection(
-            harness._pool,
-            connector="echo",
-            account=f"echo-set-{id(self)}",
-            metadata={},
-            crypto_box=crypto_box,
-        )
-        assert connection.tools == []
-
-        r = await http_client.put(
-            f"/v1/connections/{connection.id}/tools",
-            json={
-                "tools": [
-                    {
-                        "type": "custom",
-                        "name": "x_send",
-                        "description": "send",
-                        "input_schema": {"type": "object"},
-                    }
-                ],
-            },
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert len(body["tools"]) == 1
-        assert body["tools"][0]["name"] == "x_send"
-
-    async def test_rejects_non_custom_tool_type(
-        self, http_client: httpx.AsyncClient, harness: Harness, crypto_box: CryptoBox
-    ) -> None:
-        from aios.services import connections as connections_service
-
-        connection = await connections_service.create_connection(
-            harness._pool,
-            connector="echo",
-            account=f"echo-rej-{id(self)}",
-            metadata={},
-            crypto_box=crypto_box,
-        )
-
-        r = await http_client.put(
-            f"/v1/connections/{connection.id}/tools",
-            json={"tools": [{"type": "bash"}]},
-        )
-        assert r.status_code == 422, r.text
-        assert "custom" in json.dumps(r.json())

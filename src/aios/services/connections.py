@@ -66,20 +66,6 @@ async def create_connection(
         )
 
 
-async def set_connection_tools(
-    pool: asyncpg.Pool[Any],
-    connection_id: str,
-    *,
-    tools: list[ToolSpec],
-) -> Connection:
-    """Replace a connection's tools.  Caller validates ToolSpec types via
-    the request model (see :class:`ConnectionSetTools`).
-    """
-    payload = [t.model_dump(exclude_none=True) for t in tools]
-    async with pool.acquire() as conn:
-        return await queries.set_connection_tools(conn, connection_id, tools=payload)
-
-
 async def set_connection_secrets(
     pool: asyncpg.Pool[Any],
     connection_id: str,
@@ -253,9 +239,15 @@ async def _archive_binding_or_raise(
             f"connection {connection_id} is archived",
             detail={"id": connection_id},
         )
+    # The mode-guarded UPDATE may have missed either because there's no
+    # active binding (detached) or because the active binding is in the
+    # *other* mode.  Surface that distinction so operator dashboards can
+    # branch — both are 409s, but with different recovery actions.
+    current = await queries.get_active_binding(conn, connection_id)
+    current_mode = current.mode if current is not None else "detached"
     raise ConflictError(
-        f"connection {connection_id} is not in {expected_mode} mode",
-        detail={"id": connection_id},
+        f"connection {connection_id} is in {current_mode} mode, not {expected_mode}",
+        detail={"id": connection_id, "current_mode": current_mode},
     )
 
 

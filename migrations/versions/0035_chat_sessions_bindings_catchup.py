@@ -45,10 +45,8 @@ def upgrade() -> None:
 
     # Catch up bindings from any active connection whose legacy
     # ``session_id`` / ``session_template_id`` is populated but which
-    # has no active binding row yet.  The partial-unique index on
-    # ``bindings (connection_id) WHERE archived_at IS NULL`` guarantees
-    # the NOT EXISTS guard is race-free under serializable isolation
-    # (migrations run in a single transaction).
+    # has no active binding row yet.  No concurrent writers during
+    # alembic, so the NOT EXISTS guard sees a stable snapshot.
     op.execute(
         """
         INSERT INTO bindings (id, connection_id, mode, session_id,
