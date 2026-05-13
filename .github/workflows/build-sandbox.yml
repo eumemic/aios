@@ -35,6 +35,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # QEMU enables cross-arch emulation so we can build linux/arm64
+      # layers on the linux/amd64 GitHub runner without separate runners.
+      # The sandbox Dockerfile only uses apt + the multi-arch
+      # ``python:3.13-slim-bookworm`` base, so cross-build under QEMU is
+      # well within the "trivial enough to emulate" envelope.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -58,6 +67,11 @@ jobs:
         with:
           context: docker
           file: docker/Dockerfile.sandbox
+          # Multi-arch so developer machines on Apple Silicon (linux/arm64
+          # under Docker Desktop) pull a native image without ``no matching
+          # manifest`` errors.  Cross-build is QEMU-emulated; layers are
+          # cached so subsequent builds with unchanged apt set are fast.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
