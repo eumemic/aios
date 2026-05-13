@@ -44,6 +44,39 @@ def test_no_mentions_yields_empty_tuple(envelope_text_dm: dict[str, Any], bot_uu
     assert msg.mentions == ()
 
 
+def test_edit_envelope_surfaces_as_inbound(bot_uuid: str) -> None:
+    """signal-cli wraps inbound peer edits as ``envelope.editMessage.dataMessage``
+    rather than a top-level ``dataMessage``.  Without parsing both shapes the
+    bot never sees that a peer rewrote a prior message; the envelope drops to
+    None and the conversation thread silently diverges from the chat client's view.
+    """
+    envelope: dict[str, Any] = {
+        "sourceUuid": "11111111-2222-3333-4444-555555555555",
+        "sourceName": "Alice",
+        "timestamp": 1700000010000,
+        "editMessage": {
+            "targetSentTimestamp": 1700000005000,
+            "dataMessage": {
+                "timestamp": 1700000010000,
+                "message": "Actually, I meant Tuesday",
+                "groupInfo": {
+                    "groupId": "abc+def/xyz==",
+                    "groupName": "Friends",
+                    "type": "DELIVER",
+                },
+            },
+        },
+    }
+    msg = parse_envelope(envelope, bot_account_uuid=bot_uuid)
+    assert msg is not None
+    assert msg.text == "Actually, I meant Tuesday"
+    assert msg.edited is True
+    assert msg.edit_target_timestamp_ms == 1700000005000
+    # New edit timestamp at the envelope root becomes the event's
+    # ``timestamp_ms`` — uniquely identifies the edit relative to the original.
+    assert msg.timestamp_ms == 1700000010000
+
+
 def test_reaction(envelope_reaction: dict[str, Any], bot_uuid: str) -> None:
     msg = parse_envelope(envelope_reaction, bot_account_uuid=bot_uuid)
     assert msg is not None

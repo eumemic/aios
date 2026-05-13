@@ -809,6 +809,14 @@ def build_metadata(msg: InboundMessage, chat_id: str, bot_uuid: str) -> dict[str
         metadata["sender_name"] = msg.sender_name
     if msg.chat_name is not None:
         metadata["chat_name"] = msg.chat_name
+    if msg.edited:
+        # The harness's ``_format_channel_header`` already renders
+        # ``edited=true`` when this flag is set; pairing it with
+        # ``edit_target_timestamp_ms`` lets the model correlate the
+        # edited message back to the original it's replacing.
+        metadata["edited"] = True
+        if msg.edit_target_timestamp_ms is not None:
+            metadata["edit_target_timestamp_ms"] = msg.edit_target_timestamp_ms
     if msg.mentions:
         metadata["mentions"] = [
             {"uuid": m.uuid, "name": m.name} for m in msg.mentions

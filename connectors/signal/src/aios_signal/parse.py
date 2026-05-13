@@ -83,6 +83,8 @@ class InboundMessage:
     mentions: tuple[Mention, ...]
     reply: Reply | None
     reaction: Reaction | None
+    edited: bool = False
+    edit_target_timestamp_ms: int | None = None
 
 
 def _substitute_mentions(text: str, mentions: list[dict[str, Any]]) -> str:
@@ -118,9 +120,30 @@ def parse_envelope(
     if envelope.get("receiptMessage") or envelope.get("typingMessage"):
         return None
 
+    # signal-cli emits two top-level shapes for inbound payloads:
+    # ``dataMessage`` for plain sends and ``editMessage.dataMessage``
+    # for edits.  An edit envelope carries the EDITED content's
+    # ``timestamp`` at the envelope root and ``targetSentTimestamp``
+    # inside ``editMessage`` pointing at the original.  Both shapes
+    # feed the same downstream parsing — only the ``edited`` /
+    # ``edit_target_timestamp_ms`` fields on the result differ.
+    edited = False
+    edit_target_ts: int | None = None
     data_message = envelope.get("dataMessage")
     if not isinstance(data_message, dict):
-        return None
+        edit_envelope = envelope.get("editMessage")
+        if isinstance(edit_envelope, dict):
+            nested = edit_envelope.get("dataMessage")
+            if isinstance(nested, dict):
+                data_message = nested
+                edited = True
+                target_raw = edit_envelope.get("targetSentTimestamp")
+                if isinstance(target_raw, int):
+                    edit_target_ts = target_raw
+            else:
+                return None
+        else:
+            return None
 
     timestamp_ms = int(envelope.get("timestamp", 0))
     sender_name = envelope.get("sourceName") or None
@@ -225,6 +248,8 @@ def parse_envelope(
         mentions=parsed_mentions,
         reply=reply,
         reaction=reaction,
+        edited=edited,
+        edit_target_timestamp_ms=edit_target_ts,
     )
 
 
