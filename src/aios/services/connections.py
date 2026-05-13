@@ -24,6 +24,7 @@ from aios.db import queries
 from aios.errors import ConflictError, NotFoundError
 from aios.models.agents import ToolSpec
 from aios.models.connections import (
+    BindingMode,
     BoundChat,
     Connection,
     ConnectionMode,
@@ -233,27 +234,29 @@ async def unconfigure_connection(pool: asyncpg.Pool[Any], connection_id: str) ->
 
 
 async def _archive_binding_or_raise(
-    conn: asyncpg.Connection[Any], connection_id: str, *, expected_mode: str
+    conn: asyncpg.Connection[Any], connection_id: str, *, expected_mode: BindingMode
 ) -> None:
     """Archive the connection's active binding, raising on a mode mismatch.
 
-    Centralises the diagnostic 4xx selection for ``detach_connection``
-    and ``unconfigure_connection``: NotFound > archived > wrong mode.
+    Happy path is a single mode-guarded UPDATE-RETURNING.  On miss we
+    follow up with a connection read to diagnose: NotFound > archived
+    > wrong mode (or detached).
     """
+    archived = await queries.archive_active_binding(
+        conn, connection_id, expected_mode=expected_mode
+    )
+    if archived is not None:
+        return
     existing = await queries.get_connection(conn, connection_id)
     if existing.archived_at is not None:
         raise ConflictError(
             f"connection {connection_id} is archived",
             detail={"id": connection_id},
         )
-    binding = await queries.get_active_binding(conn, connection_id)
-    expected_label = "single_session" if expected_mode == "single_session" else "per_chat"
-    if binding is None or binding.mode != expected_mode:
-        raise ConflictError(
-            f"connection {connection_id} is not in {expected_label} mode",
-            detail={"id": connection_id},
-        )
-    await queries.archive_active_binding(conn, connection_id)
+    raise ConflictError(
+        f"connection {connection_id} is not in {expected_mode} mode",
+        detail={"id": connection_id},
+    )
 
 
 async def bind_chat_to_session(

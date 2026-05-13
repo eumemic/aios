@@ -49,7 +49,7 @@ from aios.ids import (
     make_id,
 )
 from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
-from aios.models.connections import Connection
+from aios.models.connections import BindingMode, Connection, ConnectionMode
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
 from aios.models.files import File
@@ -1537,6 +1537,9 @@ async def list_pending_calls_for_connector(
     if not tool_names:
         return []
 
+    # The lineage predicate joins ``s.id`` not a parameter, so we inline
+    # rather than calling ``_session_bound_to_connection_predicate``
+    # (which expects a $N param index for the session).
     rows = await conn.fetch(
         """
         SELECT c.id AS connection_id,
@@ -1689,17 +1692,11 @@ async def _list_bound_connection_ids(
     and harmlessly no-op them on the consumer side.
     """
     rows = await conn.fetch(
-        """
+        f"""
         SELECT c.id, c.connector
           FROM connections c
          WHERE c.archived_at IS NULL
-           AND (EXISTS (SELECT 1 FROM bindings b
-                         WHERE b.connection_id = c.id
-                           AND b.archived_at IS NULL
-                           AND b.session_id = $1)
-                OR EXISTS (SELECT 1 FROM chat_sessions cs
-                            WHERE cs.connection_id = c.id
-                              AND cs.session_id = $1))
+           AND {_session_bound_to_connection_predicate(connection_alias="c", session_param_index=1)}
         """,
         session_id,
     )
@@ -1720,18 +1717,12 @@ async def is_session_bound_to_connection(
     every time they need to authorise a connector-driven write.
     """
     row = await conn.fetchval(
-        """
+        f"""
         SELECT 1
           FROM connections c
          WHERE c.id = $1
            AND c.archived_at IS NULL
-           AND (EXISTS (SELECT 1 FROM bindings b
-                         WHERE b.connection_id = c.id
-                           AND b.archived_at IS NULL
-                           AND b.session_id = $2)
-                OR EXISTS (SELECT 1 FROM chat_sessions cs
-                            WHERE cs.connection_id = c.id
-                              AND cs.session_id = $2))
+           AND {_session_bound_to_connection_predicate(connection_alias="c", session_param_index=2)}
          LIMIT 1
         """,
         connection_id,
@@ -2611,12 +2602,38 @@ async def resolve_skill_refs(
 #                          columns) ────────────────────────────────────────
 
 
+def _session_bound_to_connection_predicate(
+    *, connection_alias: str, session_param_index: int
+) -> str:
+    """SQL fragment for "this session is bound to ``<connection_alias>``."
+
+    Used by every query that walks the connection→session lineage:
+    ``is_session_bound_to_connection`` (existence check),
+    ``_list_bound_connection_ids`` (filter), ``list_connection_tools_for_session``
+    (filter), ``list_pending_calls_for_connector`` (join predicate).
+
+    Two lineage paths after #328 PR 7:
+
+    * an active ``single_session`` binding whose ``session_id`` matches; or
+    * a row in ``chat_sessions`` for ``(connection_id, session_id)``.
+    """
+    return f"""(
+        EXISTS (SELECT 1 FROM bindings b
+                 WHERE b.connection_id = {connection_alias}.id
+                   AND b.archived_at IS NULL
+                   AND b.session_id = ${session_param_index})
+        OR EXISTS (SELECT 1 FROM chat_sessions cs
+                    WHERE cs.connection_id = {connection_alias}.id
+                      AND cs.session_id = ${session_param_index})
+    )"""
+
+
 class ActiveBinding(NamedTuple):
     """Read view of a connection's single active binding."""
 
     id: str
     connection_id: str
-    mode: str
+    mode: BindingMode
     session_id: str | None
     session_template_id: str | None
 
@@ -2654,7 +2671,7 @@ async def insert_binding(
     conn: asyncpg.Connection[Any],
     *,
     connection_id: str,
-    mode: str,
+    mode: BindingMode,
     session_id: str | None = None,
     session_template_id: str | None = None,
 ) -> ActiveBinding:
@@ -2702,21 +2719,43 @@ async def insert_binding(
     )
 
 
-async def archive_active_binding(conn: asyncpg.Connection[Any], connection_id: str) -> bool:
+async def archive_active_binding(
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    expected_mode: BindingMode | None = None,
+) -> ActiveBinding | None:
     """Soft-archive the connection's active binding.
 
-    Returns ``True`` iff a row was archived (no active binding → ``False``;
-    callers decide whether that's a 4xx).
+    Returns the now-archived :class:`ActiveBinding`, or ``None`` if no
+    matching binding existed.  When ``expected_mode`` is set, the
+    archive is guarded by ``bindings.mode = expected_mode`` — a binding
+    in the *other* mode is left intact and the call returns ``None``;
+    callers diagnose via a follow-up read.
     """
-    result = await conn.execute(
-        """
+    where = "connection_id = $1 AND archived_at IS NULL"
+    args: tuple[Any, ...] = (connection_id,)
+    if expected_mode is not None:
+        where += " AND mode = $2"
+        args = (connection_id, expected_mode)
+    row = await conn.fetchrow(
+        f"""
         UPDATE bindings
            SET archived_at = now()
-         WHERE connection_id = $1 AND archived_at IS NULL
+         WHERE {where}
+        RETURNING id, connection_id, mode, session_id, session_template_id
         """,
-        connection_id,
+        *args,
     )
-    return bool(result.endswith(" 1"))
+    if row is None:
+        return None
+    return ActiveBinding(
+        id=row["id"],
+        connection_id=row["connection_id"],
+        mode=row["mode"],
+        session_id=row["session_id"],
+        session_template_id=row["session_template_id"],
+    )
 
 
 async def _raise_for_failed_binding_insert(
@@ -2773,13 +2812,28 @@ async def _raise_for_failed_binding_insert(
 _CONNECTION_COLUMNS = """
     c.*,
     b.session_id           AS binding_session_id,
-    b.session_template_id  AS binding_session_template_id
+    b.session_template_id  AS binding_session_template_id,
+    b.created_at           AS binding_created_at
 """.strip()
 
 _CONNECTION_FROM = """
     connections c
     LEFT JOIN bindings b
            ON b.connection_id = c.id AND b.archived_at IS NULL
+""".strip()
+
+# Trailing JOIN for ``UPDATE connections ... RETURNING *`` CTEs that need
+# to re-shape the row through ``_row_to_connection``: read the updated
+# row's binding via the same LEFT JOIN as a plain SELECT would. The
+# input alias ``u`` is the CTE's RETURNING table.
+_CONNECTION_UPDATE_CTE_TAIL = """
+    SELECT u.*,
+           b.session_id           AS binding_session_id,
+           b.session_template_id  AS binding_session_template_id,
+           b.created_at           AS binding_created_at
+      FROM updated u
+      LEFT JOIN bindings b
+             ON b.connection_id = u.id AND b.archived_at IS NULL
 """.strip()
 
 
@@ -2796,7 +2850,11 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         tools=tools_data,
         secrets_set=row["secrets_ciphertext"] is not None,
         created_at=row["created_at"],
-        attached_at=row["attached_at"],
+        # ``attached_at`` is "when did the active binding land" — derive
+        # from the binding row's ``created_at`` rather than the legacy
+        # ``connections.attached_at`` column (which is no longer written
+        # by the new attach/configure service paths).
+        attached_at=row["binding_created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
     )
@@ -2860,8 +2918,9 @@ async def insert_connection(
                 RETURNING *
             )
             SELECT i.*,
-                   NULL::text AS binding_session_id,
-                   NULL::text AS binding_session_template_id
+                   NULL::text        AS binding_session_id,
+                   NULL::text        AS binding_session_template_id,
+                   NULL::timestamptz AS binding_created_at
               FROM inserted i
             """,
             make_id(CONNECTION),
@@ -2909,7 +2968,7 @@ async def set_connection_tools(
     connection is almost certainly a stale operator command.
     """
     row = await conn.fetchrow(
-        """
+        f"""
         WITH updated AS (
             UPDATE connections
                SET tools = $2::jsonb,
@@ -2917,12 +2976,7 @@ async def set_connection_tools(
              WHERE id = $1 AND archived_at IS NULL
             RETURNING *
         )
-        SELECT u.*,
-               b.session_id           AS binding_session_id,
-               b.session_template_id  AS binding_session_template_id
-          FROM updated u
-          LEFT JOIN bindings b
-                 ON b.connection_id = u.id AND b.archived_at IS NULL
+        {_CONNECTION_UPDATE_CTE_TAIL}
         """,
         connection_id,
         json.dumps(tools),
@@ -2953,7 +3007,7 @@ async def set_connection_secrets(
     ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
     nonce = secrets_blob.nonce if secrets_blob is not None else None
     row = await conn.fetchrow(
-        """
+        f"""
         WITH updated AS (
             UPDATE connections
                SET secrets_ciphertext = $2,
@@ -2962,12 +3016,7 @@ async def set_connection_secrets(
              WHERE id = $1 AND archived_at IS NULL
             RETURNING *
         )
-        SELECT u.*,
-               b.session_id           AS binding_session_id,
-               b.session_template_id  AS binding_session_template_id
-          FROM updated u
-          LEFT JOIN bindings b
-                 ON b.connection_id = u.id AND b.archived_at IS NULL
+        {_CONNECTION_UPDATE_CTE_TAIL}
         """,
         connection_id,
         ciphertext,
@@ -3025,20 +3074,14 @@ async def list_connection_tools_for_session(
     ready to feed through :func:`tools.registry.to_openai_tools_custom`.
     """
     rows = await conn.fetch(
-        """
+        f"""
         SELECT cat.tools_schema AS tools
           FROM connectors cat
          WHERE cat.connector IN (
                 SELECT DISTINCT c.connector
                   FROM connections c
                  WHERE c.archived_at IS NULL
-                   AND (EXISTS (SELECT 1 FROM bindings b
-                                 WHERE b.connection_id = c.id
-                                   AND b.archived_at IS NULL
-                                   AND b.session_id = $1)
-                        OR EXISTS (SELECT 1 FROM chat_sessions cs
-                                    WHERE cs.connection_id = c.id
-                                      AND cs.session_id = $1))
+                   AND {_session_bound_to_connection_predicate(connection_alias="c", session_param_index=1)}
             )
         """,
         session_id,
@@ -3072,7 +3115,7 @@ async def list_connections(
     *,
     connector: str | None = None,
     session_id: str | None = None,
-    mode: str | None = None,
+    mode: ConnectionMode | None = None,
     limit: int = 50,
     after: str | None = None,
 ) -> list[Connection]:
@@ -3112,7 +3155,7 @@ async def list_connections(
 # in-place columns: a connection is detached iff no active binding
 # exists; single_session / per_chat iff the active binding carries
 # that mode value.
-_MODE_PREDICATES: dict[str, str] = {
+_MODE_PREDICATES: dict[ConnectionMode, str] = {
     "detached": "b.id IS NULL",
     "single_session": "b.mode = 'single_session'",
     "per_chat": "b.mode = 'per_chat'",
@@ -3130,7 +3173,7 @@ async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) 
     constraint is satisfied because both columns flip together.
     """
     row = await conn.fetchrow(
-        """
+        f"""
         WITH updated AS (
             UPDATE connections
                SET archived_at        = now(),
@@ -3140,10 +3183,7 @@ async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) 
              WHERE id = $1 AND archived_at IS NULL
             RETURNING *
         )
-        SELECT u.*,
-               NULL::text AS binding_session_id,
-               NULL::text AS binding_session_template_id
-          FROM updated u
+        {_CONNECTION_UPDATE_CTE_TAIL}
         """,
         connection_id,
     )

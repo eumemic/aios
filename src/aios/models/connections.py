@@ -33,6 +33,12 @@ from aios.models.agents import ToolSpec
 
 ConnectionMode = Literal["detached", "single_session", "per_chat"]
 
+# A connection's *binding* exists only when curated — ``detached`` is "no
+# binding row," not a binding mode.  This narrower alias is what the
+# ``bindings`` table's ``mode`` column carries (enforced by the
+# ``bindings_mode_ck`` CHECK constraint).
+BindingMode = Literal["single_session", "per_chat"]
+
 
 def _validate_connection_tools(tools: list[ToolSpec]) -> list[ToolSpec]:
     """Connection-declared tools must be ``type="custom"`` (#301).
