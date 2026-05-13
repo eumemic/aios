@@ -21,6 +21,8 @@ import asyncio
 from collections import deque
 from typing import Any
 
+import pytest
+
 from aios_signal.connector import SignalConnector, _SignalConnectionState
 from aios_signal.daemon import GroupInfo
 from tests.conftest import (
@@ -253,6 +255,34 @@ async def test_inbound_dispatcher_resolves_echo_on_peer_account_stream(
 
     assert fut.done()
     assert fut.result() == 777
+
+
+async def test_signal_send_cleans_up_echo_future_when_rpc_raises(
+    connector: SignalConnector,
+) -> None:
+    """If ``rpc.call`` raises (e.g. signal-cli's libsignal
+    ``InvalidSessionException`` when a group member has no
+    established protocol session yet), the pre-registered echo
+    future must be cancelled rather than left orphan at the head of
+    the deque.  Without the cleanup, a subsequent successful send's
+    echo would resolve the orphan with the WRONG message's
+    timestamp.
+    """
+    from aios_signal.errors import RpcError
+
+    connector._daemon.rpc.call.side_effect = RpcError("send failed")  # type: ignore[union-attr]
+    connector._conn_state[CONNECTION_ID] = _state()
+
+    with pytest.raises(RpcError):
+        await connector.signal_send(
+            text="explodes", chat_id=GROUP_CHAT_ID, connection_id=CONNECTION_ID
+        )
+
+    # Any future registered before the raise must be done (cancelled
+    # by the finally block) so the drain-stale logic in
+    # _maybe_resolve_self_echo prunes it before the next send.
+    queue = connector._pending_echoes.get((PHONE, GROUP_CHAT_ID), deque())
+    assert all(fut.done() for fut in queue)
 
 
 async def test_signal_send_dm_does_not_register_echo_future(

@@ -369,22 +369,36 @@ class SignalConnector(HttpConnector):
             self._pending_echoes.setdefault((state.phone, chat_id), deque()).append(
                 echo_future
             )
-        result = await self._daemon.rpc.call("send", params)
-        ts = _extract_timestamp(result)
-        if ts is None and echo_future is not None:
-            try:
-                ts = await asyncio.wait_for(echo_future, timeout=_ECHO_WAIT_S)
-            except (TimeoutError, asyncio.CancelledError):
-                # Echo never arrived in the deadline window — degrade
-                # to the no-timestamp shape.  The cancelled future
-                # gets pruned at next ``_maybe_resolve_self_echo``
-                # pop-from-front.
-                log.warning(
-                    "signal.send.echo_timeout",
-                    phone=state.phone,
-                    chat_id=chat_id,
-                )
-        return {"sent_at_ms": ts} if ts is not None else {"status": "ok"}
+        try:
+            result = await self._daemon.rpc.call("send", params)
+            ts = _extract_timestamp(result)
+            if ts is None and echo_future is not None:
+                try:
+                    ts = await asyncio.wait_for(echo_future, timeout=_ECHO_WAIT_S)
+                except (TimeoutError, asyncio.CancelledError):
+                    # Echo never arrived in the deadline window — degrade
+                    # to the no-timestamp shape.  The cancelled future
+                    # gets pruned at next ``_maybe_resolve_self_echo``
+                    # pop-from-front.
+                    log.warning(
+                        "signal.send.echo_timeout",
+                        phone=state.phone,
+                        chat_id=chat_id,
+                    )
+            return {"sent_at_ms": ts} if ts is not None else {"status": "ok"}
+        finally:
+            # Cancel any unresolved future so the drain-stale logic in
+            # ``_maybe_resolve_self_echo`` prunes it before the NEXT
+            # successful send's echo can match it.  Without this guard,
+            # a failing rpc.call (e.g. signal-cli's libsignal
+            # ``InvalidSessionException`` when a group member has no
+            # established protocol session yet) would leak an orphan
+            # future at the head of the deque, and the next echo would
+            # resolve to the WRONG send's timestamp.  cancel() on
+            # already-done futures (resolved by the echo dispatcher or
+            # cancelled by wait_for's timeout path) is a no-op.
+            if echo_future is not None and not echo_future.done():
+                echo_future.cancel()
 
     @tool()
     async def signal_delete(
