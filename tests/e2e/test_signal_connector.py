@@ -292,6 +292,27 @@ class TestSignalMultiConnection:
             events_b = await harness.events(session_b.id)
             assert not any("hello-B" in (e.data.get("content") or "") for e in events_a)
             assert not any("hello-A" in (e.data.get("content") or "") for e in events_b)
+
+            # The connector sends an explicit ``sendReceipt --type read``
+            # to the original sender after every inbound is persisted to
+            # the session log — "the agent has seen it."  signal-cli's
+            # automatic delivery receipts in daemon mode batch
+            # unpredictably; the explicit read receipt forces the
+            # sender's 2nd checkmark immediately on consumption.
+            rpc_call = mocked_signal_daemon["rpc_call"]
+            receipt_calls = [
+                c for c in rpc_call.call_args_list if c.args and c.args[0] == "sendReceipt"
+            ]
+            assert len(receipt_calls) == 2, (
+                f"expected 2 read receipts (one per inbound), got {len(receipt_calls)}"
+            )
+            receipt_accounts = {c.args[1]["account"] for c in receipt_calls}
+            assert receipt_accounts == {PHONE_A, PHONE_B}
+            for c in receipt_calls:
+                params = c.args[1]
+                assert params["type"] == "read"
+                assert params["recipient"] == ALICE_UUID
+                assert params["targetTimestamp"] == [1700000000000]
         finally:
             connector_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

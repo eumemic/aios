@@ -50,6 +50,7 @@ from aios_connector_http import (
 from .addressing import decode_chat_id, encode_chat_id
 from .config import Settings
 from .daemon import GroupInfo, SignalDaemon
+from .errors import RpcError
 from .markdown import convert_markdown_to_signal_styles
 from .mentions import build_mention_strings, encode_mentions
 from .parse import InboundMessage, build_content_text, is_group_update_envelope, parse_envelope
@@ -235,6 +236,17 @@ class SignalConnector(HttpConnector):
             metadata=build_metadata(msg, chat_id, state.bot_uuid),
             timestamp=timestamp_iso,
         )
+        # Send a read receipt now that the message is persisted in the
+        # session event log — semantically, "the agent has seen it."
+        # signal-cli's automatic delivery receipts in daemon mode batch
+        # unpredictably (some receipts land seconds after the envelope,
+        # some get skipped until a later flush trigger), so the sender's
+        # UI checkmark state lags reality.  An explicit read receipt
+        # forces the 2nd checkmark immediately and gives the sender
+        # confirmation tied to actual consumption rather than to
+        # signal-cli's internal flush timing.  Best-effort: a failure
+        # here is cosmetic only — the inbound is already in the log.
+        await self._send_read_receipt(state, msg)
 
     # ── model-facing tools ────────────────────────────────────────────
 
@@ -401,6 +413,35 @@ class SignalConnector(HttpConnector):
         return {"status": "ok"}
 
     # ── helpers ───────────────────────────────────────────────────────
+
+    async def _send_read_receipt(
+        self, state: _SignalConnectionState, msg: InboundMessage
+    ) -> None:
+        """Send a read receipt for ``msg`` to its original sender.
+
+        Best-effort: signal-cli's daemon-mode automatic delivery
+        receipts batch unpredictably, so we fire an explicit read
+        receipt synchronously after ``emit_inbound`` succeeds.  A
+        failure here is logged and swallowed — the inbound is already
+        in the session log, so retrying or crashing would just churn.
+        """
+        assert self._daemon is not None
+        params = {
+            "account": state.phone,
+            "recipient": msg.sender_uuid,
+            "targetTimestamp": [msg.timestamp_ms],
+            "type": "read",
+        }
+        try:
+            await self._daemon.rpc.call("sendReceipt", params)
+        except RpcError as exc:
+            log.warning(
+                "signal.read_receipt.send_failed",
+                phone=state.phone,
+                sender_uuid=msg.sender_uuid,
+                target_timestamp_ms=msg.timestamp_ms,
+                error=str(exc),
+            )
 
     async def _maybe_refresh_roster(
         self, state: _SignalConnectionState, envelope: dict[str, Any]
