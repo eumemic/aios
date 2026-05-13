@@ -52,9 +52,11 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "openapi-python-client>=0.21",
-    # Reference HTTP connector — used by the echo-http e2e test that
-    # validates the full SDK + API + connector wire shape.
+    # Reference + production connectors — e2e tests import each
+    # connector's runner directly to drive multi-connection routing.
     "aios-echo-http",
+    "aios-signal",
+    "aios-telegram",
 ]
 
 [project.scripts]
@@ -77,12 +79,15 @@ members = [
     "packages/aios-sdk",
 ]
 
-# Install the SDK + reference connector in editable mode for development
-# and tests; production deploys each connector as its own container.
+# Install the SDK + reference + production connectors in editable mode
+# for development and tests; production deploys each connector as its
+# own container.
 [tool.uv.sources]
 aios-connector-http = { workspace = true }
 aios-echo-http = { workspace = true }
 aios-sdk = { workspace = true }
+aios-signal = { workspace = true }
+aios-telegram = { workspace = true }
 
 # ─── ruff ────────────────────────────────────────────────────────────────────
 [tool.ruff]

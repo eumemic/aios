@@ -135,6 +135,8 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "aios-echo-http" },
+    { name = "aios-signal" },
+    { name = "aios-telegram" },
     { name = "httpx" },
     { name = "mypy" },
     { name = "openapi-python-client" },
@@ -172,6 +174,8 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "aios-echo-http", editable = "connectors/echo-http" },
+    { name = "aios-signal", editable = "connectors/signal" },
+    { name = "aios-telegram", editable = "connectors/telegram" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "openapi-python-client", specifier = ">=0.21" },

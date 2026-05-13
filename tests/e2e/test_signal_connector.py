@@ -70,6 +70,7 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
 
     with (
         mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock),
+        mock.patch("aios.api.routers.connectors.defer_wake", new_callable=mock.AsyncMock),
         mock.patch("aios.services.inbound.defer_wake", new_callable=mock.AsyncMock),
     ):
         serve_task = asyncio.create_task(_serve())
@@ -144,21 +145,24 @@ class _FakeListener:
 
 
 def _build_text_envelope(sender_uuid: str, text: str) -> dict[str, Any]:
-    """Minimal signal-cli envelope shape that :func:`parse_envelope` accepts."""
+    """Minimal signal-cli envelope shape that :func:`parse_envelope` accepts.
+
+    Mirrors what :class:`aios_signal.rpc.RpcListener` yields downstream:
+    the *inner* ``envelope`` dict from a ``receive`` notification, not
+    the outer wrapper — the listener strips that on its way out.
+    """
     return {
-        "envelope": {
-            "source": sender_uuid,
-            "sourceName": "Alice",
-            "sourceUuid": sender_uuid,
-            "sourceDevice": 1,
+        "source": sender_uuid,
+        "sourceName": "Alice",
+        "sourceUuid": sender_uuid,
+        "sourceDevice": 1,
+        "timestamp": 1700000000000,
+        "dataMessage": {
             "timestamp": 1700000000000,
-            "dataMessage": {
-                "timestamp": 1700000000000,
-                "message": text,
-                "expiresInSeconds": 0,
-                "viewOnce": False,
-            },
-        }
+            "message": text,
+            "expiresInSeconds": 0,
+            "viewOnce": False,
+        },
     }
 
 
@@ -204,6 +208,7 @@ class TestSignalMultiConnection:
         aios_env: dict[str, str],
         mocked_signal_daemon: dict[str, Any],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An inbound envelope tagged with phone A's ``account`` lands as
         a user-message event on session A; an envelope tagged with B's
@@ -245,10 +250,13 @@ class TestSignalMultiConnection:
         await _set_signal_tools(api_key, live_server, conn_b)
         token = await issue_runtime_token(api_key, live_server, "signal")
 
+        # ``HttpConnector.__init__`` reads ``AIOS_URL`` + ``AIOS_RUNTIME_TOKEN``
+        # before any per-instance overrides can apply; set them now so the
+        # constructor picks up the live-server bindings.
+        monkeypatch.setenv("AIOS_URL", live_server)
+        monkeypatch.setenv("AIOS_RUNTIME_TOKEN", token)
         cfg = Settings(config_dir=tmp_path / "cfg", cli_bin="/usr/bin/signal-cli")
         connector = SignalConnector(cfg)
-        connector._base_url = live_server
-        connector._token = token
 
         connector_task = asyncio.create_task(connector.run())
         listener: _FakeListener = mocked_signal_daemon["listener"]
@@ -297,6 +305,7 @@ class TestSignalMultiConnection:
         aios_env: dict[str, str],
         mocked_signal_daemon: dict[str, Any],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The model calling ``signal_send`` on session A's tool call
         lands as an RPC ``send`` with ``account=PHONE_A``, not PHONE_B."""
@@ -340,16 +349,20 @@ class TestSignalMultiConnection:
         await _set_signal_tools(api_key, live_server, conn_b)
         token = await issue_runtime_token(api_key, live_server, "signal")
 
+        monkeypatch.setenv("AIOS_URL", live_server)
+        monkeypatch.setenv("AIOS_RUNTIME_TOKEN", token)
         cfg = Settings(config_dir=tmp_path / "cfg", cli_bin="/usr/bin/signal-cli")
         connector = SignalConnector(cfg)
-        connector._base_url = live_server
-        connector._token = token
 
         harness.script_model(
             [
                 assistant(
                     tool_calls=[
-                        tool_call("signal_send", {"text": "hi-from-A"}, call_id="call_send")
+                        tool_call(
+                            "signal_send",
+                            {"text": "hi-from-A", "chat_id": ALICE_UUID},
+                            call_id="call_send",
+                        )
                     ]
                 ),
                 assistant("done"),
@@ -378,6 +391,20 @@ class TestSignalMultiConnection:
             assert params["account"] == PHONE_A
             assert params["account"] != PHONE_B
             assert params["message"] == "hi-from-A"
+
+            # Wait for the connector to persist the tool_result event back
+            # to the session log — the daemon RPC fires before the runner
+            # POSTs the result, so a bare ``run_step`` here would race.
+            # Tool results are ``kind="message"`` with ``data.role="tool"``.
+            async def _has_tool_result() -> bool:
+                msgs = await harness.events(session_a.id)
+                return any(e.data.get("role") == "tool" for e in msgs)
+
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while not await _has_tool_result():
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("tool_result event never persisted")
+                await asyncio.sleep(0.1)
 
             # Drive the wrap-up step so harness state stays clean.
             await harness.run_step(session_a.id)

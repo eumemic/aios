@@ -71,6 +71,7 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
 
     with (
         mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock),
+        mock.patch("aios.api.routers.connectors.defer_wake", new_callable=mock.AsyncMock),
         mock.patch("aios.services.inbound.defer_wake", new_callable=mock.AsyncMock),
     ):
         serve_task = asyncio.create_task(_serve())

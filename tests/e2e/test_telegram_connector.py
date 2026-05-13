@@ -68,6 +68,7 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
 
     with (
         mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock),
+        mock.patch("aios.api.routers.connectors.defer_wake", new_callable=mock.AsyncMock),
         mock.patch("aios.services.inbound.defer_wake", new_callable=mock.AsyncMock),
     ):
         serve_task = asyncio.create_task(_serve())
@@ -185,6 +186,7 @@ class TestTelegramMultiConnection:
         live_server: str,
         aios_env: dict[str, str],
         mocked_telegram_application: dict[str, MagicMock],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The model calling ``telegram_send`` on session A's tool call
         invokes bot A's ``send_message`` exactly once, and never bot B's.
@@ -228,9 +230,12 @@ class TestTelegramMultiConnection:
         await _set_telegram_tools(api_key, live_server, conn_b)
         token = await issue_runtime_token(api_key, live_server, "telegram")
 
+        # ``HttpConnector.__init__`` reads ``AIOS_URL`` + ``AIOS_RUNTIME_TOKEN``
+        # before any per-instance overrides can apply; set them now so the
+        # constructor picks up the live-server bindings.
+        monkeypatch.setenv("AIOS_URL", live_server)
+        monkeypatch.setenv("AIOS_RUNTIME_TOKEN", token)
         connector = TelegramConnector()
-        connector._base_url = live_server
-        connector._token = token
 
         harness.script_model(
             [
@@ -238,7 +243,7 @@ class TestTelegramMultiConnection:
                     tool_calls=[
                         tool_call(
                             "telegram_send",
-                            {"text": "hi-from-A"},
+                            {"text": "hi-from-A", "chat_id": "12345"},
                             call_id="call_send",
                         )
                     ]
@@ -274,6 +279,21 @@ class TestTelegramMultiConnection:
             app_b = mocked_telegram_application.get(BOT_TOKEN_B)
             if app_b is not None:
                 assert app_b.bot.send_message.await_count == 0
+
+            # Wait for the connector to persist the tool_result event back
+            # to the session log — ``send_message`` is awaited before the
+            # runner POSTs the result, so a bare ``run_step`` here would
+            # race.  Tool results are ``kind="message"`` with
+            # ``data.role="tool"``.
+            async def _has_tool_result() -> bool:
+                msgs = await harness.events(session_a.id)
+                return any(e.data.get("role") == "tool" for e in msgs)
+
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while not await _has_tool_result():
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("tool_result event never persisted")
+                await asyncio.sleep(0.1)
 
             # Drive the wrap-up step so harness state stays clean.
             await harness.run_step(session_a.id)
