@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import structlog
 from aios_connector_http import (
     Attachment as SDKAttachment,
@@ -221,21 +222,42 @@ class SignalConnector(HttpConnector):
             if msg.timestamp_ms
             else None
         )
-        await self.emit_inbound(
-            connection_id=connection_id,
-            # Signal's (sender_uuid, timestamp_ms) pair is the platform's
-            # canonical message identity; feeding it as ``event_id`` lets
-            # aios's ``inbound_acks`` dedupe a redelivered envelope after
-            # a runtime restart (the inbound dispatcher's queue can hold
-            # up to ``maxsize`` envelopes that signal-cli would replay).
-            event_id=f"signal-{msg.sender_uuid}-{msg.timestamp_ms}",
-            chat_id=chat_id,
-            sender=sender_payload,
-            content=build_content_text(msg),
-            attachments=attachments,
-            metadata=build_metadata(msg, chat_id, state.bot_uuid),
-            timestamp=timestamp_iso,
-        )
+        try:
+            await self.emit_inbound(
+                connection_id=connection_id,
+                # Signal's (sender_uuid, timestamp_ms) pair is the platform's
+                # canonical message identity; feeding it as ``event_id`` lets
+                # aios's ``inbound_acks`` dedupe a redelivered envelope after
+                # a runtime restart (the inbound dispatcher's queue can hold
+                # up to ``maxsize`` envelopes that signal-cli would replay).
+                event_id=f"signal-{msg.sender_uuid}-{msg.timestamp_ms}",
+                chat_id=chat_id,
+                sender=sender_payload,
+                content=build_content_text(msg),
+                attachments=attachments,
+                metadata=build_metadata(msg, chat_id, state.bot_uuid),
+                timestamp=timestamp_iso,
+            )
+        except httpx.HTTPStatusError as exc:
+            # Drop-and-continue on routine 4xx so one bad envelope can't
+            # tear down the container and every other connection it
+            # serves.  401/403 (token revoked / runtime misconfigured)
+            # and 5xx (server outage or bug) are container-level problems
+            # that warrant the crash-and-restart loop, so let them
+            # propagate.  Without this guard, a single 422 from the api's
+            # multipart validator collapses the entire TaskGroup.
+            sc = exc.response.status_code
+            if sc in (401, 403) or sc >= 500:
+                raise
+            log.warning(
+                "signal.inbound.dropped",
+                connection_id=connection_id,
+                status_code=sc,
+                sender_uuid=msg.sender_uuid,
+                timestamp_ms=msg.timestamp_ms,
+                body=exc.response.text[:500],
+            )
+            return
         # Send a read receipt now that the message is persisted in the
         # session event log — semantically, "the agent has seen it."
         # signal-cli's automatic delivery receipts in daemon mode batch
