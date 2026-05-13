@@ -228,10 +228,10 @@ Both qwen3.6-flash and Haiku 4.5 frequently emitted `INTERNAL_MONOLOGUE_NOT_SEEN
 | 8 | Scrub orphaned `mcp_toolset` entries on pre-PR-5 agents | data migration or CLI | open (separate one-off) |
 | 10 | Daemon process-group ownership + SIGTERM trap | small fix | ✅ `5f6a0e5` |
 | 11 | Telegram attachment Path → bytes for PTB upload | small fix | ✅ `02b4ac5` |
-| 12 | Per-connection `serve_connection` failure isolation (same shape as #4 but for bring-up) | small fix | open (separate PR) |
-| 13 | SDK lifecycle hardening — hoist #4 / #10 / #12 + state/focal-channel boilerplate onto `HttpConnector` so telegram inherits the safety rails | medium refactor | open (separate PR) |
-| 14 | Signal account registration via the aios API — three routes + management-call SSE so new phones can be onboarded without SSH or restart | medium feature | open (separate PR) |
-| (env) | `aios dev bootstrap` discoverability / harder-to-source-wrong-.env | DX | open |
-| (env) | Runtime token connection-subset scope | feature | open |
+| 12 | Per-connection `serve_connection` failure isolation (same shape as #4 but for bring-up) | small fix | open → [#346](https://github.com/eumemic/aios/issues/346) |
+| 13 | SDK lifecycle hardening — hoist #4 / #10 / #12 + state/focal-channel boilerplate onto `HttpConnector` so telegram inherits the safety rails | medium refactor | open → [#347](https://github.com/eumemic/aios/issues/347) |
+| 14 | Signal account registration via the aios API — three routes + management-call SSE so new phones can be onboarded without SSH or restart | medium feature | open → [#348](https://github.com/eumemic/aios/issues/348) |
+| (env) | `aios dev bootstrap` discoverability / harder-to-source-wrong-.env | DX | open → [#349](https://github.com/eumemic/aios/issues/349) |
+| (env) | Runtime token connection-subset scope | feature | open → [#350](https://github.com/eumemic/aios/issues/350) |
 
-All numbered code-path findings (4, 5, 6, 10, 11) landed in the `refactor/328-fixup-smoke` follow-up branch.  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene unrelated to PR 8's scope.  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.  #12 + #13 + #14 are architectural follow-ups surfaced when reasoning about the post-fixup connector boundary and operator UX, and deserve their own targeted PRs.
+All numbered code-path findings (4, 5, 6, 10, 11) landed in the `refactor/328-fixup-smoke` follow-up branch.  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene → [#345](https://github.com/eumemic/aios/issues/345).  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.  #12 → [#346](https://github.com/eumemic/aios/issues/346) and #13 + #14 are architectural follow-ups surfaced when reasoning about the post-fixup connector boundary and operator UX, all filed as separate issues for their own targeted PRs.
