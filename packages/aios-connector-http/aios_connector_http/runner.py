@@ -258,6 +258,21 @@ class HttpConnector:
             "/v1/connectors/runtime/inbound",
             files=files,
         )
+        if response.is_error:
+            # ``response.raise_for_status()`` discards the body, which is
+            # exactly where FastAPI's validation diagnostics live for a 422
+            # (and where our error envelope lives for everything else).  Log
+            # the body verbatim before raising so the operator has the field
+            # path / message in the container log instead of just the bare
+            # status + URL from ``httpx.HTTPStatusError``.
+            body = response.text
+            log.warning(
+                "connector.inbound.failed",
+                status_code=response.status_code,
+                event_id=eid,
+                connection_id=connection_id,
+                body=body[:2000],
+            )
         response.raise_for_status()
         return dict(response.json())
 

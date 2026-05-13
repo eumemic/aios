@@ -408,6 +408,54 @@ class TestLogging:
             for v in r.values():
                 assert secret_body not in str(v), f"content leaked into log field: {r}"
 
+    async def test_emit_inbound_logs_response_body_on_error(
+        self, probe: _ProbeConnector
+    ) -> None:
+        """When the api rejects an inbound (e.g. FastAPI 422 validation),
+        the response body carries the diagnostic — which field, why.
+        ``response.raise_for_status()`` discards it, so the connector must
+        log the body explicitly before raising or the operator only sees a
+        bare ``HTTPStatusError: 422`` in the crash traceback with no clue
+        what triggered the rejection.
+        """
+        import httpx
+
+        validation_body = (
+            '{"error":{"type":"validation_error","detail":'
+            '{"errors":[{"type":"missing","loc":["body","content"],'
+            '"msg":"Field required","input":null}]}}}'
+        )
+        mock_response = MagicMock()
+        mock_response.is_error = True
+        mock_response.status_code = 422
+        mock_response.text = validation_body
+        mock_response.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError(
+                "422 Unprocessable Content", request=MagicMock(), response=mock_response
+            )
+        )
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        with (
+            structlog.testing.capture_logs() as records,
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await probe.emit_inbound(
+                connection_id="conn_1",
+                chat_id="c",
+                sender={"id": 1},
+                content="",
+            )
+        failed = [r for r in records if r.get("event") == "connector.inbound.failed"]
+        assert len(failed) == 1, "expected one connector.inbound.failed record"
+        assert failed[0]["status_code"] == 422
+        assert failed[0]["connection_id"] == "conn_1"
+        # The full validation body is logged so the operator can see the
+        # offending field path without replaying the request.
+        assert "content" in failed[0]["body"]
+        assert "Field required" in failed[0]["body"]
+
     async def test_dispatch_call_logs_dispatched_then_completed(
         self, probe: _ProbeConnector
     ) -> None:

@@ -272,7 +272,12 @@ async def post_runtime_inbound(
     connection_id: Annotated[str, Form(description="The connection this inbound belongs to.")],
     event_id: Annotated[str, Form(description="Client-supplied dedup key (ULID).")],
     chat_id: Annotated[str, Form()],
-    content: Annotated[str, Form()],
+    # Default empty so attachment-only / reaction-passthrough / group-update
+    # envelopes can flow through.  FastAPI's multipart Form parser treats an
+    # empty field value as ``input=null`` (missing), which 422s a required
+    # ``content: str``; the explicit ``= ""`` default makes empty bodies a
+    # valid first-class shape rather than a server-side validation failure.
+    content: Annotated[str, Form()] = "",
     sender: Annotated[
         str | None,
         Form(description='JSON-encoded sender dict (e.g. {"display_name": "Alice"}).'),

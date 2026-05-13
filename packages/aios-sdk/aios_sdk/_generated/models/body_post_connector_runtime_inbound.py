@@ -19,7 +19,7 @@ class BodyPostConnectorRuntimeInbound:
         connection_id (str): The connection this inbound belongs to.
         event_id (str): Client-supplied dedup key (ULID).
         chat_id (str):
-        content (str):
+        content (str | Unset):  Default: ''.
         sender (None | str | Unset): JSON-encoded sender dict (e.g. {"display_name": "Alice"}).
         metadata (None | str | Unset): JSON-encoded connector metadata dict.
         timestamp (None | str | Unset): Optional ISO-8601 platform timestamp; stored in event metadata.
@@ -29,7 +29,7 @@ class BodyPostConnectorRuntimeInbound:
     connection_id: str
     event_id: str
     chat_id: str
-    content: str
+    content: str | Unset = ""
     sender: None | str | Unset = UNSET
     metadata: None | str | Unset = UNSET
     timestamp: None | str | Unset = UNSET
@@ -79,9 +79,10 @@ class BodyPostConnectorRuntimeInbound:
                 "connection_id": connection_id,
                 "event_id": event_id,
                 "chat_id": chat_id,
-                "content": content,
             }
         )
+        if content is not UNSET:
+            field_dict["content"] = content
         if sender is not UNSET:
             field_dict["sender"] = sender
         if metadata is not UNSET:
@@ -104,7 +105,8 @@ class BodyPostConnectorRuntimeInbound:
 
         files.append(("chat_id", (None, str(self.chat_id).encode(), "text/plain")))
 
-        files.append(("content", (None, str(self.content).encode(), "text/plain")))
+        if not isinstance(self.content, Unset):
+            files.append(("content", (None, str(self.content).encode(), "text/plain")))
 
         if not isinstance(self.sender, Unset):
             if isinstance(self.sender, str):
@@ -171,7 +173,7 @@ class BodyPostConnectorRuntimeInbound:
 
         chat_id = d.pop("chat_id")
 
-        content = d.pop("content")
+        content = d.pop("content", UNSET)
 
         def _parse_sender(data: object) -> None | str | Unset:
             if data is None:
