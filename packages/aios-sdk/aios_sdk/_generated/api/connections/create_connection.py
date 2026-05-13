@@ -98,9 +98,6 @@ def sync_detailed(
             in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
             and a ``/`` would create ambiguous segment boundaries.
 
-            ``tools`` declares the model-facing custom tools this connection
-            contributes to any session it's attached to (see #301).
-
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
@@ -156,9 +153,6 @@ def sync(
             in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
             and a ``/`` would create ambiguous segment boundaries.
 
-            ``tools`` declares the model-facing custom tools this connection
-            contributes to any session it's attached to (see #301).
-
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
@@ -208,9 +202,6 @@ async def asyncio_detailed(
             ``connector`` and ``account`` may not contain ``/`` — they're used
             in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
             and a ``/`` would create ambiguous segment boundaries.
-
-            ``tools`` declares the model-facing custom tools this connection
-            contributes to any session it's attached to (see #301).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -264,9 +255,6 @@ async def asyncio(
             ``connector`` and ``account`` may not contain ``/`` — they're used
             in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
             and a ``/`` would create ambiguous segment boundaries.
-
-            ``tools`` declares the model-facing custom tools this connection
-            contributes to any session it's attached to (see #301).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

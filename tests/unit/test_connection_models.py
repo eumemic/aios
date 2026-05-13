@@ -1,10 +1,10 @@
-"""Unit tests for the new connection + session-template models (#200).
+"""Unit tests for the connection + session-template wire models.
 
-The connector redesign collapses ``connections`` + ``channel_bindings`` +
-``connection_routing_rules`` into one ``connections`` table with three
-valid shapes (detached / single_session / per_chat) enforced by the
-``connections_one_mode_ck`` CHECK constraint.  Wire-level model
-validation covers the request shapes.
+Three valid connection shapes (detached / single_session / per_chat) are
+encoded by which of ``session_id`` / ``session_template_id`` is populated
+on the ``Connection`` read view; both are projected from the active
+``bindings`` row at read time.  These tests cover wire-level validation
+of the request bodies and response shapes.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from datetime import datetime
 
 import pytest
 
-from aios.models.agents import ToolSpec
 from aios.models.connections import (
     Connection,
     ConnectionAttach,
@@ -56,44 +55,18 @@ class TestConnectionCreate:
                 }
             )
 
-    def test_accepts_tools(self) -> None:
-        """Connections can declare model-facing custom tools (#301)."""
-        body = ConnectionCreate(
-            connector="signal",
-            account="+1",
-            tools=[
-                ToolSpec(
-                    type="custom",
-                    name="signal_send",
-                    description="Send a Signal message",
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "chat_id": {"type": "string"},
-                            "text": {"type": "string"},
-                        },
-                        "required": ["chat_id", "text"],
-                    },
-                ),
-            ],
-        )
-        assert len(body.tools) == 1
-        assert body.tools[0].name == "signal_send"
-
-    def test_tools_default_empty(self) -> None:
-        body = ConnectionCreate(connector="signal", account="+1")
-        assert body.tools == []
-
-    def test_rejects_non_custom_tool_types(self) -> None:
-        """Per #301: connection-declared tools are always client-executed.
-        Built-in (e.g. ``bash``) and ``mcp_toolset`` types belong on the
-        agent, not the connection.
+    def test_rejects_tools_field(self) -> None:
+        """``tools`` is no longer accepted on create — per-connector-type
+        catalogs live on the ``connectors`` table now, not per connection.
+        ``extra="forbid"`` 422s any caller still passing it.
         """
-        with pytest.raises(ValueError, match="custom"):
-            ConnectionCreate(
-                connector="signal",
-                account="+1",
-                tools=[ToolSpec(type="bash")],
+        with pytest.raises(ValueError):
+            ConnectionCreate.model_validate(
+                {
+                    "connector": "signal",
+                    "account": "+1",
+                    "tools": [{"type": "custom", "name": "x", "input_schema": {}}],
+                }
             )
 
 
@@ -158,37 +131,6 @@ class TestConnectionReadView:
         )
         assert c.session_id is None
         assert c.session_template_id == "stpl_1"
-
-    def test_tools_default_empty(self) -> None:
-        c = Connection(
-            id="conn_1",
-            connector="signal",
-            account="+1",
-            metadata={},
-            created_at=self._now(),
-            updated_at=self._now(),
-        )
-        assert c.tools == []
-
-    def test_round_trips_tools(self) -> None:
-        c = Connection(
-            id="conn_1",
-            connector="signal",
-            account="+1",
-            metadata={},
-            tools=[
-                ToolSpec(
-                    type="custom",
-                    name="signal_send",
-                    description="Send",
-                    input_schema={"type": "object"},
-                ),
-            ],
-            created_at=self._now(),
-            updated_at=self._now(),
-        )
-        assert len(c.tools) == 1
-        assert c.tools[0].name == "signal_send"
 
 
 class TestSessionTemplateCreate:

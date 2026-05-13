@@ -4577,7 +4577,7 @@
           "connections"
         ],
         "summary": "Set Secrets",
-        "description": "Replace the connection's encrypted secrets dict, wholesale.\n\nMirrors ``set_tools`` \u2014 the request body fully replaces the stored\nblob.  Pass ``{\"secrets\": {}}`` to clear secrets entirely.\nOperator-facing reads only ever expose ``secrets_set: bool``; the\ndecrypted values are exclusively available to the connector\ncontainer that holds a connector token resolving to this connection.",
+        "description": "Replace the connection's encrypted secrets dict, wholesale.\n\nThe request body fully replaces the stored blob.  Pass\n``{\"secrets\": {}}`` to clear secrets entirely.  Operator-facing reads\nonly ever expose ``secrets_set: bool``; the decrypted values are\nexclusively available via the runtime-scoped\n``GET /v1/connectors/runtime/secrets`` route to a connector container\nholding a runtime token for this connector type.",
         "operationId": "set_connection_secrets",
         "parameters": [
           {
@@ -6787,13 +6787,6 @@
             "type": "object",
             "title": "Metadata"
           },
-          "tools": {
-            "items": {
-              "$ref": "#/components/schemas/ToolSpec"
-            },
-            "type": "array",
-            "title": "Tools"
-          },
           "secrets_set": {
             "type": "boolean",
             "title": "Secrets Set",
@@ -6895,13 +6888,6 @@
             "type": "object",
             "title": "Metadata"
           },
-          "tools": {
-            "items": {
-              "$ref": "#/components/schemas/ToolSpec"
-            },
-            "type": "array",
-            "title": "Tools"
-          },
           "secrets": {
             "anyOf": [
               {
@@ -6925,7 +6911,7 @@
           "account"
         ],
         "title": "ConnectionCreate",
-        "description": "Request body for ``POST /v1/connections``.\n\nCreated in detached mode \u2014 neither ``session_id`` nor\n``session_template_id`` is set.  Use ``POST .../attach`` or\n``POST .../configure-per-chat`` afterward to bind a routing mode.\n\n``connector`` and ``account`` may not contain ``/`` \u2014 they're used\nin the focal-channel address scheme ``{connector}/{account}/{chat_id}``\nand a ``/`` would create ambiguous segment boundaries.\n\n``tools`` declares the model-facing custom tools this connection\ncontributes to any session it's attached to (see #301)."
+        "description": "Request body for ``POST /v1/connections``.\n\nCreated in detached mode \u2014 neither ``session_id`` nor\n``session_template_id`` is set.  Use ``POST .../attach`` or\n``POST .../configure-per-chat`` afterward to bind a routing mode.\n\n``connector`` and ``account`` may not contain ``/`` \u2014 they're used\nin the focal-channel address scheme ``{connector}/{account}/{chat_id}``\nand a ``/`` would create ambiguous segment boundaries."
       },
       "ConnectionSetSecrets": {
         "properties": {

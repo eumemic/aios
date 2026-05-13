@@ -22,7 +22,6 @@ import asyncpg
 from aios.crypto.vault import CryptoBox, EncryptedBlob
 from aios.db import queries
 from aios.errors import ConflictError, NotFoundError
-from aios.models.agents import ToolSpec
 from aios.models.connections import (
     BindingMode,
     BoundChat,
@@ -50,18 +49,15 @@ async def create_connection(
     connector: str,
     account: str,
     metadata: dict[str, Any],
-    tools: list[ToolSpec] | None = None,
     secrets: dict[str, str] | None = None,
     crypto_box: CryptoBox,
 ) -> Connection:
-    tools_payload = [t.model_dump(exclude_none=True) for t in (tools or [])]
     async with pool.acquire() as conn:
         return await queries.insert_connection(
             conn,
             connector=connector,
             account=account,
             metadata=metadata,
-            tools=tools_payload,
             secrets_blob=_encrypt_secrets(secrets, crypto_box),
         )
 

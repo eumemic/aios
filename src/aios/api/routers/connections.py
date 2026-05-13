@@ -57,7 +57,6 @@ async def create(
         connector=body.connector,
         account=body.account,
         metadata=body.metadata,
-        tools=body.tools,
         secrets=body.secrets,
         crypto_box=crypto_box,
     )
@@ -73,11 +72,12 @@ async def set_secrets(
 ) -> Connection:
     """Replace the connection's encrypted secrets dict, wholesale.
 
-    Mirrors ``set_tools`` — the request body fully replaces the stored
-    blob.  Pass ``{"secrets": {}}`` to clear secrets entirely.
-    Operator-facing reads only ever expose ``secrets_set: bool``; the
-    decrypted values are exclusively available to the connector
-    container that holds a connector token resolving to this connection.
+    The request body fully replaces the stored blob.  Pass
+    ``{"secrets": {}}`` to clear secrets entirely.  Operator-facing reads
+    only ever expose ``secrets_set: bool``; the decrypted values are
+    exclusively available via the runtime-scoped
+    ``GET /v1/connectors/runtime/secrets`` route to a connector container
+    holding a runtime token for this connector type.
     """
     return await service.set_connection_secrets(
         pool, connection_id, secrets=body.secrets, crypto_box=crypto_box

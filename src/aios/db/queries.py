@@ -2804,10 +2804,9 @@ async def _raise_for_failed_binding_insert(
 #   single_session — active binding row with mode='single_session'
 #   per_chat       — active binding row with mode='per_chat'
 #
-# The legacy in-place ``connections.session_id`` / ``session_template_id``
-# columns are retained in the schema for PR 8 soak but are neither read
-# nor written by this layer. ``Connection.session_id`` / ``session_template_id``
-# wire fields are populated from the active binding via a LEFT JOIN.
+# ``Connection.session_id`` / ``session_template_id`` / ``attached_at``
+# wire fields are populated from the active binding row via a LEFT JOIN
+# on ``bindings`` — there is no per-connection session column to read.
 
 _CONNECTION_COLUMNS = """
     c.*,
@@ -2838,22 +2837,17 @@ _CONNECTION_UPDATE_CTE_TAIL = """
 
 
 def _row_to_connection(row: asyncpg.Record) -> Connection:
-    metadata = _parse_jsonb(row["metadata"])
-    tools_data = _parse_jsonb(row["tools"])
     return Connection(
         id=row["id"],
         connector=row["connector"],
         account=row["account"],
         session_id=row["binding_session_id"],
         session_template_id=row["binding_session_template_id"],
-        metadata=metadata,
-        tools=tools_data,
+        metadata=_parse_jsonb(row["metadata"]),
         secrets_set=row["secrets_ciphertext"] is not None,
         created_at=row["created_at"],
-        # ``attached_at`` is "when did the active binding land" — derive
-        # from the binding row's ``created_at`` rather than the legacy
-        # ``connections.attached_at`` column (which is no longer written
-        # by the new attach/configure service paths).
+        # ``attached_at`` is "when did the active binding land," derived
+        # from the binding row's ``created_at``.
         attached_at=row["binding_created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -2866,7 +2860,6 @@ async def insert_connection(
     connector: str,
     account: str,
     metadata: dict[str, Any],
-    tools: list[dict[str, Any]] | None = None,
     secrets_blob: EncryptedBlob | None = None,
 ) -> Connection:
     """Insert a detached connection, idempotent on the active uniqueness key.
@@ -2893,7 +2886,6 @@ async def insert_connection(
     # any realistic contention pattern.  The bound is defensive — three
     # iterations is enough that exhaustion would mean the system is wedged
     # in a hot insert/archive cycle that no retry strategy can resolve.
-    tools_json = json.dumps(tools or [])
     ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
     nonce = secrets_blob.nonce if secrets_blob is not None else None
     # Upsert into the connectors catalog so the runtime_tokens /
@@ -2910,10 +2902,10 @@ async def insert_connection(
             """
             WITH inserted AS (
                 INSERT INTO connections (
-                    id, connector, account, metadata, tools,
+                    id, connector, account, metadata,
                     secrets_ciphertext, secrets_nonce
                 )
-                VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
+                VALUES ($1, $2, $3, $4::jsonb, $5, $6)
                 ON CONFLICT (connector, account) WHERE archived_at IS NULL DO NOTHING
                 RETURNING *
             )
@@ -2927,7 +2919,6 @@ async def insert_connection(
             connector,
             account,
             json.dumps(metadata),
-            tools_json,
             ciphertext,
             nonce,
         )
