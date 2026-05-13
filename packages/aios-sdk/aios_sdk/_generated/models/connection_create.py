@@ -32,8 +32,8 @@ class ConnectionCreate:
             account (str):
             metadata (ConnectionCreateMetadata | Unset):
             secrets (ConnectionCreateSecretsType0 | None | Unset): Platform credentials (e.g. ``bot_token``).  Encrypted at
-                rest via the server's ``AIOS_VAULT_KEY``; only ever read back via the connector-scoped ``GET
-                /v1/connectors/secrets``.  Operator-facing reads return ``secrets_set: bool`` instead of values.
+                rest via the server's ``AIOS_VAULT_KEY``; only ever read back via the runtime-scoped ``GET
+                /v1/connectors/runtime/secrets``.  Operator-facing reads return ``secrets_set: bool`` instead of values.
     """
 
     connector: str

@@ -48,9 +48,9 @@ async def create(
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
-    and only ever read back through the connector-scoped
-    ``GET /v1/connectors/secrets`` route — operator-facing reads return
-    ``secrets_set: bool`` instead of values.
+    and only ever read back through the runtime-scoped
+    ``GET /v1/connectors/runtime/secrets`` route — operator-facing
+    reads return ``secrets_set: bool`` instead of values.
     """
     return await service.create_connection(
         pool,

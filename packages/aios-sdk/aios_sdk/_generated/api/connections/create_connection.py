@@ -82,9 +82,9 @@ def sync_detailed(
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
-    and only ever read back through the connector-scoped
-    ``GET /v1/connectors/secrets`` route — operator-facing reads return
-    ``secrets_set: bool`` instead of values.
+    and only ever read back through the runtime-scoped
+    ``GET /v1/connectors/runtime/secrets`` route — operator-facing
+    reads return ``secrets_set: bool`` instead of values.
 
     Args:
         authorization (None | str | Unset):
@@ -137,9 +137,9 @@ def sync(
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
-    and only ever read back through the connector-scoped
-    ``GET /v1/connectors/secrets`` route — operator-facing reads return
-    ``secrets_set: bool`` instead of values.
+    and only ever read back through the runtime-scoped
+    ``GET /v1/connectors/runtime/secrets`` route — operator-facing
+    reads return ``secrets_set: bool`` instead of values.
 
     Args:
         authorization (None | str | Unset):
@@ -187,9 +187,9 @@ async def asyncio_detailed(
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
-    and only ever read back through the connector-scoped
-    ``GET /v1/connectors/secrets`` route — operator-facing reads return
-    ``secrets_set: bool`` instead of values.
+    and only ever read back through the runtime-scoped
+    ``GET /v1/connectors/runtime/secrets`` route — operator-facing
+    reads return ``secrets_set: bool`` instead of values.
 
     Args:
         authorization (None | str | Unset):
@@ -240,9 +240,9 @@ async def asyncio(
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
-    and only ever read back through the connector-scoped
-    ``GET /v1/connectors/secrets`` route — operator-facing reads return
-    ``secrets_set: bool`` instead of values.
+    and only ever read back through the runtime-scoped
+    ``GET /v1/connectors/runtime/secrets`` route — operator-facing
+    reads return ``secrets_set: bool`` instead of values.
 
     Args:
         authorization (None | str | Unset):

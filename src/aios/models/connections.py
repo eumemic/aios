@@ -59,7 +59,7 @@ class ConnectionCreate(BaseModel):
         default=None,
         description="Platform credentials (e.g. ``bot_token``).  Encrypted "
         "at rest via the server's ``AIOS_VAULT_KEY``; only ever read back "
-        "via the connector-scoped ``GET /v1/connectors/secrets``.  "
+        "via the runtime-scoped ``GET /v1/connectors/runtime/secrets``.  "
         "Operator-facing reads return ``secrets_set: bool`` instead of values.",
     )
 
@@ -139,12 +139,12 @@ class ConnectionSetSecrets(BaseModel):
 
 
 class ConnectorSecrets(BaseModel):
-    """Response shape for ``GET /v1/connectors/secrets``.
+    """Response shape for ``GET /v1/connectors/runtime/secrets``.
 
-    Only the connector container's bearer token (which scopes to one
-    ``connection_id``) can hit this route.  Returns the decrypted dict
-    the operator stored at create / set-secrets time.  Empty dict when
-    the connection has no secrets configured.
+    Only a connector container holding a runtime token for the
+    connection's connector type can hit this route.  Returns the
+    decrypted dict the operator stored at create / set-secrets time,
+    or an empty dict when the connection has no secrets configured.
     """
 
     secrets: dict[str, str] = Field(default_factory=dict)

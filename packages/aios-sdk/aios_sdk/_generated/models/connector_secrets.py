@@ -17,12 +17,12 @@ T = TypeVar("T", bound="ConnectorSecrets")
 
 @_attrs_define
 class ConnectorSecrets:
-    """Response shape for ``GET /v1/connectors/secrets``.
+    """Response shape for ``GET /v1/connectors/runtime/secrets``.
 
-    Only the connector container's bearer token (which scopes to one
-    ``connection_id``) can hit this route.  Returns the decrypted dict
-    the operator stored at create / set-secrets time.  Empty dict when
-    the connection has no secrets configured.
+    Only a connector container holding a runtime token for the
+    connection's connector type can hit this route.  Returns the
+    decrypted dict the operator stored at create / set-secrets time,
+    or an empty dict when the connection has no secrets configured.
 
         Attributes:
             secrets (ConnectorSecretsSecrets | Unset):
