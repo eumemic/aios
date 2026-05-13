@@ -1,34 +1,18 @@
 """Drop the legacy ``connections.{session_id,session_template_id,tools}``
-columns and the legacy ``connection_chat_sessions`` table (#328 PR 8).
+columns and the legacy ``connection_chat_sessions`` table.
 
-PR 7 cut every reader and writer over to the new subsystem:
+Replacements:
 
-* ``connections.session_id`` / ``session_template_id`` → now projected
-  from the active row of the ``bindings`` table via LEFT JOIN.
-* ``connections.tools`` → was zombie data; the per-connector-type
-  catalog in ``connectors.tools_schema`` is the live source consulted
-  by ``list_connection_tools_for_session``.
-* ``connection_chat_sessions`` → superseded by ``chat_sessions``
-  (migration 0033) which is read by the resolver's Tier 1.
+* ``connections.session_id`` / ``session_template_id`` — projected from
+  the active row of the ``bindings`` table via LEFT JOIN.
+* ``connections.tools`` — superseded by ``connectors.tools_schema``
+  (per connector type).
+* ``connection_chat_sessions`` — superseded by ``chat_sessions``.
 
-The columns and table sat dormant across PR 7 so operators could watch
-for accidental writes during the soak window.  Soak is clean — this
-migration finishes the cutover by removing them from the schema.
-
-``DROP COLUMN ... CASCADE`` removes the column along with any
-constraints / indexes that reference it:
-
-* ``connections.session_id`` cascades the ``connections_session_id_idx``
-  partial index (0029) and the FK to ``sessions(id)`` (0027).
-* ``connections.session_template_id`` cascades the FK to
-  ``session_templates(id)`` (0027).
-* Either column drop cascades ``connections_one_mode_ck`` (0027) — the
-  CHECK constraint that enforced "at most one populated" is no longer
-  meaningful once the mode lives on ``bindings``.
-
-The downgrade path reconstitutes the schema shape but not the data;
-recovery from a pre-0039 state requires a database snapshot, since the
-catch-up migration (0035) is one-way.
+``CASCADE`` on the column drops sweeps along the partial index on
+``session_id``, the FKs to ``sessions(id)`` / ``session_templates(id)``,
+and the ``connections_one_mode_ck`` CHECK that gated mode-uniqueness on
+the legacy shape.
 
 Revision ID: 0039
 Revises: 0038
@@ -48,9 +32,15 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER TABLE connections DROP COLUMN IF EXISTS session_id CASCADE")
-    op.execute("ALTER TABLE connections DROP COLUMN IF EXISTS session_template_id CASCADE")
-    op.execute("ALTER TABLE connections DROP COLUMN IF EXISTS tools")
+    # One ALTER per relation: a single ACCESS EXCLUSIVE lock cycle on
+    # ``connections`` for all three drops, instead of three serialized
+    # waits during deploy.
+    op.execute(
+        "ALTER TABLE connections "
+        "DROP COLUMN IF EXISTS session_id CASCADE, "
+        "DROP COLUMN IF EXISTS session_template_id CASCADE, "
+        "DROP COLUMN IF EXISTS tools"
+    )
     op.execute("DROP TABLE IF EXISTS connection_chat_sessions")
 
 

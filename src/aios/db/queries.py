@@ -2804,9 +2804,9 @@ async def _raise_for_failed_binding_insert(
 #   single_session — active binding row with mode='single_session'
 #   per_chat       — active binding row with mode='per_chat'
 #
-# ``Connection.session_id`` / ``session_template_id`` / ``attached_at``
-# wire fields are populated from the active binding row via a LEFT JOIN
-# on ``bindings`` — there is no per-connection session column to read.
+# ``Connection.session_id`` / ``session_template_id`` / ``attached_at`` are
+# projected from the binding via a LEFT JOIN — there is no per-connection
+# session column.
 
 _CONNECTION_COLUMNS = """
     c.*,
@@ -2846,8 +2846,6 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         metadata=_parse_jsonb(row["metadata"]),
         secrets_set=row["secrets_ciphertext"] is not None,
         created_at=row["created_at"],
-        # ``attached_at`` is "when did the active binding land," derived
-        # from the binding row's ``created_at``.
         attached_at=row["binding_created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
