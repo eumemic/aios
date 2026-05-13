@@ -148,10 +148,13 @@ async def test_signal_send_group_returns_sent_at_ms_from_echo(
     async def _fake_send(_method: str, _params: dict[str, Any]) -> Any:
         # signal-cli 0.14.x: group send returns null at the RPC layer.
         # The echo arrives via the receive stream concurrently — simulate
-        # by routing a synthetic envelope through _handle_envelope from
-        # inside the mocked RPC call.
-        await connector._handle_envelope(
-            CONNECTION_ID, _state(), _self_echo_envelope(timestamp_ms=sent_ts)
+        # by routing a synthetic envelope through _maybe_resolve_self_echo
+        # directly.  In production the dispatcher invokes this from
+        # _inbound_dispatcher when the envelope lands on any peer's
+        # account stream (group self-echoes arrive on RECEIVING peers'
+        # streams, not on the sender's own stream).
+        connector._maybe_resolve_self_echo(
+            _state(), _self_echo_envelope(timestamp_ms=sent_ts)
         )
         return None
 
@@ -179,6 +182,42 @@ async def test_signal_send_group_falls_back_when_echo_times_out(
     )
 
     assert result == {"status": "ok"}
+
+
+async def test_inbound_dispatcher_resolves_echo_on_peer_account_stream(
+    connector: SignalConnector,
+) -> None:
+    """Regression for the post-#6 smoke gap: signal-cli emits group
+    self-echoes on the receiving peers' account streams (because
+    those are the streams the message actually flows through),
+    *not* on the sender's own account stream.  The dispatcher must
+    resolve the echo regardless of which ``account`` arrived with
+    the envelope — keyed by ``sourceUuid`` matching any known bot
+    rather than by per-account routing.
+    """
+    # Register the bot under its own account.
+    connector._conn_state[CONNECTION_ID] = _state()
+    fut: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    connector._pending_echoes[(PHONE, GROUP_CHAT_ID)] = deque([fut])
+
+    # Mock listener.messages() to emit a single self-echo envelope
+    # arriving on a DIFFERENT account stream (e.g. a peer bot like
+    # Ultron whose account signal-cli also serves).
+    peer_account = "+19092871349"
+
+    class _StubListener:
+        async def messages(self) -> Any:
+            yield peer_account, _self_echo_envelope(timestamp_ms=777)
+
+    assert connector._daemon is not None
+    connector._daemon.listener = _StubListener()  # type: ignore[assignment]
+
+    # Dispatcher runs until listener.messages exhausts; our generator
+    # yields once then completes.
+    await connector._inbound_dispatcher()
+
+    assert fut.done()
+    assert fut.result() == 777
 
 
 async def test_signal_send_dm_does_not_register_echo_future(

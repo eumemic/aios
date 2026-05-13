@@ -208,9 +208,28 @@ class SignalConnector(HttpConnector):
         return self._inbound_queues[phone]
 
     async def _inbound_dispatcher(self) -> None:
-        """Fan ``daemon.listener.messages()`` out to per-account queues."""
+        """Fan ``daemon.listener.messages()`` out to per-account queues.
+
+        Self-echo resolution rides at this layer rather than inside the
+        per-account queue drain because signal-cli's group self-echoes
+        (the ``dataMessage`` with ``groupInfo`` carrying the send
+        timestamp) emit on the RECEIVING peers' account streams, not on
+        the sender's own account stream.  When the bot sends to a group
+        that includes other peers whose accounts signal-cli also serves
+        (e.g. a co-located bot like Ultron in the QA group), the echo
+        arrives on *their* stream and never reaches the bot's queue.
+        Checking each envelope's ``sourceUuid`` against every known
+        bot before routing lets us correlate regardless of which
+        account stream the envelope landed on.
+        """
         assert self._daemon is not None
         async for account, envelope in self._daemon.listener.messages():
+            source_uuid = envelope.get("sourceUuid")
+            if isinstance(source_uuid, str) and source_uuid:
+                for state in self._conn_state.values():
+                    if state.bot_uuid == source_uuid:
+                        self._maybe_resolve_self_echo(state, envelope)
+                        break
             queue = self._queue_for(account.strip())
             await queue.put(envelope)
 
@@ -223,12 +242,6 @@ class SignalConnector(HttpConnector):
         await self._maybe_refresh_roster(state, envelope)
         msg = parse_envelope(envelope, bot_account_uuid=state.bot_uuid)
         if msg is None:
-            # Could still be a self-echo of one of our own group sends
-            # whose timestamp ``signal_send`` is waiting for.  Inbounds
-            # from other peers get a structured ``InboundMessage``; bot
-            # self-traffic falls into this None branch (parse_envelope
-            # drops same-uuid envelopes).
-            self._maybe_resolve_self_echo(state, envelope)
             return
         if msg.sender_name is None:
             resolved = state.contact_names.get(msg.sender_uuid)
