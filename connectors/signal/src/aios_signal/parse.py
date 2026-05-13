@@ -55,6 +55,22 @@ class Reply:
 
 
 @dataclass(slots=True, frozen=True)
+class Mention:
+    """One structured @-mention from a Signal inbound.
+
+    The placeholder-substituted text in ``InboundMessage.text`` is what
+    the sender's UI rendered; the structured ``Mention`` list is what
+    the platform actually encoded.  Agents that need to distinguish "the
+    sender typed my name as text" from "the sender's client emitted a
+    mention targeting my UUID" read ``mentions`` (and ``self_mentioned``
+    on the metadata) rather than substring-searching ``text``.
+    """
+
+    uuid: str
+    name: str | None
+
+
+@dataclass(slots=True, frozen=True)
 class InboundMessage:
     chat_type: ChatType
     raw_chat_id: str
@@ -64,6 +80,7 @@ class InboundMessage:
     timestamp_ms: int
     text: str
     attachments: tuple[Attachment, ...]
+    mentions: tuple[Mention, ...]
     reply: Reply | None
     reaction: Reaction | None
 
@@ -172,11 +189,26 @@ def parse_envelope(
     )
 
     raw_text = data_message.get("message")
-    mentions = data_message.get("mentions")
+    mentions_raw = data_message.get("mentions")
     if isinstance(raw_text, str):
-        text = _substitute_mentions(raw_text, mentions) if isinstance(mentions, list) else raw_text
+        text = (
+            _substitute_mentions(raw_text, mentions_raw)
+            if isinstance(mentions_raw, list)
+            else raw_text
+        )
     else:
         text = ""
+
+    parsed_mentions: tuple[Mention, ...] = ()
+    if isinstance(mentions_raw, list):
+        parsed_mentions = tuple(
+            Mention(
+                uuid=m["uuid"],
+                name=m.get("name") if isinstance(m.get("name"), str) else None,
+            )
+            for m in mentions_raw
+            if isinstance(m, dict) and isinstance(m.get("uuid"), str) and m.get("uuid")
+        )
 
     if not text and not attachments and reaction is None:
         return None
@@ -190,6 +222,7 @@ def parse_envelope(
         timestamp_ms=timestamp_ms,
         text=text,
         attachments=attachments,
+        mentions=parsed_mentions,
         reply=reply,
         reaction=reaction,
     )

@@ -31,6 +31,17 @@ def test_text_group_with_mentions(envelope_text_group: dict[str, Any], bot_uuid:
     assert msg.chat_name == "Friends"
     # Mention placeholder substituted with @Name.
     assert msg.text == "hey @Bob thanks!"
+    # Structured mention list preserved alongside the substituted text so
+    # callers can distinguish a structured @-mention from a literal "@Bob".
+    assert len(msg.mentions) == 1
+    assert msg.mentions[0].uuid == "66666666-7777-8888-9999-aaaaaaaaaaaa"
+    assert msg.mentions[0].name == "Bob"
+
+
+def test_no_mentions_yields_empty_tuple(envelope_text_dm: dict[str, Any], bot_uuid: str) -> None:
+    msg = parse_envelope(envelope_text_dm, bot_account_uuid=bot_uuid)
+    assert msg is not None
+    assert msg.mentions == ()
 
 
 def test_reaction(envelope_reaction: dict[str, Any], bot_uuid: str) -> None:
@@ -109,6 +120,7 @@ def test_build_content_text_with_text_and_attachment(bot_uuid: str) -> None:
                 id="abc",
             ),
         ),
+        mentions=(),
         reply=None,
         reaction=None,
     )

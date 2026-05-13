@@ -658,6 +658,13 @@ def build_metadata(msg: InboundMessage, chat_id: str, bot_uuid: str) -> dict[str
     (e.g. ``aios sessions events`` JSON output).  Reply / reaction
     payloads are nested so the model sees them as structured siblings
     of ``content`` rather than embedded prose.
+
+    Mentions ride as a structured list plus a derived ``self_mentioned``
+    bool, so the agent can distinguish "sender typed @<name> as text"
+    from "sender's client encoded a mention targeting my UUID" without
+    substring-searching ``content``.  Group sends in particular often
+    @-tag the bot to summon a response, and the placeholder-substituted
+    text alone hides that signal.
     """
     metadata: dict[str, Any] = {
         "channel": f"signal/{bot_uuid}/{chat_id}",
@@ -669,6 +676,11 @@ def build_metadata(msg: InboundMessage, chat_id: str, bot_uuid: str) -> dict[str
         metadata["sender_name"] = msg.sender_name
     if msg.chat_name is not None:
         metadata["chat_name"] = msg.chat_name
+    if msg.mentions:
+        metadata["mentions"] = [
+            {"uuid": m.uuid, "name": m.name} for m in msg.mentions
+        ]
+        metadata["self_mentioned"] = any(m.uuid == bot_uuid for m in msg.mentions)
     if msg.reply is not None:
         metadata["reply_to"] = {
             "author_uuid": msg.reply.author_uuid,
