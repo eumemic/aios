@@ -39,7 +39,6 @@ class TestConnectionToolsInPrelude:
         self, harness: Harness, crypto_box: CryptoBox
     ) -> None:
         from aios.harness.step_context import compute_step_prelude
-        from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
         from aios.services import environments as env_svc
@@ -66,26 +65,34 @@ class TestConnectionToolsInPrelude:
             metadata={},
         )
 
-        # Connection with a single custom tool, attached to the session.
+        # Connection of type "echo" attached to the session.  Tools are
+        # owned by the connector *type* (in ``connectors.tools_schema``),
+        # not per-connection — the runtime container publishes its
+        # schema once and every connection of that type inherits it.
         connection = await connections_service.create_connection(
             harness._pool,
             connector="echo",
             account="echo-1",
             metadata={},
             crypto_box=crypto_box,
-            tools=[
-                ToolSpec(
-                    type="custom",
-                    name="chat_send",
-                    description="Send a chat message to the user",
-                    input_schema={
-                        "type": "object",
-                        "properties": {"text": {"type": "string"}},
-                        "required": ["text"],
-                    },
-                ),
-            ],
         )
+        async with harness._pool.acquire() as db_conn:
+            await db_queries.update_connector_tools_schema(
+                db_conn,
+                "echo",
+                tools_schema=[
+                    {
+                        "type": "custom",
+                        "name": "chat_send",
+                        "description": "Send a chat message to the user",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                            "required": ["text"],
+                        },
+                    },
+                ],
+            )
         await connections_service.attach_connection(
             harness._pool, connection.id, session_id=session.id
         )
@@ -118,7 +125,6 @@ class TestConnectionToolsInPrelude:
         the connection isn't directly ``session_id``-attached.
         """
         from aios.harness.step_context import compute_step_prelude
-        from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
         from aios.services import environments as env_svc
@@ -154,15 +160,20 @@ class TestConnectionToolsInPrelude:
             account="echo-pc",
             metadata={},
             crypto_box=crypto_box,
-            tools=[
-                ToolSpec(
-                    type="custom",
-                    name="bot_send",
-                    description="Send via bot",
-                    input_schema={"type": "object", "properties": {}},
-                ),
-            ],
         )
+        async with harness._pool.acquire() as db_conn:
+            await db_queries.update_connector_tools_schema(
+                db_conn,
+                "echo",
+                tools_schema=[
+                    {
+                        "type": "custom",
+                        "name": "bot_send",
+                        "description": "Send via bot",
+                        "input_schema": {"type": "object", "properties": {}},
+                    },
+                ],
+            )
         await connections_service.configure_per_chat(
             harness._pool, connection.id, session_template_id=template.id
         )
@@ -205,7 +216,6 @@ class TestConnectionToolDispatch:
     async def test_model_calls_connection_tool_then_resumes_after_result(
         self, harness: Harness, crypto_box: CryptoBox
     ) -> None:
-        from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
         from aios.services import environments as env_svc
@@ -236,19 +246,24 @@ class TestConnectionToolDispatch:
             account="echo-d",
             metadata={},
             crypto_box=crypto_box,
-            tools=[
-                ToolSpec(
-                    type="custom",
-                    name="chat_send",
-                    description="Send",
-                    input_schema={
-                        "type": "object",
-                        "properties": {"text": {"type": "string"}},
-                        "required": ["text"],
-                    },
-                ),
-            ],
         )
+        async with harness._pool.acquire() as db_conn:
+            await db_queries.update_connector_tools_schema(
+                db_conn,
+                "echo",
+                tools_schema=[
+                    {
+                        "type": "custom",
+                        "name": "chat_send",
+                        "description": "Send",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                            "required": ["text"],
+                        },
+                    },
+                ],
+            )
         await connections_service.attach_connection(
             harness._pool, connection.id, session_id=session.id
         )

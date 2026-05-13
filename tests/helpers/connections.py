@@ -1,9 +1,8 @@
 """Shared httpx helpers for e2e tests.
 
 E2E tests routinely build ``httpx`` requests with a bearer token —
-operator key (``aios_env["AIOS_API_KEY"]``) or connector token from
-``POST /v1/connector-tokens``.  Two duplicated patterns were found
-across ~17 sites in 13 files:
+operator key (``aios_env["AIOS_API_KEY"]``) or runtime token from
+``POST /v1/runtime-tokens``.  Two duplicated patterns recur:
 
 * **Client construction** — ``httpx.AsyncClient(base_url=...,
   headers={"Authorization": f"Bearer {token}"})`` (sometimes with a

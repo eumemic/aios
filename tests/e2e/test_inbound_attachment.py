@@ -1,8 +1,8 @@
-"""E2E test for inbound attachment staging through ``/v1/connectors/inbound``.
+"""E2E test for inbound attachment staging through ``/v1/connectors/runtime/inbound``.
 
-Post-#328 the inbound endpoint takes ``multipart/form-data``: text
-fields ride as ``Form`` parts, attachments ride as ``UploadFile``
-parts. The api streams each file's bytes into
+The runtime inbound endpoint takes ``multipart/form-data``: text fields
+ride as ``Form`` parts, attachments ride as ``UploadFile`` parts. The
+api streams each file's bytes into
 ``<workspace>/_attachments/<session>/<connector>/<...>``; there's no
 shared filesystem coupling (closes #322 P1).
 
@@ -24,7 +24,7 @@ import httpx
 from aios.ids import EVENT, make_id, split_id
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness
-from tests.helpers.connections import bearer
+from tests.helpers.connections import bearer, issue_runtime_token
 
 
 def _new_event_id() -> str:
@@ -46,16 +46,10 @@ async def _attach(harness: Harness, connection_id: str, session_id: str) -> None
     await connections_service.attach_connection(harness._pool, connection_id, session_id=session_id)
 
 
-async def _issue_token(http_client: httpx.AsyncClient, connection_id: str) -> str:
-    r = await http_client.post("/v1/connector-tokens", json={"connection_id": connection_id})
-    assert r.status_code == 201, r.text
-    return str(r.json()["plaintext"])
-
-
 @needs_docker
 class TestInboundAttachmentStaging:
     async def test_attachment_streamed_into_workspace(
-        self, http_client: httpx.AsyncClient, harness: Harness
+        self, http_client: httpx.AsyncClient, harness: Harness, aios_env: dict[str, str]
     ) -> None:
         import json as _json
 
@@ -85,14 +79,16 @@ class TestInboundAttachmentStaging:
         )
         connection_id = await _create_connection(http_client, f"att-{id(self)}")
         await _attach(harness, connection_id, session.id)
-        token = await _issue_token(http_client, connection_id)
+        base_url: str = str(http_client._base_url)  # type: ignore[attr-defined]
+        token = await issue_runtime_token(aios_env["AIOS_API_KEY"], base_url, "echo")
 
         event_id = _new_event_id()
         payload = b"\x89PNG\r\n\x1a\nfake-image-bytes"
         r = await http_client.post(
-            "/v1/connectors/inbound",
+            "/v1/connectors/runtime/inbound",
             headers=bearer(token),
             data={
+                "connection_id": connection_id,
                 "event_id": event_id,
                 "chat_id": "chat-att",
                 "sender": _json.dumps({"display_name": "Alice"}),
