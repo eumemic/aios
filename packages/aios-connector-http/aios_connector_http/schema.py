@@ -38,8 +38,13 @@ shape):
   ``Path``s before dispatching.
 * Anything else → ``SchemaError``.
 
-Focal-channel-injected params (``account``, ``chat_id``) are
-excluded from the schema entirely — the model never supplies them.
+Runtime-injected params (``connection_id``, ``account``, ``chat_id``)
+are excluded from the schema entirely — the model never supplies
+them.  ``connection_id`` rides on every calls-SSE event and is
+authoritative; ``account`` / ``chat_id`` are parsed from the focal
+channel.  Stripping them from the model-facing schema means the
+runner is the sole source of truth and the model can't guess them
+wrong.
 
 Docstrings parse Google-style: the description is everything before
 ``Args:``; the per-param descriptions come from the indented entries
@@ -58,7 +63,7 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from .sandbox import _SandboxPathMarker
 
-_FOCAL_INJECTABLE: frozenset[str] = frozenset({"account", "chat_id"})
+_INJECTED_PARAMS: frozenset[str] = frozenset({"connection_id", "account", "chat_id"})
 
 
 class SchemaError(ValueError):
@@ -81,7 +86,7 @@ def derive_tool_spec(name: str, fn: Callable[..., Any]) -> dict[str, Any]:
     properties: dict[str, dict[str, Any]] = {}
     required: list[str] = []
     for param_name, param in sig.parameters.items():
-        if param_name == "self" or param_name in _FOCAL_INJECTABLE:
+        if param_name == "self" or param_name in _INJECTED_PARAMS:
             continue
         if param.kind in (
             inspect.Parameter.VAR_POSITIONAL,

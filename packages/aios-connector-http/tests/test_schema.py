@@ -160,9 +160,11 @@ class TestRequiredAndDefaults:
 
 
 class TestSkipsInjectedParams:
-    """Focal-channel kwargs (``chat_id``, ``account``) are injected by
-    the SDK at dispatch time — the model never supplies them, so they
-    must be absent from the input_schema.
+    """Runtime-injected kwargs (``connection_id``, ``chat_id``,
+    ``account``) are filled in by the SDK at dispatch time from the
+    calls-SSE payload + focal channel — the model never supplies them,
+    so they must be absent from the input_schema.  Leaving any of them
+    in the schema invites the model to guess and pass an invalid value.
     """
 
     def test_chat_id_is_excluded_from_schema(self) -> None:
@@ -186,6 +188,18 @@ class TestSkipsInjectedParams:
         spec = derive_tool_spec("t", C().t)
         assert spec["input_schema"]["properties"] == {}
         assert spec["input_schema"].get("required", []) == []
+
+    def test_connection_id_is_excluded_from_schema(self) -> None:
+        class C(_DummyForBindings):
+            @tool()
+            async def t(self, *, text: str, connection_id: str) -> str:
+                return f"{connection_id}: {text}"
+
+        spec = derive_tool_spec("t", C().t)
+        props = spec["input_schema"]["properties"]
+        assert "text" in props
+        assert "connection_id" not in props
+        assert "connection_id" not in spec["input_schema"]["required"]
 
 
 class TestDocstringParsing:
