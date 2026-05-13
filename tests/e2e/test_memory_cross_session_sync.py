@@ -231,9 +231,8 @@ class TestCrossSessionSync:
         assert "error" not in result, result
         assert "from-api" in result["content"]
 
-    async def test_bash_visible_cross_session_but_no_version(self, docker_harness: Harness) -> None:
-        """Documented v2 limitation: bash writes propagate via shared FS
-        (so other sessions see them) but produce no memory_versions row."""
+    async def test_bash_create_reconciles_to_version(self, docker_harness: Harness) -> None:
+        """bash writes to memory mounts are reconciled into memory_versions by the post-exec hook."""
         from aios.db import queries
         from aios.tools.bash import bash_handler
 
@@ -245,7 +244,7 @@ class TestCrossSessionSync:
         await sandbox.get_or_provision(a.id, pool=docker_harness._pool)
         await sandbox.get_or_provision(b.id, pool=docker_harness._pool)
 
-        # A bash-writes a new file.
+        # A bash-writes a new file; reconcile hook fires after exec.
         a_bash = await bash_handler(
             a.id,
             {"command": "echo bashed-by-a > /mnt/memory/xsync-bash/from_bash.md"},
@@ -256,11 +255,117 @@ class TestCrossSessionSync:
         b_bash = await bash_handler(b.id, {"command": "cat /mnt/memory/xsync-bash/from_bash.md"})
         assert "bashed-by-a" in b_bash["stdout"]
 
-        # But: no memory_versions row was created. Documented v2 gap.
+        # Post-exec reconcile created a memory_versions row.
         async with docker_harness._pool.acquire() as conn:
             versions = await queries.list_memory_versions(conn, store_id)
         paths = [v.path for v in versions]
-        assert "/from_bash.md" not in paths
+        assert "/from_bash.md" in paths
+
+        # Version was stamped as session_actor.
+        version = next(v for v in versions if v.path == "/from_bash.md")
+        assert version.created_by.type == "session_actor"
+
+    async def test_bash_modify_reconciles_version(self, docker_harness: Harness) -> None:
+        """bash modifies existing file; a 'modified' version row appears."""
+        from aios.db import queries
+        from aios.tools.bash import bash_handler
+
+        store_id = await _attach_store(docker_harness, "xsync-bash-mod")
+        a = await _start_session_with_store(docker_harness, store_id)
+
+        sandbox = runtime.require_sandbox_registry()
+        await sandbox.get_or_provision(a.id, pool=docker_harness._pool)
+
+        # Modify the pre-seeded /seed.md via bash.
+        # snapshot before exec sees seed.md; after exec sees changed content.
+        result = await bash_handler(
+            a.id,
+            {"command": "echo modified-by-bash > /mnt/memory/xsync-bash-mod/seed.md"},
+        )
+        assert result.get("exit_code", 0) == 0, result
+
+        async with docker_harness._pool.acquire() as conn:
+            versions = await queries.list_memory_versions(conn, store_id)
+        # There should be at least 2 versions: created (from seed) + modified (from bash).
+        seed_versions = [v for v in versions if v.path == "/seed.md"]
+        operations = {v.operation for v in seed_versions}
+        assert "modified" in operations
+
+    async def test_bash_delete_reconciles_version(self, docker_harness: Harness) -> None:
+        """bash rm's a file; a 'deleted' version row appears."""
+        from aios.db import queries
+        from aios.tools.bash import bash_handler
+
+        store_id = await _attach_store(docker_harness, "xsync-bash-del")
+        a = await _start_session_with_store(docker_harness, store_id)
+
+        sandbox = runtime.require_sandbox_registry()
+        await sandbox.get_or_provision(a.id, pool=docker_harness._pool)
+
+        # Delete /seed.md via bash.
+        result = await bash_handler(
+            a.id,
+            {"command": "rm /mnt/memory/xsync-bash-del/seed.md"},
+        )
+        assert result.get("exit_code", 0) == 0, result
+
+        async with docker_harness._pool.acquire() as conn:
+            versions = await queries.list_memory_versions(conn, store_id)
+        seed_versions = [v for v in versions if v.path == "/seed.md"]
+        operations = {v.operation for v in seed_versions}
+        assert "deleted" in operations
+
+    async def test_bash_binary_file_reconcile_warning(self, docker_harness: Harness) -> None:
+        """bash writes binary bytes; stderr contains reconcile warning; no version row created."""
+        from aios.db import queries
+        from aios.tools.bash import bash_handler
+
+        store_id = await _attach_store(docker_harness, "xsync-bash-bin")
+        a = await _start_session_with_store(docker_harness, store_id)
+
+        sandbox = runtime.require_sandbox_registry()
+        await sandbox.get_or_provision(a.id, pool=docker_harness._pool)
+
+        # Write binary (non-UTF-8) bytes to a memory mount file.
+        result = await bash_handler(
+            a.id,
+            {"command": "printf '\\xff\\xfe\\x00\\x01' > /mnt/memory/xsync-bash-bin/binary.bin"},
+        )
+        assert result.get("exit_code", 0) == 0, result
+
+        # Warning should appear in stderr.
+        assert "[memory-reconcile]" in result["stderr"]
+
+        # No version row created for the binary file.
+        async with docker_harness._pool.acquire() as conn:
+            versions = await queries.list_memory_versions(conn, store_id)
+        paths = [v.path for v in versions]
+        assert "/binary.bin" not in paths
+
+    async def test_bash_nohup_residual_gap(self, docker_harness: Harness) -> None:
+        """Background processes after bash returns may not be captured.
+
+        Documents that nohup/background bash writes to memory mounts that
+        complete *after* the command returns fall outside the reconcile window.
+        The test simply asserts no crash occurs — not that the write is captured.
+        """
+        from aios.tools.bash import bash_handler
+
+        store_id = await _attach_store(docker_harness, "xsync-bash-nohup")
+        a = await _start_session_with_store(docker_harness, store_id)
+
+        sandbox = runtime.require_sandbox_registry()
+        await sandbox.get_or_provision(a.id, pool=docker_harness._pool)
+
+        # Background process that writes after bash -c returns.
+        result = await bash_handler(
+            a.id,
+            {
+                "command": "nohup sh -c 'sleep 0.5; echo done > /mnt/memory/xsync-bash-nohup/bg.md' & echo done"
+            },
+        )
+        # No crash; exit_code check is lenient — the command itself should succeed.
+        assert result.get("exit_code", 0) == 0, result
 
 
 @needs_docker

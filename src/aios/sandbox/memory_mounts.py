@@ -13,8 +13,8 @@ marker file. Subsequent provisioning sees the marker and is a no-op.
 
 Tool/API writes after materialization keep the host dir in sync via the
 atomic mirror helpers in :mod:`aios.sandbox.atomic_mirror`. Bash writes
-hit the host dir directly — visible cross-session, but not synced to DB
-(documented v2 limitation).
+hit the host dir directly and are reconciled back to the DB by the
+post-exec hook in :mod:`aios.tools.bash_memory_reconcile`.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from aios.sandbox.volumes import memory_store_host_dir, memory_store_lock_path
 
 log = get_logger("aios.sandbox.memory_mounts")
 
-_MATERIALIZED_MARKER = ".materialized"
+MATERIALIZED_MARKER = ".materialized"
 
 
 async def materialize_store_to_host(
@@ -48,7 +48,7 @@ async def materialize_store_to_host(
     not by re-materialization.
     """
     host_dir = memory_store_host_dir(store_id)
-    marker = host_dir / _MATERIALIZED_MARKER
+    marker = host_dir / MATERIALIZED_MARKER
     if marker.exists():
         return
 

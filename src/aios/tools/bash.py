@@ -53,6 +53,7 @@ from typing import Any
 from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
+from aios.tools.bash_memory_reconcile import reconcile_memory_mounts, snapshot_memory_mounts
 from aios.tools.registry import registry
 
 
@@ -124,17 +125,42 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     sandbox = runtime.require_sandbox_registry()
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
-    result = await sandbox.exec(
-        handle,
-        command,
-        timeout_seconds=timeout,
-        max_output_bytes=settings.bash_max_output_bytes,
-    )
+    before = snapshot_memory_mounts(session_id)
+    reconcile_warnings: list[str] = []
+    exec_raised = False
+
+    try:
+        result = await sandbox.exec(
+            handle,
+            command,
+            timeout_seconds=timeout,
+            max_output_bytes=settings.bash_max_output_bytes,
+        )
+    except Exception:
+        exec_raised = True
+        raise
+    finally:
+        # Reconcile unconditionally — even when exec raises (e.g. container death)
+        # so that partial writes made before the crash are captured in the DB.
+        # reconcile_memory_mounts returns [] immediately when there are no mounts,
+        # so this is a cheap no-op in the common case.
+        # When exec succeeded, reconcile errors propagate; when exec already raised,
+        # we suppress them so the original exception is not shadowed.
+        try:
+            reconcile_warnings = await reconcile_memory_mounts(session_id, before)
+        except Exception:
+            if not exec_raised:
+                raise  # fail hard when exec succeeded
+
+    stderr = result.stderr
+    if reconcile_warnings:
+        suffix = "\n[memory-reconcile] " + "; ".join(reconcile_warnings)
+        stderr = stderr + suffix
 
     return {
         "exit_code": result.exit_code,
         "stdout": result.stdout,
-        "stderr": result.stderr,
+        "stderr": stderr,
         "timed_out": result.timed_out,
         "truncated": result.truncated,
     }
