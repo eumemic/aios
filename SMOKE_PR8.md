@@ -57,25 +57,25 @@ Two-part fix:
 
 Verified by replaying the previously-crashing payload via curl (now returns 201) AND by Jarvis exercising the full bidirectional matrix above — reaction inbounds, attachment inbounds, voice notes, sound effects all flow through cleanly.  Container stayed up across the entire smoke after the fix.
 
-### Open — observed but not yet fixed
+**4. `emit_inbound` propagating raise tore down the container on non-2xx** — `315c969`
 
-**4. `emit_inbound` propagating raise still tears down the container on non-2xx**
+Even with #3, the connector previously treated any `emit_inbound` failure as fatal: 4xx propagated → `serve_connection` raised → TaskGroup tore down → process exit.  That's correct for genuine server outages and unrecoverable contract violations (5xx, 401/403), but for routine 4xx ("the api rejected one specific payload"), drop-and-continue is the right posture — one bad envelope shouldn't kill every other connection the container is serving.
 
-Even with #3, the connector still treats any `emit_inbound` failure as fatal: 4xx propagates → `serve_connection` raises → TaskGroup tears down → process exit.  That's correct for genuine server outages and for unrecoverable contract violations (5xx, 401/403), but for routine 4xx ("the api rejected one specific payload"), drop-and-continue makes more sense.  One bad envelope shouldn't kill every other connection the container is serving.
+Fix: in `_handle_envelope`, catch `httpx.HTTPStatusError` and classify by status.  4xx except 401/403 → log + drop the envelope, keep serving.  401/403 (token revoked / runtime misconfigured) and 5xx (server outage or bug) still propagate so the operator sees red on real problems.  Locked with five tests covering 400/422/401/503 + the happy path (read receipt fires on 2xx).
 
-Recommended: in `_handle_envelope`, catch `httpx.HTTPStatusError` for 4xx specifically, log + `return`; let 5xx and connection errors propagate.
+**5. Inbound `@mention` metadata was collapsed into plain text** — `67a14e0`
 
-**5. Inbound `@mention` metadata is collapsed into plain text**
+`connectors/signal/src/aios_signal/parse.py:_substitute_mentions` replaces the Unicode placeholder (`￼`) with `@<display_name>` inline in the message body.  The model saw a string indistinguishable from "the sender typed my name as text" — no signal that the sender's client encoded a structured mention targeting the bot's own UUID.  Group chats in particular use mentions to summon a response; that signal was getting lost in the substring.
 
-`connectors/signal/src/aios_signal/parse.py:_substitute_mentions` replaces the Unicode placeholder (`￼`) with `@<display_name>` inline in the message body.  The model sees a string indistinguishable from "the sender typed my name as text" — there's no signal that the sender's client encoded a structured mention targeting the bot's own UUID.
+Fix: structured `Mention(uuid, name)` dataclass on `InboundMessage`, populated from the raw envelope alongside the placeholder substitution.  `build_metadata` emits a `mentions: [{uuid, name}]` list and a derived `self_mentioned: bool` (True when one of the entries matches `bot_uuid`).  Agents that want different behavior for "tagged" vs "named-in-passing" inbounds read `metadata.self_mentioned` instead of grepping content.  Locked with four `build_metadata` tests + a parse test that asserts the raw envelope mention array survives intact through `parse_envelope`.
 
-Recommended: extend `build_metadata` to carry a `mentions: list[{"uuid", "name"}]` entry on the inbound event, plus a derived `self_mentioned: bool` when one of the entries matches the bot's UUID.  The model can then choose to react/respond differently when actually pinged vs. just named.
+**6. Group `signal_send` returned `{"status": "ok"}`; DM returned `{"sent_at_ms": ...}`** — `a5db125`
 
-**6. Group `signal_send` returns `{"status": "ok"}`; DM returns `{"sent_at_ms": ...}`**
+Investigation against the live daemon (signal-cli 0.14.2) revealed that `send` RPC for groups returns literal `null` regardless of params — no nested timestamp to fish out.  The smoke doc's original recommendation ("check what signal-cli returns for group send calls and surface that timestamp") rested on a premise that turned out to be false.
 
-Inconsistent result shape between group and DM outbound.  `_extract_timestamp(result)` in `connectors/signal/src/aios_signal/connector.py` returns `None` for group sends, so the tool result falls back to `{"status": "ok"}`.  Minor — the model can edit/react/delete a previous message by `target_timestamp_ms`, but only knows the timestamp for DM sends.  Group outbound editing/reacting/deleting from the bot's own messages is therefore harder.
+However, the timestamp *does* arrive on the receive stream as a self-echo envelope (`sourceUuid == bot_uuid` + `dataMessage.groupInfo` + `dataMessage.timestamp`).  Direct probe confirmed the shape; parse_envelope already drops self-messages to `None`, which is the existing hook we extend.
 
-Recommended: check what signal-cli returns for group `send` calls and surface that timestamp (signal-cli's `sendMessage` should return a per-recipient envelope with a timestamp even for group sends).
+Fix: `signal_send` for groups pre-registers an `asyncio.Future` in a per-`(phone, chat_id)` FIFO before issuing the RPC, then waits up to 2s for the matching echo.  `_maybe_resolve_self_echo` runs in `_handle_envelope`'s `msg is None` branch, pops the head future, sets the timestamp.  On timeout we degrade to `{"status": "ok"}` so a slow network doesn't hang the tool call.  DMs untouched — signal-cli already returns the timestamp inline.  Locked with seven tests covering match / prune / non-bot-sender / DM-skip + signal_send end-to-end (echo → sent_at_ms, timeout → status:ok, DM skips registration entirely).
 
 ### Pre-existing, not stack-related
 
@@ -93,11 +93,21 @@ Agents like `eumemic-bot` still carry an `mcp_toolset` tools-list entry with `mc
 
 The pre-PR-5 `eumemic-bot` session at `sess_01KQXTMDFR8NPCE24ZBEQE9W81` had ~1200 events of `mcp__telegram__telegram_send(...)` calls in its history.  Post-PR-5 the actual exposed tool is plain `telegram_send`, but the model pattern-matched off history and called `mcp__telegram__telegram_send(...)`, which routed to the MCP dispatcher and errored `"MCP server 'telegram' not found"`.  Real architectural cost of the monotonic-context invariant.
 
-**10. `signal-cli` daemon child not in connector's process group**
+**10. `signal-cli` daemon child orphaned on connector kill** — `5f6a0e5`
 
-Encountered mid-smoke: `pkill -f aios_signal` killed the Python connector but left the spawned `signal-cli daemon` JVM running with the TCP port + SQLite lock on `~/.local/share/signal-cli/data` still held.  Multiple restarts accumulated three orphaned daemons fighting for the lock.  Symptom: new connector's daemon couldn't fully claim the receive websocket — the oldest live daemon kept consuming inbounds.
+`pkill -f aios_signal` killed the Python connector but left the spawned `signal-cli daemon` JVM running with the TCP port + SQLite lock on `~/.local/share/signal-cli/data` still held.  Multiple restarts accumulated three orphaned daemons fighting for the lock; the oldest live daemon kept consuming inbounds.
 
-Recommended: connector should put `signal-cli daemon` in its own process group (start_new_session=True on subprocess) so a single SIGTERM to the connector cleans up the daemon tree, OR explicitly terminate the subprocess on `SignalConnector.teardown()` and confirm via wait_for / timeout.
+Two correlated causes:
+1. `asyncio.run` installs a SIGINT handler by default but not SIGTERM, so the default SIGTERM action (kill the runtime) ran before `teardown` could fire.
+2. `pkill -f aios_signal` matches only the Python cmdline, never the JVM cmdline; the JVM survived as an orphan.
+
+Fix: `__main__.py` now traps both SIGINT and SIGTERM via `loop.add_signal_handler`, flipping a stop event that cancels the connector task — the `try/finally` in `HttpConnector.run` then calls `teardown` which SIGTERMs the daemon subprocess and waits with a grace period.  `daemon.py` spawns signal-cli with `start_new_session=True` so a foreground-terminal Ctrl-C no longer reaches the daemon via the controlling terminal.  Locked with three tests: `_serve` cancels the connector on stop, `_serve` returns cleanly if the connector exits first, `_spawn_subprocess` passes `start_new_session=True` to the loop.
+
+**11. Telegram outbound attachments crashed on `pathlib.Path` JSON serialization** — `02b4ac5`
+
+python-telegram-bot's HTTPX request layer JSON-serializes the request body; passing a raw `pathlib.Path` as a `photo` / `document` / etc. kwarg falls into the "unknown object" branch and raises `TypeError: Object of type PosixPath is not JSON serializable`.  Surfaced live in PR 8 smoke when SmokeBot tried to send an outbound image attachment.
+
+Fix: `_read_for_upload(host_path)` reads bytes up-front; `_send_single_media` and `_build_media_group` pass the bytes (not Path) to PTB so the upload path is multipart, not JSON-encoded.  Locked with a regression test asserting every media kwarg handed to PTB is bytes, never a `Path`.
 
 ### Verification
 
@@ -127,15 +137,16 @@ Both qwen3.6-flash and Haiku 4.5 frequently emitted `INTERNAL_MONOLOGUE_NOT_SEEN
 
 ## Recommendations / follow-ups
 
-| # | Action | Scope | Where |
+| # | Action | Scope | Status |
 |---|---|---|---|
-| 4 | Container resilience: drop-and-continue on 4xx in `_handle_envelope` | one commit | runner.py |
-| 5 | Expose mention metadata + `self_mentioned: bool` to the model | small feature | signal connector `build_metadata` + parse |
-| 6 | Surface group-send timestamp | small fix | signal `signal_send` result shape |
-| 7 | Build multi-arch sandbox image (linux/amd64 + linux/arm64) | infra | `docker/Dockerfile.sandbox` + buildx |
-| 8 | Scrub orphaned `mcp_toolset` entries on agents missing matching `mcp_servers` | data migration or CLI | one-off |
-| 10 | Process-group ownership of `signal-cli daemon` | small fix | signal `daemon.py:SignalDaemon.__aenter__` |
-| (env) | `aios dev bootstrap` discoverability / harder-to-source-wrong-.env | DX | dev CLI doc |
-| (env) | Runtime token connection-subset scope | feature | runtime tokens + discovery filter |
+| 4 | Container resilience: drop-and-continue on 4xx | one commit | ✅ `315c969` |
+| 5 | Expose mention metadata + `self_mentioned: bool` | small feature | ✅ `67a14e0` |
+| 6 | Surface group-send timestamp via self-echo correlation | small feature | ✅ `a5db125` |
+| 7 | Build multi-arch sandbox image (linux/amd64 + linux/arm64) | infra | ✅ workflow `456cf58` (image republishes on next master merge) |
+| 8 | Scrub orphaned `mcp_toolset` entries on pre-PR-5 agents | data migration or CLI | open (separate one-off) |
+| 10 | Daemon process-group ownership + SIGTERM trap | small fix | ✅ `5f6a0e5` |
+| 11 | Telegram attachment Path → bytes for PTB upload | small fix | ✅ `02b4ac5` |
+| (env) | `aios dev bootstrap` discoverability / harder-to-source-wrong-.env | DX | open |
+| (env) | Runtime token connection-subset scope | feature | open |
 
-Items 4, 5, 6, 7, 10 are stack-level and could fold into the fixup PR.  Item 7 (sandbox image) is highest priority given how many ❌s in the matrix collapse to it.
+All numbered code-path findings (4, 5, 6, 10, 11) landed in the `refactor/328-fixup-smoke` follow-up branch.  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene unrelated to PR 8's scope.  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.
