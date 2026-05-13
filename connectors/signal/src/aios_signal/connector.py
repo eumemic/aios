@@ -31,6 +31,7 @@ connection's phone + bot UUID + caches via
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,6 +58,14 @@ from .mentions import build_mention_strings, encode_mentions
 from .parse import InboundMessage, build_content_text, is_group_update_envelope, parse_envelope
 
 log = structlog.get_logger(__name__)
+
+# How long ``signal_send`` waits for the self-echo of a group send
+# to arrive on the inbound stream before degrading to the
+# no-timestamp result shape.  Signal-cli's ``send`` blocks until the
+# network round-trip completes, so the echo typically arrives within
+# tens of ms; 2.0s gives generous headroom for a slow network and
+# still keeps the model's tool-call latency reasonable on failure.
+_ECHO_WAIT_S: float = 2.0
 
 
 @dataclass
@@ -89,6 +98,17 @@ class SignalConnector(HttpConnector):
         # first — there's a natural race between an inbound arriving
         # and the connection's serve loop coming online).
         self._inbound_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        # Self-echo correlation for group sends: signal-cli 0.14.x's
+        # ``send`` JSON-RPC returns a top-level ``timestamp`` for DM
+        # sends but a bare ``null`` for groups.  The send timestamp
+        # *does* arrive on the receive stream as a self-echo envelope
+        # (source_uuid == bot_uuid + groupInfo + dataMessage.timestamp);
+        # we register a future before issuing ``send`` and resolve it
+        # from ``_handle_envelope`` when the matching echo arrives.
+        # Keyed by ``(account_phone, chat_id)``, FIFO since signal-cli's
+        # send blocks until the network round-trip completes so echoes
+        # to the same chat arrive in send order.
+        self._pending_echoes: dict[tuple[str, str], deque[asyncio.Future[int]]] = {}
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
@@ -203,6 +223,12 @@ class SignalConnector(HttpConnector):
         await self._maybe_refresh_roster(state, envelope)
         msg = parse_envelope(envelope, bot_account_uuid=state.bot_uuid)
         if msg is None:
+            # Could still be a self-echo of one of our own group sends
+            # whose timestamp ``signal_send`` is waiting for.  Inbounds
+            # from other peers get a structured ``InboundMessage``; bot
+            # self-traffic falls into this None branch (parse_envelope
+            # drops same-uuid envelopes).
+            self._maybe_resolve_self_echo(state, envelope)
             return
         if msg.sender_name is None:
             resolved = state.contact_names.get(msg.sender_uuid)
@@ -317,8 +343,34 @@ class SignalConnector(HttpConnector):
             edit_timestamp_ms=edit_timestamp_ms,
         )
         assert self._daemon is not None
+        # Pre-register an echo future for group sends.  DMs get a
+        # timestamp inline from signal-cli's send result; groups
+        # return null there and we fish the timestamp out of the
+        # self-echo on the inbound stream instead.  Registering
+        # *before* issuing the RPC closes the race where the echo
+        # could arrive before we're listening.
+        chat_type, _ = decode_chat_id(chat_id)
+        echo_future: asyncio.Future[int] | None = None
+        if chat_type == "group":
+            echo_future = asyncio.get_running_loop().create_future()
+            self._pending_echoes.setdefault((state.phone, chat_id), deque()).append(
+                echo_future
+            )
         result = await self._daemon.rpc.call("send", params)
         ts = _extract_timestamp(result)
+        if ts is None and echo_future is not None:
+            try:
+                ts = await asyncio.wait_for(echo_future, timeout=_ECHO_WAIT_S)
+            except (TimeoutError, asyncio.CancelledError):
+                # Echo never arrived in the deadline window — degrade
+                # to the no-timestamp shape.  The cancelled future
+                # gets pruned at next ``_maybe_resolve_self_echo``
+                # pop-from-front.
+                log.warning(
+                    "signal.send.echo_timeout",
+                    phone=state.phone,
+                    chat_id=chat_id,
+                )
         return {"sent_at_ms": ts} if ts is not None else {"status": "ok"}
 
     @tool()
@@ -435,6 +487,51 @@ class SignalConnector(HttpConnector):
         return {"status": "ok"}
 
     # ── helpers ───────────────────────────────────────────────────────
+
+    def _maybe_resolve_self_echo(
+        self, state: _SignalConnectionState, envelope: dict[str, Any]
+    ) -> None:
+        """Resolve a pending ``signal_send`` echo future from a self-envelope.
+
+        signal-cli emits the bot's own outbound group messages back on
+        the receive stream as ``sourceUuid == bot_uuid`` envelopes with
+        ``dataMessage.groupInfo``.  The envelope's ``timestamp`` is the
+        send timestamp the model needs to edit / delete / react to the
+        message later.  We match by ``(phone, chat_id)`` FIFO since
+        signal-cli's send blocks until the network round-trip
+        completes, so echoes to the same chat arrive in send order.
+
+        DM echoes are silently dropped — signal-cli's DM send returns
+        the timestamp inline, so the future-registration path in
+        ``signal_send`` is groups-only.
+        """
+        if envelope.get("sourceUuid") != state.bot_uuid:
+            return
+        data = envelope.get("dataMessage")
+        if not isinstance(data, dict):
+            return
+        group_info = data.get("groupInfo")
+        if not isinstance(group_info, dict):
+            return
+        raw_id = group_info.get("groupId")
+        if not isinstance(raw_id, str) or not raw_id:
+            return
+        ts = envelope.get("timestamp")
+        if not isinstance(ts, int):
+            return
+        chat_id = encode_chat_id(raw_id, "group")
+        key = (state.phone, chat_id)
+        queue = self._pending_echoes.get(key)
+        if queue is None:
+            return
+        # Drain stale (timed-out / cancelled) waiters at the front so
+        # the FIFO discipline reflects live ``signal_send`` callers.
+        while queue and queue[0].done():
+            queue.popleft()
+        if queue:
+            queue.popleft().set_result(ts)
+        if not queue:
+            self._pending_echoes.pop(key, None)
 
     async def _send_read_receipt(
         self, state: _SignalConnectionState, msg: InboundMessage

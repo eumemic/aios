@@ -14,8 +14,19 @@ import pytest
 os.environ.setdefault("AIOS_URL", "http://test")
 os.environ.setdefault("AIOS_RUNTIME_TOKEN", "aios_runtime_test")
 
+from aios_signal import connector as _connector_module
 from aios_signal.config import Settings
 from aios_signal.connector import SignalConnector, _SignalConnectionState
+
+
+@pytest.fixture(autouse=True)
+def _fast_echo_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Collapse the group-send self-echo deadline so tests don't pay 2s
+    per group ``signal_send`` while waiting for an echo that the mocked
+    daemon never emits.  Tests that exercise the echo path explicitly
+    set the future themselves; everyone else relies on this autouse to
+    hit the timeout in ~10ms instead of ~2s."""
+    monkeypatch.setattr(_connector_module, "_ECHO_WAIT_S", 0.01)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
