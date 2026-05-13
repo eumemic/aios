@@ -114,6 +114,51 @@ After the refactor: telegram inherits #4 / #10 / #12 hardening for free; the nex
 
 Note: changing `emit_inbound`'s default to swallow 4xx is a behavior change.  Either (a) signal removes its wrap when the SDK gets one, or (b) the SDK adds the wrap as opt-in (`raise_on_4xx=False` default, but with a strict mode for callers that depend on the raise).  Sign-off needed on the default before landing.
 
+**14. Signal account registration via the aios API (close the SSH-required gap)**
+
+Surfaced when reasoning about operator UX for adding new signal/telegram accounts.  Today's aios api is the bookkeeping side: `POST /v1/connections`, `PUT .../secrets`, `attach`, `configure-per-chat`, `bind-chat` — all dynamic, all no-restart for adding connections of an **already-registered** platform account.  The connector runtime's discovery SSE picks up new connection rows without a container bounce.
+
+What's gated behind SSH today: signal-cli's `register` / `verify` / `submitRateLimitChallenge` / `updateProfile` JSON-RPC methods.  signal-cli exposes them on the running daemon, but the connector doesn't route them through; operators have to SSH into the host and shell into `signal-cli` directly to register a new phone.  Once registration completes, `accounts.json` updates and `verify_phone` re-reads it fresh per call — so the running daemon picks up the new account without restart.  The api gap is the missing piece, not the runtime.
+
+Telegram has a different shape: bot creation via @BotFather is upstream-manual (Telegram doesn't expose programmatic bot creation), but token-in-hand → connection-attached is already a single `POST /v1/connections` away.  So telegram's part of this finding is "already done modulo the irreducible BotFather step".
+
+Recommended scope for signal:
+
+| Piece | Size |
+|---|---|
+| Three api routes (`/v1/connectors/signal/register`, `/verify`, optional `/profile`) | ~120 LOC + tests |
+| Management-call SSE event kind (sibling of `tool_call` on the existing per-type call stream) | ~80 LOC + tests |
+| SDK base: management-call dispatcher routing the new event to per-connector handlers | ~40 LOC + tests |
+| Captcha-handoff response shape (api returns signalcaptchas.org URL; operator solves; reposts token) | ~30 LOC + tests |
+| CLI convenience (`aios signal register +<phone>` / `aios signal verify <code>`) | ~60 LOC |
+
+Architecture choice: reuse the existing tool-call SSE pattern (api emits `management_call` events on the connector-type stream; connector handles via a sibling of `_tool_loop`; result POSTs back through the existing tool-result route, keyed by `call_id` and unblocked via the same one-shot future pattern requires-action custom tools already use).  Fits the current architecture without adding a new connector-side HTTP listener.
+
+End-to-end signal flow then becomes:
+
+```
+POST /v1/connectors/signal/register   { phone, captcha_token? }
+→ if captcha needed: 200 { captcha_url }; operator solves + reposts with token
+→ 200 { verification_required: true }
+
+POST /v1/connectors/signal/verify     { phone, code }
+→ 200 { account: { phone, uuid } }    // accounts.json now has the entry
+
+POST /v1/connections                  { connector: "signal", account: <phone>, secrets: { phone } }
+→ 201                                   // discovery SSE fires "added"
+
+POST /v1/connections/{id}/attach      { session_id }
+→ 201                                   // binding row inserted, connector serves
+```
+
+No SSH, no restart, no shelling into the host.
+
+Risks worth flagging:
+
+- **Captcha rate-limiting** — Signal aggressively requires captcha on programmatic registration; the route shape needs to surface the captcha URL cleanly rather than returning opaque "Captcha required" errors.
+- **Phone-number reclamation** — registering a phone already in use elsewhere boots the other device.  Worth a confirmation flag.
+- **Secrets shape** — `secrets={phone}` is just an addressing label; the real cryptographic material (libsignal protocol keys) lives in signal-cli's `accounts.json`, not in aios.
+
 ### Pre-existing, not stack-related
 
 **7. ARM64 sandbox image missing** (`ghcr.io/eumemic/aios-sandbox:latest` has no `linux/arm64/v8` manifest)
@@ -185,7 +230,8 @@ Both qwen3.6-flash and Haiku 4.5 frequently emitted `INTERNAL_MONOLOGUE_NOT_SEEN
 | 11 | Telegram attachment Path → bytes for PTB upload | small fix | ✅ `02b4ac5` |
 | 12 | Per-connection `serve_connection` failure isolation (same shape as #4 but for bring-up) | small fix | open (separate PR) |
 | 13 | SDK lifecycle hardening — hoist #4 / #10 / #12 + state/focal-channel boilerplate onto `HttpConnector` so telegram inherits the safety rails | medium refactor | open (separate PR) |
+| 14 | Signal account registration via the aios API — three routes + management-call SSE so new phones can be onboarded without SSH or restart | medium feature | open (separate PR) |
 | (env) | `aios dev bootstrap` discoverability / harder-to-source-wrong-.env | DX | open |
 | (env) | Runtime token connection-subset scope | feature | open |
 
-All numbered code-path findings (4, 5, 6, 10, 11) landed in the `refactor/328-fixup-smoke` follow-up branch.  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene unrelated to PR 8's scope.  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.  #12 + #13 are architectural follow-ups surfaced when reasoning about the post-fixup connector boundary and deserve their own targeted PRs.
+All numbered code-path findings (4, 5, 6, 10, 11) landed in the `refactor/328-fixup-smoke` follow-up branch.  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene unrelated to PR 8's scope.  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.  #12 + #13 + #14 are architectural follow-ups surfaced when reasoning about the post-fixup connector boundary and operator UX, and deserve their own targeted PRs.
