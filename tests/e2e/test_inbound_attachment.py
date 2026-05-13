@@ -24,7 +24,7 @@ import httpx
 from aios.ids import EVENT, make_id, split_id
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness
-from tests.helpers.connections import bearer, issue_runtime_token
+from tests.helpers.connections import bearer
 
 
 def _new_event_id() -> str:
@@ -79,8 +79,11 @@ class TestInboundAttachmentStaging:
         )
         connection_id = await _create_connection(http_client, f"att-{id(self)}")
         await _attach(harness, connection_id, session.id)
-        base_url: str = str(http_client._base_url)  # type: ignore[attr-defined]
-        token = await issue_runtime_token(aios_env["AIOS_API_KEY"], base_url, "echo")
+        # Mint via ``http_client`` directly (keeps the ASGI transport — a
+        # fresh client against the ``testserver`` host would hit real DNS).
+        r = await http_client.post("/v1/runtime-tokens", json={"connector": "echo"})
+        r.raise_for_status()
+        token = str(r.json()["plaintext"])
 
         event_id = _new_event_id()
         payload = b"\x89PNG\r\n\x1a\nfake-image-bytes"
