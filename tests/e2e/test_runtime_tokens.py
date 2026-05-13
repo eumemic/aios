@@ -15,7 +15,7 @@ authenticate, asserting:
 from __future__ import annotations
 
 from tests.conftest import needs_docker
-from tests.helpers.connections import authed_client
+from tests.helpers.connections import bearer
 
 
 async def _issue_runtime_token(http_client: object, connector: str) -> tuple[str, str]:
@@ -78,11 +78,12 @@ class TestRuntimeTokensRoundtrip:
         r.raise_for_status()
 
         _token_id, plaintext = await _issue_runtime_token(http_client, "echo")
-        base_url: str = str(http_client._base_url)  # type: ignore[attr-defined]
-        async with authed_client(base_url, plaintext) as runtime_c:
-            # ``/connectors/secrets`` is the legacy per-connection route;
-            # ConnectorAuthDep rejects runtime tokens.
-            r = await runtime_c.get("/v1/connectors/secrets")
+        # Per-request bearer override so we reuse ``http_client``'s ASGI
+        # transport — building a fresh client against ``base_url`` would
+        # try real DNS resolution on the in-process ``testserver`` host.
+        r = await http_client.get(  # type: ignore[attr-defined]
+            "/v1/connectors/secrets", headers=bearer(plaintext)
+        )
         assert r.status_code == 401
 
     async def test_legacy_token_rejects_runtime_route(
@@ -99,12 +100,11 @@ class TestRuntimeTokensRoundtrip:
         connection_id = r.json()["id"]
         plaintext = await _issue_connector_token(http_client, connection_id)
 
-        base_url: str = str(http_client._base_url)  # type: ignore[attr-defined]
-        async with authed_client(base_url, plaintext) as legacy_c:
-            r = await legacy_c.get(
-                "/v1/connectors/runtime/secrets",
-                params={"connection_id": connection_id},
-            )
+        r = await http_client.get(  # type: ignore[attr-defined]
+            "/v1/connectors/runtime/secrets",
+            params={"connection_id": connection_id},
+            headers=bearer(plaintext),
+        )
         assert r.status_code == 401
 
     async def test_revoked_runtime_token_401s(
@@ -125,12 +125,11 @@ class TestRuntimeTokensRoundtrip:
         r.raise_for_status()
         connection_id = r.json()["id"]
 
-        base_url: str = str(http_client._base_url)  # type: ignore[attr-defined]
-        async with authed_client(base_url, plaintext) as revoked_c:
-            r = await revoked_c.get(
-                "/v1/connectors/runtime/secrets",
-                params={"connection_id": connection_id},
-            )
+        r = await http_client.get(  # type: ignore[attr-defined]
+            "/v1/connectors/runtime/secrets",
+            params={"connection_id": connection_id},
+            headers=bearer(plaintext),
+        )
         assert r.status_code == 401
 
     async def test_runtime_token_rejects_cross_type_connection(
@@ -153,10 +152,9 @@ class TestRuntimeTokensRoundtrip:
         telegram_conn_id = r.json()["id"]
 
         _token_id, plaintext = await _issue_runtime_token(http_client, "echo")
-        base_url: str = str(http_client._base_url)  # type: ignore[attr-defined]
-        async with authed_client(base_url, plaintext) as runtime_c:
-            r = await runtime_c.get(
-                "/v1/connectors/runtime/secrets",
-                params={"connection_id": telegram_conn_id},
-            )
+        r = await http_client.get(  # type: ignore[attr-defined]
+            "/v1/connectors/runtime/secrets",
+            params={"connection_id": telegram_conn_id},
+            headers=bearer(plaintext),
+        )
         assert r.status_code == 403

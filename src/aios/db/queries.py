@@ -4613,7 +4613,17 @@ async def insert_runtime_token(
     label: str | None,
     token_hash: str,
 ) -> RuntimeToken:
-    """Insert a new (unrevoked) token scoping a runtime container to ``connector``."""
+    """Insert a new (unrevoked) token scoping a runtime container to ``connector``.
+
+    Upserts the ``connectors`` catalog row so operators can mint a
+    runtime token for a connector type before any connection of that
+    type exists (the FK on ``runtime_tokens.connector`` would otherwise
+    block first-token-on-fresh-type).
+    """
+    await conn.execute(
+        "INSERT INTO connectors (connector) VALUES ($1) ON CONFLICT DO NOTHING",
+        connector,
+    )
     row = await conn.fetchrow(
         """
         INSERT INTO runtime_tokens (id, connector, label, token_hash)
