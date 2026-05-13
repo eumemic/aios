@@ -614,6 +614,19 @@ def _iso(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).isoformat()
 
 
+def _read_for_upload(host_path: Path) -> bytes:
+    """Read attachment bytes for upload to Telegram's Bot API.
+
+    python-telegram-bot serializes the request body via JSON; passing a
+    raw ``pathlib.Path`` falls into the "unknown object" branch and
+    raises ``TypeError('Object of type PosixPath is not JSON
+    serializable')`` from the HTTPX layer.  Bytes (or a file-like) are
+    treated as multipart uploads.  See PTB's
+    ``telegram.request.HTTPXRequest`` for the serialization rule.
+    """
+    return host_path.read_bytes()
+
+
 async def _send_single_media(
     bot: Any,
     *,
@@ -631,7 +644,7 @@ async def _send_single_media(
         "audio": bot.send_audio,
         "document": bot.send_document,
     }[kind]
-    kwargs: dict[str, Any] = {"chat_id": chat_id, kind: host_path}
+    kwargs: dict[str, Any] = {"chat_id": chat_id, kind: _read_for_upload(host_path)}
     if caption is not None:
         kwargs["caption"] = caption
         if parse_mode is not None:
@@ -649,7 +662,7 @@ def _build_media_group(
     items: list[Any] = []
     for idx, path in enumerate(host_paths):
         kind = _classify(path)
-        kwargs: dict[str, Any] = {"media": path}
+        kwargs: dict[str, Any] = {"media": _read_for_upload(path)}
         if idx == 0 and caption is not None:
             kwargs["caption"] = caption
             if parse_mode is not None:

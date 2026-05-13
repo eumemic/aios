@@ -39,26 +39,31 @@ def test_classify_extensions() -> None:
     assert _classify(Path("/x/no-ext")) == "document"
 
 
-def test_build_media_group_caption_on_first_only() -> None:
-    items = _build_media_group(
-        [Path("/host/a.jpg"), Path("/host/b.jpg"), Path("/host/c.jpg")],
-        caption="three pics",
-    )
+def test_build_media_group_caption_on_first_only(tmp_path: Path) -> None:
+    paths = [tmp_path / f"{name}.jpg" for name in ("a", "b", "c")]
+    for p in paths:
+        p.write_bytes(b"x")
+    items = _build_media_group(paths, caption="three pics")
     assert items[0].caption == "three pics"
     assert items[1].caption is None
     assert items[2].caption is None
 
 
-def test_build_media_group_no_caption() -> None:
-    items = _build_media_group([Path("/host/a.jpg"), Path("/host/b.jpg")], caption=None)
+def test_build_media_group_no_caption(tmp_path: Path) -> None:
+    paths = [tmp_path / "a.jpg", tmp_path / "b.jpg"]
+    for p in paths:
+        p.write_bytes(b"x")
+    items = _build_media_group(paths, caption=None)
     assert all(item.caption is None for item in items)
 
 
-def test_build_media_group_voice_demoted_to_document() -> None:
+def test_build_media_group_voice_demoted_to_document(tmp_path: Path) -> None:
     """Voice can't ride in a media group; falls back to document."""
     from telegram import InputMediaDocument
 
-    items = _build_media_group([Path("/host/v.ogg")], caption=None)
+    voice = tmp_path / "v.ogg"
+    voice.write_bytes(b"x")
+    items = _build_media_group([voice], caption=None)
     assert isinstance(items[0], InputMediaDocument)
 
 
@@ -144,7 +149,11 @@ async def test_telegram_send_single_photo_routes_to_send_photo(
     bot.send_photo.assert_awaited_once()
     kwargs = bot.send_photo.call_args.kwargs
     assert kwargs["chat_id"] == 123
-    assert kwargs["photo"] == photo
+    # Bytes, not Path: python-telegram-bot serializes the request body as
+    # JSON and rejects ``pathlib.Path`` (``TypeError: Object of type
+    # PosixPath is not JSON serializable``).  Read-bytes-up-front pins
+    # the upload path to multipart.
+    assert kwargs["photo"] == photo.read_bytes()
     assert kwargs["caption"] == "look"
 
 
@@ -157,6 +166,32 @@ async def test_telegram_send_single_voice_routes_to_send_voice(
     voice.write_bytes(b"x")
     await connector.telegram_send(text="", attachments=[voice], chat_id="123", connection_id=CONNECTION_ID)
     bot.send_voice.assert_awaited_once()
+
+
+async def test_telegram_send_passes_bytes_not_path(
+    connector: TelegramConnector,
+    bot: Any,
+    tmp_path: Path,
+) -> None:
+    """python-telegram-bot's HTTPX request layer JSON-serializes the
+    body; passing a raw ``pathlib.Path`` falls into the "unknown object"
+    branch and raises
+    ``TypeError('Object of type PosixPath is not JSON serializable')``.
+
+    Surfaced live in PR 8 smoke when SmokeBot tried to send an outbound
+    image attachment.  Pin the upload-shape contract: every media kwarg
+    handed to PTB is bytes (or another non-Path), never a ``Path``.
+    """
+    photo = tmp_path / "img.png"
+    photo.write_bytes(b"\x89PNG\r\n\x1a\nbytes-canary")
+    await connector.telegram_send(
+        text="", attachments=[photo], chat_id="123", connection_id=CONNECTION_ID
+    )
+    photo_arg = bot.send_photo.call_args.kwargs["photo"]
+    assert not isinstance(photo_arg, Path), (
+        f"PTB media kwarg leaked a Path object: {photo_arg!r}"
+    )
+    assert photo_arg == b"\x89PNG\r\n\x1a\nbytes-canary"
 
 
 async def test_telegram_send_single_document_routes_to_send_document(
@@ -240,6 +275,8 @@ async def test_telegram_send_dispatch_resolves_sandbox_path(
         }
     )
 
+    # The SDK resolves the ``SandboxPath`` to a real ``Path`` for the
+    # tool method; we then read it up-front (see ``_read_for_upload``)
+    # so PTB gets bytes rather than a ``PosixPath`` it can't JSON-encode.
     photo_arg: Any = bot.send_photo.call_args.kwargs["photo"]
-    assert isinstance(photo_arg, Path)
-    assert photo_arg == ws / "cat.jpg"
+    assert photo_arg == (ws / "cat.jpg").read_bytes()
