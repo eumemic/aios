@@ -114,7 +114,9 @@ class TestAttachmentParams:
     def test_oversize_rejected(self, tmp_path: Path) -> None:
         path = tmp_path / "big.bin"
         path.write_bytes(b"\0" * (5 * 1024 * 1024 + 1))
-        att = Attachment(host_path=str(path), filename="big.bin", content_type="application/octet-stream")
+        att = Attachment(
+            host_path=str(path), filename="big.bin", content_type="application/octet-stream"
+        )
         with pytest.raises(AttachmentError, match="5242880 bytes"):
             att.as_params()
 
@@ -203,9 +205,7 @@ class TestDispatchSandboxPathResolution:
                 "tool_call_id": "c2",
                 "session_id": "sess_1",
                 "name": "send_many",
-                "arguments": json.dumps(
-                    {"paths": ["/workspace/photo.jpg", "/workspace/doc.pdf"]}
-                ),
+                "arguments": json.dumps({"paths": ["/workspace/photo.jpg", "/workspace/doc.pdf"]}),
             }
         )
         paths = consumer.calls[0]["paths"]

@@ -81,9 +81,7 @@ async def test_maybe_resolve_self_echo_pops_first_waiter(connector: SignalConnec
     state = _state()
     fut: asyncio.Future[int] = asyncio.get_running_loop().create_future()
     connector._pending_echoes[(PHONE, GROUP_CHAT_ID)] = deque([fut])
-    connector._maybe_resolve_self_echo(
-        state, _self_echo_envelope(timestamp_ms=12345)
-    )
+    connector._maybe_resolve_self_echo(state, _self_echo_envelope(timestamp_ms=12345))
     assert fut.done()
     assert fut.result() == 12345
     # Empty queue is pruned so we don't leak keys.
@@ -100,9 +98,7 @@ async def test_maybe_resolve_self_echo_skips_stale_futures(
     fresh: asyncio.Future[int] = asyncio.get_running_loop().create_future()
     connector._pending_echoes[(PHONE, GROUP_CHAT_ID)] = deque([stale, fresh])
 
-    connector._maybe_resolve_self_echo(
-        _state(), _self_echo_envelope(timestamp_ms=999)
-    )
+    connector._maybe_resolve_self_echo(_state(), _self_echo_envelope(timestamp_ms=999))
 
     assert fresh.done()
     assert fresh.result() == 999
@@ -190,13 +186,11 @@ async def test_signal_send_group_returns_sent_at_ms_from_echo(
         # _inbound_dispatcher when the envelope lands on any peer's
         # account stream (group self-echoes arrive on RECEIVING peers'
         # streams, not on the sender's own stream).
-        connector._maybe_resolve_self_echo(
-            _state(), _self_echo_envelope(timestamp_ms=sent_ts)
-        )
+        connector._maybe_resolve_self_echo(_state(), _self_echo_envelope(timestamp_ms=sent_ts))
         return None
 
     connector._daemon.rpc.call.side_effect = _fake_send  # type: ignore[union-attr]
-    connector._conn_state[CONNECTION_ID] = _state()
+    connector.state[CONNECTION_ID] = _state()
 
     result = await connector.signal_send(
         text="hello", chat_id=GROUP_CHAT_ID, connection_id=CONNECTION_ID
@@ -212,7 +206,7 @@ async def test_signal_send_group_falls_back_when_echo_times_out(
     signal_send returns ``{"status": "ok"}`` after the deadline rather
     than hanging the tool call forever."""
     connector._daemon.rpc.call.return_value = None  # type: ignore[union-attr]
-    connector._conn_state[CONNECTION_ID] = _state()
+    connector.state[CONNECTION_ID] = _state()
 
     result = await connector.signal_send(
         text="silence", chat_id=GROUP_CHAT_ID, connection_id=CONNECTION_ID
@@ -233,7 +227,7 @@ async def test_inbound_dispatcher_resolves_echo_on_peer_account_stream(
     rather than by per-account routing.
     """
     # Register the bot under its own account.
-    connector._conn_state[CONNECTION_ID] = _state()
+    connector.state[CONNECTION_ID] = _state()
     fut: asyncio.Future[int] = asyncio.get_running_loop().create_future()
     connector._pending_echoes[(PHONE, GROUP_CHAT_ID)] = deque([fut])
 
@@ -271,7 +265,7 @@ async def test_signal_send_cleans_up_echo_future_when_rpc_raises(
     from aios_signal.errors import RpcError
 
     connector._daemon.rpc.call.side_effect = RpcError("send failed")  # type: ignore[union-attr]
-    connector._conn_state[CONNECTION_ID] = _state()
+    connector.state[CONNECTION_ID] = _state()
 
     with pytest.raises(RpcError):
         await connector.signal_send(
@@ -291,11 +285,9 @@ async def test_signal_send_dm_does_not_register_echo_future(
     """DMs skip the echo path entirely — signal-cli returns their
     timestamp inline, so a pending-echoes entry would leak."""
     connector._daemon.rpc.call.return_value = {"timestamp": 999}  # type: ignore[union-attr]
-    connector._conn_state[CONNECTION_ID] = _state()
+    connector.state[CONNECTION_ID] = _state()
 
-    result = await connector.signal_send(
-        text="dm", chat_id=ALICE_UUID, connection_id=CONNECTION_ID
-    )
+    result = await connector.signal_send(text="dm", chat_id=ALICE_UUID, connection_id=CONNECTION_ID)
 
     assert result == {"sent_at_ms": 999}
     assert (PHONE, ALICE_UUID) not in connector._pending_echoes

@@ -47,7 +47,7 @@ def connector(bot: Any) -> TelegramConnector:
     c = TelegramConnector()
     application = MagicMock()
     application.bot = bot
-    c._conn_state[CONNECTION_ID] = _TelegramConnectionState(
+    c.state[CONNECTION_ID] = _TelegramConnectionState(
         application=application,
         bot_id=BOT_ID,
         first_name="TestBot",

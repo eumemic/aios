@@ -149,7 +149,9 @@ async def test_telegram_send_single_photo_routes_to_send_photo(
     photo = tmp_path / "cat.jpg"
     photo.write_bytes(b"x")
 
-    result = await connector.telegram_send(text="look", attachments=[photo], chat_id="123", connection_id=CONNECTION_ID)
+    result = await connector.telegram_send(
+        text="look", attachments=[photo], chat_id="123", connection_id=CONNECTION_ID
+    )
 
     assert result == {"message_id": 43}
     bot.send_photo.assert_awaited_once()
@@ -174,7 +176,9 @@ async def test_telegram_send_single_voice_routes_to_send_voice(
 ) -> None:
     voice = tmp_path / "v.ogg"
     voice.write_bytes(b"x")
-    await connector.telegram_send(text="", attachments=[voice], chat_id="123", connection_id=CONNECTION_ID)
+    await connector.telegram_send(
+        text="", attachments=[voice], chat_id="123", connection_id=CONNECTION_ID
+    )
     bot.send_voice.assert_awaited_once()
 
 
@@ -224,7 +228,9 @@ async def test_telegram_send_single_document_routes_to_send_document(
 ) -> None:
     doc = tmp_path / "report.pdf"
     doc.write_bytes(b"x")
-    await connector.telegram_send(text="", attachments=[doc], chat_id="123", connection_id=CONNECTION_ID)
+    await connector.telegram_send(
+        text="", attachments=[doc], chat_id="123", connection_id=CONNECTION_ID
+    )
     bot.send_document.assert_awaited_once()
 
 
@@ -258,7 +264,9 @@ async def test_telegram_send_non_int_chat_id_raises(
     connector: TelegramConnector,
 ) -> None:
     with pytest.raises(ValueError, match="must be an integer"):
-        await connector.telegram_send(text="hi", chat_id="not-a-number", connection_id=CONNECTION_ID)
+        await connector.telegram_send(
+            text="hi", chat_id="not-a-number", connection_id=CONNECTION_ID
+        )
 
 
 # Integration check: feed the SDK dispatch path with a sandbox path
@@ -291,9 +299,7 @@ async def test_telegram_send_dispatch_resolves_sandbox_path(
             "tool_call_id": "c1",
             "session_id": "sess-1",
             "name": "telegram_send",
-            "arguments": json.dumps(
-                {"text": "look", "attachments": ["/workspace/cat.jpg"]}
-            ),
+            "arguments": json.dumps({"text": "look", "attachments": ["/workspace/cat.jpg"]}),
             "focal_channel": "telegram/0/123",
         }
     )

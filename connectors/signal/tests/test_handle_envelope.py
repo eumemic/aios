@@ -1,10 +1,18 @@
-"""Cover ``_handle_envelope``'s drop-and-continue behavior on routine 4xx.
+"""Cover ``_handle_envelope``'s response to ``emit_inbound`` outcomes.
 
-A single bad envelope going to the api must not tear the container down:
-422s and other routine 4xx are logged + dropped so the connector keeps
-serving other connections.  401/403 (token revoked / runtime
-misconfigured) and 5xx (server outage or bug) still propagate so the
-operator sees red on real problems.
+The drop-and-continue policy itself now lives in
+:meth:`HttpConnector.emit_inbound` and is unit-tested in
+``packages/aios-connector-http/tests/test_runner.py``
+(``TestEmitInbound4xxDrop``).  Here we verify that
+``_handle_envelope`` honors the SDK's two return shapes:
+
+* ``None`` → envelope was dropped (routine 4xx); skip the read receipt
+  since the inbound never landed in the session log.
+* ``dict`` → envelope persisted; fire the explicit read receipt.
+
+5xx / 401 / 403 raise out of ``emit_inbound`` and must keep
+propagating so the container crashes + restarts on auth-broken /
+server-outage failures.
 """
 
 from __future__ import annotations
@@ -47,27 +55,12 @@ def _state() -> _SignalConnectionState:
     )
 
 
-async def test_handle_envelope_drops_on_422(
+async def test_handle_envelope_skips_receipt_when_inbound_dropped(
     connector: SignalConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A 422 from the api affects one envelope; the container survives."""
-    monkeypatch.setattr(
-        connector, "emit_inbound", AsyncMock(side_effect=_http_status_error(422, '{"detail":"bad"}'))
-    )
-    receipt = AsyncMock()
-    monkeypatch.setattr(connector, "_send_read_receipt", receipt)
-
-    await connector._handle_envelope(CONNECTION_ID, _state(), _make_envelope())
-
-    receipt.assert_not_awaited()
-
-
-async def test_handle_envelope_drops_on_400(
-    connector: SignalConnector, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        connector, "emit_inbound", AsyncMock(side_effect=_http_status_error(400))
-    )
+    """``emit_inbound`` returns ``None`` when the SDK drops a routine 4xx;
+    no read receipt should fire since the inbound never persisted."""
+    monkeypatch.setattr(connector, "emit_inbound", AsyncMock(return_value=None))
     receipt = AsyncMock()
     monkeypatch.setattr(connector, "_send_read_receipt", receipt)
 
@@ -80,9 +73,7 @@ async def test_handle_envelope_raises_on_401(
     connector: SignalConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """401 means the runtime token is busted — fatal for every connection."""
-    monkeypatch.setattr(
-        connector, "emit_inbound", AsyncMock(side_effect=_http_status_error(401))
-    )
+    monkeypatch.setattr(connector, "emit_inbound", AsyncMock(side_effect=_http_status_error(401)))
 
     with pytest.raises(httpx.HTTPStatusError):
         await connector._handle_envelope(CONNECTION_ID, _state(), _make_envelope())
@@ -92,9 +83,7 @@ async def test_handle_envelope_raises_on_500(
     connector: SignalConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """5xx is a server-side outage; let the container crash + restart."""
-    monkeypatch.setattr(
-        connector, "emit_inbound", AsyncMock(side_effect=_http_status_error(503))
-    )
+    monkeypatch.setattr(connector, "emit_inbound", AsyncMock(side_effect=_http_status_error(503)))
 
     with pytest.raises(httpx.HTTPStatusError):
         await connector._handle_envelope(CONNECTION_ID, _state(), _make_envelope())

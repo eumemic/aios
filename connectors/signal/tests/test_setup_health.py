@@ -42,9 +42,7 @@ def connector(tmp_path: Path) -> SignalConnector:
     return SignalConnector(cfg)
 
 
-async def _serve_until_idle(
-    connector: SignalConnector, secrets: dict[str, str]
-) -> None:
+async def _serve_until_idle(connector: SignalConnector, secrets: dict[str, str]) -> None:
     """Run ``serve_connection`` up to the point where it starts draining
     the inbound queue, then cancel.  Lets us assert on the bot_uuid /
     contacts / groups registered in state without leaving a task hanging.
@@ -54,7 +52,7 @@ async def _serve_until_idle(
         # Poll for the state to appear (means verify_phone + list_groups +
         # list_contacts have run and the queue-drain loop has started).
         for _ in range(50):
-            if CONNECTION_ID in connector._conn_state:
+            if CONNECTION_ID in connector.state:
                 break
             await asyncio.sleep(0.01)
     finally:

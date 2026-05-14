@@ -148,9 +148,7 @@ class TestRequiredAndDefaults:
     def test_required_excludes_defaulted_keeps_undefaulted(self) -> None:
         class C(_DummyForBindings):
             @tool()
-            async def t(
-                self, *, must: str, maybe: int = 7, also: bool = False
-            ) -> str:
+            async def t(self, *, must: str, maybe: int = 7, also: bool = False) -> str:
                 return f"{must} {maybe} {also}"
 
         spec = derive_tool_spec("t", C().t)

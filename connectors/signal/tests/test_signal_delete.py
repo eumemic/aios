@@ -7,7 +7,9 @@ from tests.conftest import ALICE_UUID, CONNECTION_ID, GROUP_CHAT_ID, GROUP_RAW_I
 
 
 async def test_signal_delete_dm_uses_recipient(connector: SignalConnector) -> None:
-    result = await connector.signal_delete(target_timestamp_ms=1700000000000, chat_id=ALICE_UUID, connection_id=CONNECTION_ID)
+    result = await connector.signal_delete(
+        target_timestamp_ms=1700000000000, chat_id=ALICE_UUID, connection_id=CONNECTION_ID
+    )
     assert result == {"status": "ok"}
     method, params = connector._daemon.rpc.call.call_args.args  # type: ignore[union-attr]
     assert method == "remoteDelete"
@@ -19,7 +21,9 @@ async def test_signal_delete_dm_uses_recipient(connector: SignalConnector) -> No
 
 
 async def test_signal_delete_group_uses_groupid(connector: SignalConnector) -> None:
-    await connector.signal_delete(target_timestamp_ms=999, chat_id=GROUP_CHAT_ID, connection_id=CONNECTION_ID)
+    await connector.signal_delete(
+        target_timestamp_ms=999, chat_id=GROUP_CHAT_ID, connection_id=CONNECTION_ID
+    )
     method, params = connector._daemon.rpc.call.call_args.args  # type: ignore[union-attr]
     assert method == "remoteDelete"
     assert params == {

@@ -135,9 +135,7 @@ async def stream_connection_discovery(
         yield msg
 
 
-async def _stream_sse(
-    httpx_client: httpx.AsyncClient, path: str
-) -> AsyncIterator[SseMessage]:
+async def _stream_sse(httpx_client: httpx.AsyncClient, path: str) -> AsyncIterator[SseMessage]:
     """Open an SSE stream against ``path`` and yield parsed messages."""
     async with httpx_client.stream(
         "GET",

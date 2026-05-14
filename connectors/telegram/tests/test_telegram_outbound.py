@@ -39,30 +39,26 @@ def bot() -> Any:
 # ── telegram_typing ──────────────────────────────────────────────────
 
 
-async def test_telegram_typing_default_action(
-    connector: TelegramConnector, bot: Any
-) -> None:
+async def test_telegram_typing_default_action(connector: TelegramConnector, bot: Any) -> None:
     result = await connector.telegram_typing(chat_id="123", connection_id=CONNECTION_ID)
     assert result == {"status": "ok"}
     bot.send_chat_action.assert_awaited_once_with(chat_id=123, action=ChatAction.TYPING)
 
 
-async def test_telegram_typing_upload_photo_action(
-    connector: TelegramConnector, bot: Any
-) -> None:
-    await connector.telegram_typing(action="upload_photo", chat_id="123", connection_id=CONNECTION_ID)
-    bot.send_chat_action.assert_awaited_once_with(
-        chat_id=123, action=ChatAction.UPLOAD_PHOTO
+async def test_telegram_typing_upload_photo_action(connector: TelegramConnector, bot: Any) -> None:
+    await connector.telegram_typing(
+        action="upload_photo", chat_id="123", connection_id=CONNECTION_ID
     )
+    bot.send_chat_action.assert_awaited_once_with(chat_id=123, action=ChatAction.UPLOAD_PHOTO)
 
 
 # ── telegram_edit_message ────────────────────────────────────────────
 
 
-async def test_telegram_edit_message_plain(
-    connector: TelegramConnector, bot: Any
-) -> None:
-    result = await connector.telegram_edit_message(message_id=99, text="fixed", chat_id="123", connection_id=CONNECTION_ID)
+async def test_telegram_edit_message_plain(connector: TelegramConnector, bot: Any) -> None:
+    result = await connector.telegram_edit_message(
+        message_id=99, text="fixed", chat_id="123", connection_id=CONNECTION_ID
+    )
     assert result == {"message_id": 99}
     bot.edit_message_text.assert_awaited_once_with(
         chat_id=123, message_id=99, text="fixed", parse_mode=None
@@ -107,17 +103,19 @@ async def test_telegram_edit_message_inline_returns_status_ok(
 ) -> None:
     """Editing an inline-bot message returns True from PTB; we surface status only."""
     bot.edit_message_text = AsyncMock(return_value=True)
-    result = await connector.telegram_edit_message(message_id=99, text="hi", chat_id="123", connection_id=CONNECTION_ID)
+    result = await connector.telegram_edit_message(
+        message_id=99, text="hi", chat_id="123", connection_id=CONNECTION_ID
+    )
     assert result == {"status": "ok"}
 
 
 # ── telegram_delete_message ──────────────────────────────────────────
 
 
-async def test_telegram_delete_message(
-    connector: TelegramConnector, bot: Any
-) -> None:
-    result = await connector.telegram_delete_message(message_id=50, chat_id="123", connection_id=CONNECTION_ID)
+async def test_telegram_delete_message(connector: TelegramConnector, bot: Any) -> None:
+    result = await connector.telegram_delete_message(
+        message_id=50, chat_id="123", connection_id=CONNECTION_ID
+    )
     assert result == {"status": "ok"}
     bot.delete_message.assert_awaited_once_with(chat_id=123, message_id=50)
 
@@ -125,10 +123,10 @@ async def test_telegram_delete_message(
 # ── telegram_react ───────────────────────────────────────────────────
 
 
-async def test_telegram_react_with_emoji(
-    connector: TelegramConnector, bot: Any
-) -> None:
-    result = await connector.telegram_react(message_id=50, emoji="👍", chat_id="123", connection_id=CONNECTION_ID)
+async def test_telegram_react_with_emoji(connector: TelegramConnector, bot: Any) -> None:
+    result = await connector.telegram_react(
+        message_id=50, emoji="👍", chat_id="123", connection_id=CONNECTION_ID
+    )
     assert result == {"status": "ok"}
     kwargs = bot.set_message_reaction.call_args.kwargs
     assert kwargs["chat_id"] == 123
@@ -139,10 +137,10 @@ async def test_telegram_react_with_emoji(
     assert kwargs["reaction"][0].emoji == "👍"
 
 
-async def test_telegram_react_clear(
-    connector: TelegramConnector, bot: Any
-) -> None:
-    await connector.telegram_react(message_id=50, emoji=None, chat_id="123", connection_id=CONNECTION_ID)
+async def test_telegram_react_clear(connector: TelegramConnector, bot: Any) -> None:
+    await connector.telegram_react(
+        message_id=50, emoji=None, chat_id="123", connection_id=CONNECTION_ID
+    )
     kwargs = bot.set_message_reaction.call_args.kwargs
     assert kwargs["reaction"] is None
 
@@ -150,14 +148,14 @@ async def test_telegram_react_clear(
 # ── telegram_send parse_mode ─────────────────────────────────────────
 
 
-async def test_telegram_send_markdown_mode_converts(
-    connector: TelegramConnector, bot: Any
-) -> None:
+async def test_telegram_send_markdown_mode_converts(connector: TelegramConnector, bot: Any) -> None:
     """``parse_mode="markdown"`` runs the input through
     :func:`markdown_to_telegram_html`.  This is the renamed form of
     what used to be ``parse_mode="html"`` before the smoke-#17 fix —
     the old name collided with Telegram Bot API semantics."""
-    await connector.telegram_send(text="**hi** _there_", parse_mode="markdown", chat_id="123", connection_id=CONNECTION_ID)
+    await connector.telegram_send(
+        text="**hi** _there_", parse_mode="markdown", chat_id="123", connection_id=CONNECTION_ID
+    )
     kwargs = bot.send_message.call_args.kwargs
     assert kwargs["text"] == "<b>hi</b> <i>there</i>"
     assert kwargs["parse_mode"] == "HTML"
@@ -171,7 +169,9 @@ async def test_telegram_send_html_mode_passes_through(
     verbatim.  Critical for agents that want to use raw ``<a href>``
     tags or other constructs the markdown converter doesn't emit."""
     raw = '<b>bold</b> <a href="https://example.com">link</a>'
-    await connector.telegram_send(text=raw, parse_mode="html", chat_id="123", connection_id=CONNECTION_ID)
+    await connector.telegram_send(
+        text=raw, parse_mode="html", chat_id="123", connection_id=CONNECTION_ID
+    )
     kwargs = bot.send_message.call_args.kwargs
     assert kwargs["text"] == raw  # untouched
     assert kwargs["parse_mode"] == "HTML"
