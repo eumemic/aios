@@ -1060,24 +1060,26 @@ async def clone_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 status, stop_reason, workspace_volume_path, env, last_event_seq,
-                focal_channel
+                focal_channel, account_id
             )
             SELECT $1, agent_id, environment_id, agent_version, title, metadata,
-                   status, stop_reason, $2, env, last_event_seq, focal_channel
+                   status, stop_reason, $2, env, last_event_seq, focal_channel, $4
               FROM sessions WHERE id = $3
             RETURNING *
             """,
             new_id,
             workspace_path,
             parent_session_id,
+            account_id,
         )
         assert new_row is not None
 
         await conn.execute(
-            "INSERT INTO session_vaults (session_id, vault_id, rank) "
-            "SELECT $1, vault_id, rank FROM session_vaults WHERE session_id = $2",
+            "INSERT INTO session_vaults (session_id, vault_id, rank, account_id) "
+            "SELECT $1, vault_id, rank, $3 FROM session_vaults WHERE session_id = $2",
             new_id,
             parent_session_id,
+            account_id,
         )
 
         # Events are gapless 1..last_event_seq per session, so we pre-generate
@@ -1090,12 +1092,12 @@ async def clone_session(
             INSERT INTO events (
                 id, session_id, seq, kind, data, created_at, cumulative_tokens,
                 channel, orig_channel, focal_channel_at_arrival,
-                role, tool_name, is_error, sender_name
+                role, tool_name, is_error, sender_name, account_id
             )
             SELECT i.id, $2, s.seq, s.kind, s.data, s.created_at,
                    s.cumulative_tokens,
                    s.channel, s.orig_channel, s.focal_channel_at_arrival,
-                   s.role, s.tool_name, s.is_error, s.sender_name
+                   s.role, s.tool_name, s.is_error, s.sender_name, $4
               FROM (
                 SELECT *, row_number() OVER (ORDER BY seq) AS rn
                   FROM events WHERE session_id = $1
@@ -1105,6 +1107,7 @@ async def clone_session(
             parent_session_id,
             new_id,
             new_event_ids,
+            account_id,
         )
 
     return _row_to_session(new_row)
@@ -1527,9 +1530,9 @@ async def append_event(
             "INSERT INTO events "
             "(id, session_id, seq, kind, data, cumulative_tokens, "
             " orig_channel, focal_channel_at_arrival, channel, "
-            " role, tool_name, is_error, sender_name) "
+            " role, tool_name, is_error, sender_name, account_id) "
             "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, "
-            " $10, $11, $12, $13) RETURNING *",
+            " $10, $11, $12, $13, $14) RETURNING *",
             new_id,
             session_id,
             seq,
@@ -1543,6 +1546,7 @@ async def append_event(
             tool_name,
             is_error,
             sender_name,
+            account_id,
         )
         assert row is not None
 

@@ -95,7 +95,6 @@ async def compute_step_prelude(
     :func:`compose_step_context` unchanged, so the composed prompt stays
     byte-identical to what it was before the split.
     """
-    account_id = ""  # PR 4 stub; PR 5 threads from caller
     from aios.harness.channels import (
         augment_with_focal_paradigm,
         max_tail_block_local,
@@ -106,8 +105,10 @@ async def compute_step_prelude(
     )
     from aios.harness.memory_stores import augment_with_memory_stores
     from aios.harness.skills import augment_system_prompt
+    from aios.services import sessions as sessions_service
     from aios.services import skills as skills_service
 
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     tools = to_openai_tools(agent.tools)
     # The switch_channel built-in is the agent's only path to mutate
     # focal attention; inject it whenever the session has bound channels.
