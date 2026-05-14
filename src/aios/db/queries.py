@@ -561,6 +561,8 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
         focal_channel=row["focal_channel"],
+        focal_locked=row["focal_locked"],
+        owner_id=row["owner_id"],
     )
 
 
@@ -587,22 +589,25 @@ async def insert_session(
     ``spawned_from_connection_id`` + ``focal_channel`` are written
     atomically with the row insert so the focal-locked invariant (see
     ``switch_channel``'s rejection of mutations on per_chat sessions)
-    holds from creation.
+    holds from creation. ``focal_locked`` is derived in the same
+    statement: any session that was spawned for a single chat starts
+    its life locked.
     """
     from aios.config import get_settings
 
     new_id = make_id(SESSION)
     if workspace_path is None:
         workspace_path = str(get_settings().workspace_root / new_id)
+    focal_locked = spawned_from_connection_id is not None
     try:
         row = await conn.fetchrow(
             """
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 status, workspace_volume_path, env,
-                spawned_from_connection_id, focal_channel
+                spawned_from_connection_id, focal_channel, focal_locked
             )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10, $11)
             RETURNING *
             """,
             new_id,
@@ -615,6 +620,7 @@ async def insert_session(
             json.dumps(env or {}),
             spawned_from_connection_id,
             focal_channel,
+            focal_locked,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -655,18 +661,24 @@ async def get_session_focal_channel(conn: asyncpg.Connection[Any], session_id: s
     return focal
 
 
-async def get_session_spawn_origin(conn: asyncpg.Connection[Any], session_id: str) -> str | None:
-    """Return the session's ``spawned_from_connection_id`` (or NULL).
+async def is_session_focal_locked(conn: asyncpg.Connection[Any], session_id: str) -> bool:
+    """Return whether the session's focal channel is locked.
 
-    A non-null value indicates a per_chat-spawned session whose focal
-    channel is locked at creation; ``switch_channel`` rejects mutations
-    on those sessions.
+    The flag is set at session creation by per_chat-mode spawns (and any
+    future spawner that wants to pin a session to a single channel).
+    ``switch_channel`` rejects any mutation when this returns ``True``.
+
+    Raises :class:`NotFoundError` if the session row doesn't exist —
+    callers in the harness should never reach this with an invalid
+    session id, so a missing row is a real bug, not a permission state.
     """
-    val: str | None = await conn.fetchval(
-        "SELECT spawned_from_connection_id FROM sessions WHERE id = $1",
+    locked: bool | None = await conn.fetchval(
+        "SELECT focal_locked FROM sessions WHERE id = $1",
         session_id,
     )
-    return val
+    if locked is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    return locked
 
 
 async def set_session_focal_channel(

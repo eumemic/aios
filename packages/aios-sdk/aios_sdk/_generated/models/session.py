@@ -43,6 +43,8 @@ class Session:
         resources (list[GithubRepositoryResourceEcho | MemoryStoreResourceEcho] | Unset):
         archived_at (datetime.datetime | None | Unset):
         focal_channel (None | str | Unset):
+        focal_locked (bool | Unset):  Default: False.
+        owner_id (None | str | Unset):
     """
 
     id: str
@@ -63,6 +65,8 @@ class Session:
     )
     archived_at: datetime.datetime | None | Unset = UNSET
     focal_channel: None | str | Unset = UNSET
+    focal_locked: bool | Unset = False
+    owner_id: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -131,6 +135,14 @@ class Session:
         else:
             focal_channel = self.focal_channel
 
+        focal_locked = self.focal_locked
+
+        owner_id: None | str | Unset
+        if isinstance(self.owner_id, Unset):
+            owner_id = UNSET
+        else:
+            owner_id = self.owner_id
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -158,6 +170,10 @@ class Session:
             field_dict["archived_at"] = archived_at
         if focal_channel is not UNSET:
             field_dict["focal_channel"] = focal_channel
+        if focal_locked is not UNSET:
+            field_dict["focal_locked"] = focal_locked
+        if owner_id is not UNSET:
+            field_dict["owner_id"] = owner_id
 
         return field_dict
 
@@ -281,6 +297,17 @@ class Session:
 
         focal_channel = _parse_focal_channel(d.pop("focal_channel", UNSET))
 
+        focal_locked = d.pop("focal_locked", UNSET)
+
+        def _parse_owner_id(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        owner_id = _parse_owner_id(d.pop("owner_id", UNSET))
+
         session = cls(
             id=id,
             agent_id=agent_id,
@@ -298,6 +325,8 @@ class Session:
             resources=resources,
             archived_at=archived_at,
             focal_channel=focal_channel,
+            focal_locked=focal_locked,
+            owner_id=owner_id,
         )
 
         session.additional_properties = d

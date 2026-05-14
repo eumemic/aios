@@ -189,7 +189,7 @@ class TestFocalChannelE2E:
         events = await harness.events(session.id)
         result = next(e for e in events if e.data.get("role") == "tool")
         assert result.data.get("is_error") is True
-        assert "per_chat" in result.data["content"]
+        assert "focal channel is locked" in result.data["content"]
 
     async def test_paradigm_block_renders_when_session_has_channels(self, harness: Harness) -> None:
         """The cache-stable focal-channel paradigm block appears in the

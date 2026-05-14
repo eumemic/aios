@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from aios.mcp.pool import McpSessionPool
     from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.sandbox.registry import SandboxRegistry
+    from aios.tools.providers import ToolProvider
 
 
 pool: asyncpg.Pool[Any] | None = None
@@ -35,6 +36,7 @@ worker_id: str | None = None
 sandbox_registry: SandboxRegistry | None = None
 task_registry: TaskRegistry | None = None
 mcp_session_pool: McpSessionPool | None = None
+tool_provider: ToolProvider | None = None
 
 # Per-session memory-mount cache. Populated at the top of every step (in
 # ``loop._run_session_step_body``) and consumed by ``tools.memory_intercept``
@@ -142,3 +144,12 @@ def require_mcp_session_pool() -> McpSessionPool:
             "this code is running outside a worker_main context"
         )
     return mcp_session_pool
+
+
+def require_tool_provider() -> ToolProvider:
+    if tool_provider is None:
+        raise RuntimeError(
+            "aios.harness.runtime.tool_provider is not initialized; "
+            "this code is running outside a worker_main context"
+        )
+    return tool_provider

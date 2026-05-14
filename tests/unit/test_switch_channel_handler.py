@@ -33,9 +33,9 @@ def _patched_conn() -> Any:
 
 
 class TestPerChatLock:
-    """Sessions with ``spawned_from_connection_id`` set are bound to a
-    single chat by construction; ``switch_channel`` must reject any
-    attempt to mutate focal on them.
+    """Sessions with ``focal_locked = TRUE`` are bound to a single chat
+    by construction (today set at per_chat-mode spawn time);
+    ``switch_channel`` must reject any attempt to mutate focal on them.
     """
 
     async def test_rejects_when_session_was_per_chat_spawned(self) -> None:
@@ -44,9 +44,9 @@ class TestPerChatLock:
         with (
             _patch_pool(pool),
             patch(
-                "aios.tools.switch_channel.queries.get_session_spawn_origin",
+                "aios.tools.switch_channel.queries.is_session_focal_locked",
                 new_callable=AsyncMock,
-            ) as origin,
+            ) as locked,
             patch(
                 "aios.tools.switch_channel.queries.get_session_focal_channel",
                 new_callable=AsyncMock,
@@ -60,14 +60,14 @@ class TestPerChatLock:
                 new_callable=AsyncMock,
             ) as list_channels,
         ):
-            origin.return_value = "conn_per_chat"
+            locked.return_value = True
             result = await switch_channel_handler(
                 "sess_per_chat", {"channel_id": "signal/+1/chat-2"}
             )
 
         assert isinstance(result, ToolResult)
         assert result.is_error is True
-        assert "per_chat" in result.content
+        assert "focal channel is locked" in result.content
         marker = result.metadata[SWITCH_CHANNEL_METADATA_KEY]
         assert marker == {"target": "signal/+1/chat-2", "success": False}
         # Focal-lock short-circuits before any other DB read or write.
@@ -84,15 +84,15 @@ class TestPerChatLock:
         with (
             _patch_pool(pool),
             patch(
-                "aios.tools.switch_channel.queries.get_session_spawn_origin",
+                "aios.tools.switch_channel.queries.is_session_focal_locked",
                 new_callable=AsyncMock,
-            ) as origin,
+            ) as locked,
             patch(
                 "aios.tools.switch_channel.queries.set_session_focal_channel",
                 new_callable=AsyncMock,
             ) as set_focal,
         ):
-            origin.return_value = "conn_per_chat"
+            locked.return_value = True
             result = await switch_channel_handler("sess_per_chat", {"channel_id": None})
 
         assert result.is_error is True
@@ -104,9 +104,9 @@ class TestPerChatLock:
 
 
 class TestNonPerChatPathStillWorks:
-    """Sanity check that ordinary (non-per_chat) sessions reach the
+    """Sanity check that ordinary (non-locked) sessions reach the
     rest of the handler — the focal-lock guard short-circuits *only*
-    when ``spawned_from_connection_id`` is set.
+    when ``focal_locked`` is TRUE.
     """
 
     async def test_no_op_when_target_already_focal(self) -> None:
@@ -115,9 +115,9 @@ class TestNonPerChatPathStillWorks:
         with (
             _patch_pool(pool),
             patch(
-                "aios.tools.switch_channel.queries.get_session_spawn_origin",
+                "aios.tools.switch_channel.queries.is_session_focal_locked",
                 new_callable=AsyncMock,
-            ) as origin,
+            ) as locked,
             patch(
                 "aios.tools.switch_channel.queries.get_session_focal_channel",
                 new_callable=AsyncMock,
@@ -127,7 +127,7 @@ class TestNonPerChatPathStillWorks:
                 new_callable=AsyncMock,
             ) as set_focal,
         ):
-            origin.return_value = None
+            locked.return_value = False
             focal.return_value = "signal/+1/chat-1"
             result = await switch_channel_handler("sess_normal", {"channel_id": "signal/+1/chat-1"})
 
@@ -142,9 +142,9 @@ class TestNonPerChatPathStillWorks:
         with (
             _patch_pool(pool),
             patch(
-                "aios.tools.switch_channel.queries.get_session_spawn_origin",
+                "aios.tools.switch_channel.queries.is_session_focal_locked",
                 new_callable=AsyncMock,
-            ) as origin,
+            ) as locked,
             patch(
                 "aios.tools.switch_channel.queries.get_session_focal_channel",
                 new_callable=AsyncMock,
@@ -154,7 +154,7 @@ class TestNonPerChatPathStillWorks:
                 new_callable=AsyncMock,
             ) as set_focal,
         ):
-            origin.return_value = None
+            locked.return_value = False
             focal.return_value = "signal/+1/chat-1"
             result = await switch_channel_handler("sess_normal", {"channel_id": None})
 
