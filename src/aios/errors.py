@@ -162,6 +162,27 @@ class OAuthRefreshError(AiosError):
     status_code = 502
 
 
+class ManagementCallTimeoutError(AiosError):
+    """Management call exceeded its per-method timeout.
+
+    The pending row stays in ``pending`` so the connector can still
+    deliver; the operator's request is just no longer LISTENing.
+    """
+
+    error_type = "management_call_timeout"
+    status_code = 504
+
+
+class ConnectorCallFailedError(AiosError):
+    """Connector POSTed a management-call result with ``is_error=true``.
+
+    ``detail.connector_error`` carries the connector's error envelope.
+    """
+
+    error_type = "connector_call_failed"
+    status_code = 502
+
+
 # ─── FastAPI integration ─────────────────────────────────────────────────────
 
 

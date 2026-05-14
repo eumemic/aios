@@ -264,32 +264,33 @@ class TestSignalMultiConnection:
             await listener.feed(PHONE_A, _build_text_envelope(ALICE_UUID, "hello-A"))
             await listener.feed(PHONE_B, _build_text_envelope(ALICE_UUID, "hello-B"))
 
-            async def _both_landed() -> bool:
-                events_a = await harness.events(session_a.id)
-                events_b = await harness.events(session_b.id)
-                has_a = any(
-                    e.kind == "message"
-                    and e.data.get("role") == "user"
-                    and "hello-A" in (e.data.get("content") or "")
-                    for e in events_a
-                )
-                has_b = any(
-                    e.kind == "message"
-                    and e.data.get("role") == "user"
-                    and "hello-B" in (e.data.get("content") or "")
-                    for e in events_b
-                )
-                return has_a and has_b
+            # Poll on the receipt RPCs rather than just on event visibility:
+            # ``_handle_envelope`` awaits ``emit_inbound`` (which commits
+            # the event, making it DB-visible) BEFORE awaiting
+            # ``_send_read_receipt``.  Watching only the event flips the
+            # predicate true while the next-line receipt await is still
+            # pending on the per-connection task — CI flaked here.  Two
+            # receipts implies both ``emit_inbound`` calls returned
+            # non-None, so the cross-routing assertions below are
+            # equally satisfied.
+            rpc_call = mocked_signal_daemon["rpc_call"]
+
+            def _receipt_calls() -> list[Any]:
+                return [c for c in rpc_call.call_args_list if c.args and c.args[0] == "sendReceipt"]
 
             deadline = asyncio.get_running_loop().time() + 10.0
-            while not await _both_landed():
+            while len(_receipt_calls()) < 2:
                 if asyncio.get_running_loop().time() >= deadline:
-                    raise AssertionError("inbound never demuxed onto both sessions")
+                    raise AssertionError(
+                        f"expected 2 read receipts within 10s, got {len(_receipt_calls())}"
+                    )
                 await asyncio.sleep(0.1)
 
             # Cross-routing: session A must NOT have B's message and vice versa.
             events_a = await harness.events(session_a.id)
             events_b = await harness.events(session_b.id)
+            assert any("hello-A" in (e.data.get("content") or "") for e in events_a)
+            assert any("hello-B" in (e.data.get("content") or "") for e in events_b)
             assert not any("hello-B" in (e.data.get("content") or "") for e in events_a)
             assert not any("hello-A" in (e.data.get("content") or "") for e in events_b)
 
@@ -299,12 +300,9 @@ class TestSignalMultiConnection:
             # automatic delivery receipts in daemon mode batch
             # unpredictably; the explicit read receipt forces the
             # sender's 2nd checkmark immediately on consumption.
-            rpc_call = mocked_signal_daemon["rpc_call"]
-            receipt_calls = [
-                c for c in rpc_call.call_args_list if c.args and c.args[0] == "sendReceipt"
-            ]
+            receipt_calls = _receipt_calls()
             assert len(receipt_calls) == 2, (
-                f"expected 2 read receipts (one per inbound), got {len(receipt_calls)}"
+                f"expected exactly 2 read receipts (one per inbound), got {len(receipt_calls)}"
             )
             receipt_accounts = {c.args[1]["account"] for c in receipt_calls}
             assert receipt_accounts == {PHONE_A, PHONE_B}

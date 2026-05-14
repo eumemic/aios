@@ -10,7 +10,13 @@ they need an operation not exposed at the base-class level.
 
 from __future__ import annotations
 
-from .runner import HttpConnector, SandboxPathError, tool
+from .runner import (
+    HttpConnector,
+    ManagementHandlerError,
+    SandboxPathError,
+    management_handler,
+    tool,
+)
 from .sandbox import Attachment, AttachmentError, SandboxPath
 from .spool import SqliteAnsweredSpool
 
@@ -18,8 +24,10 @@ __all__ = [
     "Attachment",
     "AttachmentError",
     "HttpConnector",
+    "ManagementHandlerError",
     "SandboxPath",
     "SandboxPathError",
     "SqliteAnsweredSpool",
+    "management_handler",
     "tool",
 ]

@@ -231,6 +231,48 @@ async def listen_for_connector_calls_by_type(
 
 
 @asynccontextmanager
+async def listen_for_management_calls(
+    db_url: str,
+    connector: str,
+    *,
+    queue_max: int = 1000,
+) -> AsyncIterator[asyncio.Queue[str]]:
+    """LISTEN ``connector_management_calls_<connector>``; yield a queue of ``call_id`` payloads."""
+    conn = await asyncpg.connect(normalize_dsn(db_url))
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
+    channel = f"connector_management_calls_{connector}"
+
+    def _callback(
+        _conn: asyncpg.Connection[object],
+        _pid: int,
+        _channel: str,
+        payload: str,
+    ) -> None:
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            log.warning(
+                "listen.connector_management_calls_queue_full_drop",
+                connector=connector,
+                queue_max=queue_max,
+            )
+            try:
+                queue.get_nowait()
+                queue.put_nowait(payload)
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
+
+    await conn.add_listener(channel, _callback)
+    try:
+        yield queue
+    finally:
+        with contextlib.suppress(Exception):
+            await conn.remove_listener(channel, _callback)
+        with contextlib.suppress(Exception):
+            await conn.close()
+
+
+@asynccontextmanager
 async def listen_for_connection_discovery(
     db_url: str,
     connector: str,

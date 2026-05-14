@@ -97,6 +97,7 @@ from .memory_update_precondition import MemoryUpdatePrecondition
 from .memory_version import MemoryVersion
 from .memory_version_operation import MemoryVersionOperation
 from .recent_chat import RecentChat
+from .runtime_management_call_result_request import RuntimeManagementCallResultRequest
 from .runtime_token import RuntimeToken
 from .runtime_token_issue import RuntimeTokenIssue
 from .runtime_token_issued import RuntimeTokenIssued
@@ -124,6 +125,12 @@ from .session_update_metadata_type_0 import SessionUpdateMetadataType0
 from .session_usage import SessionUsage
 from .session_user_message import SessionUserMessage
 from .session_user_message_metadata import SessionUserMessageMetadata
+from .signal_profile_request import SignalProfileRequest
+from .signal_register_request import SignalRegisterRequest
+from .signal_register_response import SignalRegisterResponse
+from .signal_register_response_status import SignalRegisterResponseStatus
+from .signal_verify_request import SignalVerifyRequest
+from .signal_verify_response import SignalVerifyResponse
 from .skill import Skill
 from .skill_create import SkillCreate
 from .skill_create_files import SkillCreateFiles
@@ -260,6 +267,7 @@ __all__ = (
     "MemoryVersion",
     "MemoryVersionOperation",
     "RecentChat",
+    "RuntimeManagementCallResultRequest",
     "RuntimeToken",
     "RuntimeTokenIssue",
     "RuntimeTokenIssued",
@@ -285,6 +293,12 @@ __all__ = (
     "SessionUsage",
     "SessionUserMessage",
     "SessionUserMessageMetadata",
+    "SignalProfileRequest",
+    "SignalRegisterRequest",
+    "SignalRegisterResponse",
+    "SignalRegisterResponseStatus",
+    "SignalVerifyRequest",
+    "SignalVerifyResponse",
     "Skill",
     "SkillCreate",
     "SkillCreateFiles",

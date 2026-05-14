@@ -1,31 +1,33 @@
-"""Runtime-container-facing endpoints (#328 PR 5+).
+"""Connector-related endpoints — two distinct caller populations.
 
-A runtime container talks to aios via these routes, all authenticated
-by a per-connector-type bearer token (``RuntimeAuthDep``):
+The file groups three sections:
 
-* ``POST /v1/connectors/runtime/inbound`` — submit an inbound message.
-* ``POST /v1/connectors/runtime/tool-results`` — submit a tool result.
-* ``GET  /v1/connectors/runtime/calls`` — SSE stream of pending tool calls.
-* ``GET  /v1/connectors/runtime/secrets`` — fetch decrypted secrets.
-* ``GET  /v1/connectors/connections`` — SSE stream of add/remove events.
-* ``PUT  /v1/connectors/{connector}/tools_schema`` — publish tool catalog.
+1. **Runtime-container-facing** (``RuntimeAuthDep``, per-connector-type
+   bearer): ``/runtime/inbound``, ``/runtime/tool-results``,
+   ``/runtime/calls``, ``/runtime/secrets``, ``/connections``,
+   ``/{connector}/tools_schema``, ``/runtime/management-calls``,
+   ``/runtime/management-call-results``.  The bearer scopes the caller
+   to one ``connector`` type; ``connection_id`` rides as a form/query
+   field for the routes that operate on a specific connection.
+2. **Operator-facing signal management** (``AuthDep``, operator API key):
+   ``/signal/register``, ``/signal/verify``, ``/signal/profile``.  These
+   block-await the connector's resolution via the
+   ``connector_result_<call_id>`` LISTEN channel.
 
-The bearer scopes the caller to one ``connector`` type; ``connection_id``
-rides as a form/query field for the routes that operate on a specific
-connection.  The connector-type → connections fan-out happens
-client-side via the ``/connections`` SSE subscription.
+Section banners (``# ───`) below mark the boundary.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, File, Form, UploadFile, status
 from pydantic import BaseModel, ConfigDict
 from sse_starlette import EventSourceResponse
 
 from aios.api.deps import (
+    AuthDep,
     CryptoBoxDep,
     DbUrlDep,
     PoolDep,
@@ -33,11 +35,13 @@ from aios.api.deps import (
 )
 from aios.api.sse import (
     connection_discovery_stream,
+    management_calls_stream,
     runtime_connector_calls_stream,
 )
 from aios.db import queries
 from aios.errors import (
     AiosError,
+    ConnectorCallFailedError,
     ForbiddenError,
     NotFoundError,
     PayloadTooLargeError,
@@ -46,6 +50,7 @@ from aios.errors import (
 from aios.models.connections import ConnectorSecrets
 from aios.services import connections as connections_service
 from aios.services import inbound as inbound_service
+from aios.services import management_calls
 from aios.services import sessions as sessions_service
 from aios.services.attachment_staging import InboundAttachment
 from aios.services.wake import defer_wake
@@ -418,3 +423,223 @@ async def get_runtime_calls(
         runtime_connector_calls_stream(db_url, pool, connector),
         ping=15,
     )
+
+
+@router.get(
+    "/runtime/management-calls",
+    openapi_extra={"x-codegen": {"targets": []}},
+)
+async def get_runtime_management_calls(
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    auth: RuntimeAuthDep,
+) -> EventSourceResponse:
+    """SSE stream of pending management calls for the caller's connector type.
+
+    Per-connector-type only (no session/connection scope).  Each event is
+    keyed ``call`` with body ``{"call_id": "mgmt_...", "method": str, "params": dict}``.
+    """
+    _, connector = auth
+    return EventSourceResponse(
+        management_calls_stream(db_url, pool, connector),
+        ping=15,
+    )
+
+
+# ─── operator-facing signal management routes ─────────────────────────
+
+
+class SignalRegisterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account: str
+    captcha: str | None = None
+    voice: bool = False
+
+
+class SignalRegisterResponse(BaseModel):
+    """``status="captcha_required"`` is a 200, not a 4xx — it's an actionable
+    next step (solve the captcha, repost with the token), and 4xx would bury
+    the URL inside FastAPI's error envelope."""
+
+    account: str
+    status: Literal["sms_sent", "voice_sent", "captcha_required"]
+    captcha_url: str | None = None
+
+
+class SignalVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account: str
+    code: str
+    pin: str | None = None
+
+
+class SignalVerifyResponse(BaseModel):
+    account: str
+    uuid: str
+
+
+class SignalProfileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account: str
+    given_name: str | None = None
+    family_name: str | None = None
+    about: str | None = None
+
+
+def _is_captcha_required(result: Any) -> bool:
+    return isinstance(result, dict) and result.get("status") == "captcha_required"
+
+
+async def _signal_management_call(
+    db_url: str,
+    pool: PoolDep,
+    *,
+    method: str,
+    params: dict[str, Any],
+    timeout_s: float,
+) -> Any:
+    result, is_error = await management_calls.submit_call(
+        db_url,
+        pool,
+        connector="signal",
+        method=method,
+        params=params,
+        timeout_s=timeout_s,
+    )
+    if is_error and not _is_captcha_required(result):
+        raise ConnectorCallFailedError(
+            f"signal connector failed {method!r}",
+            detail={"method": method, "connector_error": result},
+        )
+    return result
+
+
+@router.post(
+    "/signal/register",
+    operation_id="post_connector_signal_register",
+)
+async def post_signal_register(
+    body: SignalRegisterRequest,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    _auth: AuthDep,
+) -> SignalRegisterResponse:
+    """Initiate signal-cli ``register`` for ``account``.
+
+    On captcha-required (common), returns 200 with the URL — solve in a
+    browser, repost with ``captcha=<token>``.  On success: SMS (or voice
+    call with ``voice=true``) carrying a 6-digit code for ``verify``.
+    """
+    result = await _signal_management_call(
+        db_url,
+        pool,
+        method="register",
+        params=body.model_dump(exclude_none=True),
+        timeout_s=30.0,
+    )
+    if _is_captcha_required(result):
+        return SignalRegisterResponse(
+            account=body.account,
+            status="captcha_required",
+            captcha_url=result["captcha_url"],
+        )
+    return SignalRegisterResponse(
+        account=body.account,
+        status="voice_sent" if body.voice else "sms_sent",
+    )
+
+
+@router.post(
+    "/signal/verify",
+    operation_id="post_connector_signal_verify",
+)
+async def post_signal_verify(
+    body: SignalVerifyRequest,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    _auth: AuthDep,
+) -> SignalVerifyResponse:
+    """Submit the SMS / voice verification code.
+
+    signal-cli writes the new account to its ``accounts.json``; the
+    running connector picks it up on the next ``verify_phone`` call
+    without restart.
+    """
+    result = await _signal_management_call(
+        db_url,
+        pool,
+        method="verify",
+        params=body.model_dump(exclude_none=True),
+        timeout_s=60.0,
+    )
+    return SignalVerifyResponse(account=body.account, uuid=str(result.get("uuid", "")))
+
+
+@router.post(
+    "/signal/profile",
+    operation_id="post_connector_signal_profile",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def post_signal_profile(
+    body: SignalProfileRequest,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    _auth: AuthDep,
+) -> None:
+    """Update ``given_name`` / ``family_name`` / ``about``.  Avatar bytes
+    are not supported in v1 (no operator→container file staging surface)."""
+    await _signal_management_call(
+        db_url,
+        pool,
+        method="updateProfile",
+        params=body.model_dump(exclude_none=True),
+        timeout_s=30.0,
+    )
+
+
+# ─── runtime management-call result intake ────────────────────────────
+
+
+class RuntimeManagementCallResultRequest(BaseModel):
+    """Idempotent on ``call_id`` — a replay POST against an already-resolved
+    row no-ops (no double-NOTIFY)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    call_id: str
+    result: Any = None
+    is_error: bool = False
+
+
+@router.post(
+    "/runtime/management-call-results",
+    operation_id="post_connector_runtime_management_call_result",
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_runtime_management_call_result(
+    body: RuntimeManagementCallResultRequest,
+    pool: PoolDep,
+    auth: RuntimeAuthDep,
+) -> None:
+    _, auth_connector = auth
+    # Autocommit conn (no ``async with conn.transaction()``): the UPDATE
+    # commits before the NOTIFY fires.  Don't wrap these in a
+    # transaction — subscribers would see uncommitted state.  See
+    # db/listen.py for the full rationale.
+    async with pool.acquire() as conn:
+        row = await queries.get_management_call(conn, body.call_id)
+        if row is None:
+            raise NotFoundError("no such management call", detail={"call_id": body.call_id})
+        _check_runtime_scope(auth_connector, row["connector"])
+        moved = await queries.mark_management_call_resolved(
+            conn,
+            call_id=body.call_id,
+            result=body.result,
+            is_error=body.is_error,
+        )
+        if not moved:
+            return
+        await queries.notify_management_call_result(conn, call_id=body.call_id)

@@ -33,6 +33,7 @@ from aios.db.listen import (
     listen_for_connection_discovery,
     listen_for_connector_calls_by_type,
     listen_for_events,
+    listen_for_management_calls,
 )
 from aios.logging import get_logger
 
@@ -179,6 +180,47 @@ async def runtime_connector_calls_stream(
                 emitted.add(call["tool_call_id"])
                 call["connection_id"] = connection_id
                 yield ServerSentEvent(data=json.dumps(call), event="call")
+
+
+async def management_calls_stream(
+    db_url: str,
+    pool: asyncpg.Pool[Any],
+    connector: str,
+) -> AsyncIterator[ServerSentEvent]:
+    """Yield SSE events for pending management calls of ``connector`` type.
+
+    Backfills pending unexpired calls, then tails
+    ``connector_management_calls_<connector>``.  Each event:
+    ``{"call_id": "mgmt_...", "method": str, "params": dict}``.
+    """
+    async with listen_for_management_calls(db_url, connector) as queue:
+        emitted: set[str] = set()
+
+        async with pool.acquire() as conn:
+            backfill = await queries.list_pending_management_calls_for_connector(conn, connector)
+        for call in backfill:
+            emitted.add(call["call_id"])
+            yield ServerSentEvent(data=json.dumps(call), event="call")
+
+        while True:
+            call_id = await queue.get()
+            if call_id in emitted:
+                continue
+            # The NOTIFY payload is just the id; re-fetch the row for the
+            # method + params.  Keeping the NOTIFY payload tiny stays well
+            # under the 8000-byte cap and means a follow-up UPDATE can't
+            # desync from a stale payload already in flight.
+            async with pool.acquire() as conn:
+                row = await queries.get_management_call(conn, call_id)
+            if row is None or row["status"] != "pending":
+                continue
+            emitted.add(call_id)
+            yield ServerSentEvent(
+                data=json.dumps(
+                    {"call_id": row["id"], "method": row["method"], "params": row["params"]}
+                ),
+                event="call",
+            )
 
 
 async def connection_discovery_stream(

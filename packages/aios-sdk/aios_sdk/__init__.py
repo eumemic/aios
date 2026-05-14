@@ -18,6 +18,7 @@ from aios_sdk.streaming import (
     parse_sse_lines,
     stream_connection_discovery,
     stream_connector_calls,
+    stream_management_calls,
     stream_session,
 )
 
@@ -29,5 +30,6 @@ __all__ = [
     "parse_sse_lines",
     "stream_connection_discovery",
     "stream_connector_calls",
+    "stream_management_calls",
     "stream_session",
 ]

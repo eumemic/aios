@@ -26,6 +26,10 @@ Tool methods take ``connection_id`` and ``chat_id`` from the call's
 and the SDK threads them through.  Each method looks up its
 connection's phone + bot UUID + caches via
 ``self.state[connection_id]``.
+
+Operator-callable management handlers (``register``, ``verify``,
+``updateProfile``) live in :mod:`aios_signal.management` and are
+mixed in via :class:`SignalManagementMixin`.
 """
 
 from __future__ import annotations
@@ -52,6 +56,7 @@ from .addressing import decode_chat_id, encode_chat_id
 from .config import Settings
 from .daemon import GroupInfo, SignalDaemon
 from .errors import RpcError
+from .management import SignalManagementMixin
 from .markdown import convert_markdown_to_signal_styles
 from .mentions import build_mention_strings, encode_mentions
 from .parse import InboundMessage, build_content_text, is_group_update_envelope, parse_envelope
@@ -83,7 +88,7 @@ class _SignalConnectionState:
     groups: list[GroupInfo] = field(default_factory=list)
 
 
-class SignalConnector(HttpConnector):
+class SignalConnector(SignalManagementMixin, HttpConnector):
     connector = "signal"
     state: dict[str, _SignalConnectionState]
 

@@ -20,7 +20,7 @@ import contextlib
 import signal
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 import structlog
 
@@ -359,6 +359,38 @@ class SignalDaemon:
             if isinstance(name, str) and name.strip():
                 mapping[uuid] = name.strip()
         return mapping
+
+    async def register(self, *, phone: str, captcha: str | None, voice: bool) -> None:
+        params: dict[str, Any] = {"account": phone, "voice": voice}
+        if captcha is not None:
+            params["captcha"] = captcha
+        await self.rpc.call("register", params)
+
+    async def verify(self, *, phone: str, code: str, pin: str | None) -> dict[str, Any]:
+        params: dict[str, Any] = {"account": phone, "verificationCode": code}
+        if pin is not None:
+            params["pin"] = pin
+        result = await self.rpc.call("verify", params)
+        return result if isinstance(result, dict) else {}
+
+    async def update_profile(
+        self,
+        *,
+        phone: str,
+        given_name: str | None,
+        family_name: str | None,
+        about: str | None,
+    ) -> None:
+        # ``None`` is dropped — signal-cli treats absent params as
+        # "no change" and null params as "clear field."
+        params: dict[str, Any] = {"account": phone}
+        if given_name is not None:
+            params["givenName"] = given_name
+        if family_name is not None:
+            params["familyName"] = family_name
+        if about is not None:
+            params["about"] = about
+        await self.rpc.call("updateProfile", params)
 
 
 async def _spawn_subprocess(args: list[str]) -> asyncio.subprocess.Process:

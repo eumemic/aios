@@ -47,6 +47,7 @@ MEMORY: Final = "mem"
 MEMORY_VERSION: Final = "memver"
 GITHUB_REPOSITORY: Final = "ghrepo"
 FILE: Final = "file"
+MANAGEMENT_CALL: Final = "mgmt"
 
 _PREFIXES: Final = frozenset(
     {
@@ -71,6 +72,7 @@ _PREFIXES: Final = frozenset(
         RUNTIME,
         RUNTIME_TOKEN,
         ROUTING_RULE,
+        MANAGEMENT_CALL,
     }
 )
 
