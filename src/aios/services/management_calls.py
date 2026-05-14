@@ -38,6 +38,10 @@ async def submit_call(
     expires_at = datetime.now(UTC) + timedelta(seconds=timeout_s + _EXPIRY_SLACK_S)
 
     async with listen.listen_for_connector_result(db_url, call_id) as queue:
+        # pool.acquire() yields an autocommit connection; the INSERT
+        # commits before the NOTIFY fires.  Do NOT wrap these in
+        # ``async with conn.transaction()`` — see db/listen.py for why
+        # NOTIFY-after-commit is load-bearing for subscribers.
         async with pool.acquire() as conn:
             await queries.insert_management_call(
                 conn,

@@ -1,19 +1,20 @@
-"""Runtime-container-facing endpoints (#328 PR 5+).
+"""Connector-related endpoints — two distinct caller populations.
 
-A runtime container talks to aios via these routes, all authenticated
-by a per-connector-type bearer token (``RuntimeAuthDep``):
+The file groups three sections:
 
-* ``POST /v1/connectors/runtime/inbound`` — submit an inbound message.
-* ``POST /v1/connectors/runtime/tool-results`` — submit a tool result.
-* ``GET  /v1/connectors/runtime/calls`` — SSE stream of pending tool calls.
-* ``GET  /v1/connectors/runtime/secrets`` — fetch decrypted secrets.
-* ``GET  /v1/connectors/connections`` — SSE stream of add/remove events.
-* ``PUT  /v1/connectors/{connector}/tools_schema`` — publish tool catalog.
+1. **Runtime-container-facing** (``RuntimeAuthDep``, per-connector-type
+   bearer): ``/runtime/inbound``, ``/runtime/tool-results``,
+   ``/runtime/calls``, ``/runtime/secrets``, ``/connections``,
+   ``/{connector}/tools_schema``, ``/runtime/management-calls``,
+   ``/runtime/management-call-results``.  The bearer scopes the caller
+   to one ``connector`` type; ``connection_id`` rides as a form/query
+   field for the routes that operate on a specific connection.
+2. **Operator-facing signal management** (``AuthDep``, operator API key):
+   ``/signal/register``, ``/signal/verify``, ``/signal/profile``.  These
+   block-await the connector's resolution via the
+   ``connector_result_<call_id>`` LISTEN channel.
 
-The bearer scopes the caller to one ``connector`` type; ``connection_id``
-rides as a form/query field for the routes that operate on a specific
-connection.  The connector-type → connections fan-out happens
-client-side via the ``/connections`` SSE subscription.
+Section banners (``# ───`) below mark the boundary.
 """
 
 from __future__ import annotations
@@ -626,6 +627,10 @@ async def post_runtime_management_call_result(
     auth: RuntimeAuthDep,
 ) -> None:
     _, auth_connector = auth
+    # Autocommit conn (no ``async with conn.transaction()``): the UPDATE
+    # commits before the NOTIFY fires.  Don't wrap these in a
+    # transaction — subscribers would see uncommitted state.  See
+    # db/listen.py for the full rationale.
     async with pool.acquire() as conn:
         row = await queries.get_management_call(conn, body.call_id)
         if row is None:

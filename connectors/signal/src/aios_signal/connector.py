@@ -26,6 +26,10 @@ Tool methods take ``connection_id`` and ``chat_id`` from the call's
 and the SDK threads them through.  Each method looks up its
 connection's phone + bot UUID + caches via
 ``self.state[connection_id]``.
+
+Operator-callable management handlers (``register``, ``verify``,
+``updateProfile``) live in :mod:`aios_signal.management` and are
+mixed in via :class:`SignalManagementMixin`.
 """
 
 from __future__ import annotations
