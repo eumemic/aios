@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from aios.harness.task_registry import TaskRegistry
     from aios.mcp.pool import McpSessionPool
     from aios.models.memory_stores import MemoryStoreResourceEcho
+    from aios.sandbox.mcp_proxy import McpBroker
     from aios.sandbox.registry import SandboxRegistry
     from aios.tools.providers import ToolProvider
 
@@ -36,6 +37,7 @@ worker_id: str | None = None
 sandbox_registry: SandboxRegistry | None = None
 task_registry: TaskRegistry | None = None
 mcp_session_pool: McpSessionPool | None = None
+mcp_broker: McpBroker | None = None
 tool_provider: ToolProvider | None = None
 
 # Per-session memory-mount cache. Populated at the top of every step (in
@@ -144,6 +146,15 @@ def require_mcp_session_pool() -> McpSessionPool:
             "this code is running outside a worker_main context"
         )
     return mcp_session_pool
+
+
+def require_mcp_broker() -> McpBroker:
+    if mcp_broker is None:
+        raise RuntimeError(
+            "aios.harness.runtime.mcp_broker is not initialized; "
+            "this code is running outside a worker_main context"
+        )
+    return mcp_broker
 
 
 def require_tool_provider() -> ToolProvider:

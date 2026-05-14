@@ -51,6 +51,10 @@ RUN uv sync --frozen --no-dev --no-install-project
 # Project source. Order: leaf-most-likely-to-change LAST.
 COPY alembic.ini README.md ./
 COPY migrations ./migrations
+# Sandbox-mounted CLI(s) — bind-mounted from /app/bin/ into every
+# sandbox container at provision time. Source path must exist in the
+# worker image; the worker resolves it via ``Path(__file__).parents[3]``.
+COPY bin ./bin
 COPY src ./src
 RUN uv sync --frozen --no-dev
 
