@@ -213,11 +213,7 @@ def test_settings_env_file_tuple_layers_and_later_wins(
 
     secrets = tmp_path / "secrets.env"
     dotenv = tmp_path / ".env"
-    secrets.write_text(
-        "AIOS_API_KEY=from_secrets\n"
-        "AIOS_VAULT_KEY=vk_secrets\n"
-        "AIOS_DB_URL=postgresql://secrets/db\n"
-    )
+    secrets.write_text("AIOS_VAULT_KEY=vk_secrets\nAIOS_DB_URL=postgresql://secrets/db\n")
     dotenv.write_text("AIOS_DB_URL=postgresql://dotenv/db\n")
 
     # Clear any inherited aios vars so only the files + our explicit env
@@ -225,7 +221,6 @@ def test_settings_env_file_tuple_layers_and_later_wins(
     for k in list(monkeypatch._setenv.keys() if hasattr(monkeypatch, "_setenv") else []):
         monkeypatch.delenv(k, raising=False)
     for k in (
-        "AIOS_API_KEY",
         "AIOS_VAULT_KEY",
         "AIOS_DB_URL",
         "AIOS_INSTANCE_ID",
@@ -235,7 +230,6 @@ def test_settings_env_file_tuple_layers_and_later_wins(
         monkeypatch.delenv(k, raising=False)
 
     s = Settings(_env_file=(str(secrets), str(dotenv)))  # type: ignore[call-arg]
-    assert s.api_key.get_secret_value() == "from_secrets"
     assert s.vault_key.get_secret_value() == "vk_secrets"
     # Later file overrides earlier.
     assert s.db_url == "postgresql://dotenv/db"

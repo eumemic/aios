@@ -4895,3 +4895,32 @@ async def bootstrap_root_account(
             key_label,
         )
     return _row_to_account(account_row), key_id
+
+
+async def lookup_account_by_key_hash(
+    conn: asyncpg.Connection[Any],
+    *,
+    key_hash: bytes,
+) -> tuple[Account, str] | None:
+    """Resolve a bearer-key sha256 hash to its account and key_id.
+
+    Returns ``(account, key_id)`` if the hash matches an active key
+    on an active account; ``None`` otherwise. Filters out revoked
+    keys and archived accounts so the auth path never accepts them.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT
+            accounts.*,
+            account_keys.key_id AS _key_id
+        FROM account_keys
+        JOIN accounts ON accounts.id = account_keys.account_id
+        WHERE account_keys.hash = $1
+          AND account_keys.revoked_at IS NULL
+          AND accounts.archived_at IS NULL
+        """,
+        key_hash,
+    )
+    if row is None:
+        return None
+    return _row_to_account(row), row["_key_id"]
