@@ -256,6 +256,47 @@ class TestBuildMessages:
         roles = [m["role"] for m in msgs]
         assert roles == ["user", "assistant", "tool", "assistant", "tool", "assistant"]
 
+    def test_tool_result_image_url_mime_corrected_at_replay(self) -> None:
+        """Historical tool_result events (e.g. from the ``read`` tool) may
+        carry an ``image_url`` data URL whose declared mime disagrees with
+        the base64 bytes.  build_messages walks the assembled message list
+        and substitutes the magic-byte-detected mime so Anthropic doesn't
+        400 on replay — the original wedge incident was a tool_result
+        image part.
+        """
+        import base64 as _b64
+
+        jpeg_b64 = _b64.b64encode(b"\xff\xd8\xff\xe0" + b"\x00" * 32).decode("ascii")
+        bad_url = f"data:image/png;base64,{jpeg_b64}"
+        events = [
+            _evt(1, "user", content="show photo"),
+            _evt(2, "assistant", tool_calls=[_tc("a", name="read")]),
+            Event(
+                id="evt_3",
+                session_id="sess_01TEST",
+                seq=3,
+                kind="message",
+                data={
+                    "role": "tool",
+                    "tool_call_id": "a",
+                    "content": [
+                        {"type": "text", "text": "Image: photo.png"},
+                        {"type": "image_url", "image_url": {"url": bad_url}},
+                    ],
+                },
+                created_at=datetime.now(tz=UTC),
+                orig_channel=None,
+                focal_channel_at_arrival=None,
+            ),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        tool_msg = msgs[2]
+        assert tool_msg["role"] == "tool"
+        url = tool_msg["content"][1]["image_url"]["url"]
+        assert url.startswith("data:image/jpeg;base64,"), (
+            f"walker should have corrected image/png → image/jpeg, got {url[:40]}"
+        )
+
     def test_prune_orphan_tool_results_at_start(self) -> None:
         """If DB windowing drops an assistant but keeps its tool results,
         those orphan tool results should be pruned from the start."""

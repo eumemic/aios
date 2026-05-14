@@ -274,6 +274,46 @@ class TestVisionAwareRendering:
         # And the image_url part is preserved.
         assert any(p.get("type") == "image_url" for p in content)
 
+    def test_mime_corrected_when_event_declares_wrong_type(self, temp_workspace_root: Path) -> None:
+        """#342: a persisted event may carry a wrong content_type (Signal /
+        Telegram occasionally label JPEG as image/png).  Without correction
+        the rendered data URL declares image/png and Anthropic 400s on
+        magic-vs-declared mismatch.  Renderer must sniff and substitute.
+
+        This is the historical-event path — the SDK-boundary correction
+        only protects new events; long-running sessions still carry bad
+        declarations from before the fix, so the renderer is the layer
+        that unwedges them at replay time.
+        """
+        jpeg_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+        sandbox_path = _stage_image(
+            temp_workspace_root, "sess-1", "echo", "evt-1-lies.png", jpeg_bytes
+        )
+        event = _user_event(
+            content="historical",
+            attachments=[
+                {
+                    "filename": "lies.png",
+                    "content_type": "image/png",  # the lie
+                    "size": len(jpeg_bytes),
+                    "in_sandbox_path": sandbox_path,
+                }
+            ],
+        )
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",
+            "echo/acct/chat-1",
+            model="model/vision",
+            session_id="sess-1",
+        )
+        content = msg["content"]
+        assert isinstance(content, list)
+        url = content[1]["image_url"]["url"]
+        assert url.startswith("data:image/jpeg;base64,"), (
+            f"renderer should have corrected image/png → image/jpeg, got {url[:50]}"
+        )
+
     def test_multiple_attachments_mixed(self, temp_workspace_root: Path) -> None:
         a = _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-a.jpg", b"AAA")
         b = _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-b.pdf", b"PDF")

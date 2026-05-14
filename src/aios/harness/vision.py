@@ -8,13 +8,36 @@ recoverable.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from typing import Any
 
 import litellm
 
 from aios.logging import get_logger
+from aios_connector_http.mime import sniff_image_mime
 
 log = get_logger("aios.harness.vision")
+
+
+def correct_image_mime_b64(declared: str, data_b64: str) -> str:
+    """Return the magic-byte-detected mime for a base64-encoded image,
+    or ``declared`` unchanged when sniffing yields nothing.  Warns on
+    substitution so operators see when a persisted event's declared
+    mime disagreed with its bytes.
+    """
+    head_b64 = data_b64[:24]
+    pad = (-len(head_b64)) % 4
+    try:
+        head = base64.b64decode(head_b64 + "=" * pad)
+    except binascii.Error:
+        return declared
+    sniffed = sniff_image_mime(head)
+    if sniffed is None or sniffed == declared:
+        return declared
+    log.warning("vision.image_mime_corrected", declared=declared, actual=sniffed)
+    return sniffed
+
 
 INLINE_SIZE_CAP_BYTES = 2 * 1024 * 1024
 
@@ -61,7 +84,15 @@ def can_inline_image(*, model: str, content_type: str, size_bytes: int) -> bool:
 
 
 def make_image_url_part(*, content_type: str, data_b64: str) -> dict[str, Any]:
-    """Build a chat-completions ``image_url`` content part."""
+    """Build a chat-completions ``image_url`` content part.
+
+    Reconciles the declared ``content_type`` against the magic bytes —
+    inbound platform metadata and extension-based guesses both
+    occasionally lie, and Anthropic rejects mime-vs-magic mismatches.
+    Centralising the sniff here means every caller is covered without
+    having to remember to wire correction at the call site.
+    """
+    content_type = correct_image_mime_b64(content_type, data_b64)
     return {
         "type": "image_url",
         "image_url": {"url": f"data:{content_type};base64,{data_b64}"},

@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
 
+from aios_connector_http.mime import sniff_image_mime
+
 # Trailing slash on _WORKSPACE_PREFIX is load-bearing — prevents
 # ``/workspaces/foo`` matching ``/workspace``.
 _WORKSPACE_PREFIX = "/workspace/"
@@ -132,6 +134,10 @@ class Attachment:
         exceeds the 5 MiB cap.  Stat'ing here rather than at construction
         lets callers build :class:`Attachment` instances before their
         backing files are fully written.
+
+        For image attachments, the declared ``content_type`` is
+        reconciled against the actual magic bytes — Anthropic rejects
+        mime-vs-magic mismatches, so the truth must reach the event log.
         """
         try:
             st = os.stat(self.host_path)
@@ -146,9 +152,15 @@ class Attachment:
                 f"attachment {self.filename!r} is {st.st_size} bytes; "
                 f"SDK cap is {_MAX_ATTACHMENT_BYTES} bytes (5 MiB)."
             )
+        content_type = self.content_type
+        if content_type.startswith("image/"):
+            with open(self.host_path, "rb") as f:
+                sniffed = sniff_image_mime(f.read(16))
+            if sniffed is not None:
+                content_type = sniffed
         return {
             "host_path": self.host_path,
             "filename": self.filename,
-            "content_type": self.content_type,
+            "content_type": content_type,
             "size": st.st_size,
         }

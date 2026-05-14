@@ -124,6 +124,22 @@ class TestMakeImageUrlPart:
             "image_url": {"url": "data:image/png;base64,ZmFrZQ=="},
         }
 
+    def test_self_corrects_mismatched_mime(self) -> None:
+        """Single construction point reconciles declared mime against the
+        bytes' magic.  Covers every caller (renderer, read tool, future)
+        without each having to remember to wire correction.
+        """
+        import base64 as _b64
+
+        jpeg_b64 = _b64.b64encode(b"\xff\xd8\xff\xe0" + b"\x00" * 32).decode("ascii")
+        part = vision.make_image_url_part(content_type="image/png", data_b64=jpeg_b64)
+        assert part["image_url"]["url"] == f"data:image/jpeg;base64,{jpeg_b64}"
+
+    def test_keeps_declared_mime_when_unrecognized(self) -> None:
+        """Sniff returns None on random/unknown bytes — declared mime wins."""
+        part = vision.make_image_url_part(content_type="image/png", data_b64="ZmFrZQ==")
+        assert part["image_url"]["url"].startswith("data:image/png;base64,")
+
 
 class TestTextMarker:
     def test_image_with_path(self) -> None:
