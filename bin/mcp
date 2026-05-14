@@ -8,10 +8,11 @@ applies the session's authorization envelope and proxies to the upstream
 MCP server. Credentials never enter the sandbox.
 
 Usage:
-  mcp                                 list permitted servers
-  mcp <server>                        list permitted tools on a server
-  mcp <server> <tool> --help          show description + JSON schema
-  mcp <server> <tool> --json '{...}'  invoke with JSON arguments
+  mcp                          list permitted servers
+  mcp <server>                 list permitted tools on a server
+  mcp <server> <tool> --help   show description + JSON schema
+  mcp <server> <tool> '{...}'  invoke with JSON arguments
+  mcp <server> <tool>          invoke with empty arguments ({})
 
 Output:
   By default, invocation prints the tool's ``content`` (text) to stdout.
@@ -28,14 +29,14 @@ import urllib.parse
 import urllib.request
 
 USAGE = """Usage:
-  mcp                                 list permitted servers
-  mcp <server>                        list permitted tools on a server
-  mcp <server> <tool> --help          show description + JSON schema
-  mcp <server> <tool> --json '{...}'  invoke with JSON arguments
+  mcp                          list permitted servers
+  mcp <server>                 list permitted tools on a server
+  mcp <server> <tool> --help   show description + JSON schema
+  mcp <server> <tool> '{...}'  invoke with JSON arguments
+  mcp <server> <tool>          invoke with empty arguments ({})
 
 Options for invocation:
-  --json '<json>'   tool arguments as a JSON object (default: {})
-  --full            print full JSON envelope instead of just content text
+  --full   print full JSON envelope instead of just content text
 """
 
 
@@ -155,23 +156,18 @@ def main(argv: list[str]) -> None:
     json_arg: str | None = None
     full_envelope = False
 
-    i = 3
-    while i < len(argv):
-        a = argv[i]
+    for a in argv[3:]:
         if a in ("-h", "--help"):
             show_help = True
-            i += 1
-        elif a == "--json":
-            if i + 1 >= len(argv):
-                sys.stderr.write("mcp: --json requires an argument\n")
-                sys.exit(2)
-            json_arg = argv[i + 1]
-            i += 2
         elif a == "--full":
             full_envelope = True
-            i += 1
+        elif a.startswith("-"):
+            sys.stderr.write(f"mcp: unknown option: {a}\n")
+            sys.exit(2)
+        elif json_arg is None:
+            json_arg = a
         else:
-            sys.stderr.write(f"mcp: unknown argument: {a}\n")
+            sys.stderr.write(f"mcp: extra positional argument: {a}\n")
             sys.exit(2)
 
     if show_help:
