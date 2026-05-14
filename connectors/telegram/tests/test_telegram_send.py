@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aios_connector_http import HttpConnector
+from telegram import InputFile
 
 from aios_telegram.connector import (
     TelegramConnector,
@@ -154,11 +155,15 @@ async def test_telegram_send_single_photo_routes_to_send_photo(
     bot.send_photo.assert_awaited_once()
     kwargs = bot.send_photo.call_args.kwargs
     assert kwargs["chat_id"] == 123
-    # Bytes, not Path: python-telegram-bot serializes the request body as
-    # JSON and rejects ``pathlib.Path`` (``TypeError: Object of type
-    # PosixPath is not JSON serializable``).  Read-bytes-up-front pins
-    # the upload path to multipart.
-    assert kwargs["photo"] == photo.read_bytes()
+    # Wrapped in ``InputFile`` with the source filename so PTB's
+    # multipart writer sets the right Content-Type from the
+    # extension.  Raw bytes would land as application/octet-stream
+    # and Telegram would render the attachment as a downloadable
+    # blob instead of an inline image / animation / etc.
+    photo_arg = kwargs["photo"]
+    assert isinstance(photo_arg, InputFile)
+    assert photo_arg.input_file_content == photo.read_bytes()
+    assert photo_arg.filename == "cat.jpg"
     assert kwargs["caption"] == "look"
 
 
@@ -173,19 +178,30 @@ async def test_telegram_send_single_voice_routes_to_send_voice(
     bot.send_voice.assert_awaited_once()
 
 
-async def test_telegram_send_passes_bytes_not_path(
+async def test_telegram_send_wraps_bytes_in_input_file_with_filename(
     connector: TelegramConnector,
     bot: Any,
     tmp_path: Path,
 ) -> None:
-    """python-telegram-bot's HTTPX request layer JSON-serializes the
-    body; passing a raw ``pathlib.Path`` falls into the "unknown object"
-    branch and raises
-    ``TypeError('Object of type PosixPath is not JSON serializable')``.
+    """Pin the full upload-shape contract:
 
-    Surfaced live in PR 8 smoke when SmokeBot tried to send an outbound
-    image attachment.  Pin the upload-shape contract: every media kwarg
-    handed to PTB is bytes (or another non-Path), never a ``Path``.
+    1. **Never a Path** — python-telegram-bot's HTTPX layer JSON-
+       serializes the body; ``pathlib.Path`` raises
+       ``TypeError('Object of type PosixPath is not JSON
+       serializable')``.  Surfaced live in PR 8 smoke as an outbound
+       image crash.
+    2. **Never raw bytes** — bytes survive JSON, but PTB defaults the
+       ``InputFile`` filename to ``"application.octet-stream"`` and
+       Telegram renders the attachment as a downloadable blob
+       (``Content-Type: application/octet-stream``) instead of an
+       inline image / animation / audio.  Caught live on the
+       follow-on smoke (Tom: "don't send an octet-stream") after the
+       ``.gif`` extension already routed correctly to
+       ``send_animation`` — without the filename hint, Telegram
+       still couldn't determine the type.
+
+    Right shape: ``InputFile(bytes, filename=host_path.name)`` so
+    PTB's multipart writer sets ``Content-Type`` from the extension.
     """
     photo = tmp_path / "img.png"
     photo.write_bytes(b"\x89PNG\r\n\x1a\nbytes-canary")
@@ -193,10 +209,12 @@ async def test_telegram_send_passes_bytes_not_path(
         text="", attachments=[photo], chat_id="123", connection_id=CONNECTION_ID
     )
     photo_arg = bot.send_photo.call_args.kwargs["photo"]
-    assert not isinstance(photo_arg, Path), (
-        f"PTB media kwarg leaked a Path object: {photo_arg!r}"
+    assert isinstance(photo_arg, InputFile), (
+        f"PTB media kwarg should be InputFile so the filename drives "
+        f"Content-Type, got {type(photo_arg).__name__}: {photo_arg!r}"
     )
-    assert photo_arg == b"\x89PNG\r\n\x1a\nbytes-canary"
+    assert photo_arg.input_file_content == b"\x89PNG\r\n\x1a\nbytes-canary"
+    assert photo_arg.filename == "img.png"
 
 
 async def test_telegram_send_single_document_routes_to_send_document(
@@ -284,4 +302,5 @@ async def test_telegram_send_dispatch_resolves_sandbox_path(
     # tool method; we then read it up-front (see ``_read_for_upload``)
     # so PTB gets bytes rather than a ``PosixPath`` it can't JSON-encode.
     photo_arg: Any = bot.send_photo.call_args.kwargs["photo"]
-    assert photo_arg == (ws / "cat.jpg").read_bytes()
+    assert isinstance(photo_arg, InputFile)
+    assert photo_arg.input_file_content == (ws / "cat.jpg").read_bytes()

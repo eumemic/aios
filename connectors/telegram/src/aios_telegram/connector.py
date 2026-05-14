@@ -46,6 +46,7 @@ from aios_connector_http import (
     tool,
 )
 from telegram import (
+    InputFile,
     InputMediaAudio,
     InputMediaDocument,
     InputMediaPhoto,
@@ -627,17 +628,31 @@ def _iso(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).isoformat()
 
 
-def _read_for_upload(host_path: Path) -> bytes:
-    """Read attachment bytes for upload to Telegram's Bot API.
+def _read_for_upload(host_path: Path) -> InputFile:
+    """Wrap attachment bytes in a PTB :class:`InputFile` for upload.
 
-    python-telegram-bot serializes the request body via JSON; passing a
-    raw ``pathlib.Path`` falls into the "unknown object" branch and
-    raises ``TypeError('Object of type PosixPath is not JSON
-    serializable')`` from the HTTPX layer.  Bytes (or a file-like) are
-    treated as multipart uploads.  See PTB's
-    ``telegram.request.HTTPXRequest`` for the serialization rule.
+    Two problems we have to thread:
+
+    1. python-telegram-bot's HTTPX request layer JSON-serializes the
+       request body; passing a raw ``pathlib.Path`` falls into the
+       "unknown object" branch and raises ``TypeError('Object of type
+       PosixPath is not JSON serializable')``.
+    2. Passing raw ``bytes`` *does* survive the JSON path (PTB wraps
+       them in InputFile internally), but with no filename hint the
+       default falls to literal ``"application.octet-stream"`` and
+       Telegram interprets the attachment as
+       ``application/octet-stream`` — animated GIFs render as a
+       static download instead of an inline animation, photos lose
+       their image affordance, etc.  Surfaced live during PR 8 smoke
+       when a ``.gif`` attachment rendered as a downloadable blob
+       even after routing through ``send_animation``.
+
+    Wrapping in ``InputFile(bytes, filename=host_path.name)`` lets
+    PTB's multipart writer set the correct ``Content-Type`` from the
+    extension, which Telegram then uses to render the attachment in
+    its native player.
     """
-    return host_path.read_bytes()
+    return InputFile(host_path.read_bytes(), filename=host_path.name)
 
 
 async def _send_single_media(
