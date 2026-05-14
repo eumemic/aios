@@ -58,6 +58,5 @@ jobs:
               "app": "aios-sandbox",
               "track": "R",
               "digest": "${{ steps.digest.outputs.digest }}",
-              "sha": "${{ github.sha }}",
               "promoted_by": "${{ github.actor }}"
             }
