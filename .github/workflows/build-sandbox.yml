@@ -25,6 +25,12 @@ on:
       - .github/workflows/build-sandbox.yml
   workflow_dispatch:
 
+# One build+smoke pipeline at a time per ref.  A second push while smoke
+# is running cancels the in-flight run rather than racing to update :smoked.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest

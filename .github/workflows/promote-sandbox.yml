@@ -48,6 +48,7 @@ jobs:
             -t ghcr.io/eumemic/aios-sandbox:stable \
             ghcr.io/eumemic/aios-sandbox@${{ steps.digest.outputs.digest }}
       - name: Trigger ledger append
+        if: success()
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.EUMEMIC_OPS_DISPATCH_TOKEN }}
