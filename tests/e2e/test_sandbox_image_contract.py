@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 import platform
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -23,7 +22,8 @@ from tests.conftest import needs_docker
 
 pytestmark = needs_docker
 
-# The image under test. Matches the default in aios.config.Settings.docker_image.
+# Read directly from env rather than importing Settings to avoid triggering the
+# settings singleton, which requires AIOS_DB_URL and other runtime env vars.
 IMAGE = os.environ.get("AIOS_DOCKER_IMAGE", "ghcr.io/eumemic/aios-sandbox:latest")
 
 
@@ -46,15 +46,19 @@ def pulled_image() -> str:
     return IMAGE
 
 
-def _docker_run(image: str, *args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-    """Run ``docker run --rm IMAGE *args`` and return the completed process."""
-    return subprocess.run(
-        ["docker", "run", "--rm", image, *args],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=timeout,
-    )
+def _docker_run(
+    image: str, *args: str, volume: str | None = None, timeout: int = 30
+) -> subprocess.CompletedProcess[str]:
+    """Run ``docker run --rm IMAGE *args`` and return the completed process.
+
+    If *volume* is given it is passed as ``--volume <volume>`` before the image name.
+    """
+    cmd = ["docker", "run", "--rm"]
+    if volume is not None:
+        cmd += ["--volume", volume]
+    cmd.append(image)
+    cmd.extend(args)
+    return subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
 
 
 # -- binary availability -------------------------------------------------------
@@ -160,22 +164,12 @@ class TestWorkspaceMount:
         """The harness mounts a host directory at /workspace; the container
         must be able to write there so tool outputs survive the exec call."""
         sentinel = tmp_path / "sentinel.txt"
-        result = subprocess.run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--volume",
-                f"{tmp_path}:/workspace",
-                pulled_image,
-                "bash",
-                "-c",
-                "echo 'mounted-ok' > /workspace/sentinel.txt",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        result = _docker_run(
+            pulled_image,
+            "bash",
+            "-c",
+            "echo 'mounted-ok' > /workspace/sentinel.txt",
+            volume=f"{tmp_path}:/workspace",
         )
         assert result.returncode == 0, result.stderr
         assert sentinel.exists(), "sentinel file not created on host"
@@ -186,22 +180,12 @@ class TestWorkspaceMount:
     ) -> None:
         """Files placed in the host workspace are visible to the container."""
         (tmp_path / "host-file.txt").write_text("from-host\n")
-        result = subprocess.run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--volume",
-                f"{tmp_path}:/workspace",
-                pulled_image,
-                "bash",
-                "-c",
-                "cat /workspace/host-file.txt",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        result = _docker_run(
+            pulled_image,
+            "bash",
+            "-c",
+            "cat /workspace/host-file.txt",
+            volume=f"{tmp_path}:/workspace",
         )
         assert result.returncode == 0, result.stderr
         assert "from-host" in result.stdout
@@ -245,8 +229,6 @@ class TestArchitecture:
 
         Skips if ``docker buildx`` or ``imagetools`` sub-command is unavailable.
         """
-        if shutil.which("docker") is None:
-            pytest.skip("docker not on PATH")
         result = subprocess.run(
             ["docker", "buildx", "imagetools", "inspect", pulled_image],
             capture_output=True,
