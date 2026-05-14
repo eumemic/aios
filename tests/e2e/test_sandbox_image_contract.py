@@ -23,8 +23,10 @@ from tests.conftest import needs_docker
 
 pytestmark = needs_docker
 
-# Read directly from env rather than importing Settings to avoid triggering the
-# settings singleton, which requires AIOS_DB_URL and other runtime env vars.
+# Read directly from env: importing Settings would fail in test environments
+# because Settings has required fields (AIOS_DB_URL, AIOS_API_KEY, etc.) with
+# no defaults. The env var name is stable -- it's derived from env_prefix="AIOS_"
+# + field name "docker_image".
 IMAGE = os.environ.get("AIOS_DOCKER_IMAGE", "ghcr.io/eumemic/aios-sandbox:latest")
 
 
@@ -41,6 +43,7 @@ def pulled_image() -> str:
         capture_output=True,
         text=True,
         check=False,
+        timeout=300,
     )
     if result.returncode != 0:
         pytest.fail(f"Could not pull {IMAGE!r}: {result.stderr.strip()}")
@@ -65,68 +68,33 @@ def _docker_run(
 # -- binary availability -------------------------------------------------------
 
 
-class TestRequiredBinaries:
-    """Verify every binary the harness depends on is present in the image."""
+@pytest.mark.parametrize(
+    "binary",
+    [
+        "bash",
+        "python3",
+        "python3.13",
+        "rg",  # ripgrep -- required by the glob and grep tools
+        "curl",
+        "git",
+        "iptables",  # required for limited-networking mode
+        "tail",  # the image CMD is `tail -f /dev/null`
+        "cat",
+        "head",
+        "grep",
+        "find",
+        "sed",
+        "awk",
+    ],
+)
+def test_binary_available(pulled_image: str, binary: str) -> None:
+    """Verify every binary the harness depends on is present in the image.
 
-    def test_bash(self, pulled_image: str) -> None:
-        r = _docker_run(pulled_image, "which", "bash")
-        assert r.returncode == 0, r.stderr
-
-    def test_python3(self, pulled_image: str) -> None:
-        r = _docker_run(pulled_image, "which", "python3")
-        assert r.returncode == 0, r.stderr
-
-    def test_python313(self, pulled_image: str) -> None:
-        """python3.13 specifically -- version match matters for sandboxed tool execution."""
-        r = _docker_run(pulled_image, "which", "python3.13")
-        assert r.returncode == 0, r.stderr
-
-    def test_cat(self, pulled_image: str) -> None:
-        r = _docker_run(pulled_image, "which", "cat")
-        assert r.returncode == 0, r.stderr
-
-    def test_head(self, pulled_image: str) -> None:
-        r = _docker_run(pulled_image, "which", "head")
-        assert r.returncode == 0, r.stderr
-
-    def test_grep(self, pulled_image: str) -> None:
-        r = _docker_run(pulled_image, "which", "grep")
-        assert r.returncode == 0, r.stderr
-
-    def test_find(self, pulled_image: str) -> None:
-        r = _docker_run(pulled_image, "which", "find")
-        assert r.returncode == 0, r.stderr
-
-    def test_sed(self, pulled_image: str) -> None:
-        r = _docker_run(pulled_image, "which", "sed")
-        assert r.returncode == 0, r.stderr
-
-    def test_awk(self, pulled_image: str) -> None:
-        r = _docker_run(pulled_image, "which", "awk")
-        assert r.returncode == 0, r.stderr
-
-    def test_rg(self, pulled_image: str) -> None:
-        """ripgrep -- required by the glob and grep tools."""
-        r = _docker_run(pulled_image, "which", "rg")
-        assert r.returncode == 0, r.stderr
-
-    def test_curl(self, pulled_image: str) -> None:
-        r = _docker_run(pulled_image, "which", "curl")
-        assert r.returncode == 0, r.stderr
-
-    def test_git(self, pulled_image: str) -> None:
-        r = _docker_run(pulled_image, "which", "git")
-        assert r.returncode == 0, r.stderr
-
-    def test_iptables(self, pulled_image: str) -> None:
-        """iptables -- required for limited-networking mode."""
-        r = _docker_run(pulled_image, "which", "iptables")
-        assert r.returncode == 0, r.stderr
-
-    def test_tail(self, pulled_image: str) -> None:
-        """tail -- the image CMD is ``tail -f /dev/null``."""
-        r = _docker_run(pulled_image, "which", "tail")
-        assert r.returncode == 0, r.stderr
+    Each binary gets its own test-case ID in CI output so failures pinpoint
+    the exact missing binary.
+    """
+    r = _docker_run(pulled_image, "which", binary)
+    assert r.returncode == 0, f"{binary!r} not found: {r.stderr}"
 
 
 # -- runtime behaviour ---------------------------------------------------------
