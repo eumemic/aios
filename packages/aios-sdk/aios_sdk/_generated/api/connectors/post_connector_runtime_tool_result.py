@@ -78,9 +78,9 @@ def sync_detailed(
         authorization (None | str | Unset):
         body (RuntimeToolResultRequest): Body for ``POST /v1/connectors/runtime/tool-results``.
 
-            Like :class:`ConnectorToolResultRequest` but carries ``connection_id``
-            explicitly — the bearer scopes the caller to a connector *type*,
-            not to one connection.
+            Carries ``connection_id`` explicitly — the bearer scopes the
+            caller to a connector *type*, not to one connection, so the body
+            has to name the target connection.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -119,9 +119,9 @@ def sync(
         authorization (None | str | Unset):
         body (RuntimeToolResultRequest): Body for ``POST /v1/connectors/runtime/tool-results``.
 
-            Like :class:`ConnectorToolResultRequest` but carries ``connection_id``
-            explicitly — the bearer scopes the caller to a connector *type*,
-            not to one connection.
+            Carries ``connection_id`` explicitly — the bearer scopes the
+            caller to a connector *type*, not to one connection, so the body
+            has to name the target connection.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -155,9 +155,9 @@ async def asyncio_detailed(
         authorization (None | str | Unset):
         body (RuntimeToolResultRequest): Body for ``POST /v1/connectors/runtime/tool-results``.
 
-            Like :class:`ConnectorToolResultRequest` but carries ``connection_id``
-            explicitly — the bearer scopes the caller to a connector *type*,
-            not to one connection.
+            Carries ``connection_id`` explicitly — the bearer scopes the
+            caller to a connector *type*, not to one connection, so the body
+            has to name the target connection.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -194,9 +194,9 @@ async def asyncio(
         authorization (None | str | Unset):
         body (RuntimeToolResultRequest): Body for ``POST /v1/connectors/runtime/tool-results``.
 
-            Like :class:`ConnectorToolResultRequest` but carries ``connection_id``
-            explicitly — the bearer scopes the caller to a connector *type*,
-            not to one connection.
+            Carries ``connection_id`` explicitly — the bearer scopes the
+            caller to a connector *type*, not to one connection, so the body
+            has to name the target connection.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

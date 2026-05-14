@@ -54,8 +54,8 @@ async def create_session(
     crypto_box: CryptoBox | None = None,
     workspace_path: str | None = None,
     env: dict[str, str] | None = None,
-    spawned_from_connection_id: str | None = None,
     focal_channel: str | None = None,
+    focal_locked: bool = False,
 ) -> Session:
     """Create a session row and return it.
 
@@ -65,10 +65,10 @@ async def create_session(
     failed attach (e.g. archived store, name collision) leaves no
     orphaned session.
 
-    ``spawned_from_connection_id`` and ``focal_channel`` are set
-    together by the per_chat inbound flow — ``switch_channel``'s
-    focal-locked invariant depends on the pair being written atomically
-    with the row insert.
+    ``focal_channel`` + ``focal_locked`` are written atomically with
+    the row insert so ``switch_channel``'s focal-locked invariant
+    holds from creation.  Per-chat-spawned sessions pass
+    ``focal_locked=True``.
 
     ``crypto_box`` is required when ``resources`` includes any
     ``github_repository`` entries (their auth tokens are encrypted on
@@ -84,8 +84,8 @@ async def create_session(
             metadata=metadata,
             workspace_path=workspace_path,
             env=env,
-            spawned_from_connection_id=spawned_from_connection_id,
             focal_channel=focal_channel,
+            focal_locked=focal_locked,
         )
         if vault_ids:
             await queries.set_session_vaults(conn, session.id, vault_ids)

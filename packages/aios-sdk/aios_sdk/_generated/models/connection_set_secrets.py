@@ -18,9 +18,9 @@ T = TypeVar("T", bound="ConnectionSetSecrets")
 class ConnectionSetSecrets:
     """Request body for ``PUT /v1/connections/{id}/secrets``.
 
-    Replaces the connection's secrets dict wholesale (matches the
-    ``set_connection_tools`` pattern).  Encrypted at rest server-side via
-    ``AIOS_VAULT_KEY``; the operator never reads them back.
+    Replaces the connection's secrets dict wholesale.  Encrypted at
+    rest server-side via ``AIOS_VAULT_KEY``; the operator never reads
+    them back.
 
     Pass an empty dict to clear secrets.
 

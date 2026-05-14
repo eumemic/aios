@@ -19,7 +19,6 @@ import pytest
 from aios.config import get_settings
 from aios.sandbox.volumes import session_uploads_dir
 from tests.e2e.harness import Harness
-from tests.helpers.connections import bearer
 
 
 async def _make_session(harness: Harness) -> str:
@@ -52,24 +51,6 @@ async def _make_session(harness: Harness) -> str:
     return session.id
 
 
-async def _create_connection_with_session(
-    harness: Harness, http_client: httpx.AsyncClient, session_id: str, account_suffix: str
-) -> tuple[str, str]:
-    """Returns ``(connection_id, token_plaintext)`` attached to ``session_id``."""
-    from aios.services import connections as connections_service
-
-    r = await http_client.post(
-        "/v1/connections",
-        json={"connector": "echo", "account": f"files-{account_suffix}"},
-    )
-    assert r.status_code == 201, r.text
-    connection_id = str(r.json()["id"])
-    await connections_service.attach_connection(harness._pool, connection_id, session_id=session_id)
-    t = await http_client.post("/v1/connector-tokens", json={"connection_id": connection_id})
-    assert t.status_code == 201, t.text
-    return connection_id, str(t.json()["plaintext"])
-
-
 class TestSessionFilesUpload:
     async def test_operator_upload_happy_path(
         self, http_client: httpx.AsyncClient, harness: Harness
@@ -95,40 +76,6 @@ class TestSessionFilesUpload:
         host_path = session_uploads_dir(session_id) / body["file_id"] / "photo.png"
         assert host_path.exists()
         assert host_path.read_bytes() == payload
-
-    async def test_connector_token_can_upload_to_attached_session(
-        self, http_client: httpx.AsyncClient, harness: Harness
-    ) -> None:
-        session_id = await _make_session(harness)
-        _, token = await _create_connection_with_session(harness, http_client, session_id, "ok")
-
-        r = await http_client.post(
-            f"/v1/sessions/{session_id}/files",
-            headers=bearer(token),
-            files={"file": ("doc.txt", b"hello", "text/plain")},
-        )
-        assert r.status_code == 201, r.text
-        assert r.json()["filename"] == "doc.txt"
-
-    async def test_connector_token_rejected_for_other_session(
-        self, http_client: httpx.AsyncClient, harness: Harness
-    ) -> None:
-        attached_session = await _make_session(harness)
-        other_session = await _make_session(harness)
-        _, token = await _create_connection_with_session(
-            harness, http_client, attached_session, "mismatch"
-        )
-
-        r = await http_client.post(
-            f"/v1/sessions/{other_session}/files",
-            headers=bearer(token),
-            files={"file": ("nope.bin", b"x", "application/octet-stream")},
-        )
-        assert r.status_code == 403, r.text
-        body = r.json()
-        # Error envelope is {"error": {"type", "message", "detail": {...}}}.
-        assert body["error"]["type"] == "forbidden"
-        assert body["error"]["detail"]["session_id"] == other_session
 
     async def test_unknown_session_returns_404(
         self, http_client: httpx.AsyncClient, harness: Harness

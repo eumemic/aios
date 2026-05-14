@@ -95,26 +95,28 @@ async def _create_telegram_connection(
         return str(r.json()["id"])
 
 
-async def _set_telegram_tools(api_key: str, base_url: str, connection_id: str) -> None:
-    async with authed_client(base_url, api_key) as c:
-        r = await c.put(
-            f"/v1/connections/{connection_id}/tools",
-            json={
-                "tools": [
-                    {
-                        "type": "custom",
-                        "name": "telegram_send",
-                        "description": "Send a Telegram message.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"text": {"type": "string"}},
-                            "required": ["text"],
-                        },
+async def _publish_telegram_tools_schema(harness: Harness) -> None:
+    """Stamp ``connectors.tools_schema`` for the telegram type (post-PR-7
+    source of truth for what the model sees)."""
+    from aios.db import queries as db_queries
+
+    async with harness._pool.acquire() as db_conn:
+        await db_queries.update_connector_tools_schema(
+            db_conn,
+            "telegram",
+            tools_schema=[
+                {
+                    "type": "custom",
+                    "name": "telegram_send",
+                    "description": "Send a Telegram message.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
                     },
-                ]
-            },
+                },
+            ],
         )
-        r.raise_for_status()
 
 
 @pytest.fixture
@@ -226,8 +228,7 @@ class TestTelegramMultiConnection:
         )
         await connections_service.attach_connection(harness._pool, conn_a, session_id=session_a.id)
         await connections_service.attach_connection(harness._pool, conn_b, session_id=session_b.id)
-        await _set_telegram_tools(api_key, live_server, conn_a)
-        await _set_telegram_tools(api_key, live_server, conn_b)
+        await _publish_telegram_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "telegram")
 
         # ``HttpConnector.__init__`` reads ``AIOS_URL`` + ``AIOS_RUNTIME_TOKEN``

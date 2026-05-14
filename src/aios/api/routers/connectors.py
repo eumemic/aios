@@ -1,13 +1,19 @@
-"""Connector-facing endpoints (#301).
+"""Runtime-container-facing endpoints (#328 PR 5+).
 
-A connector container talks to aios via three routes here:
+A runtime container talks to aios via these routes, all authenticated
+by a per-connector-type bearer token (``RuntimeAuthDep``):
 
-* ``POST /v1/connectors/inbound`` — submit an inbound user message.
-* ``POST /v1/connectors/tool-results`` — submit a custom-tool result.
-* ``GET /v1/connectors/calls`` — SSE stream of pending tool calls.
+* ``POST /v1/connectors/runtime/inbound`` — submit an inbound message.
+* ``POST /v1/connectors/runtime/tool-results`` — submit a tool result.
+* ``GET  /v1/connectors/runtime/calls`` — SSE stream of pending tool calls.
+* ``GET  /v1/connectors/runtime/secrets`` — fetch decrypted secrets.
+* ``GET  /v1/connectors/connections`` — SSE stream of add/remove events.
+* ``PUT  /v1/connectors/{connector}/tools_schema`` — publish tool catalog.
 
-All three use ``ConnectorAuthDep`` — the bearer token resolves to a
-single ``connection_id``; the request body never carries it.
+The bearer scopes the caller to one ``connector`` type; ``connection_id``
+rides as a form/query field for the routes that operate on a specific
+connection.  The connector-type → connections fan-out happens
+client-side via the ``/connections`` SSE subscription.
 """
 
 from __future__ import annotations
@@ -20,7 +26,6 @@ from pydantic import BaseModel, ConfigDict
 from sse_starlette import EventSourceResponse
 
 from aios.api.deps import (
-    ConnectorAuthDep,
     CryptoBoxDep,
     DbUrlDep,
     PoolDep,
@@ -28,7 +33,6 @@ from aios.api.deps import (
 )
 from aios.api.sse import (
     connection_discovery_stream,
-    connector_calls_stream,
     runtime_connector_calls_stream,
 )
 from aios.db import queries
@@ -39,7 +43,7 @@ from aios.errors import (
     PayloadTooLargeError,
     ValidationError,
 )
-from aios.models.connections import Connection, ConnectionSetTools, ConnectorSecrets
+from aios.models.connections import ConnectorSecrets
 from aios.services import connections as connections_service
 from aios.services import inbound as inbound_service
 from aios.services import sessions as sessions_service
@@ -154,194 +158,12 @@ async def _do_inbound(
     )
 
 
-@router.post(
-    "/inbound",
-    operation_id="post_connector_inbound",
-    status_code=status.HTTP_201_CREATED,
-)
-async def post_inbound(
-    pool: PoolDep,
-    connection_id: ConnectorAuthDep,
-    event_id: Annotated[str, Form(description="Client-supplied dedup key (ULID).")],
-    chat_id: Annotated[str, Form()],
-    content: Annotated[str, Form()],
-    sender: Annotated[
-        str | None,
-        Form(description='JSON-encoded sender dict (e.g. {"display_name": "Alice"}).'),
-    ] = None,
-    metadata: Annotated[
-        str | None,
-        Form(description="JSON-encoded connector metadata dict."),
-    ] = None,
-    timestamp: Annotated[
-        str | None,
-        Form(description="Optional ISO-8601 platform timestamp; stored in event metadata."),
-    ] = None,
-    attachments: Annotated[
-        list[UploadFile] | None,
-        File(description="One file part per attachment; filename + content-type read from each."),
-    ] = None,
-) -> ConnectorInboundResponse:
-    """Append an inbound user message to the session bound to the caller's connection.
-
-    Multipart form: the message text + IDs ride as form fields; any
-    attachments ride as ``UploadFile`` parts whose bytes the handler
-    streams into the per-session attachment dir (no shared-filesystem
-    coupling, closes #322 P1).
-
-    Idempotent on ``event_id`` — replays return the original event id
-    with ``deduped=True``. Drops surface as 4xx/5xx with a body
-    explaining the reason (operator-config issue vs server error vs
-    payload).
-    """
-    return await _do_inbound(
-        pool,
-        connection_id=connection_id,
-        event_id=event_id,
-        chat_id=chat_id,
-        content=content,
-        sender_json=sender,
-        metadata_json=metadata,
-        timestamp=timestamp,
-        attachments=attachments,
-    )
-
-
-class ConnectorToolResultRequest(BaseModel):
-    """Body for ``POST /v1/connectors/tool-results``.
-
-    Mirrors the operator-facing :class:`ToolResultRequest` but adds
-    ``session_id`` since connector tokens aren't path-scoped to a
-    session.  The handler validates the session is bound to the
-    caller's connection (preventing a connector from posting results
-    for sessions outside its scope).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    session_id: str
-    tool_call_id: str
-    content: str | list[dict[str, Any]]
-    is_error: bool = False
-
-
-@router.post(
-    "/tool-results",
-    operation_id="post_connector_tool_result",
-    status_code=status.HTTP_201_CREATED,
-)
-async def post_tool_result(
-    body: ConnectorToolResultRequest,
-    pool: PoolDep,
-    connection_id: ConnectorAuthDep,
-) -> Any:
-    """Submit a custom tool result from a connector container.
-
-    Authorization: the session must be bound to the caller's connection
-    (single_session attach, per_chat origin, or operator-bound chat).
-    Otherwise → 403.
-    """
-    async with pool.acquire() as conn:
-        if not await queries.is_session_bound_to_connection(
-            conn, connection_id=connection_id, session_id=body.session_id
-        ):
-            raise ForbiddenError(
-                "session is not bound to this connection",
-                detail={"session_id": body.session_id, "connection_id": connection_id},
-            )
-        event = await sessions_service.append_tool_result(
-            conn,
-            session_id=body.session_id,
-            tool_call_id=body.tool_call_id,
-            content=body.content,
-            is_error=body.is_error,
-        )
-    await defer_wake(pool, body.session_id, cause="connector_tool_result")
-    return event
-
-
-@router.get("/secrets", operation_id="get_connector_secrets")
-async def get_secrets(
-    pool: PoolDep,
-    crypto_box: CryptoBoxDep,
-    connection_id: ConnectorAuthDep,
-) -> ConnectorSecrets:
-    """Decrypted secrets for the caller's connection.
-
-    The bearer token resolves server-side to one ``connection_id``;
-    operators set secrets on that connection via
-    ``POST /v1/connections`` or ``PUT /v1/connections/{id}/secrets`` and
-    never read them back through the operator surface.  This is the only
-    decryption path.
-
-    Returns ``{"secrets": {}}`` when no secrets are configured — the
-    connector author decides whether that's acceptable (most need at
-    least one credential and should fail loudly).
-    """
-    secrets = await connections_service.get_connection_secrets(
-        pool, connection_id, crypto_box=crypto_box
-    )
-    return ConnectorSecrets(secrets=secrets)
-
-
-@router.put("/tools", operation_id="set_connector_tools")
-async def set_tools(
-    body: ConnectionSetTools,
-    pool: PoolDep,
-    connection_id: ConnectorAuthDep,
-) -> Connection:
-    """Publish the connector's tool schemas onto its own connection.
-
-    The connector container is the source of truth for what tools it
-    serves — it knows their names, parameter shapes, and docstrings.
-    The SDK derives JSON Schemas from ``@tool``-decorated methods at
-    startup and POSTs them here, replacing whatever was on the
-    connection wholesale.  Operators don't hand-write ``tools.json``.
-
-    Authorization: the bearer token resolves to one ``connection_id``;
-    a connector can only publish tools for its own connection.  This
-    is the connector-scoped twin of operator-scoped
-    ``PUT /v1/connections/{id}/tools``.
-    """
-    return await connections_service.set_connection_tools(pool, connection_id, tools=body.tools)
-
-
-@router.get("/calls", openapi_extra={"x-codegen": {"targets": []}})
-async def get_calls(
-    db_url: DbUrlDep,
-    pool: PoolDep,
-    connection_id: ConnectorAuthDep,
-) -> EventSourceResponse:
-    """SSE stream of pending custom tool calls for the caller's connection.
-
-    Backfills any pending calls at subscribe time (calls already parked
-    in some session's ``stop_reason.custom_tools``), then tails the
-    ``connector_calls_<connection_id>`` NOTIFY channel.  Each emitted
-    event is keyed ``call`` with a JSON body shaped::
-
-        {
-            "session_id": "...",
-            "tool_call_id": "...",
-            "name": "...",
-            "arguments": "...",       // JSON string from the model
-            "focal_channel": "..."
-        }
-
-    Connector containers dedupe by ``tool_call_id`` client-side so SSE
-    reconnects (which replay the backfill) don't double-execute.
-    """
-    return EventSourceResponse(
-        connector_calls_stream(db_url, pool, connection_id),
-        ping=15,
-    )
-
-
 # ─── runtime-scoped endpoints (#328 PR 5) ────────────────────────────────────
 #
-# These mirror the per-connection routes above but accept a ``runtime``
-# bearer token that scopes the caller to one ``connector`` type and N
-# of its connections.  The legacy per-connection routes stay alive
-# alongside these until PR 7 cuts them; PR 8 drops the table.
+# All routes accept a ``runtime`` bearer token (``RuntimeAuthDep``) that
+# scopes the caller to one ``connector`` type and N of its connections.
+# Per-connection variants from PR 4/PR 5's parallel-live window were
+# removed in PR 7 alongside their ``connector_tokens`` auth surface.
 
 
 class ToolsSchemaUpdate(BaseModel):
@@ -355,9 +177,9 @@ class ToolsSchemaUpdate(BaseModel):
 class RuntimeToolResultRequest(BaseModel):
     """Body for ``POST /v1/connectors/runtime/tool-results``.
 
-    Like :class:`ConnectorToolResultRequest` but carries ``connection_id``
-    explicitly — the bearer scopes the caller to a connector *type*,
-    not to one connection.
+    Carries ``connection_id`` explicitly — the bearer scopes the
+    caller to a connector *type*, not to one connection, so the body
+    has to name the target connection.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -470,10 +292,11 @@ async def post_runtime_inbound(
 ) -> ConnectorInboundResponse:
     """Append an inbound user message to ``connection_id``'s session.
 
-    Runtime-scoped twin of :func:`post_inbound`: the bearer authenticates
-    the caller as one connector *type*; ``connection_id`` rides as a
-    form field and must belong to that type.  Same multipart shape, same
-    dedup-on-``event_id`` semantics, same drop_reason → HTTP mapping.
+    The bearer authenticates the caller as one connector *type*;
+    ``connection_id`` rides as a form field and must belong to that
+    type.  Idempotent on ``event_id``; drops surface as 4xx/5xx with
+    a body explaining the reason (operator-config issue vs server
+    error vs payload).
     """
     _, auth_connector = auth
     async with pool.acquire() as conn:
@@ -546,8 +369,9 @@ async def get_runtime_secrets(
 ) -> ConnectorSecrets:
     """Decrypted secrets for ``connection_id``.
 
-    Runtime-scoped twin of :func:`get_secrets`.  The bearer's connector
-    must match the connection's connector type.
+    The bearer's connector must match the connection's connector
+    type.  Returns ``{"secrets": {}}`` when none are configured —
+    callers decide whether that's acceptable.
     """
     _, auth_connector = auth
     async with pool.acquire() as conn:
@@ -572,9 +396,19 @@ async def get_runtime_calls(
     connection of the caller's connector type.
 
     Backfills at subscribe time, then tails ``connector_calls_<connector>``.
-    Each event is keyed ``call`` with the same payload as
-    :func:`get_calls` plus an explicit ``connection_id`` field so the
-    runtime container can fan out to its per-connection workers.
+    Each event is keyed ``call`` with a JSON body shaped::
+
+        {
+            "session_id": "...",
+            "tool_call_id": "...",
+            "name": "...",
+            "arguments": "...",       // JSON string from the model
+            "focal_channel": "...",
+            "connection_id": "..."
+        }
+
+    The ``connection_id`` field lets the runtime container fan out to
+    its per-connection workers client-side.
     """
     _, connector = auth
     return EventSourceResponse(

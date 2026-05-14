@@ -76,9 +76,8 @@ def sync_detailed(
 
      Upload a single file into the session's workspace (#324).
 
-    Accepts either the operator API key or a connector token bound to
-    this session.  Files land at a stable host path; the model sees
-    them inside the sandbox at ``/mnt/uploads/<file_id>/<filename>``.
+    Operator-authenticated.  Files land at a stable host path; the model
+    sees them inside the sandbox at ``/mnt/uploads/<file_id>/<filename>``.
 
     Args:
         session_id (str):
@@ -117,9 +116,8 @@ def sync(
 
      Upload a single file into the session's workspace (#324).
 
-    Accepts either the operator API key or a connector token bound to
-    this session.  Files land at a stable host path; the model sees
-    them inside the sandbox at ``/mnt/uploads/<file_id>/<filename>``.
+    Operator-authenticated.  Files land at a stable host path; the model
+    sees them inside the sandbox at ``/mnt/uploads/<file_id>/<filename>``.
 
     Args:
         session_id (str):
@@ -153,9 +151,8 @@ async def asyncio_detailed(
 
      Upload a single file into the session's workspace (#324).
 
-    Accepts either the operator API key or a connector token bound to
-    this session.  Files land at a stable host path; the model sees
-    them inside the sandbox at ``/mnt/uploads/<file_id>/<filename>``.
+    Operator-authenticated.  Files land at a stable host path; the model
+    sees them inside the sandbox at ``/mnt/uploads/<file_id>/<filename>``.
 
     Args:
         session_id (str):
@@ -192,9 +189,8 @@ async def asyncio(
 
      Upload a single file into the session's workspace (#324).
 
-    Accepts either the operator API key or a connector token bound to
-    this session.  Files land at a stable host path; the model sees
-    them inside the sandbox at ``/mnt/uploads/<file_id>/<filename>``.
+    Operator-authenticated.  Files land at a stable host path; the model
+    sees them inside the sandbox at ``/mnt/uploads/<file_id>/<filename>``.
 
     Args:
         session_id (str):

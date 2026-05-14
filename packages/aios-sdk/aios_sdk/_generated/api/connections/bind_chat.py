@@ -78,7 +78,7 @@ def sync_detailed(
 
      Operator-curate a chat → session mapping (#215).
 
-    A row in ``connection_chat_sessions`` overrides the connection's
+    A row in ``chat_sessions`` overrides the connection's
     mode-default fallback for that ``chat_id``.  Operators use this to
     point different chats on a single account at different existing
     sessions — the middle case the unified ``connections`` shape didn't
@@ -94,11 +94,10 @@ def sync_detailed(
         authorization (None | str | Unset):
         body (BindChatRequest): Request body for ``POST /v1/connections/{id}/bind-chat``.
 
-            Pre-populates a ``connection_chat_sessions`` row so inbound on
-            ``chat_id`` routes to ``session_id`` regardless of the connection's
-            mode-default fallback (#215).  Operators use this to point
-            different chats on a single account at different operator-curated
-            existing sessions.
+            Pre-populates a ``chat_sessions`` row so inbound on ``chat_id``
+            routes to ``session_id`` regardless of the connection's mode-default
+            fallback (#215).  Operators use this to point different chats on a
+            single account at different operator-curated existing sessions.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -132,7 +131,7 @@ def sync(
 
      Operator-curate a chat → session mapping (#215).
 
-    A row in ``connection_chat_sessions`` overrides the connection's
+    A row in ``chat_sessions`` overrides the connection's
     mode-default fallback for that ``chat_id``.  Operators use this to
     point different chats on a single account at different existing
     sessions — the middle case the unified ``connections`` shape didn't
@@ -148,11 +147,10 @@ def sync(
         authorization (None | str | Unset):
         body (BindChatRequest): Request body for ``POST /v1/connections/{id}/bind-chat``.
 
-            Pre-populates a ``connection_chat_sessions`` row so inbound on
-            ``chat_id`` routes to ``session_id`` regardless of the connection's
-            mode-default fallback (#215).  Operators use this to point
-            different chats on a single account at different operator-curated
-            existing sessions.
+            Pre-populates a ``chat_sessions`` row so inbound on ``chat_id``
+            routes to ``session_id`` regardless of the connection's mode-default
+            fallback (#215).  Operators use this to point different chats on a
+            single account at different operator-curated existing sessions.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -181,7 +179,7 @@ async def asyncio_detailed(
 
      Operator-curate a chat → session mapping (#215).
 
-    A row in ``connection_chat_sessions`` overrides the connection's
+    A row in ``chat_sessions`` overrides the connection's
     mode-default fallback for that ``chat_id``.  Operators use this to
     point different chats on a single account at different existing
     sessions — the middle case the unified ``connections`` shape didn't
@@ -197,11 +195,10 @@ async def asyncio_detailed(
         authorization (None | str | Unset):
         body (BindChatRequest): Request body for ``POST /v1/connections/{id}/bind-chat``.
 
-            Pre-populates a ``connection_chat_sessions`` row so inbound on
-            ``chat_id`` routes to ``session_id`` regardless of the connection's
-            mode-default fallback (#215).  Operators use this to point
-            different chats on a single account at different operator-curated
-            existing sessions.
+            Pre-populates a ``chat_sessions`` row so inbound on ``chat_id``
+            routes to ``session_id`` regardless of the connection's mode-default
+            fallback (#215).  Operators use this to point different chats on a
+            single account at different operator-curated existing sessions.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -233,7 +230,7 @@ async def asyncio(
 
      Operator-curate a chat → session mapping (#215).
 
-    A row in ``connection_chat_sessions`` overrides the connection's
+    A row in ``chat_sessions`` overrides the connection's
     mode-default fallback for that ``chat_id``.  Operators use this to
     point different chats on a single account at different existing
     sessions — the middle case the unified ``connections`` shape didn't
@@ -249,11 +246,10 @@ async def asyncio(
         authorization (None | str | Unset):
         body (BindChatRequest): Request body for ``POST /v1/connections/{id}/bind-chat``.
 
-            Pre-populates a ``connection_chat_sessions`` row so inbound on
-            ``chat_id`` routes to ``session_id`` regardless of the connection's
-            mode-default fallback (#215).  Operators use this to point
-            different chats on a single account at different operator-curated
-            existing sessions.
+            Pre-populates a ``chat_sessions`` row so inbound on ``chat_id``
+            routes to ``session_id`` regardless of the connection's mode-default
+            fallback (#215).  Operators use this to point different chats on a
+            single account at different operator-curated existing sessions.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

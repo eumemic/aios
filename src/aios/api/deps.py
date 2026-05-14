@@ -8,7 +8,7 @@ exposed here as typed accessors.
 from __future__ import annotations
 
 import secrets
-from typing import Annotated, Literal, cast
+from typing import Annotated, cast
 
 import asyncpg
 from fastapi import Depends, Header, HTTPException, Request, status
@@ -17,7 +17,6 @@ from procrastinate import App as ProcrastinateApp
 from aios.config import Settings, get_settings
 from aios.crypto.vault import CryptoBox
 from aios.errors import UnauthorizedError
-from aios.services import connector_tokens as connector_tokens_service
 from aios.services import runtime_tokens as runtime_tokens_service
 
 
@@ -72,24 +71,6 @@ def require_bearer_auth(
         raise UnauthorizedError("invalid api key")
 
 
-async def require_connector_auth(
-    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> str:
-    """Resolve a bearer connector token to its ``connection_id``.
-
-    Accepts only tokens issued via ``POST /v1/connector-tokens`` — the
-    global ``AIOS_API_KEY`` is operator-scoped and cannot reach
-    connector-facing endpoints (#301).  Routes that take
-    ``ConnectorAuthDep`` receive the resolved ``connection_id``.
-    """
-    token = _extract_bearer_token(authorization)
-    resolved = await connector_tokens_service.resolve(pool, token)
-    if resolved is None:
-        raise UnauthorizedError("invalid or revoked connector token")
-    return resolved.connection_id
-
-
 async def require_runtime_auth(
     pool: Annotated[asyncpg.Pool, Depends(get_pool)],
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
@@ -108,33 +89,6 @@ async def require_runtime_auth(
     return (resolved.token_id, resolved.connector)
 
 
-async def require_operator_or_connector_auth(
-    settings: Annotated[Settings, Depends(get_settings_dep)],
-    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> tuple[Literal["operator", "connector"], str | None]:
-    """Accept either the operator API key or a connector token.
-
-    Returns ``("operator", None)`` for the operator key and
-    ``("connector", connection_id)`` for a valid connector token.
-    Raises :class:`UnauthorizedError` (401) when the header is missing,
-    malformed, or doesn't match either credential.
-
-    The operator-key path is checked first via constant-time compare so
-    requests carrying the operator key never hit the DB.  Routes that
-    take ``OperatorOrConnectorAuthDep`` are responsible for any
-    session-level scope check on the ``connector`` branch (typically
-    ``queries.is_session_bound_to_connection``).
-    """
-    token = _extract_bearer_token(authorization)
-    if secrets.compare_digest(token, settings.api_key.get_secret_value()):
-        return ("operator", None)
-    resolved = await connector_tokens_service.resolve(pool, token)
-    if resolved is None:
-        raise UnauthorizedError("invalid api key or connector token")
-    return ("connector", resolved.connection_id)
-
-
 # Type aliases for clarity at the route definitions.
 # Note: asyncpg.Pool isn't subscriptable at runtime, so we annotate with the
 # bare class. FastAPI's dependency injection ignores generic parameters.
@@ -143,9 +97,4 @@ CryptoBoxDep = Annotated[CryptoBox, Depends(get_crypto_box)]
 ProcrastinateDep = Annotated[ProcrastinateApp, Depends(get_procrastinate)]
 DbUrlDep = Annotated[str, Depends(get_db_url)]
 AuthDep = Annotated[None, Depends(require_bearer_auth)]
-ConnectorAuthDep = Annotated[str, Depends(require_connector_auth)]
 RuntimeAuthDep = Annotated[tuple[str, str], Depends(require_runtime_auth)]
-OperatorOrConnectorAuthDep = Annotated[
-    tuple[Literal["operator", "connector"], str | None],
-    Depends(require_operator_or_connector_auth),
-]

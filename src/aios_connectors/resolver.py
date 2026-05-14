@@ -5,17 +5,17 @@ Given ``(connection, chat_id)`` find or spawn the target session:
 1. **chat_sessions ledger** — operator-curated overrides + previously
    spawned per_chat sessions. If a row exists, dispatch to its
    ``session_id`` directly.
-2. **routing_rules prefix demux** (new in #328 PR 2/4) — iterate
-   the connection's active binding's rules. The first rule whose
+2. **routing_rules prefix demux** (#328 PR 2/4) — iterate the
+   connection's active binding's rules. The first rule whose
    ``prefix`` matches ``chat_id`` decides the target:
    - ``target_type='session'``: drop into the named session and
      stamp the chat_sessions ledger so future inbounds short-circuit.
    - ``target_type='session_template'``: spawn from the named
      template and stamp the ledger.
-3. **bindings.mode fallback** — same logic as the pre-#328 code path:
-   ``single_session`` connections dispatch to ``connection.session_id``;
-   ``per_chat`` connections spawn from ``connection.session_template_id``
-   and stamp the ledger.
+3. **bindings.mode fallback** — read the connection's active binding:
+   ``single_session`` dispatches to ``binding.session_id``;
+   ``per_chat`` spawns from ``binding.session_template_id`` and stamps
+   the ledger. No active binding → :data:`ResolveDrop.DETACHED`.
 
 All spawn-and-insert paths are race-safe via the existing
 ``chat_sessions`` ``ON CONFLICT DO NOTHING RETURNING *`` pattern: the
@@ -78,21 +78,23 @@ async def resolve_target_session(
             target_id=target_id,
         )
 
-    # Tier 3: bindings.mode fallback — same logic as pre-#328.
-    if connection.session_id is not None:
-        # single_session: any inbound on any chat goes to the attached session.
+    # Tier 3: active binding's mode + target.
+    async with pool.acquire() as conn:
+        binding = await queries.get_active_binding(conn, connection.id)
+    if binding is None:
+        return ResolveResult(session_id=None, drop=ResolveDrop.DETACHED)
+    if binding.mode == "single_session":
+        assert binding.session_id is not None
         # No ledger insert — operators opt into per-chat overrides explicitly.
-        return ResolveResult(session_id=connection.session_id, drop=None)
-
-    if connection.session_template_id is not None:
-        return await _spawn_per_chat_session(
-            pool,
-            connection=connection,
-            chat_id=chat_id,
-            template_id=connection.session_template_id,
-        )
-
-    return ResolveResult(session_id=None, drop=ResolveDrop.DETACHED)
+        return ResolveResult(session_id=binding.session_id, drop=None)
+    assert binding.mode == "per_chat"
+    assert binding.session_template_id is not None
+    return await _spawn_per_chat_session(
+        pool,
+        connection=connection,
+        chat_id=chat_id,
+        template_id=binding.session_template_id,
+    )
 
 
 async def _dispatch_routing_target(
@@ -155,7 +157,7 @@ async def _spawn_per_chat_session(
         metadata={},
         vault_ids=template.vault_ids or None,
         focal_channel=focal_channel,
-        spawned_from_connection_id=connection.id,
+        focal_locked=True,
     )
 
     # Race-safe register: loser gets the winner's session_id; just-spawned

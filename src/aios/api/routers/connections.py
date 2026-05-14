@@ -1,28 +1,21 @@
 """Connection endpoints — CRUD plus mode-binding transitions.
 
 Created in detached mode; switch to single_session via ``attach`` or
-per_chat via ``configure-per-chat``.  ``DELETE`` soft-archives — but
-only on detached connections (the service layer enforces this so
-operators can't silently break inbound delivery for live single_session
-connections or orphan ``spawned_from_connection_id`` pointers on
-per_chat-spawned sessions).
-
-``attach`` validates the connection's ``account`` against the connector
-subprocess's current snapshot (audit fix #1, design §5.6) — without
-this guard an operator can permanently attach a connection for an
-account the connector no longer serves, and inbound silently drops with
-the ``account_drift`` counter ticking up.  The validation flows through
-procrastinate RPC like the rest of ``/v1/connectors/*``: API mints a
-ULID, LISTENs on ``connector_result_<call_id>``, defers
-``harness.connector_status``, awaits NOTIFY.  ~50-200ms latency on an
-admin-only endpoint is invisible.
+per_chat via ``configure-per-chat``.  Both write to the ``bindings``
+table (one active row per connection); ``Connection.session_id`` /
+``session_template_id`` on the wire are projected from the active
+binding via a LEFT JOIN at read time, preserving the pre-#328-PR-7
+shape.  ``DELETE`` soft-archives — but only on connections with no
+active binding (the service layer enforces this so operators can't
+silently break inbound delivery for live single_session connections or
+strand the template a per_chat binding spawns from).
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, status
 
-from aios.api.deps import AuthDep, CryptoBoxDep, DbUrlDep, PoolDep
+from aios.api.deps import AuthDep, CryptoBoxDep, PoolDep
 from aios.models.common import ListResponse
 from aios.models.connections import (
     BindChatRequest,
@@ -33,7 +26,6 @@ from aios.models.connections import (
     ConnectionCreate,
     ConnectionMode,
     ConnectionSetSecrets,
-    ConnectionSetTools,
     RecentChat,
 )
 from aios.services import connections as service
@@ -69,25 +61,6 @@ async def create(
         secrets=body.secrets,
         crypto_box=crypto_box,
     )
-
-
-@router.put("/{connection_id}/tools", operation_id="set_connection_tools")
-async def set_tools(
-    connection_id: str,
-    body: ConnectionSetTools,
-    pool: PoolDep,
-    _auth: AuthDep,
-) -> Connection:
-    """Replace the connection's tools wholesale (#301).
-
-    Tools declared on a connection become available to the model as
-    ``type="custom"`` entries on every session this connection is
-    attached to (single_session) or that this connection spawned
-    (per_chat).  The model calls them, the session parks in
-    ``requires_action``, the connector executes externally and POSTs the
-    result back via ``/v1/sessions/:id/tool-results``.
-    """
-    return await service.set_connection_tools(pool, connection_id, tools=body.tools)
 
 
 @router.put("/{connection_id}/secrets", operation_id="set_connection_secrets")
@@ -156,11 +129,10 @@ async def get(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connection:
 async def delete(connection_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     """Archive a connection (DELETE soft-archives, only on detached connections).
 
-    The service layer rejects archive attempts on ``single_session`` or
-    ``per_chat`` connections — archiving those would silently break
-    inbound delivery for live sessions or orphan
-    ``spawned_from_connection_id`` pointers on per_chat-spawned sessions.
-    Detach or unconfigure first, then archive.
+    The service layer rejects archive attempts while an active binding
+    exists — archiving those would silently break inbound delivery for
+    live sessions or strand the template a per_chat binding spawns
+    from. Detach or unconfigure first, then archive.
     """
     await service.archive_connection(pool, connection_id)
 
@@ -170,17 +142,14 @@ async def attach(
     connection_id: str,
     body: ConnectionAttach,
     pool: PoolDep,
-    db_url: DbUrlDep,
     _auth: AuthDep,
 ) -> Connection:
-    """Attach a connection to a session.
+    """Attach a connection to a session (single_session mode).
 
-    The legacy supervisor's "live snapshot drift check" was removed in
-    #301 — the new architecture has connectors as peer services, so the
-    api process can't probe a worker-side account snapshot.  Operators
-    bear the responsibility of attaching to a real account; an inbound
-    referencing an unknown account simply drops at the new
-    ``/v1/connectors/inbound`` boundary.
+    Inserts an active ``bindings`` row.  Operators bear the
+    responsibility of binding a connection to a real, ongoing session;
+    an inbound referencing an unknown account simply drops at the
+    inbound boundary.
     """
     return await service.attach_connection(pool, connection_id, session_id=body.session_id)
 
@@ -245,7 +214,7 @@ async def bind_chat(
 ) -> BoundChat:
     """Operator-curate a chat → session mapping (#215).
 
-    A row in ``connection_chat_sessions`` overrides the connection's
+    A row in ``chat_sessions`` overrides the connection's
     mode-default fallback for that ``chat_id``.  Operators use this to
     point different chats on a single account at different existing
     sessions — the middle case the unified ``connections`` shape didn't

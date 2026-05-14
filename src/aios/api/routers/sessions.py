@@ -21,14 +21,13 @@ from aios.api.deps import (
     AuthDep,
     CryptoBoxDep,
     DbUrlDep,
-    OperatorOrConnectorAuthDep,
     PoolDep,
     ProcrastinateDep,
 )
 from aios.api.sse import sse_event_stream
 from aios.db import queries
 from aios.db.listen import SESSION_INTERRUPT_CHANNEL, listen_for_events
-from aios.errors import ForbiddenError, ValidationError
+from aios.errors import ValidationError
 from aios.ids import GITHUB_REPOSITORY, split_id
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
@@ -355,27 +354,14 @@ async def submit_tool_result(
 async def upload_file(
     session_id: str,
     pool: PoolDep,
-    auth: OperatorOrConnectorAuthDep,
+    _auth: AuthDep,
     file: Annotated[UploadFile, File(description="Bytes to upload into the session workspace.")],
 ) -> FileUploadResponse:
     """Upload a single file into the session's workspace (#324).
 
-    Accepts either the operator API key or a connector token bound to
-    this session.  Files land at a stable host path; the model sees
-    them inside the sandbox at ``/mnt/uploads/<file_id>/<filename>``.
+    Operator-authenticated.  Files land at a stable host path; the model
+    sees them inside the sandbox at ``/mnt/uploads/<file_id>/<filename>``.
     """
-    mode, connection_id = auth
-    if mode == "connector":
-        assert connection_id is not None
-        async with pool.acquire() as conn:
-            bound = await queries.is_session_bound_to_connection(
-                conn, connection_id=connection_id, session_id=session_id
-            )
-        if not bound:
-            raise ForbiddenError(
-                "session is not bound to this connection",
-                detail={"session_id": session_id, "connection_id": connection_id},
-            )
     record = await files_service.stage_upload(pool, session_id=session_id, upload=file)
     return FileUploadResponse(
         file_id=record.id,

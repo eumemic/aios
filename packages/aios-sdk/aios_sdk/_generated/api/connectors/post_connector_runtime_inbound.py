@@ -73,10 +73,11 @@ def sync_detailed(
 
      Append an inbound user message to ``connection_id``'s session.
 
-    Runtime-scoped twin of :func:`post_inbound`: the bearer authenticates
-    the caller as one connector *type*; ``connection_id`` rides as a
-    form field and must belong to that type.  Same multipart shape, same
-    dedup-on-``event_id`` semantics, same drop_reason → HTTP mapping.
+    The bearer authenticates the caller as one connector *type*;
+    ``connection_id`` rides as a form field and must belong to that
+    type.  Idempotent on ``event_id``; drops surface as 4xx/5xx with
+    a body explaining the reason (operator-config issue vs server
+    error vs payload).
 
     Args:
         authorization (None | str | Unset):
@@ -112,10 +113,11 @@ def sync(
 
      Append an inbound user message to ``connection_id``'s session.
 
-    Runtime-scoped twin of :func:`post_inbound`: the bearer authenticates
-    the caller as one connector *type*; ``connection_id`` rides as a
-    form field and must belong to that type.  Same multipart shape, same
-    dedup-on-``event_id`` semantics, same drop_reason → HTTP mapping.
+    The bearer authenticates the caller as one connector *type*;
+    ``connection_id`` rides as a form field and must belong to that
+    type.  Idempotent on ``event_id``; drops surface as 4xx/5xx with
+    a body explaining the reason (operator-config issue vs server
+    error vs payload).
 
     Args:
         authorization (None | str | Unset):
@@ -146,10 +148,11 @@ async def asyncio_detailed(
 
      Append an inbound user message to ``connection_id``'s session.
 
-    Runtime-scoped twin of :func:`post_inbound`: the bearer authenticates
-    the caller as one connector *type*; ``connection_id`` rides as a
-    form field and must belong to that type.  Same multipart shape, same
-    dedup-on-``event_id`` semantics, same drop_reason → HTTP mapping.
+    The bearer authenticates the caller as one connector *type*;
+    ``connection_id`` rides as a form field and must belong to that
+    type.  Idempotent on ``event_id``; drops surface as 4xx/5xx with
+    a body explaining the reason (operator-config issue vs server
+    error vs payload).
 
     Args:
         authorization (None | str | Unset):
@@ -183,10 +186,11 @@ async def asyncio(
 
      Append an inbound user message to ``connection_id``'s session.
 
-    Runtime-scoped twin of :func:`post_inbound`: the bearer authenticates
-    the caller as one connector *type*; ``connection_id`` rides as a
-    form field and must belong to that type.  Same multipart shape, same
-    dedup-on-``event_id`` semantics, same drop_reason → HTTP mapping.
+    The bearer authenticates the caller as one connector *type*;
+    ``connection_id`` rides as a form field and must belong to that
+    type.  Idempotent on ``event_id``; drops surface as 4xx/5xx with
+    a body explaining the reason (operator-config issue vs server
+    error vs payload).
 
     Args:
         authorization (None | str | Unset):

@@ -71,12 +71,13 @@ def sync_detailed(
     connection_id: str,
     authorization: None | str | Unset = UNSET,
 ) -> Response[ConnectorSecrets | HTTPValidationError]:
-    """Get Runtime Secrets
+    r"""Get Runtime Secrets
 
      Decrypted secrets for ``connection_id``.
 
-    Runtime-scoped twin of :func:`get_secrets`.  The bearer's connector
-    must match the connection's connector type.
+    The bearer's connector must match the connection's connector
+    type.  Returns ``{\"secrets\": {}}`` when none are configured —
+    callers decide whether that's acceptable.
 
     Args:
         connection_id (str):
@@ -108,12 +109,13 @@ def sync(
     connection_id: str,
     authorization: None | str | Unset = UNSET,
 ) -> ConnectorSecrets | HTTPValidationError | None:
-    """Get Runtime Secrets
+    r"""Get Runtime Secrets
 
      Decrypted secrets for ``connection_id``.
 
-    Runtime-scoped twin of :func:`get_secrets`.  The bearer's connector
-    must match the connection's connector type.
+    The bearer's connector must match the connection's connector
+    type.  Returns ``{\"secrets\": {}}`` when none are configured —
+    callers decide whether that's acceptable.
 
     Args:
         connection_id (str):
@@ -140,12 +142,13 @@ async def asyncio_detailed(
     connection_id: str,
     authorization: None | str | Unset = UNSET,
 ) -> Response[ConnectorSecrets | HTTPValidationError]:
-    """Get Runtime Secrets
+    r"""Get Runtime Secrets
 
      Decrypted secrets for ``connection_id``.
 
-    Runtime-scoped twin of :func:`get_secrets`.  The bearer's connector
-    must match the connection's connector type.
+    The bearer's connector must match the connection's connector
+    type.  Returns ``{\"secrets\": {}}`` when none are configured —
+    callers decide whether that's acceptable.
 
     Args:
         connection_id (str):
@@ -175,12 +178,13 @@ async def asyncio(
     connection_id: str,
     authorization: None | str | Unset = UNSET,
 ) -> ConnectorSecrets | HTTPValidationError | None:
-    """Get Runtime Secrets
+    r"""Get Runtime Secrets
 
      Decrypted secrets for ``connection_id``.
 
-    Runtime-scoped twin of :func:`get_secrets`.  The bearer's connector
-    must match the connection's connector type.
+    The bearer's connector must match the connection's connector
+    type.  Returns ``{\"secrets\": {}}`` when none are configured —
+    callers decide whether that's acceptable.
 
     Args:
         connection_id (str):

@@ -183,55 +183,6 @@ async def listen_for_events(
 
 
 @asynccontextmanager
-async def listen_for_connector_calls(
-    db_url: str,
-    connection_id: str,
-    *,
-    queue_max: int = 1000,
-) -> AsyncIterator[asyncio.Queue[str]]:
-    """LISTEN ``connector_calls_<connection_id>``; yield a queue of session_ids.
-
-    Mirrors :func:`listen_for_events` but scoped per-connection (#301).
-    Payload on each notification is the ``session_id`` of the session
-    where an assistant tool-calls event just landed; the SSE consumer
-    fetches that session's pending tool calls and streams them.
-    """
-    conn = await asyncpg.connect(normalize_dsn(db_url))
-    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
-    channel = f"connector_calls_{connection_id}"
-
-    def _callback(
-        _conn: asyncpg.Connection[object],
-        _pid: int,
-        _channel: str,
-        payload: str,
-    ) -> None:
-        # CRITICAL: invoked on asyncpg's read loop — must stay synchronous.
-        try:
-            queue.put_nowait(payload)
-        except asyncio.QueueFull:
-            log.warning(
-                "listen.connector_calls_queue_full_drop",
-                connection_id=connection_id,
-                queue_max=queue_max,
-            )
-            try:
-                queue.get_nowait()
-                queue.put_nowait(payload)
-            except (asyncio.QueueEmpty, asyncio.QueueFull):
-                pass
-
-    await conn.add_listener(channel, _callback)
-    try:
-        yield queue
-    finally:
-        with contextlib.suppress(Exception):
-            await conn.remove_listener(channel, _callback)
-        with contextlib.suppress(Exception):
-            await conn.close()
-
-
-@asynccontextmanager
 async def listen_for_connector_calls_by_type(
     db_url: str,
     connector: str,
@@ -240,8 +191,7 @@ async def listen_for_connector_calls_by_type(
 ) -> AsyncIterator[asyncio.Queue[str]]:
     """LISTEN ``connector_calls_<connector>``; yield a queue of ``"<session_id>|<connection_id>"`` payloads.
 
-    Counterpart to :func:`listen_for_connector_calls` (per-connection)
-    used by the runtime SSE introduced in #328 PR 5: one runtime
+    Used by the runtime SSE introduced in #328 PR 5: one runtime
     container subscribes once per ``connector`` type and fans out to
     its per-connection workers client-side via the ``connection_id``
     half of the payload.

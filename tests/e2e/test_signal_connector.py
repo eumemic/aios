@@ -97,32 +97,32 @@ async def _create_signal_connection(
         return str(r.json()["id"])
 
 
-async def _set_signal_tools(api_key: str, base_url: str, connection_id: str) -> None:
-    """Publish the signal tool schemas onto a connection.
+async def _publish_signal_tools_schema(harness: Harness) -> None:
+    """Stamp the per-type ``connectors.tools_schema`` row for ``"signal"``.
 
-    PR 7 will cut the model over to ``connectors.tools_schema``; in PR 6
-    the model still sees the per-connection list, so each test connection
-    needs its own (identical) copy.
+    Post-PR-7 the model picks tool schemas from ``connectors.tools_schema``
+    (one per connector type), not from per-connection ``connections.tools``.
+    A single publish covers every connection of the type.
     """
-    async with authed_client(base_url, api_key) as c:
-        r = await c.put(
-            f"/v1/connections/{connection_id}/tools",
-            json={
-                "tools": [
-                    {
-                        "type": "custom",
-                        "name": "signal_send",
-                        "description": "Send a Signal message.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"text": {"type": "string"}},
-                            "required": ["text"],
-                        },
+    from aios.db import queries as db_queries
+
+    async with harness._pool.acquire() as db_conn:
+        await db_queries.update_connector_tools_schema(
+            db_conn,
+            "signal",
+            tools_schema=[
+                {
+                    "type": "custom",
+                    "name": "signal_send",
+                    "description": "Send a Signal message.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
                     },
-                ]
-            },
+                },
+            ],
         )
-        r.raise_for_status()
 
 
 class _FakeListener:
@@ -246,8 +246,7 @@ class TestSignalMultiConnection:
         conn_b = await _create_signal_connection(api_key, live_server, PHONE_B, {"phone": PHONE_B})
         await connections_service.attach_connection(harness._pool, conn_a, session_id=session_a.id)
         await connections_service.attach_connection(harness._pool, conn_b, session_id=session_b.id)
-        await _set_signal_tools(api_key, live_server, conn_a)
-        await _set_signal_tools(api_key, live_server, conn_b)
+        await _publish_signal_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "signal")
 
         # ``HttpConnector.__init__`` reads ``AIOS_URL`` + ``AIOS_RUNTIME_TOKEN``
@@ -345,8 +344,7 @@ class TestSignalMultiConnection:
         )
         await connections_service.attach_connection(harness._pool, conn_a, session_id=session_a.id)
         await connections_service.attach_connection(harness._pool, conn_b, session_id=session_b.id)
-        await _set_signal_tools(api_key, live_server, conn_a)
-        await _set_signal_tools(api_key, live_server, conn_b)
+        await _publish_signal_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "signal")
 
         monkeypatch.setenv("AIOS_URL", live_server)

@@ -18,7 +18,7 @@ import math
 import time
 from datetime import datetime
 from types import EllipsisType
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 
 import asyncpg
 
@@ -32,8 +32,8 @@ from aios.errors import (
 )
 from aios.ids import (
     AGENT,
+    BINDING,
     CONNECTION,
-    CONNECTOR_TOKEN,
     ENVIRONMENT,
     EVENT,
     GITHUB_REPOSITORY,
@@ -49,8 +49,7 @@ from aios.ids import (
     make_id,
 )
 from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
-from aios.models.connections import Connection
-from aios.models.connector_tokens import ConnectorToken
+from aios.models.connections import BindingMode, Connection, ConnectionMode
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
 from aios.models.files import File
@@ -578,8 +577,8 @@ async def insert_session(
     metadata: dict[str, Any],
     workspace_path: str | None = None,
     env: dict[str, str] | None = None,
-    spawned_from_connection_id: str | None = None,
     focal_channel: str | None = None,
+    focal_locked: bool = False,
 ) -> Session:
     """Insert a fresh session row.
 
@@ -588,28 +587,27 @@ async def insert_session(
     Raises :class:`NotFoundError` if either the agent or environment FK
     is unsatisfied.
 
-    ``spawned_from_connection_id`` + ``focal_channel`` are written
-    atomically with the row insert so the focal-locked invariant (see
+    ``focal_channel`` + ``focal_locked`` are written atomically with
+    the row insert so the focal-locked invariant (see
     ``switch_channel``'s rejection of mutations on per_chat sessions)
-    holds from creation. ``focal_locked`` is derived in the same
-    statement: any session that was spawned for a single chat starts
-    its life locked.
+    holds from creation. Per-chat-spawned sessions pass
+    ``focal_locked=True`` to start life locked on the spawning
+    chat's channel.
     """
     from aios.config import get_settings
 
     new_id = make_id(SESSION)
     if workspace_path is None:
         workspace_path = str(get_settings().workspace_root / new_id)
-    focal_locked = spawned_from_connection_id is not None
     try:
         row = await conn.fetchrow(
             """
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 status, workspace_volume_path, env,
-                spawned_from_connection_id, focal_channel, focal_locked
+                focal_channel, focal_locked
             )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10)
             RETURNING *
             """,
             new_id,
@@ -620,17 +618,15 @@ async def insert_session(
             json.dumps(metadata),
             workspace_path,
             json.dumps(env or {}),
-            spawned_from_connection_id,
             focal_channel,
             focal_locked,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
-            "agent, environment, or connection not found",
+            "agent or environment not found",
             detail={
                 "agent_id": agent_id,
                 "environment_id": environment_id,
-                "spawned_from_connection_id": spawned_from_connection_id,
             },
         ) from exc
     assert row is not None
@@ -752,22 +748,19 @@ async def set_session_status(
         session_id,
     )
 
-    # Connector-calls fan-out (#301, #328 PR 5): when a session parks in
-    # ``requires_action`` with pending custom_tools, NOTIFY two channels
-    # per bound connection — the legacy per-connection channel (used by
-    # the old per-connection SSE until PR 7 retires it) and the new
-    # per-type channel (used by the runtime SSE that fans out to N
-    # connections of one connector type client-side).  Firing here
-    # (after stop_reason is committed) avoids the race where the SSE
-    # consumer's query checks for ``requires_action`` but stop_reason
-    # hasn't been written yet.
+    # Connector-calls fan-out (#328 PR 5): when a session parks in
+    # ``requires_action`` with pending custom_tools, NOTIFY the per-type
+    # channel for each bound connection's connector type — the runtime
+    # SSE subscribes once per connector type and fans out to its N
+    # connections client-side.  Firing here (after stop_reason is
+    # committed) avoids the race where the SSE consumer's query checks
+    # for ``requires_action`` but stop_reason hasn't been written yet.
     if (
         isinstance(stop_reason, dict)
         and stop_reason.get("type") == "requires_action"
         and stop_reason.get("custom_tools")
     ):
         for cid, connector in await _list_bound_connection_ids(conn, session_id):
-            await conn.execute("SELECT pg_notify($1, $2)", f"connector_calls_{cid}", session_id)
             await conn.execute(
                 "SELECT pg_notify($1, $2)",
                 f"connector_calls_{connector}",
@@ -1509,16 +1502,17 @@ async def append_event(
     return _row_to_event(row)
 
 
-async def list_pending_calls_for_connection(
-    conn: asyncpg.Connection[Any], connection_id: str
+async def list_pending_calls_for_connector(
+    conn: asyncpg.Connection[Any], connector: str
 ) -> list[dict[str, Any]]:
-    """Pending custom tool calls for ``connection_id`` across bound sessions.
+    """Pending custom tool calls across every active connection of ``connector`` type.
 
+    Used by the runtime SSE (#328 PR 5) at subscribe-time backfill.
     A "pending" call is one referenced in some session's
-    ``stop_reason.custom_tools`` array — i.e. the model called a custom
-    tool and the session is parked in ``requires_action``.  For each
-    such session, this returns one row per tool_call whose ``name``
-    matches a tool declared on the connection.
+    ``stop_reason.custom_tools`` array — i.e. the model called a
+    custom tool and the session is parked in ``requires_action``.
+    Each emitted record carries ``connection_id`` so the runtime can
+    fan out to the right per-connection worker.
 
     Output dict shape::
 
@@ -1526,83 +1520,58 @@ async def list_pending_calls_for_connection(
             "session_id": "sess_xxx",
             "tool_call_id": "call_yyy",
             "name": "telegram_send",
-            "arguments": "{...}",        # JSON string from the model
+            "arguments": "{...}",       # JSON string from the model
             "focal_channel": "telegram/bot1/chat123" | None,
+            "connection_id": "conn_zzz",
         }
-
-    Used by the connector calls SSE endpoint at subscribe-time backfill
-    and on each NOTIFY.
     """
-    # First read the connection's tools and the bound sessions, then walk
-    # session state.  Two SELECTs because postgres can't efficiently fan
-    # one query across the lineage union with a jsonb tool-name filter.
-    conn_row = await conn.fetchrow(
-        "SELECT tools FROM connections WHERE id = $1 AND archived_at IS NULL",
-        connection_id,
+    # The connector type's tool schema gates which tool_calls we surface.
+    cat_row = await conn.fetchrow(
+        "SELECT tools_schema AS tools FROM connectors WHERE connector = $1",
+        connector,
     )
-    if conn_row is None:
+    if cat_row is None:
         return []
-    tools_data = _parse_jsonb(conn_row["tools"])
+    tools_data = _parse_jsonb(cat_row["tools"])
     tool_names = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
     if not tool_names:
         return []
 
+    # The lineage predicate joins ``s.id`` not a parameter, so we inline
+    # rather than calling ``_session_bound_to_connection_predicate``
+    # (which expects a $N param index for the session).
     rows = await conn.fetch(
         """
-        SELECT s.id AS session_id, s.stop_reason, s.focal_channel
-          FROM sessions s
-         WHERE s.archived_at IS NULL
+        SELECT c.id AS connection_id,
+               s.id AS session_id, s.stop_reason, s.focal_channel
+          FROM connections c
+          JOIN sessions s
+            ON s.archived_at IS NULL
            AND s.status = 'idle'
            AND s.stop_reason->>'type' = 'requires_action'
-           AND EXISTS (
-               SELECT 1 FROM connections c
-                WHERE c.id = $1 AND c.archived_at IS NULL
-                  AND (c.session_id = s.id
-                       OR c.id = s.spawned_from_connection_id
-                       OR EXISTS (SELECT 1 FROM connection_chat_sessions ccs
-                                   WHERE ccs.connection_id = c.id
-                                     AND ccs.session_id = s.id))
-           )
-        """,
-        connection_id,
-    )
-
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        out.extend(
-            await _pending_calls_for_session(
-                conn,
-                session_id=row["session_id"],
-                stop_reason=_parse_jsonb(row["stop_reason"]),
-                focal_channel=row["focal_channel"],
-                tool_names=tool_names,
-            )
-        )
-    return out
-
-
-async def list_pending_calls_for_connector(
-    conn: asyncpg.Connection[Any], connector: str
-) -> list[dict[str, Any]]:
-    """Pending custom tool calls across every active connection of ``connector`` type.
-
-    Used by the runtime SSE (#328 PR 5) at subscribe-time backfill.
-    Each emitted record carries ``connection_id`` so the runtime can
-    fan out to the right per-connection worker; payload shape is
-    otherwise identical to :func:`list_pending_calls_for_connection`.
-    """
-    rows = await conn.fetch(
-        """
-        SELECT id FROM connections
-         WHERE connector = $1 AND archived_at IS NULL
+           AND (EXISTS (SELECT 1 FROM bindings b
+                         WHERE b.connection_id = c.id
+                           AND b.archived_at IS NULL
+                           AND b.session_id = s.id)
+                OR EXISTS (SELECT 1 FROM chat_sessions cs
+                            WHERE cs.connection_id = c.id
+                              AND cs.session_id = s.id))
+         WHERE c.connector = $1 AND c.archived_at IS NULL
         """,
         connector,
     )
+
     out: list[dict[str, Any]] = []
     for row in rows:
-        cid = row["id"]
-        for call in await list_pending_calls_for_connection(conn, cid):
-            call["connection_id"] = cid
+        calls = await _pending_calls_for_session(
+            conn,
+            session_id=row["session_id"],
+            stop_reason=_parse_jsonb(row["stop_reason"]),
+            focal_channel=row["focal_channel"],
+            tool_names=tool_names,
+        )
+        for call in calls:
+            call["connection_id"] = row["connection_id"]
             out.append(call)
     return out
 
@@ -1619,7 +1588,12 @@ async def list_pending_calls_for_session_and_connection(
     sessions.
     """
     conn_row = await conn.fetchrow(
-        "SELECT tools FROM connections WHERE id = $1 AND archived_at IS NULL",
+        """
+        SELECT cat.tools_schema AS tools
+          FROM connections c
+          JOIN connectors cat ON cat.connector = c.connector
+         WHERE c.id = $1 AND c.archived_at IS NULL
+        """,
         connection_id,
     )
     if conn_row is None:
@@ -1713,27 +1687,16 @@ async def _list_bound_connection_ids(
     """``(connection_id, connector)`` pairs for active connections bound to ``session_id``.
 
     Used by :func:`set_session_status` to fan an assistant-tool-calls
-    event out to BOTH the legacy per-connection NOTIFY channel
-    (``connector_calls_<connection_id>``, #301) AND the per-type
-    channel (``connector_calls_<connector>``, #328 PR 5) — the runtime
-    container subscribes to one type-channel for all its connections.
-    Tools-less connections receive notifications and harmlessly no-op
-    them on the consumer side — filtering by
-    ``jsonb_array_length(tools) > 0`` here forces a seq scan (function
-    expressions aren't indexable), so we accept a small amount of
-    cross-connection notification noise instead.
+    event out on the per-type ``connector_calls_<connector>`` NOTIFY
+    channel (#328 PR 5).  Tools-less connections receive notifications
+    and harmlessly no-op them on the consumer side.
     """
     rows = await conn.fetch(
-        """
+        f"""
         SELECT c.id, c.connector
           FROM connections c
-          LEFT JOIN sessions s ON s.id = $1
          WHERE c.archived_at IS NULL
-           AND (c.session_id = $1
-                OR c.id = s.spawned_from_connection_id
-                OR EXISTS (SELECT 1 FROM connection_chat_sessions ccs
-                            WHERE ccs.connection_id = c.id
-                              AND ccs.session_id = $1))
+           AND {_session_bound_to_connection_predicate(connection_alias="c", session_param_index=1)}
         """,
         session_id,
     )
@@ -1743,28 +1706,23 @@ async def _list_bound_connection_ids(
 async def is_session_bound_to_connection(
     conn: asyncpg.Connection[Any], *, connection_id: str, session_id: str
 ) -> bool:
-    """True iff ``connection_id`` is bound to ``session_id`` via any of the
-    three lineage paths used everywhere connector-session binding matters:
+    """True iff ``connection_id`` is bound to ``session_id`` via either
+    of the two lineage paths:
 
-    * single_session attach (``connections.session_id``)
-    * per_chat origin (``sessions.spawned_from_connection_id``)
-    * operator-curated chat binding (``connection_chat_sessions``)
+    * Active single_session binding on this connection whose
+      ``bindings.session_id`` matches.
+    * Row in ``chat_sessions`` for this ``(connection_id, session_id)``.
 
-    Centralised so route handlers don't inline the three-branch WHERE
-    clause every time they need to authorize a connector-driven write.
+    Centralised so route handlers don't inline the union of branches
+    every time they need to authorise a connector-driven write.
     """
     row = await conn.fetchval(
-        """
+        f"""
         SELECT 1
           FROM connections c
-          LEFT JOIN sessions s ON s.id = $2
          WHERE c.id = $1
            AND c.archived_at IS NULL
-           AND (c.session_id = $2
-                OR c.id = s.spawned_from_connection_id
-                OR EXISTS (SELECT 1 FROM connection_chat_sessions ccs
-                            WHERE ccs.connection_id = c.id
-                              AND ccs.session_id = $2))
+           AND {_session_bound_to_connection_predicate(connection_alias="c", session_param_index=2)}
          LIMIT 1
         """,
         connection_id,
@@ -2639,13 +2597,244 @@ async def resolve_skill_refs(
     return results
 
 
+# ─── bindings (#328 PR 7 — unit of curation, succeeded the in-place
+#                          ``connections.session_id`` / ``session_template_id``
+#                          columns) ────────────────────────────────────────
+
+
+def _session_bound_to_connection_predicate(
+    *, connection_alias: str, session_param_index: int
+) -> str:
+    """SQL fragment for "this session is bound to ``<connection_alias>``."
+
+    Used by every query that walks the connection→session lineage:
+    ``is_session_bound_to_connection`` (existence check),
+    ``_list_bound_connection_ids`` (filter), ``list_connection_tools_for_session``
+    (filter), ``list_pending_calls_for_connector`` (join predicate).
+
+    Two lineage paths after #328 PR 7:
+
+    * an active ``single_session`` binding whose ``session_id`` matches; or
+    * a row in ``chat_sessions`` for ``(connection_id, session_id)``.
+    """
+    return f"""(
+        EXISTS (SELECT 1 FROM bindings b
+                 WHERE b.connection_id = {connection_alias}.id
+                   AND b.archived_at IS NULL
+                   AND b.session_id = ${session_param_index})
+        OR EXISTS (SELECT 1 FROM chat_sessions cs
+                    WHERE cs.connection_id = {connection_alias}.id
+                      AND cs.session_id = ${session_param_index})
+    )"""
+
+
+class ActiveBinding(NamedTuple):
+    """Read view of a connection's single active binding."""
+
+    id: str
+    connection_id: str
+    mode: BindingMode
+    session_id: str | None
+    session_template_id: str | None
+
+
+async def get_active_binding(
+    conn: asyncpg.Connection[Any], connection_id: str
+) -> ActiveBinding | None:
+    """Return the connection's active binding, if one exists.
+
+    Returns ``None`` for detached connections. The
+    ``bindings_connection_active_uniq`` partial-unique index enforces
+    "at most one active binding per connection," so the result is
+    unambiguous.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT id, connection_id, mode, session_id, session_template_id
+          FROM bindings
+         WHERE connection_id = $1 AND archived_at IS NULL
+        """,
+        connection_id,
+    )
+    if row is None:
+        return None
+    return ActiveBinding(
+        id=row["id"],
+        connection_id=row["connection_id"],
+        mode=row["mode"],
+        session_id=row["session_id"],
+        session_template_id=row["session_template_id"],
+    )
+
+
+async def insert_binding(
+    conn: asyncpg.Connection[Any],
+    *,
+    connection_id: str,
+    mode: BindingMode,
+    session_id: str | None = None,
+    session_template_id: str | None = None,
+) -> ActiveBinding:
+    """Insert a new active binding for ``connection_id``.
+
+    Race-safe via the partial-unique index ``bindings_connection_active_uniq``:
+    a concurrent attempt to bind the same connection surfaces as
+    :class:`ConflictError`. Missing or archived connection / session /
+    template surfaces as :class:`NotFoundError` (we resolve which by
+    a follow-up read to keep the error specific).
+    """
+    new_id = make_id(BINDING)
+    try:
+        await conn.execute(
+            """
+            INSERT INTO bindings (id, connection_id, mode,
+                                  session_id, session_template_id)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            new_id,
+            connection_id,
+            mode,
+            session_id,
+            session_template_id,
+        )
+    except asyncpg.UniqueViolationError as exc:
+        raise ConflictError(
+            f"connection {connection_id} is already bound; detach or unconfigure first",
+            detail={"id": connection_id},
+        ) from exc
+    except asyncpg.ForeignKeyViolationError as exc:
+        await _raise_for_failed_binding_insert(
+            conn,
+            connection_id=connection_id,
+            session_id=session_id,
+            session_template_id=session_template_id,
+        )
+        raise exc  # pragma: no cover — _raise_for_failed_binding_insert is NoReturn
+    return ActiveBinding(
+        id=new_id,
+        connection_id=connection_id,
+        mode=mode,
+        session_id=session_id,
+        session_template_id=session_template_id,
+    )
+
+
+async def archive_active_binding(
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    expected_mode: BindingMode | None = None,
+) -> ActiveBinding | None:
+    """Soft-archive the connection's active binding.
+
+    Returns the now-archived :class:`ActiveBinding`, or ``None`` if no
+    matching binding existed.  When ``expected_mode`` is set, the
+    archive is guarded by ``bindings.mode = expected_mode`` — a binding
+    in the *other* mode is left intact and the call returns ``None``;
+    callers diagnose via a follow-up read.
+    """
+    where = "connection_id = $1 AND archived_at IS NULL"
+    args: tuple[Any, ...] = (connection_id,)
+    if expected_mode is not None:
+        where += " AND mode = $2"
+        args = (connection_id, expected_mode)
+    row = await conn.fetchrow(
+        f"""
+        UPDATE bindings
+           SET archived_at = now()
+         WHERE {where}
+        RETURNING id, connection_id, mode, session_id, session_template_id
+        """,
+        *args,
+    )
+    if row is None:
+        return None
+    return ActiveBinding(
+        id=row["id"],
+        connection_id=row["connection_id"],
+        mode=row["mode"],
+        session_id=row["session_id"],
+        session_template_id=row["session_template_id"],
+    )
+
+
+async def _raise_for_failed_binding_insert(
+    conn: asyncpg.Connection[Any],
+    *,
+    connection_id: str,
+    session_id: str | None,
+    session_template_id: str | None,
+) -> NoReturn:
+    """Translate an FK violation on bindings into a specific 4xx."""
+    existing = await conn.fetchrow(
+        "SELECT archived_at FROM connections WHERE id = $1",
+        connection_id,
+    )
+    if existing is None:
+        raise NotFoundError(
+            f"connection {connection_id} not found",
+            detail={"id": connection_id},
+        )
+    if existing["archived_at"] is not None:
+        raise ConflictError(
+            f"connection {connection_id} is archived",
+            detail={"id": connection_id},
+        )
+    if session_id is not None:
+        raise NotFoundError(
+            f"session {session_id} not found",
+            detail={"session_id": session_id},
+        )
+    if session_template_id is not None:
+        raise NotFoundError(
+            f"session template {session_template_id} not found",
+            detail={"session_template_id": session_template_id},
+        )
+    raise ConflictError(
+        f"failed to insert binding for connection {connection_id}",
+        detail={"id": connection_id},
+    )
+
+
 # ─── connections ────────────────────────────────────────────────────────────
 #
-# Three valid shapes per ``connections_one_mode_ck``:
+# Three valid mode views (derived from the active binding row in ``bindings``):
 #
-#   detached       — session_id NULL,  session_template_id NULL
-#   single_session — session_id SET,   session_template_id NULL
-#   per_chat       — session_id NULL,  session_template_id SET
+#   detached       — no active binding row
+#   single_session — active binding row with mode='single_session'
+#   per_chat       — active binding row with mode='per_chat'
+#
+# The legacy in-place ``connections.session_id`` / ``session_template_id``
+# columns are retained in the schema for PR 8 soak but are neither read
+# nor written by this layer. ``Connection.session_id`` / ``session_template_id``
+# wire fields are populated from the active binding via a LEFT JOIN.
+
+_CONNECTION_COLUMNS = """
+    c.*,
+    b.session_id           AS binding_session_id,
+    b.session_template_id  AS binding_session_template_id,
+    b.created_at           AS binding_created_at
+""".strip()
+
+_CONNECTION_FROM = """
+    connections c
+    LEFT JOIN bindings b
+           ON b.connection_id = c.id AND b.archived_at IS NULL
+""".strip()
+
+# Trailing JOIN for ``UPDATE connections ... RETURNING *`` CTEs that need
+# to re-shape the row through ``_row_to_connection``: read the updated
+# row's binding via the same LEFT JOIN as a plain SELECT would. The
+# input alias ``u`` is the CTE's RETURNING table.
+_CONNECTION_UPDATE_CTE_TAIL = """
+    SELECT u.*,
+           b.session_id           AS binding_session_id,
+           b.session_template_id  AS binding_session_template_id,
+           b.created_at           AS binding_created_at
+      FROM updated u
+      LEFT JOIN bindings b
+             ON b.connection_id = u.id AND b.archived_at IS NULL
+""".strip()
 
 
 def _row_to_connection(row: asyncpg.Record) -> Connection:
@@ -2655,13 +2844,17 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         id=row["id"],
         connector=row["connector"],
         account=row["account"],
-        session_id=row["session_id"],
-        session_template_id=row["session_template_id"],
+        session_id=row["binding_session_id"],
+        session_template_id=row["binding_session_template_id"],
         metadata=metadata,
         tools=tools_data,
         secrets_set=row["secrets_ciphertext"] is not None,
         created_at=row["created_at"],
-        attached_at=row["attached_at"],
+        # ``attached_at`` is "when did the active binding land" — derive
+        # from the binding row's ``created_at`` rather than the legacy
+        # ``connections.attached_at`` column (which is no longer written
+        # by the new attach/configure service paths).
+        attached_at=row["binding_created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
     )
@@ -2715,13 +2908,20 @@ async def insert_connection(
     for _ in range(3):
         row = await conn.fetchrow(
             """
-            INSERT INTO connections (
-                id, connector, account, metadata, tools,
-                secrets_ciphertext, secrets_nonce
+            WITH inserted AS (
+                INSERT INTO connections (
+                    id, connector, account, metadata, tools,
+                    secrets_ciphertext, secrets_nonce
+                )
+                VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
+                ON CONFLICT (connector, account) WHERE archived_at IS NULL DO NOTHING
+                RETURNING *
             )
-            VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
-            ON CONFLICT (connector, account) WHERE archived_at IS NULL DO NOTHING
-            RETURNING *
+            SELECT i.*,
+                   NULL::text        AS binding_session_id,
+                   NULL::text        AS binding_session_template_id,
+                   NULL::timestamptz AS binding_created_at
+              FROM inserted i
             """,
             make_id(CONNECTION),
             connector,
@@ -2744,40 +2944,13 @@ async def insert_connection(
 
 
 async def get_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
-    row = await conn.fetchrow("SELECT * FROM connections WHERE id = $1", connection_id)
-    if row is None:
-        raise NotFoundError(
-            f"connection {connection_id} not found",
-            detail={"id": connection_id},
-        )
-    return _row_to_connection(row)
-
-
-async def set_connection_tools(
-    conn: asyncpg.Connection[Any],
-    connection_id: str,
-    *,
-    tools: list[dict[str, Any]],
-) -> Connection:
-    """Replace a connection's ``tools`` array.  Bumps ``updated_at``.
-
-    Refuses on archived rows: a tools update against an archived
-    connection is almost certainly a stale operator command.
-    """
     row = await conn.fetchrow(
-        """
-        UPDATE connections
-           SET tools = $2::jsonb,
-               updated_at = now()
-         WHERE id = $1 AND archived_at IS NULL
-        RETURNING *
-        """,
+        f"SELECT {_CONNECTION_COLUMNS} FROM {_CONNECTION_FROM} WHERE c.id = $1",
         connection_id,
-        json.dumps(tools),
     )
     if row is None:
         raise NotFoundError(
-            f"connection {connection_id} not found or archived",
+            f"connection {connection_id} not found",
             detail={"id": connection_id},
         )
     return _row_to_connection(row)
@@ -2801,13 +2974,16 @@ async def set_connection_secrets(
     ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
     nonce = secrets_blob.nonce if secrets_blob is not None else None
     row = await conn.fetchrow(
-        """
-        UPDATE connections
-           SET secrets_ciphertext = $2,
-               secrets_nonce      = $3,
-               updated_at         = now()
-         WHERE id = $1 AND archived_at IS NULL
-        RETURNING *
+        f"""
+        WITH updated AS (
+            UPDATE connections
+               SET secrets_ciphertext = $2,
+                   secrets_nonce      = $3,
+                   updated_at         = now()
+             WHERE id = $1 AND archived_at IS NULL
+            RETURNING *
+        )
+        {_CONNECTION_UPDATE_CTE_TAIL}
         """,
         connection_id,
         ciphertext,
@@ -2856,23 +3032,24 @@ async def list_connection_tools_for_session(
 ) -> list[dict[str, Any]]:
     """Custom tool specs from every active connection bound to ``session_id``.
 
-    Walks the three lineage paths enumerated in
-    :func:`is_session_bound_to_connection` (single_session attach,
-    per_chat origin, operator-curated chat binding) and returns the
-    flattened list of ToolSpec dicts (jsonb) ready to feed through
-    :func:`tools.registry.to_openai_tools_custom`.
+    Walks the two lineage paths enumerated in
+    :func:`is_session_bound_to_connection` (single_session binding,
+    per-chat ledger entry) to find the active connections bound to
+    this session, then JOINs to ``connectors.tools_schema`` — the
+    runtime container is the source of truth for what tools its
+    connector type serves (PR 5).  The flattened tool-spec list is
+    ready to feed through :func:`tools.registry.to_openai_tools_custom`.
     """
     rows = await conn.fetch(
-        """
-        SELECT c.tools AS tools
-          FROM connections c
-          LEFT JOIN sessions s ON s.id = $1
-         WHERE c.archived_at IS NULL
-           AND (c.session_id = $1
-                OR c.id = s.spawned_from_connection_id
-                OR EXISTS (SELECT 1 FROM connection_chat_sessions ccs
-                            WHERE ccs.connection_id = c.id
-                              AND ccs.session_id = $1))
+        f"""
+        SELECT cat.tools_schema AS tools
+          FROM connectors cat
+         WHERE cat.connector IN (
+                SELECT DISTINCT c.connector
+                  FROM connections c
+                 WHERE c.archived_at IS NULL
+                   AND {_session_bound_to_connection_predicate(connection_alias="c", session_param_index=1)}
+            )
         """,
         session_id,
     )
@@ -2887,7 +3064,11 @@ async def get_connection_for_account(
 ) -> Connection | None:
     """Active connection for ``(connector, account)``, or ``None``."""
     row = await conn.fetchrow(
-        "SELECT * FROM connections WHERE connector = $1 AND account = $2 AND archived_at IS NULL",
+        f"""
+        SELECT {_CONNECTION_COLUMNS}
+          FROM {_CONNECTION_FROM}
+         WHERE c.connector = $1 AND c.account = $2 AND c.archived_at IS NULL
+        """,
         connector,
         account,
     )
@@ -2896,225 +3077,56 @@ async def get_connection_for_account(
     return _row_to_connection(row)
 
 
-async def _raise_for_failed_mode_transition(
-    conn: asyncpg.Connection[Any], connection_id: str
-) -> NoReturn:
-    """Diagnose why a guarded mode-transition UPDATE returned no row.
-
-    Called from ``attach_connection``/``configure_per_chat_connection``
-    when the WHERE clause didn't match any row.  Picks the most specific
-    error to raise: NotFound > archived > already-bound.
-    """
-    existing = await conn.fetchrow(
-        "SELECT archived_at FROM connections WHERE id = $1",
-        connection_id,
-    )
-    if existing is None:
-        raise NotFoundError(
-            f"connection {connection_id} not found",
-            detail={"id": connection_id},
-        )
-    if existing["archived_at"] is not None:
-        raise ConflictError(
-            f"connection {connection_id} is archived",
-            detail={"id": connection_id},
-        )
-    raise ConflictError(
-        f"connection {connection_id} is already attached or configured per_chat; "
-        "detach or unconfigure first",
-        detail={"id": connection_id},
-    )
-
-
-_MODE_PREDICATES: dict[str, str] = {
-    "detached": "session_id IS NULL AND session_template_id IS NULL",
-    "single_session": "session_id IS NOT NULL",
-    "per_chat": "session_template_id IS NOT NULL",
-}
-
-
 async def list_connections(
     conn: asyncpg.Connection[Any],
     *,
     connector: str | None = None,
     session_id: str | None = None,
-    mode: str | None = None,
+    mode: ConnectionMode | None = None,
     limit: int = 50,
     after: str | None = None,
 ) -> list[Connection]:
     """List active connections.  Optional filters narrow by connector type,
     attached session id, or routing mode (``detached`` / ``single_session``
     / ``per_chat``).
+
+    ``session_id`` filters on the active binding's ``session_id`` —
+    only single_session bindings match (per_chat bindings carry a
+    ``session_template_id`` instead).  ``mode`` filters on the active
+    binding's mode or its absence (detached).
     """
-    clauses: list[str] = ["archived_at IS NULL"]
+    clauses: list[str] = ["c.archived_at IS NULL"]
     args: list[Any] = []
     if connector is not None:
         args.append(connector)
-        clauses.append(f"connector = ${len(args)}")
+        clauses.append(f"c.connector = ${len(args)}")
     if session_id is not None:
         args.append(session_id)
-        clauses.append(f"session_id = ${len(args)}")
+        clauses.append(f"b.session_id = ${len(args)}")
     if mode is not None:
         clauses.append(_MODE_PREDICATES[mode])
     if after is not None:
         args.append(after)
-        clauses.append(f"id < ${len(args)}")
+        clauses.append(f"c.id < ${len(args)}")
     args.append(limit)
     sql = (
-        f"SELECT * FROM connections WHERE {' AND '.join(clauses)} "
-        f"ORDER BY id DESC LIMIT ${len(args)}"
+        f"SELECT {_CONNECTION_COLUMNS} FROM {_CONNECTION_FROM} "
+        f"WHERE {' AND '.join(clauses)} "
+        f"ORDER BY c.id DESC LIMIT ${len(args)}"
     )
     rows = await conn.fetch(sql, *args)
     return [_row_to_connection(r) for r in rows]
 
 
-async def attach_connection(
-    conn: asyncpg.Connection[Any],
-    connection_id: str,
-    *,
-    session_id: str,
-) -> Connection:
-    """Bind a detached connection to a session (single_session mode)."""
-    try:
-        row = await conn.fetchrow(
-            """
-            UPDATE connections
-               SET session_id = $2,
-                   attached_at = now(),
-                   updated_at = now()
-             WHERE id = $1
-               AND archived_at IS NULL
-               AND session_id IS NULL
-               AND session_template_id IS NULL
-            RETURNING *
-            """,
-            connection_id,
-            session_id,
-        )
-    except asyncpg.ForeignKeyViolationError as exc:
-        raise NotFoundError(
-            f"session {session_id} not found",
-            detail={"session_id": session_id},
-        ) from exc
-    if row is None:
-        await _raise_for_failed_mode_transition(conn, connection_id)
-    return _row_to_connection(row)
-
-
-async def detach_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
-    """Drop the single_session binding, leaving the connection detached.
-
-    Already-spawned per_chat sessions on this connection (if any) are
-    not cascaded — they remain alive with ``spawned_from_connection_id``
-    still pointing at this row.
-    """
-    row = await conn.fetchrow(
-        """
-        UPDATE connections
-           SET session_id = NULL,
-               attached_at = NULL,
-               updated_at = now()
-         WHERE id = $1
-           AND archived_at IS NULL
-           AND session_id IS NOT NULL
-        RETURNING *
-        """,
-        connection_id,
-    )
-    if row is None:
-        existing = await conn.fetchrow(
-            "SELECT archived_at, session_id FROM connections WHERE id = $1",
-            connection_id,
-        )
-        if existing is None:
-            raise NotFoundError(
-                f"connection {connection_id} not found",
-                detail={"id": connection_id},
-            )
-        if existing["archived_at"] is not None:
-            raise ConflictError(
-                f"connection {connection_id} is archived",
-                detail={"id": connection_id},
-            )
-        raise ConflictError(
-            f"connection {connection_id} is not in single_session mode",
-            detail={"id": connection_id},
-        )
-    return _row_to_connection(row)
-
-
-async def configure_per_chat_connection(
-    conn: asyncpg.Connection[Any],
-    connection_id: str,
-    *,
-    session_template_id: str,
-) -> Connection:
-    """Switch the connection into per_chat mode."""
-    try:
-        row = await conn.fetchrow(
-            """
-            UPDATE connections
-               SET session_template_id = $2,
-                   attached_at = now(),
-                   updated_at = now()
-             WHERE id = $1
-               AND archived_at IS NULL
-               AND session_id IS NULL
-               AND session_template_id IS NULL
-            RETURNING *
-            """,
-            connection_id,
-            session_template_id,
-        )
-    except asyncpg.ForeignKeyViolationError as exc:
-        raise NotFoundError(
-            f"session template {session_template_id} not found",
-            detail={"session_template_id": session_template_id},
-        ) from exc
-    if row is None:
-        await _raise_for_failed_mode_transition(conn, connection_id)
-    return _row_to_connection(row)
-
-
-async def unconfigure_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
-    """Drop the per_chat configuration, leaving the connection detached.
-
-    Already-spawned per_chat sessions are not cascaded — they remain
-    alive with ``spawned_from_connection_id`` still pointing at this row.
-    """
-    row = await conn.fetchrow(
-        """
-        UPDATE connections
-           SET session_template_id = NULL,
-               attached_at = NULL,
-               updated_at = now()
-         WHERE id = $1
-           AND archived_at IS NULL
-           AND session_template_id IS NOT NULL
-        RETURNING *
-        """,
-        connection_id,
-    )
-    if row is None:
-        existing = await conn.fetchrow(
-            "SELECT archived_at, session_template_id FROM connections WHERE id = $1",
-            connection_id,
-        )
-        if existing is None:
-            raise NotFoundError(
-                f"connection {connection_id} not found",
-                detail={"id": connection_id},
-            )
-        if existing["archived_at"] is not None:
-            raise ConflictError(
-                f"connection {connection_id} is archived",
-                detail={"id": connection_id},
-            )
-        raise ConflictError(
-            f"connection {connection_id} is not in per_chat mode",
-            detail={"id": connection_id},
-        )
-    return _row_to_connection(row)
+# Mode predicates filter on the active-binding row, not the legacy
+# in-place columns: a connection is detached iff no active binding
+# exists; single_session / per_chat iff the active binding carries
+# that mode value.
+_MODE_PREDICATES: dict[ConnectionMode, str] = {
+    "detached": "b.id IS NULL",
+    "single_session": "b.mode = 'single_session'",
+    "per_chat": "b.mode = 'per_chat'",
+}
 
 
 async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
@@ -3128,14 +3140,17 @@ async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) 
     constraint is satisfied because both columns flip together.
     """
     row = await conn.fetchrow(
-        """
-        UPDATE connections
-           SET archived_at        = now(),
-               updated_at         = now(),
-               secrets_ciphertext = NULL,
-               secrets_nonce      = NULL
-         WHERE id = $1 AND archived_at IS NULL
-        RETURNING *
+        f"""
+        WITH updated AS (
+            UPDATE connections
+               SET archived_at        = now(),
+                   updated_at         = now(),
+                   secrets_ciphertext = NULL,
+                   secrets_nonce      = NULL
+             WHERE id = $1 AND archived_at IS NULL
+            RETURNING *
+        )
+        {_CONNECTION_UPDATE_CTE_TAIL}
         """,
         connection_id,
     )
@@ -3147,7 +3162,7 @@ async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) 
     return _row_to_connection(row)
 
 
-# ─── connection_chat_sessions (per_chat ledger) ─────────────────────────────
+# ─── chat_sessions (per_chat ledger, #328 PR 7) ─────────────────────────────
 
 
 async def lookup_chat_session(
@@ -3155,7 +3170,7 @@ async def lookup_chat_session(
 ) -> str | None:
     """Existing session_id for ``(connection_id, chat_id)``, else ``None``."""
     val: str | None = await conn.fetchval(
-        "SELECT session_id FROM connection_chat_sessions WHERE connection_id = $1 AND chat_id = $2",
+        "SELECT session_id FROM chat_sessions WHERE connection_id = $1 AND chat_id = $2",
         connection_id,
         chat_id,
     )
@@ -3177,7 +3192,7 @@ async def insert_chat_session(
     """
     row = await conn.fetchrow(
         """
-        INSERT INTO connection_chat_sessions (connection_id, chat_id, session_id)
+        INSERT INTO chat_sessions (connection_id, chat_id, session_id)
         VALUES ($1, $2, $3)
         ON CONFLICT (connection_id, chat_id) DO NOTHING
         RETURNING session_id
@@ -3202,15 +3217,15 @@ async def insert_chat_session(
 async def delete_chat_session(
     conn: asyncpg.Connection[Any], connection_id: str, chat_id: str
 ) -> bool:
-    """Remove a ``connection_chat_sessions`` row.  Returns ``True`` iff
-    a row was actually deleted.
+    """Remove a ``chat_sessions`` row.  Returns ``True`` iff a row was
+    actually deleted.
 
     Used by the operator-bound chat unbind endpoint.  Hard delete (no
     soft-archive): the row is just an operator-curated route, deleting
     it returns the chat to the connection's mode-default fallback.
     """
     result = await conn.execute(
-        "DELETE FROM connection_chat_sessions WHERE connection_id = $1 AND chat_id = $2",
+        "DELETE FROM chat_sessions WHERE connection_id = $1 AND chat_id = $2",
         connection_id,
         chat_id,
     )
@@ -3229,7 +3244,7 @@ async def get_chat_session_row(
     row = await conn.fetchrow(
         """
         SELECT chat_id, session_id, created_at
-          FROM connection_chat_sessions
+          FROM chat_sessions
          WHERE connection_id = $1 AND chat_id = $2
         """,
         connection_id,
@@ -3245,7 +3260,7 @@ async def list_chat_sessions_for_connection(
 ) -> list[tuple[str, str, datetime]]:
     """List ``(chat_id, session_id, created_at)`` rows in chat_id order.
 
-    Operator-bound and supervisor-spawned rows are returned together —
+    Operator-bound and per-chat-spawned rows are returned together —
     the table doesn't tag the writer, and the union is what an operator
     wants to see when answering "where does each chat on this account
     route?".
@@ -3253,7 +3268,7 @@ async def list_chat_sessions_for_connection(
     rows = await conn.fetch(
         """
         SELECT chat_id, session_id, created_at
-          FROM connection_chat_sessions
+          FROM chat_sessions
          WHERE connection_id = $1
          ORDER BY chat_id
         """,
@@ -4418,118 +4433,6 @@ async def delete_session_github_repos(conn: asyncpg.Connection[Any], session_id:
         "DELETE FROM session_github_repositories WHERE session_id = $1",
         session_id,
     )
-
-
-# ─── connector_tokens ────────────────────────────────────────────────────────
-#
-# Per-connection scoped bearer tokens (#301).  The DB stores only a
-# SHA-256 hash; plaintext is returned ONCE on issue.  ``resolve_connector_token``
-# is the single auth lookup — it touches ``last_used_at`` in the same
-# round-trip as the hash match so auth costs one DB call, not two.
-
-
-def _row_to_connector_token(row: asyncpg.Record) -> ConnectorToken:
-    return ConnectorToken(
-        id=row["id"],
-        connection_id=row["connection_id"],
-        label=row["label"],
-        created_at=row["created_at"],
-        last_used_at=row["last_used_at"],
-        revoked_at=row["revoked_at"],
-    )
-
-
-async def insert_connector_token(
-    conn: asyncpg.Connection[Any],
-    *,
-    connection_id: str,
-    label: str | None,
-    token_hash: str,
-) -> ConnectorToken:
-    """Insert a new (unrevoked) token bound to ``connection_id``."""
-    row = await conn.fetchrow(
-        """
-        INSERT INTO connector_tokens (id, connection_id, label, token_hash)
-        VALUES ($1, $2, $3, $4)
-        RETURNING *
-        """,
-        make_id(CONNECTOR_TOKEN),
-        connection_id,
-        label,
-        token_hash,
-    )
-    assert row is not None  # INSERT … RETURNING * always returns the row
-    return _row_to_connector_token(row)
-
-
-async def list_connector_tokens(
-    conn: asyncpg.Connection[Any], connection_id: str
-) -> list[ConnectorToken]:
-    """All tokens (revoked included) for a connection, newest first.
-
-    Revoked tokens stay in the listing so operators can audit who issued
-    what when; clients should filter by ``revoked_at IS NULL`` if they
-    only want live tokens.
-    """
-    rows = await conn.fetch(
-        """
-        SELECT * FROM connector_tokens
-         WHERE connection_id = $1
-         ORDER BY created_at DESC
-        """,
-        connection_id,
-    )
-    return [_row_to_connector_token(r) for r in rows]
-
-
-async def revoke_connector_token(conn: asyncpg.Connection[Any], token_id: str) -> ConnectorToken:
-    """Soft-delete a token by setting ``revoked_at = now()``.
-
-    Idempotent: re-revoking is a SELECT (the WHERE filter excludes
-    already-revoked rows from the UPDATE), and the existing
-    ``revoked_at`` is returned unchanged.
-    """
-    row = await conn.fetchrow(
-        """
-        UPDATE connector_tokens
-           SET revoked_at = now()
-         WHERE id = $1 AND revoked_at IS NULL
-        RETURNING *
-        """,
-        token_id,
-    )
-    if row is not None:
-        return _row_to_connector_token(row)
-    # Either the token doesn't exist OR it was already revoked.
-    existing = await conn.fetchrow("SELECT * FROM connector_tokens WHERE id = $1", token_id)
-    if existing is None:
-        raise NotFoundError(
-            f"connector_token {token_id} not found",
-            detail={"id": token_id},
-        )
-    return _row_to_connector_token(existing)
-
-
-async def resolve_connector_token(
-    conn: asyncpg.Connection[Any], token_hash: str
-) -> tuple[str, str] | None:
-    """Look up an unrevoked token by hash; touch ``last_used_at`` in one round-trip.
-
-    Returns ``(token_id, connection_id)`` on hit, ``None`` on miss/revoked.
-    Single ``UPDATE … RETURNING`` so auth is one query — not lookup-then-update.
-    """
-    row = await conn.fetchrow(
-        """
-        UPDATE connector_tokens
-           SET last_used_at = now()
-         WHERE token_hash = $1 AND revoked_at IS NULL
-        RETURNING id, connection_id
-        """,
-        token_hash,
-    )
-    if row is None:
-        return None
-    return (row["id"], row["connection_id"])
 
 
 # ─── connectors (type catalog) ───────────────────────────────────────────────

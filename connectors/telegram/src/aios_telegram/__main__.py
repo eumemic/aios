@@ -1,10 +1,9 @@
 """``python -m aios_telegram`` entry point.
 
-Reads ``AIOS_URL`` and ``AIOS_CONNECTOR_TOKEN`` from env (the SDK does
-this automatically inside ``HttpConnector.__init__``).  The bot token
-lives on the connection record (encrypted at rest server-side); the
-connector fetches it via the SDK's ``self.secrets()`` helper at
-``setup()`` time.
+Reads ``AIOS_URL`` and ``AIOS_RUNTIME_TOKEN`` from env (the SDK does
+this automatically inside ``HttpConnector.__init__``).  Each bot token
+lives on its connection record (encrypted at rest server-side); the
+connector fetches secrets per-connection inside ``serve_connection``.
 """
 
 from __future__ import annotations
