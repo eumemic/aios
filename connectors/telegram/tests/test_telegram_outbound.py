@@ -69,18 +69,36 @@ async def test_telegram_edit_message_plain(
     )
 
 
-async def test_telegram_edit_message_html_mode_converts_markdown(
+async def test_telegram_edit_message_markdown_mode_converts(
     connector: TelegramConnector, bot: Any
 ) -> None:
     await connector.telegram_edit_message(
         message_id=99,
         text="**bold**",
-        parse_mode="html",
+        parse_mode="markdown",
         chat_id="123",
         connection_id=CONNECTION_ID,
     )
     kwargs = bot.edit_message_text.call_args.kwargs
     assert kwargs["text"] == "<b>bold</b>"
+    assert kwargs["parse_mode"] == "HTML"
+
+
+async def test_telegram_edit_message_html_mode_passes_through(
+    connector: TelegramConnector, bot: Any
+) -> None:
+    """``parse_mode="html"`` ships raw HTML to Telegram (matching the
+    Bot API's own ``parse_mode=HTML`` semantics).  No markdown
+    conversion — what the agent wrote is what gets sent."""
+    await connector.telegram_edit_message(
+        message_id=99,
+        text='<a href="https://example.com">link</a>',
+        parse_mode="html",
+        chat_id="123",
+        connection_id=CONNECTION_ID,
+    )
+    kwargs = bot.edit_message_text.call_args.kwargs
+    assert kwargs["text"] == '<a href="https://example.com">link</a>'
     assert kwargs["parse_mode"] == "HTML"
 
 
@@ -132,12 +150,30 @@ async def test_telegram_react_clear(
 # ── telegram_send parse_mode ─────────────────────────────────────────
 
 
-async def test_telegram_send_html_mode_converts_markdown(
+async def test_telegram_send_markdown_mode_converts(
     connector: TelegramConnector, bot: Any
 ) -> None:
-    await connector.telegram_send(text="**hi** _there_", parse_mode="html", chat_id="123", connection_id=CONNECTION_ID)
+    """``parse_mode="markdown"`` runs the input through
+    :func:`markdown_to_telegram_html`.  This is the renamed form of
+    what used to be ``parse_mode="html"`` before the smoke-#17 fix —
+    the old name collided with Telegram Bot API semantics."""
+    await connector.telegram_send(text="**hi** _there_", parse_mode="markdown", chat_id="123", connection_id=CONNECTION_ID)
     kwargs = bot.send_message.call_args.kwargs
     assert kwargs["text"] == "<b>hi</b> <i>there</i>"
+    assert kwargs["parse_mode"] == "HTML"
+
+
+async def test_telegram_send_html_mode_passes_through(
+    connector: TelegramConnector, bot: Any
+) -> None:
+    """``parse_mode="html"`` matches Telegram's own ``parse_mode=HTML``
+    semantics: the agent writes HTML directly, the connector forwards
+    verbatim.  Critical for agents that want to use raw ``<a href>``
+    tags or other constructs the markdown converter doesn't emit."""
+    raw = '<b>bold</b> <a href="https://example.com">link</a>'
+    await connector.telegram_send(text=raw, parse_mode="html", chat_id="123", connection_id=CONNECTION_ID)
+    kwargs = bot.send_message.call_args.kwargs
+    assert kwargs["text"] == raw  # untouched
     assert kwargs["parse_mode"] == "HTML"
 
 

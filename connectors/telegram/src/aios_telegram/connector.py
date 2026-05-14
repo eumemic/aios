@@ -373,7 +373,7 @@ class TelegramConnector(HttpConnector):
         self,
         text: str,
         attachments: list[SandboxPath] | None = None,
-        parse_mode: Literal["plain", "html"] = "plain",
+        parse_mode: Literal["plain", "markdown", "html"] = "plain",
         reply_to_message_id: int | None = None,
         *,
         connection_id: str,
@@ -398,12 +398,16 @@ class TelegramConnector(HttpConnector):
                 / etc.; multiple attachments use ``send_media_group``
                 with caption attached to the first item only (per
                 Telegram API).
-            parse_mode: ``"plain"`` (default) sends the text as-is —
-                literal characters, no formatting.  ``"html"`` runs
-                ``text`` through a Markdown→Telegram-HTML converter so
+            parse_mode: How to interpret ``text``.
+                ``"plain"`` (default) — literal characters, no
+                formatting.  ``"markdown"`` — input is markdown;
                 ``**bold**``, ``*italic*``, ``[label](url)``, fenced
-                code, ``> quotes``, and ``||spoilers||`` render with
-                Telegram's native styling.
+                code, ``> quotes``, and ``||spoilers||`` are converted
+                to Telegram's native styling.  ``"html"`` — input is
+                raw HTML (``<b>``, ``<i>``, ``<a href="...">``,
+                ``<code>``, ``<blockquote>``, ``<tg-spoiler>``); passed
+                through verbatim to Telegram per its Bot API
+                ``parse_mode=HTML`` semantics.
             reply_to_message_id: When set, the message is rendered as a
                 native Telegram reply quoting that message (the client
                 UI shows the parent inline above your text).  Pass the
@@ -485,7 +489,7 @@ class TelegramConnector(HttpConnector):
         self,
         message_id: int,
         text: str,
-        parse_mode: Literal["plain", "html"] = "plain",
+        parse_mode: Literal["plain", "markdown", "html"] = "plain",
         *,
         connection_id: str,
         chat_id: str,
@@ -501,9 +505,10 @@ class TelegramConnector(HttpConnector):
             message_id: The id of the message to edit.  Returned by
                 ``telegram_send`` as ``message_id``.
             text: The new body.  See ``parse_mode``.
-            parse_mode: ``"plain"`` sends literal text; ``"html"`` runs
-                ``text`` through the same Markdown→Telegram-HTML
-                converter as ``telegram_send``.
+            parse_mode: How to interpret ``text``.  Same semantics as
+                ``telegram_send``: ``"plain"`` literal text, ``"markdown"``
+                runs the Markdown→Telegram-HTML converter, ``"html"``
+                passes raw HTML through to Telegram.
         """
         state = self._conn_state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
@@ -617,9 +622,26 @@ def _coerce_chat_id(chat_id: str) -> int:
 
 
 def _prepare_text(text: str, parse_mode: str) -> tuple[str, str | None]:
-    """Map a model-facing parse_mode to (body, ptb_parse_mode)."""
-    if parse_mode == "html":
+    """Map a model-facing ``parse_mode`` to (body, ptb_parse_mode).
+
+    Three modes, named so each matches the actual *input* convention
+    being declared:
+
+    - ``"plain"`` — literal text, no formatting.  Empty PTB parse_mode.
+    - ``"markdown"`` — input is markdown; run through
+      :func:`markdown_to_telegram_html` and tell PTB to render the
+      result as HTML.  This is the new name for what used to be called
+      ``"html"`` (which collided with Telegram Bot API semantics — see
+      smoke finding #17).
+    - ``"html"`` — input IS HTML; pass through verbatim and tell PTB
+      to render as HTML.  Matches Telegram's own ``parse_mode=HTML``
+      semantics, so an agent that writes ``<a href="...">link</a>``
+      gets the expected rendering instead of literal text.
+    """
+    if parse_mode == "markdown":
         return markdown_to_telegram_html(text), "HTML"
+    if parse_mode == "html":
+        return text, "HTML"
     return text, None
 
 

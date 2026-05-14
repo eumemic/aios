@@ -185,19 +185,23 @@ Fix: extract `.gif` from `_PHOTO_EXTS` into a new `_ANIMATION_EXTS`; `_classify`
 
 **Note**: #16 + the `9617c84` follow-on to #11 together close the full attachment-rendering chain: `.gif` now routes via `send_animation` AND has `Content-Type: image/gif`, so animated GIFs play inline in Telegram.
 
-### Open — observed but not yet fixed
+**17. Telegram `parse_mode="html"` ran Markdown→HTML converter; name collided with Bot API semantics**
 
-**17. Telegram `parse_mode="html"` runs Markdown→HTML converter; name collides with Bot API semantics** → [#351](https://github.com/eumemic/aios/issues/351)
+The connector's `parse_mode: Literal["plain", "html"]` parameter did NOT mean "I'm writing HTML" (Telegram Bot API semantics) — it meant "I'm writing markdown, you run it through `markdown_to_telegram_html` before sending".  The docstring described the actual behavior, but the parameter NAME was the load-bearing signal; smart-enough models inferred the standard semantics, wrote `<a href="...">`, and got literal-text fallout in chat.
 
-The connector's `parse_mode: Literal["plain", "html"]` parameter does NOT mean "I'm writing HTML" (Telegram Bot API semantics) — it means "I'm writing markdown, you run it through `markdown_to_telegram_html` before sending".  The docstring describes the actual behavior, but the parameter NAME is the load-bearing signal; smart-enough models infer the standard semantics, write `<a href="...">`, and get literal-text fallout in chat.
+Surfaced live when another agent (Ultron) tried `parse_mode="html"` with raw `<a href>` tags and saw the text render as literal characters.
 
-Surfaced live when another agent (Ultron) tried `parse_mode="html"` with raw `<a href>` tags and saw the text render as literal characters.  Recommended rename: `parse_mode: Literal["plain", "markdown", "html"]` where `"markdown"` is the current converter behavior and `"html"` becomes true HTML pass-through.
+Fix: renamed the literal values to match what each actually does.  `parse_mode: Literal["plain", "markdown", "html"]` where `"plain"` is unchanged literal-text, `"markdown"` is the renamed form of the old `"html"` (runs the converter), and the new `"html"` is true Bot-API-semantics raw HTML pass-through (`<b>`, `<i>`, `<a href>`, etc. forwarded verbatim).  Old `parse_mode="html"` callers now hit the new pass-through path; the misnamed-converter behavior is reachable only via `"markdown"`.  Locked with separate tests for each branch.
 
-**18. Tool-call dispatched before `serve_connection` registers state → stringified KeyError** → [#352](https://github.com/eumemic/aios/issues/352)
+**18. Tool-call dispatched before `serve_connection` registers state → stringified KeyError**
 
-The dispatch SSE and the connection-discovery SSE are independent streams.  Backfill on the tool-call stream can fire while `_on_connection_added` is still running.  When the tool method does `self._conn_state[connection_id]`, it raises `KeyError(connection_id)` and the SDK base stringifies it to `{"error": "'conn_01...'"}` — incomprehensible from the model's POV.
+The dispatch SSE and the connection-discovery SSE are independent streams.  Backfill on the tool-call stream could fire while `_on_connection_added` was still running.  When the tool method did `self._conn_state[connection_id]`, it raised `KeyError(connection_id)` and the SDK base stringified it to `{"error": "'conn_01...'"}` — incomprehensible from the model's POV.
 
 Observed during a telegram restart: connector came up at `17:48:40`, tool-call dispatched at `17:48:43`, got the bare-ID KeyError; retry 1s later succeeded.  Same root cause family as #346 (per-connection state race), different symptom path.
+
+Fix: in `HttpConnector.dispatch_call`, special-case the shape — when the tool method raises `KeyError(connection_id)`, produce a structured `{"error": "connection not yet active; retry shortly", "connection_id": ...}` result and log with `reason="connection_state_race"` instead of the opaque quoted ID.  Locked with two tests: one asserting the race shape produces the new payload + reason, one asserting an unrelated `KeyError` (different key) still surfaces as the generic `tool_exception` so the special-case doesn't disguise real bugs.
+
+### Open — observed but not yet fixed
 
 **19. Harness sweep re-wakes session forever on persistent model timeouts** → [#353](https://github.com/eumemic/aios/issues/353)
 
@@ -297,10 +301,10 @@ Not a bug — agent-level configuration choice.  Documented here as a capacity /
 | 14 | Signal account registration via the aios API — three routes + management-call SSE so new phones can be onboarded without SSH or restart | medium feature | open → [#348](https://github.com/eumemic/aios/issues/348) |
 | 15 | Peer inbound edits silently dropped — accept `envelope.editMessage.dataMessage` shape | small fix | ✅ `cfc464e` |
 | 16 | Telegram outbound `.gif` → `send_animation` (not `send_photo`) | small fix | ✅ `4f409bd` |
-| 17 | Telegram `parse_mode="html"` parameter name collides with Bot API semantics | small fix | open → [#351](https://github.com/eumemic/aios/issues/351) |
-| 18 | Tool-call dispatched before `serve_connection` registers state → stringified KeyError | small fix | open → [#352](https://github.com/eumemic/aios/issues/352) |
+| 17 | Telegram `parse_mode="html"` parameter name (rename + add real HTML pass-through) | small fix | ✅ (this PR) |
+| 18 | Tool-call dispatched before `serve_connection` registers state → stringified KeyError | small fix | ✅ (this PR) |
 | 19 | Harness sweep retries persistent-timeout sessions forever; no backoff or cap | medium fix | open → [#353](https://github.com/eumemic/aios/issues/353) |
 | (env) | `aios dev bootstrap` discoverability / harder-to-source-wrong-.env | DX | open → [#349](https://github.com/eumemic/aios/issues/349) |
 | (env) | Runtime token connection-subset scope | feature | open → [#350](https://github.com/eumemic/aios/issues/350) |
 
-All ✅ items landed in the `refactor/328-fixup-smoke` follow-up branch (PR #344).  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene → [#345](https://github.com/eumemic/aios/issues/345).  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.  #12 → [#346](https://github.com/eumemic/aios/issues/346), #13 → [#347](https://github.com/eumemic/aios/issues/347), #14 → [#348](https://github.com/eumemic/aios/issues/348), #17 → [#351](https://github.com/eumemic/aios/issues/351), #18 → [#352](https://github.com/eumemic/aios/issues/352), and #19 → [#353](https://github.com/eumemic/aios/issues/353) are all open follow-ups with their own targeted PRs.
+All ✅ items landed in the `refactor/328-fixup-smoke` follow-up branch (PR #344).  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene → [#345](https://github.com/eumemic/aios/issues/345).  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.  #12 → [#346](https://github.com/eumemic/aios/issues/346), #13 → [#347](https://github.com/eumemic/aios/issues/347), #14 → [#348](https://github.com/eumemic/aios/issues/348), and #19 → [#353](https://github.com/eumemic/aios/issues/353) are all open follow-ups with their own targeted PRs.  [#351](https://github.com/eumemic/aios/issues/351) and [#352](https://github.com/eumemic/aios/issues/352) were closed by this PR — their fixes landed in the same fixup so the open-issue queue stays focused on the items that genuinely need separate PRs.

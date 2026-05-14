@@ -536,12 +536,37 @@ class HttpConnector:
         try:
             result = await meta.fn(**args)
         except Exception as exc:
+            # Tool-call SSE backfill can deliver a call for ``connection_id``
+            # before the connection-discovery SSE has finished registering
+            # the connection's state in the connector's ``_conn_state`` dict
+            # (the two streams are independent).  The tool method's
+            # ``self._conn_state[connection_id]`` lookup KeyErrors and the
+            # raw ``str(KeyError("'conn_01...'"))`` reaches the model as an
+            # opaque quoted ID with no indication that the connection just
+            # wasn't ready yet.  Detect that shape and produce an
+            # interpretable error so the model retries sensibly instead of
+            # guessing at "is `'conn_01...'` an arg I should pass?".
+            error_payload: dict[str, Any]
+            if (
+                isinstance(exc, KeyError)
+                and len(exc.args) == 1
+                and isinstance(exc.args[0], str)
+                and exc.args[0] == connection_id
+            ):
+                error_payload = {
+                    "error": "connection not yet active; retry shortly",
+                    "connection_id": connection_id,
+                }
+                reason = "connection_state_race"
+            else:
+                error_payload = {"error": str(exc)}
+                reason = "tool_exception"
             log.warning(
                 "connector.tool_call.failed",
                 name=name,
                 tool_call_id=tool_call_id,
                 session_id=session_id,
-                reason="tool_exception",
+                reason=reason,
                 error=str(exc),
             )
             await self._post_tool_result(
@@ -549,7 +574,7 @@ class HttpConnector:
                 connection_id=connection_id,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
-                content=json.dumps({"error": str(exc)}),
+                content=json.dumps(error_payload),
                 is_error=True,
             )
             return
@@ -585,7 +610,7 @@ class HttpConnector:
             connection_id=connection_id,
             session_id=session_id,
             tool_call_id=tool_call_id,
-            content=content,  # type: ignore[arg-type]
+            content=content,
             is_error=is_error,
         )
         response = await _post_runtime_tool_result(client=client, body=body)
