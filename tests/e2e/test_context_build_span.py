@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -54,12 +55,22 @@ class TestContextBuildSpan:
         harness.script_model([assistant("Hi!")])
         session = await harness.start("hello")
 
-        # Poison ``build_messages`` on the specific step we drive next.
+        # ``loop.py`` binds ``defer_wake`` via ``from ... import ...``, so the
+        # conftest's patch on ``aios.services.wake.defer_wake`` doesn't reach
+        # the loop-level call site that fires after the outer ``harness_error``
+        # handler reschedules. Patch the loop binding directly (same pattern as
+        # ``test_litellm_502_recovery.py``).
+        async def _noop_defer_wake(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        # Poison ``build_messages`` on every step we drive next; the retry
+        # budget exhausts after 5 steps and ``run_session_step`` re-raises.
         with (
             mock.patch(
                 "aios.harness.step_context.build_messages",
                 side_effect=RuntimeError("boom"),
             ),
+            mock.patch("aios.harness.loop.defer_wake", _noop_defer_wake),
             pytest.raises(RuntimeError, match="boom"),
         ):
             await harness.run_until_idle(session.id)
