@@ -45,7 +45,7 @@ async def bootstrap(
     ``plaintext_key`` in the response is the only time the operator key
     is returned in plaintext.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     async with pool.acquire() as conn:
         if await queries.has_active_root_account(conn, account_id=account_id):
             raise NotFoundError("bootstrap endpoint closed: root account already exists")

@@ -87,7 +87,7 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
     current focal) return a terse ack with empty metadata — they didn't
     actually change the agent's attention and shouldn't anchor anything.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     target = arguments.get("channel_id")
     if target is not None and not isinstance(target, str):
         return ToolResult(

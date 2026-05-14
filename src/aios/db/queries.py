@@ -18,7 +18,7 @@ import math
 import time
 from datetime import datetime
 from types import EllipsisType
-from typing import Any, NamedTuple, NoReturn
+from typing import Any, NamedTuple, NoReturn, cast
 
 import asyncpg
 
@@ -583,7 +583,6 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         archived_at=row["archived_at"],
         focal_channel=row["focal_channel"],
         focal_locked=row["focal_locked"],
-        owner_id=row["owner_id"],
     )
 
 
@@ -5159,3 +5158,18 @@ async def lookup_account_by_key_hash(
     if row is None:
         return None
     return _row_to_account(row), row["_key_id"]
+
+
+# ─── unscoped account_id bootstrap ────────────────────────────────────────────
+# After PR 4, every other query in this module filters by account_id. But the
+# worker side needs to know account_id BEFORE it can call those queries — it
+# starts with only a session_id. This helper is the bootstrap: it looks up
+# sessions.account_id without filtering on account_id, so the worker can
+# discover the account context for a session.
+
+
+async def unscoped_get_session_account_id(conn: asyncpg.Connection[Any], session_id: str) -> str:
+    row = await conn.fetchrow("SELECT account_id FROM sessions WHERE id = $1", session_id)
+    if row is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"session_id": session_id})
+    return cast("str", row["account_id"])

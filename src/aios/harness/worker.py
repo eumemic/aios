@@ -75,7 +75,7 @@ def _make_worker_id() -> str:
 
 
 async def worker_main() -> None:
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     settings = get_settings()
     configure_logging(settings.log_level)
     log = get_logger("aios.worker")

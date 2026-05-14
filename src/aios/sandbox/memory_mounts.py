@@ -47,7 +47,7 @@ async def materialize_store_to_host(
     Subsequent DB drift is propagated by the per-write mirror helpers,
     not by re-materialization.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     host_dir = memory_store_host_dir(store_id)
     marker = host_dir / MATERIALIZED_MARKER
     if marker.exists():

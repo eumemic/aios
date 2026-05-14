@@ -29,6 +29,17 @@ from aios.services import github_repositories as github_repo_service
 from aios.services import memory_stores as memory_service
 
 
+async def load_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> str:
+    """Bootstrap helper: load ``account_id`` for a session by id, no scoping.
+
+    Used by worker / harness / tool entry points that have a ``session_id``
+    but don't yet know the account context. The result is then threaded to
+    every downstream query that requires ``account_id``.
+    """
+    async with pool.acquire() as conn:
+        return await queries.unscoped_get_session_account_id(conn, session_id)
+
+
 async def _list_all_echoes(
     conn: asyncpg.Connection[Any],
     session_id: str,

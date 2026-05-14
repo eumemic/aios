@@ -133,7 +133,7 @@ async def _do_inbound(
     attachment shaping, the handle_inbound call, drop-reason mapping
     — is identical.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     sender_dict: dict[str, Any] = _parse_form_json("sender", sender_json, default={}) or {}
     metadata_dict: dict[str, Any] | None = _parse_form_json("metadata", metadata_json)
     inbound_attachments = [
