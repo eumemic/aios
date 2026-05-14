@@ -410,10 +410,7 @@ async def _run_session_step_body(
                 "cost_usd": None,
             },
         )
-        delay = await _apply_retry_or_failure(pool, session_id)
-        if delay is not None:
-            return delay
-        raise
+        return await _apply_retry_or_failure(pool, session_id)
 
     # ``local_tokens`` costs the full payload (messages + tools) so it
     # matches what the provider counts.  The error branch above stays
