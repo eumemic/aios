@@ -18,6 +18,7 @@ def _get_kwargs(
     after_seq: int | Unset = 0,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
+    error_only: bool | Unset = False,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -38,6 +39,8 @@ def _get_kwargs(
     params["kind"] = json_kind
 
     params["limit"] = limit
+
+    params["error_only"] = error_only
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -90,6 +93,7 @@ def sync_detailed(
     after_seq: int | Unset = 0,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
+    error_only: bool | Unset = False,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseEvent]:
     """List Events
@@ -99,6 +103,7 @@ def sync_detailed(
         after_seq (int | Unset):  Default: 0.
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
+        error_only (bool | Unset):  Default: False.
         authorization (None | str | Unset):
 
     Raises:
@@ -114,6 +119,7 @@ def sync_detailed(
         after_seq=after_seq,
         kind=kind,
         limit=limit,
+        error_only=error_only,
         authorization=authorization,
     )
 
@@ -131,6 +137,7 @@ def sync(
     after_seq: int | Unset = 0,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
+    error_only: bool | Unset = False,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseEvent | None:
     """List Events
@@ -140,6 +147,7 @@ def sync(
         after_seq (int | Unset):  Default: 0.
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
+        error_only (bool | Unset):  Default: False.
         authorization (None | str | Unset):
 
     Raises:
@@ -156,6 +164,7 @@ def sync(
         after_seq=after_seq,
         kind=kind,
         limit=limit,
+        error_only=error_only,
         authorization=authorization,
     ).parsed
 
@@ -167,6 +176,7 @@ async def asyncio_detailed(
     after_seq: int | Unset = 0,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
+    error_only: bool | Unset = False,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseEvent]:
     """List Events
@@ -176,6 +186,7 @@ async def asyncio_detailed(
         after_seq (int | Unset):  Default: 0.
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
+        error_only (bool | Unset):  Default: False.
         authorization (None | str | Unset):
 
     Raises:
@@ -191,6 +202,7 @@ async def asyncio_detailed(
         after_seq=after_seq,
         kind=kind,
         limit=limit,
+        error_only=error_only,
         authorization=authorization,
     )
 
@@ -206,6 +218,7 @@ async def asyncio(
     after_seq: int | Unset = 0,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
+    error_only: bool | Unset = False,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseEvent | None:
     """List Events
@@ -215,6 +228,7 @@ async def asyncio(
         after_seq (int | Unset):  Default: 0.
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
+        error_only (bool | Unset):  Default: False.
         authorization (None | str | Unset):
 
     Raises:
@@ -232,6 +246,7 @@ async def asyncio(
             after_seq=after_seq,
             kind=kind,
             limit=limit,
+            error_only=error_only,
             authorization=authorization,
         )
     ).parsed

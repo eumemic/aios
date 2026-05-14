@@ -1902,6 +1902,16 @@
             }
           },
           {
+            "name": "error_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Error Only"
+            }
+          },
+          {
             "name": "Authorization",
             "in": "header",
             "required": false,

@@ -362,8 +362,8 @@ class TestStepStartEndSpans:
             "step_end",
         ]
 
-    async def test_step_end_emitted_when_body_raises(self) -> None:
-        """If the body raises past the retry budget, ``step_end`` still fires."""
+    async def test_step_end_emitted_when_budget_exhausted(self) -> None:
+        """If the model-call budget is exhausted, ``step_end`` still fires."""
         from aios.harness.loop import run_session_step
 
         session = SimpleNamespace(
@@ -432,11 +432,10 @@ class TestStepStartEndSpans:
             patch("aios.harness.loop.defer_wake", AsyncMock()),
             patch(
                 "aios.harness.loop._count_consecutive_rescheduling",
-                AsyncMock(return_value=4),  # budget exhausted — re-raises
+                AsyncMock(return_value=4),  # budget exhausted — no re-raise, returns None
             ),
-            pytest.raises(RuntimeError, match="provider boom"),
         ):
-            await run_session_step("sess_x")
+            await run_session_step("sess_x")  # must NOT raise
 
         span_names = _span_event_names(append_event)
         assert span_names[0] == "step_start"

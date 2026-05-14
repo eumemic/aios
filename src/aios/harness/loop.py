@@ -137,6 +137,21 @@ async def run_session_step(
             # proceed (matches what the body's litellm-error handler does).
             log.exception("step.job_timeout", session_id=session_id, timeout=_JOB_TIMEOUT_S)
             retry_delay = await _handle_step_timeout(pool, session_id)
+        except Exception:
+            # Unexpected harness error (not a model/tool error — those are caught
+            # inside _run_session_step_body). Emit a span so the event log has a
+            # record, then apply the retry-or-failure state machine identically to
+            # the timeout path. Re-raise when the budget is exhausted.
+            log.exception("step.harness_error", session_id=session_id)
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "span",
+                {"event": "harness_error", "is_error": True},
+            )
+            retry_delay = await _apply_retry_or_failure(pool, session_id)
+            if retry_delay is None:
+                raise
     finally:
         task_registry.unregister_step(session_id)
         await sessions_service.append_event(
@@ -395,10 +410,7 @@ async def _run_session_step_body(
                 "cost_usd": None,
             },
         )
-        delay = await _apply_retry_or_failure(pool, session_id)
-        if delay is not None:
-            return delay
-        raise
+        return await _apply_retry_or_failure(pool, session_id)
 
     # ``local_tokens`` costs the full payload (messages + tools) so it
     # matches what the provider counts.  The error branch above stays
@@ -847,7 +859,7 @@ async def _handle_step_timeout(pool: Any, session_id: str) -> float | None:
         pool,
         session_id,
         "span",
-        {"event": "step_timeout", "timeout_seconds": _JOB_TIMEOUT_S},
+        {"event": "step_timeout", "timeout_seconds": _JOB_TIMEOUT_S, "is_error": True},
     )
     return await _apply_retry_or_failure(pool, session_id)
 
