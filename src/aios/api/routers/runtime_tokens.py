@@ -1,10 +1,8 @@
 """Runtime token endpoints — operator-scoped issue / list / revoke (#328 PR 5).
 
-Successor to :mod:`aios.api.routers.connector_tokens`: bearer tokens
-scope per ``connector`` type rather than per ``connection_id``.  One
-runtime container hosts N connections of one type and authenticates
-with one token; per-connection auth lives on for the legacy paths only
-until PR 7 cuts them.
+Bearer tokens scope per ``connector`` type rather than per
+``connection_id``.  One runtime container hosts N connections of one
+type and authenticates with one token.
 
 Plaintext is returned ONCE on issue.  All subsequent reads expose only
 the :class:`RuntimeToken` view.

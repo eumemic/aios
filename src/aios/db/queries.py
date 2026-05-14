@@ -4480,11 +4480,9 @@ async def update_connector_tools_schema(
 
 # ─── runtime_tokens ──────────────────────────────────────────────────────────
 #
-# Per-connector-type bearer tokens (#328 PR 5). Successor to
-# ``connector_tokens`` (which is per-connection); one bearer authenticates
+# Per-connector-type bearer tokens (#328 PR 5). One bearer authenticates
 # a runtime container that hosts N connections of one ``connector`` type.
-# Shape mirrors ``connector_tokens`` queries — SHA-256 hash, soft-revoke,
-# single ``UPDATE … RETURNING`` resolve.
+# Storage: SHA-256 hash, soft-revoke, single ``UPDATE … RETURNING`` resolve.
 
 
 def _row_to_runtime_token(row: asyncpg.Record) -> RuntimeToken:
