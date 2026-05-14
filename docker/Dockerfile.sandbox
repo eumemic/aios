@@ -2,8 +2,11 @@
 #
 # This is the image every aios v1 session runs inside. It's intentionally
 # minimal: a Python runtime for scripted tool calls, standard POSIX
-# utilities, curl for HTTP fetches, git, and ripgrep for the Phase 4
-# grep/glob tools. No languages beyond Python; no package manager state at
+# utilities, curl for HTTP fetches, git, ripgrep for the grep/glob tools,
+# jq for JSON-from-bash composition (notably ``mcp <server> <tool> | jq
+# ...`` flows), and Node + npm so agents can ``npm install -g`` into the
+# persistent workspace npm prefix without first apt-installing the
+# runtime themselves. No other languages; no package manager state at
 # runtime (apt lists are cleaned).
 #
 # Published as ``ghcr.io/eumemic/aios-sandbox`` by
@@ -40,6 +43,9 @@ RUN apt-get update \
         curl \
         git \
         iptables \
+        jq \
+        nodejs \
+        npm \
         ripgrep \
  && rm -rf /var/lib/apt/lists/*
 
