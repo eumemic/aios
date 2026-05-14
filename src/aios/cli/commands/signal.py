@@ -1,16 +1,4 @@
-"""``aios signal ...`` — signal-cli management operations via the aios API (#348).
-
-Three commands cover the SSH-required gap:
-
-* ``aios signal register +1...`` — initiate registration; prints the
-  signalcaptcha URL and the exact retry command if captcha is required.
-* ``aios signal verify +1... 123456`` — submit the SMS / voice code.
-* ``aios signal profile +1... --given-name=Alice`` — update profile metadata.
-
-Each command is a thin layer over the generated SDK operation; the
-operator-facing route blocks until the connector resolves the call,
-so the CLI experiences one HTTP round-trip per step.
-"""
+"""``aios signal {register, verify, profile}`` — signal-cli management ops."""
 
 from __future__ import annotations
 

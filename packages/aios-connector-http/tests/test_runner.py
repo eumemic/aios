@@ -611,9 +611,7 @@ class TestEmitInbound4xxDrop:
         assert result is None
 
     @pytest.mark.parametrize("status_code", [401, 500])
-    async def test_raises_on_auth_and_5xx(
-        self, probe: _ProbeConnector, status_code: int
-    ) -> None:
+    async def test_raises_on_auth_and_5xx(self, probe: _ProbeConnector, status_code: int) -> None:
         mock_response = MagicMock()
         mock_response.is_error = True
         mock_response.status_code = status_code

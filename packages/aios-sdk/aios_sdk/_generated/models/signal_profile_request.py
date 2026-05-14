@@ -12,18 +12,12 @@ T = TypeVar("T", bound="SignalProfileRequest")
 
 @_attrs_define
 class SignalProfileRequest:
-    """Body for ``POST /v1/connectors/signal/profile``.
-
-    Avatar is intentionally not exposed in v1: the operator API has no
-    clean way to ship file bytes to the connector container yet.  Adding
-    it requires a generic file-staging surface for management calls;
-    revisit then.
-
-        Attributes:
-            account (str):
-            given_name (None | str | Unset):
-            family_name (None | str | Unset):
-            about (None | str | Unset):
+    """
+    Attributes:
+        account (str):
+        given_name (None | str | Unset):
+        family_name (None | str | Unset):
+        about (None | str | Unset):
     """
 
     account: str

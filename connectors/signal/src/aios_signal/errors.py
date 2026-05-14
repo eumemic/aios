@@ -12,11 +12,9 @@ class SignalConnectorError(Exception):
 class RpcError(SignalConnectorError):
     """JSON-RPC error from signal-cli.
 
-    Carries the structured ``code`` and ``data`` fields when present —
-    captcha-required errors put the challenge URL inside ``data`` and
-    would be lost if we flattened to a string.  Either field can be
-    ``None`` when the daemon returned a non-structured failure (e.g.
-    connection drop before a response).
+    ``code`` / ``data`` carry the structured fields when present —
+    captcha-required puts the challenge in ``data`` and would be lost
+    on a string flatten.
     """
 
     def __init__(self, message: str, *, code: int | None = None, data: Any = None) -> None:

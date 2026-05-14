@@ -62,16 +62,10 @@ def sync_detailed(
 ) -> Response[Any | HTTPValidationError]:
     r"""Get Runtime Management Calls
 
-     SSE stream of pending operator-initiated management calls for the
-    caller's connector type (#348).
+     SSE stream of pending management calls for the caller's connector type.
 
-    Sibling of :func:`get_runtime_calls` but per-connector-type only —
-    management calls aren't bound to a session or a connection.
-    Backfills any pending, unexpired calls at subscribe time, then tails
-    ``connector_management_calls_<connector>``.  Each event is keyed
-    ``call`` with a JSON body shaped::
-
-        {\"call_id\": \"mgmt_...\", \"method\": \"register\", \"params\": {...}}
+    Per-connector-type only (no session/connection scope).  Each event is
+    keyed ``call`` with body ``{\"call_id\": \"mgmt_...\", \"method\": str, \"params\": dict}``.
 
     Args:
         authorization (None | str | Unset):
@@ -102,16 +96,10 @@ def sync(
 ) -> Any | HTTPValidationError | None:
     r"""Get Runtime Management Calls
 
-     SSE stream of pending operator-initiated management calls for the
-    caller's connector type (#348).
+     SSE stream of pending management calls for the caller's connector type.
 
-    Sibling of :func:`get_runtime_calls` but per-connector-type only —
-    management calls aren't bound to a session or a connection.
-    Backfills any pending, unexpired calls at subscribe time, then tails
-    ``connector_management_calls_<connector>``.  Each event is keyed
-    ``call`` with a JSON body shaped::
-
-        {\"call_id\": \"mgmt_...\", \"method\": \"register\", \"params\": {...}}
+    Per-connector-type only (no session/connection scope).  Each event is
+    keyed ``call`` with body ``{\"call_id\": \"mgmt_...\", \"method\": str, \"params\": dict}``.
 
     Args:
         authorization (None | str | Unset):
@@ -137,16 +125,10 @@ async def asyncio_detailed(
 ) -> Response[Any | HTTPValidationError]:
     r"""Get Runtime Management Calls
 
-     SSE stream of pending operator-initiated management calls for the
-    caller's connector type (#348).
+     SSE stream of pending management calls for the caller's connector type.
 
-    Sibling of :func:`get_runtime_calls` but per-connector-type only —
-    management calls aren't bound to a session or a connection.
-    Backfills any pending, unexpired calls at subscribe time, then tails
-    ``connector_management_calls_<connector>``.  Each event is keyed
-    ``call`` with a JSON body shaped::
-
-        {\"call_id\": \"mgmt_...\", \"method\": \"register\", \"params\": {...}}
+    Per-connector-type only (no session/connection scope).  Each event is
+    keyed ``call`` with body ``{\"call_id\": \"mgmt_...\", \"method\": str, \"params\": dict}``.
 
     Args:
         authorization (None | str | Unset):
@@ -175,16 +157,10 @@ async def asyncio(
 ) -> Any | HTTPValidationError | None:
     r"""Get Runtime Management Calls
 
-     SSE stream of pending operator-initiated management calls for the
-    caller's connector type (#348).
+     SSE stream of pending management calls for the caller's connector type.
 
-    Sibling of :func:`get_runtime_calls` but per-connector-type only —
-    management calls aren't bound to a session or a connection.
-    Backfills any pending, unexpired calls at subscribe time, then tails
-    ``connector_management_calls_<connector>``.  Each event is keyed
-    ``call`` with a JSON body shaped::
-
-        {\"call_id\": \"mgmt_...\", \"method\": \"register\", \"params\": {...}}
+    Per-connector-type only (no session/connection scope).  Each event is
+    keyed ``call`` with body ``{\"call_id\": \"mgmt_...\", \"method\": str, \"params\": dict}``.
 
     Args:
         authorization (None | str | Unset):

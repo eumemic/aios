@@ -71,16 +71,15 @@ def sync_detailed(
 ) -> Response[HTTPValidationError | SignalVerifyResponse]:
     """Post Signal Verify
 
-     Submit the verification code received via SMS / voice.
+     Submit the SMS / voice verification code.
 
-    On success, signal-cli writes the new account to its on-disk
-    ``accounts.json``.  The running signal connector picks it up
-    without restart on the next ``verify_phone`` call (the daemon
-    re-reads the file fresh; see ``daemon.py:_read_accounts_index``).
+    signal-cli writes the new account to its ``accounts.json``; the
+    running connector picks it up on the next ``verify_phone`` call
+    without restart.
 
     Args:
         authorization (None | str | Unset):
-        body (SignalVerifyRequest): Body for ``POST /v1/connectors/signal/verify``.
+        body (SignalVerifyRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -110,16 +109,15 @@ def sync(
 ) -> HTTPValidationError | SignalVerifyResponse | None:
     """Post Signal Verify
 
-     Submit the verification code received via SMS / voice.
+     Submit the SMS / voice verification code.
 
-    On success, signal-cli writes the new account to its on-disk
-    ``accounts.json``.  The running signal connector picks it up
-    without restart on the next ``verify_phone`` call (the daemon
-    re-reads the file fresh; see ``daemon.py:_read_accounts_index``).
+    signal-cli writes the new account to its ``accounts.json``; the
+    running connector picks it up on the next ``verify_phone`` call
+    without restart.
 
     Args:
         authorization (None | str | Unset):
-        body (SignalVerifyRequest): Body for ``POST /v1/connectors/signal/verify``.
+        body (SignalVerifyRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -144,16 +142,15 @@ async def asyncio_detailed(
 ) -> Response[HTTPValidationError | SignalVerifyResponse]:
     """Post Signal Verify
 
-     Submit the verification code received via SMS / voice.
+     Submit the SMS / voice verification code.
 
-    On success, signal-cli writes the new account to its on-disk
-    ``accounts.json``.  The running signal connector picks it up
-    without restart on the next ``verify_phone`` call (the daemon
-    re-reads the file fresh; see ``daemon.py:_read_accounts_index``).
+    signal-cli writes the new account to its ``accounts.json``; the
+    running connector picks it up on the next ``verify_phone`` call
+    without restart.
 
     Args:
         authorization (None | str | Unset):
-        body (SignalVerifyRequest): Body for ``POST /v1/connectors/signal/verify``.
+        body (SignalVerifyRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -181,16 +178,15 @@ async def asyncio(
 ) -> HTTPValidationError | SignalVerifyResponse | None:
     """Post Signal Verify
 
-     Submit the verification code received via SMS / voice.
+     Submit the SMS / voice verification code.
 
-    On success, signal-cli writes the new account to its on-disk
-    ``accounts.json``.  The running signal connector picks it up
-    without restart on the next ``verify_phone`` call (the daemon
-    re-reads the file fresh; see ``daemon.py:_read_accounts_index``).
+    signal-cli writes the new account to its ``accounts.json``; the
+    running connector picks it up on the next ``verify_phone`` call
+    without restart.
 
     Args:
         authorization (None | str | Unset):
-        body (SignalVerifyRequest): Body for ``POST /v1/connectors/signal/verify``.
+        body (SignalVerifyRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

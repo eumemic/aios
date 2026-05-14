@@ -102,16 +102,11 @@ _MGMT_ATTR = "__aios_http_management__"
 
 
 class ManagementHandlerError(Exception):
-    """Raised inside a ``@management_handler`` to deliver a structured failure.
+    """Raised by a ``@management_handler`` to POST a structured ``is_error=true`` payload.
 
-    Carries a JSON-serialisable payload that becomes the result envelope
-    POSTed back to the api as ``is_error=true``.  Signal-cli's
-    captcha-required path uses this to surface the captcha URL — the
-    operator-facing route then re-interprets it as a 200 actionable
-    state.  Plain ``Exception`` subclasses become generic
-    ``{"error": str(exc)}`` payloads via ``dispatch_management_call``;
-    use this when the operator side needs a discriminator beyond a
-    string.
+    Plain exceptions become ``{"error": str(exc)}``; raise this when the
+    operator side needs to discriminate on a structured shape (e.g.
+    captcha-required carrying a URL).
     """
 
     def __init__(self, payload: dict[str, Any]) -> None:
@@ -169,18 +164,11 @@ def management_handler(
     *,
     method: str | None = None,
 ) -> Callable[[ToolFn], ToolFn]:
-    """Decorate a method as a management-call handler (#348).
+    """Decorate a method as a management-call handler.
 
-    Sibling of :func:`tool` for operator-initiated management
-    operations.  The decorated method's name (or the explicit
-    ``method=`` override) is the wire-level method name the api uses
-    to dispatch — must match what the operator-facing routes submit
-    (e.g. ``register``, ``verify``, ``updateProfile``).
-
-    Management handlers are NOT included in the tool catalog (they
-    aren't model-callable); the SDK spawns a separate
-    ``_management_call_loop`` that pulls from the per-type
-    ``GET /v1/connectors/runtime/management-calls`` SSE.
+    Sibling of :func:`tool` for operator-initiated calls (not model-callable).
+    The decorated method's name (or the explicit ``method=`` override) is
+    the wire-level method the operator-facing route dispatches to.
     """
 
     def _wrap(f: ToolFn) -> ToolFn:
@@ -750,11 +738,8 @@ class HttpConnector:
     async def _management_call_loop(self) -> None:
         """Tail the per-type management-calls SSE and dispatch each call.
 
-        Sibling of :meth:`_tool_loop` (#348).  Same dedup spool
-        (``self._answered``) because ``mgmt_*`` and ``call_*`` ULIDs
-        share a namespace and never collide.  Same retry posture —
-        transport errors back off, app-level exceptions propagate so
-        the operator sees the bug.
+        Shares ``self._answered`` with :meth:`_tool_loop`; ``mgmt_*`` and
+        ``call_*`` ULIDs are namespace-disjoint.
         """
         client = self._require_client()
         backoff = 1.0
@@ -788,15 +773,7 @@ class HttpConnector:
     async def dispatch_management_call(self, call: dict[str, Any]) -> None:
         """Run the management handler for ``call`` and POST the result.
 
-        Public surface so tests can drive dispatch without going
-        through SSE — the production path is :meth:`_management_call_loop`.
-
-        :class:`ManagementHandlerError` payloads pass through to the api
-        as ``is_error=true`` with the handler's structured payload
-        intact (used for signal's captcha-required flow).  Any other
-        exception becomes ``{"error": str(exc)}`` so the operator sees
-        a readable error envelope rather than the connector silently
-        timing out.
+        Public so tests can drive dispatch without SSE.
         """
         client = self._require_client()
         call_id = call.get("call_id", "")
@@ -872,7 +849,6 @@ class HttpConnector:
         result: Any,
         is_error: bool,
     ) -> None:
-        """POST one management-call result via the generated runtime op."""
         body = RuntimeManagementCallResultRequest(
             call_id=call_id,
             result=result,
@@ -881,8 +857,7 @@ class HttpConnector:
         response = await _post_runtime_management_call_result(client=client, body=body)
         if response.status_code >= 400:
             raise RuntimeError(
-                f"management-call result POST failed: "
-                f"{response.status_code} {response.content!r}"
+                f"management-call result POST failed: {response.status_code} {response.content!r}"
             )
 
     @staticmethod

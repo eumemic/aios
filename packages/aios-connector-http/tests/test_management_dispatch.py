@@ -60,9 +60,7 @@ class _ManagementProbeConnector(HttpConnector):
         is_error: bool,
     ) -> None:
         del client
-        self.results.append(
-            _RecordedResult(call_id=call_id, result=result, is_error=is_error)
-        )
+        self.results.append(_RecordedResult(call_id=call_id, result=result, is_error=is_error))
 
 
 @pytest.fixture
@@ -72,9 +70,7 @@ def probe() -> _ManagementProbeConnector:
 
 class TestDispatchManagementCall:
     @pytest.mark.asyncio
-    async def test_routes_call_to_decorated_handler(
-        self, probe: _ManagementProbeConnector
-    ) -> None:
+    async def test_routes_call_to_decorated_handler(self, probe: _ManagementProbeConnector) -> None:
         await probe.dispatch_management_call(
             {"call_id": "mgmt_1", "method": "register", "params": {"account": "+15551234567"}}
         )

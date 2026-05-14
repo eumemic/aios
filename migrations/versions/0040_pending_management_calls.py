@@ -1,17 +1,6 @@
-"""Pending management calls — operator→connector RPC plane (#348).
+"""Pending management calls — operator→connector RPC plane.
 
-The api process posts a row here when an operator hits one of the
-``/v1/connectors/<connector>/<method>`` routes (register, verify,
-updateProfile for signal); the runtime container subscribes via
-``GET /v1/connectors/runtime/management-calls`` SSE, dispatches the
-call, and POSTs the result back to
-``/v1/connectors/runtime/management-call-results``.  The api process
-LISTENs on ``connector_result_<call_id>`` (existing primitive in
-``db/listen.py``) for the wakeup.
-
-Rows are NOT deleted on resolve — a small audit trail for botched
-registrations.  A cleanup job for ``resolved_at IS NOT NULL AND
-resolved_at < now() - interval '30 days'`` is a follow-up.
+Resolved rows are kept for audit; a TTL cleanup is a follow-up.
 
 Revision ID: 0040
 Revises: 0039

@@ -237,15 +237,7 @@ async def listen_for_management_calls(
     *,
     queue_max: int = 1000,
 ) -> AsyncIterator[asyncio.Queue[str]]:
-    """LISTEN ``connector_management_calls_<connector>``; yield a queue of ``call_id`` payloads.
-
-    Sibling of :func:`listen_for_connector_calls_by_type` for the
-    operator→connector RPC plane (#348).  The runtime container
-    subscribes via ``GET /v1/connectors/runtime/management-calls``; the
-    api emits one NOTIFY per ``submit_call``.  Payload is just the
-    ``call_id`` — the SSE generator fetches the full row to assemble
-    the event.
-    """
+    """LISTEN ``connector_management_calls_<connector>``; yield a queue of ``call_id`` payloads."""
     conn = await asyncpg.connect(normalize_dsn(db_url))
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
     channel = f"connector_management_calls_{connector}"

@@ -4478,18 +4478,7 @@ async def update_connector_tools_schema(
     )
 
 
-# ─── pending management calls (operator→connector RPC plane, #348) ──────────
-#
-# Sibling of the tool-call substrate but per-connector-type, not per-session.
-# Operator hits ``POST /v1/connectors/<connector>/<method>``; the api inserts
-# a row here and emits a ``connector_management_calls_<connector>`` NOTIFY;
-# the runtime container subscribes via SSE, dispatches, POSTs the result
-# back; the result-intake route resolves the row and NOTIFYs
-# ``connector_result_<call_id>`` which the originating request is LISTENing
-# on (see ``listen_for_connector_result`` in db/listen.py).
-#
-# Rows are NOT deleted on resolve — small audit trail for botched
-# registrations.  A cleanup job is a follow-up.
+# ─── pending management calls (operator→connector RPC plane) ──────────
 
 
 async def insert_management_call(

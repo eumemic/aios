@@ -139,7 +139,7 @@ async def stream_management_calls(
     httpx_client: httpx.AsyncClient,
     connector: str,
 ) -> AsyncIterator[SseMessage]:
-    """Yield SSE messages from ``GET /v1/connectors/runtime/management-calls`` (#348).
+    """Yield SSE messages from ``GET /v1/connectors/runtime/management-calls``.
 
     Sibling of :func:`stream_connector_calls` for operator-initiated
     management operations (e.g. signal-cli ``register`` / ``verify`` /

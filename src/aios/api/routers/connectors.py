@@ -435,16 +435,10 @@ async def get_runtime_management_calls(
     pool: PoolDep,
     auth: RuntimeAuthDep,
 ) -> EventSourceResponse:
-    """SSE stream of pending operator-initiated management calls for the
-    caller's connector type (#348).
+    """SSE stream of pending management calls for the caller's connector type.
 
-    Sibling of :func:`get_runtime_calls` but per-connector-type only —
-    management calls aren't bound to a session or a connection.
-    Backfills any pending, unexpired calls at subscribe time, then tails
-    ``connector_management_calls_<connector>``.  Each event is keyed
-    ``call`` with a JSON body shaped::
-
-        {"call_id": "mgmt_...", "method": "register", "params": {...}}
+    Per-connector-type only (no session/connection scope).  Each event is
+    keyed ``call`` with body ``{"call_id": "mgmt_...", "method": str, "params": dict}``.
     """
     _, connector = auth
     return EventSourceResponse(
@@ -453,39 +447,21 @@ async def get_runtime_management_calls(
     )
 
 
-# ─── operator-facing signal management routes (#348) ─────────────────────────
-#
-# Block-open shape: the route awaits the connector's result via the
-# ``connector_result_<call_id>`` LISTEN channel and returns it inline.
-# Timeouts (per-method) are absorbed by ``ManagementCallTimeoutError``.
-# Single-instance signal connector is the v1 assumption — see the
-# pending_management_calls table comment in queries.py:4480.
-
-
-_SIGNAL_REGISTER_TIMEOUT_S: float = 30.0
-_SIGNAL_VERIFY_TIMEOUT_S: float = 60.0
-_SIGNAL_PROFILE_TIMEOUT_S: float = 30.0
-_SIGNAL_CAPTCHA_URL: str = "https://signalcaptchas.org/registration/generate"
+# ─── operator-facing signal management routes ─────────────────────────
 
 
 class SignalRegisterRequest(BaseModel):
-    """Body for ``POST /v1/connectors/signal/register``."""
-
     model_config = ConfigDict(extra="forbid")
 
-    account: str  # E.164 phone, e.g. "+15551234567"
-    captcha: str | None = None  # signalcaptcha:// token from a prior 200
-    voice: bool = False  # SMS by default; True opts into voice call
+    account: str
+    captcha: str | None = None
+    voice: bool = False
 
 
 class SignalRegisterResponse(BaseModel):
-    """Outcome of a register call.
-
-    ``status="captcha_required"`` is intentionally a 200 response, not a
-    4xx — it's an actionable next step (solve the captcha, repost with
-    the token) rather than an error.  4xx would bury the URL inside the
-    error envelope.
-    """
+    """``status="captcha_required"`` is a 200, not a 4xx — it's an actionable
+    next step (solve the captcha, repost with the token), and 4xx would bury
+    the URL inside FastAPI's error envelope."""
 
     account: str
     status: Literal["sms_sent", "voice_sent", "captcha_required"]
@@ -493,13 +469,11 @@ class SignalRegisterResponse(BaseModel):
 
 
 class SignalVerifyRequest(BaseModel):
-    """Body for ``POST /v1/connectors/signal/verify``."""
-
     model_config = ConfigDict(extra="forbid")
 
     account: str
-    code: str  # 6-digit SMS / voice code
-    pin: str | None = None  # PIN for accounts with registration lock
+    code: str
+    pin: str | None = None
 
 
 class SignalVerifyResponse(BaseModel):
@@ -508,14 +482,6 @@ class SignalVerifyResponse(BaseModel):
 
 
 class SignalProfileRequest(BaseModel):
-    """Body for ``POST /v1/connectors/signal/profile``.
-
-    Avatar is intentionally not exposed in v1: the operator API has no
-    clean way to ship file bytes to the connector container yet.  Adding
-    it requires a generic file-staging surface for management calls;
-    revisit then.
-    """
-
     model_config = ConfigDict(extra="forbid")
 
     account: str
@@ -524,8 +490,8 @@ class SignalProfileRequest(BaseModel):
     about: str | None = None
 
 
-class SignalProfileResponse(BaseModel):
-    account: str
+def _is_captcha_required(result: Any) -> bool:
+    return isinstance(result, dict) and result.get("status") == "captcha_required"
 
 
 async def _signal_management_call(
@@ -536,15 +502,6 @@ async def _signal_management_call(
     params: dict[str, Any],
     timeout_s: float,
 ) -> Any:
-    """Submit a signal management call and translate the (result, is_error) envelope.
-
-    ``is_error=True`` from the connector becomes :class:`ConnectorCallFailedError`
-    (HTTP 502).  The one exception is captcha-required: signal's handler
-    raises a structured ``ManagementHandlerError`` with the captcha URL
-    payload, which the connector POSTs as ``is_error=True`` — but the
-    route surfaces it as a normal 200 response with
-    ``status="captcha_required"``.  See SignalRegisterResponse.
-    """
     result, is_error = await management_calls.submit_call(
         db_url,
         pool,
@@ -561,10 +518,6 @@ async def _signal_management_call(
     return result
 
 
-def _is_captcha_required(result: Any) -> bool:
-    return isinstance(result, dict) and result.get("status") == "captcha_required"
-
-
 @router.post(
     "/signal/register",
     operation_id="post_connector_signal_register",
@@ -575,30 +528,24 @@ async def post_signal_register(
     pool: PoolDep,
     _auth: AuthDep,
 ) -> SignalRegisterResponse:
-    """Initiate a signal-cli ``register`` for ``account``.
+    """Initiate signal-cli ``register`` for ``account``.
 
-    If signal requires a captcha (commonly the case), returns 200 with
-    ``status="captcha_required"`` and ``captcha_url``.  Solve in a
-    browser, then POST again with ``captcha=<signalcaptcha-token>``.
-    On success the user receives an SMS (or voice call with
-    ``voice=true``) carrying a 6-digit code — submit it via
-    :func:`post_signal_verify`.
+    On captcha-required (common), returns 200 with the URL — solve in a
+    browser, repost with ``captcha=<token>``.  On success: SMS (or voice
+    call with ``voice=true``) carrying a 6-digit code for ``verify``.
     """
-    params: dict[str, Any] = {"account": body.account, "voice": body.voice}
-    if body.captcha is not None:
-        params["captcha"] = body.captcha
     result = await _signal_management_call(
         db_url,
         pool,
         method="register",
-        params=params,
-        timeout_s=_SIGNAL_REGISTER_TIMEOUT_S,
+        params=body.model_dump(exclude_none=True),
+        timeout_s=30.0,
     )
     if _is_captcha_required(result):
         return SignalRegisterResponse(
             account=body.account,
             status="captcha_required",
-            captcha_url=result.get("captcha_url", _SIGNAL_CAPTCHA_URL),
+            captcha_url=result["captcha_url"],
         )
     return SignalRegisterResponse(
         account=body.account,
@@ -616,22 +563,18 @@ async def post_signal_verify(
     pool: PoolDep,
     _auth: AuthDep,
 ) -> SignalVerifyResponse:
-    """Submit the verification code received via SMS / voice.
+    """Submit the SMS / voice verification code.
 
-    On success, signal-cli writes the new account to its on-disk
-    ``accounts.json``.  The running signal connector picks it up
-    without restart on the next ``verify_phone`` call (the daemon
-    re-reads the file fresh; see ``daemon.py:_read_accounts_index``).
+    signal-cli writes the new account to its ``accounts.json``; the
+    running connector picks it up on the next ``verify_phone`` call
+    without restart.
     """
-    params: dict[str, Any] = {"account": body.account, "code": body.code}
-    if body.pin is not None:
-        params["pin"] = body.pin
     result = await _signal_management_call(
         db_url,
         pool,
         method="verify",
-        params=params,
-        timeout_s=_SIGNAL_VERIFY_TIMEOUT_S,
+        params=body.model_dump(exclude_none=True),
+        timeout_s=60.0,
     )
     return SignalVerifyResponse(account=body.account, uuid=str(result.get("uuid", "")))
 
@@ -639,46 +582,31 @@ async def post_signal_verify(
 @router.post(
     "/signal/profile",
     operation_id="post_connector_signal_profile",
+    status_code=status.HTTP_204_NO_CONTENT,
 )
 async def post_signal_profile(
     body: SignalProfileRequest,
     db_url: DbUrlDep,
     pool: PoolDep,
     _auth: AuthDep,
-) -> SignalProfileResponse:
-    """Update the signal profile (given_name / family_name / about) for ``account``.
-
-    Avatar bytes are not supported in v1; see SignalProfileRequest.
-    """
-    fields: dict[str, Any] = {"account": body.account}
-    if body.given_name is not None:
-        fields["given_name"] = body.given_name
-    if body.family_name is not None:
-        fields["family_name"] = body.family_name
-    if body.about is not None:
-        fields["about"] = body.about
+) -> None:
+    """Update ``given_name`` / ``family_name`` / ``about``.  Avatar bytes
+    are not supported in v1 (no operator→container file staging surface)."""
     await _signal_management_call(
         db_url,
         pool,
         method="updateProfile",
-        params=fields,
-        timeout_s=_SIGNAL_PROFILE_TIMEOUT_S,
+        params=body.model_dump(exclude_none=True),
+        timeout_s=30.0,
     )
-    return SignalProfileResponse(account=body.account)
 
 
-# ─── runtime management-call result intake (#348) ────────────────────────────
+# ─── runtime management-call result intake ────────────────────────────
 
 
 class RuntimeManagementCallResultRequest(BaseModel):
-    """Body for ``POST /v1/connectors/runtime/management-call-results``.
-
-    The runtime container POSTs this after dispatching a management call
-    received via the ``/runtime/management-calls`` SSE.  Idempotent on
-    ``call_id`` — a second POST whose row has already moved out of
-    ``pending`` no-ops (no double-NOTIFY, so the operator can't get two
-    wakes).
-    """
+    """Idempotent on ``call_id`` — a replay POST against an already-resolved
+    row no-ops (no double-NOTIFY)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -697,15 +625,6 @@ async def post_runtime_management_call_result(
     pool: PoolDep,
     auth: RuntimeAuthDep,
 ) -> None:
-    """Resolve a pending management call by posting the connector's result.
-
-    Authorization: the runtime bearer's connector must match the
-    pending call's connector.  The handler does the scope check, runs
-    a conditional UPDATE (only resolves rows still in ``pending``),
-    and on success fires the wake NOTIFY on
-    ``connector_result_<call_id>`` — the operator's request is LISTENing
-    there via :func:`aios.db.listen.listen_for_connector_result`.
-    """
     _, auth_connector = auth
     async with pool.acquire() as conn:
         row = await queries.get_management_call(conn, body.call_id)
@@ -719,13 +638,7 @@ async def post_runtime_management_call_result(
             is_error=body.is_error,
         )
         if not moved:
-            # Already resolved by a prior POST — no-op, no NOTIFY.  Returns
-            # 201 anyway because the caller's "deliver the result" intent
-            # is satisfied (it was satisfied last time).
             return
-        # NOTIFY fires after the UPDATE row is durable but before this
-        # connection's autocommit closes; the LISTENing client gets the
-        # wake the moment the row is visible.
         await conn.execute(
             "SELECT pg_notify($1, $2)",
             f"connector_result_{body.call_id}",

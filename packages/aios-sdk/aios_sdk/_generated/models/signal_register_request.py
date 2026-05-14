@@ -12,8 +12,7 @@ T = TypeVar("T", bound="SignalRegisterRequest")
 
 @_attrs_define
 class SignalRegisterRequest:
-    """Body for ``POST /v1/connectors/signal/register``.
-
+    """
     Attributes:
         account (str):
         captcha (None | str | Unset):

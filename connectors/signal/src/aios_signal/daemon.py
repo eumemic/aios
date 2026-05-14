@@ -361,58 +361,36 @@ class SignalDaemon:
         return mapping
 
     async def register(self, *, phone: str, captcha: str | None, voice: bool) -> None:
-        """Initiate registration for ``phone`` (#348).
-
-        Wraps signal-cli's ``register`` JSON-RPC.  ``captcha`` is the
-        ``signalcaptcha://`` token from a prior captcha-required
-        response; pass ``None`` on the first attempt.  ``voice=True``
-        switches the verification channel from SMS to voice call.
-        Raises :class:`RpcError` on failure — captcha-required reaches
-        the caller as an ``RpcError`` carrying the structured ``data``
-        field; the operator-facing handler unwraps it.
-        """
         params: dict[str, Any] = {"account": phone, "voice": voice}
         if captcha is not None:
             params["captcha"] = captcha
         await self.rpc.call("register", params)
 
     async def verify(self, *, phone: str, code: str, pin: str | None) -> dict[str, Any]:
-        """Submit the SMS / voice verification code (#348).
-
-        On success, signal-cli writes the new account row to
-        ``config_dir/data/accounts.json``; the next
-        :meth:`verify_phone` call sees it without any restart.  Returns
-        whatever the daemon emits as the ``result`` field — typically
-        ``{"uuid": ...}``.  Returns ``{}`` if the daemon emits a
-        non-dict result (best-effort: the row gets written either way).
-        """
         params: dict[str, Any] = {"account": phone, "verificationCode": code}
         if pin is not None:
             params["pin"] = pin
         result = await self.rpc.call("verify", params)
         return result if isinstance(result, dict) else {}
 
-    async def update_profile(self, *, phone: str, **fields: str | None) -> None:
-        """Update profile metadata for ``phone`` via signal-cli's ``updateProfile``.
-
-        ``fields`` may include ``given_name``, ``family_name``, ``about``
-        (translated to signal-cli's camelCase params at the call site).
-        ``None`` values are dropped — the daemon treats absent params
-        as "no change" but treats null params as "clear field."
-        """
+    async def update_profile(
+        self,
+        *,
+        phone: str,
+        given_name: str | None,
+        family_name: str | None,
+        about: str | None,
+    ) -> None:
+        # ``None`` is dropped — signal-cli treats absent params as
+        # "no change" and null params as "clear field."
         params: dict[str, Any] = {"account": phone}
-        for key, value in fields.items():
-            if value is None:
-                continue
-            # signal-cli's updateProfile uses camelCase param names.
-            params[_snake_to_camel(key)] = value
+        if given_name is not None:
+            params["givenName"] = given_name
+        if family_name is not None:
+            params["familyName"] = family_name
+        if about is not None:
+            params["about"] = about
         await self.rpc.call("updateProfile", params)
-
-
-def _snake_to_camel(name: str) -> str:
-    """Translate ``given_name`` → ``givenName`` for signal-cli params."""
-    head, *tail = name.split("_")
-    return head + "".join(part.title() for part in tail)
 
 
 async def _spawn_subprocess(args: list[str]) -> asyncio.subprocess.Process:

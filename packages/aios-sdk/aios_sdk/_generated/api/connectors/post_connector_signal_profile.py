@@ -1,5 +1,5 @@
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -7,7 +7,6 @@ from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
 from ...models.signal_profile_request import SignalProfileRequest
-from ...models.signal_profile_response import SignalProfileResponse
 from ...types import UNSET, Response, Unset
 
 
@@ -35,11 +34,10 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> HTTPValidationError | SignalProfileResponse | None:
-    if response.status_code == 200:
-        response_200 = SignalProfileResponse.from_dict(response.json())
-
-        return response_200
+) -> Any | HTTPValidationError | None:
+    if response.status_code == 204:
+        response_204 = cast(Any, None)
+        return response_204
 
     if response.status_code == 422:
         response_422 = HTTPValidationError.from_dict(response.json())
@@ -54,7 +52,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[HTTPValidationError | SignalProfileResponse]:
+) -> Response[Any | HTTPValidationError]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -68,28 +66,22 @@ def sync_detailed(
     client: AuthenticatedClient | Client,
     body: SignalProfileRequest,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | SignalProfileResponse]:
+) -> Response[Any | HTTPValidationError]:
     """Post Signal Profile
 
-     Update the signal profile (given_name / family_name / about) for ``account``.
-
-    Avatar bytes are not supported in v1; see SignalProfileRequest.
+     Update ``given_name`` / ``family_name`` / ``about``.  Avatar bytes
+    are not supported in v1 (no operator→container file staging surface).
 
     Args:
         authorization (None | str | Unset):
-        body (SignalProfileRequest): Body for ``POST /v1/connectors/signal/profile``.
-
-            Avatar is intentionally not exposed in v1: the operator API has no
-            clean way to ship file bytes to the connector container yet.  Adding
-            it requires a generic file-staging surface for management calls;
-            revisit then.
+        body (SignalProfileRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | SignalProfileResponse]
+        Response[Any | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
@@ -109,28 +101,22 @@ def sync(
     client: AuthenticatedClient | Client,
     body: SignalProfileRequest,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | SignalProfileResponse | None:
+) -> Any | HTTPValidationError | None:
     """Post Signal Profile
 
-     Update the signal profile (given_name / family_name / about) for ``account``.
-
-    Avatar bytes are not supported in v1; see SignalProfileRequest.
+     Update ``given_name`` / ``family_name`` / ``about``.  Avatar bytes
+    are not supported in v1 (no operator→container file staging surface).
 
     Args:
         authorization (None | str | Unset):
-        body (SignalProfileRequest): Body for ``POST /v1/connectors/signal/profile``.
-
-            Avatar is intentionally not exposed in v1: the operator API has no
-            clean way to ship file bytes to the connector container yet.  Adding
-            it requires a generic file-staging surface for management calls;
-            revisit then.
+        body (SignalProfileRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | SignalProfileResponse
+        Any | HTTPValidationError
     """
 
     return sync_detailed(
@@ -145,28 +131,22 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
     body: SignalProfileRequest,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | SignalProfileResponse]:
+) -> Response[Any | HTTPValidationError]:
     """Post Signal Profile
 
-     Update the signal profile (given_name / family_name / about) for ``account``.
-
-    Avatar bytes are not supported in v1; see SignalProfileRequest.
+     Update ``given_name`` / ``family_name`` / ``about``.  Avatar bytes
+    are not supported in v1 (no operator→container file staging surface).
 
     Args:
         authorization (None | str | Unset):
-        body (SignalProfileRequest): Body for ``POST /v1/connectors/signal/profile``.
-
-            Avatar is intentionally not exposed in v1: the operator API has no
-            clean way to ship file bytes to the connector container yet.  Adding
-            it requires a generic file-staging surface for management calls;
-            revisit then.
+        body (SignalProfileRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | SignalProfileResponse]
+        Response[Any | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
@@ -184,28 +164,22 @@ async def asyncio(
     client: AuthenticatedClient | Client,
     body: SignalProfileRequest,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | SignalProfileResponse | None:
+) -> Any | HTTPValidationError | None:
     """Post Signal Profile
 
-     Update the signal profile (given_name / family_name / about) for ``account``.
-
-    Avatar bytes are not supported in v1; see SignalProfileRequest.
+     Update ``given_name`` / ``family_name`` / ``about``.  Avatar bytes
+    are not supported in v1 (no operator→container file staging surface).
 
     Args:
         authorization (None | str | Unset):
-        body (SignalProfileRequest): Body for ``POST /v1/connectors/signal/profile``.
-
-            Avatar is intentionally not exposed in v1: the operator API has no
-            clean way to ship file bytes to the connector container yet.  Adding
-            it requires a generic file-staging surface for management calls;
-            revisit then.
+        body (SignalProfileRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | SignalProfileResponse
+        Any | HTTPValidationError
     """
 
     return (

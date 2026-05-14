@@ -1,15 +1,6 @@
-"""End-to-end coverage for operator→connector management calls (#348).
+"""E2E: operator-route → NOTIFY → SDK SSE dispatch → result POST → wake → response.
 
-Stands up a real aios API server in-process, spawns a fake "signal"
-connector that uses the production :class:`HttpConnector` SDK and three
-``@management_handler``-decorated methods, then drives the
-``POST /v1/connectors/signal/{register,verify,profile}`` operator routes
-through the full data plane: api INSERT → NOTIFY → SDK SSE dispatch →
-result POST → ``connector_result_<call_id>`` wake → operator response.
-
-The signal-cli daemon itself is not exercised — we mock at the handler
-boundary so the e2e can run without ``signal-cli`` installed.  Real
-signal-cli coverage is the live-smoke step, not CI.
+Mocks at the ``@management_handler`` boundary so signal-cli isn't required.
 """
 
 from __future__ import annotations
@@ -194,8 +185,7 @@ class TestSignalRegistration:
                     json={"account": "+15551234567", "given_name": "Alice"},
                     timeout=10.0,
                 )
-                assert r.status_code == 200, r.text
-                assert r.json() == {"account": "+15551234567"}
+                assert r.status_code == 204, r.text
 
             # The handler was hit with the right kwargs.
             assert (

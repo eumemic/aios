@@ -50,9 +50,7 @@ class TestRegister:
     async def test_happy_path_returns_sms_sent(self, probe: _Probe, daemon: MagicMock) -> None:
         result = await probe.register(account="+15551234567")
         assert result == {"account": "+15551234567", "status": "sms_sent"}
-        daemon.register.assert_awaited_once_with(
-            phone="+15551234567", captcha=None, voice=False
-        )
+        daemon.register.assert_awaited_once_with(phone="+15551234567", captcha=None, voice=False)
 
     @pytest.mark.asyncio
     async def test_voice_routes_to_voice_sent(self, probe: _Probe, daemon: MagicMock) -> None:
@@ -61,9 +59,7 @@ class TestRegister:
         daemon.register.assert_awaited_once_with(phone="+1", captcha=None, voice=True)
 
     @pytest.mark.asyncio
-    async def test_passes_captcha_token_to_daemon(
-        self, probe: _Probe, daemon: MagicMock
-    ) -> None:
+    async def test_passes_captcha_token_to_daemon(self, probe: _Probe, daemon: MagicMock) -> None:
         await probe.register(account="+1", captcha="signalcaptcha://x")
         daemon.register.assert_awaited_once_with(
             phone="+1", captcha="signalcaptcha://x", voice=False
@@ -83,9 +79,7 @@ class TestRegister:
         }
 
     @pytest.mark.asyncio
-    async def test_non_captcha_rpc_error_propagates(
-        self, probe: _Probe, daemon: MagicMock
-    ) -> None:
+    async def test_non_captcha_rpc_error_propagates(self, probe: _Probe, daemon: MagicMock) -> None:
         daemon.register.side_effect = RpcError("phone already registered elsewhere")
         with pytest.raises(RpcError, match="already registered"):
             await probe.register(account="+1")
@@ -106,9 +100,7 @@ class TestVerify:
 
 class TestUpdateProfile:
     @pytest.mark.asyncio
-    async def test_passes_only_non_none_fields(
-        self, probe: _Probe, daemon: MagicMock
-    ) -> None:
+    async def test_passes_only_non_none_fields(self, probe: _Probe, daemon: MagicMock) -> None:
         await probe.update_profile(account="+1", given_name="Alice", about=None)
         daemon.update_profile.assert_awaited_once_with(
             phone="+1", given_name="Alice", family_name=None, about=None

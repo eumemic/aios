@@ -69,20 +69,17 @@ def sync_detailed(
     body: SignalRegisterRequest,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | SignalRegisterResponse]:
-    r"""Post Signal Register
+    """Post Signal Register
 
-     Initiate a signal-cli ``register`` for ``account``.
+     Initiate signal-cli ``register`` for ``account``.
 
-    If signal requires a captcha (commonly the case), returns 200 with
-    ``status=\"captcha_required\"`` and ``captcha_url``.  Solve in a
-    browser, then POST again with ``captcha=<signalcaptcha-token>``.
-    On success the user receives an SMS (or voice call with
-    ``voice=true``) carrying a 6-digit code — submit it via
-    :func:`post_signal_verify`.
+    On captcha-required (common), returns 200 with the URL — solve in a
+    browser, repost with ``captcha=<token>``.  On success: SMS (or voice
+    call with ``voice=true``) carrying a 6-digit code for ``verify``.
 
     Args:
         authorization (None | str | Unset):
-        body (SignalRegisterRequest): Body for ``POST /v1/connectors/signal/register``.
+        body (SignalRegisterRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -110,20 +107,17 @@ def sync(
     body: SignalRegisterRequest,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | SignalRegisterResponse | None:
-    r"""Post Signal Register
+    """Post Signal Register
 
-     Initiate a signal-cli ``register`` for ``account``.
+     Initiate signal-cli ``register`` for ``account``.
 
-    If signal requires a captcha (commonly the case), returns 200 with
-    ``status=\"captcha_required\"`` and ``captcha_url``.  Solve in a
-    browser, then POST again with ``captcha=<signalcaptcha-token>``.
-    On success the user receives an SMS (or voice call with
-    ``voice=true``) carrying a 6-digit code — submit it via
-    :func:`post_signal_verify`.
+    On captcha-required (common), returns 200 with the URL — solve in a
+    browser, repost with ``captcha=<token>``.  On success: SMS (or voice
+    call with ``voice=true``) carrying a 6-digit code for ``verify``.
 
     Args:
         authorization (None | str | Unset):
-        body (SignalRegisterRequest): Body for ``POST /v1/connectors/signal/register``.
+        body (SignalRegisterRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -146,20 +140,17 @@ async def asyncio_detailed(
     body: SignalRegisterRequest,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | SignalRegisterResponse]:
-    r"""Post Signal Register
+    """Post Signal Register
 
-     Initiate a signal-cli ``register`` for ``account``.
+     Initiate signal-cli ``register`` for ``account``.
 
-    If signal requires a captcha (commonly the case), returns 200 with
-    ``status=\"captcha_required\"`` and ``captcha_url``.  Solve in a
-    browser, then POST again with ``captcha=<signalcaptcha-token>``.
-    On success the user receives an SMS (or voice call with
-    ``voice=true``) carrying a 6-digit code — submit it via
-    :func:`post_signal_verify`.
+    On captcha-required (common), returns 200 with the URL — solve in a
+    browser, repost with ``captcha=<token>``.  On success: SMS (or voice
+    call with ``voice=true``) carrying a 6-digit code for ``verify``.
 
     Args:
         authorization (None | str | Unset):
-        body (SignalRegisterRequest): Body for ``POST /v1/connectors/signal/register``.
+        body (SignalRegisterRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -185,20 +176,17 @@ async def asyncio(
     body: SignalRegisterRequest,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | SignalRegisterResponse | None:
-    r"""Post Signal Register
+    """Post Signal Register
 
-     Initiate a signal-cli ``register`` for ``account``.
+     Initiate signal-cli ``register`` for ``account``.
 
-    If signal requires a captcha (commonly the case), returns 200 with
-    ``status=\"captcha_required\"`` and ``captcha_url``.  Solve in a
-    browser, then POST again with ``captcha=<signalcaptcha-token>``.
-    On success the user receives an SMS (or voice call with
-    ``voice=true``) carrying a 6-digit code — submit it via
-    :func:`post_signal_verify`.
+    On captcha-required (common), returns 200 with the URL — solve in a
+    browser, repost with ``captcha=<token>``.  On success: SMS (or voice
+    call with ``voice=true``) carrying a 6-digit code for ``verify``.
 
     Args:
         authorization (None | str | Unset):
-        body (SignalRegisterRequest): Body for ``POST /v1/connectors/signal/register``.
+        body (SignalRegisterRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

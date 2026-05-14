@@ -12,8 +12,7 @@ T = TypeVar("T", bound="SignalVerifyRequest")
 
 @_attrs_define
 class SignalVerifyRequest:
-    """Body for ``POST /v1/connectors/signal/verify``.
-
+    """
     Attributes:
         account (str):
         code (str):

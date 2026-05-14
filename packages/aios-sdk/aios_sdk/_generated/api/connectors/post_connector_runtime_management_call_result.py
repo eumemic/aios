@@ -71,25 +71,11 @@ def sync_detailed(
 ) -> Response[Any | HTTPValidationError]:
     """Post Runtime Management Call Result
 
-     Resolve a pending management call by posting the connector's result.
-
-    Authorization: the runtime bearer's connector must match the
-    pending call's connector.  The handler does the scope check, runs
-    a conditional UPDATE (only resolves rows still in ``pending``),
-    and on success fires the wake NOTIFY on
-    ``connector_result_<call_id>`` — the operator's request is LISTENing
-    there via :func:`aios.db.listen.listen_for_connector_result`.
-
     Args:
         authorization (None | str | Unset):
-        body (RuntimeManagementCallResultRequest): Body for ``POST
-            /v1/connectors/runtime/management-call-results``.
-
-            The runtime container POSTs this after dispatching a management call
-            received via the ``/runtime/management-calls`` SSE.  Idempotent on
-            ``call_id`` — a second POST whose row has already moved out of
-            ``pending`` no-ops (no double-NOTIFY, so the operator can't get two
-            wakes).
+        body (RuntimeManagementCallResultRequest): Idempotent on ``call_id`` — a replay POST
+            against an already-resolved
+            row no-ops (no double-NOTIFY).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -119,25 +105,11 @@ def sync(
 ) -> Any | HTTPValidationError | None:
     """Post Runtime Management Call Result
 
-     Resolve a pending management call by posting the connector's result.
-
-    Authorization: the runtime bearer's connector must match the
-    pending call's connector.  The handler does the scope check, runs
-    a conditional UPDATE (only resolves rows still in ``pending``),
-    and on success fires the wake NOTIFY on
-    ``connector_result_<call_id>`` — the operator's request is LISTENing
-    there via :func:`aios.db.listen.listen_for_connector_result`.
-
     Args:
         authorization (None | str | Unset):
-        body (RuntimeManagementCallResultRequest): Body for ``POST
-            /v1/connectors/runtime/management-call-results``.
-
-            The runtime container POSTs this after dispatching a management call
-            received via the ``/runtime/management-calls`` SSE.  Idempotent on
-            ``call_id`` — a second POST whose row has already moved out of
-            ``pending`` no-ops (no double-NOTIFY, so the operator can't get two
-            wakes).
+        body (RuntimeManagementCallResultRequest): Idempotent on ``call_id`` — a replay POST
+            against an already-resolved
+            row no-ops (no double-NOTIFY).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -162,25 +134,11 @@ async def asyncio_detailed(
 ) -> Response[Any | HTTPValidationError]:
     """Post Runtime Management Call Result
 
-     Resolve a pending management call by posting the connector's result.
-
-    Authorization: the runtime bearer's connector must match the
-    pending call's connector.  The handler does the scope check, runs
-    a conditional UPDATE (only resolves rows still in ``pending``),
-    and on success fires the wake NOTIFY on
-    ``connector_result_<call_id>`` — the operator's request is LISTENing
-    there via :func:`aios.db.listen.listen_for_connector_result`.
-
     Args:
         authorization (None | str | Unset):
-        body (RuntimeManagementCallResultRequest): Body for ``POST
-            /v1/connectors/runtime/management-call-results``.
-
-            The runtime container POSTs this after dispatching a management call
-            received via the ``/runtime/management-calls`` SSE.  Idempotent on
-            ``call_id`` — a second POST whose row has already moved out of
-            ``pending`` no-ops (no double-NOTIFY, so the operator can't get two
-            wakes).
+        body (RuntimeManagementCallResultRequest): Idempotent on ``call_id`` — a replay POST
+            against an already-resolved
+            row no-ops (no double-NOTIFY).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -208,25 +166,11 @@ async def asyncio(
 ) -> Any | HTTPValidationError | None:
     """Post Runtime Management Call Result
 
-     Resolve a pending management call by posting the connector's result.
-
-    Authorization: the runtime bearer's connector must match the
-    pending call's connector.  The handler does the scope check, runs
-    a conditional UPDATE (only resolves rows still in ``pending``),
-    and on success fires the wake NOTIFY on
-    ``connector_result_<call_id>`` — the operator's request is LISTENing
-    there via :func:`aios.db.listen.listen_for_connector_result`.
-
     Args:
         authorization (None | str | Unset):
-        body (RuntimeManagementCallResultRequest): Body for ``POST
-            /v1/connectors/runtime/management-call-results``.
-
-            The runtime container POSTs this after dispatching a management call
-            received via the ``/runtime/management-calls`` SSE.  Idempotent on
-            ``call_id`` — a second POST whose row has already moved out of
-            ``pending`` no-ops (no double-NOTIFY, so the operator can't get two
-            wakes).
+        body (RuntimeManagementCallResultRequest): Idempotent on ``call_id`` — a replay POST
+            against an already-resolved
+            row no-ops (no double-NOTIFY).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

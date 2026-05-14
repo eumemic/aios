@@ -12,13 +12,8 @@ T = TypeVar("T", bound="RuntimeManagementCallResultRequest")
 
 @_attrs_define
 class RuntimeManagementCallResultRequest:
-    """Body for ``POST /v1/connectors/runtime/management-call-results``.
-
-    The runtime container POSTs this after dispatching a management call
-    received via the ``/runtime/management-calls`` SSE.  Idempotent on
-    ``call_id`` — a second POST whose row has already moved out of
-    ``pending`` no-ops (no double-NOTIFY, so the operator can't get two
-    wakes).
+    """Idempotent on ``call_id`` — a replay POST against an already-resolved
+    row no-ops (no double-NOTIFY).
 
         Attributes:
             call_id (str):

@@ -5803,7 +5803,7 @@
           "connectors"
         ],
         "summary": "Get Runtime Management Calls",
-        "description": "SSE stream of pending operator-initiated management calls for the\ncaller's connector type (#348).\n\nSibling of :func:`get_runtime_calls` but per-connector-type only \u2014\nmanagement calls aren't bound to a session or a connection.\nBackfills any pending, unexpired calls at subscribe time, then tails\n``connector_management_calls_<connector>``.  Each event is keyed\n``call`` with a JSON body shaped::\n\n    {\"call_id\": \"mgmt_...\", \"method\": \"register\", \"params\": {...}}",
+        "description": "SSE stream of pending management calls for the caller's connector type.\n\nPer-connector-type only (no session/connection scope).  Each event is\nkeyed ``call`` with body ``{\"call_id\": \"mgmt_...\", \"method\": str, \"params\": dict}``.",
         "operationId": "get_runtime_management_calls_v1_connectors_runtime_management_calls_get",
         "parameters": [
           {
@@ -5854,7 +5854,7 @@
           "connectors"
         ],
         "summary": "Post Signal Register",
-        "description": "Initiate a signal-cli ``register`` for ``account``.\n\nIf signal requires a captcha (commonly the case), returns 200 with\n``status=\"captcha_required\"`` and ``captcha_url``.  Solve in a\nbrowser, then POST again with ``captcha=<signalcaptcha-token>``.\nOn success the user receives an SMS (or voice call with\n``voice=true``) carrying a 6-digit code \u2014 submit it via\n:func:`post_signal_verify`.",
+        "description": "Initiate signal-cli ``register`` for ``account``.\n\nOn captcha-required (common), returns 200 with the URL \u2014 solve in a\nbrowser, repost with ``captcha=<token>``.  On success: SMS (or voice\ncall with ``voice=true``) carrying a 6-digit code for ``verify``.",
         "operationId": "post_connector_signal_register",
         "parameters": [
           {
@@ -5914,7 +5914,7 @@
           "connectors"
         ],
         "summary": "Post Signal Verify",
-        "description": "Submit the verification code received via SMS / voice.\n\nOn success, signal-cli writes the new account to its on-disk\n``accounts.json``.  The running signal connector picks it up\nwithout restart on the next ``verify_phone`` call (the daemon\nre-reads the file fresh; see ``daemon.py:_read_accounts_index``).",
+        "description": "Submit the SMS / voice verification code.\n\nsignal-cli writes the new account to its ``accounts.json``; the\nrunning connector picks it up on the next ``verify_phone`` call\nwithout restart.",
         "operationId": "post_connector_signal_verify",
         "parameters": [
           {
@@ -5974,7 +5974,7 @@
           "connectors"
         ],
         "summary": "Post Signal Profile",
-        "description": "Update the signal profile (given_name / family_name / about) for ``account``.\n\nAvatar bytes are not supported in v1; see SignalProfileRequest.",
+        "description": "Update ``given_name`` / ``family_name`` / ``about``.  Avatar bytes\nare not supported in v1 (no operator\u2192container file staging surface).",
         "operationId": "post_connector_signal_profile",
         "parameters": [
           {
@@ -6005,15 +6005,8 @@
           }
         },
         "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SignalProfileResponse"
-                }
-              }
-            }
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -6034,7 +6027,6 @@
           "connectors"
         ],
         "summary": "Post Runtime Management Call Result",
-        "description": "Resolve a pending management call by posting the connector's result.\n\nAuthorization: the runtime bearer's connector must match the\npending call's connector.  The handler does the scope check, runs\na conditional UPDATE (only resolves rows still in ``pending``),\nand on success fires the wake NOTIFY on\n``connector_result_<call_id>`` \u2014 the operator's request is LISTENing\nthere via :func:`aios.db.listen.listen_for_connector_result`.",
         "operationId": "post_connector_runtime_management_call_result",
         "parameters": [
           {
@@ -9058,7 +9050,7 @@
           "call_id"
         ],
         "title": "RuntimeManagementCallResultRequest",
-        "description": "Body for ``POST /v1/connectors/runtime/management-call-results``.\n\nThe runtime container POSTs this after dispatching a management call\nreceived via the ``/runtime/management-calls`` SSE.  Idempotent on\n``call_id`` \u2014 a second POST whose row has already moved out of\n``pending`` no-ops (no double-NOTIFY, so the operator can't get two\nwakes)."
+        "description": "Idempotent on ``call_id`` \u2014 a replay POST against an already-resolved\nrow no-ops (no double-NOTIFY)."
       },
       "RuntimeToken": {
         "properties": {
@@ -9980,21 +9972,7 @@
         "required": [
           "account"
         ],
-        "title": "SignalProfileRequest",
-        "description": "Body for ``POST /v1/connectors/signal/profile``.\n\nAvatar is intentionally not exposed in v1: the operator API has no\nclean way to ship file bytes to the connector container yet.  Adding\nit requires a generic file-staging surface for management calls;\nrevisit then."
-      },
-      "SignalProfileResponse": {
-        "properties": {
-          "account": {
-            "type": "string",
-            "title": "Account"
-          }
-        },
-        "type": "object",
-        "required": [
-          "account"
-        ],
-        "title": "SignalProfileResponse"
+        "title": "SignalProfileRequest"
       },
       "SignalRegisterRequest": {
         "properties": {
@@ -10024,8 +10002,7 @@
         "required": [
           "account"
         ],
-        "title": "SignalRegisterRequest",
-        "description": "Body for ``POST /v1/connectors/signal/register``."
+        "title": "SignalRegisterRequest"
       },
       "SignalRegisterResponse": {
         "properties": {
@@ -10060,7 +10037,7 @@
           "status"
         ],
         "title": "SignalRegisterResponse",
-        "description": "Outcome of a register call.\n\n``status=\"captcha_required\"`` is intentionally a 200 response, not a\n4xx \u2014 it's an actionable next step (solve the captcha, repost with\nthe token) rather than an error.  4xx would bury the URL inside the\nerror envelope."
+        "description": "``status=\"captcha_required\"`` is a 200, not a 4xx \u2014 it's an actionable\nnext step (solve the captcha, repost with the token), and 4xx would bury\nthe URL inside FastAPI's error envelope."
       },
       "SignalVerifyRequest": {
         "properties": {
@@ -10090,8 +10067,7 @@
           "account",
           "code"
         ],
-        "title": "SignalVerifyRequest",
-        "description": "Body for ``POST /v1/connectors/signal/verify``."
+        "title": "SignalVerifyRequest"
       },
       "SignalVerifyResponse": {
         "properties": {

@@ -187,17 +187,11 @@ async def management_calls_stream(
     pool: asyncpg.Pool[Any],
     connector: str,
 ) -> AsyncIterator[ServerSentEvent]:
-    """Yield SSE events for pending operator-initiated management calls
-    targeting ``connector`` type (#348).
+    """Yield SSE events for pending management calls of ``connector`` type.
 
-    Sibling of :func:`runtime_connector_calls_stream` but per-connector-type
-    only — management calls aren't bound to a session or a connection.
-    Backfills any pending, unexpired calls at subscribe time, then tails
-    the ``connector_management_calls_<connector>`` NOTIFY channel.
-
-    Emit shape per event::
-
-        {"call_id": "mgmt_...", "method": "register", "params": {...}}
+    Backfills pending unexpired calls, then tails
+    ``connector_management_calls_<connector>``.  Each event:
+    ``{"call_id": "mgmt_...", "method": str, "params": dict}``.
     """
     async with listen_for_management_calls(db_url, connector) as queue:
         emitted: set[str] = set()

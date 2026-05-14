@@ -126,7 +126,6 @@ from .session_usage import SessionUsage
 from .session_user_message import SessionUserMessage
 from .session_user_message_metadata import SessionUserMessageMetadata
 from .signal_profile_request import SignalProfileRequest
-from .signal_profile_response import SignalProfileResponse
 from .signal_register_request import SignalRegisterRequest
 from .signal_register_response import SignalRegisterResponse
 from .signal_register_response_status import SignalRegisterResponseStatus
@@ -295,7 +294,6 @@ __all__ = (
     "SessionUserMessage",
     "SessionUserMessageMetadata",
     "SignalProfileRequest",
-    "SignalProfileResponse",
     "SignalRegisterRequest",
     "SignalRegisterResponse",
     "SignalRegisterResponseStatus",

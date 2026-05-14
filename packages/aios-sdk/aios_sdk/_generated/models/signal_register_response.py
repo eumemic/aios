@@ -14,12 +14,9 @@ T = TypeVar("T", bound="SignalRegisterResponse")
 
 @_attrs_define
 class SignalRegisterResponse:
-    """Outcome of a register call.
-
-    ``status="captcha_required"`` is intentionally a 200 response, not a
-    4xx — it's an actionable next step (solve the captcha, repost with
-    the token) rather than an error.  4xx would bury the URL inside the
-    error envelope.
+    """``status="captcha_required"`` is a 200, not a 4xx — it's an actionable
+    next step (solve the captcha, repost with the token), and 4xx would bury
+    the URL inside FastAPI's error envelope.
 
         Attributes:
             account (str):
