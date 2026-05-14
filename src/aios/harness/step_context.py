@@ -38,11 +38,60 @@ from aios.tools.registry import to_openai_tools
 if TYPE_CHECKING:
     import asyncpg
 
-    from aios.models.agents import Agent, AgentVersion, McpServerSpec
+    from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
     from aios.models.events import Event
     from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.models.sessions import Session
     from aios.models.skills import SkillVersion
+
+
+# Generic affordance prose explaining the in-sandbox ``mcp`` CLI. Rendered
+# into the system prompt whenever the agent has at least one
+# ``always_allow`` MCP toolset entry. Worded in stable runtime terms — no
+# dev-world references — so it remains agent-actionable across releases.
+_MCP_CLI_HINT = (
+    "## Sandbox MCP CLI\n\n"
+    "Permitted MCP tools are also callable from inside the sandbox via the "
+    "`mcp` binary, so you can invoke them programmatically from `bash` "
+    "without paying an inference cycle per call:\n\n"
+    "    mcp                                 list available MCP servers\n"
+    "    mcp <server>                        list tools on a server\n"
+    "    mcp <server> <tool> --help          show description + JSON schema\n"
+    "    mcp <server> <tool> --json '{...}'  invoke with JSON arguments\n\n"
+    "Use the CLI when you want scriptable invocation (composition with `jq`, "
+    "`xargs`, redirection, scheduled wakes). The model-tool invocation path "
+    "remains available for the same tools."
+)
+
+
+def _has_always_allow_mcp_tool(agent_tools: list[ToolSpec]) -> bool:
+    """True iff at least one enabled mcp_toolset entry resolves any tool
+    to ``always_allow``.
+
+    The CLI hint is purely informational — emitting it for an agent whose
+    toolset has only ``always_ask`` policies would lie to the model
+    (every CLI call would 403). Showing it whenever there's at least one
+    ``always_allow`` path is the conservative truthful default.
+    """
+    for spec in agent_tools:
+        if spec.type != "mcp_toolset" or not spec.enabled:
+            continue
+        default = spec.default_config
+        if (
+            default
+            and default.permission_policy
+            and default.permission_policy.type == "always_allow"
+        ):
+            return True
+        if spec.configs:
+            for cfg in spec.configs:
+                if (
+                    cfg.enabled
+                    and cfg.permission_policy
+                    and cfg.permission_policy.type == "always_allow"
+                ):
+                    return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -113,11 +162,13 @@ async def compute_step_prelude(
     if channels:
         tools.append(_switch_channel_tool_spec())
 
-    instructions_block = ""
+    mcp_servers_block = ""
     if agent.mcp_servers:
         mcp_tools, mcp_instructions = await discover_session_mcp_tools(pool, session_id, agent)
         tools.extend(mcp_tools)
-        instructions_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
+        mcp_servers_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
+    cli_hint = _MCP_CLI_HINT if _has_always_allow_mcp_tool(agent.tools) else ""
+    instructions_block = "\n\n".join(s for s in (cli_hint, mcp_servers_block) if s)
 
     # Custom tools declared on connections attached to this session
     # (single_session, per_chat origin, or operator-bound chat).  Each

@@ -51,6 +51,7 @@ from aios.harness.task_registry import TaskRegistry
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
 from aios.sandbox.backends import make_backend
+from aios.sandbox.mcp_proxy import McpBroker
 from aios.sandbox.registry import SandboxRegistry
 
 # Hashed (via Postgres ``hashtextextended($1, 0)``) into the 64-bit
@@ -100,6 +101,7 @@ async def worker_main() -> None:
     sandbox_registry: SandboxRegistry | None = None
     task_registry: TaskRegistry | None = None
     mcp_session_pool: McpSessionPool | None = None
+    mcp_broker: McpBroker | None = None
     procrastinate_opened = False
     sweep_task: asyncio.Task[None] | None = None
     interrupt_task: asyncio.Task[None] | None = None
@@ -111,6 +113,8 @@ async def worker_main() -> None:
         sandbox_registry = SandboxRegistry(backend=make_backend(settings.sandbox_backend))
         task_registry = TaskRegistry()
         mcp_session_pool = McpSessionPool()
+        mcp_broker = McpBroker()
+        await mcp_broker.start()
 
         # Register the connector subsystem's ToolProvider impl against the
         # Protocol slot from PR 3 (#328). The harness reaches the
@@ -126,6 +130,7 @@ async def worker_main() -> None:
         runtime.sandbox_registry = sandbox_registry
         runtime.task_registry = task_registry
         runtime.mcp_session_pool = mcp_session_pool
+        runtime.mcp_broker = mcp_broker
         runtime.tool_provider = SubsystemToolProvider()
 
         await procrastinate_app.open_async()
@@ -227,6 +232,8 @@ async def worker_main() -> None:
             await sandbox_registry.release_all()
         if mcp_session_pool is not None:
             await mcp_session_pool.close_all()
+        if mcp_broker is not None:
+            await mcp_broker.stop()
         if procrastinate_opened:
             await procrastinate_app.close_async()
         if pool is not None:

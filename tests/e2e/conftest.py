@@ -172,6 +172,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     from aios.harness import runtime
     from aios.harness.task_registry import TaskRegistry
     from aios.sandbox.backends import make_backend
+    from aios.sandbox.mcp_proxy import McpBroker
     from aios.sandbox.registry import SandboxRegistry
     from aios.tools.registry import registry
     from aios_connectors.providers import SubsystemToolProvider
@@ -181,12 +182,15 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
     task_reg = TaskRegistry()
     sandbox_reg = SandboxRegistry(backend=make_backend(settings.sandbox_backend))
+    mcp_broker = McpBroker()
+    await mcp_broker.start()
 
     prev = (
         runtime.pool,
         runtime.crypto_box,
         runtime.task_registry,
         runtime.sandbox_registry,
+        runtime.mcp_broker,
         runtime.worker_id,
         runtime.tool_provider,
     )
@@ -194,6 +198,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     runtime.crypto_box = crypto_box
     runtime.task_registry = task_reg
     runtime.sandbox_registry = sandbox_reg
+    runtime.mcp_broker = mcp_broker
     runtime.worker_id = "worker_test"
     runtime.tool_provider = SubsystemToolProvider()
 
@@ -221,11 +226,13 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
         runtime.crypto_box,
         runtime.task_registry,
         runtime.sandbox_registry,
+        runtime.mcp_broker,
         runtime.worker_id,
         runtime.tool_provider,
     ) = prev
     await task_reg.shutdown()
     await sandbox_reg.release_all()
+    await mcp_broker.stop()
     await pool.close()
 
 
