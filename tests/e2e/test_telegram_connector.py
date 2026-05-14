@@ -256,12 +256,12 @@ class TestTelegramMultiConnection:
 
         connector_task = asyncio.create_task(connector.run())
         try:
-            # Let discovery + serve_connection populate ``_conn_state``
-            # before driving the tool call — without this, the calls-SSE
+            # Let discovery + serve_connection populate ``state`` before
+            # driving the tool call — without this, the calls-SSE
             # backfill can dispatch ``telegram_send`` before
-            # ``serve_connection`` populates ``_conn_state`` and the
-            # handler ``KeyError``s on the connection_id (CI loses this
-            # race; local dev usually wins it).
+            # ``serve_connection`` populates ``state`` and the handler
+            # ``KeyError``s on the connection_id (CI loses this race;
+            # local dev usually wins it).
             await asyncio.sleep(0.5)
 
             await harness.run_step(session_a.id)

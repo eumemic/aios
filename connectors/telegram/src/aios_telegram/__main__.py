@@ -14,7 +14,7 @@ from .connector import TelegramConnector
 
 
 def main() -> None:
-    asyncio.run(TelegramConnector().run())
+    asyncio.run(TelegramConnector().run_until_stopped())
 
 
 if __name__ == "__main__":

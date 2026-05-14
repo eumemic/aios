@@ -45,9 +45,11 @@ durability across container restart, override :meth:`load_answered` /
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import os
+import signal as _signal
 import types
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -85,6 +87,20 @@ ToolFn = Callable[..., Awaitable[Any]]
 log: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
 _TOOL_ATTR = "__aios_http_tool__"
+
+
+def _is_fatal_inbound_status(status_code: int) -> bool:
+    """``emit_inbound`` raises for these; everything else (routine 4xx)
+    drops the envelope and returns ``None``.
+
+    ``401`` / ``403`` mean the runtime token is busted (revoked or
+    misconfigured) — fatal for every connection the container serves.
+    ``5xx`` is a server-side outage / bug — also fatal so the
+    container crash-and-restarts.  Routine 4xx (``400``, ``422``)
+    indicates one specific envelope is malformed; dropping it lets
+    sibling connections keep serving.
+    """
+    return status_code in (401, 403) or status_code >= 500
 
 
 def tool(
@@ -157,6 +173,22 @@ class HttpConnector:
         self._tools: dict[str, _ToolMeta] = self._collect_tools()
         self._answered: set[str] = set()
         self._connections: dict[str, _ConnectionState] = {}
+        # Subclasses narrow the value type via a class-body annotation::
+        #
+        #     class SignalConnector(HttpConnector):
+        #         state: dict[str, _SignalConnectionState]
+        self.state: dict[str, Any] = {}
+
+    # ─── helpers (subclasses use these) ──────────────────────────────
+
+    def focal_channel(self, account: str, chat_id: str) -> str:
+        """Return the canonical ``<connector>/<account>/<chat_id>`` string.
+
+        Outbound tool methods write this to messages they edit/react to;
+        the runtime parses it back into ``account`` / ``chat_id`` kwargs
+        on the next call (see :func:`_inject_focal_kwargs`).
+        """
+        return f"{self.connector}/{account}/{chat_id}"
 
     # ─── lifecycle hooks (override as needed) ────────────────────────
 
@@ -175,9 +207,7 @@ class HttpConnector:
         """
         del tg
 
-    async def serve_connection(
-        self, connection_id: str, secrets: dict[str, str]
-    ) -> None:
+    async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
         """Override: per-connection long-running platform task.
 
         Spawned when the discovery SSE emits ``added`` for this
@@ -215,12 +245,23 @@ class HttpConnector:
         metadata: dict[str, Any] | None = None,
         timestamp: str | None = None,
         event_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """Forward a platform inbound to aios for ``connection_id``.
 
         Idempotent on ``event_id``.  ``attachments`` is a list of
         ``(filename, bytes, content_type)`` tuples that ride as
         multipart parts.
+
+        Routine 4xx responses (a 422 from one malformed envelope, a 400
+        from a stale connection_id mid-removal) drop the envelope and
+        return ``None`` so one bad inbound can't tear down the whole
+        container via the parent TaskGroup.  ``401`` / ``403`` (auth
+        broken — runtime token revoked or misconfigured) and ``5xx``
+        (server outage / bug) still raise: those are container-level
+        problems that warrant the crash-and-restart loop.  Callers that
+        need the bad-envelope to surface (e.g. integration-test tools
+        that want loud validation failures) check for ``None`` and
+        raise themselves.
         """
         client = self._require_client()
         eid = event_id or str(ULID())
@@ -246,9 +287,7 @@ class HttpConnector:
             ("sender", (None, json.dumps(sender).encode(), "text/plain")),
         ]
         if metadata is not None:
-            files.append(
-                ("metadata", (None, json.dumps(metadata).encode(), "text/plain"))
-            )
+            files.append(("metadata", (None, json.dumps(metadata).encode(), "text/plain")))
         if timestamp is not None:
             files.append(("timestamp", (None, timestamp.encode(), "text/plain")))
         for filename, blob, content_type in attachments or []:
@@ -262,21 +301,57 @@ class HttpConnector:
             # ``response.raise_for_status()`` discards the body, which is
             # exactly where FastAPI's validation diagnostics live for a 422
             # (and where our error envelope lives for everything else).  Log
-            # the body verbatim before raising so the operator has the field
-            # path / message in the container log instead of just the bare
-            # status + URL from ``httpx.HTTPStatusError``.
-            body = response.text
+            # the body verbatim so the operator has the field path /
+            # message in the container log instead of just the bare status
+            # + URL from ``httpx.HTTPStatusError``.
+            sc = response.status_code
             log.warning(
                 "connector.inbound.failed",
-                status_code=response.status_code,
+                status_code=sc,
                 event_id=eid,
                 connection_id=connection_id,
-                body=body[:2000],
+                body=response.text[:2000],
             )
-        response.raise_for_status()
+            if _is_fatal_inbound_status(sc):
+                response.raise_for_status()
+            return None
         return dict(response.json())
 
     # ─── runner ──────────────────────────────────────────────────────
+
+    async def run_until_stopped(self, *, install_signal_handlers: bool = True) -> None:
+        """Run the connector until SIGINT/SIGTERM (or cancelled).
+
+        Wraps :meth:`run` with a process-level stop signal: a SIGTERM
+        (the Docker stop signal) or SIGINT (Ctrl-C) cancels the run
+        task cleanly so :meth:`teardown` fires.  ``asyncio.run`` traps
+        SIGINT by default but **not** SIGTERM — without this handler,
+        ``docker stop`` would kill Python before subclasses get a
+        chance to clean up subprocesses, sockets, etc.  Pass
+        ``install_signal_handlers=False`` from tests that drive
+        cancellation directly.
+        """
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        signals = (_signal.SIGINT, _signal.SIGTERM) if install_signal_handlers else ()
+        for sig in signals:
+            loop.add_signal_handler(sig, stop.set)
+        run_task = asyncio.create_task(self.run(), name=f"aios-{self.connector}-run")
+        stop_task = asyncio.create_task(stop.wait(), name=f"aios-{self.connector}-stop-wait")
+        try:
+            await asyncio.wait({run_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            # Removing handlers in the finally lets embedded callers
+            # invoke ``run_until_stopped`` multiple times without the
+            # previous ``stop.set`` target outliving its Event.
+            for sig in signals:
+                with contextlib.suppress(NotImplementedError, ValueError):
+                    loop.remove_signal_handler(sig)
+            stop_task.cancel()
+            if not run_task.done():
+                run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await run_task
 
     async def run(self) -> None:
         """Open the client, publish tools, race discovery + tool loops."""
@@ -307,9 +382,7 @@ class HttpConnector:
         body = ToolsSchemaUpdate(
             tools=[ToolsSchemaUpdateToolsItem.from_dict(spec) for spec in specs]
         )
-        response = await _put_tools_schema(
-            client=client, connector=self.connector, body=body
-        )
+        response = await _put_tools_schema(client=client, connector=self.connector, body=body)
         if response.status_code >= 400:
             raise RuntimeError(
                 f"failed to publish tools schema: {response.status_code} {response.content!r}"
@@ -388,21 +461,15 @@ class HttpConnector:
             )
         body = response.parsed
         if body is None or isinstance(body, HTTPValidationError):
-            raise RuntimeError(
-                f"unparseable secrets response for connection {connection_id!r}"
-            )
+            raise RuntimeError(f"unparseable secrets response for connection {connection_id!r}")
         raw_secrets = body.secrets
         if isinstance(raw_secrets, Unset):
             secrets_map: dict[str, str] = {}
         else:
-            secrets_map = {
-                str(k): str(v) for k, v in raw_secrets.additional_properties.items()
-            }
-        state = _ConnectionState(
-            connection_id=connection_id, account=account, secrets=secrets_map
-        )
+            secrets_map = {str(k): str(v) for k, v in raw_secrets.additional_properties.items()}
+        state = _ConnectionState(connection_id=connection_id, account=account, secrets=secrets_map)
         state.worker = tg.create_task(
-            self.serve_connection(connection_id, secrets_map),
+            self._isolated_serve_connection(connection_id, secrets_map),
             name=f"aios-conn-{connection_id}",
         )
         self._connections[connection_id] = state
@@ -412,6 +479,27 @@ class HttpConnector:
             connection_id=connection_id,
             account=account,
         )
+
+    async def _isolated_serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
+        """Run :meth:`serve_connection` with failure-isolated cleanup.
+
+        Catches any non-``CancelledError`` exception so a single bad
+        connection (typo'd secret, unregistered phone, revoked bot
+        token) can't tear down sibling connections via the parent
+        TaskGroup.  Always pops the user-state slot on exit so
+        connections cycling in/out don't leak stale state.
+        """
+        try:
+            await self.serve_connection(connection_id, secrets)
+        except Exception as exc:
+            log.exception(
+                "connector.connection.serve_failed",
+                connector=self.connector,
+                connection_id=connection_id,
+                error=type(exc).__name__,
+            )
+        finally:
+            self.state.pop(connection_id, None)
 
     async def _on_connection_removed(self, connection_id: str) -> None:
         """Cancel the worker task for a vanished connection."""
@@ -538,9 +626,9 @@ class HttpConnector:
         except Exception as exc:
             # Tool-call SSE backfill can deliver a call for ``connection_id``
             # before the connection-discovery SSE has finished registering
-            # the connection's state in the connector's ``_conn_state`` dict
+            # the connection's state in the connector's ``state`` dict
             # (the two streams are independent).  The tool method's
-            # ``self._conn_state[connection_id]`` lookup KeyErrors and the
+            # ``self.state[connection_id]`` lookup KeyErrors and the
             # raw ``str(KeyError("'conn_01...'"))`` reaches the model as an
             # opaque quoted ID with no indication that the connection just
             # wasn't ready yet.  Detect that shape and produce an
@@ -610,7 +698,14 @@ class HttpConnector:
             connection_id=connection_id,
             session_id=session_id,
             tool_call_id=tool_call_id,
-            content=content,
+            # The generated wrapper narrows ``content`` to
+            # ``str | list[RuntimeToolResultRequestContentType1Item]``;
+            # we pass ``list[dict[str, Any]]`` whose items are
+            # structurally compatible with the content-block model.
+            # Re-shaping at this boundary would duplicate the wire
+            # schema in Python without adding any safety the generated
+            # POST doesn't already enforce.
+            content=content,  # type: ignore[arg-type]
             is_error=is_error,
         )
         response = await _post_runtime_tool_result(client=client, body=body)
@@ -738,11 +833,7 @@ def _inject_focal_kwargs(
     pass it explicitly.
     """
     out = dict(args)
-    if (
-        connection_id
-        and "connection_id" in meta.focal_params
-        and "connection_id" not in out
-    ):
+    if connection_id and "connection_id" in meta.focal_params and "connection_id" not in out:
         out["connection_id"] = connection_id
     if focal_channel and meta.focal_params & {"account", "chat_id"}:
         parts = focal_channel.split("/", 2)
@@ -753,5 +844,3 @@ def _inject_focal_kwargs(
             if "chat_id" in meta.focal_params and "chat_id" not in out:
                 out["chat_id"] = chat_id
     return out
-
-

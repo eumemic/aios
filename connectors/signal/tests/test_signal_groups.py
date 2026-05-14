@@ -43,14 +43,18 @@ async def test_create_group_raises_when_no_groupid_in_result(
     # create.  Anything else is a contract break — fail loud rather than
     # silently swallowing.
     with pytest.raises(RuntimeError, match="did not return a groupId"):
-        await connector.signal_create_group(name="x", member_uuids=[], chat_id=ALICE_UUID, connection_id=CONNECTION_ID)
+        await connector.signal_create_group(
+            name="x", member_uuids=[], chat_id=ALICE_UUID, connection_id=CONNECTION_ID
+        )
 
 
 # ── signal_rename_group ──────────────────────────────────────────────
 
 
 async def test_rename_group_with_group_focal(connector: SignalConnector) -> None:
-    result = await connector.signal_rename_group(name="Renamed", chat_id=GROUP_CHAT_ID, connection_id=CONNECTION_ID)
+    result = await connector.signal_rename_group(
+        name="Renamed", chat_id=GROUP_CHAT_ID, connection_id=CONNECTION_ID
+    )
     assert result == {"status": "ok"}
     method, params = connector._daemon.rpc.call.call_args.args  # type: ignore[union-attr]
     assert method == "updateGroup"
@@ -63,7 +67,9 @@ async def test_rename_group_with_group_focal(connector: SignalConnector) -> None
 
 async def test_rename_group_from_dm_focal_raises(connector: SignalConnector) -> None:
     with pytest.raises(ValueError, match="DM, not a group"):
-        await connector.signal_rename_group(name="X", chat_id=ALICE_UUID, connection_id=CONNECTION_ID)
+        await connector.signal_rename_group(
+            name="X", chat_id=ALICE_UUID, connection_id=CONNECTION_ID
+        )
 
 
 # ── _maybe_refresh_roster ──────────────────────────────────────────────
@@ -77,9 +83,9 @@ async def test_maybe_refresh_roster_calls_list_groups_on_update(
     fresh = [GroupInfo(id="abc", name="QA", member_uuids=[ALICE_UUID, BOB_UUID])]
     connector._daemon.list_groups.return_value = fresh  # type: ignore[union-attr]
     envelope = {"dataMessage": {"groupInfo": {"groupId": "abc==", "type": "UPDATE"}}}
-    await connector._maybe_refresh_roster(connector._conn_state[CONNECTION_ID], envelope)
+    await connector._maybe_refresh_roster(connector.state[CONNECTION_ID], envelope)
     connector._daemon.list_groups.assert_awaited_once_with(account=PHONE)  # type: ignore[union-attr]
-    assert connector._conn_state[CONNECTION_ID].groups == fresh
+    assert connector.state[CONNECTION_ID].groups == fresh
 
 
 async def test_maybe_refresh_roster_no_op_for_regular_message(
@@ -91,6 +97,6 @@ async def test_maybe_refresh_roster_no_op_for_regular_message(
             "groupInfo": {"groupId": "abc==", "type": "DELIVER"},
         }
     }
-    await connector._maybe_refresh_roster(connector._conn_state[CONNECTION_ID], envelope)
+    await connector._maybe_refresh_roster(connector.state[CONNECTION_ID], envelope)
     connector._daemon.list_groups.assert_not_awaited()  # type: ignore[union-attr]
-    assert connector._conn_state[CONNECTION_ID].groups == []
+    assert connector.state[CONNECTION_ID].groups == []

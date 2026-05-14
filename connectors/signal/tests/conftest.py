@@ -28,6 +28,7 @@ def _fast_echo_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     hit the timeout in ~10ms instead of ~2s."""
     monkeypatch.setattr(_connector_module, "_ECHO_WAIT_S", 0.01)
 
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 BOT_UUID = "99999999-8888-7777-6666-555555555555"
@@ -72,7 +73,7 @@ def connector(tmp_path: Path) -> SignalConnector:
             "verify_phone": AsyncMock(return_value="bot-uuid"),
         },
     )()
-    c._conn_state[CONNECTION_ID] = _SignalConnectionState(
+    c.state[CONNECTION_ID] = _SignalConnectionState(
         phone=PHONE,
         bot_uuid="bot-uuid",
         contact_names={},

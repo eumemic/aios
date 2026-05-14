@@ -96,16 +96,11 @@ class _TelegramConnectionState:
 
 class TelegramConnector(HttpConnector):
     connector = "telegram"
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._conn_state: dict[str, _TelegramConnectionState] = {}
+    state: dict[str, _TelegramConnectionState]
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
-    async def serve_connection(
-        self, connection_id: str, secrets: dict[str, str]
-    ) -> None:
+    async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
         """Build a PTB Application for this connection and run its loops.
 
         Each connection has its own bot token (one PTB Application per
@@ -116,11 +111,10 @@ class TelegramConnector(HttpConnector):
         bot_token = secrets.get("bot_token")
         if not bot_token:
             raise RuntimeError(
-                f"telegram connection {connection_id!r} requires a "
-                "'bot_token' entry in its secrets"
+                f"telegram connection {connection_id!r} requires a 'bot_token' entry in its secrets"
             )
         state = await self._build_state(bot_token)
-        self._conn_state[connection_id] = state
+        self.state[connection_id] = state
         log.info(
             "telegram.connection.ready",
             connection_id=connection_id,
@@ -139,7 +133,6 @@ class TelegramConnector(HttpConnector):
                     name=f"telegram-drain-{connection_id}",
                 )
         finally:
-            self._conn_state.pop(connection_id, None)
             await self._shutdown_application(state.application)
 
     async def _build_state(self, bot_token: str) -> _TelegramConnectionState:
@@ -177,9 +170,7 @@ class TelegramConnector(HttpConnector):
             await inbound_queue.put(parsed)
 
         async def on_error(_update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-            log.error(
-                "telegram.handler.error", bot_id=bot_id, error=str(context.error)
-            )
+            log.error("telegram.handler.error", bot_id=bot_id, error=str(context.error))
 
         application.add_handler(MessageHandler(filters.UpdateType.MESSAGES, on_message))
         application.add_handler(MessageReactionHandler(on_reaction))
@@ -214,9 +205,7 @@ class TelegramConnector(HttpConnector):
         await state.application.updater.start_polling(allowed_updates=_ALLOWED_UPDATES)
         await asyncio.Event().wait()
 
-    async def _drain_queue(
-        self, connection_id: str, state: _TelegramConnectionState
-    ) -> None:
+    async def _drain_queue(self, connection_id: str, state: _TelegramConnectionState) -> None:
         while True:
             item = await state.inbound_queue.get()
             if isinstance(item, InboundReaction):
@@ -263,7 +252,7 @@ class TelegramConnector(HttpConnector):
             "display_name": reaction.sender_name or str(reaction.sender_id),
         }
         metadata: dict[str, Any] = {
-            "channel": f"telegram/{state.bot_id}/{reaction.chat_id}",
+            "channel": self.focal_channel(str(state.bot_id), str(reaction.chat_id)),
             "chat_type": reaction.chat_kind,
             "sender_id": reaction.sender_id,
             "timestamp_ms": reaction.timestamp_ms,
@@ -301,9 +290,7 @@ class TelegramConnector(HttpConnector):
         attachments: tuple[Attachment, ...],
     ) -> list[tuple[str, bytes, str]] | None:
         """Download each attachment, validate size + bytes, return runtime tuples."""
-        host_paths = await asyncio.gather(
-            *(self._download_one(state, a) for a in attachments)
-        )
+        host_paths = await asyncio.gather(*(self._download_one(state, a) for a in attachments))
         out: list[tuple[str, bytes, str]] = []
         for att, host_path in zip(attachments, host_paths, strict=True):
             if host_path is None:
@@ -336,9 +323,7 @@ class TelegramConnector(HttpConnector):
             out.append((att.filename, blob, att.content_type))
         return out or None
 
-    async def _download_one(
-        self, state: _TelegramConnectionState, att: Attachment
-    ) -> Path | None:
+    async def _download_one(self, state: _TelegramConnectionState, att: Attachment) -> Path | None:
         try:
             file = await state.application.bot.get_file(att.file_id)
         except TelegramError as err:
@@ -416,7 +401,7 @@ class TelegramConnector(HttpConnector):
                 from an earlier ``telegram_send`` response.  Default
                 ``None`` sends as a top-level message in the chat.
         """
-        state = self._conn_state[connection_id]
+        state = self.state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
 
         body, ptb_parse_mode = _prepare_text(text, parse_mode)
@@ -477,11 +462,9 @@ class TelegramConnector(HttpConnector):
                 ``"record_voice"`` / ``"upload_voice"`` /
                 ``"upload_document"`` make sense before sending media.
         """
-        state = self._conn_state[connection_id]
+        state = self.state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
-        await state.application.bot.send_chat_action(
-            chat_id=chat_id_int, action=ChatAction(action)
-        )
+        await state.application.bot.send_chat_action(chat_id=chat_id_int, action=ChatAction(action))
         return {"status": "ok"}
 
     @tool()
@@ -510,7 +493,7 @@ class TelegramConnector(HttpConnector):
                 runs the Markdown→Telegram-HTML converter, ``"html"``
                 passes raw HTML through to Telegram.
         """
-        state = self._conn_state[connection_id]
+        state = self.state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
         body, ptb_parse_mode = _prepare_text(text, parse_mode)
         edited = await state.application.bot.edit_message_text(
@@ -542,11 +525,9 @@ class TelegramConnector(HttpConnector):
         Args:
             message_id: The id of the message to delete.
         """
-        state = self._conn_state[connection_id]
+        state = self.state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
-        await state.application.bot.delete_message(
-            chat_id=chat_id_int, message_id=message_id
-        )
+        await state.application.bot.delete_message(chat_id=chat_id_int, message_id=message_id)
         return {"status": "ok"}
 
     @tool()
@@ -573,7 +554,7 @@ class TelegramConnector(HttpConnector):
                 check there if a glyph you'd expect to work is rejected.
                 Pass ``None`` to clear the bot's existing reaction.
         """
-        state = self._conn_state[connection_id]
+        state = self.state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
         reaction = [ReactionTypeEmoji(emoji=emoji)] if emoji is not None else None
         await state.application.bot.set_message_reaction(

@@ -12,10 +12,13 @@ is intercepted by mocking the underlying ``httpx.AsyncClient.post``.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 import structlog
 from aios_connector_http import HttpConnector, tool
@@ -145,9 +148,7 @@ class TestDispatch:
         body = json.loads(r.kwargs["content"])
         assert "unknown tool" in body["error"]
 
-    async def test_exception_in_tool_becomes_error_result(
-        self, probe: _ProbeConnector
-    ) -> None:
+    async def test_exception_in_tool_becomes_error_result(self, probe: _ProbeConnector) -> None:
         await probe.dispatch_call(
             {
                 "connection_id": "conn_1",
@@ -162,9 +163,7 @@ class TestDispatch:
         body = json.loads(r.kwargs["content"])
         assert body["error"] == "kaboom"
 
-    async def test_malformed_arguments_dispatched_as_empty(
-        self, probe: _ProbeConnector
-    ) -> None:
+    async def test_malformed_arguments_dispatched_as_empty(self, probe: _ProbeConnector) -> None:
         await probe.dispatch_call(
             {
                 "connection_id": "conn_1",
@@ -302,9 +301,7 @@ class TestFocalChannelInjection:
                 "focal_channel": "signal/+15551234/group-abc",
             }
         )
-        assert c.focal_calls == [
-            {"account": "+15551234", "chat_id": "group-abc", "text": "hi"}
-        ]
+        assert c.focal_calls == [{"account": "+15551234", "chat_id": "group-abc", "text": "hi"}]
 
     async def test_injects_connection_id_when_signature_accepts(self) -> None:
         c = _FocalConnector()
@@ -376,7 +373,7 @@ class TestLogging:
         # Patch the underlying async httpx client so emit_inbound's POST
         # is a no-op returning a stub response.
         mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
+        mock_response.is_error = False
         mock_response.json = MagicMock(return_value={"appended_event_id": "evt_x"})
         mock_post = AsyncMock(return_value=mock_response)
         probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
@@ -395,12 +392,10 @@ class TestLogging:
         assert rec["sender"] == {"id": 99, "name": "alice"}
         assert rec["connection_id"] == "conn_1"
 
-    async def test_emit_inbound_does_not_log_message_content(
-        self, probe: _ProbeConnector
-    ) -> None:
+    async def test_emit_inbound_does_not_log_message_content(self, probe: _ProbeConnector) -> None:
         """Message bodies are user data — log length, not content."""
         mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
+        mock_response.is_error = False
         mock_response.json = MagicMock(return_value={"appended_event_id": "evt_x"})
         mock_post = AsyncMock(return_value=mock_response)
         probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
@@ -416,18 +411,16 @@ class TestLogging:
             for v in r.values():
                 assert secret_body not in str(v), f"content leaked into log field: {r}"
 
-    async def test_emit_inbound_logs_response_body_on_error(
+    async def test_emit_inbound_logs_response_body_on_4xx_then_drops(
         self, probe: _ProbeConnector
     ) -> None:
         """When the api rejects an inbound (e.g. FastAPI 422 validation),
-        the response body carries the diagnostic — which field, why.
-        ``response.raise_for_status()`` discards it, so the connector must
-        log the body explicitly before raising or the operator only sees a
-        bare ``HTTPStatusError: 422`` in the crash traceback with no clue
-        what triggered the rejection.
+        the response body carries the diagnostic — which field, why.  The
+        body is logged before the envelope drops so the operator has the
+        field path / message in the container log.  ``None`` return
+        signals the drop so callers can skip downstream work (read
+        receipts, side-effects) without inspecting the result shape.
         """
-        import httpx
-
         validation_body = (
             '{"error":{"type":"validation_error","detail":'
             '{"errors":[{"type":"missing","loc":["body","content"],'
@@ -437,24 +430,17 @@ class TestLogging:
         mock_response.is_error = True
         mock_response.status_code = 422
         mock_response.text = validation_body
-        mock_response.raise_for_status = MagicMock(
-            side_effect=httpx.HTTPStatusError(
-                "422 Unprocessable Content", request=MagicMock(), response=mock_response
-            )
-        )
         mock_post = AsyncMock(return_value=mock_response)
         probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
 
-        with (
-            structlog.testing.capture_logs() as records,
-            pytest.raises(httpx.HTTPStatusError),
-        ):
-            await probe.emit_inbound(
+        with structlog.testing.capture_logs() as records:
+            result = await probe.emit_inbound(
                 connection_id="conn_1",
                 chat_id="c",
                 sender={"id": 1},
                 content="",
             )
+        assert result is None
         failed = [r for r in records if r.get("event") == "connector.inbound.failed"]
         assert len(failed) == 1, "expected one connector.inbound.failed record"
         assert failed[0]["status_code"] == 422
@@ -557,9 +543,7 @@ class TestLogging:
         failed = [r for r in records if r["event"] == "connector.tool_call.failed"]
         assert failed[0]["reason"] == "tool_exception"
 
-    async def test_dispatch_call_logs_failed_on_unknown_tool(
-        self, probe: _ProbeConnector
-    ) -> None:
+    async def test_dispatch_call_logs_failed_on_unknown_tool(self, probe: _ProbeConnector) -> None:
         with structlog.testing.capture_logs() as records:
             await probe.dispatch_call(
                 {
@@ -580,9 +564,7 @@ class TestMultiConnectionDispatch:
     """The new shape's headline property: one runner, N connections,
     dispatch routes by ``connection_id`` on the call payload."""
 
-    async def test_two_connections_dispatched_independently(
-        self, probe: _ProbeConnector
-    ) -> None:
+    async def test_two_connections_dispatched_independently(self, probe: _ProbeConnector) -> None:
         await probe.dispatch_call(
             {
                 "connection_id": "conn_A",
@@ -606,3 +588,128 @@ class TestMultiConnectionDispatch:
         assert probe.results[0].kwargs["session_id"] == "sess_A"
         assert probe.results[1].kwargs["connection_id"] == "conn_B"
         assert probe.results[1].kwargs["session_id"] == "sess_B"
+
+
+class TestEmitInbound4xxDrop:
+    """``emit_inbound`` drops-and-continues on routine 4xx so one bad
+    envelope can't tear down sibling connections via the parent
+    TaskGroup.  Auth-broken (401/403) and 5xx still raise."""
+
+    @pytest.mark.parametrize("status_code", [422, 400])
+    async def test_drops_routine_4xx_returns_none(
+        self, probe: _ProbeConnector, status_code: int
+    ) -> None:
+        mock_response = MagicMock()
+        mock_response.is_error = True
+        mock_response.status_code = status_code
+        mock_response.text = "diagnostic body"
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+        result = await probe.emit_inbound(
+            connection_id="conn_1", chat_id="c", sender={"id": 1}, content=""
+        )
+        assert result is None
+
+    @pytest.mark.parametrize("status_code", [401, 500])
+    async def test_raises_on_auth_and_5xx(
+        self, probe: _ProbeConnector, status_code: int
+    ) -> None:
+        mock_response = MagicMock()
+        mock_response.is_error = True
+        mock_response.status_code = status_code
+        mock_response.text = "auth or server error"
+        mock_response.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError(
+                f"{status_code}", request=MagicMock(), response=mock_response
+            )
+        )
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+        with pytest.raises(httpx.HTTPStatusError):
+            await probe.emit_inbound(
+                connection_id="conn_1", chat_id="c", sender={"id": 1}, content=""
+            )
+
+
+class TestFocalChannelHelper:
+    async def test_returns_canonical_string(self, probe: _ProbeConnector) -> None:
+        assert probe.focal_channel("account-x", "chat-42") == "probe/account-x/chat-42"
+
+
+class TestIsolatedServeConnection:
+    """``_isolated_serve_connection`` wraps ``serve_connection`` so a
+    bad bring-up (typo'd secret, unregistered phone) doesn't tear down
+    sibling connections via the parent TaskGroup.  Always pops the
+    user-state slot on exit."""
+
+    async def test_swallows_non_cancel_exception(self) -> None:
+        class _CrashingConnector(HttpConnector):
+            connector = "crashy"
+
+            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
+                raise RuntimeError("daemon refused this phone")
+
+        c = _CrashingConnector(base_url="http://x", token="aios_runtime_x")
+        with structlog.testing.capture_logs() as records:
+            # Should NOT raise.
+            await c._isolated_serve_connection("conn_1", {"phone": "+1..."})
+        failed = [r for r in records if r["event"] == "connector.connection.serve_failed"]
+        assert len(failed) == 1
+        assert failed[0]["connection_id"] == "conn_1"
+        assert failed[0]["error"] == "RuntimeError"
+
+    async def test_pops_state_on_cancel(self) -> None:
+        class _Connector(HttpConnector):
+            connector = "withstate"
+
+            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
+                self.state[connection_id] = {"loaded": True}
+                await asyncio.Event().wait()
+
+        c = _Connector(base_url="http://x", token="aios_runtime_x")
+        task = asyncio.create_task(c._isolated_serve_connection("conn_1", {}))
+        await asyncio.sleep(0)  # let serve_connection populate state
+        assert "conn_1" in c.state
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert "conn_1" not in c.state
+
+
+class TestRunUntilStopped:
+    """``run_until_stopped`` wraps ``run`` with cancel-on-stop so SIGTERM
+    fires ``teardown``.  Tests drive cancellation directly; the
+    process-level signal handler is exercised separately by hand or e2e."""
+
+    async def test_cancel_propagates_and_teardown_runs(self) -> None:
+        teardown_called = asyncio.Event()
+
+        class _Connector(HttpConnector):
+            connector = "stoppable"
+
+            async def run(self) -> None:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    teardown_called.set()
+
+        c = _Connector(base_url="http://x", token="aios_runtime_x")
+        task = asyncio.create_task(c.run_until_stopped(install_signal_handlers=False))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert teardown_called.is_set(), "run's finally should have fired"
+
+    async def test_run_returns_naturally(self) -> None:
+        """If ``run`` returns on its own (e.g. SSE closes cleanly),
+        ``run_until_stopped`` returns without raising."""
+
+        class _Connector(HttpConnector):
+            connector = "shortlived"
+
+            async def run(self) -> None:
+                return
+
+        c = _Connector(base_url="http://x", token="aios_runtime_x")
+        await c.run_until_stopped(install_signal_handlers=False)

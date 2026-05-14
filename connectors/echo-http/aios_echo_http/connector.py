@@ -51,6 +51,13 @@ class EchoConnector(HttpConnector):
             sender={"display_name": sender_name},
             content=content,
         )
+        # Integration tests want loud failures.  ``emit_inbound`` returns
+        # ``None`` when the api drops a routine 4xx envelope; surface that
+        # to the test instead of swallowing it.
+        if result is None:
+            raise RuntimeError(
+                f"emit_inbound dropped envelope for connection {connection_id!r}"
+            )
         return {"event_id": result.get("appended_event_id")}
 
 
