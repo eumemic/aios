@@ -161,12 +161,38 @@ class TestMcpCli:
 
         monkeypatch.setattr("aios.sandbox.mcp_proxy.call_mcp_tool", _call)
 
-        result = await _run_cli("tav", "web_search", "--json", "{}", broker=broker)
+        result = await _run_cli("tav", "web_search", "{}", broker=broker)
         assert result.returncode == 0
         assert result.stdout.strip() == "the result"
 
+    async def test_invoke_no_args_sends_empty_object(
+        self, broker: McpBroker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mcp <server> <tool>`` with no positional JSON sends ``{}``."""
+        broker.register_session("sess_X", "s")
+        agent = _agent_with_one_tool()
+
+        async def _load(*_a: Any, **_k: Any) -> Any:
+            return agent
+
+        monkeypatch.setattr(broker, "_load_agent", _load)
+
+        captured: dict[str, Any] = {}
+
+        async def _call(
+            _url: str, _h: dict[str, str], _tool: str, args: dict[str, Any]
+        ) -> dict[str, Any]:
+            captured["args"] = args
+            return {"content": "ok"}
+
+        monkeypatch.setattr("aios.sandbox.mcp_proxy.call_mcp_tool", _call)
+
+        result = await _run_cli("tav", "web_search", broker=broker)
+        assert result.returncode == 0
+        assert captured["args"] == {}
+
     async def test_invoke_unknown_secret_exits_nonzero(self, broker: McpBroker) -> None:
-        result = await _run_cli("tav", "web_search", "--json", "{}", broker=broker, secret="wrong")
+        result = await _run_cli("tav", "web_search", "{}", broker=broker, secret="wrong")
         assert result.returncode != 0
         assert "mcp:" in result.stderr.lower()
 
@@ -186,7 +212,7 @@ class TestMcpCli:
 
         monkeypatch.setattr("aios.sandbox.mcp_proxy.call_mcp_tool", _call)
 
-        result = await _run_cli("tav", "web_search", "--json", "{}", "--full", broker=broker)
+        result = await _run_cli("tav", "web_search", "{}", "--full", broker=broker)
         assert result.returncode == 0
         # --full prints the JSON envelope, not the bare content.
         assert json.loads(result.stdout) == {"content": "ok"}
