@@ -86,7 +86,7 @@ async def _start_session(
         resources=resources,
         account_id=account_id,
     )
-    await refresh_session_mount_state(harness._pool, session.id)
+    await refresh_session_mount_state(harness._pool, session.id, account_id="acc_test_stub")
     return session
 
 
@@ -421,7 +421,9 @@ class TestMountUpdateRecyclesContainer:
             ],
             account_id=account_id,
         )
-        await refresh_session_mount_state(docker_harness._pool, session.id)
+        await refresh_session_mount_state(
+            docker_harness._pool, session.id, account_id="acc_test_stub"
+        )
 
         after = await bash_handler(
             session.id, {"command": "ls -d /mnt/memory/attach-mount && echo OK"}
@@ -454,7 +456,9 @@ class TestMountUpdateRecyclesContainer:
         await sessions_service.update_session(
             docker_harness._pool, session.id, resources=[], account_id=account_id
         )
-        await refresh_session_mount_state(docker_harness._pool, session.id)
+        await refresh_session_mount_state(
+            docker_harness._pool, session.id, account_id="acc_test_stub"
+        )
 
         after = await bash_handler(session.id, {"command": "ls /mnt/memory 2>&1; true"})
         assert "detach-mount" not in after["stdout"]
@@ -480,7 +484,9 @@ class TestMountUpdateRecyclesContainer:
             ],
             account_id=account_id,
         )
-        await refresh_session_mount_state(docker_harness._pool, session.id)
+        await refresh_session_mount_state(
+            docker_harness._pool, session.id, account_id="acc_test_stub"
+        )
 
         cached = sandbox.peek(session.id)
         assert cached is not None

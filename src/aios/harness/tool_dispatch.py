@@ -110,7 +110,12 @@ async def _execute_tool_async(
             bound_log.warning("tool.bad_arguments")
             is_error = True
             await _append_tool_result(
-                pool, session_id, call_id, name, error="arguments were not valid JSON"
+                pool,
+                session_id,
+                call_id,
+                name,
+                account_id=account_id,
+                error="arguments were not valid JSON",
             )
             return
 
@@ -120,7 +125,9 @@ async def _execute_tool_async(
         except ToolNotFoundError as err:
             bound_log.warning("tool.not_registered")
             is_error = True
-            await _append_tool_result(pool, session_id, call_id, name, error=err.message)
+            await _append_tool_result(
+                pool, session_id, call_id, name, account_id=account_id, error=err.message
+            )
             return
 
         # Validate arguments against the tool's parameters_schema before
@@ -135,7 +142,9 @@ async def _execute_tool_async(
         if schema_error is not None:
             bound_log.info("tool.schema_error", error=schema_error)
             is_error = True
-            await _append_tool_result(pool, session_id, call_id, name, error=schema_error)
+            await _append_tool_result(
+                pool, session_id, call_id, name, account_id=account_id, error=schema_error
+            )
             return
 
         # Invoke handler.  Handlers return either a plain dict (JSON-
@@ -171,14 +180,21 @@ async def _execute_tool_async(
     except asyncio.CancelledError:
         bound_log.info("tool.cancelled")
         is_error = True
-        await _append_tool_result(pool, session_id, call_id, name, error="cancelled")
+        await _append_tool_result(
+            pool, session_id, call_id, name, account_id=account_id, error="cancelled"
+        )
 
     except Exception as err:
         bound_log.exception("tool.handler_failed")
         is_error = True
         _evict_session_container(session_id)
         await _append_tool_result(
-            pool, session_id, call_id, name, error=f"{type(err).__name__}: {err}"
+            pool,
+            session_id,
+            call_id,
+            name,
+            account_id=account_id,
+            error=f"{type(err).__name__}: {err}",
         )
 
     finally:
@@ -195,7 +211,7 @@ async def _execute_tool_async(
             },
             account_id=account_id,
         )
-        await _trigger_sweep(pool, session_id, bound_log)
+        await _trigger_sweep(pool, session_id, bound_log, account_id=account_id)
 
 
 def _parse_arguments(raw_args: Any) -> dict[str, Any] | None:
@@ -245,10 +261,10 @@ async def _append_tool_result(
     call_id: str,
     name: str,
     *,
+    account_id: str,
     error: str,
 ) -> None:
     """Append a tool-role error event."""
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
     content = json.dumps({"error": error}, ensure_ascii=False)
     await sessions_service.append_event(
         pool,
@@ -276,11 +292,12 @@ async def _trigger_sweep(
     pool: asyncpg.Pool[Any],
     session_id: str,
     bound_log: Any,
+    *,
+    account_id: str,
 ) -> None:
     """Run the sweep for this session. Called from the finally block of
     every tool task — both built-in and MCP.
     """
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
     from aios.harness.sweep import SweepResult, wake_sessions_needing_inference
 
     sweep_start = await sessions_service.append_event(
@@ -397,7 +414,12 @@ async def _execute_mcp_tool_async(
             bound_log.warning("mcp_tool.bad_arguments")
             is_error = True
             await _append_tool_result(
-                pool, session_id, call_id, name, error="arguments were not valid JSON"
+                pool,
+                session_id,
+                call_id,
+                name,
+                account_id=account_id,
+                error="arguments were not valid JSON",
             )
             return
 
@@ -428,6 +450,7 @@ async def _execute_mcp_tool_async(
                     session_id,
                     call_id,
                     name,
+                    account_id=account_id,
                     error=f"MCP server {server_name!r} not found",
                 )
                 return
@@ -435,7 +458,9 @@ async def _execute_mcp_tool_async(
             from aios.mcp.client import call_mcp_tool, resolve_auth_for_url
 
             crypto_box = runtime.require_crypto_box()
-            headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
+            headers = await resolve_auth_for_url(
+                pool, crypto_box, session_id, url, account_id=account_id
+            )
             result = await call_mcp_tool(url, headers, tool_name, arguments, meta=meta)
 
         content_str = json.dumps(result, ensure_ascii=False)
@@ -458,13 +483,20 @@ async def _execute_mcp_tool_async(
     except asyncio.CancelledError:
         bound_log.info("mcp_tool.cancelled")
         is_error = True
-        await _append_tool_result(pool, session_id, call_id, name, error="cancelled")
+        await _append_tool_result(
+            pool, session_id, call_id, name, account_id=account_id, error="cancelled"
+        )
 
     except Exception as err:
         bound_log.exception("mcp_tool.handler_failed")
         is_error = True
         await _append_tool_result(
-            pool, session_id, call_id, name, error=f"{type(err).__name__}: {err}"
+            pool,
+            session_id,
+            call_id,
+            name,
+            account_id=account_id,
+            error=f"{type(err).__name__}: {err}",
         )
 
     finally:
@@ -481,4 +513,4 @@ async def _execute_mcp_tool_async(
             },
             account_id=account_id,
         )
-        await _trigger_sweep(pool, session_id, bound_log)
+        await _trigger_sweep(pool, session_id, bound_log, account_id=account_id)

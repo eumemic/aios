@@ -17,6 +17,7 @@ from typing import Any
 import asyncpg
 
 from aios.services import connections as connections_service
+from aios.services import sessions as sessions_service
 
 
 class SubsystemToolProvider:
@@ -31,7 +32,7 @@ class SubsystemToolProvider:
     async def list_tools_for_session(
         self, pool: asyncpg.Pool[Any], session_id: str
     ) -> list[dict[str, Any]]:
-        account_id = ""  # PR 3 stub; PR 4 threads real id
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
         return await connections_service.list_tools_for_session(
             pool, session_id, account_id=account_id
         )

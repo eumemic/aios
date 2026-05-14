@@ -43,7 +43,7 @@ class TestResolveAuthForUrl:
         ) as s:
             s.return_value = (blob, "static_bearer", "vlt_s1")
             result = await resolve_auth_for_url(
-                pool, crypto_box, "sess_123", "https://mcp.example.com"
+                pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
         assert result == {"Authorization": "Bearer session-token"}
         s.assert_awaited_once()
@@ -56,7 +56,7 @@ class TestResolveAuthForUrl:
         ) as s:
             s.return_value = None
             result = await resolve_auth_for_url(
-                pool, crypto_box, "sess_123", "https://mcp.example.com"
+                pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
         assert result == {}
 
@@ -70,7 +70,7 @@ class TestResolveAuthForUrl:
         ) as s:
             s.return_value = (blob, "static_bearer", "vlt_s1")
             result = await resolve_auth_for_url(
-                pool, crypto_box, "sess_123", "https://mcp.example.com"
+                pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
         assert result == {}
 
@@ -84,7 +84,7 @@ class TestResolveAuthForUrl:
         ) as s:
             s.return_value = (blob, "mcp_oauth", "vlt_s1")
             result = await resolve_auth_for_url(
-                pool, crypto_box, "sess_123", "https://mcp.example.com"
+                pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
         assert result == {"Authorization": "Bearer oauth-token"}
 
@@ -122,7 +122,7 @@ class TestResolveAuthForUrl:
             s.return_value = (stale_blob, "mcp_oauth", "vlt_s1")
             v.return_value = (fresh_blob, "mcp_oauth")
             result = await resolve_auth_for_url(
-                pool, crypto_box, "sess_123", "https://mcp.example.com"
+                pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
 
         refresh_mock.assert_awaited_once()
@@ -153,7 +153,7 @@ class TestResolveAuthForUrl:
         ):
             s.return_value = (blob, "mcp_oauth", "vlt_s1")
             result = await resolve_auth_for_url(
-                pool, crypto_box, "sess_123", "https://mcp.example.com"
+                pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
 
         refresh_mock.assert_not_awaited()
@@ -185,7 +185,9 @@ class TestResolveAuthForUrl:
             pytest.raises(OAuthRefreshError),
         ):
             s.return_value = (blob, "mcp_oauth", "vlt_s1")
-            await resolve_auth_for_url(pool, crypto_box, "sess_123", "https://mcp.example.com")
+            await resolve_auth_for_url(
+                pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
+            )
 
 
 # ── discover_mcp_tools ────────────────────────────────────────────────────────

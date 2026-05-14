@@ -67,7 +67,7 @@ def _retry_delay_for_attempt(attempt: int) -> float | None:
 
 
 async def refresh_session_mount_state(
-    pool: asyncpg.Pool[Any], session_id: str
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
 ) -> list[MemoryStoreResourceEcho]:
     """Refresh the cached resource echoes and the sandbox drift check.
 
@@ -75,7 +75,6 @@ async def refresh_session_mount_state(
     Github echoes are cached and fed into the registry's drift check but
     not returned — no current caller in the step body needs them.
     """
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
     from aios.db import queries
 
     async with pool.acquire() as conn:
@@ -134,7 +133,12 @@ async def run_session_step(
         try:
             retry_delay = await asyncio.wait_for(
                 _run_session_step_body(
-                    pool, task_registry, session_id, cause=cause, wake_reason=wake_reason
+                    pool,
+                    task_registry,
+                    session_id,
+                    cause=cause,
+                    wake_reason=wake_reason,
+                    account_id=account_id,
                 ),
                 timeout=_JOB_TIMEOUT_S,
             )
@@ -173,13 +177,13 @@ async def _run_session_step_body(
     *,
     cause: str,
     wake_reason: str | None,
+    account_id: str,
 ) -> float | None:
     """Returns the retry backoff delay when the model errored and the
     outer function should defer a ``cause="reschedule"`` wake after
     ``step_end``; ``None`` otherwise.  Keeping the actual ``defer_wake``
     call outside the body is what makes the reschedule's
     ``wake_deferred`` land in the next step's temporal window."""
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
     if cause == "scheduled" and wake_reason:
         await sessions_service.append_event(
             pool,
@@ -246,7 +250,7 @@ async def _run_session_step_body(
     agent, channels, memory_echoes = await asyncio.gather(
         agent_task,
         list_session_channels(pool, session_id, account_id=account_id),
-        refresh_session_mount_state(pool, session_id),
+        refresh_session_mount_state(pool, session_id, account_id=account_id),
     )
 
     mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
@@ -258,6 +262,7 @@ async def _run_session_step_body(
     prelude = await compute_step_prelude(
         pool,
         session_id,
+        account_id=account_id,
         session=session,
         agent=agent,
         channels=channels,
@@ -750,6 +755,8 @@ async def discover_session_mcp_tools(
     pool: Any,
     session_id: str,
     agent: Any,
+    *,
+    account_id: str,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Discover MCP tools from agent-declared servers, filtered by enabled
     ``mcp_toolset`` entries.
@@ -774,7 +781,9 @@ async def discover_session_mcp_tools(
     crypto_box = runtime.require_crypto_box()
 
     async def _discover_one(name: str, url: str) -> tuple[list[dict[str, Any]], str | None]:
-        headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
+        headers = await resolve_auth_for_url(
+            pool, crypto_box, session_id, url, account_id=account_id
+        )
         return await discover_mcp_tools(url, name, headers)
 
     results = await asyncio.gather(*[_discover_one(n, u) for n, u in servers])

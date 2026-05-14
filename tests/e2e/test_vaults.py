@@ -647,7 +647,9 @@ class TestOAuthRefreshE2E:
             post_calls,
             body={"access_token": "fresh-at", "expires_in": 3600},
         ):
-            headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
+            headers = await resolve_auth_for_url(
+                pool, crypto_box, session_id, url, account_id="acc_test_stub"
+            )
 
         assert len(post_calls) == 1, "expected exactly one POST to the token endpoint"
         assert post_calls[0][0] == "https://issuer.example/token"
@@ -699,7 +701,12 @@ class TestOAuthRefreshE2E:
             body={"access_token": "fresh-at", "expires_in": 3600},
         ):
             results = await asyncio.gather(
-                *(resolve_auth_for_url(pool, crypto_box, session_id, url) for _ in range(5))
+                *(
+                    resolve_auth_for_url(
+                        pool, crypto_box, session_id, url, account_id="acc_test_stub"
+                    )
+                    for _ in range(5)
+                )
             )
 
         assert all(r == {"Authorization": "Bearer fresh-at"} for r in results)
@@ -747,7 +754,9 @@ class TestOAuthRefreshE2E:
             patch("aios.services.vaults.httpx.AsyncClient", MagicMock(return_value=client)),
             pytest.raises(OAuthRefreshError),
         ):
-            await resolve_auth_for_url(pool, crypto_box, session_id, url)
+            await resolve_auth_for_url(
+                pool, crypto_box, session_id, url, account_id="acc_test_stub"
+            )
 
     async def test_concurrent_refresh_of_different_credentials_runs_in_parallel(
         self, pool: Any, crypto_box: Any
@@ -796,8 +805,8 @@ class TestOAuthRefreshE2E:
             body={"access_token": "fresh-at", "expires_in": 3600},
         ):
             results = await asyncio.gather(
-                resolve_auth_for_url(pool, crypto_box, sess1, url1),
-                resolve_auth_for_url(pool, crypto_box, sess2, url2),
+                resolve_auth_for_url(pool, crypto_box, sess1, url1, account_id="acc_test_stub"),
+                resolve_auth_for_url(pool, crypto_box, sess2, url2, account_id="acc_test_stub"),
             )
 
         assert all(r == {"Authorization": "Bearer fresh-at"} for r in results)
