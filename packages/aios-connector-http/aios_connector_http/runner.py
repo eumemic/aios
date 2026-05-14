@@ -278,6 +278,8 @@ class HttpConnector:
     async def teardown(self) -> None:
         """Override: cleanup before the runner exits."""
 
+    # ── test-coordination primitives ──────────────────────────────────
+
     async def wait_ready(self, deadline: float = 5.0) -> None:
         """Block until run() has submitted all three background loop tasks.
 
@@ -586,7 +588,8 @@ class HttpConnector:
     async def _on_connection_removed(self, connection_id: str) -> None:
         """Cancel the worker task for a vanished connection."""
         state = self._connections.pop(connection_id, None)
-        self._connection_served.pop(connection_id, None)
+        if event := self._connection_served.get(connection_id):
+            event.clear()
         if state is None or state.worker is None:
             return
         state.worker.cancel()

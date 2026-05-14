@@ -787,7 +787,7 @@ class TestWaitConnectionServed:
         mock_response.parsed = mock_body
 
         mock_tg = MagicMock()
-        mock_tg.create_task = MagicMock(return_value=MagicMock())
+        mock_tg.create_task = lambda coro, **kw: (coro.close(), MagicMock())[1]
 
         with patch(
             "aios_connector_http.runner._get_runtime_secrets",
