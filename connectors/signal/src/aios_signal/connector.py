@@ -145,11 +145,9 @@ class SignalConnector(HttpConnector):
         """Verify the phone, load roster, drain its inbound queue.
 
         ``secrets["phone"]`` is the account this connection owns.
-        Missing → raise (the operator misconfigured this connection's
-        secrets and the container should refuse to serve it; per
-        ``HttpConnector``'s discovery loop the bad connection's
-        ``serve_connection`` task crashes the TaskGroup, which is
-        the failure mode we want).
+        Missing → raise; :meth:`HttpConnector._isolated_serve_connection`
+        logs the failure under ``connector.connection.serve_failed`` and
+        keeps the container serving its other connections.
         """
         phone = secrets.get("phone")
         if not phone:

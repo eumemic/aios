@@ -173,11 +173,7 @@ class HttpConnector:
         self._tools: dict[str, _ToolMeta] = self._collect_tools()
         self._answered: set[str] = set()
         self._connections: dict[str, _ConnectionState] = {}
-        # User-state slot for subclasses: per-connection objects keyed
-        # by connection_id.  Subclasses populate this inside their
-        # :meth:`serve_connection`; the SDK auto-pops on serve exit so
-        # tool methods always read fresh state.  Narrow the value type
-        # via attribute annotation in the subclass body, e.g.::
+        # Subclasses narrow the value type via a class-body annotation::
         #
         #     class SignalConnector(HttpConnector):
         #         state: dict[str, _SignalConnectionState]
@@ -630,9 +626,9 @@ class HttpConnector:
         except Exception as exc:
             # Tool-call SSE backfill can deliver a call for ``connection_id``
             # before the connection-discovery SSE has finished registering
-            # the connection's state in the connector's ``_conn_state`` dict
+            # the connection's state in the connector's ``state`` dict
             # (the two streams are independent).  The tool method's
-            # ``self._conn_state[connection_id]`` lookup KeyErrors and the
+            # ``self.state[connection_id]`` lookup KeyErrors and the
             # raw ``str(KeyError("'conn_01...'"))`` reaches the model as an
             # opaque quoted ID with no indication that the connection just
             # wasn't ready yet.  Detect that shape and produce an
