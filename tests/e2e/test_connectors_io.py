@@ -18,6 +18,9 @@ resolves to a single connection_id, never the global API key.
 
 from __future__ import annotations
 
+import json as _json
+from typing import Any
+
 import httpx
 
 from aios.ids import EVENT, make_id, split_id
@@ -29,6 +32,35 @@ from tests.helpers.connections import bearer
 def _new_event_id() -> str:
     """A fresh 26-char ULID — the dedup-key shape connectors emit."""
     return split_id(make_id(EVENT))[1]
+
+
+def _inbound_form(
+    *,
+    event_id: str,
+    chat_id: str,
+    content: str,
+    sender: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+    timestamp: str | None = None,
+) -> dict[str, str]:
+    """Build the multipart-form payload for ``/v1/connectors/inbound``.
+
+    The inbound endpoint is ``multipart/form-data`` post-#328: text
+    fields are ``Form`` parts, JSON-shaped dicts (sender / metadata)
+    ride as JSON-encoded strings.
+    """
+    form: dict[str, str] = {
+        "event_id": event_id,
+        "chat_id": chat_id,
+        "content": content,
+    }
+    if sender is not None:
+        form["sender"] = _json.dumps(sender)
+    if metadata is not None:
+        form["metadata"] = _json.dumps(metadata)
+    if timestamp is not None:
+        form["timestamp"] = timestamp
+    return form
 
 
 async def _create_connection(http_client: httpx.AsyncClient, account: str) -> str:
@@ -109,12 +141,12 @@ class TestPostInbound:
         r = await http_client.post(
             "/v1/connectors/inbound",
             headers=bearer(token),
-            json={
-                "event_id": _new_event_id(),
-                "chat_id": "chat-1",
-                "sender": {"display_name": "Alice"},
-                "content": "hello",
-            },
+            data=_inbound_form(
+                event_id=_new_event_id(),
+                chat_id="chat-1",
+                sender={"display_name": "Alice"},
+                content="hello",
+            ),
         )
         assert r.status_code == 201, r.text
         body = r.json()
@@ -154,17 +186,17 @@ class TestPostInbound:
         token = await _issue_token(http_client, connection_id)
 
         event_id = _new_event_id()
-        body = {
-            "event_id": event_id,
-            "chat_id": "chat-1",
-            "sender": {"display_name": "Alice"},
-            "content": "hello",
-        }
+        form = _inbound_form(
+            event_id=event_id,
+            chat_id="chat-1",
+            sender={"display_name": "Alice"},
+            content="hello",
+        )
 
         r1 = await http_client.post(
             "/v1/connectors/inbound",
             headers=bearer(token),
-            json=body,
+            data=form,
         )
         assert r1.status_code == 201
         assert r1.json()["deduped"] is False
@@ -172,7 +204,7 @@ class TestPostInbound:
         r2 = await http_client.post(
             "/v1/connectors/inbound",
             headers=bearer(token),
-            json=body,
+            data=form,
         )
         assert r2.status_code == 201
         assert r2.json()["deduped"] is True
@@ -190,12 +222,11 @@ class TestPostInbound:
         r = await http_client.post(
             "/v1/connectors/inbound",
             headers=bearer(token),
-            json={
-                "event_id": _new_event_id(),
-                "chat_id": "chat-1",
-                "sender": {},
-                "content": "hi",
-            },
+            data=_inbound_form(
+                event_id=_new_event_id(),
+                chat_id="chat-1",
+                content="hi",
+            ),
         )
         assert r.status_code == 422, r.text
         assert r.json()["error"]["detail"]["drop_reason"] == "detached"
@@ -206,11 +237,10 @@ class TestPostInbound:
         r = await http_client.post(
             "/v1/connectors/inbound",
             headers=bearer(aios_env["AIOS_API_KEY"]),
-            json={
-                "event_id": "01J00000000000000000000000",
-                "chat_id": "chat-1",
-                "sender": {},
-                "content": "hi",
-            },
+            data=_inbound_form(
+                event_id="01J00000000000000000000000",
+                chat_id="chat-1",
+                content="hi",
+            ),
         )
         assert r.status_code == 401, r.text

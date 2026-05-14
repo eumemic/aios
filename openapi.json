@@ -5574,7 +5574,7 @@
           "connectors"
         ],
         "summary": "Post Inbound",
-        "description": "Append an inbound user message to the session bound to the caller's connection.\n\nIdempotent on ``body.event_id`` \u2014 replays return the original\nevent id with ``deduped=True``.  Drops surface as 4xx/5xx with\na body explaining the reason (operator-config issue vs server\nerror vs payload).",
+        "description": "Append an inbound user message to the session bound to the caller's connection.\n\nMultipart form: the message text + IDs ride as form fields; any\nattachments ride as ``UploadFile`` parts whose bytes the handler\nstreams into the per-session attachment dir (no shared-filesystem\ncoupling, closes #322 P1).\n\nIdempotent on ``event_id`` \u2014 replays return the original event id\nwith ``deduped=True``. Drops surface as 4xx/5xx with a body\nexplaining the reason (operator-config issue vs server error vs\npayload).",
         "operationId": "post_connector_inbound",
         "parameters": [
           {
@@ -5597,9 +5597,9 @@
         "requestBody": {
           "required": true,
           "content": {
-            "application/json": {
+            "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/ConnectorInboundRequest"
+                "$ref": "#/components/schemas/Body_post_connector_inbound"
               }
             }
           }
@@ -6676,6 +6676,82 @@
         "title": "BindChatRequest",
         "description": "Request body for ``POST /v1/connections/{id}/bind-chat``.\n\nPre-populates a ``connection_chat_sessions`` row so inbound on\n``chat_id`` routes to ``session_id`` regardless of the connection's\nmode-default fallback (#215).  Operators use this to point\ndifferent chats on a single account at different operator-curated\nexisting sessions."
       },
+      "Body_post_connector_inbound": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id",
+            "description": "Client-supplied dedup key (ULID)."
+          },
+          "chat_id": {
+            "type": "string",
+            "title": "Chat Id"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "sender": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sender",
+            "description": "JSON-encoded sender dict (e.g. {\"display_name\": \"Alice\"})."
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata",
+            "description": "JSON-encoded connector metadata dict."
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp",
+            "description": "Optional ISO-8601 platform timestamp; stored in event metadata."
+          },
+          "attachments": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "contentMediaType": "application/octet-stream"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachments",
+            "description": "One file part per attachment; filename + content-type read from each."
+          }
+        },
+        "type": "object",
+        "required": [
+          "event_id",
+          "chat_id",
+          "content"
+        ],
+        "title": "Body_post_connector_inbound"
+      },
       "Body_upload_session_file": {
         "properties": {
           "file": {
@@ -6926,76 +7002,6 @@
         "type": "object",
         "title": "ConnectionSetTools",
         "description": "Request body for ``PUT /v1/connections/{id}/tools`` (#301).\n\nReplaces the connection's tools array wholesale.  Each entry must\nbe ``type=\"custom\"`` \u2014 see :func:`_validate_connection_tools`."
-      },
-      "ConnectorInboundRequest": {
-        "properties": {
-          "event_id": {
-            "type": "string",
-            "title": "Event Id",
-            "description": "Client-supplied dedup key (ULID).  Replays return the original event id."
-          },
-          "chat_id": {
-            "type": "string",
-            "title": "Chat Id"
-          },
-          "sender": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Sender"
-          },
-          "content": {
-            "type": "string",
-            "title": "Content"
-          },
-          "attachments": {
-            "anyOf": [
-              {
-                "items": {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Attachments"
-          },
-          "metadata": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Metadata"
-          },
-          "timestamp": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Timestamp",
-            "description": "Optional ISO-8601 platform timestamp; stored in event metadata."
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "event_id",
-          "chat_id",
-          "content"
-        ],
-        "title": "ConnectorInboundRequest",
-        "description": "Body for ``POST /v1/connectors/inbound``.\n\nAuthenticated via ``ConnectorAuthDep`` so the connection_id is\nserver-resolved from the bearer token \u2014 clients don't pick which\nconnection their inbound lands on."
       },
       "ConnectorInboundResponse": {
         "properties": {

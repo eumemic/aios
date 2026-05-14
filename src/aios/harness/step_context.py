@@ -123,10 +123,14 @@ async def compute_step_prelude(
     # (single_session, per_chat origin, or operator-bound chat).  Each
     # entry is dispatched via the requires_action / tool-results flow —
     # the connector executes externally and POSTs the result back (#301).
+    # Resolved via the ``ToolProvider`` Protocol (#328) so the harness
+    # doesn't import connector-subsystem code directly.
+    from aios.harness import runtime as harness_runtime
     from aios.models.agents import ToolSpec
-    from aios.services import connections as connections_service
 
-    connection_tool_dicts = await connections_service.list_tools_for_session(pool, session_id)
+    connection_tool_dicts = await harness_runtime.require_tool_provider().list_tools_for_session(
+        pool, session_id
+    )
     if connection_tool_dicts:
         connection_tools = [ToolSpec.model_validate(d) for d in connection_tool_dicts]
         tools.extend(to_openai_tools(connection_tools))

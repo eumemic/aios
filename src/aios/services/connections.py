@@ -121,9 +121,11 @@ async def get_connection_secrets(
 async def list_tools_for_session(pool: asyncpg.Pool[Any], session_id: str) -> list[dict[str, Any]]:
     """Custom tool specs from every active connection bound to ``session_id``.
 
-    Used by :func:`aios.harness.step_context.compute_step_prelude` to
-    surface connection-declared tools to the model alongside agent +
-    MCP + connector-subprocess tools (#301).
+    Reached from the harness's per-step prelude via the ``ToolProvider``
+    Protocol (#328): :class:`aios_connectors.providers.SubsystemToolProvider`
+    delegates here, and ``compute_step_prelude`` calls the provider
+    rather than this function directly. PR 7 swaps the SQL onto the
+    new ``bindings`` ⨝ ``connectors.tools_schema`` tables.
     """
     async with pool.acquire() as conn:
         return await queries.list_connection_tools_for_session(conn, session_id)

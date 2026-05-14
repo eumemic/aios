@@ -1,9 +1,11 @@
-"""Inbound message handling for connector containers (#301, #318).
+"""Inbound message handling for connector containers (#301, #318, #328).
 
 The ``POST /v1/connectors/inbound`` endpoint calls
 :func:`handle_inbound`, which wraps the dedup / attachment-staging /
-session-resolution logic shared with the peer HTTP-client connector
-architecture introduced in #318. Built on
+session-resolution logic for inbound user messages from connector
+runtimes. Session resolution is delegated to
+:func:`aios_connectors.resolver.resolve_target_session` (the three-tier
+resolver introduced in #328 PR 4). Built on
 :func:`aios.db.queries.try_record_inbound_ack`,
 :func:`aios.services.sessions.append_event`, and
 :func:`aios.services.attachment_staging.stage_inbound_attachments`.
@@ -19,11 +21,10 @@ import asyncpg
 
 from aios.db import queries
 from aios.errors import NotFoundError
-from aios.models.connections import Connection
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
-from aios.services import sessions as sessions_service
 from aios.services.attachment_staging import (
     AttachmentStagingError,
+    InboundAttachment,
     stage_inbound_attachments,
 )
 from aios.services.wake import defer_wake
@@ -57,11 +58,6 @@ class InboundResult(NamedTuple):
     deduped: bool
 
 
-class _PerChatResolution(NamedTuple):
-    session_id: str | None
-    drop: InboundDrop | None
-
-
 async def handle_inbound(
     pool: asyncpg.Pool[Any],
     *,
@@ -70,7 +66,7 @@ async def handle_inbound(
     chat_id: str,
     sender: dict[str, Any],
     content: str,
-    attachments: list[Any] | None = None,
+    attachments: list[InboundAttachment] | None = None,
     connector_metadata: dict[str, Any] | None = None,
     platform_timestamp: str | None = None,
 ) -> InboundResult:
@@ -78,34 +74,41 @@ async def handle_inbound(
 
     Idempotent on ``event_id``: a replay returns ``deduped=True`` and
     re-defers the wake (procrastinate's queueing_lock coalesces).
+
+    ``attachments`` is a list of :class:`InboundAttachment` — streamable
+    multipart bodies plus their metadata. The router constructs them
+    from FastAPI's :class:`UploadFile` instances.
     """
     if len(content) > MAX_USER_MESSAGE_CHARS:
         return InboundResult(None, None, InboundDrop.PAYLOAD_TOO_LARGE, False)
 
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, connection_id)
-        existing_session_id = await queries.lookup_chat_session(conn, connection.id, chat_id)
 
-    target_session_id = existing_session_id
-    if target_session_id is None:
-        if connection.session_id is not None:
-            target_session_id = connection.session_id
-        elif connection.session_template_id is not None:
-            resolution = await _resolve_per_chat(pool, connection=connection, chat_id=chat_id)
-            if resolution.drop is not None:
-                return InboundResult(None, None, resolution.drop, False)
-            target_session_id = resolution.session_id
-        else:
-            return InboundResult(None, None, InboundDrop.DETACHED, False)
+    # Session resolution: three-tier resolver in the connector subsystem
+    # (chat_sessions → routing_rules → bindings.mode). Imported inside the
+    # function so the core service module stays import-clean against the
+    # subsystem at top level — the registration boundary is enforced by
+    # convention (see ``aios_connectors/__init__.py``).
+    from aios_connectors.resolver import ResolveDrop, resolve_target_session
 
-    assert target_session_id is not None  # both branches above either set it or returned
+    resolution = await resolve_target_session(pool, connection=connection, chat_id=chat_id)
+    if resolution.drop is not None:
+        drop = (
+            InboundDrop.DETACHED
+            if resolution.drop is ResolveDrop.DETACHED
+            else InboundDrop.ARCHIVED_TEMPLATE
+        )
+        return InboundResult(None, None, drop, False)
+    target_session_id = resolution.session_id
+    assert target_session_id is not None
 
     try:
-        staged_attachments, newly_staged_paths = stage_inbound_attachments(
+        staged_attachments, newly_staged_paths = await stage_inbound_attachments(
             session_id=target_session_id,
             connector_name=connection.connector,
             event_id=event_id,
-            raw_attachments=attachments,
+            attachments=attachments or [],
         )
     except AttachmentStagingError:
         return InboundResult(None, target_session_id, InboundDrop.ATTACHMENT_STAGING_FAILED, False)
@@ -143,42 +146,6 @@ async def handle_inbound(
         drop_reason=None,
         deduped=not appended,
     )
-
-
-async def _resolve_per_chat(
-    pool: asyncpg.Pool[Any], *, connection: Connection, chat_id: str
-) -> _PerChatResolution:
-    """Spawn (or reuse) a session for ``(connection.id, chat_id)`` per-chat mode."""
-    assert connection.session_template_id is not None
-    async with pool.acquire() as conn:
-        template = await queries.get_session_template(conn, connection.session_template_id)
-    if template.archived_at is not None:
-        return _PerChatResolution(session_id=None, drop=InboundDrop.ARCHIVED_TEMPLATE)
-
-    focal_channel = f"{connection.connector}/{connection.account}/{chat_id}"
-    session = await sessions_service.create_session(
-        pool,
-        agent_id=template.agent_id,
-        environment_id=template.environment_id,
-        agent_version=template.agent_version,
-        title=None,
-        metadata={},
-        vault_ids=template.vault_ids or None,
-        focal_channel=focal_channel,
-        spawned_from_connection_id=connection.id,
-    )
-
-    # Race-safe register: insert_chat_session returns the existing
-    # session_id if another writer beat us, and the just-spawned session
-    # is intentionally orphaned (operator can archive later).
-    async with pool.acquire() as conn:
-        registered = await queries.insert_chat_session(
-            conn,
-            connection_id=connection.id,
-            chat_id=chat_id,
-            session_id=session.id,
-        )
-    return _PerChatResolution(session_id=registered, drop=None)
 
 
 async def _append_with_dedup(

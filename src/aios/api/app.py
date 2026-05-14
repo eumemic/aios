@@ -53,17 +53,24 @@ def create_app() -> FastAPI:
         app.state.procrastinate = procrastinate_app
         app.state.db_url = settings.db_url
         # The ``/context`` endpoint (issue #60) reuses the worker's
-        # ``compose_step_context`` → ``discover_session_mcp_tools`` path,
-        # which reaches for ``runtime.require_crypto_box()`` to decrypt
-        # per-vault MCP OAuth tokens.  Mirror the worker's globals on the
-        # API side so the shared composer works from either process.
+        # ``compose_step_context`` → ``compute_step_prelude`` path, which
+        # reaches for ``runtime.require_crypto_box()`` to decrypt per-vault
+        # MCP OAuth tokens and ``runtime.require_tool_provider()`` to merge
+        # connection-declared tools (#328 PR 4). Mirror the worker's
+        # globals on the API side so the shared composer works from either
+        # process.
+        from aios_connectors.providers import SubsystemToolProvider
+
         prev_crypto = runtime.crypto_box
+        prev_tool_provider = runtime.tool_provider
         runtime.crypto_box = crypto_box
+        runtime.tool_provider = SubsystemToolProvider()
         try:
             yield
         finally:
             log.info("api.shutdown")
             runtime.crypto_box = prev_crypto
+            runtime.tool_provider = prev_tool_provider
             await procrastinate_app.close_async()
             await pool.close()
             await close_pool()

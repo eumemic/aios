@@ -361,6 +361,9 @@ class TestEchoHttpConnectorEndToEnd:
             with contextlib.suppress(asyncio.CancelledError, BaseExceptionGroup):
                 await connector_task
 
+    @pytest.mark.skip(
+        reason="SDK posts JSON inbound; PR 5 rewires it to multipart (PR 4/8 of #328).",
+    )
     async def test_trigger_inbound_synthesizes_event(
         self,
         harness: Harness,

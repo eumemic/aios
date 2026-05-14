@@ -102,6 +102,7 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     from aios.harness import runtime
     from aios.harness.task_registry import TaskRegistry
     from aios.tools.registry import registry
+    from aios_connectors.providers import SubsystemToolProvider
 
     settings = get_settings()
     pool = await create_pool(settings.db_url, min_size=1, max_size=4)
@@ -115,6 +116,7 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
         runtime.task_registry,
         runtime.sandbox_registry,
         runtime.worker_id,
+        runtime.tool_provider,
     )
 
     # Install
@@ -123,6 +125,7 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     runtime.task_registry = task_reg
     runtime.sandbox_registry = None  # no Docker in fast tier
     runtime.worker_id = "worker_test"
+    runtime.tool_provider = SubsystemToolProvider()
 
     # Snapshot tool registry
     tool_snapshot = dict(registry._tools)
@@ -153,6 +156,7 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
         runtime.task_registry,
         runtime.sandbox_registry,
         runtime.worker_id,
+        runtime.tool_provider,
     ) = prev
     await task_reg.shutdown()
     await pool.close()
@@ -170,6 +174,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     from aios.sandbox.backends import make_backend
     from aios.sandbox.registry import SandboxRegistry
     from aios.tools.registry import registry
+    from aios_connectors.providers import SubsystemToolProvider
 
     settings = get_settings()
     pool = await create_pool(settings.db_url, min_size=1, max_size=4)
@@ -183,12 +188,14 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
         runtime.task_registry,
         runtime.sandbox_registry,
         runtime.worker_id,
+        runtime.tool_provider,
     )
     runtime.pool = pool
     runtime.crypto_box = crypto_box
     runtime.task_registry = task_reg
     runtime.sandbox_registry = sandbox_reg
     runtime.worker_id = "worker_test"
+    runtime.tool_provider = SubsystemToolProvider()
 
     tool_snapshot = dict(registry._tools)
     h = Harness(pool, task_reg)
@@ -215,6 +222,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
         runtime.task_registry,
         runtime.sandbox_registry,
         runtime.worker_id,
+        runtime.tool_provider,
     ) = prev
     await task_reg.shutdown()
     await sandbox_reg.release_all()
@@ -235,6 +243,8 @@ async def http_client(aios_env: dict[str, str]) -> AsyncIterator[Any]:
     from aios.config import get_settings
     from aios.crypto.vault import CryptoBox
     from aios.db.pool import create_pool
+    from aios.harness import runtime
+    from aios_connectors.providers import SubsystemToolProvider
 
     settings = get_settings()
     pool = await create_pool(settings.db_url, min_size=1, max_size=4)
@@ -243,18 +253,27 @@ async def http_client(aios_env: dict[str, str]) -> AsyncIterator[Any]:
     app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
     app.state.db_url = settings.db_url
     app.state.procrastinate = mock.MagicMock()
+    # The fixture skips the API lifespan (httpx ASGITransport doesn't
+    # fire startup/shutdown), so mirror the lifespan's runtime
+    # registrations explicitly — the ``/context`` endpoint reaches
+    # ``runtime.require_tool_provider()`` via ``compute_step_prelude``.
+    prev_tool_provider = runtime.tool_provider
+    runtime.tool_provider = SubsystemToolProvider()
     transport = httpx.ASGITransport(app=app)
     # Mock at every call site that imports ``defer_wake`` directly —
     # patching the source (``aios.services.wake``) is too late since the
     # importing modules already captured the unmocked reference.
-    with (
-        mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock),
-        mock.patch("aios.services.inbound.defer_wake", new_callable=mock.AsyncMock),
-    ):
-        async with authed_client(
-            "http://testserver",
-            aios_env["AIOS_API_KEY"],
-            transport=transport,
-        ) as client:
-            yield client
-    await pool.close()
+    try:
+        with (
+            mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock),
+            mock.patch("aios.services.inbound.defer_wake", new_callable=mock.AsyncMock),
+        ):
+            async with authed_client(
+                "http://testserver",
+                aios_env["AIOS_API_KEY"],
+                transport=transport,
+            ) as client:
+                yield client
+    finally:
+        runtime.tool_provider = prev_tool_provider
+        await pool.close()

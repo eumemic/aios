@@ -12,10 +12,11 @@ single ``connection_id``; the request body never carries it.
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import Annotated, Any
 
-from fastapi import APIRouter, status
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, File, Form, UploadFile, status
+from pydantic import BaseModel, ConfigDict
 from sse_starlette import EventSourceResponse
 
 from aios.api.deps import ConnectorAuthDep, CryptoBoxDep, DbUrlDep, PoolDep
@@ -32,36 +33,13 @@ from aios.models.connections import Connection, ConnectionSetTools, ConnectorSec
 from aios.services import connections as connections_service
 from aios.services import inbound as inbound_service
 from aios.services import sessions as sessions_service
+from aios.services.attachment_staging import InboundAttachment
 from aios.services.wake import defer_wake
 
 router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
 
 
 # ─── connector-facing endpoints (#301) ──────────────────────────────────────
-
-
-class ConnectorInboundRequest(BaseModel):
-    """Body for ``POST /v1/connectors/inbound``.
-
-    Authenticated via ``ConnectorAuthDep`` so the connection_id is
-    server-resolved from the bearer token — clients don't pick which
-    connection their inbound lands on.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    event_id: str = Field(
-        description="Client-supplied dedup key (ULID).  Replays return the original event id.",
-    )
-    chat_id: str
-    sender: dict[str, Any] = Field(default_factory=dict)
-    content: str
-    attachments: list[dict[str, Any]] | None = None
-    metadata: dict[str, Any] | None = None
-    timestamp: str | None = Field(
-        default=None,
-        description="Optional ISO-8601 platform timestamp; stored in event metadata.",
-    )
 
 
 class ConnectorInboundResponse(BaseModel):
@@ -92,29 +70,90 @@ def _inbound_drop_error(drop_reason: str) -> AiosError:
     return AiosError(msg, detail=detail)
 
 
-@router.post("/inbound", operation_id="post_connector_inbound", status_code=status.HTTP_201_CREATED)
+_DEFAULT_ATTACHMENT_CONTENT_TYPE = "application/octet-stream"
+
+
+def _parse_form_json(field: str, raw: str | None, *, default: Any = None) -> Any:
+    """Decode an optional JSON-in-multipart-form field.
+
+    Multipart form values are always text; we expose ``sender`` and
+    ``metadata`` as JSON-encoded strings so connector clients keep the
+    shape the JSON inbound used (with JSON dicts) without hand-rolled
+    field-flattening on either side. Raises :class:`ValidationError` on
+    bad JSON so connector authors see the parse error in the response,
+    not a 500.
+    """
+    if raw is None:
+        return default
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as err:
+        raise ValidationError(
+            f"{field!r} must be a JSON-encoded string",
+            detail={"field": field, "error": str(err)},
+        ) from err
+
+
+@router.post(
+    "/inbound",
+    operation_id="post_connector_inbound",
+    status_code=status.HTTP_201_CREATED,
+)
 async def post_inbound(
-    body: ConnectorInboundRequest,
     pool: PoolDep,
     connection_id: ConnectorAuthDep,
+    event_id: Annotated[str, Form(description="Client-supplied dedup key (ULID).")],
+    chat_id: Annotated[str, Form()],
+    content: Annotated[str, Form()],
+    sender: Annotated[
+        str | None,
+        Form(description='JSON-encoded sender dict (e.g. {"display_name": "Alice"}).'),
+    ] = None,
+    metadata: Annotated[
+        str | None,
+        Form(description="JSON-encoded connector metadata dict."),
+    ] = None,
+    timestamp: Annotated[
+        str | None,
+        Form(description="Optional ISO-8601 platform timestamp; stored in event metadata."),
+    ] = None,
+    attachments: Annotated[
+        list[UploadFile] | None,
+        File(description="One file part per attachment; filename + content-type read from each."),
+    ] = None,
 ) -> ConnectorInboundResponse:
     """Append an inbound user message to the session bound to the caller's connection.
 
-    Idempotent on ``body.event_id`` — replays return the original
-    event id with ``deduped=True``.  Drops surface as 4xx/5xx with
-    a body explaining the reason (operator-config issue vs server
-    error vs payload).
+    Multipart form: the message text + IDs ride as form fields; any
+    attachments ride as ``UploadFile`` parts whose bytes the handler
+    streams into the per-session attachment dir (no shared-filesystem
+    coupling, closes #322 P1).
+
+    Idempotent on ``event_id`` — replays return the original event id
+    with ``deduped=True``. Drops surface as 4xx/5xx with a body
+    explaining the reason (operator-config issue vs server error vs
+    payload).
     """
+    sender_dict: dict[str, Any] = _parse_form_json("sender", sender, default={}) or {}
+    metadata_dict: dict[str, Any] | None = _parse_form_json("metadata", metadata)
+    inbound_attachments = [
+        InboundAttachment(
+            stream=upload,
+            filename=upload.filename or "",
+            content_type=upload.content_type or _DEFAULT_ATTACHMENT_CONTENT_TYPE,
+        )
+        for upload in (attachments or [])
+    ]
     result = await inbound_service.handle_inbound(
         pool,
         connection_id=connection_id,
-        event_id=body.event_id,
-        chat_id=body.chat_id,
-        sender=body.sender,
-        content=body.content,
-        attachments=body.attachments,
-        connector_metadata=body.metadata,
-        platform_timestamp=body.timestamp,
+        event_id=event_id,
+        chat_id=chat_id,
+        sender=sender_dict,
+        content=content,
+        attachments=inbound_attachments,
+        connector_metadata=metadata_dict,
+        platform_timestamp=timestamp,
     )
     if result.drop_reason is not None:
         raise _inbound_drop_error(result.drop_reason.value)
