@@ -69,6 +69,8 @@ Fix: in `_handle_envelope`, catch `httpx.HTTPStatusError` and classify by status
 
 Fix: structured `Mention(uuid, name)` dataclass on `InboundMessage`, populated from the raw envelope alongside the placeholder substitution.  `build_metadata` emits a `mentions: [{uuid, name}]` list and a derived `self_mentioned: bool` (True when one of the entries matches `bot_uuid`).  Agents that want different behavior for "tagged" vs "named-in-passing" inbounds read `metadata.self_mentioned` instead of grepping content.  Locked with four `build_metadata` tests + a parse test that asserts the raw envelope mention array survives intact through `parse_envelope`.
 
+**Follow-on caught in live smoke** — `cfc464e`: extracting mention metadata to the inbound event was only half the job.  The harness's `_format_channel_header` rendered a whitelist of metadata fields into the visible `content` (channel, sender, timestamp, edited, reaction, reply_to, sticker_emoji) but **didn't include `mentions` or `self_mentioned`**.  So even with the connector fix the model never saw the structured signal — it only saw the placeholder-substituted `@<name>` text in the body, exactly the pre-fix shape.  Direct harness invocation against the persisted event confirmed: the metadata was there, the renderer was dropping it.  Fix: extend `_format_channel_header` to emit `self_mentioned=true` on the main header line and one `[mention: name=... · uuid=...]` line per entry so the model has both the boolean signal and the uuids for outbound mention encoding.  Locked with three new context tests.
+
 **6. Group `signal_send` returned `{"status": "ok"}`; DM returned `{"sent_at_ms": ...}`** — `a5db125`
 
 Investigation against the live daemon (signal-cli 0.14.2) revealed that `send` RPC for groups returns literal `null` regardless of params — no nested timestamp to fish out.  The smoke doc's original recommendation ("check what signal-cli returns for group send calls and surface that timestamp") rested on a premise that turned out to be false.
@@ -76,6 +78,12 @@ Investigation against the live daemon (signal-cli 0.14.2) revealed that `send` R
 However, the timestamp *does* arrive on the receive stream as a self-echo envelope (`sourceUuid == bot_uuid` + `dataMessage.groupInfo` + `dataMessage.timestamp`).  Direct probe confirmed the shape; parse_envelope already drops self-messages to `None`, which is the existing hook we extend.
 
 Fix: `signal_send` for groups pre-registers an `asyncio.Future` in a per-`(phone, chat_id)` FIFO before issuing the RPC, then waits up to 2s for the matching echo.  `_maybe_resolve_self_echo` runs in `_handle_envelope`'s `msg is None` branch, pops the head future, sets the timestamp.  On timeout we degrade to `{"status": "ok"}` so a slow network doesn't hang the tool call.  DMs untouched — signal-cli already returns the timestamp inline.  Locked with seven tests covering match / prune / non-bot-sender / DM-skip + signal_send end-to-end (echo → sent_at_ms, timeout → status:ok, DM skips registration entirely).
+
+**Three follow-on bugs caught in live smoke after the first deploy:**
+
+- **`9620a74`** — Self-echo for group sends actually lands on the **receiving peers' account streams**, not the bot's own account stream.  When signal-cli serves multiple registered phones (e.g. a co-located bot like Ultron in the QA group), the dataMessage echo for SmokeBot's send appears on Ultron's `+19092871349` stream — never on SmokeBot's `+16575274288` stream.  The original fix's `_handle_envelope` only watched the bot's own queue, so the echo never resolved, every group send hit the 2s timeout, and the result fell back to `{"status": "ok"}` 100% of the time.  Moved the resolver to `_inbound_dispatcher` and key match by `sourceUuid` against any known `bot_uuid` rather than per-account routing.  Live-verified: `signal_send` → `{"sent_at_ms": 1778711928198}` on the very next group send.
+- **`c7d824c`** — Edit echoes use a DIFFERENT envelope shape: `envelope.editMessage.dataMessage` (nested one level deeper) with the new edit's timestamp at the envelope root.  The matcher only checked `envelope.dataMessage`; chained-edit timestamps (model edits its own message and wants the new timestamp for further edits) silently fell back to `{"status": "ok"}`.  Accept both shapes.
+- **`4fe0ef5`** — When `daemon.rpc.call("send", ...)` raises (e.g. signal-cli's `InvalidSessionException` if a group member has no protocol session yet), the pre-registered echo future was orphaned at the head of the deque.  Drain-stale only pops `done()` futures; an orphan sits indefinitely and the NEXT successful send's echo resolves the orphan with the wrong message's timestamp.  Wrap in `try/finally` cancelling the future on the way out so drain-stale prunes it before the next send.
 
 ### Open — surfaced post-fixup
 
@@ -159,6 +167,44 @@ Risks worth flagging:
 - **Phone-number reclamation** — registering a phone already in use elsewhere boots the other device.  Worth a confirmation flag.
 - **Secrets shape** — `secrets={phone}` is just an addressing label; the real cryptographic material (libsignal protocol keys) lives in signal-cli's `accounts.json`, not in aios.
 
+**15. Peer inbound edits silently dropped** — `cfc464e`
+
+When a chat partner (not the bot) edits a prior message, signal-cli emits an envelope with `envelope.editMessage.dataMessage` rather than the top-level `envelope.dataMessage` shape `parse_envelope` was matching.  Edits returned `None` from parse → the inbound dispatcher dropped them → **the bot never saw a peer's edit**, so the bot's view of the conversation silently diverged from the chat client's view.
+
+Caught live when Tom edited "@+16575274288 still?" to "@+16575274288 still? - EDIT can you see this?" and asked SmokeBot.  Before the fix the bot would have been answering off the pre-edit content.
+
+Fix: `parse_envelope` falls back to `envelope.editMessage.dataMessage` and sets `edited=True` + `edit_target_timestamp_ms` on the resulting `InboundMessage`.  `build_metadata` propagates these to event metadata; the harness's existing `edited=true` rendering picks it up and now also surfaces `edit_target_timestamp_ms`.  Locked with a parse test against the captured envelope shape.
+
+**16. Telegram outbound `.gif` rendered as a static first frame** — `4f409bd`
+
+Telegram's Bot API treats a `.gif` passed to `sendPhoto` as a static image and only renders the first frame.  `sendAnimation` is the first-class animated-image surface.
+
+`_classify` had `.gif` in `_PHOTO_EXTS` → routed to `bot.send_photo` → Tom saw a static image where a 30-frame Mandelbrot zoom was supposed to be.  The bot worked around it client-side by converting to MP4 via moviepy (installed on demand via `pip install`), which worked but lost the obvious-thing-should-just-work property.
+
+Fix: extract `.gif` from `_PHOTO_EXTS` into a new `_ANIMATION_EXTS`; `_classify` returns `"animation"`; dispatch table maps `"animation"` to `bot.send_animation`.  Multi-attachment media-group path leaves `.gif` falling back to `InputMediaDocument` since Telegram media groups don't have an `InputMediaAnimation` type (platform constraint, not a fixable connector issue).  Locked with a new `_classify` assertion.
+
+**Note**: #16 + the `9617c84` follow-on to #11 together close the full attachment-rendering chain: `.gif` now routes via `send_animation` AND has `Content-Type: image/gif`, so animated GIFs play inline in Telegram.
+
+### Open — observed but not yet fixed
+
+**17. Telegram `parse_mode="html"` runs Markdown→HTML converter; name collides with Bot API semantics** → [#351](https://github.com/eumemic/aios/issues/351)
+
+The connector's `parse_mode: Literal["plain", "html"]` parameter does NOT mean "I'm writing HTML" (Telegram Bot API semantics) — it means "I'm writing markdown, you run it through `markdown_to_telegram_html` before sending".  The docstring describes the actual behavior, but the parameter NAME is the load-bearing signal; smart-enough models infer the standard semantics, write `<a href="...">`, and get literal-text fallout in chat.
+
+Surfaced live when another agent (Ultron) tried `parse_mode="html"` with raw `<a href>` tags and saw the text render as literal characters.  Recommended rename: `parse_mode: Literal["plain", "markdown", "html"]` where `"markdown"` is the current converter behavior and `"html"` becomes true HTML pass-through.
+
+**18. Tool-call dispatched before `serve_connection` registers state → stringified KeyError** → [#352](https://github.com/eumemic/aios/issues/352)
+
+The dispatch SSE and the connection-discovery SSE are independent streams.  Backfill on the tool-call stream can fire while `_on_connection_added` is still running.  When the tool method does `self._conn_state[connection_id]`, it raises `KeyError(connection_id)` and the SDK base stringifies it to `{"error": "'conn_01...'"}` — incomprehensible from the model's POV.
+
+Observed during a telegram restart: connector came up at `17:48:40`, tool-call dispatched at `17:48:43`, got the bare-ID KeyError; retry 1s later succeeded.  Same root cause family as #346 (per-connection state race), different symptom path.
+
+**19. Harness sweep re-wakes session forever on persistent model timeouts** → [#353](https://github.com/eumemic/aios/issues/353)
+
+When wake-step consistently exceeds the 5-min `step_timeout` (e.g. agent on a slow local model with too-large a context window), the sweep keeps re-firing the same wake on every cycle with no backoff or budget.  Each retry pegs the local GPU for 5 minutes and produces nothing.
+
+Observed during the ollama-27B experiment: wake_session[331, 332, 362, 375, 379, 402, 423, ...] all on the same session, alternating between 41s/142s/300s.  Tom's laptop got pegged before we caught it; archive on the session was the only way to break the loop.  Recommended fix: retry budget on consecutive timeouts + promote to `errored` status after N to make the sweep skip the session.
+
 ### Pre-existing, not stack-related
 
 **7. ARM64 sandbox image missing** (`ghcr.io/eumemic/aios-sandbox:latest` has no `linux/arm64/v8` manifest)
@@ -191,6 +237,8 @@ python-telegram-bot's HTTPX request layer JSON-serializes the request body; pass
 
 Fix: `_read_for_upload(host_path)` reads bytes up-front; `_send_single_media` and `_build_media_group` pass the bytes (not Path) to PTB so the upload path is multipart, not JSON-encoded.  Locked with a regression test asserting every media kwarg handed to PTB is bytes, never a `Path`.
 
+**Follow-on caught in live smoke** — `9617c84`: bytes survived the JSON-serialize layer, but PTB then wraps raw bytes in an `InputFile` with a default filename of `"application.octet-stream"`.  Telegram derives `Content-Type` from the InputFile filename's extension; with the default, every attachment landed as `Content-Type: application/octet-stream` — Tom saw a 713 KB "application.octet-stream" download icon even for animated GIFs that had been correctly routed (post-#16) to `send_animation`.  Wrap the bytes in `InputFile(bytes, filename=host_path.name)` so PTB's multipart writer attaches the source filename, Telegram reads the extension, and the attachment renders in its native player (image preview / inline animation / audio scrubber / etc.).
+
 ### Verification
 
 After the three fixes in `refactor/328-fixup-smoke`, the previously-crashing scenarios were re-exercised end-to-end:
@@ -217,6 +265,22 @@ After the three fixes in `refactor/328-fixup-smoke`, the previously-crashing sce
 
 Both qwen3.6-flash and Haiku 4.5 frequently emitted `INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER` content instead of either calling a connector send tool or returning silently (the latter being the "right" choice per the focal paradigm).  Sonnet 4.6 was noticeably cleaner — fewer wakes ended in monologue-only output, more wakes responded directly with `signal_send` when a reply was actually warranted.  Not a bug per se — bare assistant text is correctly never delivered — but a measurable model-capability gradient.
 
+### Bot ↔ bot invisibility in Telegram groups
+
+Observed when SmokeBot and another bot (MetalsAndAIBot / Ultron) were both members of the "Metals and AI" Telegram group: SmokeBot received messages from human members (Tom, David) but NOT from MetalsAndAIBot, and vice versa.  Confirmed via direct test — SmokeBot saw 4 `@mention` strings in a message that tagged 4 entities (`@MetalsAndAIBot @eumemic @EumemicBot @daviduser`) but no inbound stream from MetalsAndAIBot's posts.
+
+Telegram-platform-level constraint: bots can't read other bots' messages in groups, even with privacy mode disabled.  Nothing aios can route around.  Worth noting because the smoke matrix's "bot-to-bot in group" cell is permanently ❌ on Telegram (whereas on Signal it works fine — Signal has no bot-vs-user concept).
+
+### Ollama 27B local model: latency profile vs harness step_timeout
+
+Observed during a brief experiment switching the agent's `model` to `ollama_chat/huihui_ai/qwen3.5-abliterated:27b-Claude` (locally hosted Qwen 3.5 27B Q4_K_M) on an M4 Pro / 48GB Mac:
+
+- **Throughput**: ~18.7 tok/s prompt eval, ~8.6 tok/s generation eval (vs typical M4 Pro range of 15-20 tok/s for 27B Q4_K_M — somewhat below ceiling but functional).
+- **Thinking-mode**: Default ON for this Qwen variant.  With thinking enabled, all output budget gets spent in `<thinking>` tokens and the visible `response` field stays empty — directly observed: 10-token probe returned `response=''` with all 10 tokens in `thinking=`.  Disabled via `/no_think` system-prompt prefix + ollama `think: false` option (latter passes through LiteLLM via the agent's `litellm_extra`).
+- **Step budget**: The harness's 5-minute `step_timeout` is too short for this combination of (27B model + 30k context window + un-disabled thinking).  Hit reliably during smoke; the sweep then re-fires the timed-out wake forever (see #19).
+
+Not a bug — agent-level configuration choice.  Documented here as a capacity / compat note for anyone wiring a similar local model.
+
 ## Recommendations / follow-ups
 
 | # | Action | Scope | Status |
@@ -227,11 +291,16 @@ Both qwen3.6-flash and Haiku 4.5 frequently emitted `INTERNAL_MONOLOGUE_NOT_SEEN
 | 7 | Build multi-arch sandbox image (linux/amd64 + linux/arm64) | infra | ✅ workflow `456cf58` (image republishes on next master merge) |
 | 8 | Scrub orphaned `mcp_toolset` entries on pre-PR-5 agents | data migration or CLI | open (separate one-off) |
 | 10 | Daemon process-group ownership + SIGTERM trap | small fix | ✅ `5f6a0e5` |
-| 11 | Telegram attachment Path → bytes for PTB upload | small fix | ✅ `02b4ac5` |
+| 11 | Telegram attachment shape (Path → bytes → InputFile + filename for Content-Type) | small fix | ✅ `02b4ac5` + `9617c84` |
 | 12 | Per-connection `serve_connection` failure isolation (same shape as #4 but for bring-up) | small fix | open → [#346](https://github.com/eumemic/aios/issues/346) |
 | 13 | SDK lifecycle hardening — hoist #4 / #10 / #12 + state/focal-channel boilerplate onto `HttpConnector` so telegram inherits the safety rails | medium refactor | open → [#347](https://github.com/eumemic/aios/issues/347) |
 | 14 | Signal account registration via the aios API — three routes + management-call SSE so new phones can be onboarded without SSH or restart | medium feature | open → [#348](https://github.com/eumemic/aios/issues/348) |
+| 15 | Peer inbound edits silently dropped — accept `envelope.editMessage.dataMessage` shape | small fix | ✅ `cfc464e` |
+| 16 | Telegram outbound `.gif` → `send_animation` (not `send_photo`) | small fix | ✅ `4f409bd` |
+| 17 | Telegram `parse_mode="html"` parameter name collides with Bot API semantics | small fix | open → [#351](https://github.com/eumemic/aios/issues/351) |
+| 18 | Tool-call dispatched before `serve_connection` registers state → stringified KeyError | small fix | open → [#352](https://github.com/eumemic/aios/issues/352) |
+| 19 | Harness sweep retries persistent-timeout sessions forever; no backoff or cap | medium fix | open → [#353](https://github.com/eumemic/aios/issues/353) |
 | (env) | `aios dev bootstrap` discoverability / harder-to-source-wrong-.env | DX | open → [#349](https://github.com/eumemic/aios/issues/349) |
 | (env) | Runtime token connection-subset scope | feature | open → [#350](https://github.com/eumemic/aios/issues/350) |
 
-All numbered code-path findings (4, 5, 6, 10, 11) landed in the `refactor/328-fixup-smoke` follow-up branch.  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene → [#345](https://github.com/eumemic/aios/issues/345).  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.  #12 → [#346](https://github.com/eumemic/aios/issues/346) and #13 + #14 are architectural follow-ups surfaced when reasoning about the post-fixup connector boundary and operator UX, all filed as separate issues for their own targeted PRs.
+All ✅ items landed in the `refactor/328-fixup-smoke` follow-up branch (PR #344).  #7's workflow change publishes the multi-arch image on the next push to master.  #8 is pre-existing data hygiene → [#345](https://github.com/eumemic/aios/issues/345).  #9 is the architectural cost of the monotonic-context invariant and not a fixable bug.  #12 → [#346](https://github.com/eumemic/aios/issues/346), #13 → [#347](https://github.com/eumemic/aios/issues/347), #14 → [#348](https://github.com/eumemic/aios/issues/348), #17 → [#351](https://github.com/eumemic/aios/issues/351), #18 → [#352](https://github.com/eumemic/aios/issues/352), and #19 → [#353](https://github.com/eumemic/aios/issues/353) are all open follow-ups with their own targeted PRs.
