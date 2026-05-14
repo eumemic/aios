@@ -17,6 +17,8 @@ from .agent_version_litellm_extra import AgentVersionLitellmExtra
 from .bind_chat_request import BindChatRequest
 from .body_post_connector_runtime_inbound import BodyPostConnectorRuntimeInbound
 from .body_upload_session_file import BodyUploadSessionFile
+from .bootstrap_request import BootstrapRequest
+from .bootstrap_response import BootstrapResponse
 from .bound_chat import BoundChat
 from .connection import Connection
 from .connection_attach import ConnectionAttach
@@ -191,6 +193,8 @@ __all__ = (
     "BindChatRequest",
     "BodyPostConnectorRuntimeInbound",
     "BodyUploadSessionFile",
+    "BootstrapRequest",
+    "BootstrapResponse",
     "BoundChat",
     "Connection",
     "ConnectionAttach",

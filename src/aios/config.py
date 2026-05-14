@@ -59,6 +59,15 @@ class Settings(BaseSettings):
         ...,
         description="Base64-encoded 32-byte master key for libsodium secretbox.",
     )
+    bootstrap_token: SecretStr | None = Field(
+        default=None,
+        description="Optional one-shot token that unlocks ``POST /v1/accounts/bootstrap`` "
+        "when the ``accounts`` table has no root row. Once a root exists, the bootstrap "
+        "endpoint is 404 regardless of this value. Operator generates a random token "
+        "(`openssl rand -base64 32`), sets it on a fresh deployment, hits the endpoint, "
+        "captures the returned account_id + plaintext key, then unsets the env. Leaving "
+        "the env set after bootstrap is harmless — the endpoint is already closed.",
+    )
 
     # ── database (required) ────────────────────────────────────────────────
     db_url: str = Field(
