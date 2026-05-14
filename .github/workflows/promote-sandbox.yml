@@ -36,12 +36,17 @@ jobs:
           DIGEST=$(docker buildx imagetools inspect \
             ghcr.io/eumemic/aios-sandbox:smoked \
             --format '{{.Manifest.Digest}}')
+          # Fail loudly if :smoked doesn't exist or inspect returned empty.
+          [ -n "$DIGEST" ] || { echo "ERROR: could not resolve :smoked digest — has the smoke job run?"; exit 1; }
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
       - name: Retag :smoked → :stable
+        # Use the pinned digest (not the mutable :smoked tag) so that even
+        # if a concurrent smoke run updates :smoked between the resolve and
+        # retag steps, :stable points to exactly the image we inspected.
         run: |
           docker buildx imagetools create \
             -t ghcr.io/eumemic/aios-sandbox:stable \
-            ghcr.io/eumemic/aios-sandbox:smoked
+            ghcr.io/eumemic/aios-sandbox@${{ steps.digest.outputs.digest }}
       - name: Trigger ledger append
         uses: peter-evans/repository-dispatch@v3
         with:
