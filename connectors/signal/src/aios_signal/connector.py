@@ -255,10 +255,6 @@ class SignalConnector(HttpConnector):
             if msg.timestamp_ms
             else None
         )
-        # 4xx drop-and-continue lives in :meth:`HttpConnector.emit_inbound`:
-        # a routine 422 from one malformed envelope can't tear down sibling
-        # connections.  ``None`` return signals the drop; skip the read
-        # receipt since the inbound never landed in the session log.
         result = await self.emit_inbound(
             connection_id=connection_id,
             # Signal's (sender_uuid, timestamp_ms) pair is the platform's

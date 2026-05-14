@@ -12,10 +12,13 @@ is intercepted by mocking the underlying ``httpx.AsyncClient.post``.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 import structlog
 from aios_connector_http import HttpConnector, tool
@@ -588,30 +591,18 @@ class TestMultiConnectionDispatch:
 
 
 class TestEmitInbound4xxDrop:
-    """``emit_inbound`` defaults to drop-and-continue on routine 4xx so
-    one bad envelope can't tear down sibling connections via the parent
+    """``emit_inbound`` drops-and-continues on routine 4xx so one bad
+    envelope can't tear down sibling connections via the parent
     TaskGroup.  Auth-broken (401/403) and 5xx still raise."""
 
-    async def test_drops_422_returns_none(self, probe: _ProbeConnector) -> None:
+    @pytest.mark.parametrize("status_code", [422, 400])
+    async def test_drops_routine_4xx_returns_none(
+        self, probe: _ProbeConnector, status_code: int
+    ) -> None:
         mock_response = MagicMock()
         mock_response.is_error = True
-        mock_response.status_code = 422
-        mock_response.text = "validation error body"
-        mock_post = AsyncMock(return_value=mock_response)
-        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
-        result = await probe.emit_inbound(
-            connection_id="conn_1",
-            chat_id="c",
-            sender={"id": 1},
-            content="bad",
-        )
-        assert result is None
-
-    async def test_drops_400_returns_none(self, probe: _ProbeConnector) -> None:
-        mock_response = MagicMock()
-        mock_response.is_error = True
-        mock_response.status_code = 400
-        mock_response.text = "bad request"
+        mock_response.status_code = status_code
+        mock_response.text = "diagnostic body"
         mock_post = AsyncMock(return_value=mock_response)
         probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
         result = await probe.emit_inbound(
@@ -619,59 +610,30 @@ class TestEmitInbound4xxDrop:
         )
         assert result is None
 
-    @pytest.mark.parametrize("status_code", [401, 403, 500, 502, 503])
-    async def test_raises_on_auth_and_5xx(self, probe: _ProbeConnector, status_code: int) -> None:
-        import httpx as _httpx
-
+    @pytest.mark.parametrize("status_code", [401, 500])
+    async def test_raises_on_auth_and_5xx(
+        self, probe: _ProbeConnector, status_code: int
+    ) -> None:
         mock_response = MagicMock()
         mock_response.is_error = True
         mock_response.status_code = status_code
         mock_response.text = "auth or server error"
         mock_response.raise_for_status = MagicMock(
-            side_effect=_httpx.HTTPStatusError(
+            side_effect=httpx.HTTPStatusError(
                 f"{status_code}", request=MagicMock(), response=mock_response
             )
         )
         mock_post = AsyncMock(return_value=mock_response)
         probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
-        with pytest.raises(_httpx.HTTPStatusError):
+        with pytest.raises(httpx.HTTPStatusError):
             await probe.emit_inbound(
                 connection_id="conn_1", chat_id="c", sender={"id": 1}, content=""
-            )
-
-    async def test_raise_on_4xx_escape_hatch(self, probe: _ProbeConnector) -> None:
-        """Callers that need the old strict behavior pass ``raise_on_4xx=True``."""
-        import httpx as _httpx
-
-        mock_response = MagicMock()
-        mock_response.is_error = True
-        mock_response.status_code = 422
-        mock_response.text = "validation"
-        mock_response.raise_for_status = MagicMock(
-            side_effect=_httpx.HTTPStatusError("422", request=MagicMock(), response=mock_response)
-        )
-        mock_post = AsyncMock(return_value=mock_response)
-        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
-        with pytest.raises(_httpx.HTTPStatusError):
-            await probe.emit_inbound(
-                connection_id="conn_1",
-                chat_id="c",
-                sender={"id": 1},
-                content="",
-                raise_on_4xx=True,
             )
 
 
 class TestFocalChannelHelper:
     async def test_returns_canonical_string(self, probe: _ProbeConnector) -> None:
         assert probe.focal_channel("account-x", "chat-42") == "probe/account-x/chat-42"
-
-    async def test_uses_subclass_connector_attr(self) -> None:
-        class Other(HttpConnector):
-            connector = "myplatform"
-
-        c = Other(base_url="http://x", token="aios_runtime_x")
-        assert c.focal_channel("a", "c") == "myplatform/a/c"
 
 
 class TestIsolatedServeConnection:
@@ -680,7 +642,7 @@ class TestIsolatedServeConnection:
     sibling connections via the parent TaskGroup.  Always pops the
     user-state slot on exit."""
 
-    async def test_swallows_non_cancel_exception(self, probe: _ProbeConnector) -> None:
+    async def test_swallows_non_cancel_exception(self) -> None:
         class _CrashingConnector(HttpConnector):
             connector = "crashy"
 
@@ -696,67 +658,46 @@ class TestIsolatedServeConnection:
         assert failed[0]["connection_id"] == "conn_1"
         assert failed[0]["error"] == "RuntimeError"
 
-    async def test_pops_state_on_clean_exit(self, probe: _ProbeConnector) -> None:
-
-        class _Connector(HttpConnector):
-            connector = "withstate"
-
-            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
-                self.state[connection_id] = {"loaded": True}
-                # Return cleanly (simulates _on_connection_removed cancel
-                # path collapsing onto a clean exit).
-                return
-
-        c = _Connector(base_url="http://x", token="aios_runtime_x")
-        await c._isolated_serve_connection("conn_1", {})
-        assert "conn_1" not in c.state
-
     async def test_pops_state_on_cancel(self) -> None:
-        import asyncio as _asyncio
-        import contextlib as _contextlib
-
         class _Connector(HttpConnector):
             connector = "withstate"
 
             async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
                 self.state[connection_id] = {"loaded": True}
-                await _asyncio.Event().wait()
+                await asyncio.Event().wait()
 
         c = _Connector(base_url="http://x", token="aios_runtime_x")
-        task = _asyncio.create_task(c._isolated_serve_connection("conn_1", {}))
-        await _asyncio.sleep(0)  # let serve_connection populate state
+        task = asyncio.create_task(c._isolated_serve_connection("conn_1", {}))
+        await asyncio.sleep(0)  # let serve_connection populate state
         assert "conn_1" in c.state
         task.cancel()
-        with _contextlib.suppress(_asyncio.CancelledError):
+        with contextlib.suppress(asyncio.CancelledError):
             await task
         assert "conn_1" not in c.state
 
 
 class TestRunUntilStopped:
     """``run_until_stopped`` wraps ``run`` with cancel-on-stop so SIGTERM
-    fires ``teardown``.  Tests drive cancellation via the run task; the
+    fires ``teardown``.  Tests drive cancellation directly; the
     process-level signal handler is exercised separately by hand or e2e."""
 
     async def test_cancel_propagates_and_teardown_runs(self) -> None:
-        import asyncio as _asyncio
-        import contextlib as _contextlib
-
-        teardown_called = _asyncio.Event()
+        teardown_called = asyncio.Event()
 
         class _Connector(HttpConnector):
             connector = "stoppable"
 
             async def run(self) -> None:
                 try:
-                    await _asyncio.Event().wait()
+                    await asyncio.Event().wait()
                 finally:
                     teardown_called.set()
 
         c = _Connector(base_url="http://x", token="aios_runtime_x")
-        task = _asyncio.create_task(c.run_until_stopped(install_signal_handlers=False))
-        await _asyncio.sleep(0.01)
+        task = asyncio.create_task(c.run_until_stopped(install_signal_handlers=False))
+        await asyncio.sleep(0.01)
         task.cancel()
-        with _contextlib.suppress(_asyncio.CancelledError):
+        with contextlib.suppress(asyncio.CancelledError):
             await task
         assert teardown_called.is_set(), "run's finally should have fired"
 

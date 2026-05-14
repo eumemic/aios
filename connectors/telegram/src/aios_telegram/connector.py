@@ -133,8 +133,6 @@ class TelegramConnector(HttpConnector):
                     name=f"telegram-drain-{connection_id}",
                 )
         finally:
-            # State auto-pop lives in :meth:`HttpConnector._isolated_serve_connection`;
-            # PTB shutdown is connector-specific so it stays here.
             await self._shutdown_application(state.application)
 
     async def _build_state(self, bot_token: str) -> _TelegramConnectionState:

@@ -89,6 +89,20 @@ log: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 _TOOL_ATTR = "__aios_http_tool__"
 
 
+def _is_fatal_inbound_status(status_code: int) -> bool:
+    """``emit_inbound`` raises for these; everything else (routine 4xx)
+    drops the envelope and returns ``None``.
+
+    ``401`` / ``403`` mean the runtime token is busted (revoked or
+    misconfigured) — fatal for every connection the container serves.
+    ``5xx`` is a server-side outage / bug — also fatal so the
+    container crash-and-restarts.  Routine 4xx (``400``, ``422``)
+    indicates one specific envelope is malformed; dropping it lets
+    sibling connections keep serving.
+    """
+    return status_code in (401, 403) or status_code >= 500
+
+
 def tool(
     *,
     name: str | None = None,
@@ -235,7 +249,6 @@ class HttpConnector:
         metadata: dict[str, Any] | None = None,
         timestamp: str | None = None,
         event_id: str | None = None,
-        raise_on_4xx: bool = False,
     ) -> dict[str, Any] | None:
         """Forward a platform inbound to aios for ``connection_id``.
 
@@ -249,9 +262,10 @@ class HttpConnector:
         container via the parent TaskGroup.  ``401`` / ``403`` (auth
         broken — runtime token revoked or misconfigured) and ``5xx``
         (server outage / bug) still raise: those are container-level
-        problems that warrant the crash-and-restart loop.  Pass
-        ``raise_on_4xx=True`` if a specific call site needs the old
-        strict behavior.
+        problems that warrant the crash-and-restart loop.  Callers that
+        need the bad-envelope to surface (e.g. integration-test tools
+        that want loud validation failures) check for ``None`` and
+        raise themselves.
         """
         client = self._require_client()
         eid = event_id or str(ULID())
@@ -302,7 +316,7 @@ class HttpConnector:
                 connection_id=connection_id,
                 body=response.text[:2000],
             )
-            if raise_on_4xx or sc in (401, 403) or sc >= 500:
+            if _is_fatal_inbound_status(sc):
                 response.raise_for_status()
             return None
         return dict(response.json())
@@ -323,14 +337,20 @@ class HttpConnector:
         """
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
-        if install_signal_handlers:
-            for sig in (_signal.SIGINT, _signal.SIGTERM):
-                loop.add_signal_handler(sig, stop.set)
+        signals = (_signal.SIGINT, _signal.SIGTERM) if install_signal_handlers else ()
+        for sig in signals:
+            loop.add_signal_handler(sig, stop.set)
         run_task = asyncio.create_task(self.run(), name=f"aios-{self.connector}-run")
         stop_task = asyncio.create_task(stop.wait(), name=f"aios-{self.connector}-stop-wait")
         try:
             await asyncio.wait({run_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            # Removing handlers in the finally lets embedded callers
+            # invoke ``run_until_stopped`` multiple times without the
+            # previous ``stop.set`` target outliving its Event.
+            for sig in signals:
+                with contextlib.suppress(NotImplementedError, ValueError):
+                    loop.remove_signal_handler(sig)
             stop_task.cancel()
             if not run_task.done():
                 run_task.cancel()

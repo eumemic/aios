@@ -45,17 +45,19 @@ class EchoConnector(HttpConnector):
         """Synthesize an inbound message — used by integration tests, not
         by the model in production (production inbounds arrive via a
         real platform feed in :meth:`serve_connection`)."""
-        # raise_on_4xx so the test tool surfaces validation errors as
-        # exceptions instead of silently dropping them — this method
-        # exists for integration tests, which want loud failures.
         result = await self.emit_inbound(
             connection_id=connection_id,
             chat_id=chat_id,
             sender={"display_name": sender_name},
             content=content,
-            raise_on_4xx=True,
         )
-        assert result is not None  # ``raise_on_4xx=True`` guarantees this
+        # Integration tests want loud failures.  ``emit_inbound`` returns
+        # ``None`` when the api drops a routine 4xx envelope; surface that
+        # to the test instead of swallowing it.
+        if result is None:
+            raise RuntimeError(
+                f"emit_inbound dropped envelope for connection {connection_id!r}"
+            )
         return {"event_id": result.get("appended_event_id")}
 
 

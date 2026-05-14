@@ -5,11 +5,6 @@ this automatically inside ``HttpConnector.__init__``).  Deployment-shape
 fields like ``AIOS_SIGNAL_CONFIG_DIR`` feed pydantic-settings; the
 phone (the account identity) lives on each connection's encrypted
 secrets and is fetched per-connection in ``serve_connection``.
-
-SIGINT / SIGTERM handling, cancel-on-stop, and ``teardown`` dispatch
-all live in :meth:`HttpConnector.run_until_stopped` — without that the
-daemon subprocess would orphan on ``docker stop`` (a SIGTERM the default
-``asyncio.run`` doesn't trap).
 """
 
 from __future__ import annotations

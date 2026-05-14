@@ -1,18 +1,9 @@
 """Cover ``_handle_envelope``'s response to ``emit_inbound`` outcomes.
 
-The drop-and-continue policy itself now lives in
-:meth:`HttpConnector.emit_inbound` and is unit-tested in
-``packages/aios-connector-http/tests/test_runner.py``
-(``TestEmitInbound4xxDrop``).  Here we verify that
-``_handle_envelope`` honors the SDK's two return shapes:
-
-* ``None`` → envelope was dropped (routine 4xx); skip the read receipt
-  since the inbound never landed in the session log.
+* ``None`` → envelope was dropped; skip the read receipt since the
+  inbound never landed in the session log.
 * ``dict`` → envelope persisted; fire the explicit read receipt.
-
-5xx / 401 / 403 raise out of ``emit_inbound`` and must keep
-propagating so the container crashes + restarts on auth-broken /
-server-outage failures.
+* exception → propagates (auth-broken / server-outage failures).
 """
 
 from __future__ import annotations
