@@ -16,6 +16,7 @@ from .agent_version import AgentVersion
 from .agent_version_litellm_extra import AgentVersionLitellmExtra
 from .bind_chat_request import BindChatRequest
 from .body_post_connector_inbound import BodyPostConnectorInbound
+from .body_post_connector_runtime_inbound import BodyPostConnectorRuntimeInbound
 from .body_upload_session_file import BodyUploadSessionFile
 from .bound_chat import BoundChat
 from .connection import Connection
@@ -71,6 +72,7 @@ from .list_response_event import ListResponseEvent
 from .list_response_memory_store import ListResponseMemoryStore
 from .list_response_memory_version import ListResponseMemoryVersion
 from .list_response_recent_chat import ListResponseRecentChat
+from .list_response_runtime_token import ListResponseRuntimeToken
 from .list_response_session import ListResponseSession
 from .list_response_session_template import ListResponseSessionTemplate
 from .list_response_skill import ListResponseSkill
@@ -105,6 +107,13 @@ from .memory_update_precondition import MemoryUpdatePrecondition
 from .memory_version import MemoryVersion
 from .memory_version_operation import MemoryVersionOperation
 from .recent_chat import RecentChat
+from .runtime_token import RuntimeToken
+from .runtime_token_issue import RuntimeTokenIssue
+from .runtime_token_issued import RuntimeTokenIssued
+from .runtime_tool_result_request import RuntimeToolResultRequest
+from .runtime_tool_result_request_content_type_1_item import (
+    RuntimeToolResultRequestContentType1Item,
+)
 from .session import Session
 from .session_clone_request import SessionCloneRequest
 from .session_create import SessionCreate
@@ -144,6 +153,8 @@ from .tool_spec_input_schema_type_0 import ToolSpecInputSchemaType0
 from .tool_spec_permission_type_0 import ToolSpecPermissionType0
 from .tool_spec_type_type_0 import ToolSpecTypeType0
 from .tool_spec_type_type_1 import ToolSpecTypeType1
+from .tools_schema_update import ToolsSchemaUpdate
+from .tools_schema_update_tools_item import ToolsSchemaUpdateToolsItem
 from .unrestricted_networking import UnrestrictedNetworking
 from .validation_error import ValidationError
 from .validation_error_context import ValidationErrorContext
@@ -183,6 +194,7 @@ __all__ = (
     "AgentVersionLitellmExtra",
     "BindChatRequest",
     "BodyPostConnectorInbound",
+    "BodyPostConnectorRuntimeInbound",
     "BodyUploadSessionFile",
     "BoundChat",
     "Connection",
@@ -234,6 +246,7 @@ __all__ = (
     "ListResponseMemoryStore",
     "ListResponseMemoryVersion",
     "ListResponseRecentChat",
+    "ListResponseRuntimeToken",
     "ListResponseSession",
     "ListResponseSessionTemplate",
     "ListResponseSkill",
@@ -266,6 +279,11 @@ __all__ = (
     "MemoryVersion",
     "MemoryVersionOperation",
     "RecentChat",
+    "RuntimeToken",
+    "RuntimeTokenIssue",
+    "RuntimeTokenIssued",
+    "RuntimeToolResultRequest",
+    "RuntimeToolResultRequestContentType1Item",
     "Session",
     "SessionCloneRequest",
     "SessionCreate",
@@ -305,6 +323,8 @@ __all__ = (
     "ToolSpecPermissionType0",
     "ToolSpecTypeType0",
     "ToolSpecTypeType1",
+    "ToolsSchemaUpdate",
+    "ToolsSchemaUpdateToolsItem",
     "UnrestrictedNetworking",
     "ValidationError",
     "ValidationErrorContext",

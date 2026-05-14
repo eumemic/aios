@@ -40,6 +40,7 @@ from aios.ids import (
     MEMORY,
     MEMORY_STORE,
     MEMORY_VERSION,
+    RUNTIME_TOKEN,
     SESSION,
     SESSION_TEMPLATE,
     SKILL,
@@ -63,6 +64,7 @@ from aios.models.memory_stores import (
     MemoryStoreResourceEcho,
     MemoryVersion,
 )
+from aios.models.runtime_tokens import RuntimeToken
 from aios.models.session_templates import SessionTemplate
 from aios.models.sessions import Session, SessionStatus, SessionUsage
 from aios.models.skills import AgentSkillRef, Skill, SkillVersion
@@ -750,20 +752,27 @@ async def set_session_status(
         session_id,
     )
 
-    # Connector-calls fan-out (#301): when a session parks in
-    # ``requires_action`` with pending custom_tools, every connection
-    # bound to this session needs a NOTIFY so its SSE subscriber can
-    # backfill the new pending calls.  Firing here (after stop_reason
-    # is committed) avoids the race where the SSE consumer's query
-    # checks for ``requires_action`` but stop_reason hasn't been written
-    # yet — the case if NOTIFY fired in :func:`append_event`.
+    # Connector-calls fan-out (#301, #328 PR 5): when a session parks in
+    # ``requires_action`` with pending custom_tools, NOTIFY two channels
+    # per bound connection — the legacy per-connection channel (used by
+    # the old per-connection SSE until PR 7 retires it) and the new
+    # per-type channel (used by the runtime SSE that fans out to N
+    # connections of one connector type client-side).  Firing here
+    # (after stop_reason is committed) avoids the race where the SSE
+    # consumer's query checks for ``requires_action`` but stop_reason
+    # hasn't been written yet.
     if (
         isinstance(stop_reason, dict)
         and stop_reason.get("type") == "requires_action"
         and stop_reason.get("custom_tools")
     ):
-        for cid in await _list_bound_connection_ids(conn, session_id):
+        for cid, connector in await _list_bound_connection_ids(conn, session_id):
             await conn.execute("SELECT pg_notify($1, $2)", f"connector_calls_{cid}", session_id)
+            await conn.execute(
+                "SELECT pg_notify($1, $2)",
+                f"connector_calls_{connector}",
+                f"{session_id}|{cid}",
+            )
 
 
 async def increment_session_usage(
@@ -1572,6 +1581,32 @@ async def list_pending_calls_for_connection(
     return out
 
 
+async def list_pending_calls_for_connector(
+    conn: asyncpg.Connection[Any], connector: str
+) -> list[dict[str, Any]]:
+    """Pending custom tool calls across every active connection of ``connector`` type.
+
+    Used by the runtime SSE (#328 PR 5) at subscribe-time backfill.
+    Each emitted record carries ``connection_id`` so the runtime can
+    fan out to the right per-connection worker; payload shape is
+    otherwise identical to :func:`list_pending_calls_for_connection`.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT id FROM connections
+         WHERE connector = $1 AND archived_at IS NULL
+        """,
+        connector,
+    )
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        cid = row["id"]
+        for call in await list_pending_calls_for_connection(conn, cid):
+            call["connection_id"] = cid
+            out.append(call)
+    return out
+
+
 async def list_pending_calls_for_session_and_connection(
     conn: asyncpg.Connection[Any],
     *,
@@ -1672,19 +1707,25 @@ async def _pending_calls_for_session(
     return out
 
 
-async def _list_bound_connection_ids(conn: asyncpg.Connection[Any], session_id: str) -> list[str]:
-    """IDs of active connections bound to ``session_id``.
+async def _list_bound_connection_ids(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> list[tuple[str, str]]:
+    """``(connection_id, connector)`` pairs for active connections bound to ``session_id``.
 
-    Used by :func:`append_event` to fan an assistant-tool-calls event
-    out to per-connection NOTIFY channels.  Tools-less connections
-    receive notifications and harmlessly no-op them on the consumer
-    side — filtering by ``jsonb_array_length(tools) > 0`` here forces a
-    seq scan (function expressions aren't indexable), so we accept a
-    small amount of cross-connection notification noise instead.
+    Used by :func:`set_session_status` to fan an assistant-tool-calls
+    event out to BOTH the legacy per-connection NOTIFY channel
+    (``connector_calls_<connection_id>``, #301) AND the per-type
+    channel (``connector_calls_<connector>``, #328 PR 5) — the runtime
+    container subscribes to one type-channel for all its connections.
+    Tools-less connections receive notifications and harmlessly no-op
+    them on the consumer side — filtering by
+    ``jsonb_array_length(tools) > 0`` here forces a seq scan (function
+    expressions aren't indexable), so we accept a small amount of
+    cross-connection notification noise instead.
     """
     rows = await conn.fetch(
         """
-        SELECT c.id
+        SELECT c.id, c.connector
           FROM connections c
           LEFT JOIN sessions s ON s.id = $1
          WHERE c.archived_at IS NULL
@@ -1696,7 +1737,7 @@ async def _list_bound_connection_ids(conn: asyncpg.Connection[Any], session_id: 
         """,
         session_id,
     )
-    return [row["id"] for row in rows]
+    return [(row["id"], row["connector"]) for row in rows]
 
 
 async def is_session_bound_to_connection(
@@ -2662,6 +2703,15 @@ async def insert_connection(
     tools_json = json.dumps(tools or [])
     ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
     nonce = secrets_blob.nonce if secrets_blob is not None else None
+    # Upsert into the connectors catalog so the runtime_tokens /
+    # runtimes FK to ``connectors(connector)`` resolves for this type.
+    # Migration 0033 backfilled rows for types active at migration time;
+    # creating a connection of a fresh type after migration needs this
+    # path (#328 PR 5).
+    await conn.execute(
+        "INSERT INTO connectors (connector) VALUES ($1) ON CONFLICT DO NOTHING",
+        connector,
+    )
     for _ in range(3):
         row = await conn.fetchrow(
             """
@@ -4480,6 +4530,171 @@ async def resolve_connector_token(
     if row is None:
         return None
     return (row["id"], row["connection_id"])
+
+
+# ─── connectors (type catalog) ───────────────────────────────────────────────
+
+
+async def notify_connection_change(
+    conn: asyncpg.Connection[Any],
+    *,
+    connector: str,
+    connection_id: str,
+    account: str,
+    event: str,
+) -> None:
+    """Emit a ``connections_<connector>`` NOTIFY for discovery SSE consumers.
+
+    Payload: ``"<event>|<connection_id>|<account>"`` — the SSE
+    generator parses this into an ``added``/``removed`` event. Caller
+    runs this on a pool-acquired (autocommit) connection OUTSIDE any
+    transaction so subscribers never see a payload for an uncommitted
+    row.
+    """
+    await conn.execute(
+        "SELECT pg_notify($1, $2)",
+        f"connections_{connector}",
+        f"{event}|{connection_id}|{account}",
+    )
+
+
+async def update_connector_tools_schema(
+    conn: asyncpg.Connection[Any],
+    connector: str,
+    *,
+    tools_schema: list[dict[str, Any]],
+) -> None:
+    """Upsert ``connectors.tools_schema`` for ``connector`` wholesale.
+
+    The runtime container (one per connector type) publishes its full
+    tool catalog at startup via ``PUT /v1/connectors/{connector}/tools_schema``.
+    A brand-new connector type — one not present at migration 0033's
+    backfill time and not yet referenced by any ``insert_connection``
+    upsert — can publish its schema before the operator creates its
+    first connection.
+    """
+    await conn.execute(
+        """
+        INSERT INTO connectors (connector, tools_schema, created_at, updated_at)
+        VALUES ($1, $2::jsonb, now(), now())
+        ON CONFLICT (connector) DO UPDATE
+           SET tools_schema = EXCLUDED.tools_schema,
+               updated_at   = now()
+        """,
+        connector,
+        json.dumps(tools_schema),
+    )
+
+
+# ─── runtime_tokens ──────────────────────────────────────────────────────────
+#
+# Per-connector-type bearer tokens (#328 PR 5). Successor to
+# ``connector_tokens`` (which is per-connection); one bearer authenticates
+# a runtime container that hosts N connections of one ``connector`` type.
+# Shape mirrors ``connector_tokens`` queries — SHA-256 hash, soft-revoke,
+# single ``UPDATE … RETURNING`` resolve.
+
+
+def _row_to_runtime_token(row: asyncpg.Record) -> RuntimeToken:
+    return RuntimeToken(
+        id=row["id"],
+        connector=row["connector"],
+        label=row["label"],
+        created_at=row["created_at"],
+        last_used_at=row["last_used_at"],
+        revoked_at=row["revoked_at"],
+    )
+
+
+async def insert_runtime_token(
+    conn: asyncpg.Connection[Any],
+    *,
+    connector: str,
+    label: str | None,
+    token_hash: str,
+) -> RuntimeToken:
+    """Insert a new (unrevoked) token scoping a runtime container to ``connector``.
+
+    Upserts the ``connectors`` catalog row so operators can mint a
+    runtime token for a connector type before any connection of that
+    type exists (the FK on ``runtime_tokens.connector`` would otherwise
+    block first-token-on-fresh-type).
+    """
+    await conn.execute(
+        "INSERT INTO connectors (connector) VALUES ($1) ON CONFLICT DO NOTHING",
+        connector,
+    )
+    row = await conn.fetchrow(
+        """
+        INSERT INTO runtime_tokens (id, connector, label, token_hash)
+        VALUES ($1, $2, $3, $4)
+        RETURNING *
+        """,
+        make_id(RUNTIME_TOKEN),
+        connector,
+        label,
+        token_hash,
+    )
+    assert row is not None
+    return _row_to_runtime_token(row)
+
+
+async def list_runtime_tokens(
+    conn: asyncpg.Connection[Any], *, connector: str
+) -> list[RuntimeToken]:
+    """All tokens (revoked included) for a connector type, newest first."""
+    rows = await conn.fetch(
+        """
+        SELECT * FROM runtime_tokens
+         WHERE connector = $1
+         ORDER BY created_at DESC
+        """,
+        connector,
+    )
+    return [_row_to_runtime_token(r) for r in rows]
+
+
+async def revoke_runtime_token(conn: asyncpg.Connection[Any], token_id: str) -> RuntimeToken:
+    """Soft-delete a token by setting ``revoked_at = now()``.  Idempotent."""
+    row = await conn.fetchrow(
+        """
+        UPDATE runtime_tokens
+           SET revoked_at = now()
+         WHERE id = $1 AND revoked_at IS NULL
+        RETURNING *
+        """,
+        token_id,
+    )
+    if row is not None:
+        return _row_to_runtime_token(row)
+    existing = await conn.fetchrow("SELECT * FROM runtime_tokens WHERE id = $1", token_id)
+    if existing is None:
+        raise NotFoundError(
+            f"runtime_token {token_id} not found",
+            detail={"id": token_id},
+        )
+    return _row_to_runtime_token(existing)
+
+
+async def resolve_runtime_token(
+    conn: asyncpg.Connection[Any], token_hash: str
+) -> tuple[str, str] | None:
+    """Look up an unrevoked token by hash; touch ``last_used_at`` in one round-trip.
+
+    Returns ``(token_id, connector)`` on hit, ``None`` on miss/revoked.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE runtime_tokens
+           SET last_used_at = now()
+         WHERE token_hash = $1 AND revoked_at IS NULL
+        RETURNING id, connector
+        """,
+        token_hash,
+    )
+    if row is None:
+        return None
+    return (row["id"], row["connector"])
 
 
 # ─── files ───────────────────────────────────────────────────────────────────

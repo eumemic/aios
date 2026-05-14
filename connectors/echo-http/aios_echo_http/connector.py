@@ -4,6 +4,11 @@ Mirrors :class:`aios_echo.EchoConnector` (the legacy MCP-stdio echo)
 so existing parity tests can carry over.  The model calls these tools
 through the standard ``requires_action`` flow; the connector executes
 them as plain Python and POSTs the result back.
+
+Echo has no per-platform event source — no real inbound feed to
+subscribe to — so :meth:`HttpConnector.serve_connection` is left as
+the default no-op block.  Each ``trigger_inbound`` tool call is the
+test-driven inbound trigger.
 """
 
 from __future__ import annotations
@@ -15,6 +20,8 @@ from aios_connector_http import HttpConnector, tool
 
 class EchoConnector(HttpConnector):
     """Three tools: ping, echo, trigger_inbound."""
+
+    connector = "echo"
 
     @tool()
     async def ping(self) -> dict[str, Any]:
@@ -28,12 +35,18 @@ class EchoConnector(HttpConnector):
 
     @tool()
     async def trigger_inbound(
-        self, *, chat_id: str, sender_name: str, content: str
+        self,
+        *,
+        connection_id: str,
+        chat_id: str,
+        sender_name: str,
+        content: str,
     ) -> dict[str, Any]:
         """Synthesize an inbound message — used by integration tests, not
-        by the model in production (the connector author wires real
-        platform inbounds in :meth:`serve`)."""
+        by the model in production (production inbounds arrive via a
+        real platform feed in :meth:`serve_connection`)."""
         result = await self.emit_inbound(
+            connection_id=connection_id,
             chat_id=chat_id,
             sender={"display_name": sender_name},
             content=content,

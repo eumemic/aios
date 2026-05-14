@@ -187,6 +187,7 @@ name = "aios-connector-http"
 version = "0.1.0"
 source = { editable = "packages/aios-connector-http" }
 dependencies = [
+    { name = "aios-sdk" },
     { name = "httpx" },
     { name = "python-ulid" },
     { name = "structlog" },
@@ -203,6 +204,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aios-sdk", editable = "packages/aios-sdk" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "python-ulid", specifier = ">=3.0" },
     { name = "structlog", specifier = ">=24.1" },

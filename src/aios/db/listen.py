@@ -231,6 +231,102 @@ async def listen_for_connector_calls(
             await conn.close()
 
 
+@asynccontextmanager
+async def listen_for_connector_calls_by_type(
+    db_url: str,
+    connector: str,
+    *,
+    queue_max: int = 1000,
+) -> AsyncIterator[asyncio.Queue[str]]:
+    """LISTEN ``connector_calls_<connector>``; yield a queue of ``"<session_id>|<connection_id>"`` payloads.
+
+    Counterpart to :func:`listen_for_connector_calls` (per-connection)
+    used by the runtime SSE introduced in #328 PR 5: one runtime
+    container subscribes once per ``connector`` type and fans out to
+    its per-connection workers client-side via the ``connection_id``
+    half of the payload.
+    """
+    conn = await asyncpg.connect(normalize_dsn(db_url))
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
+    channel = f"connector_calls_{connector}"
+
+    def _callback(
+        _conn: asyncpg.Connection[object],
+        _pid: int,
+        _channel: str,
+        payload: str,
+    ) -> None:
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            log.warning(
+                "listen.connector_calls_type_queue_full_drop",
+                connector=connector,
+                queue_max=queue_max,
+            )
+            try:
+                queue.get_nowait()
+                queue.put_nowait(payload)
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
+
+    await conn.add_listener(channel, _callback)
+    try:
+        yield queue
+    finally:
+        with contextlib.suppress(Exception):
+            await conn.remove_listener(channel, _callback)
+        with contextlib.suppress(Exception):
+            await conn.close()
+
+
+@asynccontextmanager
+async def listen_for_connection_discovery(
+    db_url: str,
+    connector: str,
+    *,
+    queue_max: int = 1000,
+) -> AsyncIterator[asyncio.Queue[str]]:
+    """LISTEN ``connections_<connector>``; yield a queue of ``"<event>|<connection_id>|<account>"``.
+
+    Backs the connection-discovery SSE (#328 PR 5). The emit side lives
+    in :mod:`aios.services.connections.attach_connection` /
+    ``archive_connection``.
+    """
+    conn = await asyncpg.connect(normalize_dsn(db_url))
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
+    channel = f"connections_{connector}"
+
+    def _callback(
+        _conn: asyncpg.Connection[object],
+        _pid: int,
+        _channel: str,
+        payload: str,
+    ) -> None:
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            log.warning(
+                "listen.connection_discovery_queue_full_drop",
+                connector=connector,
+                queue_max=queue_max,
+            )
+            try:
+                queue.get_nowait()
+                queue.put_nowait(payload)
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
+
+    await conn.add_listener(channel, _callback)
+    try:
+        yield queue
+    finally:
+        with contextlib.suppress(Exception):
+            await conn.remove_listener(channel, _callback)
+        with contextlib.suppress(Exception):
+            await conn.close()
+
+
 SESSION_INTERRUPT_CHANNEL = "aios_session_interrupt"
 
 

@@ -160,7 +160,19 @@ async def attach_connection(
     pool: asyncpg.Pool[Any], connection_id: str, *, session_id: str
 ) -> Connection:
     async with pool.acquire() as conn:
-        return await queries.attach_connection(conn, connection_id, session_id=session_id)
+        connection = await queries.attach_connection(conn, connection_id, session_id=session_id)
+    # Second acquire so the NOTIFY fires OUTSIDE the attach query's
+    # implicit transaction — subscribers must never see a payload for
+    # an uncommitted row.
+    async with pool.acquire() as conn:
+        await queries.notify_connection_change(
+            conn,
+            connector=connection.connector,
+            connection_id=connection.id,
+            account=connection.account,
+            event="added",
+        )
+    return connection
 
 
 async def detach_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Connection:
@@ -281,4 +293,13 @@ async def archive_connection(pool: asyncpg.Pool[Any], connection_id: str) -> Con
                 f"detach or unconfigure before archiving",
                 detail={"id": connection_id, "mode": mode},
             )
-        return await queries.archive_connection(conn, connection_id)
+        archived = await queries.archive_connection(conn, connection_id)
+    async with pool.acquire() as conn:
+        await queries.notify_connection_change(
+            conn,
+            connector=archived.connector,
+            connection_id=archived.id,
+            account=archived.account,
+            event="removed",
+        )
+    return archived

@@ -1,18 +1,19 @@
-"""End-to-end validation gate for the HTTP-client connector path (#301).
+"""End-to-end validation gate for the multi-connection runtime path (#328 PR 5).
 
-PR 4's whole point is to PROVE the new architecture works by spinning
-up the reference echo-http connector against a real aios API instance.
-Tests here:
+Spins up the reference echo-http connector against a real aios API
+instance.  Tests here:
 
 * Spawn a uvicorn server in-process (a real socket, not ASGITransport)
   so the connector's SSE streaming actually works.
-* Set up a connection + token + tools.
-* Run an :class:`EchoConnector` as an asyncio task.
+* Issue a runtime token (per-type, not per-connection); create a
+  connection + attach it + set legacy tools so the model sees them.
+* Run an :class:`EchoConnector` as an asyncio task.  The runner
+  discovers the connection via SSE, spawns its no-op worker, then
+  dispatches tool calls.
 * Drive the model via the harness so it calls a connection-tool.
 * Verify the connector executes the tool and POSTs the result.
-* Verify ``trigger_inbound`` synthesizes a session event.
-
-Once these pass, the architecture is fully validated end-to-end.
+* Verify ``trigger_inbound`` synthesizes a session event via the
+  runtime multipart route.
 """
 
 from __future__ import annotations
@@ -148,45 +149,33 @@ async def _set_tools(api_key: str, base_url: str, connection_id: str) -> None:
         r.raise_for_status()
 
 
-async def _issue_token(api_key: str, base_url: str, connection_id: str) -> str:
+async def _issue_runtime_token(api_key: str, base_url: str, connector: str) -> str:
+    """Mint a runtime token scoped to ``connector`` type (#328 PR 5)."""
     async with authed_client(base_url, api_key) as c:
-        r = await c.post("/v1/connector-tokens", json={"connection_id": connection_id})
+        r = await c.post("/v1/runtime-tokens", json={"connector": connector})
         r.raise_for_status()
         return str(r.json()["plaintext"])
 
 
 @needs_docker
 class TestSdkAgainstLiveServer:
-    """Smoke test: minimal SDK round-trip against the uvicorn fixture."""
+    """Smoke test: SDK SSE round-trip against the uvicorn fixture."""
 
-    async def test_whoami_returns_connection_id(
+    async def test_runtime_calls_stream_emits_backfill(
         self,
         harness: Harness,
         live_server: str,
         aios_env: dict[str, str],
     ) -> None:
-        from aios_connector_http import AiosClient
+        """Pre-seed a pending call → open per-type calls SSE → confirm
+        we receive it with the right ``connection_id``."""
+        import json as _json
 
-        api_key = aios_env["AIOS_API_KEY"]
-        connection_id = await _create_connection(api_key, live_server, f"acct-w-{id(self)}")
-        token = await _issue_token(api_key, live_server, connection_id)
-
-        async with AiosClient(live_server, token) as client:
-            resolved = await client.whoami()
-            assert resolved == connection_id
-
-    async def test_sse_stream_emits_backfill(
-        self,
-        harness: Harness,
-        live_server: str,
-        aios_env: dict[str, str],
-    ) -> None:
-        """Pre-seed a pending call → open SSE → confirm we receive it."""
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
         from aios.services import environments as env_svc
         from aios.services import sessions as sess_svc
-        from aios_connector_http import AiosClient
+        from aios_sdk import Client, stream_connector_calls
 
         agent = await agents_service.create_agent(
             harness._pool,
@@ -210,7 +199,7 @@ class TestSdkAgainstLiveServer:
             harness._pool, connection_id, session_id=session.id
         )
         await _set_tools(api_key, live_server, connection_id)
-        token = await _issue_token(api_key, live_server, connection_id)
+        token = await _issue_runtime_token(api_key, live_server, "echo")
 
         # Pre-seed a pending call so backfill has something to deliver.
         await sess_svc.append_event(
@@ -240,24 +229,19 @@ class TestSdkAgainstLiveServer:
             },
         )
 
-        # Sanity check: query directly to confirm the data is in place.
-        from aios.db import queries
+        async with Client(base_url=live_server, token=token) as client:
 
-        async with harness._pool.acquire() as db_conn:
-            direct = await queries.list_pending_calls_for_connection(db_conn, connection_id)
-        assert len(direct) == 1, f"backfill query empty in test setup: {direct}"
-
-        # Via the SDK helper — exercises the runner-side parser.
-        async with AiosClient(live_server, token) as client:
-
-            async def _first_call() -> dict[str, str]:
-                async for call in client.stream_calls():
-                    return call
+            async def _first_call() -> dict[str, object]:
+                async for msg in stream_connector_calls(client.get_async_httpx_client(), "echo"):
+                    if msg.event == "call":
+                        parsed: dict[str, object] = _json.loads(msg.data)
+                        return parsed
                 raise AssertionError("stream closed before any call")
 
             first = await asyncio.wait_for(_first_call(), timeout=10.0)
             assert first["tool_call_id"] == "call_sse_bf"
             assert first["name"] == "ping"
+            assert first["connection_id"] == connection_id
 
 
 @needs_docker
@@ -301,7 +285,7 @@ class TestEchoHttpConnectorEndToEnd:
             harness._pool, connection_id, session_id=session.id
         )
         await _set_tools(api_key, live_server, connection_id)
-        token = await _issue_token(api_key, live_server, connection_id)
+        token = await _issue_runtime_token(api_key, live_server, "echo")
 
         connector = EchoConnector(base_url=live_server, token=token)
 
@@ -361,9 +345,6 @@ class TestEchoHttpConnectorEndToEnd:
             with contextlib.suppress(asyncio.CancelledError, BaseExceptionGroup):
                 await connector_task
 
-    @pytest.mark.skip(
-        reason="SDK posts JSON inbound; PR 5 rewires it to multipart (PR 4/8 of #328).",
-    )
     async def test_trigger_inbound_synthesizes_event(
         self,
         harness: Harness,
@@ -371,7 +352,7 @@ class TestEchoHttpConnectorEndToEnd:
         aios_env: dict[str, str],
     ) -> None:
         """Driver: model calls trigger_inbound → connector POSTs to
-        /v1/connectors/inbound → user-message event lands."""
+        /v1/connectors/runtime/inbound (multipart) → user-message event lands."""
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
         from aios.services import environments as env_svc
@@ -399,7 +380,7 @@ class TestEchoHttpConnectorEndToEnd:
             harness._pool, connection_id, session_id=session.id
         )
         await _set_tools(api_key, live_server, connection_id)
-        token = await _issue_token(api_key, live_server, connection_id)
+        token = await _issue_runtime_token(api_key, live_server, "echo")
 
         connector = EchoConnector(base_url=live_server, token=token)
 
