@@ -287,7 +287,7 @@ class HttpConnector:
 
     # ── test-coordination primitives ──────────────────────────────────
 
-    async def wait_ready(self, deadline: float = 30.0) -> None:
+    async def wait_ready(self, deadline: float = 60.0) -> None:
         """Block until all three background loops are live and listening.
 
         Specifically: each of the discovery, tool, and management-call loops
@@ -297,24 +297,28 @@ class HttpConnector:
         — the connector is guaranteed to be listening and will not miss a
         NOTIFY sent after this method returns.
 
-        The default deadline is 30 s to tolerate CI scheduler lag and the
-        connector's exponential-backoff reconnect cycle (max backoff cap is
-        60 s, but the first successful connection almost always lands within
-        the first few retries, well under 30 s).
+        The default deadline is 60 s.  CI runs the tests in resource-constrained
+        containers and the SSE endpoint can fail repeatedly for tens of seconds
+        before a connection takes hold; with the exponential-backoff cycle
+        (1, 2, 4, 8, 16, 32 s) we observe up to 5 failures (cumulative 31 s)
+        before the 6th attempt succeeds.  60 s gives that 6th attempt plus a
+        buffer.  The underlying SSE-flapping behaviour is tracked separately
+        (the SSE generator currently crashes on first start in some CI
+        scenarios -- see followup issue).
 
         Raises ``TimeoutError`` if the loops have not all reached the live
         phase within ``deadline`` seconds.  Intended for test coordination.
         """
         await asyncio.wait_for(self._all_loops_live.wait(), timeout=deadline)
 
-    async def wait_connection_served(self, connection_id: str, deadline: float = 30.0) -> None:
+    async def wait_connection_served(self, connection_id: str, deadline: float = 60.0) -> None:
         """Block until serve_connection has been spawned for connection_id.
 
         The discovery loop must receive and process the ``added`` event for
         ``connection_id`` before this returns.  Because the discovery SSE may
         reconnect with exponential backoff before delivering the backfill, the
-        default deadline is 30 s (generous enough for CI scheduler lag and
-        one full backoff cycle).
+        default deadline is 60 s (matches :meth:`wait_ready`'s deadline so
+        callers don't need to think about which is tighter).
 
         Raises ``TimeoutError`` if the connection is not added within
         ``deadline`` seconds.  Intended for test coordination.
