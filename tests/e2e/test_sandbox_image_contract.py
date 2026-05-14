@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import subprocess
 from pathlib import Path
 
@@ -42,7 +43,7 @@ def pulled_image() -> str:
         check=False,
     )
     if result.returncode != 0:
-        pytest.skip(f"Could not pull {IMAGE!r}: {result.stderr.strip()}")
+        pytest.fail(f"Could not pull {IMAGE!r}: {result.stderr.strip()}")
     return IMAGE
 
 
@@ -73,6 +74,35 @@ class TestRequiredBinaries:
 
     def test_python3(self, pulled_image: str) -> None:
         r = _docker_run(pulled_image, "which", "python3")
+        assert r.returncode == 0, r.stderr
+
+    def test_python313(self, pulled_image: str) -> None:
+        """python3.13 specifically -- version match matters for sandboxed tool execution."""
+        r = _docker_run(pulled_image, "which", "python3.13")
+        assert r.returncode == 0, r.stderr
+
+    def test_cat(self, pulled_image: str) -> None:
+        r = _docker_run(pulled_image, "which", "cat")
+        assert r.returncode == 0, r.stderr
+
+    def test_head(self, pulled_image: str) -> None:
+        r = _docker_run(pulled_image, "which", "head")
+        assert r.returncode == 0, r.stderr
+
+    def test_grep(self, pulled_image: str) -> None:
+        r = _docker_run(pulled_image, "which", "grep")
+        assert r.returncode == 0, r.stderr
+
+    def test_find(self, pulled_image: str) -> None:
+        r = _docker_run(pulled_image, "which", "find")
+        assert r.returncode == 0, r.stderr
+
+    def test_sed(self, pulled_image: str) -> None:
+        r = _docker_run(pulled_image, "which", "sed")
+        assert r.returncode == 0, r.stderr
+
+    def test_awk(self, pulled_image: str) -> None:
+        r = _docker_run(pulled_image, "which", "awk")
         assert r.returncode == 0, r.stderr
 
     def test_rg(self, pulled_image: str) -> None:
@@ -116,7 +146,11 @@ class TestRuntimeBehaviour:
         r = _docker_run(pulled_image, "python3", "--version")
         assert r.returncode == 0, r.stderr
         version_output = r.stdout + r.stderr
-        assert "Python 3.13" in version_output, f"unexpected version: {version_output!r}"
+        # Matches Python 3.13, 3.14, etc. — forward-compatible minimum-version check.
+        match = re.search(r"Python (\d+)\.(\d+)", version_output)
+        assert match is not None, f"could not parse version from: {version_output!r}"
+        major, minor = int(match.group(1)), int(match.group(2))
+        assert (major, minor) >= (3, 13), f"expected Python >= 3.13, got {version_output.strip()!r}"
 
     def test_python3_venv_creation(self, pulled_image: str) -> None:
         """setup.py calls ``python3 -m venv /workspace/.venv`` on first provision."""
@@ -226,6 +260,10 @@ class TestArchitecture:
 
     def test_manifest_includes_amd64_and_arm64(self, pulled_image: str) -> None:
         """Published images should be multi-arch (amd64 + arm64).
+
+        Note: ``docker buildx imagetools inspect`` queries the remote registry
+        manifest, not the local pull cache. This test requires outbound network
+        access to the registry and skips gracefully when unavailable.
 
         Skips if ``docker buildx`` or ``imagetools`` sub-command is unavailable.
         """
