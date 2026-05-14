@@ -66,7 +66,7 @@ async def require_bearer_auth(
     timing or wording can't distinguish "unknown key" from "revoked key"
     from "archived account."
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     token = _extract_bearer_token(authorization)
     async with pool.acquire() as conn:
         result = await queries.lookup_account_by_key_hash(
@@ -89,7 +89,7 @@ async def require_runtime_auth(
     ``connector`` half is used to scope the runtime-facing routes
     (``/connectors/runtime/...`` family) to one connector type.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     token = _extract_bearer_token(authorization)
     resolved = await runtime_tokens_service.resolve(pool, token, account_id=account_id)
     if resolved is None:

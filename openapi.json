@@ -9470,17 +9470,6 @@
             "type": "boolean",
             "title": "Focal Locked",
             "default": false
-          },
-          "owner_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Owner Id"
           }
         },
         "type": "object",

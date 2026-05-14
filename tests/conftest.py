@@ -194,12 +194,25 @@ async def aios_env(aios_env_minimal: dict[str, str]) -> dict[str, str]:
 
     conn = await asyncpg.connect(db_url)
     try:
-        await queries.bootstrap_root_account(
+        root, _key_id = await queries.bootstrap_root_account(
             conn,
             display_name="root",
             key_hash=hash_key(plaintext),
             key_label="test-root",
             account_id=account_id,
+        )
+        # PR 4: many tests still pass the PR 3 stub literal ``"acc_test_stub"``
+        # as the account_id arg. Now that migration 0043 enforces NOT NULL +
+        # FK on every resource table, the stub must correspond to an actual
+        # row. Insert it as a child of root so existing test bodies keep
+        # working without sweeping rewrites.
+        await conn.execute(
+            """
+            INSERT INTO accounts
+                (id, parent_account_id, can_mint_children, display_name)
+            VALUES ('acc_test_stub', $1, FALSE, 'test-stub')
+            """,
+            root.id,
         )
     finally:
         await conn.close()

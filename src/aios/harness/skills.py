@@ -29,7 +29,7 @@ log = get_logger("aios.harness.skills")
 
 async def _load_workspace_path(session_id: str) -> str:
     """Load the workspace volume path for a session from the DB."""
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     from aios.harness import runtime
 
     pool = runtime.require_pool()

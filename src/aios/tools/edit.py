@@ -97,7 +97,7 @@ EDIT_PARAMETERS_SCHEMA: dict[str, Any] = {
 
 async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Handler for the edit tool. See module docstring for the return shape."""
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     path = arguments.get("path")
     if not isinstance(path, str) or not path.strip():
         raise EditArgumentError("edit tool requires a non-empty 'path' string")

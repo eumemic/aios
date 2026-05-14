@@ -188,7 +188,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
     warning string (collected and returned).  DB errors propagate — they are
     the session's problem to recover from through the normal error channel.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     # Build after snapshot as (store_id, store_path) -> bytes in one pass.
     # Using bytes avoids re-reading files during the create/modify loops.
     after_bytes = _snapshot_with_bytes(session_id)

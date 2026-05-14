@@ -108,7 +108,7 @@ async def _load_environment_config(session_id: str) -> EnvironmentConfig | None:
     Returns ``None`` if the session or environment doesn't exist (shouldn't
     happen in normal flow, but callers handle it gracefully).
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     from aios.harness import runtime
 
     pool = runtime.require_pool()
@@ -120,7 +120,7 @@ async def _load_environment_config(session_id: str) -> EnvironmentConfig | None:
 
 async def _load_session_provisioning(session_id: str) -> tuple[str, dict[str, str]]:
     """Load workspace path and env from the session row in one query."""
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     from aios.harness import runtime
 
     pool = runtime.require_pool()
@@ -138,7 +138,7 @@ async def _materialize_memory_mounts(
     the unit-test mocking surface tight — tests mock this single
     function and don't need a live pool.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     from aios.harness import runtime
     from aios.sandbox.memory_mounts import materialize_store_to_host
 
@@ -168,7 +168,7 @@ async def _materialize_github_clones(
     working tree won't be bind-mounted). The proxy stays alive for
     sibling repos.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     from aios.harness import runtime
     from aios.sandbox.git_proxy import repo_key
     from aios.services import github_repositories as github_repo_service

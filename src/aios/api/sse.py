@@ -152,7 +152,7 @@ async def runtime_connector_calls_stream(
     Backfills any pending calls at subscribe time, then tails the
     ``connector_calls_<connector>`` NOTIFY channel.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     async with listen_for_connector_calls_by_type(db_url, connector) as queue:
         emitted: set[str] = set()
 
@@ -197,7 +197,7 @@ async def management_calls_stream(
     ``connector_management_calls_<connector>``.  Each event:
     ``{"call_id": "mgmt_...", "method": str, "params": dict}``.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     async with listen_for_management_calls(db_url, connector) as queue:
         emitted: set[str] = set()
 
@@ -245,7 +245,7 @@ async def connection_discovery_stream(
     side lives in :mod:`aios.services.connections.attach_connection` /
     ``archive_connection``.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     async with listen_for_connection_discovery(db_url, connector) as queue:
         emitted_added: set[str] = set()
 

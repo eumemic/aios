@@ -51,7 +51,7 @@ async def sweep_orphan_attachments(pool: asyncpg.Pool[Any]) -> int:
     files from cleanup of empty dirs (the latter is a future polish
     item alongside session deletion).
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     root = attachments_root()
     if not root.exists():
         return 0

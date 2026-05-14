@@ -114,7 +114,7 @@ class SandboxRegistry:
     async def _provision_with_span(
         self, session_id: str, *, pool: asyncpg.Pool[Any] | None
     ) -> SandboxHandle:
-        account_id = ""  # PR 3 stub; PR 4 threads real id
+        account_id = ""  # PR 4 stub; PR 5 threads from caller
         if pool is None:
             return await self._provision(session_id)
 

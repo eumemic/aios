@@ -95,7 +95,7 @@ async def compute_step_prelude(
     :func:`compose_step_context` unchanged, so the composed prompt stays
     byte-identical to what it was before the split.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; PR 5 threads from caller
     from aios.harness.channels import (
         augment_with_focal_paradigm,
         max_tail_block_local,

@@ -75,7 +75,7 @@ async def refresh_session_mount_state(
     Github echoes are cached and fed into the registry's drift check but
     not returned — no current caller in the step body needs them.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     from aios.db import queries
 
     async with pool.acquire() as conn:
@@ -110,7 +110,7 @@ async def run_session_step(
     appended before the sweep guard so the model has something to
     react to on this step.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; needs upstream threading
     pool = runtime.require_pool()
     task_registry = runtime.require_task_registry()
 
@@ -179,7 +179,7 @@ async def _run_session_step_body(
     ``step_end``; ``None`` otherwise.  Keeping the actual ``defer_wake``
     call outside the body is what makes the reschedule's
     ``wake_deferred`` land in the next step's temporal window."""
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     if cause == "scheduled" and wake_reason:
         await sessions_service.append_event(
             pool,
@@ -799,7 +799,7 @@ async def _dispatch_confirmed_tools(
     Returns the original tool call dicts ready for ``launch_tool_calls``,
     or an empty list if nothing to dispatch.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     # Find the latest assistant message with tool_calls.
     asst_tool_calls: list[dict[str, Any]] = []
     for e in reversed(message_events):
@@ -853,7 +853,7 @@ async def _apply_retry_or_failure(pool: Any, session_id: str) -> float | None:
     state.  Both branches advance the session's lifecycle and status;
     the caller decides whether to also propagate an exception.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     attempt = await _count_consecutive_rescheduling(pool, session_id)
     delay = _retry_delay_for_attempt(attempt)
     if delay is not None:
@@ -879,7 +879,7 @@ async def _apply_retry_or_failure(pool: Any, session_id: str) -> float | None:
 
 async def _handle_step_timeout(pool: Any, session_id: str) -> float | None:
     """Synthesize a reschedulable error state when the job-level cap fires."""
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     await sessions_service.append_event(
         pool,
         session_id,
@@ -897,7 +897,7 @@ async def _count_consecutive_rescheduling(pool: Any, session_id: str) -> int:
     with ``stop_reason == "rescheduling"`` at the end of the lifecycle
     event sequence. A non-rescheduling event breaks the streak.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     # Only the tail matters; reading ASC with the default LIMIT would miss the
     # recent streak entirely on a session with >limit lifecycle events.
     lifecycle_events = await sessions_service.read_events(
@@ -925,7 +925,7 @@ async def _append_lifecycle(
     stop_reason: str,
 ) -> None:
     """Append a lifecycle event."""
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     await sessions_service.append_event(
         pool,
         session_id,

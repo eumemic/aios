@@ -94,7 +94,7 @@ async def resolve_auth_for_url(
     bubble up as :class:`OAuthRefreshError`; there is no silent fallback
     to the stale token.
     """
-    account_id = ""  # PR 3 stub; PR 4 threads real id
+    account_id = ""  # PR 4 stub; PR 5 threads from caller
     async with pool.acquire() as conn:
         session_result = await queries.resolve_mcp_credential(
             conn, session_id, mcp_server_url, account_id=account_id
