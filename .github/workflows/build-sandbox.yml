@@ -114,7 +114,7 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install test deps
-        run: uv sync --frozen
+        run: uv sync --dev --frozen
       - name: Pull just-built image
         # Pull by immutable sha tag (set by build job) to avoid a race
         # where a concurrent master push advances :latest before we smoke.
