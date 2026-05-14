@@ -82,7 +82,7 @@ async def _execute_tool_async(
 
     Brackets the lifecycle in a ``tool_execute_*`` span pair (issue #78).
     """
-    account_id = ""  # PR 4 stub; PR 5 threads from caller
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
     name = function.get("name") or ""
@@ -248,7 +248,7 @@ async def _append_tool_result(
     error: str,
 ) -> None:
     """Append a tool-role error event."""
-    account_id = ""  # PR 4 stub; PR 5 threads from caller
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     content = json.dumps({"error": error}, ensure_ascii=False)
     await sessions_service.append_event(
         pool,
@@ -280,7 +280,7 @@ async def _trigger_sweep(
     """Run the sweep for this session. Called from the finally block of
     every tool task — both built-in and MCP.
     """
-    account_id = ""  # PR 4 stub; PR 5 threads from caller
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     from aios.harness.sweep import SweepResult, wake_sessions_needing_inference
 
     sweep_start = await sessions_service.append_event(
@@ -370,7 +370,7 @@ async def _execute_mcp_tool_async(
     emission-time — a concurrent ``switch_channel`` in the same
     assistant batch does not race this injection.
     """
-    account_id = ""  # PR 4 stub; PR 5 threads from caller
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
     name: str = function.get("name") or ""

@@ -29,6 +29,7 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.logging import get_logger
 from aios.mcp.schema import make_function_tool
+from aios.services import sessions as sessions_service
 from aios.services.vaults import is_expiring, refresh_credential
 
 log = get_logger("aios.mcp.client")
@@ -94,7 +95,7 @@ async def resolve_auth_for_url(
     bubble up as :class:`OAuthRefreshError`; there is no silent fallback
     to the stale token.
     """
-    account_id = ""  # PR 4 stub; PR 5 threads from caller
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     async with pool.acquire() as conn:
         session_result = await queries.resolve_mcp_credential(
             conn, session_id, mcp_server_url, account_id=account_id

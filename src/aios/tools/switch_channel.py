@@ -30,6 +30,7 @@ from aios.harness.channels import (
 from aios.harness.context import render_user_event
 from aios.harness.tokens import approx_tokens
 from aios.models.events import Event
+from aios.services import sessions as sessions_service
 from aios.tools.registry import ToolResult, registry
 
 # Minimum rendered-content size the recap pads up to when there isn't
@@ -87,7 +88,7 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
     current focal) return a terse ack with empty metadata — they didn't
     actually change the agent's attention and shouldn't anchor anything.
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     target = arguments.get("channel_id")
     if target is not None and not isinstance(target, str):
         return ToolResult(

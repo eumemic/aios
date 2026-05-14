@@ -832,7 +832,7 @@ async def increment_session_usage(
     )
 
 
-async def list_running_session_ids(conn: asyncpg.Connection[Any], *, account_id: str) -> list[str]:
+async def list_running_session_ids(conn: asyncpg.Connection[Any]) -> list[str]:
     """Return ids of sessions with ``status = 'running'``.
 
     Used by the sandbox orphan reaper at worker startup: any Docker
@@ -878,8 +878,6 @@ async def get_session_model(
 async def list_attachment_paths_for_sessions(
     conn: asyncpg.Connection[Any],
     session_ids: list[str],
-    *,
-    account_id: str,
 ) -> dict[str, set[str]]:
     """Return ``in_sandbox_path`` values referenced by each session's events.
 
@@ -4055,8 +4053,6 @@ async def get_memory_by_path(
 async def list_active_memory_paths_and_content(
     conn: asyncpg.Connection[Any],
     store_id: str,
-    *,
-    account_id: str,
 ) -> list[tuple[str, str]]:
     """Bulk-fetch ``(path, content)`` for every non-deleted memory in the store.
 
@@ -4962,25 +4958,26 @@ async def revoke_runtime_token(
 async def resolve_runtime_token(
     conn: asyncpg.Connection[Any],
     token_hash: str,
-    *,
-    account_id: str,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, str] | None:
     """Look up an unrevoked token by hash; touch ``last_used_at`` in one round-trip.
 
-    Returns ``(token_id, connector)`` on hit, ``None`` on miss/revoked.
+    Returns ``(token_id, connector, account_id)`` on hit, ``None`` on miss/revoked.
+    The token hash is globally unique (one row owns the secret), so the lookup
+    does not filter by account; account_id is read off the matched row and
+    becomes the authenticated scope for the request.
     """
     row = await conn.fetchrow(
         """
         UPDATE runtime_tokens
            SET last_used_at = now()
          WHERE token_hash = $1 AND revoked_at IS NULL
-        RETURNING id, connector
+        RETURNING id, connector, account_id
         """,
         token_hash,
     )
     if row is None:
         return None
-    return (row["id"], row["connector"])
+    return (row["id"], row["connector"], row["account_id"])
 
 
 # ─── files ───────────────────────────────────────────────────────────────────
@@ -5064,7 +5061,7 @@ def _row_to_account(row: asyncpg.Record) -> Account:
     )
 
 
-async def has_active_root_account(conn: asyncpg.Connection[Any], *, account_id: str) -> bool:
+async def has_active_root_account(conn: asyncpg.Connection[Any]) -> bool:
     """Whether a non-archived root account exists.
 
     The bootstrap endpoint gates on this — once a root exists, the
@@ -5081,7 +5078,6 @@ async def has_active_root_account(conn: asyncpg.Connection[Any], *, account_id: 
 async def bootstrap_root_account(
     conn: asyncpg.Connection[Any],
     *,
-    account_id: str,
     display_name: str,
     key_hash: bytes,
     key_label: str,
@@ -5133,7 +5129,6 @@ async def bootstrap_root_account(
 async def lookup_account_by_key_hash(
     conn: asyncpg.Connection[Any],
     *,
-    account_id: str,
     key_hash: bytes,
 ) -> tuple[Account, str] | None:
     """Resolve a bearer-key sha256 hash to its account and key_id.

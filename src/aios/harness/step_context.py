@@ -33,6 +33,7 @@ from aios.harness.context import (
     separate_adjacent_user_messages,
     stub_missing_reasoning_content,
 )
+from aios.services import sessions as sessions_service
 from aios.tools.registry import to_openai_tools
 
 if TYPE_CHECKING:
@@ -95,7 +96,7 @@ async def compute_step_prelude(
     :func:`compose_step_context` unchanged, so the composed prompt stays
     byte-identical to what it was before the split.
     """
-    account_id = ""  # PR 4 stub; PR 5 threads from caller
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     from aios.harness.channels import (
         augment_with_focal_paradigm,
         max_tail_block_local,

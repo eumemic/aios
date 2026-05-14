@@ -116,6 +116,7 @@ def _parse_form_json(field: str, raw: str | None, *, default: Any = None) -> Any
 async def _do_inbound(
     pool: Any,
     *,
+    account_id: str,
     connection_id: str,
     event_id: str,
     chat_id: str,
@@ -133,7 +134,6 @@ async def _do_inbound(
     attachment shaping, the handle_inbound call, drop-reason mapping
     — is identical.
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
     sender_dict: dict[str, Any] = _parse_form_json("sender", sender_json, default={}) or {}
     metadata_dict: dict[str, Any] | None = _parse_form_json("metadata", metadata_json)
     inbound_attachments = [
@@ -230,8 +230,7 @@ async def put_tools_schema(
     Authorization: the runtime bearer's ``connector`` must match the
     path's ``connector``.
     """
-    _, auth_connector = auth
-    account_id = ""  # PR 3 stub for runtime-auth routes; PR 4 derives from connection
+    _, auth_connector, account_id = auth
     _check_runtime_scope(auth_connector, connector)
     async with pool.acquire() as conn:
         await queries.update_connector_tools_schema(
@@ -262,9 +261,9 @@ async def get_connection_discovery(
     fans out to per-connection workers on ``added``; tears them down
     on ``removed``.
     """
-    _, connector = auth
+    _, connector, account_id = auth
     return EventSourceResponse(
-        connection_discovery_stream(db_url, pool, connector),
+        connection_discovery_stream(db_url, pool, connector, account_id=account_id),
         ping=15,
     )
 
@@ -311,13 +310,13 @@ async def post_runtime_inbound(
     a body explaining the reason (operator-config issue vs server
     error vs payload).
     """
-    _, auth_connector = auth
-    account_id = ""  # PR 3 stub for runtime-auth routes; PR 4 derives from connection
+    _, auth_connector, account_id = auth
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, connection_id, account_id=account_id)
     _check_runtime_scope(auth_connector, connection.connector)
     return await _do_inbound(
         pool,
+        account_id=account_id,
         connection_id=connection_id,
         event_id=event_id,
         chat_id=chat_id,
@@ -344,8 +343,7 @@ async def post_runtime_tool_result(
     Authorization: the bearer's connector must match ``body.connection_id``'s
     connector, and the session must be bound to that connection.
     """
-    _, auth_connector = auth
-    account_id = ""  # PR 3 stub for runtime-auth routes; PR 4 derives from connection
+    _, auth_connector, account_id = auth
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, body.connection_id, account_id=account_id)
         _check_runtime_scope(auth_connector, connection.connector)
@@ -390,8 +388,7 @@ async def get_runtime_secrets(
     type.  Returns ``{"secrets": {}}`` when none are configured —
     callers decide whether that's acceptable.
     """
-    _, auth_connector = auth
-    account_id = ""  # PR 3 stub for runtime-auth routes; PR 4 derives from connection
+    _, auth_connector, account_id = auth
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, connection_id, account_id=account_id)
     _check_runtime_scope(auth_connector, connection.connector)
@@ -428,9 +425,9 @@ async def get_runtime_calls(
     The ``connection_id`` field lets the runtime container fan out to
     its per-connection workers client-side.
     """
-    _, connector = auth
+    _, connector, account_id = auth
     return EventSourceResponse(
-        runtime_connector_calls_stream(db_url, pool, connector),
+        runtime_connector_calls_stream(db_url, pool, connector, account_id=account_id),
         ping=15,
     )
 
@@ -449,9 +446,9 @@ async def get_runtime_management_calls(
     Per-connector-type only (no session/connection scope).  Each event is
     keyed ``call`` with body ``{"call_id": "mgmt_...", "method": str, "params": dict}``.
     """
-    _, connector = auth
+    _, connector, account_id = auth
     return EventSourceResponse(
-        management_calls_stream(db_url, pool, connector),
+        management_calls_stream(db_url, pool, connector, account_id=account_id),
         ping=15,
     )
 
@@ -642,8 +639,7 @@ async def post_runtime_management_call_result(
     pool: PoolDep,
     auth: RuntimeAuthDep,
 ) -> None:
-    _, auth_connector = auth
-    account_id = ""  # PR 3 stub for runtime-auth routes; PR 4 derives from connection
+    _, auth_connector, account_id = auth
     # Autocommit conn (no ``async with conn.transaction()``): the UPDATE
     # commits before the NOTIFY fires.  Don't wrap these in a
     # transaction — subscribers would see uncommitted state.  See

@@ -66,11 +66,10 @@ async def require_bearer_auth(
     timing or wording can't distinguish "unknown key" from "revoked key"
     from "archived account."
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
     token = _extract_bearer_token(authorization)
     async with pool.acquire() as conn:
         result = await queries.lookup_account_by_key_hash(
-            conn, key_hash=accounts_service.hash_key(token), account_id=account_id
+            conn, key_hash=accounts_service.hash_key(token)
         )
     if result is None:
         raise UnauthorizedError("invalid api key")
@@ -81,20 +80,20 @@ async def require_bearer_auth(
 async def require_runtime_auth(
     pool: Annotated[asyncpg.Pool, Depends(get_pool)],
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> tuple[str, str]:
-    """Resolve a bearer runtime token to ``(runtime_token_id, connector)``.
+) -> tuple[str, str, str]:
+    """Resolve a bearer runtime token to ``(token_id, connector, account_id)``.
 
     Accepts only tokens issued via ``POST /v1/runtime-tokens``. Routes
     that take ``RuntimeAuthDep`` receive the resolved tuple — the
     ``connector`` half is used to scope the runtime-facing routes
-    (``/connectors/runtime/...`` family) to one connector type.
+    (``/connectors/runtime/...`` family) to one connector type;
+    ``account_id`` scopes resource queries to the token's tenant.
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
     token = _extract_bearer_token(authorization)
-    resolved = await runtime_tokens_service.resolve(pool, token, account_id=account_id)
+    resolved = await runtime_tokens_service.resolve(pool, token)
     if resolved is None:
         raise UnauthorizedError("invalid or revoked runtime token")
-    return (resolved.token_id, resolved.connector)
+    return (resolved.token_id, resolved.connector, resolved.account_id)
 
 
 # Type aliases for clarity at the route definitions.
@@ -105,4 +104,4 @@ CryptoBoxDep = Annotated[CryptoBox, Depends(get_crypto_box)]
 ProcrastinateDep = Annotated[ProcrastinateApp, Depends(get_procrastinate)]
 DbUrlDep = Annotated[str, Depends(get_db_url)]
 AuthDep = Annotated[AccountAuthResult, Depends(require_bearer_auth)]
-RuntimeAuthDep = Annotated[tuple[str, str], Depends(require_runtime_auth)]
+RuntimeAuthDep = Annotated[tuple[str, str, str], Depends(require_runtime_auth)]

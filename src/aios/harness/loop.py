@@ -110,7 +110,7 @@ async def run_session_step(
     appended before the sweep guard so the model has something to
     react to on this step.
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     pool = runtime.require_pool()
     task_registry = runtime.require_task_registry()
 

@@ -45,18 +45,15 @@ async def bootstrap(
     ``plaintext_key`` in the response is the only time the operator key
     is returned in plaintext.
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
     async with pool.acquire() as conn:
-        if await queries.has_active_root_account(conn, account_id=account_id):
+        if await queries.has_active_root_account(conn):
             raise NotFoundError("bootstrap endpoint closed: root account already exists")
     token = _extract_bearer_token(authorization)
     expected_secret = get_settings().bootstrap_token
     expected = expected_secret.get_secret_value() if expected_secret is not None else ""
     if not expected or not secrets.compare_digest(token, expected):
         raise UnauthorizedError("invalid bootstrap token")
-    response = await service.bootstrap_root(
-        pool, display_name=body.display_name, account_id=account_id
-    )
+    response = await service.bootstrap_root(pool, display_name=body.display_name)
     log.info(
         "account.operation",
         actor_account_id=None,

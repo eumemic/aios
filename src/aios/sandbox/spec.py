@@ -28,6 +28,7 @@ from pathlib import Path
 
 from aios.config import get_settings
 from aios.db import queries
+from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.models.github_repositories import GithubRepositoryResourceEcho
@@ -50,6 +51,7 @@ from aios.sandbox.github_clone import (
     ensure_session_working_tree,
 )
 from aios.sandbox.setup import WORKSPACE_RUNTIME_ENV
+from aios.services import sessions as sessions_service
 
 log = get_logger("aios.sandbox.spec")
 
@@ -108,8 +110,7 @@ async def _load_environment_config(session_id: str) -> EnvironmentConfig | None:
     Returns ``None`` if the session or environment doesn't exist (shouldn't
     happen in normal flow, but callers handle it gracefully).
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
-    from aios.harness import runtime
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
@@ -120,8 +121,7 @@ async def _load_environment_config(session_id: str) -> EnvironmentConfig | None:
 
 async def _load_session_provisioning(session_id: str) -> tuple[str, dict[str, str]]:
     """Load workspace path and env from the session row in one query."""
-    account_id = ""  # PR 4 stub; needs upstream threading
-    from aios.harness import runtime
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
@@ -138,8 +138,7 @@ async def _materialize_memory_mounts(
     the unit-test mocking surface tight — tests mock this single
     function and don't need a live pool.
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
-    from aios.harness import runtime
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     from aios.sandbox.memory_mounts import materialize_store_to_host
 
     pool = runtime.require_pool()
@@ -168,8 +167,7 @@ async def _materialize_github_clones(
     working tree won't be bind-mounted). The proxy stays alive for
     sibling repos.
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
-    from aios.harness import runtime
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     from aios.sandbox.git_proxy import repo_key
     from aios.services import github_repositories as github_repo_service
 
@@ -219,8 +217,6 @@ async def _materialize_github_clones(
     # Log + append failure events outside the conn block so we don't
     # hold one connection while acquiring a second from the same pool.
     if failures:
-        from aios.services import sessions as sessions_service
-
         for failed_echo, failure in failures:
             log.warning(
                 "sandbox.github_clone_failed",

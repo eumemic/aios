@@ -183,7 +183,6 @@ async def aios_env(aios_env_minimal: dict[str, str]) -> dict[str, str]:
     drives the test on — avoids the spurious ``asyncio.run`` event-loop
     isolation that caused ASGI-callable teardown flakiness in CI.
     """
-    account_id = "acc_test_stub"  # PR 3 scaffolding
     import asyncpg
 
     from aios.db import queries
@@ -199,7 +198,6 @@ async def aios_env(aios_env_minimal: dict[str, str]) -> dict[str, str]:
             display_name="root",
             key_hash=hash_key(plaintext),
             key_label="test-root",
-            account_id=account_id,
         )
         # PR 4: many tests still pass the PR 3 stub literal ``"acc_test_stub"``
         # as the account_id arg. Now that migration 0043 enforces NOT NULL +

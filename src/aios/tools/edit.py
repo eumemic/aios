@@ -40,6 +40,7 @@ from aios.errors import (
 from aios.harness import runtime
 from aios.models.memory_stores import MAX_CONTENT_BYTES
 from aios.services import memory_stores as memory_service
+from aios.services import sessions as sessions_service
 from aios.tools.memory_intercept import resolve_memory_target
 from aios.tools.registry import registry
 
@@ -97,7 +98,7 @@ EDIT_PARAMETERS_SCHEMA: dict[str, Any] = {
 
 async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Handler for the edit tool. See module docstring for the return shape."""
-    account_id = ""  # PR 4 stub; needs upstream threading
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     path = arguments.get("path")
     if not isinstance(path, str) or not path.strip():
         raise EditArgumentError("edit tool requires a non-empty 'path' string")

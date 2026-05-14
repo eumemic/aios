@@ -47,7 +47,6 @@ async def materialize_store_to_host(
     Subsequent DB drift is propagated by the per-write mirror helpers,
     not by re-materialization.
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
     host_dir = memory_store_host_dir(store_id)
     marker = host_dir / MATERIALIZED_MARKER
     if marker.exists():
@@ -62,9 +61,7 @@ async def materialize_store_to_host(
                 return  # another waiter materialized while we blocked
             host_dir.mkdir(parents=True, exist_ok=True)
 
-            entries = await queries.list_active_memory_paths_and_content(
-                conn, store_id, account_id=account_id
-            )
+            entries = await queries.list_active_memory_paths_and_content(conn, store_id)
             for path, content in entries:
                 # Memory paths are guaranteed to start with "/" by the SQL CHECK.
                 atomic_write(host_dir / path.lstrip("/"), content or "")
