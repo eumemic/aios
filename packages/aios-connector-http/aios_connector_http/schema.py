@@ -4,9 +4,11 @@ The connector author writes Python; the SDK derives the schema the
 model sees.  Operators no longer hand-write a ``tools.json`` that
 drifts from the source.
 
-The output shape is one entry of a ``ConnectionSetTools`` body — a
-dict the runner POSTs at startup so the connection's tools list
-matches whatever the connector container is actually serving::
+The output is one entry of the per-connector-type ``tools_schema``
+list — a dict the runner publishes at startup via
+``PUT /v1/connectors/{connector}/tools_schema`` (runtime-authed) so
+the catalog matches whatever the connector container is actually
+serving::
 
     {
       "type": "custom",

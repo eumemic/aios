@@ -62,7 +62,7 @@ docker run \
 ```
 
 The container reads ``AIOS_URL`` and ``AIOS_RUNTIME_TOKEN`` from
-env, fetches its phone via ``GET /v1/connectors/secrets``, spawns
+env, fetches its phone via ``GET /v1/connectors/runtime/secrets``, spawns
 ``signal-cli daemon`` against the bind-mounted config dir, and
 starts the inbound pump.  The workspace bind-mount is required for
 outbound attachments — paths under ``/workspace/...`` resolve to host

@@ -82,9 +82,9 @@ def sync_detailed(
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
-    and only ever read back through the connector-scoped
-    ``GET /v1/connectors/secrets`` route — operator-facing reads return
-    ``secrets_set: bool`` instead of values.
+    and only ever read back through the runtime-scoped
+    ``GET /v1/connectors/runtime/secrets`` route — operator-facing
+    reads return ``secrets_set: bool`` instead of values.
 
     Args:
         authorization (None | str | Unset):
@@ -97,9 +97,6 @@ def sync_detailed(
             ``connector`` and ``account`` may not contain ``/`` — they're used
             in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
             and a ``/`` would create ambiguous segment boundaries.
-
-            ``tools`` declares the model-facing custom tools this connection
-            contributes to any session it's attached to (see #301).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -140,9 +137,9 @@ def sync(
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
-    and only ever read back through the connector-scoped
-    ``GET /v1/connectors/secrets`` route — operator-facing reads return
-    ``secrets_set: bool`` instead of values.
+    and only ever read back through the runtime-scoped
+    ``GET /v1/connectors/runtime/secrets`` route — operator-facing
+    reads return ``secrets_set: bool`` instead of values.
 
     Args:
         authorization (None | str | Unset):
@@ -155,9 +152,6 @@ def sync(
             ``connector`` and ``account`` may not contain ``/`` — they're used
             in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
             and a ``/`` would create ambiguous segment boundaries.
-
-            ``tools`` declares the model-facing custom tools this connection
-            contributes to any session it's attached to (see #301).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -193,9 +187,9 @@ async def asyncio_detailed(
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
-    and only ever read back through the connector-scoped
-    ``GET /v1/connectors/secrets`` route — operator-facing reads return
-    ``secrets_set: bool`` instead of values.
+    and only ever read back through the runtime-scoped
+    ``GET /v1/connectors/runtime/secrets`` route — operator-facing
+    reads return ``secrets_set: bool`` instead of values.
 
     Args:
         authorization (None | str | Unset):
@@ -208,9 +202,6 @@ async def asyncio_detailed(
             ``connector`` and ``account`` may not contain ``/`` — they're used
             in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
             and a ``/`` would create ambiguous segment boundaries.
-
-            ``tools`` declares the model-facing custom tools this connection
-            contributes to any session it's attached to (see #301).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -249,9 +240,9 @@ async def asyncio(
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
-    and only ever read back through the connector-scoped
-    ``GET /v1/connectors/secrets`` route — operator-facing reads return
-    ``secrets_set: bool`` instead of values.
+    and only ever read back through the runtime-scoped
+    ``GET /v1/connectors/runtime/secrets`` route — operator-facing
+    reads return ``secrets_set: bool`` instead of values.
 
     Args:
         authorization (None | str | Unset):
@@ -264,9 +255,6 @@ async def asyncio(
             ``connector`` and ``account`` may not contain ``/`` — they're used
             in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
             and a ``/`` would create ambiguous segment boundaries.
-
-            ``tools`` declares the model-facing custom tools this connection
-            contributes to any session it's attached to (see #301).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

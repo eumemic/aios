@@ -270,7 +270,7 @@ class TestDocstringParsing:
 
 class TestSpecShape:
     """The output is a ``type=custom`` ToolSpec dict ready to ship as
-    one entry of a ``ConnectionSetTools`` body.
+    one entry of the per-connector-type ``tools_schema`` list.
     """
 
     def test_top_level_shape(self) -> None:
