@@ -77,6 +77,9 @@ def _docker_run(
         "curl",
         "git",
         "iptables",  # required for limited-networking mode
+        "jq",  # JSON-from-bash composition, esp. piping `mcp <server> <tool>`
+        "node",  # so agents can run npm packages without first apt-installing the runtime
+        "npm",
         "tail",  # the image CMD is `tail -f /dev/null`
         "cat",
         "head",
