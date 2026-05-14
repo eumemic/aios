@@ -11,7 +11,7 @@ import secrets
 from typing import Annotated, cast
 
 import asyncpg
-from fastapi import Depends, Header, HTTPException, Request, status
+from fastapi import Depends, Header, Request
 from procrastinate import App as ProcrastinateApp
 
 from aios.config import Settings, get_settings
@@ -26,10 +26,7 @@ def _extract_bearer_token(authorization: str | None) -> str:
         raise UnauthorizedError("missing Authorization header")
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="expected `Authorization: Bearer <token>`",
-        )
+        raise UnauthorizedError("expected `Authorization: Bearer <token>`")
     return token
 
 

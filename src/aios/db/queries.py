@@ -31,6 +31,8 @@ from aios.errors import (
     NotFoundError,
 )
 from aios.ids import (
+    ACCOUNT,
+    ACCOUNT_KEY,
     AGENT,
     BINDING,
     CONNECTION,
@@ -48,6 +50,7 @@ from aios.ids import (
     VAULT_CREDENTIAL,
     make_id,
 )
+from aios.models.accounts import Account
 from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
 from aios.models.connections import BindingMode, Connection, ConnectionMode
 from aios.models.environments import Environment, EnvironmentConfig
@@ -4810,3 +4813,85 @@ async def insert_file(
         ) from exc
     assert row is not None
     return _row_to_file(row)
+
+
+# ─── accounts + account_keys ─────────────────────────────────────────────────
+
+
+def _row_to_account(row: asyncpg.Record) -> Account:
+    raw_metadata = row["metadata"]
+    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    return Account(
+        id=row["id"],
+        parent_account_id=row["parent_account_id"],
+        can_mint_children=row["can_mint_children"],
+        display_name=row["display_name"],
+        metadata=metadata,
+        created_at=row["created_at"],
+        archived_at=row["archived_at"],
+    )
+
+
+async def has_active_root_account(conn: asyncpg.Connection[Any]) -> bool:
+    """Whether a non-archived root account exists.
+
+    The bootstrap endpoint gates on this — once a root exists, the
+    endpoint is 404 regardless of the bootstrap token. The
+    ``accounts_one_active_root`` partial unique index enforces the
+    "at most one active root" invariant at the DB level too.
+    """
+    row = await conn.fetchrow(
+        "SELECT 1 FROM accounts WHERE parent_account_id IS NULL AND archived_at IS NULL LIMIT 1"
+    )
+    return row is not None
+
+
+async def bootstrap_root_account(
+    conn: asyncpg.Connection[Any],
+    *,
+    display_name: str,
+    key_hash: bytes,
+    key_label: str,
+) -> tuple[Account, str]:
+    """Atomically create the root account and its first API key.
+
+    Returns ``(account, key_id)``. The plaintext key isn't stored —
+    caller is responsible for returning it to the operator exactly once.
+
+    Raises :class:`NotFoundError` if a root already exists at INSERT
+    time (the ``accounts_one_active_root`` partial unique index fires).
+    Mapping to ``NotFoundError`` rather than ``ConflictError`` preserves
+    the bootstrap endpoint's "404 if root exists" invariant under
+    concurrent bootstrap attempts — the loser of the race sees the same
+    404 as a caller arriving after the winner committed.
+    """
+    account_id = make_id(ACCOUNT)
+    key_id = make_id(ACCOUNT_KEY)
+    async with conn.transaction():
+        try:
+            account_row = await conn.fetchrow(
+                """
+                INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
+                VALUES ($1, NULL, TRUE, $2)
+                RETURNING *
+                """,
+                account_id,
+                display_name,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise NotFoundError(
+                "bootstrap endpoint closed: root account already exists",
+                detail={"display_name": display_name},
+            ) from exc
+        assert account_row is not None
+        await conn.execute(
+            """
+            INSERT INTO account_keys (key_id, account_id, hash, label)
+            VALUES ($1, $2, $3, $4)
+            """,
+            key_id,
+            account_id,
+            key_hash,
+            key_label,
+        )
+    return _row_to_account(account_row), key_id

@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI
 
 from aios.api.deps import require_bearer_auth
 from aios.api.routers import (
+    accounts,
     agents,
     connections,
     connectors,
@@ -89,6 +90,7 @@ def create_app() -> FastAPI:
     )
     install_exception_handlers(app)
     app.include_router(health.router)
+    app.include_router(accounts.router)
     app.include_router(environments.router)
     app.include_router(agents.router)
     app.include_router(sessions.router)
