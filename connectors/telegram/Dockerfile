@@ -21,7 +21,13 @@ COPY packages/aios-sdk /app/packages/aios-sdk
 COPY packages/aios-connector-http /app/packages/aios-connector-http
 COPY connectors/telegram /app/connectors/telegram
 
-RUN uv pip install --system --no-cache \
+# ``--no-sources`` tells uv to ignore each package's ``[tool.uv.sources]``
+# block — those declare workspace-relative deps (e.g.
+# ``aios-sdk = { workspace = true }``) that only resolve from the
+# repo root.  In this image we install the three packages by path in
+# one invocation; uv satisfies the inter-package deps by name from
+# the install set itself.
+RUN uv pip install --system --no-cache --no-sources \
     /app/packages/aios-sdk \
     /app/packages/aios-connector-http \
     /app/connectors/telegram
