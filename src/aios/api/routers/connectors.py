@@ -507,11 +507,11 @@ async def _signal_management_call(
     db_url: str,
     pool: PoolDep,
     *,
+    account_id: str,
     method: str,
     params: dict[str, Any],
     timeout_s: float,
 ) -> Any:
-    account_id = ""  # PR 3 stub; PR 4 threads real id
     result, is_error = await management_calls.submit_call(
         db_url,
         pool,
@@ -545,9 +545,11 @@ async def post_signal_register(
     browser, repost with ``captcha=<token>``.  On success: SMS (or voice
     call with ``voice=true``) carrying a 6-digit code for ``verify``.
     """
+    account_id, _, _ = _auth
     result = await _signal_management_call(
         db_url,
         pool,
+        account_id=account_id,
         method="register",
         params=body.model_dump(exclude_none=True),
         timeout_s=30.0,
@@ -580,9 +582,11 @@ async def post_signal_verify(
     running connector picks it up on the next ``verify_phone`` call
     without restart.
     """
+    account_id, _, _ = _auth
     result = await _signal_management_call(
         db_url,
         pool,
+        account_id=account_id,
         method="verify",
         params=body.model_dump(exclude_none=True),
         timeout_s=60.0,
@@ -603,9 +607,11 @@ async def post_signal_profile(
 ) -> None:
     """Update ``given_name`` / ``family_name`` / ``about``.  Avatar bytes
     are not supported in v1 (no operator→container file staging surface)."""
+    account_id, _, _ = _auth
     await _signal_management_call(
         db_url,
         pool,
+        account_id=account_id,
         method="updateProfile",
         params=body.model_dump(exclude_none=True),
         timeout_s=30.0,
