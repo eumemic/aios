@@ -162,8 +162,6 @@ async def _do_inbound(
 #
 # All routes accept a ``runtime`` bearer token (``RuntimeAuthDep``) that
 # scopes the caller to one ``connector`` type and N of its connections.
-# Per-connection variants from PR 4/PR 5's parallel-live window were
-# removed in PR 7 alongside their ``connector_tokens`` auth surface.
 
 
 class ToolsSchemaUpdate(BaseModel):
