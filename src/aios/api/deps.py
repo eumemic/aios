@@ -7,17 +7,22 @@ exposed here as typed accessors.
 
 from __future__ import annotations
 
-import secrets
 from typing import Annotated, cast
 
 import asyncpg
 from fastapi import Depends, Header, Request
 from procrastinate import App as ProcrastinateApp
 
-from aios.config import Settings, get_settings
 from aios.crypto.vault import CryptoBox
+from aios.db import queries
 from aios.errors import UnauthorizedError
+from aios.services import accounts as accounts_service
 from aios.services import runtime_tokens as runtime_tokens_service
+
+# ``(account_id, key_id, can_mint_children)`` resolved from the bearer
+# token. Named so routes that destructure it don't have to consult the
+# auth dep's docstring to know the positions.
+AccountAuthResult = tuple[str, str, bool]
 
 
 def _extract_bearer_token(authorization: str | None) -> str:
@@ -49,23 +54,27 @@ def get_db_url(request: Request) -> str:
     return db_url
 
 
-def get_settings_dep() -> Settings:
-    return get_settings()
-
-
-def require_bearer_auth(
-    settings: Annotated[Settings, Depends(get_settings_dep)],
+async def require_bearer_auth(
+    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> None:
-    """Verify the request carries the operator API key.
+) -> AccountAuthResult:
+    """Resolve the bearer token to ``(account_id, key_id, can_mint_children)``.
 
-    Constant-time compare so the comparison itself doesn't leak timing
-    information about the key.
+    The token is hashed (sha256) and looked up against ``account_keys``;
+    a match must reference an active key on a non-archived account. Any
+    mismatch raises 401 with the same message regardless of cause so
+    timing or wording can't distinguish "unknown key" from "revoked key"
+    from "archived account."
     """
     token = _extract_bearer_token(authorization)
-    expected = settings.api_key.get_secret_value()
-    if not secrets.compare_digest(token, expected):
+    async with pool.acquire() as conn:
+        result = await queries.lookup_account_by_key_hash(
+            conn, key_hash=accounts_service.hash_key(token)
+        )
+    if result is None:
         raise UnauthorizedError("invalid api key")
+    account, key_id = result
+    return (account.id, key_id, account.can_mint_children)
 
 
 async def require_runtime_auth(
@@ -74,8 +83,8 @@ async def require_runtime_auth(
 ) -> tuple[str, str]:
     """Resolve a bearer runtime token to ``(runtime_token_id, connector)``.
 
-    Accepts only tokens issued via ``POST /v1/runtime-tokens`` (#328 PR 5).
-    Routes that take ``RuntimeAuthDep`` receive the resolved tuple — the
+    Accepts only tokens issued via ``POST /v1/runtime-tokens``. Routes
+    that take ``RuntimeAuthDep`` receive the resolved tuple — the
     ``connector`` half is used to scope the runtime-facing routes
     (``/connectors/runtime/...`` family) to one connector type.
     """
@@ -93,5 +102,5 @@ PoolDep = Annotated[asyncpg.Pool, Depends(get_pool)]
 CryptoBoxDep = Annotated[CryptoBox, Depends(get_crypto_box)]
 ProcrastinateDep = Annotated[ProcrastinateApp, Depends(get_procrastinate)]
 DbUrlDep = Annotated[str, Depends(get_db_url)]
-AuthDep = Annotated[None, Depends(require_bearer_auth)]
+AuthDep = Annotated[AccountAuthResult, Depends(require_bearer_auth)]
 RuntimeAuthDep = Annotated[tuple[str, str], Depends(require_runtime_auth)]

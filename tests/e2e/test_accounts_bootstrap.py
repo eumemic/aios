@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import secrets
 from collections.abc import AsyncIterator, Iterator
@@ -12,9 +11,14 @@ from unittest import mock
 import httpx
 import pytest
 
+from tests.helpers.connections import asgi_client
+
 
 @pytest.fixture
-async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
+async def pool(aios_env_minimal: dict[str, str]) -> AsyncIterator[Any]:
+    """Pool against a freshly-migrated DB with NO seeded root account —
+    the bootstrap-endpoint tests need to exercise the pre-bootstrap state.
+    """
     from aios.config import get_settings
     from aios.db.pool import create_pool
 
@@ -25,50 +29,38 @@ async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
 
 
 @pytest.fixture
-def bootstrap_env(aios_env: dict[str, str]) -> Iterator[dict[str, str]]:
+def bootstrap_env(aios_env_minimal: dict[str, str]) -> Iterator[dict[str, str]]:
     token = secrets.token_urlsafe(32)
     extra = {"AIOS_BOOTSTRAP_TOKEN": token}
     with mock.patch.dict(os.environ, extra):
         from aios.config import get_settings
 
         get_settings.cache_clear()
-        yield {**aios_env, **extra}
+        yield {**aios_env_minimal, **extra}
         get_settings.cache_clear()
-
-
-async def _build_client(pool: Any) -> AsyncIterator[httpx.AsyncClient]:
-    from aios.api.app import create_app
-    from aios.config import get_settings
-    from aios.crypto.vault import CryptoBox
-
-    get_settings.cache_clear()
-    settings = get_settings()
-    app = create_app()
-    app.state.pool = pool
-    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    app.state.db_url = settings.db_url
-    app.state.procrastinate = mock.MagicMock()
-
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(base_url="http://testserver", transport=transport) as client:
-        yield client
 
 
 @pytest.fixture
 async def http_client(pool: Any, bootstrap_env: dict[str, str]) -> AsyncIterator[httpx.AsyncClient]:
-    async for client in _build_client(pool):
+    from aios.config import get_settings
+
+    get_settings.cache_clear()
+    async with asgi_client(pool) as client:
         yield client
 
 
 @pytest.fixture
 async def http_client_no_bootstrap_env(
-    pool: Any, aios_env: dict[str, str]
+    pool: Any, aios_env_minimal: dict[str, str]
 ) -> AsyncIterator[httpx.AsyncClient]:
     """Client built without ``AIOS_BOOTSTRAP_TOKEN`` in env — used by the
     env-unset test, which would otherwise see the token set by
     ``bootstrap_env`` that the regular ``http_client`` depends on.
     """
-    async for client in _build_client(pool):
+    from aios.config import get_settings
+
+    get_settings.cache_clear()
+    async with asgi_client(pool) as client:
         yield client
 
 
@@ -104,9 +96,11 @@ class TestBootstrap:
             json={"display_name": "root"},
             headers=_bootstrap_headers(token),
         )
+        from aios.services.accounts import hash_key
+
         assert r.status_code == 201
         plaintext = r.json()["plaintext_key"]
-        expected_hash = hashlib.sha256(plaintext.encode()).digest()
+        expected_hash = hash_key(plaintext)
         async with pool.acquire() as conn:
             row = await conn.fetchrow("SELECT hash, label FROM account_keys")
         assert row is not None
