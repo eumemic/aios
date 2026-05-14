@@ -37,6 +37,11 @@ def test_classify_extensions() -> None:
     assert _classify(Path("/x/song.mp3")) == "audio"
     assert _classify(Path("/x/report.pdf")) == "document"
     assert _classify(Path("/x/no-ext")) == "document"
+    # .gif routes to send_animation, not send_photo: Telegram's Bot API
+    # treats a GIF passed to sendPhoto as a static image and only
+    # renders the first frame.  sendAnimation is the first-class
+    # animated-image surface — clients play it inline.
+    assert _classify(Path("/x/zoom.gif")) == "animation"
 
 
 def test_build_media_group_caption_on_first_only(tmp_path: Path) -> None:

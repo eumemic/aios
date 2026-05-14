@@ -388,13 +388,15 @@ class TelegramConnector(HttpConnector):
             text: Message body.  Becomes the caption when attachments are
                 present.  See ``parse_mode``.
             attachments: Optional in-sandbox file paths.  Type is inferred
-                from extension (``.jpg``/``.png``/``.gif``/``.webp`` →
-                photo, ``.mp4``/``.mov`` → video, ``.ogg`` → voice,
-                ``.mp3``/``.m4a``/``.wav`` → audio, anything else →
-                document).  Single attachment uses ``send_photo`` /
-                ``send_voice`` / etc.; multiple attachments use
-                ``send_media_group`` with caption attached to the first
-                item only (per Telegram API).
+                from extension (``.jpg``/``.png``/``.webp`` → photo,
+                ``.gif`` → animation (plays inline; ``send_photo``
+                would render only the first frame), ``.mp4``/``.mov``
+                → video, ``.ogg`` → voice, ``.mp3``/``.m4a``/``.wav``
+                → audio, anything else → document).  Single attachment
+                uses ``send_photo`` / ``send_animation`` / ``send_voice``
+                / etc.; multiple attachments use ``send_media_group``
+                with caption attached to the first item only (per
+                Telegram API).
             parse_mode: ``"plain"`` (default) sends the text as-is —
                 literal characters, no formatting.  ``"html"`` runs
                 ``text`` through a Markdown→Telegram-HTML converter so
@@ -576,16 +578,27 @@ class TelegramConnector(HttpConnector):
         return {"status": "ok"}
 
 
-_PHOTO_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
+_PHOTO_EXTS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+_ANIMATION_EXTS = frozenset({".gif"})
 _VIDEO_EXTS = frozenset({".mp4", ".mov", ".webm"})
 _VOICE_EXTS = frozenset({".ogg", ".oga"})
 _AUDIO_EXTS = frozenset({".mp3", ".m4a", ".wav", ".flac"})
 
 
 def _classify(host_path: Path) -> str:
+    """Route an outbound attachment to the right PTB send method.
+
+    ``.gif`` rides on ``send_animation`` (not ``send_photo``) — Telegram's
+    Bot API treats a GIF passed to ``sendPhoto`` as a static image and
+    only renders the first frame, defeating the point of an animated GIF.
+    ``sendAnimation`` is Telegram's first-class animated-image surface;
+    clients render it as an inline playing animation just like a video.
+    """
     ext = host_path.suffix.lower()
     if ext in _PHOTO_EXTS:
         return "photo"
+    if ext in _ANIMATION_EXTS:
+        return "animation"
     if ext in _VIDEO_EXTS:
         return "video"
     if ext in _VOICE_EXTS:
@@ -639,6 +652,7 @@ async def _send_single_media(
     kind = _classify(host_path)
     sender = {
         "photo": bot.send_photo,
+        "animation": bot.send_animation,
         "video": bot.send_video,
         "voice": bot.send_voice,
         "audio": bot.send_audio,
