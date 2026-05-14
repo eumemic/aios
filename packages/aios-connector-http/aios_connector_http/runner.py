@@ -130,7 +130,7 @@ class _ConnectionState:
 
 
 class HttpConnector:
-    """Base class for runtime-container connectors (#328 PR 5).
+    """Base class for runtime-container connectors.
 
     Set ``connector`` on the subclass to the platform type (e.g.
     ``"telegram"``).  Decorate methods with :func:`tool`.  Override
@@ -159,6 +159,21 @@ class HttpConnector:
         self._connections: dict[str, _ConnectionState] = {}
 
     # ─── lifecycle hooks (override as needed) ────────────────────────
+
+    async def setup(self, tg: asyncio.TaskGroup) -> None:
+        """Override: container-wide init before discovery + tool loops.
+
+        Called once inside :meth:`run` after the SDK client opens and
+        after :meth:`_publish_tools_schema`, immediately upon entering
+        the TaskGroup that owns the discovery + tool loops.  Use this
+        for per-container resources whose lifetime spans every
+        connection (e.g. a shared signal-cli daemon serving multiple
+        accounts) — spawn any long-running tasks via ``tg.create_task``
+        so an unhandled crash propagates and tears the container down,
+        rather than silently stalling inbound delivery.
+        Default is a no-op.
+        """
+        del tg
 
     async def serve_connection(
         self, connection_id: str, secrets: dict[str, str]
@@ -256,6 +271,11 @@ class HttpConnector:
             await self._publish_tools_schema()
             try:
                 async with asyncio.TaskGroup() as tg:
+                    # ``setup()`` registers any container-wide long-running
+                    # tasks under this TG so their crashes propagate and
+                    # tear the container down, rather than silently
+                    # stalling inbound delivery.
+                    await self.setup(tg)
                     tg.create_task(self._discovery_loop(tg), name="aios-discovery")
                     tg.create_task(self._tool_loop(), name="aios-tool-loop")
             finally:

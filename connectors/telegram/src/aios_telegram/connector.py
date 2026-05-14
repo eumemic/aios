@@ -1,28 +1,26 @@
 """Telegram connector built on the aios-connector-http SDK.
 
-Each connector container is one bot: the bearer token resolves to a
-single ``connection_id`` server-side, and a connection is tied to one
-``(connector, account)`` pair.  Multi-bot deployments run multiple
-containers, each with its own connector token.  The bot token lives
-on the connection record's encrypted secrets and is fetched at
-``setup()`` time via ``self.secrets()``.
+Multi-connection runtime container: one container can serve N
+connections of type ``"telegram"``, each bound to one bot token.
+Each connection gets its own python-telegram-bot ``Application``
+because every bot token is a distinct PTB identity with its own
+polling offset, identity, and update stream — there's no useful
+sharing across tokens.
 
 Lifecycle:
 
-* :meth:`setup` initializes the python-telegram-bot ``Application``,
-  discovers the bot's identity via ``Bot.get_me()``, and installs
-  message + reaction handlers that funnel parsed inbounds onto an
-  internal queue.
-* :meth:`serve` runs PTB's long-polling loop alongside an inbound
-  drainer that calls :meth:`emit_inbound` for each parsed update.
-  PTB's lifecycle owns its own background tasks; we install handlers
-  that don't block.
-* :meth:`teardown` stops polling and shuts down the application
-  cleanly.
+* :meth:`serve_connection` per connection: build the PTB
+  ``Application`` from the connection's bot token, register message +
+  reaction handlers, ``get_me`` for identity, then race a polling
+  loop with an inbound drainer that funnels updates through
+  :meth:`emit_inbound`.  On cancellation, stop polling + shut down
+  the application cleanly.
+* :meth:`teardown` is a no-op container-wide; per-connection
+  cleanup is owned by ``serve_connection``'s ``finally``.
 
-Model-facing tools are decorated with :func:`tool`; the SDK injects
-``chat_id`` from the call's ``focal_channel`` automatically when the
-method's signature accepts it.  Sandbox path resolution for outbound
+Tool methods take ``connection_id`` and ``chat_id`` from the call's
+``focal_channel`` / payload automatically — declare them as kwargs and
+the SDK threads them through.  Sandbox path resolution for outbound
 attachments runs at the dispatcher level — declare ``attachments:
 list[SandboxPath] | None`` and the SDK hands you host paths.
 """
@@ -32,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -83,24 +82,66 @@ _ALLOWED_UPDATES: list[str] = [
 ]
 
 
+@dataclass
+class _TelegramConnectionState:
+    """Per-connection PTB plumbing + identity caches."""
+
+    application: Application  # type: ignore[type-arg]
+    bot_id: int
+    first_name: str
+    username: str | None
+    inbound_queue: asyncio.Queue[InboundMessage | InboundReaction]
+
+
 class TelegramConnector(HttpConnector):
+    connector = "telegram"
+
     def __init__(self) -> None:
         super().__init__()
-        self._application: Application | None = None  # type: ignore[type-arg]
-        self._bot_id: int | None = None
-        self._first_name: str | None = None
-        self._username: str | None = None
-        self._inbound_queue: asyncio.Queue[InboundMessage | InboundReaction] | None = None
+        self._conn_state: dict[str, _TelegramConnectionState] = {}
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
-    async def setup(self) -> None:
-        secrets = await self.secrets()
+    async def serve_connection(
+        self, connection_id: str, secrets: dict[str, str]
+    ) -> None:
+        """Build a PTB Application for this connection and run its loops.
+
+        Each connection has its own bot token (one PTB Application per
+        token); no sharing across connections.  Races polling + drainer
+        in a :class:`asyncio.TaskGroup`; on cancellation, both stop and
+        ``finally`` shuts the application down cleanly.
+        """
         bot_token = secrets.get("bot_token")
         if not bot_token:
             raise RuntimeError(
-                "telegram connector requires a 'bot_token' entry in its connection's secrets"
+                f"telegram connection {connection_id!r} requires a "
+                "'bot_token' entry in its secrets"
             )
+        state = await self._build_state(bot_token)
+        self._conn_state[connection_id] = state
+        log.info(
+            "telegram.connection.ready",
+            connection_id=connection_id,
+            bot_id=state.bot_id,
+            username=state.username,
+            first_name=state.first_name,
+        )
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(
+                    self._run_polling(state),
+                    name=f"telegram-polling-{connection_id}",
+                )
+                tg.create_task(
+                    self._drain_queue(connection_id, state),
+                    name=f"telegram-drain-{connection_id}",
+                )
+        finally:
+            self._conn_state.pop(connection_id, None)
+            await self._shutdown_application(state.application)
+
+    async def _build_state(self, bot_token: str) -> _TelegramConnectionState:
         application = Application.builder().token(bot_token).build()
         await application.initialize()
         try:
@@ -109,129 +150,119 @@ class TelegramConnector(HttpConnector):
             await application.shutdown()
             raise
 
-        self._application = application
-        self._bot_id = int(me.id)
-        self._first_name = me.first_name
-        self._username = me.username or None
-        self._inbound_queue = asyncio.Queue()
+        bot_id = int(me.id)
+        inbound_queue: asyncio.Queue[InboundMessage | InboundReaction] = asyncio.Queue()
 
-        # Handler bodies are tiny so PTB's worker doesn't block on our
-        # queue write — references go through ``self`` so a future
-        # ``setup`` re-run won't leave the closure pointing at a stale
-        # queue.
+        # Handlers are tiny so PTB's worker doesn't block on our queue
+        # write.  Closures capture per-connection ``inbound_queue`` and
+        # ``bot_id`` directly — no instance-wide aliases that drift
+        # under multi-connection.
         async def on_message(update: Any, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
             message = update.message or update.edited_message
             if message is None:
                 return
-            assert self._bot_id is not None
-            assert self._inbound_queue is not None
-            parsed = parse_message(message, bot_id=self._bot_id)
+            parsed = parse_message(message, bot_id=bot_id)
             if parsed is None:
                 return
-            await self._inbound_queue.put(parsed)
+            await inbound_queue.put(parsed)
 
         async def on_reaction(update: Any, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
             reaction = update.message_reaction
             if reaction is None:
                 return
-            assert self._bot_id is not None
-            assert self._inbound_queue is not None
-            parsed = parse_reaction(reaction, bot_id=self._bot_id)
+            parsed = parse_reaction(reaction, bot_id=bot_id)
             if parsed is None:
                 return
-            await self._inbound_queue.put(parsed)
+            await inbound_queue.put(parsed)
 
         async def on_error(_update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-            log.error("telegram.handler.error", error=str(context.error))
+            log.error(
+                "telegram.handler.error", bot_id=bot_id, error=str(context.error)
+            )
 
-        # filters.UpdateType.MESSAGES matches both new and edited messages;
-        # parse_message handles channel/bot filtering with full message context.
         application.add_handler(MessageHandler(filters.UpdateType.MESSAGES, on_message))
         application.add_handler(MessageReactionHandler(on_reaction))
         application.add_error_handler(on_error)
-        log.info(
-            "telegram.bot.identified",
-            bot_id=self._bot_id,
-            username=self._username,
-            first_name=self._first_name,
+
+        return _TelegramConnectionState(
+            application=application,
+            bot_id=bot_id,
+            first_name=me.first_name,
+            username=me.username or None,
+            inbound_queue=inbound_queue,
         )
 
-    async def teardown(self) -> None:
-        if self._application is None:
-            return
+    @staticmethod
+    async def _shutdown_application(application: Application) -> None:  # type: ignore[type-arg]
+        """Best-effort PTB shutdown sequence."""
         with contextlib.suppress(Exception):
-            if self._application.updater is not None:
-                await self._application.updater.stop()
+            if application.updater is not None:
+                await application.updater.stop()
         with contextlib.suppress(Exception):
-            await self._application.stop()
+            await application.stop()
         with contextlib.suppress(Exception):
-            await self._application.shutdown()
-        self._application = None
+            await application.shutdown()
 
-    async def serve(self) -> None:
-        """Start PTB long-polling and forward inbound messages to aios.
-
-        Two coroutines run concurrently: PTB's polling (which fills the
-        queue via the registered handlers) and our drainer (which pulls
-        from the queue and calls :meth:`emit_inbound`).  Cancelling
-        either propagates and ``teardown`` runs in :meth:`HttpConnector.run`'s
-        finally.
-        """
-        assert self._application is not None
-        assert self._inbound_queue is not None
-        assert self._bot_id is not None
-
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(self._run_polling(), name="telegram-polling")
-            tg.create_task(self._drain_queue(), name="telegram-drain")
-
-    async def _run_polling(self) -> None:
-        assert self._application is not None
-        await self._application.start()
-        assert self._application.updater is not None
+    async def _run_polling(self, state: _TelegramConnectionState) -> None:
+        await state.application.start()
+        assert state.application.updater is not None
         # ``allowed_updates`` is opt-in — Telegram only delivers update
         # types we explicitly subscribe to.  Without this, edits and
         # reactions never reach the bot regardless of which handlers we
         # register locally.
-        await self._application.updater.start_polling(allowed_updates=_ALLOWED_UPDATES)
+        await state.application.updater.start_polling(allowed_updates=_ALLOWED_UPDATES)
         await asyncio.Event().wait()
 
-    async def _drain_queue(self) -> None:
-        assert self._inbound_queue is not None
-        assert self._bot_id is not None
-        assert self._application is not None
+    async def _drain_queue(
+        self, connection_id: str, state: _TelegramConnectionState
+    ) -> None:
         while True:
-            item = await self._inbound_queue.get()
+            item = await state.inbound_queue.get()
             if isinstance(item, InboundReaction):
-                await self._emit_reaction(item)
+                await self._emit_reaction(connection_id, state, item)
             else:
-                await self._emit_message(item)
+                await self._emit_message(connection_id, state, item)
 
-    async def _emit_message(self, msg: InboundMessage) -> None:
-        assert self._bot_id is not None
+    async def _emit_message(
+        self,
+        connection_id: str,
+        state: _TelegramConnectionState,
+        msg: InboundMessage,
+    ) -> None:
         sender_payload: dict[str, Any] = {
             "id": msg.sender_id,
             "display_name": msg.sender_name or str(msg.sender_id),
         }
-        metadata = build_metadata(msg, self._bot_id)
-        attachments = await self._download_attachments(msg.attachments)
+        metadata = build_metadata(msg, state.bot_id)
+        attachments = await self._download_attachments(state, msg.attachments)
         await self.emit_inbound(
+            connection_id=connection_id,
+            # Telegram's (chat_id, message_id) pair is the platform's
+            # canonical message identity; feeding it as ``event_id``
+            # lets aios's ``inbound_acks`` dedupe a redelivered update
+            # after a runtime restart (PTB's offset rewinds replay
+            # unread updates the new container also sees).
+            event_id=f"telegram-{msg.chat_id}-{msg.message_id}",
             chat_id=str(msg.chat_id),
             sender=sender_payload,
             content=msg.text,
-            attachments=attachments or None,
+            attachments=attachments,
             metadata=metadata,
             timestamp=_iso(msg.timestamp_ms),
         )
 
-    async def _emit_reaction(self, reaction: InboundReaction) -> None:
-        assert self._bot_id is not None
+    async def _emit_reaction(
+        self,
+        connection_id: str,
+        state: _TelegramConnectionState,
+        reaction: InboundReaction,
+    ) -> None:
         sender_payload: dict[str, Any] = {
             "id": reaction.sender_id,
             "display_name": reaction.sender_name or str(reaction.sender_id),
         }
         metadata: dict[str, Any] = {
-            "channel": f"telegram/{self._bot_id}/{reaction.chat_id}",
+            "channel": f"telegram/{state.bot_id}/{reaction.chat_id}",
             "chat_type": reaction.chat_kind,
             "sender_id": reaction.sender_id,
             "timestamp_ms": reaction.timestamp_ms,
@@ -246,6 +277,16 @@ class TelegramConnector(HttpConnector):
         if reaction.chat_name is not None:
             metadata["chat_name"] = reaction.chat_name
         await self.emit_inbound(
+            connection_id=connection_id,
+            # Reactions key by (target_message_id, sender_id) since
+            # the same user can re-react after clearing — pair with
+            # timestamp_ms to discriminate edit waves of the same
+            # target.  Stable across restarts since Telegram redelivers
+            # the same MessageReactionUpdated payload via PTB's offset.
+            event_id=(
+                f"telegram-react-{reaction.chat_id}-{reaction.target_message_id}"
+                f"-{reaction.sender_id}-{reaction.timestamp_ms}"
+            ),
             chat_id=str(reaction.chat_id),
             sender=sender_payload,
             content="",
@@ -254,11 +295,15 @@ class TelegramConnector(HttpConnector):
         )
 
     async def _download_attachments(
-        self, attachments: tuple[Attachment, ...]
-    ) -> list[dict[str, Any]]:
-        """Download each attachment in parallel, log+skip the rejects, return wire dicts."""
-        host_paths = await asyncio.gather(*(self._download_one(a) for a in attachments))
-        out: list[dict[str, Any]] = []
+        self,
+        state: _TelegramConnectionState,
+        attachments: tuple[Attachment, ...],
+    ) -> list[tuple[str, bytes, str]] | None:
+        """Download each attachment, validate size + bytes, return runtime tuples."""
+        host_paths = await asyncio.gather(
+            *(self._download_one(state, a) for a in attachments)
+        )
+        out: list[tuple[str, bytes, str]] = []
         for att, host_path in zip(attachments, host_paths, strict=True):
             if host_path is None:
                 continue
@@ -268,7 +313,7 @@ class TelegramConnector(HttpConnector):
                 content_type=att.content_type,
             )
             try:
-                out.append(candidate.as_params())
+                candidate.as_params()  # size + existence
             except AttachmentError as err:
                 log.warning(
                     "telegram.inbound.attachment_rejected",
@@ -277,12 +322,24 @@ class TelegramConnector(HttpConnector):
                     error=str(err),
                 )
                 continue
-        return out
+            try:
+                blob = host_path.read_bytes()
+            except OSError as err:
+                log.warning(
+                    "telegram.inbound.attachment_read_failed",
+                    file_id=att.file_id,
+                    filename=att.filename,
+                    error=str(err),
+                )
+                continue
+            out.append((att.filename, blob, att.content_type))
+        return out or None
 
-    async def _download_one(self, att: Attachment) -> Path | None:
-        assert self._application is not None
+    async def _download_one(
+        self, state: _TelegramConnectionState, att: Attachment
+    ) -> Path | None:
         try:
-            file = await self._application.bot.get_file(att.file_id)
+            file = await state.application.bot.get_file(att.file_id)
         except TelegramError as err:
             log.warning(
                 "telegram.inbound.get_file_failed",
@@ -318,12 +375,13 @@ class TelegramConnector(HttpConnector):
         parse_mode: Literal["plain", "html"] = "plain",
         reply_to_message_id: int | None = None,
         *,
+        connection_id: str,
         chat_id: str,
     ) -> dict[str, Any]:
         """Send a Telegram message to your focal chat, optionally with attachments.
 
-        The chat id is taken implicitly from your focal channel — the
-        SDK injects it from the call's ``focal_channel``.  Set focal
+        Both connection and chat ids are taken implicitly from your focal
+        channel — the SDK injects them from the call payload.  Set focal
         with the built-in ``switch_channel`` tool.
 
         Args:
@@ -344,20 +402,19 @@ class TelegramConnector(HttpConnector):
                 code, ``> quotes``, and ``||spoilers||`` render with
                 Telegram's native styling.
             reply_to_message_id: When set, the message is rendered as a
-                native Telegram reply quoting that message (the
-                client UI shows the parent inline above your text).
-                Pass the id of the message you're replying to —
-                ``message_id`` from a user inbound's metadata header,
-                or ``message_id`` from an earlier ``telegram_send``
-                response.  Default ``None`` sends as a top-level
-                message in the chat.
+                native Telegram reply quoting that message (the client
+                UI shows the parent inline above your text).  Pass the
+                id of the message you're replying to — ``message_id``
+                from a user inbound's metadata header, or ``message_id``
+                from an earlier ``telegram_send`` response.  Default
+                ``None`` sends as a top-level message in the chat.
         """
-        assert self._application is not None
+        state = self._conn_state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
 
         body, ptb_parse_mode = _prepare_text(text, parse_mode)
         host_paths: list[Path] = list(attachments or [])
-        bot = self._application.bot
+        bot = state.application.bot
 
         reply_kwargs: dict[str, Any] = (
             {"reply_to_message_id": reply_to_message_id} if reply_to_message_id is not None else {}
@@ -397,6 +454,7 @@ class TelegramConnector(HttpConnector):
             "typing", "upload_photo", "record_voice", "upload_voice", "upload_document"
         ] = "typing",
         *,
+        connection_id: str,
         chat_id: str,
     ) -> dict[str, Any]:
         """Show a chat-action bubble (e.g. "typing…") in your focal chat.
@@ -412,9 +470,11 @@ class TelegramConnector(HttpConnector):
                 ``"record_voice"`` / ``"upload_voice"`` /
                 ``"upload_document"`` make sense before sending media.
         """
-        assert self._application is not None
+        state = self._conn_state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
-        await self._application.bot.send_chat_action(chat_id=chat_id_int, action=ChatAction(action))
+        await state.application.bot.send_chat_action(
+            chat_id=chat_id_int, action=ChatAction(action)
+        )
         return {"status": "ok"}
 
     @tool()
@@ -424,6 +484,7 @@ class TelegramConnector(HttpConnector):
         text: str,
         parse_mode: Literal["plain", "html"] = "plain",
         *,
+        connection_id: str,
         chat_id: str,
     ) -> dict[str, Any]:
         """Replace the text of a message you sent earlier in your focal chat.
@@ -441,10 +502,10 @@ class TelegramConnector(HttpConnector):
                 ``text`` through the same Markdown→Telegram-HTML
                 converter as ``telegram_send``.
         """
-        assert self._application is not None
+        state = self._conn_state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
         body, ptb_parse_mode = _prepare_text(text, parse_mode)
-        edited = await self._application.bot.edit_message_text(
+        edited = await state.application.bot.edit_message_text(
             chat_id=chat_id_int,
             message_id=message_id,
             text=body,
@@ -461,6 +522,7 @@ class TelegramConnector(HttpConnector):
         self,
         message_id: int,
         *,
+        connection_id: str,
         chat_id: str,
     ) -> dict[str, Any]:
         """Delete a message in your focal chat by id.
@@ -472,9 +534,11 @@ class TelegramConnector(HttpConnector):
         Args:
             message_id: The id of the message to delete.
         """
-        assert self._application is not None
+        state = self._conn_state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
-        await self._application.bot.delete_message(chat_id=chat_id_int, message_id=message_id)
+        await state.application.bot.delete_message(
+            chat_id=chat_id_int, message_id=message_id
+        )
         return {"status": "ok"}
 
     @tool()
@@ -483,6 +547,7 @@ class TelegramConnector(HttpConnector):
         message_id: int,
         emoji: str | None,
         *,
+        connection_id: str,
         chat_id: str,
     ) -> dict[str, Any]:
         """React to a message in your focal chat with an emoji, or clear your reaction.
@@ -500,10 +565,10 @@ class TelegramConnector(HttpConnector):
                 check there if a glyph you'd expect to work is rejected.
                 Pass ``None`` to clear the bot's existing reaction.
         """
-        assert self._application is not None
+        state = self._conn_state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
         reaction = [ReactionTypeEmoji(emoji=emoji)] if emoji is not None else None
-        await self._application.bot.set_message_reaction(
+        await state.application.bot.set_message_reaction(
             chat_id=chat_id_int,
             message_id=message_id,
             reaction=reaction,

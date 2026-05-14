@@ -44,11 +44,14 @@ RUN curl -fsSL "https://github.com/AsamK/signal-cli/releases/download/v${SIGNAL_
 
 WORKDIR /app
 
-# SDK first so the layer cache stays warm across connector tweaks.
+# SDK packages first so the layer cache stays warm across connector tweaks.
+# aios-connector-http depends on aios-sdk (the workspace-published typed SDK).
+COPY packages/aios-sdk /app/packages/aios-sdk
 COPY packages/aios-connector-http /app/packages/aios-connector-http
 COPY connectors/signal /app/connectors/signal
 
 RUN uv pip install --system --no-cache \
+    /app/packages/aios-sdk \
     /app/packages/aios-connector-http \
     /app/connectors/signal
 

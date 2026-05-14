@@ -45,7 +45,7 @@ later with ``aios connections set-secrets <connection_id> --secret phone=<new>``
 ### 3. Issue a connector token
 
 ```bash
-aios connector-tokens issue --connection-id <connection_id> --label <label>
+aios runtime-tokens issue --connection-id <connection_id> --label <label>
 # → prints the plaintext token ONCE
 ```
 
@@ -54,14 +54,14 @@ aios connector-tokens issue --connection-id <connection_id> --label <label>
 ```bash
 docker run \
     -e AIOS_URL=https://api.aios.example/ \
-    -e AIOS_CONNECTOR_TOKEN=aios_conn_... \
+    -e AIOS_RUNTIME_TOKEN=aios_runtime_... \
     -e AIOS_SIGNAL_CONFIG_DIR=/var/lib/aios/signal \
     -v /var/lib/aios/signal:/var/lib/aios/signal \
     -v /var/lib/aios/workspaces:/var/lib/aios/workspaces:ro \
     aios-signal:latest
 ```
 
-The container reads ``AIOS_URL`` and ``AIOS_CONNECTOR_TOKEN`` from
+The container reads ``AIOS_URL`` and ``AIOS_RUNTIME_TOKEN`` from
 env, fetches its phone via ``GET /v1/connectors/secrets``, spawns
 ``signal-cli daemon`` against the bind-mounted config dir, and
 starts the inbound pump.  The workspace bind-mount is required for
@@ -102,7 +102,7 @@ two SDK env vars + four signal-cli deployment-shape vars:
 | Env var | Default | Description |
 |---|---|---|
 | ``AIOS_URL`` | required | Base URL of the aios api |
-| ``AIOS_CONNECTOR_TOKEN`` | required | Bearer token from ``aios connector-tokens issue`` |
+| ``AIOS_RUNTIME_TOKEN`` | required | Bearer token from ``aios runtime-tokens issue`` |
 | ``AIOS_SIGNAL_CONFIG_DIR`` | required | signal-cli config directory; account database lives here |
 | ``AIOS_SIGNAL_CLI_BIN`` | ``signal-cli`` | Path to signal-cli binary |
 | ``AIOS_SIGNAL_DAEMON_HOST`` | ``127.0.0.1`` | Internal TCP host for signal-cli daemon |

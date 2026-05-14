@@ -14,12 +14,15 @@ RUN pip install --no-cache-dir uv
 
 WORKDIR /app
 
-# Copy the SDK first so the image-build cache stays warm across connector
-# tweaks; then the connector package itself.
+# Copy the SDK packages first so the image-build cache stays warm across
+# connector tweaks; then the connector package itself. aios-connector-http
+# depends on aios-sdk (the workspace-published typed SDK).
+COPY packages/aios-sdk /app/packages/aios-sdk
 COPY packages/aios-connector-http /app/packages/aios-connector-http
 COPY connectors/telegram /app/connectors/telegram
 
 RUN uv pip install --system --no-cache \
+    /app/packages/aios-sdk \
     /app/packages/aios-connector-http \
     /app/connectors/telegram
 

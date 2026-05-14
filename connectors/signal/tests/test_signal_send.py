@@ -19,7 +19,14 @@ import pytest
 from aios_signal.connector import SignalConnector, _build_send_params
 from aios_signal.daemon import GroupInfo
 from aios_signal.parse import MENTION_PLACEHOLDER
-from tests.conftest import ALICE_UUID, BOB_UUID, GROUP_CHAT_ID, GROUP_RAW_ID, PHONE
+from tests.conftest import (
+    ALICE_UUID,
+    BOB_UUID,
+    CONNECTION_ID,
+    GROUP_CHAT_ID,
+    GROUP_RAW_ID,
+    PHONE,
+)
 
 # ── _build_send_params: attachments ─────────────────────────────────
 
@@ -44,7 +51,7 @@ def test_build_params_with_attachments() -> None:
 
 
 async def test_signal_send_text_only(connector: SignalConnector) -> None:
-    result = await connector.signal_send(text="hello there", chat_id=ALICE_UUID)
+    result = await connector.signal_send(text="hello there", chat_id=ALICE_UUID, connection_id=CONNECTION_ID)
     assert result == {"status": "ok"}
     sent_params = connector._daemon.rpc.call.call_args.args[1]  # type: ignore[union-attr]
     assert sent_params["message"] == "hello there"
@@ -57,7 +64,10 @@ async def test_signal_send_with_resolved_attachments(
     photo = tmp_path / "cat.jpg"
     photo.write_bytes(b"x")
     await connector.signal_send(
-        text="look", attachments=[photo], chat_id=ALICE_UUID
+        text="look",
+        attachments=[photo],
+        chat_id=ALICE_UUID,
+        connection_id=CONNECTION_ID,
     )
     sent_params = connector._daemon.rpc.call.call_args.args[1]  # type: ignore[union-attr]
     assert sent_params["message"] == "look"
@@ -78,8 +88,18 @@ async def test_signal_send_dispatch_resolves_sandbox_path(
     (ws / "cat.jpg").write_bytes(b"x")
     connector._client = AsyncMock()
 
+    # The dispatch_call → _post_tool_result path hits the generated SDK
+    # op which doesn't tolerate an AsyncMock client; override with a
+    # no-op so the test focuses on the SandboxPath resolution, not the
+    # result POST.
+    async def _noop_result(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(connector, "_post_tool_result", _noop_result)
+
     await connector.dispatch_call(
         {
+            "connection_id": CONNECTION_ID,
             "tool_call_id": "c1",
             "session_id": "sess-1",
             "name": "signal_send",
@@ -105,8 +125,28 @@ async def test_signal_send_dispatch_traversal_returns_error_result(
     (tmp_path / "sess-1").mkdir()
     connector._client = AsyncMock()
 
+    captured: list[dict[str, Any]] = []
+
+    async def _capture_result(
+        client: Any, *, connection_id: str, session_id: str, tool_call_id: str,
+        content: Any, is_error: bool = False,
+    ) -> None:
+        del client
+        captured.append(
+            {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "tool_call_id": tool_call_id,
+                "content": content,
+                "is_error": is_error,
+            }
+        )
+
+    monkeypatch.setattr(connector, "_post_tool_result", _capture_result)
+
     await connector.dispatch_call(
         {
+            "connection_id": CONNECTION_ID,
             "tool_call_id": "c2",
             "session_id": "sess-1",
             "name": "signal_send",
@@ -118,8 +158,8 @@ async def test_signal_send_dispatch_traversal_returns_error_result(
     )
 
     connector._daemon.rpc.call.assert_not_awaited()  # type: ignore[union-attr]
-    kwargs: dict[str, Any] = connector._client.post_tool_result.call_args.kwargs
-    assert kwargs["is_error"] is True
+    assert len(captured) == 1
+    assert captured[0]["is_error"] is True
 
 
 # ── quote / reply ─────────────────────────────────────────────────────
@@ -228,11 +268,13 @@ async def test_signal_send_in_group_encodes_mentions(
 ) -> None:
     # Seed the connector's group cache so signal_send knows the focal
     # group's members at send time.
-    connector._groups = [
+    connector._conn_state[CONNECTION_ID].groups = [
         GroupInfo(id=GROUP_CHAT_ID, name="Tea Party", member_uuids=[ALICE_UUID, BOB_UUID])
     ]
     await connector.signal_send(
-        text=f"hey @{ALICE_UUID[:8]}, ready?", chat_id=GROUP_CHAT_ID
+        text=f"hey @{ALICE_UUID[:8]}, ready?",
+        chat_id=GROUP_CHAT_ID,
+        connection_id=CONNECTION_ID,
     )
     sent_params = connector._daemon.rpc.call.call_args.args[1]  # type: ignore[union-attr]
     assert sent_params["message"] == f"hey {MENTION_PLACEHOLDER}, ready?"
@@ -249,11 +291,11 @@ async def test_signal_send_refreshes_group_cache_on_miss(
     # silently degrade.  signal_send must refresh on miss so the second
     # listGroups (now populated) populates the cache and the mention
     # encodes correctly.
-    connector._groups = []
+    connector._conn_state[CONNECTION_ID].groups = []
     connector._daemon.list_groups.return_value = [  # type: ignore[union-attr]
         GroupInfo(id=GROUP_CHAT_ID, name="Tea Party", member_uuids=[ALICE_UUID, BOB_UUID])
     ]
-    await connector.signal_send(text=f"hey @{ALICE_UUID[:8]}", chat_id=GROUP_CHAT_ID)
+    await connector.signal_send(text=f"hey @{ALICE_UUID[:8]}", chat_id=GROUP_CHAT_ID, connection_id=CONNECTION_ID)
     connector._daemon.list_groups.assert_awaited_once_with(account=PHONE)  # type: ignore[union-attr]
     sent_params = connector._daemon.rpc.call.call_args.args[1]  # type: ignore[union-attr]
     assert sent_params["mentions"] == [f"4:1:{ALICE_UUID}"]
@@ -262,16 +304,16 @@ async def test_signal_send_refreshes_group_cache_on_miss(
 async def test_signal_send_skips_refresh_on_cache_hit(
     connector: SignalConnector,
 ) -> None:
-    connector._groups = [
+    connector._conn_state[CONNECTION_ID].groups = [
         GroupInfo(id=GROUP_CHAT_ID, name="Tea Party", member_uuids=[ALICE_UUID, BOB_UUID])
     ]
-    await connector.signal_send(text="no mentions", chat_id=GROUP_CHAT_ID)
+    await connector.signal_send(text="no mentions", chat_id=GROUP_CHAT_ID, connection_id=CONNECTION_ID)
     connector._daemon.list_groups.assert_not_awaited()  # type: ignore[union-attr]
 
 
 async def test_signal_send_dm_skips_refresh(connector: SignalConnector) -> None:
     # DMs never need a group roster — refreshing on every DM send would
     # be a wasted RPC.
-    connector._groups = []
-    await connector.signal_send(text="hey", chat_id=ALICE_UUID)
+    connector._conn_state[CONNECTION_ID].groups = []
+    await connector.signal_send(text="hey", chat_id=ALICE_UUID, connection_id=CONNECTION_ID)
     connector._daemon.list_groups.assert_not_awaited()  # type: ignore[union-attr]
