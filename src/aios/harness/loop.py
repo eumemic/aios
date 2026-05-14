@@ -32,11 +32,11 @@ from aios.harness.step_context import compose_step_context, compute_step_prelude
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
-from aios.harness.wake import defer_wake
 from aios.logging import get_logger
 from aios.models.agents import ToolSpec
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
+from aios.services.wake import defer_wake
 
 if TYPE_CHECKING:
     import asyncpg
@@ -617,13 +617,9 @@ def _is_mcp_tool(name: str) -> bool:
 def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, str]) -> bool:
     """Return True if ``server_name`` resolves to a registered MCP server.
 
-    A server is "known" if either:
-
-    * It's a connector instance currently registered with the
-      :class:`~aios.harness.connector_supervisor.ConnectorSubprocessRegistry`,
-      or
-    * It appears in ``mcp_server_map`` (the agent-declared HTTP MCP
-      servers, keyed by ``McpServerSpec.name``).
+    ``mcp_server_map`` is the agent-derived map of MCP server names →
+    URLs (built upstream from both agent-declared HTTP MCP servers and
+    connection-provided MCP servers — all HTTP transport since #318).
 
     Used by :func:`_classify_tool_call` to short-circuit hallucinated
     tool names before the permission gate, so the model gets a tool

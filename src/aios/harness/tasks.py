@@ -6,14 +6,14 @@
     the job and runs a single inference step.
 
     The lock and queueing_lock are NOT set on the decorator — they are
-    passed per call from :mod:`aios.harness.wake` (``defer_wake``).
+    passed per call from :mod:`aios.services.wake` (``defer_wake``).
     Procrastinate stores the decorator's lock arguments verbatim with
     no kwarg-template substitution, so a decorator-level
     ``lock="{session_id}"`` would assign every job the same literal
     lock value and serialize all sessions through one job slot — the
     bug behind issue #192.
 
-    Per-call values used by :mod:`aios.harness.wake`:
+    Per-call values used by :mod:`aios.services.wake`:
 
     * ``lock=session_id``: procrastinate enforces mutual exclusion via
       a partial unique index ``WHERE status='doing'``. With distinct

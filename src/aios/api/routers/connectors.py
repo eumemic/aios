@@ -28,11 +28,11 @@ from aios.errors import (
     PayloadTooLargeError,
     ValidationError,
 )
-from aios.harness.wake import defer_wake
 from aios.models.connections import Connection, ConnectionSetTools, ConnectorSecrets
 from aios.services import connections as connections_service
 from aios.services import inbound as inbound_service
 from aios.services import sessions as sessions_service
+from aios.services.wake import defer_wake
 
 router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
 

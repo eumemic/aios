@@ -2691,50 +2691,6 @@ async def get_connection(conn: asyncpg.Connection[Any], connection_id: str) -> C
     return _row_to_connection(row)
 
 
-async def session_authorizes_connector_account(
-    conn: asyncpg.Connection[Any],
-    session_id: str,
-    connector: str,
-    account: str,
-) -> bool:
-    """Permission check for outbound connector tool calls.
-
-    True iff there's an active connection whose ``(connector, account)``
-    matches AND any of:
-
-    * ``c.session_id`` is this session (single_session attach), OR
-    * ``c.id`` is this session's ``spawned_from_connection_id``
-      (per_chat origin grant), OR
-    * a row in ``connection_chat_sessions`` ties this connection to
-      this session (operator-curated chat binding, #215).
-
-    Used by the outbound MCP dispatch to gate tool calls that take an
-    explicit ``account`` argument — the supervisor will happily forward
-    to the connector regardless, but the model shouldn't be able to
-    reach accounts the operator hasn't bound to this session.
-    """
-    row = await conn.fetchrow(
-        """
-        SELECT 1
-          FROM connections c
-          LEFT JOIN sessions s ON s.id = $1
-         WHERE c.connector = $2
-           AND c.account = $3
-           AND c.archived_at IS NULL
-           AND (c.session_id = $1
-                OR c.id = s.spawned_from_connection_id
-                OR EXISTS (SELECT 1 FROM connection_chat_sessions ccs
-                            WHERE ccs.connection_id = c.id
-                              AND ccs.session_id = $1))
-         LIMIT 1
-        """,
-        session_id,
-        connector,
-        account,
-    )
-    return row is not None
-
-
 async def set_connection_tools(
     conn: asyncpg.Connection[Any],
     connection_id: str,
@@ -2838,15 +2794,11 @@ async def list_connection_tools_for_session(
 ) -> list[dict[str, Any]]:
     """Custom tool specs from every active connection bound to ``session_id``.
 
-    Mirrors the three lineage paths in
-    :func:`session_authorizes_connector_account`:
-
-    * ``c.session_id = $1`` — single_session attach
-    * ``c.id = s.spawned_from_connection_id`` — per_chat origin
-    * ``connection_chat_sessions`` — operator-curated chat binding
-
-    Returns the flattened list of ToolSpec dicts (jsonb) ready to feed
-    through :func:`tools.registry.to_openai_tools_custom`.
+    Walks the three lineage paths enumerated in
+    :func:`is_session_bound_to_connection` (single_session attach,
+    per_chat origin, operator-curated chat binding) and returns the
+    flattened list of ToolSpec dicts (jsonb) ready to feed through
+    :func:`tools.registry.to_openai_tools_custom`.
     """
     rows = await conn.fetch(
         """

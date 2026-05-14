@@ -13,7 +13,7 @@ from typing import Any
 
 from aios.errors import AiosError
 from aios.harness import runtime
-from aios.harness.wake import defer_wake
+from aios.services.wake import defer_wake
 from aios.tools.registry import registry
 
 

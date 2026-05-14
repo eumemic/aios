@@ -29,7 +29,7 @@ class TestE2EConftestMockSignatures:
     def test_noop_defer_wake_matches_real_defer_wake(self) -> None:
         import inspect
 
-        from aios.harness.wake import defer_wake
+        from aios.services.wake import defer_wake
         from tests.e2e.conftest import _noop_defer_wake
 
         real_params = list(inspect.signature(defer_wake).parameters.keys())
@@ -39,11 +39,11 @@ class TestE2EConftestMockSignatures:
 
 class TestWakeDeferredEvent:
     async def test_defer_wake_emits_span_with_cause(self, in_memory_app: App) -> None:
-        from aios.harness.wake import defer_wake
+        from aios.services.wake import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
-        with patch("aios.harness.wake.sessions_service.append_event", mock_append):
+        with patch("aios.services.wake.sessions_service.append_event", mock_append):
             await defer_wake(pool, "sess_x", cause="message")
 
         mock_append.assert_awaited_once_with(
@@ -54,11 +54,11 @@ class TestWakeDeferredEvent:
         )
 
     async def test_defer_wake_span_carries_delay_when_scheduled(self, in_memory_app: App) -> None:
-        from aios.harness.wake import defer_wake
+        from aios.services.wake import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
-        with patch("aios.harness.wake.sessions_service.append_event", mock_append):
+        with patch("aios.services.wake.sessions_service.append_event", mock_append):
             await defer_wake(pool, "sess_x", cause="scheduled", delay_seconds=30, wake_reason="r")
 
         mock_append.assert_awaited_once_with(
@@ -71,11 +71,11 @@ class TestWakeDeferredEvent:
     async def test_defer_wake_emits_span_even_when_coalesced(self, in_memory_app: App) -> None:
         """N deferrals must all emit ``wake_deferred``, even if procrastinate
         coalesces them — the profiler observes coalescing as N deferred → 1 step."""
-        from aios.harness.wake import defer_wake
+        from aios.services.wake import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
-        with patch("aios.harness.wake.sessions_service.append_event", mock_append):
+        with patch("aios.services.wake.sessions_service.append_event", mock_append):
             await defer_wake(pool, "sess_x", cause="message")
             await defer_wake(pool, "sess_x", cause="sweep")
             await defer_wake(pool, "sess_x", cause="tool_confirmation")
@@ -89,11 +89,11 @@ class TestWakeDeferredEvent:
     async def test_defer_wake_with_reschedule_cause_emits_reschedule_span(
         self, in_memory_app: App
     ) -> None:
-        from aios.harness.wake import defer_wake
+        from aios.services.wake import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
-        with patch("aios.harness.wake.sessions_service.append_event", mock_append):
+        with patch("aios.services.wake.sessions_service.append_event", mock_append):
             await defer_wake(pool, "sess_x", cause="reschedule", delay_seconds=2)
 
         mock_append.assert_awaited_once_with(

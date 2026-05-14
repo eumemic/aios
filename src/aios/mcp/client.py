@@ -189,10 +189,6 @@ async def discover_mcp_tools(
 def shape_call_result(result: Any) -> dict[str, Any]:
     """Project an MCP ``CallToolResult`` onto aios's ``{"content"|"error": str}`` envelope.
 
-    Shared by the HTTP-transport path here and the stdio-transport path
-    in :class:`~aios.harness.connector_supervisor.ConnectorSubprocessRegistry`
-    so both surfaces stay byte-identical.
-
     Tool-level errors carry ``code="tool_error"`` so the API router can
     distinguish them from transport / not-ready / circuit-open
     failures (mapped to different HTTP statuses) without substring

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from procrastinate import App
 
-from aios.harness.wake import defer_wake
+from aios.services.wake import defer_wake
 
 
 @pytest.fixture(autouse=True)
@@ -17,7 +17,7 @@ def mock_append_event() -> AsyncIterator[AsyncMock]:
     """Patch ``sessions_service.append_event`` so ``wake_deferred`` span
     emission doesn't require a real DB connection (issue #131)."""
     mock = AsyncMock()
-    with patch("aios.harness.wake.sessions_service.append_event", mock):
+    with patch("aios.services.wake.sessions_service.append_event", mock):
         yield mock
 
 

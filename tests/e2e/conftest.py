@@ -141,7 +141,7 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     with (
         mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),
         mock.patch("aios.harness.completion.litellm.stream_chunk_builder", _fake_chunk_builder),
-        mock.patch("aios.harness.wake.defer_wake", _noop_defer_wake),
+        mock.patch("aios.services.wake.defer_wake", _noop_defer_wake),
     ):
         yield h
 
@@ -204,7 +204,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     with (
         mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),
         mock.patch("aios.harness.completion.litellm.stream_chunk_builder", _fake_chunk_builder),
-        mock.patch("aios.harness.wake.defer_wake", _noop_defer_wake),
+        mock.patch("aios.services.wake.defer_wake", _noop_defer_wake),
     ):
         yield h
 
@@ -245,7 +245,7 @@ async def http_client(aios_env: dict[str, str]) -> AsyncIterator[Any]:
     app.state.procrastinate = mock.MagicMock()
     transport = httpx.ASGITransport(app=app)
     # Mock at every call site that imports ``defer_wake`` directly —
-    # patching the source (``aios.harness.wake``) is too late since the
+    # patching the source (``aios.services.wake``) is too late since the
     # importing modules already captured the unmocked reference.
     with (
         mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock),

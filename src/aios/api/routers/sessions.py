@@ -29,7 +29,6 @@ from aios.api.sse import sse_event_stream
 from aios.db import queries
 from aios.db.listen import SESSION_INTERRUPT_CHANNEL, listen_for_events
 from aios.errors import ForbiddenError, ValidationError
-from aios.harness.wake import defer_wake
 from aios.ids import GITHUB_REPOSITORY, split_id
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
@@ -55,6 +54,7 @@ from aios.models.sessions import (
 from aios.services import files as files_service
 from aios.services import github_repositories as github_repo_service
 from aios.services import sessions as service
+from aios.services.wake import defer_wake
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 
