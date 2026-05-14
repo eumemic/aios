@@ -1,0 +1,57 @@
+name: Promote aios-sandbox :smoked → :stable
+
+# Manifest-level retag: promotes the already-smoked image to :stable.
+# Requires explicit reviewer approval via the ``stable`` GitHub environment
+# before the retag executes, so no untested image can reach :stable
+# without a human sign-off.
+#
+# After promoting, fires a repository-dispatch event to eumemic-ops so the
+# deploy ledger can record the new :stable digest.
+#
+# Security note: this workflow does not interpolate any untrusted input
+# into ``run:`` commands.  Only trusted contexts (github.actor,
+# secrets.GITHUB_TOKEN, secrets.EUMEMIC_OPS_DISPATCH_TOKEN, and outputs
+# from pinned actions) are referenced.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: stable  # requires reviewer approval
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve :smoked digest
+        id: digest
+        run: |
+          DIGEST=$(docker buildx imagetools inspect \
+            ghcr.io/eumemic/aios-sandbox:smoked \
+            --format '{{.Manifest.Digest}}')
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+      - name: Retag :smoked → :stable
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/eumemic/aios-sandbox:stable \
+            ghcr.io/eumemic/aios-sandbox:smoked
+      - name: Trigger ledger append
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.EUMEMIC_OPS_DISPATCH_TOKEN }}
+          repository: eumemic/eumemic-ops
+          event-type: deploy-ledger-append
+          client-payload: |
+            {
+              "app": "aios-sandbox",
+              "track": "R",
+              "digest": "${{ steps.digest.outputs.digest }}",
+              "promoted_by": "${{ github.actor }}"
+            }
