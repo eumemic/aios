@@ -4857,8 +4857,13 @@ async def bootstrap_root_account(
 
     Returns ``(account, key_id)``. The plaintext key isn't stored —
     caller is responsible for returning it to the operator exactly once.
-    Raises :class:`ConflictError` if a root already exists (the partial
-    unique index ``accounts_one_active_root`` fires).
+
+    Raises :class:`NotFoundError` if a root already exists at INSERT
+    time (the ``accounts_one_active_root`` partial unique index fires).
+    Mapping to ``NotFoundError`` rather than ``ConflictError`` preserves
+    the bootstrap endpoint's "404 if root exists" invariant under
+    concurrent bootstrap attempts — the loser of the race sees the same
+    404 as a caller arriving after the winner committed.
     """
     account_id = make_id(ACCOUNT)
     key_id = make_id(ACCOUNT_KEY)
@@ -4874,8 +4879,8 @@ async def bootstrap_root_account(
                 display_name,
             )
         except asyncpg.UniqueViolationError as exc:
-            raise ConflictError(
-                "root account already exists",
+            raise NotFoundError(
+                "bootstrap endpoint closed: root account already exists",
                 detail={"display_name": display_name},
             ) from exc
         assert account_row is not None

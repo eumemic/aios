@@ -89,7 +89,7 @@ class TestBootstrap:
         assert r.status_code == 201, r.text
         body = r.json()
         assert body["account_id"].startswith("acc_")
-        assert body["key_id"].startswith("key_")
+        assert body["key_id"].startswith("acckey_")
         assert body["plaintext_key"].startswith("aios_")
 
     async def test_persists_hashed_key_not_plaintext(
@@ -208,6 +208,37 @@ class TestBootstrap:
             headers=_bootstrap_headers(token),
         )
         assert r.status_code == 422, r.text
+
+    async def test_concurrent_bootstrap_loser_gets_404(self, pool: Any) -> None:
+        """The race-losing call gets 404, not 409.
+
+        Simulates the TOCTOU window: an existence-check passes for both
+        callers because no root exists yet, and they race to INSERT. The
+        ``accounts_one_active_root`` index lets exactly one win; the
+        loser's ``UniqueViolationError`` must surface as ``NotFoundError``
+        (404), matching the post-bootstrap behavior — otherwise the
+        endpoint's stated invariant breaks under concurrency.
+        """
+        # Pre-seed a root to put the DB in the "already bootstrapped"
+        # state, then call ``bootstrap_root_account`` directly — this is
+        # the same code path the race-loser hits at the INSERT step.
+        from aios.db import queries
+        from aios.errors import NotFoundError
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
+                VALUES ('acc_existing_root', NULL, TRUE, 'preexisting')
+                """
+            )
+            with pytest.raises(NotFoundError):
+                await queries.bootstrap_root_account(
+                    conn,
+                    display_name="loser",
+                    key_hash=b"\x00" * 32,
+                    key_label="bootstrap",
+                )
 
 
 class TestAccountInvariants:

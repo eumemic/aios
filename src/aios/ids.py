@@ -49,7 +49,7 @@ GITHUB_REPOSITORY: Final = "ghrepo"
 FILE: Final = "file"
 MANAGEMENT_CALL: Final = "mgmt"
 ACCOUNT: Final = "acc"
-ACCOUNT_KEY: Final = "key"
+ACCOUNT_KEY: Final = "acckey"
 
 _PREFIXES: Final = frozenset(
     {
