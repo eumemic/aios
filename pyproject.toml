@@ -40,6 +40,10 @@ dependencies = [
     # Split into its own package so connector containers can depend on the
     # SDK without dragging in fastapi/asyncpg/procrastinate/etc.
     "aios-sdk",
+    # Shared HTTP-client SDK: the runtime imports ``sniff_image_mime``
+    # for renderer-side mime correction so the same magic-byte detector
+    # runs at the connector boundary and at replay time.
+    "aios-connector-http",
 ]
 
 [dependency-groups]

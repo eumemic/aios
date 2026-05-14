@@ -33,7 +33,7 @@ import litellm
 
 from aios.harness.vision import (
     can_inline_image,
-    correct_image_mime,
+    correct_image_mime_b64,
     make_image_url_part,
     text_marker,
 )
@@ -317,12 +317,9 @@ def _apply_attachments(
                 )
                 marker_lines.append(text_marker(record))
                 continue
-            # Re-sniff here so historical events with a wrong declared
-            # mime (predating SDK-boundary correction) still render with
-            # the actual bytes' mime — Anthropic rejects mismatches.
             image_parts.append(
                 make_image_url_part(
-                    content_type=correct_image_mime(content_type, payload),
+                    content_type=content_type,
                     data_b64=base64.b64encode(payload).decode("ascii"),
                 )
             )
@@ -384,6 +381,37 @@ def _sanitize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any
             }
         )
     return sanitized
+
+
+def _correct_image_data_url_mimes(messages: list[dict[str, Any]]) -> None:
+    """Rewrite mismatched mime declarations on ``data:<mime>;base64,...``
+    image URLs already in the assembled message list.  Mutates in place.
+
+    The renderer cannot prevent persisted events from carrying a wrong
+    mime — tool_result content arrives pre-formed and is appended
+    verbatim, so historical events from before centralised sniffing
+    will replay forever unless we re-check them every build.
+    """
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            if not isinstance(image_url, dict):
+                continue
+            url = image_url.get("url")
+            if not isinstance(url, str) or not url.startswith("data:"):
+                continue
+            head, sep, data_b64 = url.partition(",")
+            if not sep or ";base64" not in head:
+                continue
+            declared = head.removeprefix("data:").split(";", 1)[0]
+            corrected = correct_image_mime_b64(declared, data_b64)
+            if corrected != declared:
+                image_url["url"] = f"data:{corrected};base64,{data_b64}"
 
 
 def _strip_to_spec(
@@ -589,6 +617,8 @@ def build_messages(
 
     if system_prompt:
         messages.insert(0, {"role": "system", "content": system_prompt})
+
+    _correct_image_data_url_mimes(messages)
 
     target_supports_thinking = bool(model) and litellm.supports_reasoning(model)
     return ContextResult(
