@@ -2,8 +2,8 @@
 
 Resolved rows are kept for audit; a TTL cleanup is a follow-up.
 
-Revision ID: 0040
-Revises: 0039
+Revision ID: 0041
+Revises: 0040
 Create Date: 2026-05-13
 """
 
@@ -13,8 +13,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0040"
-down_revision: str = "0039"
+revision: str = "0041"
+down_revision: str = "0040"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
