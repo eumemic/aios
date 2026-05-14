@@ -714,15 +714,15 @@ class TestRunUntilStopped:
 
 
 class TestWaitReady:
-    async def test_times_out_if_run_never_sets_ready(self) -> None:
-        """A connector whose run() never sets _ready_event causes TimeoutError."""
+    async def test_times_out_if_loops_never_signal_ready(self) -> None:
+        """A connector whose loops never call _mark_loop_backfilled causes TimeoutError."""
         blocked = asyncio.Event()
 
         class _NeverReady(HttpConnector):
             connector = "neverready"
 
             async def run(self) -> None:
-                await blocked.wait()  # never sets _ready_event
+                await blocked.wait()  # never calls _mark_loop_backfilled
 
         c = _NeverReady(base_url="http://x", token="aios_runtime_x")
         task = asyncio.create_task(c.run())
@@ -734,21 +734,24 @@ class TestWaitReady:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-    async def test_resolves_after_run_signals_ready(self) -> None:
-        """wait_ready() returns without raising once _ready_event is set."""
+    async def test_resolves_after_all_loops_signal_ready(self) -> None:
+        """wait_ready() returns without raising once all three loops backfill."""
         unblock = asyncio.Event()
 
         class _ReadyConnector(HttpConnector):
             connector = "readyconn"
 
             async def run(self) -> None:
-                self._ready_event.set()
+                # Simulate all three loops receiving their "connected" event.
+                self._mark_loop_backfilled()
+                self._mark_loop_backfilled()
+                self._mark_loop_backfilled()
                 await unblock.wait()
 
         c = _ReadyConnector(base_url="http://x", token="aios_runtime_x")
         task = asyncio.create_task(c.run())
         try:
-            # Should NOT raise — ready_event will be set quickly
+            # Should NOT raise — all loops signal ready quickly.
             await c.wait_ready(deadline=5.0)
         finally:
             unblock.set()

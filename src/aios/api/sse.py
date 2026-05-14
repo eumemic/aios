@@ -153,6 +153,13 @@ async def runtime_connector_calls_stream(
     ``connector_calls_<connector>`` NOTIFY channel.
     """
     async with listen_for_connector_calls_by_type(db_url, connector) as queue:
+        # Signal LISTEN-active to the runtime container's tool loop.  The
+        # container watches for this event to set its readiness flag so
+        # tests can await wait_ready() deterministically.  Mirrors the same
+        # "connected" event in management_calls_stream and
+        # connection_discovery_stream.
+        yield ServerSentEvent(data="{}", event="connected")
+
         emitted: set[str] = set()
 
         async with pool.acquire() as conn:
@@ -189,11 +196,19 @@ async def management_calls_stream(
 ) -> AsyncIterator[ServerSentEvent]:
     """Yield SSE events for pending management calls of ``connector`` type.
 
-    Backfills pending unexpired calls, then tails
-    ``connector_management_calls_<connector>``.  Each event:
-    ``{"call_id": "mgmt_...", "method": str, "params": dict}``.
+    Emits a ``"connected"`` event immediately after LISTEN is established
+    (before backfill) so the runtime container's management-call loop can
+    detect that its subscription is live.  Then backfills pending unexpired
+    calls and tails ``connector_management_calls_<connector>``.  Each call
+    event: ``{"call_id": "mgmt_...", "method": str, "params": dict}``.
     """
     async with listen_for_management_calls(db_url, connector) as queue:
+        # Signal to the runtime container that LISTEN is active and any
+        # NOTIFY sent after this point will be delivered.  The container's
+        # _management_call_loop watches for this event to set its readiness
+        # flag so tests can await wait_ready() deterministically.
+        yield ServerSentEvent(data="{}", event="connected")
+
         emitted: set[str] = set()
 
         async with pool.acquire() as conn:
@@ -239,6 +254,11 @@ async def connection_discovery_stream(
     ``archive_connection``.
     """
     async with listen_for_connection_discovery(db_url, connector) as queue:
+        # Signal LISTEN-active to the runtime container's discovery loop.
+        # Mirrors the "connected" event in management_calls_stream and
+        # runtime_connector_calls_stream.
+        yield ServerSentEvent(data="{}", event="connected")
+
         emitted_added: set[str] = set()
 
         # Page through all active connections of this type; the default

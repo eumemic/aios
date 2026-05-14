@@ -231,6 +231,13 @@ class HttpConnector:
         self.state: dict[str, Any] = {}
         self._ready_event: asyncio.Event = asyncio.Event()
         self._connection_served: dict[str, asyncio.Event] = {}
+        # Counts how many of the three background loops (discovery, tool,
+        # management) have completed their first successful SSE backfill and
+        # entered their live-tail phase.  wait_ready() waits until this
+        # reaches 3 — guaranteeing all loops are actively listening before
+        # the caller proceeds.  Reset to 0 on teardown so re-runs work.
+        self._loops_backfilled: int = 0
+        self._all_loops_live: asyncio.Event = asyncio.Event()
 
     # ─── helpers (subclasses use these) ──────────────────────────────
 
@@ -280,26 +287,56 @@ class HttpConnector:
 
     # ── test-coordination primitives ──────────────────────────────────
 
-    async def wait_ready(self, deadline: float = 5.0) -> None:
-        """Block until run() has submitted all three background loop tasks.
+    async def wait_ready(self, deadline: float = 30.0) -> None:
+        """Block until all three background loops are live and listening.
 
-        Specifically: setup() has returned and all three create_task() calls
-        (discovery, tool, management) have completed. The loops have been
-        *scheduled* but may not have started their first I/O iteration yet.
+        Specifically: each of the discovery, tool, and management-call loops
+        has successfully opened its SSE stream and received the server's
+        ``"connected"`` event (emitted once LISTEN is active, before backfill).
+        At this point it is safe to POST management calls or drive tool calls
+        — the connector is guaranteed to be listening and will not miss a
+        NOTIFY sent after this method returns.
 
-        Raises TimeoutError if run() does not reach this point within
-        deadline seconds. Intended for test coordination.
+        The default deadline is 30 s to tolerate CI scheduler lag and the
+        connector's exponential-backoff reconnect cycle (max backoff cap is
+        60 s, but the first successful connection almost always lands within
+        the first few retries, well under 30 s).
+
+        Raises ``TimeoutError`` if the loops have not all reached the live
+        phase within ``deadline`` seconds.  Intended for test coordination.
         """
-        await asyncio.wait_for(self._ready_event.wait(), timeout=deadline)
+        await asyncio.wait_for(self._all_loops_live.wait(), timeout=deadline)
 
-    async def wait_connection_served(self, connection_id: str, deadline: float = 5.0) -> None:
+    async def wait_connection_served(self, connection_id: str, deadline: float = 30.0) -> None:
         """Block until serve_connection has been spawned for connection_id.
 
-        Raises TimeoutError if the connection is not added within deadline seconds.
-        Intended for test coordination.
+        The discovery loop must receive and process the ``added`` event for
+        ``connection_id`` before this returns.  Because the discovery SSE may
+        reconnect with exponential backoff before delivering the backfill, the
+        default deadline is 30 s (generous enough for CI scheduler lag and
+        one full backoff cycle).
+
+        Raises ``TimeoutError`` if the connection is not added within
+        ``deadline`` seconds.  Intended for test coordination.
         """
         event = self._connection_served.setdefault(connection_id, asyncio.Event())
         await asyncio.wait_for(event.wait(), timeout=deadline)
+
+    def _mark_loop_backfilled(self) -> None:
+        """Called by each loop once it receives the server's ``"connected"`` event.
+
+        That event is emitted by the server immediately after its LISTEN is
+        active (before backfill), guaranteeing the loop won't miss a NOTIFY
+        sent after :meth:`wait_ready` returns.  When all three loops have
+        called this, ``_all_loops_live`` is set so :meth:`wait_ready` can
+        unblock.
+
+        Using a plain int (not a Lock) is safe: asyncio is single-threaded
+        so the increment is atomic within a single event-loop iteration.
+        """
+        self._loops_backfilled += 1
+        if self._loops_backfilled >= 3:
+            self._all_loops_live.set()
 
     async def load_answered(self) -> set[str]:
         """Override: persisted tool_call_ids from a previous lifetime."""
@@ -448,6 +485,8 @@ class HttpConnector:
                     self._ready_event.set()  # all background loops scheduled
             finally:
                 self._ready_event.clear()
+                self._all_loops_live.clear()
+                self._loops_backfilled = 0
                 # Reset each event rather than replacing the dict, so callers
                 # holding existing Event references are not orphaned on re-run.
                 for event in self._connection_served.values():
@@ -481,12 +520,21 @@ class HttpConnector:
         """Tail the connection-discovery SSE; spawn / cancel workers."""
         client = self._require_client()
         backoff = 1.0
+        _signalled_ready = False
         while True:
             try:
                 async for msg in stream_connection_discovery(
                     client.get_async_httpx_client(), self.connector
                 ):
                     backoff = 1.0
+                    if msg.event == "connected":
+                        # Server signals that its LISTEN is active and the
+                        # backfill is about to run.  Signal our readiness once
+                        # (on first successful connection; ignored on reconnect).
+                        if not _signalled_ready:
+                            _signalled_ready = True
+                            self._mark_loop_backfilled()
+                        continue
                     if msg.event != "connection":
                         continue
                     payload = json.loads(msg.data)
@@ -603,12 +651,18 @@ class HttpConnector:
         """Tail the per-type calls SSE and dispatch each call."""
         client = self._require_client()
         backoff = 1.0
+        _signalled_ready = False
         while True:
             try:
                 async for msg in stream_connector_calls(
                     client.get_async_httpx_client(), self.connector
                 ):
                     backoff = 1.0
+                    if msg.event == "connected":
+                        if not _signalled_ready:
+                            _signalled_ready = True
+                            self._mark_loop_backfilled()
+                        continue
                     if msg.event != "call":
                         continue
                     call = json.loads(msg.data)
@@ -785,12 +839,18 @@ class HttpConnector:
         """
         client = self._require_client()
         backoff = 1.0
+        _signalled_ready = False
         while True:
             try:
                 async for msg in stream_management_calls(
                     client.get_async_httpx_client(), self.connector
                 ):
                     backoff = 1.0
+                    if msg.event == "connected":
+                        if not _signalled_ready:
+                            _signalled_ready = True
+                            self._mark_loop_backfilled()
+                        continue
                     if msg.event != "call":
                         continue
                     call = json.loads(msg.data)
