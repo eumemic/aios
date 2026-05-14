@@ -16,7 +16,7 @@ import asyncio
 import contextlib
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -711,3 +711,92 @@ class TestRunUntilStopped:
 
         c = _Connector(base_url="http://x", token="aios_runtime_x")
         await c.run_until_stopped(install_signal_handlers=False)
+
+
+class TestWaitReady:
+    async def test_times_out_if_loops_never_signal_ready(self) -> None:
+        """A connector whose loops never call _mark_loop_backfilled causes TimeoutError."""
+        blocked = asyncio.Event()
+
+        class _NeverReady(HttpConnector):
+            connector = "neverready"
+
+            async def run(self) -> None:
+                await blocked.wait()  # never calls _mark_loop_backfilled
+
+        c = _NeverReady(base_url="http://x", token="aios_runtime_x")
+        task = asyncio.create_task(c.run())
+        try:
+            with pytest.raises(TimeoutError):
+                await c.wait_ready(deadline=0.05)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def test_resolves_after_all_loops_signal_ready(self) -> None:
+        """wait_ready() returns without raising once all three loops backfill."""
+        unblock = asyncio.Event()
+
+        class _ReadyConnector(HttpConnector):
+            connector = "readyconn"
+
+            async def run(self) -> None:
+                # Simulate all three loops receiving their "_open" marker.
+                self._mark_loop_backfilled()
+                self._mark_loop_backfilled()
+                self._mark_loop_backfilled()
+                await unblock.wait()
+
+        c = _ReadyConnector(base_url="http://x", token="aios_runtime_x")
+        task = asyncio.create_task(c.run())
+        try:
+            # Should NOT raise — all loops signal ready quickly.
+            await c.wait_ready(deadline=5.0)
+        finally:
+            unblock.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+class TestWaitConnectionServed:
+    async def test_times_out_if_connection_never_added(self) -> None:
+        """wait_connection_served raises TimeoutError when connection never appears."""
+        c = _ProbeConnector()
+        with pytest.raises(TimeoutError):
+            await c.wait_connection_served("conn_never", deadline=0.05)
+
+    async def test_resolves_after_connection_added(self) -> None:
+        """wait_connection_served returns once the event for connection_id is set."""
+        c = _ProbeConnector()
+        wait_task = asyncio.create_task(c.wait_connection_served("conn_x", deadline=5.0))
+        await asyncio.sleep(0)  # yield so wait_task starts
+        # Drive the internal event directly — tests that _on_connection_added
+        # calls this are covered by TestMultiConnectionDispatch; here we only
+        # verify the coordination contract of wait_connection_served itself.
+        c._connection_served.setdefault("conn_x", asyncio.Event()).set()
+        await wait_task  # should complete without TimeoutError
+
+    async def test_on_connection_added_sets_event(self) -> None:
+        """_on_connection_added must set _connection_served[connection_id]."""
+        from aios_sdk._generated.types import Unset
+
+        c = _ProbeConnector()
+        # Build a minimal mock secrets response: 200, parsed body with no secrets.
+        mock_body = MagicMock()
+        mock_body.secrets = Unset()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.parsed = mock_body
+
+        mock_tg = MagicMock()
+        mock_tg.create_task = lambda coro, **kw: (coro.close(), MagicMock())[1]
+
+        with patch(
+            "aios_connector_http.runner._get_runtime_secrets",
+            new=AsyncMock(return_value=mock_response),
+        ):
+            await c._on_connection_added(mock_tg, "conn_direct", "account_x")
+
+        assert "conn_direct" in c._connection_served
+        assert c._connection_served["conn_direct"].is_set()

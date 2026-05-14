@@ -150,10 +150,8 @@ class TestSignalRegistration:
         connector_task = asyncio.create_task(_run_connector(connector))
 
         try:
-            # Wait for the connector's management SSE to be live; on
-            # connect there are no pending calls so we just give the
-            # event loop a tick.
-            await asyncio.sleep(0.5)
+            # Wait for the connector's management SSE to be live.
+            await connector.wait_ready()
 
             async with authed_client(live_server, api_key) as c:
                 # Register.
@@ -223,7 +221,7 @@ class TestSignalRegistration:
         connector_task = asyncio.create_task(_run_connector(connector))
 
         try:
-            await asyncio.sleep(0.5)
+            await connector.wait_ready()
 
             async with authed_client(live_server, api_key) as c:
                 r = await c.post(

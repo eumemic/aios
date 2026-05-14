@@ -153,7 +153,20 @@ async def stream_management_calls(
 
 
 async def _stream_sse(httpx_client: httpx.AsyncClient, path: str) -> AsyncIterator[SseMessage]:
-    """Open an SSE stream against ``path`` and yield parsed messages."""
+    """Open an SSE stream against ``path`` and yield parsed messages.
+
+    The first yielded message is a synthetic ``SseMessage(event="_open",
+    data="")`` emitted immediately after the underlying HTTP response
+    returns 2xx headers — BEFORE any server payload is parsed.  Callers
+    that need a deterministic "the runtime is actually listening" signal
+    (e.g. ``HttpConnector.wait_ready()``) watch for this event.
+
+    The synthetic event is client-side only so the server-side SSE
+    generator stays simple — we don't try to make the server emit a
+    "connected" event before its first natural yield, which would push
+    sse-starlette into territory where its ASGI body framing can crash
+    pre-yield under CI load.  See aios#366 for the failure mode.
+    """
     async with httpx_client.stream(
         "GET",
         path,
@@ -161,6 +174,12 @@ async def _stream_sse(httpx_client: httpx.AsyncClient, path: str) -> AsyncIterat
         timeout=httpx.Timeout(60.0, read=None),
     ) as response:
         response.raise_for_status()
+        # Synthetic open marker so HttpConnector loops can mark themselves
+        # ready as soon as the SSE handshake succeeds, without depending
+        # on a server-emitted event (see docstring above).  The leading
+        # underscore namespaces it away from any real SSE event the
+        # server might emit.
+        yield SseMessage(event="_open", data="")
         async for msg in _aiter_sse(response):
             yield msg
 

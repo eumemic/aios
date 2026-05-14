@@ -229,6 +229,15 @@ class HttpConnector:
         #     class SignalConnector(HttpConnector):
         #         state: dict[str, _SignalConnectionState]
         self.state: dict[str, Any] = {}
+        self._ready_event: asyncio.Event = asyncio.Event()
+        self._connection_served: dict[str, asyncio.Event] = {}
+        # Counts how many of the three background loops (discovery, tool,
+        # management) have completed their first successful SSE backfill and
+        # entered their live-tail phase.  wait_ready() waits until this
+        # reaches 3 — guaranteeing all loops are actively listening before
+        # the caller proceeds.  Reset to 0 on teardown so re-runs work.
+        self._loops_backfilled: int = 0
+        self._all_loops_live: asyncio.Event = asyncio.Event()
 
     # ─── helpers (subclasses use these) ──────────────────────────────
 
@@ -275,6 +284,79 @@ class HttpConnector:
 
     async def teardown(self) -> None:
         """Override: cleanup before the runner exits."""
+
+    # ── test-coordination primitives ──────────────────────────────────
+
+    async def wait_ready(self, deadline: float = 60.0) -> None:
+        """Block until all three background loops have opened their SSE streams.
+
+        Specifically: each of the discovery, tool, and management-call loops has
+        received the synthetic ``"_open"`` event the SDK's
+        :func:`aios_sdk.streaming._stream_sse` yields right after
+        ``response.raise_for_status()`` succeeds — i.e. the HTTP handshake
+        returned 2xx headers.  At that moment the server-side body generator
+        has begun executing; within the same event-loop iteration its
+        ``listen_for_*`` context manager registers LISTEN, after which any
+        subsequent NOTIFY is queued and delivered to the SSE stream.
+
+        We deliberately do NOT depend on a server-emitted ``"connected"``
+        event yielded before backfill, because yielding from an sse-starlette
+        generator before any natural data chunk has surfaced an "ASGI callable
+        returned without completing response" failure mode in CI (see aios#366
+        commit-message archaeology).
+
+        Caveat for test authors: ``_open`` is a *best-effort* readiness
+        signal, not a strong handshake.  It fires when the client sees 2xx
+        headers, but the server-side generator may still be in the middle of
+        a slow ``asyncpg.connect()`` for its LISTEN connection.  In tests
+        that use an in-process uvicorn fixture, watch for the cross-test
+        ``sse_starlette.AppStatus.should_exit`` contamination noted in
+        :mod:`tests.conftest` (``_reset_sse_starlette_shutdown_state``);
+        without that reset, every SSE handshake after the first fixture
+        teardown can be cancelled immediately by the library's shutdown
+        watcher, defeating ``_open`` as a readiness oracle.
+
+        The default deadline is 60 s — generous for CI scheduler lag and the
+        exponential-backoff retry cycle on the SSE connection.
+
+        Raises ``TimeoutError`` if the loops have not all reached the live
+        phase within ``deadline`` seconds.  Intended for test coordination.
+        """
+        await asyncio.wait_for(self._all_loops_live.wait(), timeout=deadline)
+
+    async def wait_connection_served(self, connection_id: str, deadline: float = 60.0) -> None:
+        """Block until serve_connection has been spawned for connection_id.
+
+        The discovery loop must receive and process the ``added`` event for
+        ``connection_id`` before this returns.  Because the discovery SSE may
+        reconnect with exponential backoff before delivering the backfill, the
+        default deadline is 60 s (matches :meth:`wait_ready`'s deadline so
+        callers don't need to think about which is tighter).
+
+        Raises ``TimeoutError`` if the connection is not added within
+        ``deadline`` seconds.  Intended for test coordination.
+        """
+        event = self._connection_served.setdefault(connection_id, asyncio.Event())
+        await asyncio.wait_for(event.wait(), timeout=deadline)
+
+    def _mark_loop_backfilled(self) -> None:
+        """Called by each loop once it receives the SDK's ``"_open"`` marker.
+
+        The marker is the SDK's synthetic SSE event yielded as soon as the
+        underlying HTTP response returns 2xx headers (see
+        :func:`aios_sdk.streaming._stream_sse`).  At that point the server-
+        side SSE generator has begun executing and its ``listen_for_*``
+        context manager is in the process of registering the LISTEN —
+        within a single event-loop iteration any subsequent NOTIFY will be
+        delivered.  When all three loops have called this,
+        ``_all_loops_live`` is set so :meth:`wait_ready` can unblock.
+
+        Using a plain int (not a Lock) is safe: asyncio is single-threaded
+        so the increment is atomic within a single event-loop iteration.
+        """
+        self._loops_backfilled += 1
+        if self._loops_backfilled >= 3:
+            self._all_loops_live.set()
 
     async def load_answered(self) -> set[str]:
         """Override: persisted tool_call_ids from a previous lifetime."""
@@ -420,7 +502,15 @@ class HttpConnector:
                     tg.create_task(self._discovery_loop(tg), name="aios-discovery")
                     tg.create_task(self._tool_loop(), name="aios-tool-loop")
                     tg.create_task(self._management_call_loop(), name="aios-management-loop")
+                    self._ready_event.set()  # all background loops scheduled
             finally:
+                self._ready_event.clear()
+                self._all_loops_live.clear()
+                self._loops_backfilled = 0
+                # Reset each event rather than replacing the dict, so callers
+                # holding existing Event references are not orphaned on re-run.
+                for event in self._connection_served.values():
+                    event.clear()
                 await self.teardown()
 
     async def _publish_tools_schema(self) -> None:
@@ -450,11 +540,30 @@ class HttpConnector:
         """Tail the connection-discovery SSE; spawn / cancel workers."""
         client = self._require_client()
         backoff = 1.0
+        _signalled_ready = False
         while True:
             try:
                 async for msg in stream_connection_discovery(
                     client.get_async_httpx_client(), self.connector
                 ):
+                    if msg.event == "_open":
+                        # SDK-synthetic marker: the SSE handshake succeeded
+                        # (2xx headers received).  The server-side generator
+                        # has begun executing; its ``listen_for_*`` context
+                        # manager will register LISTEN within microseconds
+                        # of the response body's first iteration.  Signal
+                        # readiness once on the first successful connection.
+                        #
+                        # Note: we deliberately do NOT reset ``backoff`` on
+                        # ``_open`` — the synthetic event fires before any
+                        # server-side state is established, so a 2xx-then-
+                        # immediate-disconnect loop should still back off
+                        # exponentially.  Resetting only on real messages
+                        # ensures CI-side flapping doesn't pin us at 1 s.
+                        if not _signalled_ready:
+                            _signalled_ready = True
+                            self._mark_loop_backfilled()
+                        continue
                     backoff = 1.0
                     if msg.event != "connection":
                         continue
@@ -524,6 +633,7 @@ class HttpConnector:
             self._isolated_serve_connection(connection_id, secrets_map),
             name=f"aios-conn-{connection_id}",
         )
+        self._connection_served.setdefault(connection_id, asyncio.Event()).set()
         self._connections[connection_id] = state
         log.info(
             "connector.connection.added",
@@ -556,6 +666,8 @@ class HttpConnector:
     async def _on_connection_removed(self, connection_id: str) -> None:
         """Cancel the worker task for a vanished connection."""
         state = self._connections.pop(connection_id, None)
+        if event := self._connection_served.get(connection_id):
+            event.clear()
         if state is None or state.worker is None:
             return
         state.worker.cancel()
@@ -569,11 +681,19 @@ class HttpConnector:
         """Tail the per-type calls SSE and dispatch each call."""
         client = self._require_client()
         backoff = 1.0
+        _signalled_ready = False
         while True:
             try:
                 async for msg in stream_connector_calls(
                     client.get_async_httpx_client(), self.connector
                 ):
+                    if msg.event == "_open":
+                        # See ``_discovery_loop`` for the readiness +
+                        # don't-reset-backoff rationale.
+                        if not _signalled_ready:
+                            _signalled_ready = True
+                            self._mark_loop_backfilled()
+                        continue
                     backoff = 1.0
                     if msg.event != "call":
                         continue
@@ -751,11 +871,19 @@ class HttpConnector:
         """
         client = self._require_client()
         backoff = 1.0
+        _signalled_ready = False
         while True:
             try:
                 async for msg in stream_management_calls(
                     client.get_async_httpx_client(), self.connector
                 ):
+                    if msg.event == "_open":
+                        # See ``_discovery_loop`` for the readiness +
+                        # don't-reset-backoff rationale.
+                        if not _signalled_ready:
+                            _signalled_ready = True
+                            self._mark_loop_backfilled()
+                        continue
                     backoff = 1.0
                     if msg.event != "call":
                         continue
