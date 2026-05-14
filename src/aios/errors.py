@@ -162,6 +162,35 @@ class OAuthRefreshError(AiosError):
     status_code = 502
 
 
+class ManagementCallTimeoutError(AiosError):
+    """Operator-initiated management call exceeded its per-method timeout (#348).
+
+    Raised by :func:`aios.services.management_calls.submit_call` when
+    the runtime container fails to POST a result within the request's
+    deadline.  The pending_management_calls row is left as ``pending``
+    so the connector can still deliver — the operator just won't be
+    waiting on the wakeup channel anymore.  504 because the upstream
+    (the connector container) is the slow leg.
+    """
+
+    error_type = "management_call_timeout"
+    status_code = 504
+
+
+class ConnectorCallFailedError(AiosError):
+    """Runtime container processed an operator-initiated management call but it failed.
+
+    Raised when the connector POSTs a result with ``is_error=true``.
+    The error payload carries the connector's error envelope under
+    ``detail`` so the operator can see e.g. signal-cli's captcha-required
+    or rate-limit response.  502 because the failure is upstream of
+    the api process.
+    """
+
+    error_type = "connector_call_failed"
+    status_code = 502
+
+
 # ─── FastAPI integration ─────────────────────────────────────────────────────
 
 

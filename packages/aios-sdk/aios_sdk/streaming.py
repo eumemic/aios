@@ -135,6 +135,23 @@ async def stream_connection_discovery(
         yield msg
 
 
+async def stream_management_calls(
+    httpx_client: httpx.AsyncClient,
+    connector: str,
+) -> AsyncIterator[SseMessage]:
+    """Yield SSE messages from ``GET /v1/connectors/runtime/management-calls`` (#348).
+
+    Sibling of :func:`stream_connector_calls` for operator-initiated
+    management operations (e.g. signal-cli ``register`` / ``verify`` /
+    ``updateProfile``).  Per-connector-type only — payloads don't carry
+    a ``connection_id`` because the call may target an account no
+    connection yet exists for.
+    """
+    del connector  # carried implicitly via the runtime bearer token
+    async for msg in _stream_sse(httpx_client, "/v1/connectors/runtime/management-calls"):
+        yield msg
+
+
 async def _stream_sse(httpx_client: httpx.AsyncClient, path: str) -> AsyncIterator[SseMessage]:
     """Open an SSE stream against ``path`` and yield parsed messages."""
     async with httpx_client.stream(

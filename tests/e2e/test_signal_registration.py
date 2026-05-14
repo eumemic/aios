@@ -1,0 +1,264 @@
+"""End-to-end coverage for operator→connector management calls (#348).
+
+Stands up a real aios API server in-process, spawns a fake "signal"
+connector that uses the production :class:`HttpConnector` SDK and three
+``@management_handler``-decorated methods, then drives the
+``POST /v1/connectors/signal/{register,verify,profile}`` operator routes
+through the full data plane: api INSERT → NOTIFY → SDK SSE dispatch →
+result POST → ``connector_result_<call_id>`` wake → operator response.
+
+The signal-cli daemon itself is not exercised — we mock at the handler
+boundary so the e2e can run without ``signal-cli`` installed.  Real
+signal-cli coverage is the live-smoke step, not CI.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import socket
+from collections.abc import AsyncIterator
+from unittest import mock
+
+import pytest
+import uvicorn
+
+from aios_connector_http import HttpConnector, ManagementHandlerError, management_handler
+from tests.conftest import needs_docker
+from tests.helpers.connections import authed_client, issue_runtime_token, wait_for_health
+
+
+class _FakeSignalConnector(HttpConnector):
+    """Real SDK, scripted management handlers.
+
+    Each handler records what it was called with and returns a
+    pre-canned response so the test can assert both the request path
+    (correct dispatch) and the response path (correct wake) end-to-end.
+    """
+
+    connector = "signal"
+
+    def __init__(self, *, base_url: str, token: str) -> None:
+        super().__init__(base_url=base_url, token=token)
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.captcha_on_register: bool = False
+
+    @management_handler()
+    async def register(
+        self, *, account: str, captcha: str | None = None, voice: bool = False
+    ) -> dict:
+        self.calls.append(("register", {"account": account, "captcha": captcha, "voice": voice}))
+        if self.captcha_on_register and captcha is None:
+            raise ManagementHandlerError(
+                {
+                    "status": "captcha_required",
+                    "captcha_url": "https://signalcaptchas.org/registration/generate",
+                    "account": account,
+                }
+            )
+        return {"account": account, "status": "voice_sent" if voice else "sms_sent"}
+
+    @management_handler()
+    async def verify(self, *, account: str, code: str, pin: str | None = None) -> dict:
+        self.calls.append(("verify", {"account": account, "code": code, "pin": pin}))
+        return {"account": account, "uuid": "u-from-fake"}
+
+    @management_handler(method="updateProfile")
+    async def update_profile(
+        self,
+        *,
+        account: str,
+        given_name: str | None = None,
+        family_name: str | None = None,
+        about: str | None = None,
+    ) -> dict:
+        self.calls.append(
+            (
+                "updateProfile",
+                {
+                    "account": account,
+                    "given_name": given_name,
+                    "family_name": family_name,
+                    "about": about,
+                },
+            )
+        )
+        return {"account": account}
+
+
+@pytest.fixture
+async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
+    """Same uvicorn-in-process fixture pattern the other e2e tests use."""
+    from aios.api.app import create_app
+    from aios.config import get_settings
+    from aios.crypto.vault import CryptoBox
+    from aios.db.pool import create_pool
+
+    settings = get_settings()
+    pool = await create_pool(settings.db_url, min_size=1, max_size=4)
+    app = create_app()
+    app.state.pool = pool
+    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
+    app.state.db_url = settings.db_url
+    app.state.procrastinate = mock.MagicMock()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="off")
+    server = uvicorn.Server(config)
+    server.config.load()
+    server.lifespan = server.config.lifespan_class(server.config)
+
+    async def _serve() -> None:
+        sock.setblocking(False)
+        await server.serve(sockets=[sock])
+
+    with (
+        mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock),
+        mock.patch("aios.api.routers.connectors.defer_wake", new_callable=mock.AsyncMock),
+        mock.patch("aios.services.inbound.defer_wake", new_callable=mock.AsyncMock),
+    ):
+        serve_task = asyncio.create_task(_serve())
+        try:
+            url = f"http://127.0.0.1:{port}"
+            await wait_for_health(url)
+            yield url
+        finally:
+            server.should_exit = True
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(serve_task, timeout=5.0)
+            await pool.close()
+
+
+async def _run_connector(connector: _FakeSignalConnector) -> None:
+    """Run the connector with all setup hooks suppressed.
+
+    We don't want the connector's discovery loop (there are no signal
+    connections in this test) or tool loop to do anything — the
+    management call loop is the only loop we care about.  Skipping
+    ``setup()`` keeps the test from needing a daemon facade.
+    """
+    with mock.patch.object(connector, "_publish_tools_schema", new_callable=mock.AsyncMock):
+        await connector.run()
+
+
+@needs_docker
+class TestSignalRegistration:
+    async def test_register_then_verify_round_trip(
+        self,
+        live_server: str,
+        aios_env: dict[str, str],
+    ) -> None:
+        """Happy path: register returns sms_sent, verify returns the uuid."""
+        api_key = aios_env["AIOS_API_KEY"]
+        runtime_token = await issue_runtime_token(api_key, live_server, "signal")
+
+        connector = _FakeSignalConnector(base_url=live_server, token=runtime_token)
+        connector_task = asyncio.create_task(_run_connector(connector))
+
+        try:
+            # Wait for the connector's management SSE to be live; on
+            # connect there are no pending calls so we just give the
+            # event loop a tick.
+            await asyncio.sleep(0.5)
+
+            async with authed_client(live_server, api_key) as c:
+                # Register.
+                r = await c.post(
+                    "/v1/connectors/signal/register",
+                    json={"account": "+15551234567"},
+                    timeout=10.0,
+                )
+                assert r.status_code == 200, r.text
+                body = r.json()
+                assert body == {
+                    "account": "+15551234567",
+                    "status": "sms_sent",
+                    "captcha_url": None,
+                }
+
+                # Verify.
+                r = await c.post(
+                    "/v1/connectors/signal/verify",
+                    json={"account": "+15551234567", "code": "123456"},
+                    timeout=10.0,
+                )
+                assert r.status_code == 200, r.text
+                assert r.json() == {"account": "+15551234567", "uuid": "u-from-fake"}
+
+                # Profile (only given_name).
+                r = await c.post(
+                    "/v1/connectors/signal/profile",
+                    json={"account": "+15551234567", "given_name": "Alice"},
+                    timeout=10.0,
+                )
+                assert r.status_code == 200, r.text
+                assert r.json() == {"account": "+15551234567"}
+
+            # The handler was hit with the right kwargs.
+            assert (
+                "register",
+                {"account": "+15551234567", "captcha": None, "voice": False},
+            ) in connector.calls
+            assert (
+                "verify",
+                {"account": "+15551234567", "code": "123456", "pin": None},
+            ) in connector.calls
+            profile_call = next(c for c in connector.calls if c[0] == "updateProfile")
+            assert profile_call[1]["given_name"] == "Alice"
+        finally:
+            connector_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await connector_task
+
+    async def test_captcha_required_returns_200_with_url(
+        self,
+        live_server: str,
+        aios_env: dict[str, str],
+    ) -> None:
+        """Captcha-required is an actionable state, not an error.
+
+        The connector raises :class:`ManagementHandlerError`; the
+        operator-facing route translates the structured payload into a
+        200 response carrying ``status="captcha_required"`` and the URL.
+        Re-running with the captcha token clears it.
+        """
+        api_key = aios_env["AIOS_API_KEY"]
+        runtime_token = await issue_runtime_token(api_key, live_server, "signal")
+
+        connector = _FakeSignalConnector(base_url=live_server, token=runtime_token)
+        connector.captcha_on_register = True
+        connector_task = asyncio.create_task(_run_connector(connector))
+
+        try:
+            await asyncio.sleep(0.5)
+
+            async with authed_client(live_server, api_key) as c:
+                r = await c.post(
+                    "/v1/connectors/signal/register",
+                    json={"account": "+15559999999"},
+                    timeout=10.0,
+                )
+                assert r.status_code == 200, r.text
+                body = r.json()
+                assert body["status"] == "captcha_required"
+                assert body["captcha_url"] == ("https://signalcaptchas.org/registration/generate")
+
+                # Retry with a captcha token — fake connector accepts any
+                # non-None value as "operator solved the captcha."
+                r = await c.post(
+                    "/v1/connectors/signal/register",
+                    json={
+                        "account": "+15559999999",
+                        "captcha": "signalcaptcha://solved",
+                    },
+                    timeout=10.0,
+                )
+                assert r.status_code == 200, r.text
+                assert r.json()["status"] == "sms_sent"
+        finally:
+            connector_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await connector_task

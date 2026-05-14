@@ -5797,6 +5797,295 @@
         }
       }
     },
+    "/v1/connectors/runtime/management-calls": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Get Runtime Management Calls",
+        "description": "SSE stream of pending operator-initiated management calls for the\ncaller's connector type (#348).\n\nSibling of :func:`get_runtime_calls` but per-connector-type only \u2014\nmanagement calls aren't bound to a session or a connection.\nBackfills any pending, unexpired calls at subscribe time, then tails\n``connector_management_calls_<connector>``.  Each event is keyed\n``call`` with a JSON body shaped::\n\n    {\"call_id\": \"mgmt_...\", \"method\": \"register\", \"params\": {...}}",
+        "operationId": "get_runtime_management_calls_v1_connectors_runtime_management_calls_get",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "targets": []
+        }
+      }
+    },
+    "/v1/connectors/signal/register": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Signal Register",
+        "description": "Initiate a signal-cli ``register`` for ``account``.\n\nIf signal requires a captcha (commonly the case), returns 200 with\n``status=\"captcha_required\"`` and ``captcha_url``.  Solve in a\nbrowser, then POST again with ``captcha=<signalcaptcha-token>``.\nOn success the user receives an SMS (or voice call with\n``voice=true``) carrying a 6-digit code \u2014 submit it via\n:func:`post_signal_verify`.",
+        "operationId": "post_connector_signal_register",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignalRegisterRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignalRegisterResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/signal/verify": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Signal Verify",
+        "description": "Submit the verification code received via SMS / voice.\n\nOn success, signal-cli writes the new account to its on-disk\n``accounts.json``.  The running signal connector picks it up\nwithout restart on the next ``verify_phone`` call (the daemon\nre-reads the file fresh; see ``daemon.py:_read_accounts_index``).",
+        "operationId": "post_connector_signal_verify",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignalVerifyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignalVerifyResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/signal/profile": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Signal Profile",
+        "description": "Update the signal profile (given_name / family_name / about) for ``account``.\n\nAvatar bytes are not supported in v1; see SignalProfileRequest.",
+        "operationId": "post_connector_signal_profile",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignalProfileRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignalProfileResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/runtime/management-call-results": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Runtime Management Call Result",
+        "description": "Resolve a pending management call by posting the connector's result.\n\nAuthorization: the runtime bearer's connector must match the\npending call's connector.  The handler does the scope check, runs\na conditional UPDATE (only resolves rows still in ``pending``),\nand on success fires the wake NOTIFY on\n``connector_result_<call_id>`` \u2014 the operator's request is LISTENing\nthere via :func:`aios.db.listen.listen_for_connector_result`.",
+        "operationId": "post_connector_runtime_management_call_result",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeManagementCallResultRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/session-templates": {
       "post": {
         "tags": [
@@ -8748,6 +9037,29 @@
         "title": "RecentChat",
         "description": "Distinct chat_id observed on a connection's account, with the\nmost-recent inbound timestamp.\n\nReturned by ``GET /v1/connections/{id}/recent-chats`` so operators\ncan find the chat_id for a specific peer without digging through\nevent logs before calling ``bind-chat``."
       },
+      "RuntimeManagementCallResultRequest": {
+        "properties": {
+          "call_id": {
+            "type": "string",
+            "title": "Call Id"
+          },
+          "result": {
+            "title": "Result"
+          },
+          "is_error": {
+            "type": "boolean",
+            "title": "Is Error",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "call_id"
+        ],
+        "title": "RuntimeManagementCallResultRequest",
+        "description": "Body for ``POST /v1/connectors/runtime/management-call-results``.\n\nThe runtime container POSTs this after dispatching a management call\nreceived via the ``/runtime/management-calls`` SSE.  Idempotent on\n``call_id`` \u2014 a second POST whose row has already moved out of\n``pending`` no-ops (no double-NOTIFY, so the operator can't get two\nwakes)."
+      },
       "RuntimeToken": {
         "properties": {
           "id": {
@@ -9622,6 +9934,182 @@
         ],
         "title": "SessionUserMessage",
         "description": "Request body for `POST /v1/sessions/{id}/messages`."
+      },
+      "SignalProfileRequest": {
+        "properties": {
+          "account": {
+            "type": "string",
+            "title": "Account"
+          },
+          "given_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Given Name"
+          },
+          "family_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family Name"
+          },
+          "about": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "About"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "account"
+        ],
+        "title": "SignalProfileRequest",
+        "description": "Body for ``POST /v1/connectors/signal/profile``.\n\nAvatar is intentionally not exposed in v1: the operator API has no\nclean way to ship file bytes to the connector container yet.  Adding\nit requires a generic file-staging surface for management calls;\nrevisit then."
+      },
+      "SignalProfileResponse": {
+        "properties": {
+          "account": {
+            "type": "string",
+            "title": "Account"
+          }
+        },
+        "type": "object",
+        "required": [
+          "account"
+        ],
+        "title": "SignalProfileResponse"
+      },
+      "SignalRegisterRequest": {
+        "properties": {
+          "account": {
+            "type": "string",
+            "title": "Account"
+          },
+          "captcha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Captcha"
+          },
+          "voice": {
+            "type": "boolean",
+            "title": "Voice",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "account"
+        ],
+        "title": "SignalRegisterRequest",
+        "description": "Body for ``POST /v1/connectors/signal/register``."
+      },
+      "SignalRegisterResponse": {
+        "properties": {
+          "account": {
+            "type": "string",
+            "title": "Account"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "sms_sent",
+              "voice_sent",
+              "captcha_required"
+            ],
+            "title": "Status"
+          },
+          "captcha_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Captcha Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "account",
+          "status"
+        ],
+        "title": "SignalRegisterResponse",
+        "description": "Outcome of a register call.\n\n``status=\"captcha_required\"`` is intentionally a 200 response, not a\n4xx \u2014 it's an actionable next step (solve the captcha, repost with\nthe token) rather than an error.  4xx would bury the URL inside the\nerror envelope."
+      },
+      "SignalVerifyRequest": {
+        "properties": {
+          "account": {
+            "type": "string",
+            "title": "Account"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "pin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pin"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "account",
+          "code"
+        ],
+        "title": "SignalVerifyRequest",
+        "description": "Body for ``POST /v1/connectors/signal/verify``."
+      },
+      "SignalVerifyResponse": {
+        "properties": {
+          "account": {
+            "type": "string",
+            "title": "Account"
+          },
+          "uuid": {
+            "type": "string",
+            "title": "Uuid"
+          }
+        },
+        "type": "object",
+        "required": [
+          "account",
+          "uuid"
+        ],
+        "title": "SignalVerifyResponse"
       },
       "Skill": {
         "properties": {

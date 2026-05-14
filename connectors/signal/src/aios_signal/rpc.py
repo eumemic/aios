@@ -84,7 +84,13 @@ class RpcClient:
                 raise RpcError(f"RPC returned non-JSON: {line!r}") from e
             if "error" in message:
                 err = message["error"]
-                raise RpcError(f"RPC error: {err}")
+                if isinstance(err, dict):
+                    raise RpcError(
+                        err.get("message", str(err)),
+                        code=err.get("code"),
+                        data=err.get("data"),
+                    )
+                raise RpcError(str(err))
             return message.get("result")
         finally:
             writer.close()

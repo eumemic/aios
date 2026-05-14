@@ -58,9 +58,17 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 
 import httpx
 import structlog
-from aios_sdk import Client, stream_connection_discovery, stream_connector_calls
+from aios_sdk import (
+    Client,
+    stream_connection_discovery,
+    stream_connector_calls,
+    stream_management_calls,
+)
 from aios_sdk._generated.api.connectors.get_connector_runtime_secrets import (
     asyncio_detailed as _get_runtime_secrets,
+)
+from aios_sdk._generated.api.connectors.post_connector_runtime_management_call_result import (
+    asyncio_detailed as _post_runtime_management_call_result,
 )
 from aios_sdk._generated.api.connectors.post_connector_runtime_tool_result import (
     asyncio_detailed as _post_runtime_tool_result,
@@ -69,6 +77,9 @@ from aios_sdk._generated.api.connectors.put_connector_tools_schema import (
     asyncio_detailed as _put_tools_schema,
 )
 from aios_sdk._generated.models.http_validation_error import HTTPValidationError
+from aios_sdk._generated.models.runtime_management_call_result_request import (
+    RuntimeManagementCallResultRequest,
+)
 from aios_sdk._generated.models.runtime_tool_result_request import (
     RuntimeToolResultRequest,
 )
@@ -87,6 +98,25 @@ ToolFn = Callable[..., Awaitable[Any]]
 log: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
 _TOOL_ATTR = "__aios_http_tool__"
+_MGMT_ATTR = "__aios_http_management__"
+
+
+class ManagementHandlerError(Exception):
+    """Raised inside a ``@management_handler`` to deliver a structured failure.
+
+    Carries a JSON-serialisable payload that becomes the result envelope
+    POSTed back to the api as ``is_error=true``.  Signal-cli's
+    captcha-required path uses this to surface the captcha URL — the
+    operator-facing route then re-interprets it as a 200 actionable
+    state.  Plain ``Exception`` subclasses become generic
+    ``{"error": str(exc)}`` payloads via ``dispatch_management_call``;
+    use this when the operator side needs a discriminator beyond a
+    string.
+    """
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__(json.dumps(payload))
+        self.payload = payload
 
 
 def _is_fatal_inbound_status(status_code: int) -> bool:
@@ -135,6 +165,38 @@ class _ToolMeta:
     sandbox_params: tuple[tuple[str, str], ...]  # (param_name, "scalar" | "list")
 
 
+def management_handler(
+    *,
+    method: str | None = None,
+) -> Callable[[ToolFn], ToolFn]:
+    """Decorate a method as a management-call handler (#348).
+
+    Sibling of :func:`tool` for operator-initiated management
+    operations.  The decorated method's name (or the explicit
+    ``method=`` override) is the wire-level method name the api uses
+    to dispatch — must match what the operator-facing routes submit
+    (e.g. ``register``, ``verify``, ``updateProfile``).
+
+    Management handlers are NOT included in the tool catalog (they
+    aren't model-callable); the SDK spawns a separate
+    ``_management_call_loop`` that pulls from the per-type
+    ``GET /v1/connectors/runtime/management-calls`` SSE.
+    """
+
+    def _wrap(f: ToolFn) -> ToolFn:
+        setattr(f, _MGMT_ATTR, method or f.__name__)
+        return f
+
+    return _wrap
+
+
+@dataclass(frozen=True, slots=True)
+class _ManagementHandlerMeta:
+    """Per-handler reflection cache."""
+
+    fn: ToolFn
+
+
 @dataclass
 class _ConnectionState:
     """Per-connection runtime state.  One row per active connection."""
@@ -171,6 +233,7 @@ class HttpConnector:
         self._token = token or os.environ["AIOS_RUNTIME_TOKEN"]
         self._client: Client | None = None
         self._tools: dict[str, _ToolMeta] = self._collect_tools()
+        self._management: dict[str, _ManagementHandlerMeta] = self._collect_management_handlers()
         self._answered: set[str] = set()
         self._connections: dict[str, _ConnectionState] = {}
         # Subclasses narrow the value type via a class-body annotation::
@@ -368,6 +431,7 @@ class HttpConnector:
                     await self.setup(tg)
                     tg.create_task(self._discovery_loop(tg), name="aios-discovery")
                     tg.create_task(self._tool_loop(), name="aios-tool-loop")
+                    tg.create_task(self._management_call_loop(), name="aios-management-loop")
             finally:
                 await self.teardown()
 
@@ -683,6 +747,144 @@ class HttpConnector:
             is_error=False,
         )
 
+    async def _management_call_loop(self) -> None:
+        """Tail the per-type management-calls SSE and dispatch each call.
+
+        Sibling of :meth:`_tool_loop` (#348).  Same dedup spool
+        (``self._answered``) because ``mgmt_*`` and ``call_*`` ULIDs
+        share a namespace and never collide.  Same retry posture —
+        transport errors back off, app-level exceptions propagate so
+        the operator sees the bug.
+        """
+        client = self._require_client()
+        backoff = 1.0
+        while True:
+            try:
+                async for msg in stream_management_calls(
+                    client.get_async_httpx_client(), self.connector
+                ):
+                    backoff = 1.0
+                    if msg.event != "call":
+                        continue
+                    call = json.loads(msg.data)
+                    call_id = call.get("call_id", "")
+                    if not call_id or call_id in self._answered:
+                        continue
+                    await self.dispatch_management_call(call)
+                    self._answered.add(call_id)
+                    await self.save_answered(call_id)
+            except httpx.HTTPError as exc:
+                log.warning(
+                    "connector.management_loop.stream_error",
+                    error=str(exc),
+                    backoff=backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
+                continue
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60.0)
+
+    async def dispatch_management_call(self, call: dict[str, Any]) -> None:
+        """Run the management handler for ``call`` and POST the result.
+
+        Public surface so tests can drive dispatch without going
+        through SSE — the production path is :meth:`_management_call_loop`.
+
+        :class:`ManagementHandlerError` payloads pass through to the api
+        as ``is_error=true`` with the handler's structured payload
+        intact (used for signal's captcha-required flow).  Any other
+        exception becomes ``{"error": str(exc)}`` so the operator sees
+        a readable error envelope rather than the connector silently
+        timing out.
+        """
+        client = self._require_client()
+        call_id = call.get("call_id", "")
+        method = call.get("method", "")
+        log.info(
+            "connector.management_call.dispatched",
+            connector=self.connector,
+            method=method,
+            call_id=call_id,
+        )
+        meta = self._management.get(method)
+        if meta is None:
+            log.warning(
+                "connector.management_call.failed",
+                connector=self.connector,
+                method=method,
+                call_id=call_id,
+                reason="unknown_method",
+            )
+            await self._post_management_call_result(
+                client,
+                call_id=call_id,
+                result={"error": f"unknown management method {method!r}"},
+                is_error=True,
+            )
+            return
+        params = call.get("params") or {}
+        try:
+            result = await meta.fn(**params)
+        except ManagementHandlerError as exc:
+            log.info(
+                "connector.management_call.structured_error",
+                connector=self.connector,
+                method=method,
+                call_id=call_id,
+                payload=exc.payload,
+            )
+            await self._post_management_call_result(
+                client, call_id=call_id, result=exc.payload, is_error=True
+            )
+            return
+        except Exception as exc:
+            log.warning(
+                "connector.management_call.failed",
+                connector=self.connector,
+                method=method,
+                call_id=call_id,
+                reason="handler_exception",
+                error=str(exc),
+            )
+            await self._post_management_call_result(
+                client,
+                call_id=call_id,
+                result={"error": str(exc)},
+                is_error=True,
+            )
+            return
+        await self._post_management_call_result(
+            client, call_id=call_id, result=result, is_error=False
+        )
+        log.info(
+            "connector.management_call.completed",
+            connector=self.connector,
+            method=method,
+            call_id=call_id,
+        )
+
+    @staticmethod
+    async def _post_management_call_result(
+        client: Client,
+        *,
+        call_id: str,
+        result: Any,
+        is_error: bool,
+    ) -> None:
+        """POST one management-call result via the generated runtime op."""
+        body = RuntimeManagementCallResultRequest(
+            call_id=call_id,
+            result=result,
+            is_error=is_error,
+        )
+        response = await _post_runtime_management_call_result(client=client, body=body)
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"management-call result POST failed: "
+                f"{response.status_code} {response.content!r}"
+            )
+
     @staticmethod
     async def _post_tool_result(
         client: Client,
@@ -698,14 +900,7 @@ class HttpConnector:
             connection_id=connection_id,
             session_id=session_id,
             tool_call_id=tool_call_id,
-            # The generated wrapper narrows ``content`` to
-            # ``str | list[RuntimeToolResultRequestContentType1Item]``;
-            # we pass ``list[dict[str, Any]]`` whose items are
-            # structurally compatible with the content-block model.
-            # Re-shaping at this boundary would duplicate the wire
-            # schema in Python without adding any safety the generated
-            # POST doesn't already enforce.
-            content=content,  # type: ignore[arg-type]
+            content=content,
             is_error=is_error,
         )
         response = await _post_runtime_tool_result(client=client, body=body)
@@ -725,8 +920,24 @@ class HttpConnector:
         for _, member in inspect.getmembers(self):
             if not (callable(member) and hasattr(member, _TOOL_ATTR)):
                 continue
+            if hasattr(member, _MGMT_ATTR):
+                raise RuntimeError(
+                    f"method {member.__qualname__!r} carries both @tool and "
+                    "@management_handler; pick one — tools are model-callable, "
+                    "management handlers are operator-callable"
+                )
             tool_name: str = getattr(member, _TOOL_ATTR)
             out[tool_name] = _build_tool_meta(member)
+        return out
+
+    def _collect_management_handlers(self) -> dict[str, _ManagementHandlerMeta]:
+        """Walk ``self``, pick up every method tagged with @management_handler."""
+        out: dict[str, _ManagementHandlerMeta] = {}
+        for _, member in inspect.getmembers(self):
+            if not (callable(member) and hasattr(member, _MGMT_ATTR)):
+                continue
+            method_name: str = getattr(member, _MGMT_ATTR)
+            out[method_name] = _ManagementHandlerMeta(fn=member)
         return out
 
 
