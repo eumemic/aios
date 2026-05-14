@@ -111,6 +111,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiodocker" },
+    { name = "aios-connector-http" },
     { name = "aios-sdk" },
     { name = "alembic" },
     { name = "asyncpg" },
@@ -150,6 +151,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiodocker", specifier = ">=0.23" },
+    { name = "aios-connector-http", editable = "packages/aios-connector-http" },
     { name = "aios-sdk", editable = "packages/aios-sdk" },
     { name = "alembic", specifier = ">=1.13" },
     { name = "asyncpg", specifier = ">=0.30" },

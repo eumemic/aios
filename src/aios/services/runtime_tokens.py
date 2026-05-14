@@ -8,10 +8,6 @@ token; resolution returns ``(token_id, connector)``, never a single
 Plaintext format: ``aios_runtime_<32-byte-base64url>``.  The DB stores
 only ``sha256(plaintext).hexdigest()``; plaintext is returned exactly
 once, in the issue response.
-
-Mirrors :mod:`aios.services.connector_tokens` shape — see that module
-for the broader design rationale on hashing, soft revocation, and the
-prefix pre-filter.
 """
 
 from __future__ import annotations

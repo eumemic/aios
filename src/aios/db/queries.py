@@ -3334,18 +3334,21 @@ async def list_recent_chat_ids(
 # ─── connector_inbound_acks (dedup ledger) ──────────────────────────────────
 
 
-async def flip_idle_to_pending(conn: asyncpg.Connection[Any], session_id: str) -> None:
-    """Flip ``sessions.status`` from ``idle`` to ``pending`` if currently idle.
+async def flip_quiescent_to_pending(conn: asyncpg.Connection[Any], session_id: str) -> None:
+    """Flip ``sessions.status`` to ``pending`` if currently quiescent.
 
-    Called after appending a user message so polling orchestrators can
-    distinguish queued-but-not-started from turn-finished.  Other states
-    (running / rescheduling / terminated) are left alone — the worker
-    owns the running status, and changing rescheduling would lose the
-    retry-in-progress signal.
+    Quiescent here means either ``idle`` (clean turn end) or ``errored``
+    (retry budget spent — #353).  Called after appending a user message
+    so polling orchestrators can distinguish queued-but-not-started from
+    turn-finished, AND so a fresh user message lifts an ``errored``
+    session out of the sweep's blacklist (errored is opaque to the
+    sweep; ``pending`` is not).  Other states (running / rescheduling /
+    terminated) are left alone — the worker owns the running status, and
+    changing rescheduling would lose the retry-in-progress signal.
     """
     await conn.execute(
         "UPDATE sessions SET status = 'pending', updated_at = now() "
-        "WHERE id = $1 AND status = 'idle'",
+        "WHERE id = $1 AND status IN ('idle', 'errored')",
         session_id,
     )
 
@@ -4639,11 +4642,9 @@ async def notify_management_call_result(
 
 # ─── runtime_tokens ──────────────────────────────────────────────────────────
 #
-# Per-connector-type bearer tokens (#328 PR 5). Successor to
-# ``connector_tokens`` (which is per-connection); one bearer authenticates
+# Per-connector-type bearer tokens (#328 PR 5). One bearer authenticates
 # a runtime container that hosts N connections of one ``connector`` type.
-# Shape mirrors ``connector_tokens`` queries — SHA-256 hash, soft-revoke,
-# single ``UPDATE … RETURNING`` resolve.
+# Storage: SHA-256 hash, soft-revoke, single ``UPDATE … RETURNING`` resolve.
 
 
 def _row_to_runtime_token(row: asyncpg.Record) -> RuntimeToken:

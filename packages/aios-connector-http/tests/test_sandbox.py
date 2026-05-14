@@ -120,6 +120,30 @@ class TestAttachmentParams:
         with pytest.raises(AttachmentError, match="5242880 bytes"):
             att.as_params()
 
+    def test_mime_corrected_when_magic_disagrees(self, tmp_path: Path) -> None:
+        """#342: inbound platforms occasionally label a JPEG as image/png.
+        as_params re-detects from magic bytes and rewrites content_type
+        so the persisted event carries the truth.
+        """
+        path = tmp_path / "lies.png"
+        path.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 32)  # JPEG magic
+        att = Attachment(host_path=str(path), filename="photo.png", content_type="image/png")
+        assert att.as_params()["content_type"] == "image/jpeg"
+
+    def test_mime_unchanged_when_magic_agrees(self, tmp_path: Path) -> None:
+        path = tmp_path / "real.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+        att = Attachment(host_path=str(path), filename="real.png", content_type="image/png")
+        assert att.as_params()["content_type"] == "image/png"
+
+    def test_mime_unchanged_for_unsniffable_bytes(self, tmp_path: Path) -> None:
+        """Sniffer recognises PNG/JPEG/GIF only; non-image attachments
+        (PDFs, audio, etc.) keep their declared content_type."""
+        path = tmp_path / "doc.pdf"
+        path.write_bytes(b"%PDF-1.4\n%trailer")
+        att = Attachment(host_path=str(path), filename="doc.pdf", content_type="application/pdf")
+        assert att.as_params()["content_type"] == "application/pdf"
+
 
 class _PathConsumer(HttpConnector):
     """Tools that take SandboxPath args — exercises dispatcher resolution."""

@@ -188,7 +188,7 @@ async def append_user_message(
         # paths have the same race but are deferred; an orchestrator
         # resolving those still has to combine status polling with
         # event-cursor tracking.  See issue #39.
-        await queries.flip_idle_to_pending(conn, session_id)
+        await queries.flip_quiescent_to_pending(conn, session_id)
         return event
 
 

@@ -227,9 +227,17 @@ class TestRunSessionStepOnModelError:
         assert "rescheduling" in status_calls
         assert "idle" not in status_calls
 
-    async def test_exhausted_budget_raises_and_sets_idle_error(
+    async def test_exhausted_budget_raises_and_sets_errored_status(
         self, mock_step_dependencies: Any
     ) -> None:
+        """Budget exhaustion parks the session in ``errored`` status (#353).
+
+        Setting ``idle`` (the prior behavior) left the periodic sweep free
+        to re-fire on any unreacted user message, restarting the budget
+        from zero because the trailing lifecycle is ``stop_reason='error'``
+        (not ``'rescheduling'``). The terminal ``errored`` status is the
+        sweep's stop signal.
+        """
         with (
             patch(
                 "aios.harness.loop._count_consecutive_rescheduling",
@@ -240,9 +248,12 @@ class TestRunSessionStepOnModelError:
             await run_session_step("sess_x")
 
         mock_step_dependencies.defer_wake.assert_not_awaited()
-        idle_call = next(
+        statuses = [call.args[2] for call in mock_step_dependencies.set_status.call_args_list]
+        assert "errored" in statuses
+        assert "idle" not in statuses
+        errored_call = next(
             call
             for call in mock_step_dependencies.set_status.call_args_list
-            if call.args[2] == "idle"
+            if call.args[2] == "errored"
         )
-        assert idle_call.kwargs["stop_reason"] == {"type": "error"}
+        assert errored_call.kwargs["stop_reason"] == {"type": "error"}

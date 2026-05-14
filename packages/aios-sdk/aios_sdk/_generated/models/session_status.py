@@ -2,6 +2,7 @@ from enum import Enum
 
 
 class SessionStatus(str, Enum):
+    ERRORED = "errored"
     IDLE = "idle"
     PENDING = "pending"
     RESCHEDULING = "rescheduling"
