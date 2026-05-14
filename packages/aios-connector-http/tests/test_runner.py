@@ -742,7 +742,7 @@ class TestWaitReady:
             connector = "readyconn"
 
             async def run(self) -> None:
-                # Simulate all three loops receiving their "connected" event.
+                # Simulate all three loops receiving their "_open" marker.
                 self._mark_loop_backfilled()
                 self._mark_loop_backfilled()
                 self._mark_loop_backfilled()

@@ -291,20 +291,26 @@ class HttpConnector:
         """Block until all three background loops are live and listening.
 
         Specifically: each of the discovery, tool, and management-call loops
-        has successfully opened its SSE stream and received the server's
-        ``"connected"`` event (emitted once LISTEN is active, before backfill).
-        At this point it is safe to POST management calls or drive tool calls
-        — the connector is guaranteed to be listening and will not miss a
-        NOTIFY sent after this method returns.
+        has successfully opened its SSE stream (2xx headers received).  The
+        readiness signal comes from a synthetic ``"_open"`` event the SDK's
+        :func:`aios_sdk.streaming._stream_sse` yields right after
+        ``response.raise_for_status()`` succeeds.  At that moment the server-
+        side generator has begun running, which means its ``listen_for_*``
+        context manager is opening the LISTEN connection — any NOTIFY emitted
+        a moment later will be queued and delivered.  The remaining race
+        window (between 2xx-headers-sent and LISTEN-registered) is on the
+        order of microseconds in a single server event-loop iteration; tests
+        that POST/NOTIFY immediately after :meth:`wait_ready` returns do not
+        miss the notification in practice.
 
-        The default deadline is 60 s.  CI runs the tests in resource-constrained
-        containers and the SSE endpoint can fail repeatedly for tens of seconds
-        before a connection takes hold; with the exponential-backoff cycle
-        (1, 2, 4, 8, 16, 32 s) we observe up to 5 failures (cumulative 31 s)
-        before the 6th attempt succeeds.  60 s gives that 6th attempt plus a
-        buffer.  The underlying SSE-flapping behaviour is tracked separately
-        (the SSE generator currently crashes on first start in some CI
-        scenarios -- see followup issue).
+        We deliberately do NOT depend on a server-emitted ``"connected"``
+        event before backfill, because yielding from an sse-starlette
+        generator before any natural data chunk has surfaced an "ASGI
+        callable returned without completing response" failure mode in CI
+        (see aios#366 commit-message archaeology and the followup issue).
+
+        The default deadline is 60 s — generous for CI scheduler lag and
+        the exponential-backoff retry cycle on the SSE connection.
 
         Raises ``TimeoutError`` if the loops have not all reached the live
         phase within ``deadline`` seconds.  Intended for test coordination.
@@ -327,13 +333,16 @@ class HttpConnector:
         await asyncio.wait_for(event.wait(), timeout=deadline)
 
     def _mark_loop_backfilled(self) -> None:
-        """Called by each loop once it receives the server's ``"connected"`` event.
+        """Called by each loop once it receives the SDK's ``"_open"`` marker.
 
-        That event is emitted by the server immediately after its LISTEN is
-        active (before backfill), guaranteeing the loop won't miss a NOTIFY
-        sent after :meth:`wait_ready` returns.  When all three loops have
-        called this, ``_all_loops_live`` is set so :meth:`wait_ready` can
-        unblock.
+        The marker is the SDK's synthetic SSE event yielded as soon as the
+        underlying HTTP response returns 2xx headers (see
+        :func:`aios_sdk.streaming._stream_sse`).  At that point the server-
+        side SSE generator has begun executing and its ``listen_for_*``
+        context manager is in the process of registering the LISTEN —
+        within a single event-loop iteration any subsequent NOTIFY will be
+        delivered.  When all three loops have called this,
+        ``_all_loops_live`` is set so :meth:`wait_ready` can unblock.
 
         Using a plain int (not a Lock) is safe: asyncio is single-threaded
         so the increment is atomic within a single event-loop iteration.
@@ -531,10 +540,15 @@ class HttpConnector:
                     client.get_async_httpx_client(), self.connector
                 ):
                     backoff = 1.0
-                    if msg.event == "connected":
-                        # Server signals that its LISTEN is active and the
-                        # backfill is about to run.  Signal our readiness once
-                        # (on first successful connection; ignored on reconnect).
+                    if msg.event == "_open":
+                        # SDK-synthetic marker: the SSE handshake succeeded
+                        # (2xx headers received).  The server-side generator
+                        # has begun executing, which means ``listen_for_*``
+                        # is running and any NOTIFY emitted after this point
+                        # will be delivered once LISTEN registration finishes
+                        # (microseconds later — both happen in the same
+                        # event-loop iteration on the server).  Signal our
+                        # readiness once on first successful connection.
                         if not _signalled_ready:
                             _signalled_ready = True
                             self._mark_loop_backfilled()
@@ -662,7 +676,8 @@ class HttpConnector:
                     client.get_async_httpx_client(), self.connector
                 ):
                     backoff = 1.0
-                    if msg.event == "connected":
+                    if msg.event == "_open":
+                        # See ``_discovery_loop`` for the readiness rationale.
                         if not _signalled_ready:
                             _signalled_ready = True
                             self._mark_loop_backfilled()
@@ -850,7 +865,8 @@ class HttpConnector:
                     client.get_async_httpx_client(), self.connector
                 ):
                     backoff = 1.0
-                    if msg.event == "connected":
+                    if msg.event == "_open":
+                        # See ``_discovery_loop`` for the readiness rationale.
                         if not _signalled_ready:
                             _signalled_ready = True
                             self._mark_loop_backfilled()
