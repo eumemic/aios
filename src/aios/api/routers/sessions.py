@@ -66,6 +66,7 @@ async def create(
     crypto_box: CryptoBoxDep,
     _auth: AuthDep,
 ) -> Session:
+    account_id, _, _ = _auth
     session = await service.create_session(
         pool,
         agent_id=body.agent_id,
@@ -78,11 +79,14 @@ async def create(
         crypto_box=crypto_box,
         workspace_path=body.workspace_path,
         env=body.env or None,
+        account_id=account_id,
     )
     if body.initial_message is not None:
-        await service.append_user_message(pool, session.id, body.initial_message)
-        await defer_wake(pool, session.id, cause="initial_message")
-        session = await service.get_session(pool, session.id)
+        await service.append_user_message(
+            pool, session.id, body.initial_message, account_id=account_id
+        )
+        await defer_wake(pool, session.id, cause="initial_message", account_id=account_id)
+        session = await service.get_session(pool, session.id, account_id=account_id)
     return session
 
 
@@ -98,8 +102,14 @@ async def list_(
     limit: int = 50,
     after: str | None = None,
 ) -> ListResponse[Session]:
+    account_id, _, _ = _auth
     items = await service.list_sessions(
-        pool, agent_id=agent_id, status=status_filter, limit=limit, after=after
+        pool,
+        agent_id=agent_id,
+        status=status_filter,
+        limit=limit,
+        after=after,
+        account_id=account_id,
     )
     return ListResponse[Session](
         data=items,
@@ -110,7 +120,8 @@ async def list_(
 
 @router.get("/{session_id}", operation_id="get_session")
 async def get(session_id: str, pool: PoolDep, _auth: AuthDep) -> Session:
-    return await service.get_session(pool, session_id)
+    account_id, _, _ = _auth
+    return await service.get_session(pool, session_id, account_id=account_id)
 
 
 @router.put("/{session_id}", operation_id="update_session")
@@ -121,6 +132,7 @@ async def update(
     crypto_box: CryptoBoxDep,
     _auth: AuthDep,
 ) -> Session:
+    account_id, _, _ = _auth
     from aios.db.queries import _UNSET
 
     # Use model_fields_set to distinguish "not provided" from "explicitly null".
@@ -135,6 +147,7 @@ async def update(
         vault_ids=body.vault_ids,
         resources=body.resources,
         crypto_box=crypto_box,
+        account_id=account_id,
     )
 
 
@@ -149,9 +162,10 @@ async def list_resources(
     Equivalent to reading the ``resources`` field on the full session
     record, but cheaper if you don't need anything else.
     """
+    account_id, _, _ = _auth
     # Reuse get_session for ordering + echo construction; resources are
     # already on the returned record.
-    session = await service.get_session(pool, session_id)
+    session = await service.get_session(pool, session_id, account_id=account_id)
     return ListResponse[SessionResourceEcho](data=session.resources)
 
 
@@ -165,8 +179,11 @@ async def get_resource(
     memory store attachments are keyed by ``(session_id, memory_store_id)``
     and don't have a separate attachment id.
     """
+    account_id, _, _ = _auth
     _require_github_resource_id(resource_id)
-    return await github_repo_service.get_resource(pool, session_id, resource_id)
+    return await github_repo_service.get_resource(
+        pool, session_id, resource_id, account_id=account_id
+    )
 
 
 @router.post("/{session_id}/resources/{resource_id}", operation_id="update_session_resource")
@@ -184,6 +201,7 @@ async def update_resource(
     the next sandbox provision recycles the container and re-clones the
     working tree with the new token.
     """
+    account_id, _, _ = _auth
     _require_github_resource_id(resource_id)
     # Identity is replaced atomically when the caller mentions either
     # field in the payload; absent means preserve the stored values
@@ -201,6 +219,7 @@ async def update_resource(
         resource_id=resource_id,
         new_token=body.authorization_token.get_secret_value(),
         identity=identity,
+        account_id=account_id,
     )
 
 
@@ -231,7 +250,8 @@ def _require_github_resource_id(resource_id: str) -> None:
     openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
 )
 async def archive(session_id: str, pool: PoolDep, _auth: AuthDep) -> Session:
-    return await service.archive_session(pool, session_id)
+    account_id, _, _ = _auth
+    return await service.archive_session(pool, session_id, account_id=account_id)
 
 
 @router.post(
@@ -253,7 +273,10 @@ async def clone(
 
     Refuses if the parent isn't ``idle`` or ``terminated``.
     """
-    return await service.clone_session(pool, session_id, workspace_path=body.workspace_path)
+    account_id, _, _ = _auth
+    return await service.clone_session(
+        pool, session_id, workspace_path=body.workspace_path, account_id=account_id
+    )
 
 
 @router.delete(
@@ -262,7 +285,8 @@ async def clone(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def delete(session_id: str, pool: PoolDep, _auth: AuthDep) -> None:
-    await service.delete_session(pool, session_id)
+    account_id, _, _ = _auth
+    await service.delete_session(pool, session_id, account_id=account_id)
 
 
 @router.post(
@@ -277,20 +301,23 @@ async def post_message(
     procrastinate: ProcrastinateDep,
     _auth: AuthDep,
 ) -> Event:
+    account_id, _, _ = _auth
     metadata = body.metadata or None
     if metadata is not None:
         channel = metadata.get("channel")
         if isinstance(channel, str):
             async with pool.acquire() as conn:
-                bound = await queries.list_session_channels(conn, session_id)
+                bound = await queries.list_session_channels(conn, session_id, account_id=account_id)
             if channel not in bound:
                 raise ValidationError(
                     f"metadata.channel={channel!r} is not a bound channel "
                     f"on this session; omit metadata.channel to inject as a "
                     f"global-inbox event"
                 )
-    event = await service.append_user_message(pool, session_id, body.content, metadata=metadata)
-    await defer_wake(pool, session_id, cause="message")
+    event = await service.append_user_message(
+        pool, session_id, body.content, metadata=metadata, account_id=account_id
+    )
+    await defer_wake(pool, session_id, cause="message", account_id=account_id)
     return event
 
 
@@ -302,16 +329,22 @@ async def interrupt(
     _auth: AuthDep,
 ) -> Session:
     """Interrupt a running session: cancel all in-flight work and idle it."""
-    await service.append_event(pool, session_id, "interrupt", {"reason": body.reason})
-    await service.set_session_status(pool, session_id, "idle", stop_reason={"type": "interrupt"})
+    account_id, _, _ = _auth
+    await service.append_event(
+        pool, session_id, "interrupt", {"reason": body.reason}, account_id=account_id
+    )
+    await service.set_session_status(
+        pool, session_id, "idle", stop_reason={"type": "interrupt"}, account_id=account_id
+    )
     await service.append_event(
         pool,
         session_id,
         "lifecycle",
         {"event": "interrupted", "status": "idle", "stop_reason": "interrupt"},
+        account_id=account_id,
     )
     await pool.execute("SELECT pg_notify($1, $2)", SESSION_INTERRUPT_CHANNEL, session_id)
-    return await service.get_session(pool, session_id)
+    return await service.get_session(pool, session_id, account_id=account_id)
 
 
 @router.post(
@@ -334,6 +367,7 @@ async def submit_tool_result(
     ``tool_call_id`` has no matching parent assistant tool call, since a
     result with no parent is a client bug that would leave an orphan row.
     """
+    account_id, _, _ = _auth
     async with pool.acquire() as conn:
         event = await service.append_tool_result(
             conn,
@@ -341,8 +375,9 @@ async def submit_tool_result(
             tool_call_id=body.tool_call_id,
             content=body.content,
             is_error=body.is_error,
+            account_id=account_id,
         )
-    await defer_wake(pool, session_id, cause="custom_tool_result")
+    await defer_wake(pool, session_id, cause="custom_tool_result", account_id=account_id)
     return event
 
 
@@ -362,7 +397,10 @@ async def upload_file(
     Operator-authenticated.  Files land at a stable host path; the model
     sees them inside the sandbox at ``/mnt/uploads/<file_id>/<filename>``.
     """
-    record = await files_service.stage_upload(pool, session_id=session_id, upload=file)
+    account_id, _, _ = _auth
+    record = await files_service.stage_upload(
+        pool, session_id=session_id, upload=file, account_id=account_id
+    )
     return FileUploadResponse(
         file_id=record.id,
         in_sandbox_path=record.in_sandbox_path,
@@ -390,12 +428,17 @@ async def submit_tool_confirmation(
     its next step.  ``deny`` appends a tool-role error event; the model
     sees the denial message and can adapt.
     """
+    account_id, _, _ = _auth
     if body.result == "allow":
-        event = await service.confirm_tool_allow(pool, session_id, body.tool_call_id)
+        event = await service.confirm_tool_allow(
+            pool, session_id, body.tool_call_id, account_id=account_id
+        )
     else:
         deny_msg = body.deny_message or "Tool use denied by user."
-        event = await service.confirm_tool_deny(pool, session_id, body.tool_call_id, deny_msg)
-    await defer_wake(pool, session_id, cause="tool_confirmation")
+        event = await service.confirm_tool_deny(
+            pool, session_id, body.tool_call_id, deny_msg, account_id=account_id
+        )
+    await defer_wake(pool, session_id, cause="tool_confirmation", account_id=account_id)
     return event
 
 
@@ -408,7 +451,10 @@ async def list_events(
     kind: EventKind | None = None,
     limit: int = 200,
 ) -> ListResponse[Event]:
-    items = await service.read_events(pool, session_id, after_seq=after_seq, kind=kind, limit=limit)
+    account_id, _, _ = _auth
+    items = await service.read_events(
+        pool, session_id, after_seq=after_seq, kind=kind, limit=limit, account_id=account_id
+    )
     return ListResponse[Event](
         data=items,
         has_more=len(items) == limit,
@@ -431,28 +477,31 @@ async def get_context(
     session-status bumps, event appends) are omitted; the endpoint is
     read-only.
     """
+    account_id, _, _ = _auth
     from aios.harness.step_context import compose_step_context, compute_step_prelude
     from aios.harness.tokens import approx_tokens
     from aios.models.agents import Agent, AgentVersion
     from aios.services import agents as agents_service
     from aios.services.channels import list_session_channels
 
-    session = await service.get_session(pool, session_id)
+    session = await service.get_session(pool, session_id, account_id=account_id)
 
     agent: Agent | AgentVersion
     if session.agent_version is not None:
         agent = await agents_service.get_agent_version(
-            pool, session.agent_id, session.agent_version
+            pool, session.agent_id, session.agent_version, account_id=account_id
         )
     else:
-        agent = await agents_service.get_agent(pool, session.agent_id)
+        agent = await agents_service.get_agent(pool, session.agent_id, account_id=account_id)
 
-    channels = await list_session_channels(pool, session_id)
+    channels = await list_session_channels(pool, session_id, account_id=account_id)
 
     from aios.db import queries as _queries
 
     async with pool.acquire() as _conn:
-        memory_echoes = await _queries.list_session_memory_store_echoes(_conn, session_id)
+        memory_echoes = await _queries.list_session_memory_store_echoes(
+            _conn, session_id, account_id=account_id
+        )
 
     prelude = await compute_step_prelude(
         pool,
@@ -477,6 +526,7 @@ async def get_context(
         window_max=agent.window_max,
         model=agent.model,
         overhead_local=overhead_local,
+        account_id=account_id,
     )
 
     step_ctx = await compose_step_context(
@@ -503,7 +553,8 @@ async def stream_events(
     after_seq: int = 0,
 ) -> EventSourceResponse:
     """Stream session events as Server-Sent Events."""
-    await service.get_session(pool, session_id)
+    account_id, _, _ = _auth
+    await service.get_session(pool, session_id, account_id=account_id)
     return EventSourceResponse(
         sse_event_stream(db_url, pool, session_id, after_seq=after_seq),
         ping=15,
@@ -526,10 +577,13 @@ async def wait_for_events(
     stack can't reliably consume server-sent events (notably Node's
     ``fetch`` — see issue #40).
     """
-    await service.get_session(pool, session_id)
+    account_id, _, _ = _auth
+    await service.get_session(pool, session_id, account_id=account_id)
 
     async with listen_for_events(db_url, session_id) as queue:
-        events = await service.read_events(pool, session_id, after_seq=after_seq)
+        events = await service.read_events(
+            pool, session_id, after_seq=after_seq, account_id=account_id
+        )
         if not events and timeout_seconds > 0:
             # The channel carries both committed-event IDs and transient
             # streaming delta payloads (shaped like {"delta": "..."}); only
@@ -546,11 +600,13 @@ async def wait_for_events(
                     break
                 if payload.startswith("{"):
                     continue
-                events = await service.read_events(pool, session_id, after_seq=after_seq)
+                events = await service.read_events(
+                    pool, session_id, after_seq=after_seq, account_id=account_id
+                )
                 if events:
                     break
 
-    session = await service.get_session(pool, session_id)
+    session = await service.get_session(pool, session_id, account_id=account_id)
     return WaitResponse(
         events=events,
         session_status=session.status,

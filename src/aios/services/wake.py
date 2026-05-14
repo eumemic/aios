@@ -25,6 +25,7 @@ async def defer_wake(
     pool: asyncpg.Pool[Any],
     session_id: str,
     *,
+    account_id: str,
     cause: str = "message",
     delay_seconds: float | None = None,
     wake_reason: str | None = None,
@@ -50,7 +51,7 @@ async def defer_wake(
     span_data: dict[str, Any] = {"event": "wake_deferred", "cause": cause}
     if delay_seconds is not None:
         span_data["delay_seconds"] = delay_seconds
-    await sessions_service.append_event(pool, session_id, "span", span_data)
+    await sessions_service.append_event(pool, session_id, "span", span_data, account_id=account_id)
 
     task_kwargs: dict[str, JSONValue] = {"session_id": session_id, "cause": cause}
     if wake_reason is not None:

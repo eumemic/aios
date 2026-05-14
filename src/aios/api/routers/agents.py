@@ -19,6 +19,7 @@ async def create(body: AgentCreate, pool: PoolDep, _auth: AuthDep) -> Agent:
     Subsequent updates produce new immutable versions in the history; see
     ``update_agent`` and ``list_agent_versions``.
     """
+    account_id, _, _ = _auth
     return await service.create_agent(
         pool,
         name=body.name,
@@ -32,6 +33,7 @@ async def create(body: AgentCreate, pool: PoolDep, _auth: AuthDep) -> Agent:
         litellm_extra=body.litellm_extra,
         window_min=body.window_min,
         window_max=body.window_max,
+        account_id=account_id,
     )
 
 
@@ -49,7 +51,10 @@ async def list_(
     ``next_after`` to get the next page. Optional ``name`` filter matches
     exactly.
     """
-    items = await service.list_agents(pool, limit=limit, after=after, name=name)
+    account_id, _, _ = _auth
+    items = await service.list_agents(
+        pool, limit=limit, after=after, name=name, account_id=account_id
+    )
     return ListResponse[Agent](
         data=items,
         has_more=len(items) == limit,
@@ -60,7 +65,8 @@ async def list_(
 @router.get("/{agent_id}", operation_id="get_agent")
 async def get(agent_id: str, pool: PoolDep, _auth: AuthDep) -> Agent:
     """Fetch one agent by id, returning the latest version's config."""
-    return await service.get_agent(pool, agent_id)
+    account_id, _, _ = _auth
+    return await service.get_agent(pool, agent_id, account_id=account_id)
 
 
 @router.put("/{agent_id}", operation_id="update_agent")
@@ -73,6 +79,7 @@ async def update(agent_id: str, body: AgentUpdate, pool: PoolDep, _auth: AuthDep
     to the current version, no new version is created and the existing one
     is returned unchanged (no-op).
     """
+    account_id, _, _ = _auth
     return await service.update_agent(
         pool,
         agent_id,
@@ -88,6 +95,7 @@ async def update(agent_id: str, body: AgentUpdate, pool: PoolDep, _auth: AuthDep
         litellm_extra=body.litellm_extra,
         window_min=body.window_min,
         window_max=body.window_max,
+        account_id=account_id,
     )
 
 
@@ -98,7 +106,8 @@ async def archive(agent_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     The row and all version history persist; sessions referencing the agent
     continue to function. There is no API surface to un-archive currently.
     """
-    await service.archive_agent(pool, agent_id)
+    account_id, _, _ = _auth
+    await service.archive_agent(pool, agent_id, account_id=account_id)
 
 
 @router.get("/{agent_id}/versions", operation_id="list_agent_versions")
@@ -115,7 +124,10 @@ async def list_versions(
     response's ``next_after`` to get the next page. Each version is a
     complete snapshot of the agent's config at the time it was created.
     """
-    items = await service.list_agent_versions(pool, agent_id, limit=limit, after=after)
+    account_id, _, _ = _auth
+    items = await service.list_agent_versions(
+        pool, agent_id, limit=limit, after=after, account_id=account_id
+    )
     return ListResponse[AgentVersion](
         data=items,
         has_more=len(items) == limit,
@@ -130,4 +142,5 @@ async def get_version(agent_id: str, version: int, pool: PoolDep, _auth: AuthDep
     The snapshot reflects the agent's config at the time the version was
     written and is unaffected by subsequent updates or archival.
     """
-    return await service.get_agent_version(pool, agent_id, version)
+    account_id, _, _ = _auth
+    return await service.get_agent_version(pool, agent_id, version, account_id=account_id)

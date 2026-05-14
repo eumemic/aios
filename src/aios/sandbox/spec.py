@@ -108,20 +108,24 @@ async def _load_environment_config(session_id: str) -> EnvironmentConfig | None:
     Returns ``None`` if the session or environment doesn't exist (shouldn't
     happen in normal flow, but callers handle it gracefully).
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     from aios.harness import runtime
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
-        return await queries.get_environment_config_for_session(conn, session_id)
+        return await queries.get_environment_config_for_session(
+            conn, session_id, account_id=account_id
+        )
 
 
 async def _load_session_provisioning(session_id: str) -> tuple[str, dict[str, str]]:
     """Load workspace path and env from the session row in one query."""
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     from aios.harness import runtime
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
-        return await queries.get_session_provisioning(conn, session_id)
+        return await queries.get_session_provisioning(conn, session_id, account_id=account_id)
 
 
 async def _materialize_memory_mounts(
@@ -134,12 +138,15 @@ async def _materialize_memory_mounts(
     the unit-test mocking surface tight — tests mock this single
     function and don't need a live pool.
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     from aios.harness import runtime
     from aios.sandbox.memory_mounts import materialize_store_to_host
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
-        echoes = await queries.list_session_memory_store_echoes(conn, session_id)
+        echoes = await queries.list_session_memory_store_echoes(
+            conn, session_id, account_id=account_id
+        )
         for echo in echoes:
             await materialize_store_to_host(conn, store_id=echo.memory_store_id)
     return list(echoes)
@@ -161,6 +168,7 @@ async def _materialize_github_clones(
     working tree won't be bind-mounted). The proxy stays alive for
     sibling repos.
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     from aios.harness import runtime
     from aios.sandbox.git_proxy import repo_key
     from aios.services import github_repositories as github_repo_service
@@ -171,14 +179,16 @@ async def _materialize_github_clones(
     # Load echoes and decrypt all tokens up front so the proxy can be
     # initialized with the full token map before any clone runs.
     async with pool.acquire() as conn:
-        echoes = await queries.list_session_github_repo_echoes(conn, session_id)
+        echoes = await queries.list_session_github_repo_echoes(
+            conn, session_id, account_id=account_id
+        )
         if not echoes:
             return [], None
         echo_tokens: list[tuple[GithubRepositoryResourceEcho, str]] = []
         repos_map: dict[str, str] = {}
         for echo in echoes:
             token = await github_repo_service.get_session_token(
-                conn, crypto_box, session_id, echo.id
+                conn, crypto_box, session_id, echo.id, account_id=account_id
             )
             echo_tokens.append((echo, token))
             repos_map[repo_key(echo.url)] = token
@@ -229,6 +239,7 @@ async def _materialize_github_clones(
                     "repo_url": failed_echo.url,
                     "message": str(failure),
                 },
+                account_id=account_id,
             )
     return materialized, proxy
 

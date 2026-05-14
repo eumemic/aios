@@ -31,7 +31,7 @@ class _StubRegistry:
 
 
 @pytest.fixture
-def stub_handle() -> SandboxHandle:
+def stub_handle(**kwargs: Any) -> SandboxHandle:
     """A SandboxHandle with run_command mocked out."""
     handle = SandboxHandle(
         session_id="sess_01TEST",
@@ -53,7 +53,9 @@ def canned_result() -> CommandResult:
 
 
 @pytest.fixture
-def stub_registry(stub_handle: SandboxHandle, canned_result: CommandResult) -> _StubRegistry:
+def stub_registry(
+    stub_handle: SandboxHandle, canned_result: CommandResult, **kwargs: Any
+) -> _StubRegistry:
     """Install a stub sandbox registry on the runtime module, restore after."""
     from unittest.mock import MagicMock
 

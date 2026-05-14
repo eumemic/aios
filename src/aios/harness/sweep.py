@@ -180,6 +180,7 @@ async def find_and_repair_ghosts(
     Returns a list of ``(session_id, tool_call_id)`` pairs that were
     repaired.
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     in_flight = task_registry.all_in_flight_tool_call_ids()
 
     scope_clause = "AND e.session_id = $1" if session_id else ""
@@ -276,6 +277,7 @@ async def find_and_repair_ghosts(
                 "content": content,
                 "is_error": True,
             },
+            account_id=account_id,
         )
         log.info("sweep.ghost_repaired", session_id=sid, tool_call_id=tcid, tool_name=name)
 
@@ -503,8 +505,9 @@ async def wake_sessions_needing_inference(
     the number of procrastinate wakes deferred, so the tail-site
     ``sweep_end`` span can stamp both without unrolling the composition.
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     repaired = await find_and_repair_ghosts(pool, task_registry, session_id=session_id)
     woken = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
     for sid in woken:
-        await defer_wake(pool, sid, cause="sweep")
+        await defer_wake(pool, sid, cause="sweep", account_id=account_id)
     return SweepResult(repaired_ghosts=len(repaired), woken_sessions=len(woken))

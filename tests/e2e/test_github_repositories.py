@@ -102,7 +102,10 @@ async def env_and_agent(pool: Any) -> tuple[str, str]:
     the resource lifecycle. Each test gets a unique pair so cross-test
     state doesn't leak.
     """
-    env = await environments_service.create_environment(pool, name=f"ghrepo-env-{_uniq()}")
+    account_id = "acc_test_stub"  # PR 3 scaffolding
+    env = await environments_service.create_environment(
+        pool, name=f"ghrepo-env-{_uniq()}", account_id=account_id
+    )
     agent = await agents_service.create_agent(
         pool,
         name=f"ghrepo-agent-{_uniq()}",
@@ -113,6 +116,7 @@ async def env_and_agent(pool: Any) -> tuple[str, str]:
         metadata={},
         window_min=50_000,
         window_max=150_000,
+        account_id=account_id,
     )
     return env.id, agent.id
 
@@ -124,6 +128,7 @@ class TestServiceLayer:
     async def test_attach_round_trip(
         self, pool: Any, crypto_box: Any, env_and_agent: tuple[str, str]
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         env_id, agent_id = env_and_agent
         token = _pat()
         session = await sessions_service.create_session(
@@ -143,6 +148,7 @@ class TestServiceLayer:
                 )
             ],
             crypto_box=crypto_box,
+            account_id=account_id,
         )
 
         assert len(session.resources) == 1
@@ -158,6 +164,7 @@ class TestServiceLayer:
     ) -> None:
         """Service-internal: provisioner needs the raw token; verify the
         encrypt-on-create + decrypt-on-read path returns the original."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         env_id, agent_id = env_and_agent
         original_token = _pat()
         session = await sessions_service.create_session(
@@ -177,17 +184,19 @@ class TestServiceLayer:
                 )
             ],
             crypto_box=crypto_box,
+            account_id=account_id,
         )
         echo = session.resources[0]
         async with pool.acquire() as conn:
             recovered = await github_service.get_session_token(
-                conn, crypto_box, session.id, echo.id
+                conn, crypto_box, session.id, echo.id, account_id=account_id
             )
         assert recovered == original_token
 
     async def test_token_rotation_changes_blob_and_bumps_updated_at(
         self, pool: Any, crypto_box: Any, env_and_agent: tuple[str, str]
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         env_id, agent_id = env_and_agent
         first_token = _pat()
         session = await sessions_service.create_session(
@@ -207,6 +216,7 @@ class TestServiceLayer:
                 )
             ],
             crypto_box=crypto_box,
+            account_id=account_id,
         )
         original_echo = session.resources[0]
         new_token = _pat()
@@ -216,6 +226,7 @@ class TestServiceLayer:
             session_id=session.id,
             resource_id=original_echo.id,
             new_token=new_token,
+            account_id=account_id,
         )
         assert rotated.id == original_echo.id
         assert rotated.url == original_echo.url
@@ -224,7 +235,7 @@ class TestServiceLayer:
 
         async with pool.acquire() as conn:
             recovered = await github_service.get_session_token(
-                conn, crypto_box, session.id, original_echo.id
+                conn, crypto_box, session.id, original_echo.id, account_id=account_id
             )
         assert recovered == new_token
         assert recovered != first_token
@@ -234,6 +245,7 @@ class TestServiceLayer:
     ) -> None:
         """Identity supplied at create-time persists through the DB and
         echoes back on read.  Rotation overwrites it."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         env_id, agent_id = env_and_agent
         session = await sessions_service.create_session(
             pool,
@@ -254,6 +266,7 @@ class TestServiceLayer:
                 )
             ],
             crypto_box=crypto_box,
+            account_id=account_id,
         )
         echo = session.resources[0]
         assert echo.git_user_name == "Agent JN"
@@ -266,6 +279,7 @@ class TestServiceLayer:
             resource_id=echo.id,
             new_token=_pat(),
             identity=("Different Author", "other@example.com"),
+            account_id=account_id,
         )
         assert rotated.git_user_name == "Different Author"
         assert rotated.git_user_email == "other@example.com"
@@ -278,6 +292,7 @@ class TestServiceLayer:
         The router omits ``identity`` from the service call when the
         update body has no identity fields set.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         env_id, agent_id = env_and_agent
         session = await sessions_service.create_session(
             pool,
@@ -298,6 +313,7 @@ class TestServiceLayer:
                 )
             ],
             crypto_box=crypto_box,
+            account_id=account_id,
         )
         echo = session.resources[0]
 
@@ -307,6 +323,7 @@ class TestServiceLayer:
             session_id=session.id,
             resource_id=echo.id,
             new_token=_pat(),
+            account_id=account_id,
         )
         assert rotated.git_user_name == "Agent JN"
         assert rotated.git_user_email == "agent+jn@example.com"
@@ -316,6 +333,7 @@ class TestServiceLayer:
     ) -> None:
         """Identity unset on create stays NULL through the DB and echoes
         back as ``None`` — pre-#207 v1 behaviour preserved."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         env_id, agent_id = env_and_agent
         session = await sessions_service.create_session(
             pool,
@@ -334,6 +352,7 @@ class TestServiceLayer:
                 )
             ],
             crypto_box=crypto_box,
+            account_id=account_id,
         )
         echo = session.resources[0]
         assert echo.git_user_name is None
@@ -344,6 +363,7 @@ class TestServiceLayer:
     ) -> None:
         """The aios departure: PUT /sessions/{id} with ``resources=[]``
         detaches everything; with a new list, attaches that set fresh."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         env_id, agent_id = env_and_agent
         session = await sessions_service.create_session(
             pool,
@@ -362,12 +382,13 @@ class TestServiceLayer:
                 )
             ],
             crypto_box=crypto_box,
+            account_id=account_id,
         )
         assert len(session.resources) == 1
 
         # Detach all.
         cleared = await sessions_service.update_session(
-            pool, session.id, resources=[], crypto_box=crypto_box
+            pool, session.id, resources=[], crypto_box=crypto_box, account_id=account_id
         )
         assert cleared.resources == []
 
@@ -386,6 +407,7 @@ class TestServiceLayer:
                 )
             ],
             crypto_box=crypto_box,
+            account_id=account_id,
         )
         assert len(re_attached.resources) == 1
         assert re_attached.resources[0].mount_path == "/workspace/spoon"

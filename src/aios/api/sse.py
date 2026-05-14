@@ -152,11 +152,14 @@ async def runtime_connector_calls_stream(
     Backfills any pending calls at subscribe time, then tails the
     ``connector_calls_<connector>`` NOTIFY channel.
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     async with listen_for_connector_calls_by_type(db_url, connector) as queue:
         emitted: set[str] = set()
 
         async with pool.acquire() as conn:
-            backfill = await queries.list_pending_calls_for_connector(conn, connector)
+            backfill = await queries.list_pending_calls_for_connector(
+                conn, connector, account_id=account_id
+            )
         for call in backfill:
             emitted.add(call["tool_call_id"])
             yield ServerSentEvent(data=json.dumps(call), event="call")
@@ -173,6 +176,7 @@ async def runtime_connector_calls_stream(
                     conn,
                     session_id=session_id,
                     connection_id=connection_id,
+                    account_id=account_id,
                 )
             for call in pending:
                 if call["tool_call_id"] in emitted:
@@ -193,11 +197,14 @@ async def management_calls_stream(
     ``connector_management_calls_<connector>``.  Each event:
     ``{"call_id": "mgmt_...", "method": str, "params": dict}``.
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     async with listen_for_management_calls(db_url, connector) as queue:
         emitted: set[str] = set()
 
         async with pool.acquire() as conn:
-            backfill = await queries.list_pending_management_calls_for_connector(conn, connector)
+            backfill = await queries.list_pending_management_calls_for_connector(
+                conn, connector, account_id=account_id
+            )
         for call in backfill:
             emitted.add(call["call_id"])
             yield ServerSentEvent(data=json.dumps(call), event="call")
@@ -211,7 +218,7 @@ async def management_calls_stream(
             # under the 8000-byte cap and means a follow-up UPDATE can't
             # desync from a stale payload already in flight.
             async with pool.acquire() as conn:
-                row = await queries.get_management_call(conn, call_id)
+                row = await queries.get_management_call(conn, call_id, account_id=account_id)
             if row is None or row["status"] != "pending":
                 continue
             emitted.add(call_id)
@@ -238,6 +245,7 @@ async def connection_discovery_stream(
     side lives in :mod:`aios.services.connections.attach_connection` /
     ``archive_connection``.
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     async with listen_for_connection_discovery(db_url, connector) as queue:
         emitted_added: set[str] = set()
 
@@ -248,7 +256,7 @@ async def connection_discovery_stream(
         while True:
             async with pool.acquire() as conn:
                 page = await queries.list_connections(
-                    conn, connector=connector, limit=200, after=cursor
+                    conn, connector=connector, limit=200, after=cursor, account_id=account_id
                 )
             for connection in page:
                 emitted_added.add(connection.id)

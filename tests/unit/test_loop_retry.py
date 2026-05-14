@@ -221,7 +221,7 @@ class TestRunSessionStepOnModelError:
             await run_session_step("sess_x")
 
         mock_step_dependencies.defer_wake.assert_awaited_once_with(
-            ANY, "sess_x", cause="reschedule", delay_seconds=2
+            ANY, "sess_x", cause="reschedule", delay_seconds=2, account_id=ANY
         )
         status_calls = [call.args[2] for call in mock_step_dependencies.set_status.call_args_list]
         assert "rescheduling" in status_calls

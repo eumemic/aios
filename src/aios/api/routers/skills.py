@@ -24,8 +24,9 @@ async def create(body: SkillCreate, pool: PoolDep, _auth: AuthDep) -> Skill:
     ``directory``, ``name``, and ``description`` are extracted from that
     frontmatter; subsequent versions reuse this extraction.
     """
+    account_id, _, _ = _auth
     skill, _version = await service.create_skill(
-        pool, display_title=body.display_title, files=body.files
+        pool, display_title=body.display_title, files=body.files, account_id=account_id
     )
     return skill
 
@@ -41,7 +42,8 @@ async def list_(
 
     Cursor pagination via ``after``.
     """
-    items = await service.list_skills(pool, limit=limit, after=after)
+    account_id, _, _ = _auth
+    items = await service.list_skills(pool, limit=limit, after=after, account_id=account_id)
     return ListResponse[Skill](
         data=items,
         has_more=len(items) == limit,
@@ -52,7 +54,8 @@ async def list_(
 @router.get("/{skill_id}", operation_id="get_skill")
 async def get(skill_id: str, pool: PoolDep, _auth: AuthDep) -> Skill:
     """Fetch one skill by id, returning the latest version's config."""
-    return await service.get_skill(pool, skill_id)
+    account_id, _, _ = _auth
+    return await service.get_skill(pool, skill_id, account_id=account_id)
 
 
 @router.delete("/{skill_id}", operation_id="archive_skill", status_code=status.HTTP_204_NO_CONTENT)
@@ -63,7 +66,8 @@ async def archive(skill_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     by id continue to resolve their pinned versions. There is no API
     surface to un-archive currently.
     """
-    await service.archive_skill(pool, skill_id)
+    account_id, _, _ = _auth
+    await service.archive_skill(pool, skill_id, account_id=account_id)
 
 
 # ── Skill version endpoints ───────────────────────────────────────────────
@@ -84,7 +88,10 @@ async def create_version(
     a complete snapshot — files not present in the upload are not carried
     over from previous versions.
     """
-    return await service.create_skill_version(pool, skill_id, files=body.files)
+    account_id, _, _ = _auth
+    return await service.create_skill_version(
+        pool, skill_id, files=body.files, account_id=account_id
+    )
 
 
 @router.get("/{skill_id}/versions", operation_id="list_skill_versions")
@@ -101,7 +108,10 @@ async def list_versions(
     response's ``next_after`` to get the next page. Each version is a
     complete file-bundle snapshot at the time it was created.
     """
-    items = await service.list_skill_versions(pool, skill_id, limit=limit, after=after)
+    account_id, _, _ = _auth
+    items = await service.list_skill_versions(
+        pool, skill_id, limit=limit, after=after, account_id=account_id
+    )
     return ListResponse[SkillVersion](
         data=items,
         has_more=len(items) == limit,
@@ -116,4 +126,5 @@ async def get_version(skill_id: str, version: int, pool: PoolDep, _auth: AuthDep
     The bundle reflects the skill's state at the time the version was
     written and is unaffected by subsequent versions or archival.
     """
-    return await service.get_skill_version(pool, skill_id, version)
+    account_id, _, _ = _auth
+    return await service.get_skill_version(pool, skill_id, version, account_id=account_id)

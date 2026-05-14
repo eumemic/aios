@@ -81,6 +81,7 @@ WRITE_PARAMETERS_SCHEMA: dict[str, Any] = {
 
 async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Handler for the write tool. See module docstring for the return shape."""
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     path = arguments.get("path")
     if not isinstance(path, str) or not path.strip():
         raise WriteArgumentError("write tool requires a non-empty 'path' string")
@@ -117,7 +118,11 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
         precondition_sha = runtime.get_read_sha(session_id, target.store_id, target.store_path)
         try:
             existing = await memory_service.get_memory_by_path(
-                pool, target.store_id, target.store_path, include_content=False
+                pool,
+                target.store_id,
+                target.store_path,
+                include_content=False,
+                account_id=account_id,
             )
             if existing is None:
                 await memory_service.create_memory(
@@ -126,6 +131,7 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
                     path=target.store_path,
                     content=content,
                     actor=memory_service.SessionActor(session_id=session_id),
+                    account_id=account_id,
                 )
             else:
                 await memory_service.update_memory(
@@ -135,6 +141,7 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
                     new_content=content,
                     precondition_sha256=precondition_sha,
                     actor=memory_service.SessionActor(session_id=session_id),
+                    account_id=account_id,
                 )
         except MemoryPathConflictError as exc:
             return {"error": exc.message, "path": path, "detail": exc.detail}

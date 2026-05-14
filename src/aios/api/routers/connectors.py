@@ -133,6 +133,7 @@ async def _do_inbound(
     attachment shaping, the handle_inbound call, drop-reason mapping
     — is identical.
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     sender_dict: dict[str, Any] = _parse_form_json("sender", sender_json, default={}) or {}
     metadata_dict: dict[str, Any] | None = _parse_form_json("metadata", metadata_json)
     inbound_attachments = [
@@ -153,6 +154,7 @@ async def _do_inbound(
         attachments=inbound_attachments,
         connector_metadata=metadata_dict,
         platform_timestamp=timestamp,
+        account_id=account_id,
     )
     if result.drop_reason is not None:
         raise _inbound_drop_error(result.drop_reason.value)
@@ -229,9 +231,12 @@ async def put_tools_schema(
     path's ``connector``.
     """
     _, auth_connector = auth
+    account_id = ""  # PR 3 stub for runtime-auth routes; PR 4 derives from connection
     _check_runtime_scope(auth_connector, connector)
     async with pool.acquire() as conn:
-        await queries.update_connector_tools_schema(conn, connector, tools_schema=body.tools)
+        await queries.update_connector_tools_schema(
+            conn, connector, tools_schema=body.tools, account_id=account_id
+        )
 
 
 @router.get(
@@ -307,8 +312,9 @@ async def post_runtime_inbound(
     error vs payload).
     """
     _, auth_connector = auth
+    account_id = ""  # PR 3 stub for runtime-auth routes; PR 4 derives from connection
     async with pool.acquire() as conn:
-        connection = await queries.get_connection(conn, connection_id)
+        connection = await queries.get_connection(conn, connection_id, account_id=account_id)
     _check_runtime_scope(auth_connector, connection.connector)
     return await _do_inbound(
         pool,
@@ -339,13 +345,15 @@ async def post_runtime_tool_result(
     connector, and the session must be bound to that connection.
     """
     _, auth_connector = auth
+    account_id = ""  # PR 3 stub for runtime-auth routes; PR 4 derives from connection
     async with pool.acquire() as conn:
-        connection = await queries.get_connection(conn, body.connection_id)
+        connection = await queries.get_connection(conn, body.connection_id, account_id=account_id)
         _check_runtime_scope(auth_connector, connection.connector)
         if not await queries.is_session_bound_to_connection(
             conn,
             connection_id=body.connection_id,
             session_id=body.session_id,
+            account_id=account_id,
         ):
             raise ForbiddenError(
                 "session is not bound to this connection",
@@ -360,8 +368,9 @@ async def post_runtime_tool_result(
             tool_call_id=body.tool_call_id,
             content=body.content,
             is_error=body.is_error,
+            account_id=account_id,
         )
-    await defer_wake(pool, body.session_id, cause="connector_tool_result")
+    await defer_wake(pool, body.session_id, cause="connector_tool_result", account_id=account_id)
     return event
 
 
@@ -382,11 +391,12 @@ async def get_runtime_secrets(
     callers decide whether that's acceptable.
     """
     _, auth_connector = auth
+    account_id = ""  # PR 3 stub for runtime-auth routes; PR 4 derives from connection
     async with pool.acquire() as conn:
-        connection = await queries.get_connection(conn, connection_id)
+        connection = await queries.get_connection(conn, connection_id, account_id=account_id)
     _check_runtime_scope(auth_connector, connection.connector)
     secrets = await connections_service.get_connection_secrets(
-        pool, connection_id, crypto_box=crypto_box
+        pool, connection_id, crypto_box=crypto_box, account_id=account_id
     )
     return ConnectorSecrets(secrets=secrets)
 
@@ -501,6 +511,7 @@ async def _signal_management_call(
     params: dict[str, Any],
     timeout_s: float,
 ) -> Any:
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     result, is_error = await management_calls.submit_call(
         db_url,
         pool,
@@ -508,6 +519,7 @@ async def _signal_management_call(
         method=method,
         params=params,
         timeout_s=timeout_s,
+        account_id=account_id,
     )
     if is_error and not _is_captcha_required(result):
         raise ConnectorCallFailedError(
@@ -625,12 +637,13 @@ async def post_runtime_management_call_result(
     auth: RuntimeAuthDep,
 ) -> None:
     _, auth_connector = auth
+    account_id = ""  # PR 3 stub for runtime-auth routes; PR 4 derives from connection
     # Autocommit conn (no ``async with conn.transaction()``): the UPDATE
     # commits before the NOTIFY fires.  Don't wrap these in a
     # transaction — subscribers would see uncommitted state.  See
     # db/listen.py for the full rationale.
     async with pool.acquire() as conn:
-        row = await queries.get_management_call(conn, body.call_id)
+        row = await queries.get_management_call(conn, body.call_id, account_id=account_id)
         if row is None:
             raise NotFoundError("no such management call", detail={"call_id": body.call_id})
         _check_runtime_scope(auth_connector, row["connector"])
@@ -639,7 +652,10 @@ async def post_runtime_management_call_result(
             call_id=body.call_id,
             result=body.result,
             is_error=body.is_error,
+            account_id=account_id,
         )
         if not moved:
             return
-        await queries.notify_management_call_result(conn, call_id=body.call_id)
+        await queries.notify_management_call_result(
+            conn, call_id=body.call_id, account_id=account_id
+        )

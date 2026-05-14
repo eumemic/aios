@@ -53,12 +53,15 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
 
 @pytest.fixture
 async def idle_session_id(pool: Any) -> str:
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.db import queries
     from aios.services import agents as agents_svc
     from aios.services import sessions as sessions_svc
 
     async with pool.acquire() as conn:
-        env = await queries.insert_environment(conn, name=f"pending-env-{_uniq()}")
+        env = await queries.insert_environment(
+            conn, name=f"pending-env-{_uniq()}", account_id=account_id
+        )
     agent = await agents_svc.create_agent(
         pool,
         name=f"pending-agent-{_uniq()}",
@@ -69,9 +72,15 @@ async def idle_session_id(pool: Any) -> str:
         metadata={},
         window_min=50_000,
         window_max=150_000,
+        account_id=account_id,
     )
     session = await sessions_svc.create_session(
-        pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+        pool,
+        agent_id=agent.id,
+        environment_id=env.id,
+        title=None,
+        metadata={},
+        account_id=account_id,
     )
     return session.id
 
@@ -97,9 +106,12 @@ class TestPendingStatus:
     ) -> None:
         """If the session is already ``running``, a new user message must not
         rewrite the status — the in-flight worker owns it."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
-        await sessions_svc.set_session_status(pool, idle_session_id, "running")
+        await sessions_svc.set_session_status(
+            pool, idle_session_id, "running", account_id=account_id
+        )
 
         r = await http_client.post(
             f"/v1/sessions/{idle_session_id}/messages",
@@ -113,10 +125,15 @@ class TestPendingStatus:
     async def test_rescheduling_status_not_clobbered(
         self, http_client: httpx.AsyncClient, pool: Any, idle_session_id: str
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
         await sessions_svc.set_session_status(
-            pool, idle_session_id, "rescheduling", stop_reason={"type": "rescheduling"}
+            pool,
+            idle_session_id,
+            "rescheduling",
+            stop_reason={"type": "rescheduling"},
+            account_id=account_id,
         )
 
         r = await http_client.post(

@@ -30,11 +30,18 @@ from aios.services import memory_stores as memory_service
 
 
 async def _list_all_echoes(
-    conn: asyncpg.Connection[Any], session_id: str
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
 ) -> list[SessionResourceEcho]:
     """Memory echoes first then github echoes, each in rank order."""
-    memory_echoes = await queries.list_session_memory_store_echoes(conn, session_id)
-    github_echoes = await queries.list_session_github_repo_echoes(conn, session_id)
+    memory_echoes = await queries.list_session_memory_store_echoes(
+        conn, session_id, account_id=account_id
+    )
+    github_echoes = await queries.list_session_github_repo_echoes(
+        conn, session_id, account_id=account_id
+    )
     out: list[SessionResourceEcho] = []
     out.extend(memory_echoes)
     out.extend(github_echoes)
@@ -44,6 +51,7 @@ async def _list_all_echoes(
 async def create_session(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     agent_id: str,
     environment_id: str,
     agent_version: int | None = None,
@@ -86,43 +94,47 @@ async def create_session(
             env=env,
             focal_channel=focal_channel,
             focal_locked=focal_locked,
+            account_id=account_id,
         )
         if vault_ids:
-            await queries.set_session_vaults(conn, session.id, vault_ids)
+            await queries.set_session_vaults(conn, session.id, vault_ids, account_id=account_id)
             session = session.model_copy(update={"vault_ids": vault_ids})
         if resources:
             memory_resources, github_resources = split_resources_by_type(resources)
             if memory_resources:
-                await memory_service.attach_to_session(conn, session.id, memory_resources)
+                await memory_service.attach_to_session(
+                    conn, session.id, memory_resources, account_id=account_id
+                )
             if github_resources:
                 assert crypto_box is not None, (
                     "API surface requires CryptoBox when attaching github_repository"
                 )
                 await github_repo_service.attach_to_session(
-                    conn, session.id, github_resources, crypto_box
+                    conn, session.id, github_resources, crypto_box, account_id=account_id
                 )
-            echoes = await _list_all_echoes(conn, session.id)
+            echoes = await _list_all_echoes(conn, session.id, account_id=account_id)
             session = session.model_copy(update={"resources": echoes})
         return session
 
 
-async def get_session(pool: asyncpg.Pool[Any], session_id: str) -> Session:
+async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> Session:
     async with pool.acquire() as conn:
-        session = await queries.get_session(conn, session_id)
-        vault_ids = await queries.get_session_vault_ids(conn, session_id)
-        echoes = await _list_all_echoes(conn, session_id)
+        session = await queries.get_session(conn, session_id, account_id=account_id)
+        vault_ids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
+        echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
         return session.model_copy(update={"vault_ids": vault_ids, "resources": echoes})
 
 
-async def get_session_model(pool: asyncpg.Pool[Any], session_id: str) -> str:
+async def get_session_model(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> str:
     """Bound model for ``session_id`` (pinned agent version wins)."""
     async with pool.acquire() as conn:
-        return await queries.get_session_model(conn, session_id)
+        return await queries.get_session_model(conn, session_id, account_id=account_id)
 
 
 async def list_sessions(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     agent_id: str | None = None,
     status: SessionStatus | None = None,
     limit: int = 50,
@@ -130,13 +142,15 @@ async def list_sessions(
 ) -> list[Session]:
     async with pool.acquire() as conn:
         sessions = await queries.list_sessions(
-            conn, agent_id=agent_id, status=status, limit=limit, after=after
+            conn, agent_id=agent_id, status=status, limit=limit, after=after, account_id=account_id
         )
         if sessions:
-            vault_map = await queries.batch_get_session_vault_ids(conn, [s.id for s in sessions])
+            vault_map = await queries.batch_get_session_vault_ids(
+                conn, [s.id for s in sessions], account_id=account_id
+            )
             enriched: list[Session] = []
             for s in sessions:
-                echoes = await _list_all_echoes(conn, s.id)
+                echoes = await _list_all_echoes(conn, s.id, account_id=account_id)
                 enriched.append(
                     s.model_copy(
                         update={
@@ -154,6 +168,8 @@ async def append_user_message(
     session_id: str,
     content: str,
     metadata: dict[str, Any] | None = None,
+    *,
+    account_id: str,
 ) -> Event:
     """Append a `role: user` message event to the session log.
 
@@ -183,12 +199,13 @@ async def append_user_message(
             kind="message",
             data=data,
             orig_channel=orig_channel,
+            account_id=account_id,
         )
         # Narrow scope by design: the tool-result and tool-confirmation
         # paths have the same race but are deferred; an orchestrator
         # resolving those still has to combine status polling with
         # event-cursor tracking.  See issue #39.
-        await queries.flip_quiescent_to_pending(conn, session_id)
+        await queries.flip_quiescent_to_pending(conn, session_id, account_id=account_id)
         return event
 
 
@@ -197,15 +214,20 @@ async def append_event(
     session_id: str,
     kind: EventKind,
     data: dict[str, Any],
+    *,
+    account_id: str,
 ) -> Event:
     """Append an arbitrary event. Used by the harness loop."""
     async with pool.acquire() as conn:
-        return await queries.append_event(conn, session_id=session_id, kind=kind, data=data)
+        return await queries.append_event(
+            conn, session_id=session_id, kind=kind, data=data, account_id=account_id
+        )
 
 
 async def append_tool_result(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     session_id: str,
     tool_call_id: str,
     content: str | list[dict[str, Any]],
@@ -225,7 +247,9 @@ async def append_tool_result(
     """
     from aios.errors import NotFoundError
 
-    name = await queries.lookup_tool_name_by_call_id(conn, session_id, tool_call_id)
+    name = await queries.lookup_tool_name_by_call_id(
+        conn, session_id, tool_call_id, account_id=account_id
+    )
     if name is None:
         raise NotFoundError(
             f"tool_call_id {tool_call_id!r} not found",
@@ -239,13 +263,16 @@ async def append_tool_result(
     }
     if is_error:
         data["is_error"] = True
-    return await queries.append_event(conn, session_id=session_id, kind="message", data=data)
+    return await queries.append_event(
+        conn, session_id=session_id, kind="message", data=data, account_id=account_id
+    )
 
 
 async def read_events(
     pool: asyncpg.Pool[Any],
     session_id: str,
     *,
+    account_id: str,
     after_seq: int = 0,
     kind: EventKind | None = None,
     limit: int = 200,
@@ -259,18 +286,22 @@ async def read_events(
             kind=kind,
             limit=limit,
             newest_first=newest_first,
+            account_id=account_id,
         )
 
 
-async def read_message_events(pool: asyncpg.Pool[Any], session_id: str) -> list[Event]:
+async def read_message_events(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> list[Event]:
     async with pool.acquire() as conn:
-        return await queries.read_message_events(conn, session_id)
+        return await queries.read_message_events(conn, session_id, account_id=account_id)
 
 
 async def read_windowed_events(
     pool: asyncpg.Pool[Any],
     session_id: str,
     *,
+    account_id: str,
     window_min: int,
     window_max: int,
     model: str,
@@ -284,6 +315,7 @@ async def read_windowed_events(
             window_max=window_max,
             model=model,
             overhead_local=overhead_local,
+            account_id=account_id,
         )
 
 
@@ -292,15 +324,20 @@ async def set_session_status(
     session_id: str,
     status: SessionStatus,
     stop_reason: dict[str, Any] | None = None,
+    *,
+    account_id: str,
 ) -> None:
     async with pool.acquire() as conn:
-        await queries.set_session_status(conn, session_id, status, stop_reason)
+        await queries.set_session_status(
+            conn, session_id, status, stop_reason, account_id=account_id
+        )
 
 
 async def increment_usage(
     pool: asyncpg.Pool[Any],
     session_id: str,
     *,
+    account_id: str,
     input_tokens: int,
     output_tokens: int,
     cache_read_input_tokens: int = 0,
@@ -315,38 +352,41 @@ async def increment_usage(
             output_tokens=output_tokens,
             cache_read_input_tokens=cache_read_input_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
+            account_id=account_id,
         )
 
 
-async def archive_session(pool: asyncpg.Pool[Any], session_id: str) -> Session:
+async def archive_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> Session:
     async with pool.acquire() as conn:
-        return await queries.archive_session(conn, session_id)
+        return await queries.archive_session(conn, session_id, account_id=account_id)
 
 
 async def clone_session(
     pool: asyncpg.Pool[Any],
     parent_session_id: str,
     *,
+    account_id: str,
     workspace_path: str | None = None,
 ) -> Session:
     """Clone a session — see :func:`queries.clone_session`."""
     async with pool.acquire() as conn:
         session = await queries.clone_session(
-            conn, parent_session_id, workspace_path=workspace_path
+            conn, parent_session_id, workspace_path=workspace_path, account_id=account_id
         )
-        vault_ids = await queries.get_session_vault_ids(conn, session.id)
+        vault_ids = await queries.get_session_vault_ids(conn, session.id, account_id=account_id)
         return session.model_copy(update={"vault_ids": vault_ids})
 
 
-async def delete_session(pool: asyncpg.Pool[Any], session_id: str) -> None:
+async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> None:
     async with pool.acquire() as conn:
-        await queries.delete_session(conn, session_id)
+        await queries.delete_session(conn, session_id, account_id=account_id)
 
 
 async def update_session(
     pool: asyncpg.Pool[Any],
     session_id: str,
     *,
+    account_id: str,
     agent_id: str | None = None,
     agent_version: int | None = queries._UNSET,
     title: str | None = queries._UNSET,
@@ -365,26 +405,31 @@ async def update_session(
             agent_version=agent_version,
             title=title,
             metadata=metadata,
+            account_id=account_id,
         )
         if vault_ids is not None:
-            await queries.set_session_vaults(conn, session_id, vault_ids)
+            await queries.set_session_vaults(conn, session_id, vault_ids, account_id=account_id)
         if resources is not None:
             # Wire-level semantics is full-list-replace across all
             # resource types, so an incoming list that omits a type
             # detaches every existing attachment of that type.
             memory_resources, github_resources = split_resources_by_type(resources)
-            await memory_service.set_session_resources(conn, session_id, memory_resources)
+            await memory_service.set_session_resources(
+                conn, session_id, memory_resources, account_id=account_id
+            )
             if github_resources:
                 assert crypto_box is not None, (
                     "API surface requires CryptoBox when attaching github_repository"
                 )
                 await github_repo_service.set_session_resources(
-                    conn, session_id, github_resources, crypto_box
+                    conn, session_id, github_resources, crypto_box, account_id=account_id
                 )
             else:
-                await github_repo_service.detach_all_from_session(conn, session_id)
-        vids = await queries.get_session_vault_ids(conn, session_id)
-        echoes = await _list_all_echoes(conn, session_id)
+                await github_repo_service.detach_all_from_session(
+                    conn, session_id, account_id=account_id
+                )
+        vids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
+        echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
         return session.model_copy(update={"vault_ids": vids, "resources": echoes})
 
 
@@ -411,6 +456,8 @@ async def confirm_tool_allow(
     pool: asyncpg.Pool[Any],
     session_id: str,
     tool_call_id: str,
+    *,
+    account_id: str,
 ) -> Event:
     """Record an allow confirmation for an ``always_ask`` tool call.
 
@@ -422,6 +469,7 @@ async def confirm_tool_allow(
         session_id,
         "lifecycle",
         {"event": "tool_confirmed", "tool_call_id": tool_call_id, "result": "allow"},
+        account_id=account_id,
     )
 
 
@@ -430,6 +478,8 @@ async def confirm_tool_deny(
     session_id: str,
     tool_call_id: str,
     deny_message: str,
+    *,
+    account_id: str,
 ) -> Event:
     """Deny an ``always_ask`` tool call.
 
@@ -438,7 +488,7 @@ async def confirm_tool_deny(
     ``"Permission to use <tool> has been rejected."`` pattern.
     """
     # Find the tool name from the event log for the error message.
-    events = await read_message_events(pool, session_id)
+    events = await read_message_events(pool, session_id, account_id=account_id)
     tc = _find_tool_call(events, tool_call_id)
     tool_name = ((tc.get("function") or {}).get("name", "unknown")) if tc else "unknown"
 
@@ -462,4 +512,5 @@ async def confirm_tool_deny(
             "content": content,
             "is_error": True,
         },
+        account_id=account_id,
     )

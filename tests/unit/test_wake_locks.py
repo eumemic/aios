@@ -25,33 +25,38 @@ def _job_rows(app: App) -> list[dict]:
 
 class TestDeferWakeLockValues:
     async def test_lock_is_session_id(self, in_memory_app: App) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services.wake import defer_wake
 
         pool = MagicMock()
         with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
-            await defer_wake(pool, "sess_alpha", cause="message")
+            await defer_wake(pool, "sess_alpha", cause="message", account_id=account_id)
 
         rows = _job_rows(in_memory_app)
         assert len(rows) == 1
         assert rows[0]["lock"] == "sess_alpha"
 
     async def test_queueing_lock_is_session_id(self, in_memory_app: App) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services.wake import defer_wake
 
         pool = MagicMock()
         with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
-            await defer_wake(pool, "sess_beta", cause="message")
+            await defer_wake(pool, "sess_beta", cause="message", account_id=account_id)
 
         rows = _job_rows(in_memory_app)
         assert len(rows) == 1
         assert rows[0]["queueing_lock"] == "sess_beta"
 
     async def test_reschedule_defer_wake_uses_session_id_lock(self, in_memory_app: App) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services.wake import defer_wake
 
         pool = MagicMock()
         with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
-            await defer_wake(pool, "sess_gamma", cause="reschedule", delay_seconds=2)
+            await defer_wake(
+                pool, "sess_gamma", cause="reschedule", delay_seconds=2, account_id=account_id
+            )
 
         rows = _job_rows(in_memory_app)
         assert len(rows) == 1
@@ -67,6 +72,7 @@ class TestDeferWakeCrossSessionIsolation:
         the original bug wouldn't raise — it would surface as fewer
         queued jobs than sessions.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services.wake import defer_wake
 
         pool = MagicMock()
@@ -74,7 +80,7 @@ class TestDeferWakeCrossSessionIsolation:
 
         with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
             for i in range(n):
-                await defer_wake(pool, f"sess_{i}", cause="message")
+                await defer_wake(pool, f"sess_{i}", cause="message", account_id=account_id)
 
         rows = _job_rows(in_memory_app)
         assert len(rows) == n
@@ -87,14 +93,15 @@ class TestDeferWakeCrossSessionIsolation:
         completion + sweep) collapse into a single wake; the queued
         wake handles all events that arrived since it was deferred.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services.wake import defer_wake
 
         pool = MagicMock()
 
         with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
-            await defer_wake(pool, "sess_x", cause="message")
-            await defer_wake(pool, "sess_x", cause="sweep")
-            await defer_wake(pool, "sess_x", cause="tool_confirmation")
+            await defer_wake(pool, "sess_x", cause="message", account_id=account_id)
+            await defer_wake(pool, "sess_x", cause="sweep", account_id=account_id)
+            await defer_wake(pool, "sess_x", cause="tool_confirmation", account_id=account_id)
 
         rows = _job_rows(in_memory_app)
         assert len(rows) == 1

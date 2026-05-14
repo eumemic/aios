@@ -40,7 +40,7 @@ def temp_workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 
 
 @pytest.fixture
-def stub_handle(tmp_path: Path) -> SandboxHandle:
+def stub_handle(tmp_path: Path, **kwargs: Any) -> SandboxHandle:
     handle = SandboxHandle(
         session_id="sess_01TEST",
         sandbox_id="container_abc",
@@ -61,7 +61,7 @@ def canned_result() -> CommandResult:
 
 
 @pytest.fixture
-def stub_runtime(stub_handle: SandboxHandle, canned_result: CommandResult) -> Any:
+def stub_runtime(stub_handle: SandboxHandle, canned_result: CommandResult, **kwargs: Any) -> Any:
     prev_registry = runtime.sandbox_registry
     prev_pool = runtime.pool
     stub = _StubRegistry(stub_handle, canned_result)
@@ -86,7 +86,7 @@ def _vision_overrides(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 @pytest.fixture
-def stub_get_session_model(monkeypatch: pytest.MonkeyPatch) -> Any:
+def stub_get_session_model(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> Any:
     """Replace the DB lookup with a callable returning whatever the test sets."""
 
     class _Model:
@@ -94,7 +94,7 @@ def stub_get_session_model(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     state = _Model()
 
-    async def fake(_pool: Any, _session_id: str) -> str:
+    async def fake(_pool: Any, _session_id: str, **kwargs: Any) -> str:
         return state.value
 
     monkeypatch.setattr("aios.tools.read.sessions_service.get_session_model", fake)

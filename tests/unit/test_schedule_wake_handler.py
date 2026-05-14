@@ -39,6 +39,7 @@ class TestScheduleWakeHandler:
             cause="scheduled",
             delay_seconds=30,
             wake_reason="check back later",
+            account_id=ANY,
         )
         assert result["scheduled"] is True
         assert result["delay_seconds"] == 30

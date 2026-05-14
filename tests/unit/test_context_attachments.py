@@ -28,7 +28,7 @@ def temp_workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 
 
 @pytest.fixture(autouse=True)
-def _stub_supports_vision(monkeypatch: pytest.MonkeyPatch) -> Any:
+def _stub_supports_vision(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> Any:
     """Default: vision-capable model returns True; non-vision-capable returns False.
 
     Tests can override individual mappings via ``vision._VISION_OVERRIDES``.

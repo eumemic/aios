@@ -49,7 +49,7 @@ class _FakeConn:
 
 
 @pytest.fixture(autouse=True)
-def _stub_read_message_events(monkeypatch: pytest.MonkeyPatch) -> None:
+def _stub_read_message_events(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> None:
     """Short-circuit ``read_message_events`` so no real DB is hit when the
     code path falls back to 'load everything'.  We sentinel its return so
     tests can detect the fallback."""
@@ -63,9 +63,16 @@ def _stub_read_message_events(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_no_cumulative_falls_back_to_full_read() -> None:
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     conn = _FakeConn(total_local=None, ratio_n=0, ratio_mean=0.0)
     result = await queries.read_windowed_events(
-        conn, "sess_x", window_min=1_000, window_max=2_000, model="m", overhead_local=0
+        conn,
+        "sess_x",
+        window_min=1_000,
+        window_max=2_000,
+        model="m",
+        overhead_local=0,
+        account_id=account_id,
     )
     # Fallback short-circuit — ratio never consulted.
     assert result == ["_fallback_sentinel"]
@@ -80,11 +87,18 @@ async def test_insufficient_ratio_1_matches_today() -> None:
     byte-identically to the pre-ratio chunked-snap algorithm — otherwise
     the "gradual rollout" rollout property breaks.  This test pins that.
     """
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     conn = _FakeConn(total_local=3_000, ratio_n=4, ratio_mean=0.0)
     # window_min=1000, window_max=2000 → chunk size 1000.
     # total=3000 → overshoot 1000 → drop 1000 (one chunk).
     await queries.read_windowed_events(
-        conn, "sess_x", window_min=1_000, window_max=2_000, model="m", overhead_local=0
+        conn,
+        "sess_x",
+        window_min=1_000,
+        window_max=2_000,
+        model="m",
+        overhead_local=0,
+        account_id=account_id,
     )
     assert conn.fetch_calls, "expected bounded range scan to be called"
     # Second positional arg to conn.fetch is the drop value.
@@ -105,9 +119,16 @@ async def test_ratio_above_1_drops_more() -> None:
     Uses ratio_n=100 so the sigma_prior bucket (0.004 at n=100) is tight
     enough to quantize raw=1.5 to exactly 1.5.
     """
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     conn = _FakeConn(total_local=1_500, ratio_n=100, ratio_mean=1.5)
     await queries.read_windowed_events(
-        conn, "sess_x", window_min=1_000, window_max=2_000, model="m", overhead_local=0
+        conn,
+        "sess_x",
+        window_min=1_000,
+        window_max=2_000,
+        model="m",
+        overhead_local=0,
+        account_id=account_id,
     )
     _session_id, drop_local = conn.fetch_calls[-1]
     assert drop_local == 667
@@ -116,9 +137,16 @@ async def test_ratio_above_1_drops_more() -> None:
 @pytest.mark.asyncio
 async def test_ratio_below_1_drops_fewer() -> None:
     """ratio=0.5 deflates total_effective below window_max → no drop."""
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     conn = _FakeConn(total_local=3_000, ratio_n=5, ratio_mean=0.5)
     result = await queries.read_windowed_events(
-        conn, "sess_x", window_min=1_000, window_max=2_000, model="m", overhead_local=0
+        conn,
+        "sess_x",
+        window_min=1_000,
+        window_max=2_000,
+        model="m",
+        overhead_local=0,
+        account_id=account_id,
     )
     # total_effective = 1500 < 2000 → drop_effective = 0 → fallback.
     assert result == ["_fallback_sentinel"]
@@ -130,6 +158,7 @@ async def test_ceil_div_never_overshoots_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Post-drop effective size must be <= window_max for any ratio > 1."""
+    account_id = "acc_test_stub"
     ratio = 1.37
     total_local = 10_000
     window_min, window_max = 3_000, 5_000
@@ -150,7 +179,13 @@ async def test_ceil_div_never_overshoots_window(
 
     conn.fetch = _fetch
     await queries.read_windowed_events(
-        conn, "sess_x", window_min=window_min, window_max=window_max, model="m", overhead_local=0
+        conn,
+        "sess_x",
+        window_min=window_min,
+        window_max=window_max,
+        model="m",
+        overhead_local=0,
+        account_id=account_id,
     )
     drop_local = captured["drop_local"]
     remaining_local = total_local - drop_local

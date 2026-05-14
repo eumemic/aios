@@ -34,6 +34,7 @@ async def create(body: SessionTemplateCreate, pool: PoolDep, _auth: AuthDep) -> 
     partner. Pin ``agent_version`` to a specific version for deterministic
     spawning, or leave unset to track the agent's latest.
     """
+    account_id, _, _ = _auth
     return await service.create_session_template(
         pool,
         name=body.name,
@@ -43,6 +44,7 @@ async def create(body: SessionTemplateCreate, pool: PoolDep, _auth: AuthDep) -> 
         vault_ids=body.vault_ids,
         memory_store_ids=body.memory_store_ids,
         metadata=body.metadata,
+        account_id=account_id,
     )
 
 
@@ -57,7 +59,10 @@ async def list_(
 
     Cursor pagination via ``after``.
     """
-    items = await service.list_session_templates(pool, limit=limit, after=after)
+    account_id, _, _ = _auth
+    items = await service.list_session_templates(
+        pool, limit=limit, after=after, account_id=account_id
+    )
     return ListResponse[SessionTemplate](
         data=items,
         has_more=len(items) == limit,
@@ -68,7 +73,8 @@ async def list_(
 @router.get("/{template_id}", operation_id="get_session_template")
 async def get(template_id: str, pool: PoolDep, _auth: AuthDep) -> SessionTemplate:
     """Fetch one session template by id."""
-    return await service.get_session_template(pool, template_id)
+    account_id, _, _ = _auth
+    return await service.get_session_template(pool, template_id, account_id=account_id)
 
 
 @router.put("/{template_id}", operation_id="update_session_template")
@@ -82,6 +88,7 @@ async def update(
     pass null to switch to "track latest," pass a number to pin to that
     specific version. Already-spawned sessions are unaffected.
     """
+    account_id, _, _ = _auth
     return await service.update_session_template(
         pool,
         template_id,
@@ -92,6 +99,7 @@ async def update(
         vault_ids=body.vault_ids,
         memory_store_ids=body.memory_store_ids,
         metadata=body.metadata,
+        account_id=account_id,
     )
 
 
@@ -109,4 +117,5 @@ async def delete(template_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     handler until the connection is reconfigured to point at a different
     template. There is no API surface to un-archive currently.
     """
-    await service.archive_session_template(pool, template_id)
+    account_id, _, _ = _auth
+    await service.archive_session_template(pool, template_id, account_id=account_id)

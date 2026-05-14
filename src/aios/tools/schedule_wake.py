@@ -63,6 +63,7 @@ SCHEDULE_WAKE_PARAMETERS_SCHEMA: dict[str, Any] = {
 
 
 async def schedule_wake_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     delay_seconds = arguments.get("delay_seconds")
     if not isinstance(delay_seconds, int):
         raise ScheduleWakeArgumentError("delay_seconds must be an integer")
@@ -84,6 +85,7 @@ async def schedule_wake_handler(session_id: str, arguments: dict[str, Any]) -> d
         cause="scheduled",
         delay_seconds=delay_seconds,
         wake_reason=reason,
+        account_id=account_id,
     )
 
     return {

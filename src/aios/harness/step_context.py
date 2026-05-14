@@ -95,6 +95,7 @@ async def compute_step_prelude(
     :func:`compose_step_context` unchanged, so the composed prompt stays
     byte-identical to what it was before the split.
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     from aios.harness.channels import (
         augment_with_focal_paradigm,
         max_tail_block_local,
@@ -136,7 +137,9 @@ async def compute_step_prelude(
         tools.extend(to_openai_tools(connection_tools))
 
     skill_versions = (
-        await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
+        await skills_service.resolve_skill_refs(pool, agent.skills, account_id=account_id)
+        if agent.skills
+        else []
     )
     system_prompt = augment_system_prompt(agent.system, skill_versions)
     system_prompt = augment_with_focal_paradigm(system_prompt, channels)

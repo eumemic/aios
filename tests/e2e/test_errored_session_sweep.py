@@ -46,6 +46,7 @@ async def _seed_session_with_unreacted_message(
     """Create a session via the service layer, append a user message, then
     force ``status`` if it isn't ``pending``.  Returns the new session id.
     """
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     agent_id, environment_id = await _ensure_agent_and_env(pool)
     session = await sessions_service.create_session(
         pool,
@@ -53,10 +54,11 @@ async def _seed_session_with_unreacted_message(
         environment_id=environment_id,
         title=None,
         metadata={},
+        account_id=account_id,
     )
-    await sessions_service.append_user_message(pool, session.id, "hi")
+    await sessions_service.append_user_message(pool, session.id, "hi", account_id=account_id)
     if status != "pending":
-        await sessions_service.set_session_status(pool, session.id, status)
+        await sessions_service.set_session_status(pool, session.id, status, account_id=account_id)
     return session.id
 
 
@@ -95,9 +97,12 @@ class TestErroredSessionSweepFilter:
         """``append_user_message`` is the operator-recovery escape hatch:
         it must un-park an ``errored`` session by flipping status to ``pending``.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         sid = await _seed_session_with_unreacted_message(db_pool, status="errored")
 
-        await sessions_service.append_user_message(db_pool, sid, "please try again")
+        await sessions_service.append_user_message(
+            db_pool, sid, "please try again", account_id=account_id
+        )
 
         async with db_pool.acquire() as conn:
             status = await conn.fetchval("SELECT status FROM sessions WHERE id = $1", sid)

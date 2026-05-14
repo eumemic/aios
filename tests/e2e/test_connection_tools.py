@@ -36,6 +36,7 @@ class TestConnectionToolsInPrelude:
     async def test_attached_connection_tools_visible_to_model(
         self, harness: Harness, crypto_box: CryptoBox
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.harness.step_context import compute_step_prelude
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
@@ -53,14 +54,18 @@ class TestConnectionToolsInPrelude:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-{id(self)}", account_id=account_id
+        )
         session = await sess_svc.create_session(
             harness._pool,
             agent_id=agent.id,
             environment_id=env.id,
             title="conn-tool-prelude",
             metadata={},
+            account_id=account_id,
         )
 
         # Connection of type "echo" attached to the session.  Tools are
@@ -73,6 +78,7 @@ class TestConnectionToolsInPrelude:
             account="echo-1",
             metadata={},
             crypto_box=crypto_box,
+            account_id=account_id,
         )
         async with harness._pool.acquire() as db_conn:
             await db_queries.update_connector_tools_schema(
@@ -90,15 +96,16 @@ class TestConnectionToolsInPrelude:
                         },
                     },
                 ],
+                account_id=account_id,
             )
         await connections_service.attach_connection(
-            harness._pool, connection.id, session_id=session.id
+            harness._pool, connection.id, session_id=session.id, account_id=account_id
         )
 
         prelude = await compute_step_prelude(
             pool=harness._pool,
             session_id=session.id,
-            session=await sess_svc.get_session(harness._pool, session.id),
+            session=await sess_svc.get_session(harness._pool, session.id, account_id=account_id),
             agent=agent,
             channels=[],
             memory_store_echoes=[],
@@ -122,6 +129,7 @@ class TestConnectionToolsInPrelude:
         that session must see the bot's send/edit/react tools even though
         the connection isn't directly ``session_id``-attached.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.harness.step_context import compute_step_prelude
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
@@ -139,8 +147,11 @@ class TestConnectionToolsInPrelude:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-pc-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-pc-{id(self)}", account_id=account_id
+        )
         template = await templates_svc.create_session_template(
             harness._pool,
             name=f"tpl-{id(self)}",
@@ -150,6 +161,7 @@ class TestConnectionToolsInPrelude:
             vault_ids=[],
             memory_store_ids=[],
             metadata={},
+            account_id=account_id,
         )
 
         connection = await connections_service.create_connection(
@@ -158,6 +170,7 @@ class TestConnectionToolsInPrelude:
             account="echo-pc",
             metadata={},
             crypto_box=crypto_box,
+            account_id=account_id,
         )
         async with harness._pool.acquire() as db_conn:
             await db_queries.update_connector_tools_schema(
@@ -171,9 +184,10 @@ class TestConnectionToolsInPrelude:
                         "input_schema": {"type": "object", "properties": {}},
                     },
                 ],
+                account_id=account_id,
             )
         await connections_service.configure_per_chat(
-            harness._pool, connection.id, session_template_id=template.id
+            harness._pool, connection.id, session_template_id=template.id, account_id=account_id
         )
 
         # Spawn a session as if from inbound, then stamp the chat_sessions
@@ -186,6 +200,7 @@ class TestConnectionToolsInPrelude:
             title="spawned",
             metadata={},
             focal_locked=True,
+            account_id=account_id,
         )
         async with harness._pool.acquire() as db_conn:
             await db_queries.insert_chat_session(
@@ -193,12 +208,13 @@ class TestConnectionToolsInPrelude:
                 connection_id=connection.id,
                 chat_id="chat_seed",
                 session_id=session.id,
+                account_id=account_id,
             )
 
         prelude = await compute_step_prelude(
             pool=harness._pool,
             session_id=session.id,
-            session=await sess_svc.get_session(harness._pool, session.id),
+            session=await sess_svc.get_session(harness._pool, session.id, account_id=account_id),
             agent=agent,
             channels=[],
             memory_store_echoes=[],
@@ -214,6 +230,7 @@ class TestConnectionToolDispatch:
     async def test_model_calls_connection_tool_then_resumes_after_result(
         self, harness: Harness, crypto_box: CryptoBox
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
         from aios.services import environments as env_svc
@@ -229,14 +246,18 @@ class TestConnectionToolDispatch:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-d-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-d-{id(self)}", account_id=account_id
+        )
         session = await sess_svc.create_session(
             harness._pool,
             agent_id=agent.id,
             environment_id=env.id,
             title="dispatch",
             metadata={},
+            account_id=account_id,
         )
         connection = await connections_service.create_connection(
             harness._pool,
@@ -244,6 +265,7 @@ class TestConnectionToolDispatch:
             account="echo-d",
             metadata={},
             crypto_box=crypto_box,
+            account_id=account_id,
         )
         async with harness._pool.acquire() as db_conn:
             await db_queries.update_connector_tools_schema(
@@ -261,9 +283,10 @@ class TestConnectionToolDispatch:
                         },
                     },
                 ],
+                account_id=account_id,
             )
         await connections_service.attach_connection(
-            harness._pool, connection.id, session_id=session.id
+            harness._pool, connection.id, session_id=session.id, account_id=account_id
         )
 
         # Model calls the connection tool, then (after the result lands)
@@ -274,7 +297,9 @@ class TestConnectionToolDispatch:
                 assistant("Done."),
             ]
         )
-        await sess_svc.append_user_message(harness._pool, session.id, "say hi")
+        await sess_svc.append_user_message(
+            harness._pool, session.id, "say hi", account_id=account_id
+        )
 
         # Step 1: model calls chat_send → session parks in requires_action.
         await harness.run_step(session.id)
@@ -290,6 +315,7 @@ class TestConnectionToolDispatch:
             session.id,
             "message",
             {"role": "tool", "tool_call_id": "cs_1", "content": "ok", "name": "chat_send"},
+            account_id=account_id,
         )
 
         # Step 2: session resumes, model produces the wrap-up.
@@ -307,6 +333,7 @@ class TestMultimodalToolResults:
     async def test_list_content_round_trips_intact(
         self, http_client: httpx.AsyncClient, harness: Harness
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
         from aios.services import environments as env_svc
@@ -329,17 +356,23 @@ class TestMultimodalToolResults:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-mm-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-mm-{id(self)}", account_id=account_id
+        )
         session = await sess_svc.create_session(
             harness._pool,
             agent_id=agent.id,
             environment_id=env.id,
             title="mm",
             metadata={},
+            account_id=account_id,
         )
         # Seed an assistant tool_call so /tool-results has a parent to bind to.
-        await sess_svc.append_user_message(harness._pool, session.id, "fetch")
+        await sess_svc.append_user_message(
+            harness._pool, session.id, "fetch", account_id=account_id
+        )
         await sess_svc.append_event(
             harness._pool,
             session.id,
@@ -355,6 +388,7 @@ class TestMultimodalToolResults:
                     }
                 ],
             },
+            account_id=account_id,
         )
 
         multimodal_content = [
@@ -381,6 +415,7 @@ class TestMultimodalToolResults:
         self, http_client: httpx.AsyncClient, harness: Harness
     ) -> None:
         """Backwards-compat: existing clients that POST a plain string keep working."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
         from aios.services import environments as env_svc
@@ -403,16 +438,22 @@ class TestMultimodalToolResults:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-str-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-str-{id(self)}", account_id=account_id
+        )
         session = await sess_svc.create_session(
             harness._pool,
             agent_id=agent.id,
             environment_id=env.id,
             title="str",
             metadata={},
+            account_id=account_id,
         )
-        await sess_svc.append_user_message(harness._pool, session.id, "fetch")
+        await sess_svc.append_user_message(
+            harness._pool, session.id, "fetch", account_id=account_id
+        )
         await sess_svc.append_event(
             harness._pool,
             session.id,
@@ -428,6 +469,7 @@ class TestMultimodalToolResults:
                     }
                 ],
             },
+            account_id=account_id,
         )
 
         r = await http_client.post(

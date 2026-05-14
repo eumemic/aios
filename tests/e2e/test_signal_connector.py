@@ -104,6 +104,7 @@ async def _publish_signal_tools_schema(harness: Harness) -> None:
     (one per connector type), not from per-connection ``connections.tools``.
     A single publish covers every connection of the type.
     """
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.db import queries as db_queries
 
     async with harness._pool.acquire() as db_conn:
@@ -122,6 +123,7 @@ async def _publish_signal_tools_schema(harness: Harness) -> None:
                     },
                 },
             ],
+            account_id=account_id,
         )
 
 
@@ -213,6 +215,7 @@ class TestSignalMultiConnection:
         """An inbound envelope tagged with phone A's ``account`` lands as
         a user-message event on session A; an envelope tagged with B's
         account lands on session B."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios_signal.config import Settings
         from aios_signal.connector import SignalConnector
 
@@ -232,20 +235,37 @@ class TestSignalMultiConnection:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-sig-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-sig-{id(self)}", account_id=account_id
+        )
         session_a = await sess_svc.create_session(
-            harness._pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title=None,
+            metadata={},
+            account_id=account_id,
         )
         session_b = await sess_svc.create_session(
-            harness._pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title=None,
+            metadata={},
+            account_id=account_id,
         )
 
         api_key = aios_env["AIOS_API_KEY"]
         conn_a = await _create_signal_connection(api_key, live_server, PHONE_A, {"phone": PHONE_A})
         conn_b = await _create_signal_connection(api_key, live_server, PHONE_B, {"phone": PHONE_B})
-        await connections_service.attach_connection(harness._pool, conn_a, session_id=session_a.id)
-        await connections_service.attach_connection(harness._pool, conn_b, session_id=session_b.id)
+        await connections_service.attach_connection(
+            harness._pool, conn_a, session_id=session_a.id, account_id=account_id
+        )
+        await connections_service.attach_connection(
+            harness._pool, conn_b, session_id=session_b.id, account_id=account_id
+        )
         await _publish_signal_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "signal")
 
@@ -327,6 +347,7 @@ class TestSignalMultiConnection:
     ) -> None:
         """The model calling ``signal_send`` on session A's tool call
         lands as an RPC ``send`` with ``account=PHONE_A``, not PHONE_B."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios_signal.config import Settings
         from aios_signal.connector import SignalConnector
 
@@ -345,13 +366,26 @@ class TestSignalMultiConnection:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-sigo-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-sigo-{id(self)}", account_id=account_id
+        )
         session_a = await sess_svc.create_session(
-            harness._pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title=None,
+            metadata={},
+            account_id=account_id,
         )
         session_b = await sess_svc.create_session(
-            harness._pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title=None,
+            metadata={},
+            account_id=account_id,
         )
 
         api_key = aios_env["AIOS_API_KEY"]
@@ -361,8 +395,12 @@ class TestSignalMultiConnection:
         conn_b = await _create_signal_connection(
             api_key, live_server, PHONE_B + "-out", {"phone": PHONE_B}
         )
-        await connections_service.attach_connection(harness._pool, conn_a, session_id=session_a.id)
-        await connections_service.attach_connection(harness._pool, conn_b, session_id=session_b.id)
+        await connections_service.attach_connection(
+            harness._pool, conn_a, session_id=session_a.id, account_id=account_id
+        )
+        await connections_service.attach_connection(
+            harness._pool, conn_b, session_id=session_b.id, account_id=account_id
+        )
         await _publish_signal_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "signal")
 
@@ -385,7 +423,9 @@ class TestSignalMultiConnection:
                 assistant("done"),
             ]
         )
-        await sess_svc.append_user_message(harness._pool, session_a.id, "ping")
+        await sess_svc.append_user_message(
+            harness._pool, session_a.id, "ping", account_id=account_id
+        )
 
         connector_task = asyncio.create_task(connector.run())
         rpc_call: AsyncMock = mocked_signal_daemon["rpc_call"]

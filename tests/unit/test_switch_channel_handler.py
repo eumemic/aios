@@ -9,7 +9,7 @@ the bound-channels validation path.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from aios.harness.channels import SWITCH_CHANNEL_METADATA_KEY
 from aios.tools.registry import ToolResult
@@ -163,4 +163,4 @@ class TestNonPerChatPathStillWorks:
             "target": None,
             "success": True,
         }
-        set_focal.assert_awaited_once_with(conn, "sess_normal", None)
+        set_focal.assert_awaited_once_with(conn, "sess_normal", None, account_id=ANY)
