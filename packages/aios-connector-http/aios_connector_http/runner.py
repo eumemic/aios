@@ -279,9 +279,13 @@ class HttpConnector:
         """Override: cleanup before the runner exits."""
 
     async def wait_ready(self, deadline: float = 5.0) -> None:
-        """Block until run() has scheduled all background loops.
+        """Block until run() has submitted all three background loop tasks.
 
-        Raises TimeoutError if run() does not reach the ready state within
+        Specifically: setup() has returned and all three create_task() calls
+        (discovery, tool, management) have completed. The loops have been
+        *scheduled* but may not have started their first I/O iteration yet.
+
+        Raises TimeoutError if run() does not reach this point within
         deadline seconds. Intended for test coordination.
         """
         await asyncio.wait_for(self._ready_event.wait(), timeout=deadline)
@@ -442,6 +446,7 @@ class HttpConnector:
                     self._ready_event.set()  # all background loops scheduled
             finally:
                 self._ready_event.clear()
+                self._connection_served.clear()
                 await self.teardown()
 
     async def _publish_tools_schema(self) -> None:
@@ -578,6 +583,7 @@ class HttpConnector:
     async def _on_connection_removed(self, connection_id: str) -> None:
         """Cancel the worker task for a vanished connection."""
         state = self._connections.pop(connection_id, None)
+        self._connection_served.pop(connection_id, None)
         if state is None or state.worker is None:
             return
         state.worker.cancel()

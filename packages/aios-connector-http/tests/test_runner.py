@@ -768,6 +768,8 @@ class TestWaitConnectionServed:
         c = _ProbeConnector()
         wait_task = asyncio.create_task(c.wait_connection_served("conn_x", deadline=5.0))
         await asyncio.sleep(0)  # yield so wait_task starts
-        # Simulate what _on_connection_added does — set the event
+        # Drive the internal event directly — tests that _on_connection_added
+        # calls this are covered by TestMultiConnectionDispatch; here we only
+        # verify the coordination contract of wait_connection_served itself.
         c._connection_served.setdefault("conn_x", asyncio.Event()).set()
         await wait_task  # should complete without TimeoutError
