@@ -35,7 +35,7 @@
           "accounts"
         ],
         "summary": "Bootstrap",
-        "description": "One-shot endpoint that mints the root account and its first API key.\n\nGated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset\nor empty, the endpoint is 401 regardless of header value \u2014 a fresh\ndeployment must explicitly opt in to bootstrap by setting the env.\n\nOnce a non-archived root account exists, the endpoint is 404\nregardless of token validity. The ``accounts_one_active_root``\npartial unique index in migration 0040 enforces the invariant at\nthe DB layer too \u2014 the 404 here is the friendly upstream answer.\n\nThe ``plaintext_key`` field of the response is the *only* time the\noperator key is returned in plaintext. After this call, every\nsubsequent use of that key authenticates against the stored\n``sha256`` hash.",
+        "description": "Mint the root account and its first API key.\n\nGated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset\nor empty, the endpoint is 401 regardless of header value.\n\nRoot-exists check fires before the token check so a probe with no/\nwrong token can't distinguish \"no bootstrap\" (404) from \"wrong token\nbut bootstrap is still open\" (401). Once a root is in place the\nendpoint behaves like it doesn't exist at all.\n\n``plaintext_key`` in the response is the only time the operator key\nis returned in plaintext.",
         "operationId": "bootstrap_root_account",
         "parameters": [
           {
@@ -7082,8 +7082,7 @@
         "required": [
           "display_name"
         ],
-        "title": "BootstrapRequest",
-        "description": "Body for ``POST /v1/accounts/bootstrap``.\n\nOnly the human-readable display_name is required at bootstrap time;\nmetadata can be added later via a PATCH endpoint (lands in PR 6)."
+        "title": "BootstrapRequest"
       },
       "BootstrapResponse": {
         "properties": {
@@ -7106,8 +7105,7 @@
           "key_id",
           "plaintext_key"
         ],
-        "title": "BootstrapResponse",
-        "description": "Response from ``POST /v1/accounts/bootstrap``.\n\n``plaintext_key`` is returned exactly once \u2014 it's never recoverable\nafter this response. The operator must capture it (env, secret store,\npassword manager). All subsequent API calls use it as a bearer token."
+        "title": "BootstrapResponse"
       },
       "BoundChat": {
         "properties": {

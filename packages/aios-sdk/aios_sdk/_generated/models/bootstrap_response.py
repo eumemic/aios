@@ -11,16 +11,11 @@ T = TypeVar("T", bound="BootstrapResponse")
 
 @_attrs_define
 class BootstrapResponse:
-    """Response from ``POST /v1/accounts/bootstrap``.
-
-    ``plaintext_key`` is returned exactly once — it's never recoverable
-    after this response. The operator must capture it (env, secret store,
-    password manager). All subsequent API calls use it as a bearer token.
-
-        Attributes:
-            account_id (str):
-            key_id (str):
-            plaintext_key (str):
+    """
+    Attributes:
+        account_id (str):
+        key_id (str):
+        plaintext_key (str):
     """
 
     account_id: str

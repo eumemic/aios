@@ -4815,7 +4815,7 @@ async def insert_file(
     return _row_to_file(row)
 
 
-# ─── accounts + account_keys (#367 PR 1 — multi-tenancy foundation) ──────────
+# ─── accounts + account_keys ─────────────────────────────────────────────────
 
 
 def _row_to_account(row: asyncpg.Record) -> Account:

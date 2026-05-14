@@ -95,8 +95,7 @@ curl -sS -H "Authorization: Bearer $PLAINTEXT" \
 ```
 
 Once the recovery key is verified, restart api + worker so any cached
-auth state is cleared. (Strictly speaking PR 1 doesn't cache anything,
-but later PRs may, and the restart is cheap insurance.)
+auth state is cleared.
 
 ### 6. Rotate the recovery key
 

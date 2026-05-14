@@ -48,8 +48,6 @@ MEMORY_VERSION: Final = "memver"
 GITHUB_REPOSITORY: Final = "ghrepo"
 FILE: Final = "file"
 MANAGEMENT_CALL: Final = "mgmt"
-# Multi-tenancy v1 (#367). PR 1 adds the two tables; later PRs in the
-# stack reference account ids on every user-data row.
 ACCOUNT: Final = "acc"
 ACCOUNT_KEY: Final = "key"
 

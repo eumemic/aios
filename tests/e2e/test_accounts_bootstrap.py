@@ -1,9 +1,4 @@
-"""E2E tests for ``POST /v1/accounts/bootstrap`` (#367 PR 1).
-
-The bootstrap endpoint is the only ``/v1/accounts/*`` surface in PR 1.
-Tests run against a real testcontainer Postgres so the partial unique
-indexes from migration 0040 are exercised end-to-end.
-"""
+"""E2E tests for ``POST /v1/accounts/bootstrap``."""
 
 from __future__ import annotations
 
@@ -31,11 +26,6 @@ async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
 
 @pytest.fixture
 def bootstrap_env(aios_env: dict[str, str]) -> Iterator[dict[str, str]]:
-    """Layer ``AIOS_BOOTSTRAP_TOKEN`` on top of the standard aios env.
-
-    ``aios_env`` already mocks the base env; this fixture adds the
-    bootstrap-specific token without disturbing the rest.
-    """
     token = secrets.token_urlsafe(32)
     extra = {"AIOS_BOOTSTRAP_TOKEN": token}
     with mock.patch.dict(os.environ, extra):
@@ -46,17 +36,12 @@ def bootstrap_env(aios_env: dict[str, str]) -> Iterator[dict[str, str]]:
         get_settings.cache_clear()
 
 
-@pytest.fixture
-async def http_client(pool: Any, bootstrap_env: dict[str, str]) -> AsyncIterator[httpx.AsyncClient]:
-    """Bootstrap endpoint is unauthenticated against ``AIOS_API_KEY`` —
-    it carries its own ``AIOS_BOOTSTRAP_TOKEN``. The client returned
-    here sends no default Authorization header; each test adds the
-    right header per call.
-    """
+async def _build_client(pool: Any) -> AsyncIterator[httpx.AsyncClient]:
     from aios.api.app import create_app
     from aios.config import get_settings
     from aios.crypto.vault import CryptoBox
 
+    get_settings.cache_clear()
     settings = get_settings()
     app = create_app()
     app.state.pool = pool
@@ -66,6 +51,12 @@ async def http_client(pool: Any, bootstrap_env: dict[str, str]) -> AsyncIterator
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(base_url="http://testserver", transport=transport) as client:
+        yield client
+
+
+@pytest.fixture
+async def http_client(pool: Any, bootstrap_env: dict[str, str]) -> AsyncIterator[httpx.AsyncClient]:
+    async for client in _build_client(pool):
         yield client
 
 
@@ -73,31 +64,12 @@ async def http_client(pool: Any, bootstrap_env: dict[str, str]) -> AsyncIterator
 async def http_client_no_bootstrap_env(
     pool: Any, aios_env: dict[str, str]
 ) -> AsyncIterator[httpx.AsyncClient]:
-    """Client where ``AIOS_BOOTSTRAP_TOKEN`` is *not* in env.
-
-    Used by the env-unset test; the regular ``http_client`` fixture
-    depends on ``bootstrap_env`` which sets the token, so a separate
-    fixture is needed to exercise the unset case.
+    """Client built without ``AIOS_BOOTSTRAP_TOKEN`` in env — used by the
+    env-unset test, which would otherwise see the token set by
+    ``bootstrap_env`` that the regular ``http_client`` depends on.
     """
-    from aios.api.app import create_app
-    from aios.config import get_settings
-    from aios.crypto.vault import CryptoBox
-
-    # Defensive: ensure the env actually doesn't carry the token,
-    # even if a prior test leaked it.
-    assert "AIOS_BOOTSTRAP_TOKEN" not in os.environ
-    get_settings.cache_clear()
-    settings = get_settings()
-    app = create_app()
-    app.state.pool = pool
-    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    app.state.db_url = settings.db_url
-    app.state.procrastinate = mock.MagicMock()
-
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(base_url="http://testserver", transport=transport) as client:
+    async for client in _build_client(pool):
         yield client
-    get_settings.cache_clear()
 
 
 def _bootstrap_headers(token: str) -> dict[str, str]:
@@ -239,7 +211,7 @@ class TestBootstrap:
 
 
 class TestAccountInvariants:
-    """Direct DB tests for the migration 0040 partial-unique indexes.
+    """Direct DB tests for the ``accounts`` partial-unique indexes.
 
     These exercise the DDL itself (not the bootstrap endpoint) so a
     future refactor of the endpoint doesn't accidentally remove the

@@ -10,13 +10,9 @@ T = TypeVar("T", bound="BootstrapRequest")
 
 @_attrs_define
 class BootstrapRequest:
-    """Body for ``POST /v1/accounts/bootstrap``.
-
-    Only the human-readable display_name is required at bootstrap time;
-    metadata can be added later via a PATCH endpoint (lands in PR 6).
-
-        Attributes:
-            display_name (str):
+    """
+    Attributes:
+        display_name (str):
     """
 
     display_name: str

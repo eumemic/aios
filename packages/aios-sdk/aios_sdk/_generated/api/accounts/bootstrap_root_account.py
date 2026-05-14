@@ -69,30 +69,24 @@ def sync_detailed(
     body: BootstrapRequest,
     authorization: None | str | Unset = UNSET,
 ) -> Response[BootstrapResponse | HTTPValidationError]:
-    """Bootstrap
+    r"""Bootstrap
 
-     One-shot endpoint that mints the root account and its first API key.
+     Mint the root account and its first API key.
 
     Gated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset
-    or empty, the endpoint is 401 regardless of header value — a fresh
-    deployment must explicitly opt in to bootstrap by setting the env.
+    or empty, the endpoint is 401 regardless of header value.
 
-    Once a non-archived root account exists, the endpoint is 404
-    regardless of token validity. The ``accounts_one_active_root``
-    partial unique index in migration 0040 enforces the invariant at
-    the DB layer too — the 404 here is the friendly upstream answer.
+    Root-exists check fires before the token check so a probe with no/
+    wrong token can't distinguish \"no bootstrap\" (404) from \"wrong token
+    but bootstrap is still open\" (401). Once a root is in place the
+    endpoint behaves like it doesn't exist at all.
 
-    The ``plaintext_key`` field of the response is the *only* time the
-    operator key is returned in plaintext. After this call, every
-    subsequent use of that key authenticates against the stored
-    ``sha256`` hash.
+    ``plaintext_key`` in the response is the only time the operator key
+    is returned in plaintext.
 
     Args:
         authorization (None | str | Unset):
-        body (BootstrapRequest): Body for ``POST /v1/accounts/bootstrap``.
-
-            Only the human-readable display_name is required at bootstrap time;
-            metadata can be added later via a PATCH endpoint (lands in PR 6).
+        body (BootstrapRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -120,30 +114,24 @@ def sync(
     body: BootstrapRequest,
     authorization: None | str | Unset = UNSET,
 ) -> BootstrapResponse | HTTPValidationError | None:
-    """Bootstrap
+    r"""Bootstrap
 
-     One-shot endpoint that mints the root account and its first API key.
+     Mint the root account and its first API key.
 
     Gated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset
-    or empty, the endpoint is 401 regardless of header value — a fresh
-    deployment must explicitly opt in to bootstrap by setting the env.
+    or empty, the endpoint is 401 regardless of header value.
 
-    Once a non-archived root account exists, the endpoint is 404
-    regardless of token validity. The ``accounts_one_active_root``
-    partial unique index in migration 0040 enforces the invariant at
-    the DB layer too — the 404 here is the friendly upstream answer.
+    Root-exists check fires before the token check so a probe with no/
+    wrong token can't distinguish \"no bootstrap\" (404) from \"wrong token
+    but bootstrap is still open\" (401). Once a root is in place the
+    endpoint behaves like it doesn't exist at all.
 
-    The ``plaintext_key`` field of the response is the *only* time the
-    operator key is returned in plaintext. After this call, every
-    subsequent use of that key authenticates against the stored
-    ``sha256`` hash.
+    ``plaintext_key`` in the response is the only time the operator key
+    is returned in plaintext.
 
     Args:
         authorization (None | str | Unset):
-        body (BootstrapRequest): Body for ``POST /v1/accounts/bootstrap``.
-
-            Only the human-readable display_name is required at bootstrap time;
-            metadata can be added later via a PATCH endpoint (lands in PR 6).
+        body (BootstrapRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -166,30 +154,24 @@ async def asyncio_detailed(
     body: BootstrapRequest,
     authorization: None | str | Unset = UNSET,
 ) -> Response[BootstrapResponse | HTTPValidationError]:
-    """Bootstrap
+    r"""Bootstrap
 
-     One-shot endpoint that mints the root account and its first API key.
+     Mint the root account and its first API key.
 
     Gated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset
-    or empty, the endpoint is 401 regardless of header value — a fresh
-    deployment must explicitly opt in to bootstrap by setting the env.
+    or empty, the endpoint is 401 regardless of header value.
 
-    Once a non-archived root account exists, the endpoint is 404
-    regardless of token validity. The ``accounts_one_active_root``
-    partial unique index in migration 0040 enforces the invariant at
-    the DB layer too — the 404 here is the friendly upstream answer.
+    Root-exists check fires before the token check so a probe with no/
+    wrong token can't distinguish \"no bootstrap\" (404) from \"wrong token
+    but bootstrap is still open\" (401). Once a root is in place the
+    endpoint behaves like it doesn't exist at all.
 
-    The ``plaintext_key`` field of the response is the *only* time the
-    operator key is returned in plaintext. After this call, every
-    subsequent use of that key authenticates against the stored
-    ``sha256`` hash.
+    ``plaintext_key`` in the response is the only time the operator key
+    is returned in plaintext.
 
     Args:
         authorization (None | str | Unset):
-        body (BootstrapRequest): Body for ``POST /v1/accounts/bootstrap``.
-
-            Only the human-readable display_name is required at bootstrap time;
-            metadata can be added later via a PATCH endpoint (lands in PR 6).
+        body (BootstrapRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -215,30 +197,24 @@ async def asyncio(
     body: BootstrapRequest,
     authorization: None | str | Unset = UNSET,
 ) -> BootstrapResponse | HTTPValidationError | None:
-    """Bootstrap
+    r"""Bootstrap
 
-     One-shot endpoint that mints the root account and its first API key.
+     Mint the root account and its first API key.
 
     Gated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset
-    or empty, the endpoint is 401 regardless of header value — a fresh
-    deployment must explicitly opt in to bootstrap by setting the env.
+    or empty, the endpoint is 401 regardless of header value.
 
-    Once a non-archived root account exists, the endpoint is 404
-    regardless of token validity. The ``accounts_one_active_root``
-    partial unique index in migration 0040 enforces the invariant at
-    the DB layer too — the 404 here is the friendly upstream answer.
+    Root-exists check fires before the token check so a probe with no/
+    wrong token can't distinguish \"no bootstrap\" (404) from \"wrong token
+    but bootstrap is still open\" (401). Once a root is in place the
+    endpoint behaves like it doesn't exist at all.
 
-    The ``plaintext_key`` field of the response is the *only* time the
-    operator key is returned in plaintext. After this call, every
-    subsequent use of that key authenticates against the stored
-    ``sha256`` hash.
+    ``plaintext_key`` in the response is the only time the operator key
+    is returned in plaintext.
 
     Args:
         authorization (None | str | Unset):
-        body (BootstrapRequest): Body for ``POST /v1/accounts/bootstrap``.
-
-            Only the human-readable display_name is required at bootstrap time;
-            metadata can be added later via a PATCH endpoint (lands in PR 6).
+        body (BootstrapRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

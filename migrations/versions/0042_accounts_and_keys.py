@@ -1,23 +1,12 @@
-"""Multi-tenancy v1 PR 1: ``accounts`` + ``account_keys`` tables.
+"""Add ``accounts`` + ``account_keys`` tables.
 
-First migration of the multi-tenancy stack (issue #367). Adds the two
-tables that everything else hangs off:
+``accounts`` is the hierarchical tenant. Each row points to its parent
+via ``parent_account_id`` (NULL for the singular root). ``can_mint_children``
+gates the create-child management verbs. Soft-archived via ``archived_at``.
 
-* ``accounts`` — the hierarchical tenant. Tree via ``parent_account_id``;
-  one capability flag (``can_mint_children``); soft-archived via
-  ``archived_at``. Three partial-unique indexes enforce: (a) sibling
-  display names are unique within a parent, (b) root display names are
-  unique among roots (because ``NULL != NULL`` in regular UNIQUE), and
-  (c) at most one active root can exist at a time.
-* ``account_keys`` — bearer API keys. Plaintext returned once at mint;
-  stored as ``sha256`` hash. Multiple active keys per account allowed
-  (zero-downtime rotation). ``ON DELETE CASCADE`` so a hard ``purge``
-  of an account sweeps its keys with it.
-
-No resource table gets touched here — PR 4 in the stack will add the
-``account_id`` columns and FKs. PR 2 changes the auth dep to return
-``(account_id, key_id, can_mint_children)``; PR 1 just lays the
-foundation.
+``account_keys`` holds bearer API keys, hashed at rest. Plaintext is
+returned exactly once at mint time; multiple active keys per account
+are allowed so rotation is mint-new + switch-callers + revoke-old.
 
 Revision ID: 0042
 Revises: 0041
@@ -51,9 +40,6 @@ def upgrade() -> None:
         """
     )
 
-    # Sibling-unique display names: two active accounts under the same
-    # parent can't share a name.  Partial on ``archived_at IS NULL`` so a
-    # soft-deleted name is immediately reusable.
     op.execute(
         """
         CREATE UNIQUE INDEX accounts_sibling_name_uniq
@@ -62,9 +48,9 @@ def upgrade() -> None:
         """
     )
 
-    # Root display names: regular UNIQUE treats NULLs as distinct, so a
-    # plain ``UNIQUE (parent_account_id, display_name)`` would let two
-    # roots share a name (both rows have ``parent_account_id IS NULL``).
+    # Regular UNIQUE treats NULLs as distinct, so a plain
+    # ``UNIQUE (parent_account_id, display_name)`` would let two roots
+    # share a name (both rows have ``parent_account_id IS NULL``).
     # Partial unique on display_name where the parent is NULL fixes it.
     op.execute(
         """
@@ -74,9 +60,9 @@ def upgrade() -> None:
         """
     )
 
-    # At most one active root: an expression index on a constant value
-    # makes every matching row share the same key, so a second active
-    # root violates uniqueness.  Cleaner than a CHECK + trigger.
+    # ``((TRUE))`` makes every matching row share the same index key,
+    # so a second active root violates uniqueness — cleaner than a
+    # CHECK + trigger for "at most one active root."
     op.execute(
         """
         CREATE UNIQUE INDEX accounts_one_active_root
@@ -85,8 +71,6 @@ def upgrade() -> None:
         """
     )
 
-    # Fast lookup of a parent's direct children (the management
-    # endpoint that lists children, the cascade-archive walk).
     op.execute(
         """
         CREATE INDEX accounts_parent_idx
@@ -110,9 +94,6 @@ def upgrade() -> None:
         """
     )
 
-    # The auth dep looks up tokens by hash; the UNIQUE constraint above
-    # already gives a B-tree on hash.  We also need a fast "active keys
-    # for this account" lookup for the list-keys endpoint.
     op.execute(
         """
         CREATE INDEX account_keys_account_active_idx
