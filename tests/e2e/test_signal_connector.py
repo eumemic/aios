@@ -393,7 +393,7 @@ class TestSignalMultiConnection:
             # Wait until serve_connection has been spawned for conn_a so
             # the calls-SSE backfill doesn't dispatch ``signal_send``
             # before ``serve_connection`` populates ``state``.
-            await connector.wait_connection_served(conn_a.id)
+            await connector.wait_connection_served(conn_a)
 
             await harness.run_step(session_a.id)
 
