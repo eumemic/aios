@@ -153,8 +153,9 @@ async def _read_image(
     handle: SandboxHandle,
     pool: Any,
 ) -> ToolResult:
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     mime = _EXT_TO_MIME[os.path.splitext(path)[1].lower()]
-    model = await sessions_service.get_session_model(pool, session_id)
+    model = await sessions_service.get_session_model(pool, session_id, account_id=account_id)
 
     host_path = resolve_to_host_path(session_id, path)
     if host_path is not None:

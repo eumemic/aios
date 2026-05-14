@@ -72,7 +72,7 @@ async def in_memory_app() -> AsyncIterator[App]:
         yield patched
 
 
-def fake_pool_yielding_conn(conn: Any) -> Any:
+def fake_pool_yielding_conn(conn: Any, **kwargs: Any) -> Any:
     """Stand-in for ``asyncpg.Pool`` whose ``async with pool.acquire()`` yields *conn*."""
     pool = MagicMock()
     cm = MagicMock()

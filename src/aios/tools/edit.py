@@ -97,6 +97,7 @@ EDIT_PARAMETERS_SCHEMA: dict[str, Any] = {
 
 async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Handler for the edit tool. See module docstring for the return shape."""
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     path = arguments.get("path")
     if not isinstance(path, str) or not path.strip():
         raise EditArgumentError("edit tool requires a non-empty 'path' string")
@@ -136,7 +137,7 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     pool = runtime.require_pool()
     if target is not None:
         existing = await memory_service.get_memory_by_path(
-            pool, target.store_id, target.store_path, include_content=True
+            pool, target.store_id, target.store_path, include_content=True, account_id=account_id
         )
         if existing is None:
             return {
@@ -209,6 +210,7 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
                 new_content=modified,
                 precondition_sha256=precondition_sha,
                 actor=memory_service.SessionActor(session_id=session_id),
+                account_id=account_id,
             )
         except MemoryPreconditionFailedError as exc:
             return {"error": exc.message, "path": path}

@@ -52,6 +52,7 @@ class TestFocalChannelE2E:
         tool_result carries the ``switch_channel`` success marker the
         unread-derivation helpers anchor on.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         harness.script_model(
             [
                 assistant(tool_calls=[_switch_call("signal/+1/chat-a", call_id="c1")]),
@@ -65,18 +66,20 @@ class TestFocalChannelE2E:
             session.id,
             "from chat-a",
             metadata={"channel": "signal/+1/chat-a"},
+            account_id=account_id,
         )
         await sessions_service.append_user_message(
             harness._pool,
             session.id,
             "from chat-b",
             metadata={"channel": "signal/+1/chat-b"},
+            account_id=account_id,
         )
         await harness.run_until_idle(session.id)
 
         # Focal updated to the requested target.
         async with harness._pool.acquire() as conn:
-            focal = await queries.get_session_focal_channel(conn, session.id)
+            focal = await queries.get_session_focal_channel(conn, session.id, account_id=account_id)
         assert focal == "signal/+1/chat-a"
 
         # Tool result carries the success marker.
@@ -91,6 +94,7 @@ class TestFocalChannelE2E:
         not a bound channel; the handler returns is_error and leaves
         focal unchanged.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         harness.script_model(
             [
                 assistant(tool_calls=[_switch_call("signal/+1/never-seen", call_id="c1")]),
@@ -103,11 +107,12 @@ class TestFocalChannelE2E:
             session.id,
             "from chat-a",
             metadata={"channel": "signal/+1/chat-a"},
+            account_id=account_id,
         )
         await harness.run_until_idle(session.id)
 
         async with harness._pool.acquire() as conn:
-            focal = await queries.get_session_focal_channel(conn, session.id)
+            focal = await queries.get_session_focal_channel(conn, session.id, account_id=account_id)
         assert focal is None, "rejected switch must not mutate focal"
 
         events = await harness.events(session.id)
@@ -123,6 +128,7 @@ class TestFocalChannelE2E:
         chat by construction; ``switch_channel`` rejects every attempt
         regardless of target.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         del crypto_box  # focal-lock check needs no connection lineage.
 
         harness.script_model(
@@ -141,7 +147,7 @@ class TestFocalChannelE2E:
             from aios.services import environments as environments_service
 
             env = await environments_service.create_environment(
-                harness._pool, name=f"focal-env-{make_id('env')[-8:]}"
+                harness._pool, name=f"focal-env-{make_id('env')[-8:]}", account_id=account_id
             )
             harness._env_id = env.id
         agent = await agents_service.create_agent(
@@ -154,6 +160,7 @@ class TestFocalChannelE2E:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
         session = await sessions_service.create_session(
             harness._pool,
@@ -163,18 +170,20 @@ class TestFocalChannelE2E:
             metadata={},
             focal_channel="signal/+1/chat-a",
             focal_locked=True,
+            account_id=account_id,
         )
         await sessions_service.append_user_message(
             harness._pool,
             session.id,
             "hi from chat-a",
             metadata={"channel": "signal/+1/chat-a"},
+            account_id=account_id,
         )
         await harness.run_until_idle(session.id)
 
         # Focal must be the spawn-time value, untouched.
         async with harness._pool.acquire() as conn:
-            focal = await queries.get_session_focal_channel(conn, session.id)
+            focal = await queries.get_session_focal_channel(conn, session.id, account_id=account_id)
         assert focal == "signal/+1/chat-a"
 
         events = await harness.events(session.id)
@@ -187,6 +196,7 @@ class TestFocalChannelE2E:
         system prompt once the session has any bound channel; the
         ephemeral tail block appears as a user-role message.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         harness.script_model([assistant("ok")])
         session = await harness.start("hi")
         await sessions_service.append_user_message(
@@ -194,6 +204,7 @@ class TestFocalChannelE2E:
             session.id,
             "first inbound",
             metadata={"channel": "signal/+1/chat-a"},
+            account_id=account_id,
         )
         await harness.run_until_idle(session.id)
 
@@ -214,6 +225,7 @@ class TestFocalChannelE2E:
         (the connector tools, not the text, deliver to the peer).  The
         loop applies ``MONOLOGUE_PREFIX`` so the log is uniform on replay.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         harness.script_model([assistant("thinking out loud")])
         session = await harness.start("hi")
         await sessions_service.append_user_message(
@@ -221,6 +233,7 @@ class TestFocalChannelE2E:
             session.id,
             "channel inbound",
             metadata={"channel": "signal/+1/chat-a"},
+            account_id=account_id,
         )
         await harness.run_until_idle(session.id)
 

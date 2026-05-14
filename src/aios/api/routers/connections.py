@@ -52,6 +52,7 @@ async def create(
     ``GET /v1/connectors/runtime/secrets`` route — operator-facing
     reads return ``secrets_set: bool`` instead of values.
     """
+    account_id, _, _ = _auth
     return await service.create_connection(
         pool,
         connector=body.connector,
@@ -59,6 +60,7 @@ async def create(
         metadata=body.metadata,
         secrets=body.secrets,
         crypto_box=crypto_box,
+        account_id=account_id,
     )
 
 
@@ -79,8 +81,9 @@ async def set_secrets(
     ``GET /v1/connectors/runtime/secrets`` route to a connector container
     holding a runtime token for this connector type.
     """
+    account_id, _, _ = _auth
     return await service.set_connection_secrets(
-        pool, connection_id, secrets=body.secrets, crypto_box=crypto_box
+        pool, connection_id, secrets=body.secrets, crypto_box=crypto_box, account_id=account_id
     )
 
 
@@ -100,6 +103,7 @@ async def list_(
     connections in single_session mode bound to that session), ``mode``
     (``detached`` / ``single_session`` / ``per_chat``). Filters compose.
     """
+    account_id, _, _ = _auth
     items = await service.list_connections(
         pool,
         connector=connector,
@@ -107,6 +111,7 @@ async def list_(
         mode=mode,
         limit=limit,
         after=after,
+        account_id=account_id,
     )
     return ListResponse[Connection](
         data=items,
@@ -118,7 +123,8 @@ async def list_(
 @router.get("/{connection_id}", operation_id="get_connection")
 async def get(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connection:
     """Fetch one connection by id."""
-    return await service.get_connection(pool, connection_id)
+    account_id, _, _ = _auth
+    return await service.get_connection(pool, connection_id, account_id=account_id)
 
 
 @router.delete(
@@ -134,7 +140,8 @@ async def delete(connection_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     live sessions or strand the template a per_chat binding spawns
     from. Detach or unconfigure first, then archive.
     """
-    await service.archive_connection(pool, connection_id)
+    account_id, _, _ = _auth
+    await service.archive_connection(pool, connection_id, account_id=account_id)
 
 
 @router.post("/{connection_id}/attach", operation_id="attach_connection")
@@ -151,7 +158,10 @@ async def attach(
     an inbound referencing an unknown account simply drops at the
     inbound boundary.
     """
-    return await service.attach_connection(pool, connection_id, session_id=body.session_id)
+    account_id, _, _ = _auth
+    return await service.attach_connection(
+        pool, connection_id, session_id=body.session_id, account_id=account_id
+    )
 
 
 @router.post(
@@ -166,7 +176,8 @@ async def detach(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Connectio
     connection's mode/binding changes. Inbound on this connection is
     paused until it's re-attached or configured for per_chat.
     """
-    return await service.detach_connection(pool, connection_id)
+    account_id, _, _ = _auth
+    return await service.detach_connection(pool, connection_id, account_id=account_id)
 
 
 @router.post(
@@ -182,8 +193,9 @@ async def configure_per_chat(
     sessions using the named template (agent + environment + vaults +
     memory stores). Use ``unconfigure_connection`` to return to detached.
     """
+    account_id, _, _ = _auth
     return await service.configure_per_chat(
-        pool, connection_id, session_template_id=body.session_template_id
+        pool, connection_id, session_template_id=body.session_template_id, account_id=account_id
     )
 
 
@@ -201,7 +213,8 @@ async def unconfigure(connection_id: str, pool: PoolDep, _auth: AuthDep) -> Conn
     chats) is removed — inbound from new chat partners is paused until
     the connection is reconfigured.
     """
-    return await service.unconfigure_connection(pool, connection_id)
+    account_id, _, _ = _auth
+    return await service.unconfigure_connection(pool, connection_id, account_id=account_id)
 
 
 @router.post(
@@ -225,8 +238,9 @@ async def bind_chat(
     from the requested one if a concurrent writer landed first or the
     supervisor pre-populated it via per_chat spawn).
     """
+    account_id, _, _ = _auth
     return await service.bind_chat_to_session(
-        pool, connection_id, chat_id=body.chat_id, session_id=body.session_id
+        pool, connection_id, chat_id=body.chat_id, session_id=body.session_id, account_id=account_id
     )
 
 
@@ -237,7 +251,8 @@ async def bind_chat(
 )
 async def unbind_chat(connection_id: str, chat_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     """Drop the operator-curated row.  Idempotent — repeat calls 204."""
-    await service.unbind_chat(pool, connection_id, chat_id)
+    account_id, _, _ = _auth
+    await service.unbind_chat(pool, connection_id, chat_id, account_id=account_id)
 
 
 @router.get("/{connection_id}/bound-chats", operation_id="list_bound_chats")
@@ -248,7 +263,8 @@ async def bound_chats(connection_id: str, pool: PoolDep, _auth: AuthDep) -> List
     auto-spawned rows (via the supervisor on first inbound from a new
     chat partner).
     """
-    items = await service.list_bound_chats(pool, connection_id)
+    account_id, _, _ = _auth
+    items = await service.list_bound_chats(pool, connection_id, account_id=account_id)
     return ListResponse[BoundChat](data=items)
 
 
@@ -265,5 +281,6 @@ async def recent_chats(
     enumerates the conversational counterparts that the connector has
     delivered messages from.
     """
-    items = await service.list_recent_chats(pool, connection_id, limit=limit)
+    account_id, _, _ = _auth
+    items = await service.list_recent_chats(pool, connection_id, limit=limit, account_id=account_id)
     return ListResponse[RecentChat](data=items)

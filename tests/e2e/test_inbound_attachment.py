@@ -41,9 +41,12 @@ async def _create_connection(http_client: httpx.AsyncClient, account: str) -> st
 
 
 async def _attach(harness: Harness, connection_id: str, session_id: str) -> None:
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.services import connections as connections_service
 
-    await connections_service.attach_connection(harness._pool, connection_id, session_id=session_id)
+    await connections_service.attach_connection(
+        harness._pool, connection_id, session_id=session_id, account_id=account_id
+    )
 
 
 @needs_docker
@@ -51,6 +54,7 @@ class TestInboundAttachmentStaging:
     async def test_attachment_streamed_into_workspace(
         self, http_client: httpx.AsyncClient, harness: Harness, aios_env: dict[str, str]
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         import json as _json
 
         from aios.sandbox.volumes import session_attachments_dir
@@ -68,14 +72,18 @@ class TestInboundAttachmentStaging:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-att-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-att-{id(self)}", account_id=account_id
+        )
         session = await sess_svc.create_session(
             harness._pool,
             agent_id=agent.id,
             environment_id=env.id,
             title=None,
             metadata={},
+            account_id=account_id,
         )
         connection_id = await _create_connection(http_client, f"att-{id(self)}")
         await _attach(harness, connection_id, session.id)
@@ -130,6 +138,7 @@ class TestInboundAttachmentStaging:
         422 and crash the connector container.  Pin that the route accepts
         empty content as a first-class shape.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import agents as agents_service
         from aios.services import environments as env_svc
         from aios.services import sessions as sess_svc
@@ -144,14 +153,18 @@ class TestInboundAttachmentStaging:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-att-empty-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-att-empty-{id(self)}", account_id=account_id
+        )
         session = await sess_svc.create_session(
             harness._pool,
             agent_id=agent.id,
             environment_id=env.id,
             title=None,
             metadata={},
+            account_id=account_id,
         )
         connection_id = await _create_connection(http_client, f"att-empty-{id(self)}")
         await _attach(harness, connection_id, session.id)

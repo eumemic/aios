@@ -33,10 +33,12 @@ def _encrypt_token(crypto_box: CryptoBox, token: str) -> Any:
     return crypto_box.encrypt(token)
 
 
-async def _list_attached_resource_ids(conn: asyncpg.Connection[Any], session_id: str) -> list[str]:
+async def _list_attached_resource_ids(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> list[str]:
     """Return the resource_ids currently attached so we can clean up
     their on-disk working trees after the DB rows go away."""
-    echoes = await queries.list_session_github_repo_echoes(conn, session_id)
+    echoes = await queries.list_session_github_repo_echoes(conn, session_id, account_id=account_id)
     return [e.id for e in echoes]
 
 
@@ -53,6 +55,8 @@ async def attach_to_session(
     session_id: str,
     resources: list[GithubRepositoryResource],
     crypto_box: CryptoBox,
+    *,
+    account_id: str,
 ) -> None:
     """Encrypt each token and insert the attachment rows.
 
@@ -67,7 +71,9 @@ async def attach_to_session(
         blob = _encrypt_token(crypto_box, res.authorization_token.get_secret_value())
         entries.append((res.url, res.mount_path, blob, res.git_user_name, res.git_user_email))
     try:
-        await queries.attach_github_repos_to_session(conn, session_id, entries)
+        await queries.attach_github_repos_to_session(
+            conn, session_id, entries, account_id=account_id
+        )
     except asyncpg.UniqueViolationError as exc:
         # The unique index hit means the new payload collides with an
         # already-attached row. The model validator catches duplicates
@@ -85,6 +91,8 @@ async def set_session_resources(
     session_id: str,
     resources: list[GithubRepositoryResource],
     crypto_box: CryptoBox,
+    *,
+    account_id: str,
 ) -> None:
     """Replace attached repositories atomically.
 
@@ -96,40 +104,54 @@ async def set_session_resources(
     be a slow plaintext-token leak.
     """
     async with conn.transaction():
-        old_ids = await _list_attached_resource_ids(conn, session_id)
-        await queries.delete_session_github_repos(conn, session_id)
-        await attach_to_session(conn, session_id, resources, crypto_box)
+        old_ids = await _list_attached_resource_ids(conn, session_id, account_id=account_id)
+        await queries.delete_session_github_repos(conn, session_id, account_id=account_id)
+        await attach_to_session(conn, session_id, resources, crypto_box, account_id=account_id)
     _purge_working_trees(session_id, old_ids)
 
 
-async def detach_all_from_session(conn: asyncpg.Connection[Any], session_id: str) -> None:
+async def detach_all_from_session(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> None:
     """Detach every github_repository from a session and clean up the
     working trees. Used by the full-list-replace path when the new
     resource list contains no github entries."""
     async with conn.transaction():
-        old_ids = await _list_attached_resource_ids(conn, session_id)
-        await queries.delete_session_github_repos(conn, session_id)
+        old_ids = await _list_attached_resource_ids(conn, session_id, account_id=account_id)
+        await queries.delete_session_github_repos(conn, session_id, account_id=account_id)
     _purge_working_trees(session_id, old_ids)
 
 
 async def list_session_echoes(
-    pool: asyncpg.Pool[Any], session_id: str
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    account_id: str,
 ) -> list[GithubRepositoryResourceEcho]:
     async with pool.acquire() as conn:
-        return await queries.list_session_github_repo_echoes(conn, session_id)
+        return await queries.list_session_github_repo_echoes(
+            conn, session_id, account_id=account_id
+        )
 
 
 async def get_resource(
-    pool: asyncpg.Pool[Any], session_id: str, resource_id: str
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    resource_id: str,
+    *,
+    account_id: str,
 ) -> GithubRepositoryResourceEcho:
     async with pool.acquire() as conn:
-        return await queries.get_session_github_repo(conn, session_id, resource_id)
+        return await queries.get_session_github_repo(
+            conn, session_id, resource_id, account_id=account_id
+        )
 
 
 async def rotate_token(
     pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
     *,
+    account_id: str,
     session_id: str,
     resource_id: str,
     new_token: str,
@@ -152,6 +174,7 @@ async def rotate_token(
             resource_id,
             blob,
             identity=identity,
+            account_id=account_id,
         )
 
 
@@ -160,6 +183,8 @@ async def get_session_token(
     crypto_box: CryptoBox,
     session_id: str,
     resource_id: str,
+    *,
+    account_id: str,
 ) -> str:
     """Decrypt and return the raw auth token for a single attachment.
 
@@ -167,5 +192,7 @@ async def get_session_token(
     auth-embedded clone URL. Lives here (not in queries) because it's
     the boundary that owns the CryptoBox.
     """
-    _, blob = await queries.get_session_github_repo_with_blob(conn, session_id, resource_id)
+    _, blob = await queries.get_session_github_repo_with_blob(
+        conn, session_id, resource_id, account_id=account_id
+    )
     return crypto_box.decrypt(blob)

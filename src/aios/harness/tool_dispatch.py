@@ -82,6 +82,7 @@ async def _execute_tool_async(
 
     Brackets the lifecycle in a ``tool_execute_*`` span pair (issue #78).
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
     name = function.get("name") or ""
@@ -98,6 +99,7 @@ async def _execute_tool_async(
             "tool_call_id": call_id,
             "tool_name": name,
         },
+        account_id=account_id,
     )
     is_error = False
 
@@ -163,6 +165,7 @@ async def _execute_tool_async(
             session_id,
             "message",
             event_data,
+            account_id=account_id,
         )
 
     except asyncio.CancelledError:
@@ -190,6 +193,7 @@ async def _execute_tool_async(
                 "tool_name": name,
                 "is_error": is_error,
             },
+            account_id=account_id,
         )
         await _trigger_sweep(pool, session_id, bound_log)
 
@@ -244,6 +248,7 @@ async def _append_tool_result(
     error: str,
 ) -> None:
     """Append a tool-role error event."""
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     content = json.dumps({"error": error}, ensure_ascii=False)
     await sessions_service.append_event(
         pool,
@@ -256,6 +261,7 @@ async def _append_tool_result(
             "content": content,
             "is_error": True,
         },
+        account_id=account_id,
     )
 
 
@@ -274,6 +280,7 @@ async def _trigger_sweep(
     """Run the sweep for this session. Called from the finally block of
     every tool task — both built-in and MCP.
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     from aios.harness.sweep import SweepResult, wake_sessions_needing_inference
 
     sweep_start = await sessions_service.append_event(
@@ -281,6 +288,7 @@ async def _trigger_sweep(
         session_id,
         "span",
         {"event": "sweep_start", "site": "tail"},
+        account_id=account_id,
     )
     result = SweepResult(repaired_ghosts=0, woken_sessions=0)
     try:
@@ -301,6 +309,7 @@ async def _trigger_sweep(
                 "repaired_ghosts": result.repaired_ghosts,
                 "woken_sessions": result.woken_sessions,
             },
+            account_id=account_id,
         )
 
 
@@ -361,6 +370,7 @@ async def _execute_mcp_tool_async(
     emission-time — a concurrent ``switch_channel`` in the same
     assistant batch does not race this injection.
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
     name: str = function.get("name") or ""
@@ -377,6 +387,7 @@ async def _execute_mcp_tool_async(
             "tool_call_id": call_id,
             "tool_name": name,
         },
+        account_id=account_id,
     )
     is_error = False
 
@@ -440,7 +451,9 @@ async def _execute_mcp_tool_async(
             is_error = True
 
         bound_log.info("mcp_tool.completed", is_error=mcp_is_error)
-        await sessions_service.append_event(pool, session_id, "message", event_data)
+        await sessions_service.append_event(
+            pool, session_id, "message", event_data, account_id=account_id
+        )
 
     except asyncio.CancelledError:
         bound_log.info("mcp_tool.cancelled")
@@ -466,5 +479,6 @@ async def _execute_mcp_tool_async(
                 "tool_name": name,
                 "is_error": is_error,
             },
+            account_id=account_id,
         )
         await _trigger_sweep(pool, session_id, bound_log)

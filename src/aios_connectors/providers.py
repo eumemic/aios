@@ -31,4 +31,7 @@ class SubsystemToolProvider:
     async def list_tools_for_session(
         self, pool: asyncpg.Pool[Any], session_id: str
     ) -> list[dict[str, Any]]:
-        return await connections_service.list_tools_for_session(pool, session_id)
+        account_id = ""  # PR 3 stub; PR 4 threads real id
+        return await connections_service.list_tools_for_session(
+            pool, session_id, account_id=account_id
+        )

@@ -181,6 +181,7 @@ class TestConnectionDiscoverySse:
             settings = get_settings()
             pool = await create_pool(settings.db_url, min_size=1, max_size=2)
             try:
+                account_id = "acc_test_stub"  # PR 3 scaffolding
                 agent = await agents_service.create_agent(
                     pool,
                     name=f"disc-{id(self)}",
@@ -191,17 +192,27 @@ class TestConnectionDiscoverySse:
                     metadata={},
                     window_min=50_000,
                     window_max=150_000,
+                    account_id=account_id,
                 )
-                env = await env_svc.create_environment(pool, name=f"env-disc-{id(self)}")
+                env = await env_svc.create_environment(
+                    pool, name=f"env-disc-{id(self)}", account_id=account_id
+                )
                 session = await sess_svc.create_session(
-                    pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+                    pool,
+                    agent_id=agent.id,
+                    environment_id=env.id,
+                    title=None,
+                    metadata={},
+                    account_id=account_id,
                 )
-                await connections_service.attach_connection(pool, new_id, session_id=session.id)
+                await connections_service.attach_connection(
+                    pool, new_id, session_id=session.id, account_id=account_id
+                )
                 await asyncio.wait_for(saw_added.wait(), timeout=5.0)
 
                 # Detach + archive — ``archive_connection`` emits ``removed``.
-                await connections_service.detach_connection(pool, new_id)
-                await connections_service.archive_connection(pool, new_id)
+                await connections_service.detach_connection(pool, new_id, account_id=account_id)
+                await connections_service.archive_connection(pool, new_id, account_id=account_id)
                 await asyncio.wait_for(saw_removed.wait(), timeout=5.0)
             finally:
                 await pool.close()

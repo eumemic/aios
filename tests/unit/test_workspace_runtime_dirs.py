@@ -17,6 +17,7 @@ After the SandboxBackend refactor these tests exercise:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -71,7 +72,7 @@ async def _capture_docker_argv(spec: SandboxSpec, monkeypatch: pytest.MonkeyPatc
     captured: list[list[str]] = []
 
     async def fake_run_docker(
-        argv: list[str], *, timeout_s: float = 30.0
+        argv: list[str], *, timeout_s: float = 30.0, **kwargs: Any
     ) -> tuple[int, bytes, bytes]:
         captured.append(argv)
         return 0, b"container_abc123\n", b""

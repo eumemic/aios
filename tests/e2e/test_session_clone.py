@@ -59,12 +59,15 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
 @pytest.fixture
 async def parent_session_id(pool: Any) -> str:
     """Create an idle session with a couple of events to clone."""
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.db import queries
     from aios.services import agents as agents_svc
     from aios.services import sessions as sessions_svc
 
     async with pool.acquire() as conn:
-        env = await queries.insert_environment(conn, name=f"clone-env-{_uniq()}")
+        env = await queries.insert_environment(
+            conn, name=f"clone-env-{_uniq()}", account_id=account_id
+        )
     agent = await agents_svc.create_agent(
         pool,
         name=f"clone-agent-{_uniq()}",
@@ -75,6 +78,7 @@ async def parent_session_id(pool: Any) -> str:
         metadata={},
         window_min=50_000,
         window_max=150_000,
+        account_id=account_id,
     )
     session = await sessions_svc.create_session(
         pool,
@@ -82,12 +86,13 @@ async def parent_session_id(pool: Any) -> str:
         environment_id=env.id,
         title="parent",
         metadata={"k": "v"},
+        account_id=account_id,
     )
     # Append a couple of events so we can verify the copy.
-    await sessions_svc.append_user_message(pool, session.id, "first")
-    await sessions_svc.append_user_message(pool, session.id, "second")
+    await sessions_svc.append_user_message(pool, session.id, "first", account_id=account_id)
+    await sessions_svc.append_user_message(pool, session.id, "second", account_id=account_id)
     # The append flips status to pending; tests that need idle reset it.
-    await sessions_svc.set_session_status(pool, session.id, "idle")
+    await sessions_svc.set_session_status(pool, session.id, "idle", account_id=account_id)
     return session.id
 
 
@@ -104,9 +109,10 @@ class TestCloneBasic:
     async def test_inherits_config_fields(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
-        parent = await sessions_svc.get_session(pool, parent_session_id)
+        parent = await sessions_svc.get_session(pool, parent_session_id, account_id=account_id)
         r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         assert r.status_code == 201, r.text
         clone = r.json()
@@ -122,14 +128,19 @@ class TestCloneBasic:
     async def test_copies_event_log_with_fresh_ids(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
-        parent_events = await sessions_svc.read_events(pool, parent_session_id, limit=200)
+        parent_events = await sessions_svc.read_events(
+            pool, parent_session_id, limit=200, account_id=account_id
+        )
         assert len(parent_events) >= 2
 
         r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         clone_id = r.json()["id"]
-        clone_events = await sessions_svc.read_events(pool, clone_id, limit=200)
+        clone_events = await sessions_svc.read_events(
+            pool, clone_id, limit=200, account_id=account_id
+        )
 
         assert len(clone_events) == len(parent_events)
         for p, f in zip(parent_events, clone_events, strict=True):
@@ -142,10 +153,11 @@ class TestCloneBasic:
     async def test_resets_cumulative_usage(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
         await sessions_svc.increment_usage(
-            pool, parent_session_id, input_tokens=42, output_tokens=7
+            pool, parent_session_id, input_tokens=42, output_tokens=7, account_id=account_id
         )
         r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         clone = r.json()
@@ -157,27 +169,36 @@ class TestCloneRefusal:
     async def test_refuses_running_parent(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
-        await sessions_svc.set_session_status(pool, parent_session_id, "running")
+        await sessions_svc.set_session_status(
+            pool, parent_session_id, "running", account_id=account_id
+        )
         r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         assert r.status_code == 409, r.text
 
     async def test_refuses_pending_parent(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
-        await sessions_svc.set_session_status(pool, parent_session_id, "pending")
+        await sessions_svc.set_session_status(
+            pool, parent_session_id, "pending", account_id=account_id
+        )
         r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         assert r.status_code == 409, r.text
 
     async def test_allowed_when_terminated(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
-        await sessions_svc.set_session_status(pool, parent_session_id, "terminated")
+        await sessions_svc.set_session_status(
+            pool, parent_session_id, "terminated", account_id=account_id
+        )
         r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         assert r.status_code == 201, r.text
         assert r.json()["status"] == "terminated"
@@ -194,18 +215,25 @@ class TestCloneIndependence:
     async def test_appending_to_clone_does_not_affect_parent(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
-        parent_events_before = await sessions_svc.read_events(pool, parent_session_id, limit=200)
+        parent_events_before = await sessions_svc.read_events(
+            pool, parent_session_id, limit=200, account_id=account_id
+        )
         r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         clone_id = r.json()["id"]
 
-        await sessions_svc.append_user_message(pool, clone_id, "clone-only")
+        await sessions_svc.append_user_message(pool, clone_id, "clone-only", account_id=account_id)
 
-        parent_events_after = await sessions_svc.read_events(pool, parent_session_id, limit=200)
+        parent_events_after = await sessions_svc.read_events(
+            pool, parent_session_id, limit=200, account_id=account_id
+        )
         assert len(parent_events_after) == len(parent_events_before)
 
-        clone_events = await sessions_svc.read_events(pool, clone_id, limit=200)
+        clone_events = await sessions_svc.read_events(
+            pool, clone_id, limit=200, account_id=account_id
+        )
         assert len(clone_events) == len(parent_events_before) + 1
         # New event got the next seq beyond the inherited prefix.
         assert clone_events[-1].seq == parent_events_before[-1].seq + 1
@@ -214,15 +242,22 @@ class TestCloneIndependence:
     async def test_appending_to_parent_does_not_affect_clone(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
         r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         clone_id = r.json()["id"]
-        clone_events_before = await sessions_svc.read_events(pool, clone_id, limit=200)
+        clone_events_before = await sessions_svc.read_events(
+            pool, clone_id, limit=200, account_id=account_id
+        )
 
-        await sessions_svc.append_user_message(pool, parent_session_id, "parent-only")
+        await sessions_svc.append_user_message(
+            pool, parent_session_id, "parent-only", account_id=account_id
+        )
 
-        clone_events_after = await sessions_svc.read_events(pool, clone_id, limit=200)
+        clone_events_after = await sessions_svc.read_events(
+            pool, clone_id, limit=200, account_id=account_id
+        )
         assert len(clone_events_after) == len(clone_events_before)
 
 
@@ -230,19 +265,26 @@ class TestCloneVaults:
     async def test_copies_vault_bindings(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.db import queries
         from aios.services import sessions as sessions_svc
         from aios.services import vaults as vaults_svc
 
-        v1 = await vaults_svc.create_vault(pool, display_name=f"vault-{_uniq()}", metadata={})
-        v2 = await vaults_svc.create_vault(pool, display_name=f"vault-{_uniq()}", metadata={})
+        v1 = await vaults_svc.create_vault(
+            pool, display_name=f"vault-{_uniq()}", metadata={}, account_id=account_id
+        )
+        v2 = await vaults_svc.create_vault(
+            pool, display_name=f"vault-{_uniq()}", metadata={}, account_id=account_id
+        )
         async with pool.acquire() as conn:
-            await queries.set_session_vaults(conn, parent_session_id, [v1.id, v2.id])
+            await queries.set_session_vaults(
+                conn, parent_session_id, [v1.id, v2.id], account_id=account_id
+            )
 
         r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         clone = r.json()
         assert clone["vault_ids"] == [v1.id, v2.id]
 
         # Confirm round-trip via service too (covers the get-with-vaults shape).
-        fetched = await sessions_svc.get_session(pool, clone["id"])
+        fetched = await sessions_svc.get_session(pool, clone["id"], account_id=account_id)
         assert fetched.vault_ids == [v1.id, v2.id]

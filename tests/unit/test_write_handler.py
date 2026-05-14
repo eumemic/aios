@@ -31,7 +31,7 @@ class _StubRegistry:
 
 
 @pytest.fixture
-def stub_handle() -> SandboxHandle:
+def stub_handle(**kwargs: Any) -> SandboxHandle:
     handle = SandboxHandle(
         session_id="sess_01TEST",
         sandbox_id="container_abc",
@@ -52,7 +52,7 @@ def canned_result() -> CommandResult:
 
 
 @pytest.fixture
-def stub_registry(stub_handle: SandboxHandle, canned_result: CommandResult) -> Any:
+def stub_registry(stub_handle: SandboxHandle, canned_result: CommandResult, **kwargs: Any) -> Any:
     from unittest.mock import MagicMock
 
     prev_registry = runtime.sandbox_registry

@@ -37,6 +37,7 @@ async def _seed_valid_span(
     ``harness/loop.py`` stamps.  Pool-acquiring via the service wrapper
     matches the production write path.
     """
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     await sessions_service.append_event(
         harness._pool,
         session_id,
@@ -53,6 +54,7 @@ async def _seed_valid_span(
             "local_tokens": local_tokens,
             "model": model,
         },
+        account_id=account_id,
     )
 
 
@@ -62,6 +64,7 @@ async def _seed_error_span(harness: Harness, session_id: str) -> None:
     and ``model`` keys; ``is_error = True``.  Must be excluded by the
     partial index and by the query's WHERE clause.
     """
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     await sessions_service.append_event(
         harness._pool,
         session_id,
@@ -72,11 +75,13 @@ async def _seed_error_span(harness: Harness, session_id: str) -> None:
             "model_usage": {},
             "cost_usd": None,
         },
+        account_id=account_id,
     )
 
 
 class TestModelTokenRatioSQL:
     async def test_below_min_samples_returns_1(self, harness: Harness) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         model = f"test-model-{uuid.uuid4().hex[:8]}"
         session = await harness.start("seed")
         for _ in range(4):
@@ -84,9 +89,10 @@ class TestModelTokenRatioSQL:
                 harness, session.id, model=model, local_tokens=100, input_tokens=150
             )
         async with harness._pool.acquire() as conn:
-            assert await queries.model_token_ratio(conn, model) == 1.0
+            assert await queries.model_token_ratio(conn, model, account_id=account_id) == 1.0
 
     async def test_min_samples_returns_mean_ratio(self, harness: Harness) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         model = f"test-model-{uuid.uuid4().hex[:8]}"
         session = await harness.start("seed")
         for _ in range(5):
@@ -94,7 +100,7 @@ class TestModelTokenRatioSQL:
                 harness, session.id, model=model, local_tokens=100, input_tokens=150
             )
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(conn, model)
+            ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
         assert ratio == pytest.approx(1.5, abs=0.005)
 
     async def test_ignores_cache_breakdown_fields(self, harness: Harness) -> None:
@@ -106,6 +112,7 @@ class TestModelTokenRatioSQL:
         invariant: seeding spans with nonzero cache_* fields does not
         change the ratio; only ``input_tokens`` and ``local_tokens``
         contribute."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         model = f"test-model-{uuid.uuid4().hex[:8]}"
         session = await harness.start("seed")
         for _ in range(5):
@@ -119,12 +126,13 @@ class TestModelTokenRatioSQL:
                 cache_creation=40,
             )
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(conn, model)
+            ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
         # per-span ratio = input_tokens/local_tokens = 150/100 (cache_* ignored).
         # ratio = 150/100 = 1.5.
         assert ratio == pytest.approx(1.5, abs=0.005)
 
     async def test_excludes_error_spans(self, harness: Harness) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         model = f"test-model-{uuid.uuid4().hex[:8]}"
         session = await harness.start("seed")
         for _ in range(5):
@@ -134,10 +142,11 @@ class TestModelTokenRatioSQL:
         for _ in range(30):
             await _seed_error_span(harness, session.id)
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(conn, model)
+            ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
         assert ratio == pytest.approx(1.5, abs=0.005)
 
     async def test_partitions_by_model_string(self, harness: Harness) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         model_a = f"test-model-{uuid.uuid4().hex[:8]}"
         model_b = f"test-model-{uuid.uuid4().hex[:8]}"
         session = await harness.start("seed")
@@ -150,8 +159,8 @@ class TestModelTokenRatioSQL:
                 harness, session.id, model=model_b, local_tokens=100, input_tokens=120
             )
         async with harness._pool.acquire() as conn:
-            ratio_a = await queries.model_token_ratio(conn, model_a)
-            ratio_b = await queries.model_token_ratio(conn, model_b)
+            ratio_a = await queries.model_token_ratio(conn, model_a, account_id=account_id)
+            ratio_b = await queries.model_token_ratio(conn, model_b, account_id=account_id)
         assert ratio_a == pytest.approx(1.5, abs=0.005)
         assert ratio_b == pytest.approx(1.2, abs=0.005)
 
@@ -159,6 +168,7 @@ class TestModelTokenRatioSQL:
         """Ratio pools spans across every session in the DB for a given
         model — a new session on a known model inherits the calibration
         from prior traffic."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         model = f"test-model-{uuid.uuid4().hex[:8]}"
         session_a = await harness.start("seed-a")
         session_b = await harness.start("seed-b")
@@ -171,12 +181,13 @@ class TestModelTokenRatioSQL:
                 harness, session_b.id, model=model, local_tokens=100, input_tokens=150
             )
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(conn, model)
+            ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
         assert ratio == pytest.approx(1.5, abs=0.005)
 
     async def test_uses_unweighted_mean_ratio(self, harness: Harness) -> None:
         """Point estimate and stddev describe the same unweighted
         per-span-ratio estimator, even when span sizes skew."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         model = f"test-model-{uuid.uuid4().hex[:8]}"
         session = await harness.start("seed")
         for _ in range(4):
@@ -188,7 +199,9 @@ class TestModelTokenRatioSQL:
         )
 
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(conn, model, k_bucket=0.001)
+            ratio = await queries.model_token_ratio(
+                conn, model, k_bucket=0.001, account_id=account_id
+            )
 
         # Unweighted mean = (1 + 1 + 1 + 1 + 2) / 5 = 1.2.
         # Weighted SUM(input)/SUM(local) would be ~1.96, which this must not return.
@@ -197,6 +210,7 @@ class TestModelTokenRatioSQL:
     async def test_lifetime_aggregate_retains_old_samples(self, harness: Harness) -> None:
         """All historical calibration samples for the model contribute to
         the aggregate; older samples do not fall out of a LIMIT-N window."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         model = f"test-model-{uuid.uuid4().hex[:8]}"
         session = await harness.start("seed")
         # Older regime: ratio 2.0.
@@ -212,13 +226,14 @@ class TestModelTokenRatioSQL:
         async with harness._pool.acquire() as conn:
             # Use a narrow bucket here to isolate lifetime aggregation:
             # mean_ratio = mean([2.0] * 30 + [1.5] * 30) = 1.75.
-            assert await queries.model_token_ratio(conn, model, k_bucket=0.001) == pytest.approx(
-                1.75
-            )
+            assert await queries.model_token_ratio(
+                conn, model, k_bucket=0.001, account_id=account_id
+            ) == pytest.approx(1.75)
 
     async def test_bucket_shrinks_as_sample_count_grows(self, harness: Harness) -> None:
         """With the same underlying ratio distribution, standard-error
         bucketing gets narrower as n grows."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         model = f"test-model-{uuid.uuid4().hex[:8]}"
         session = await harness.start("seed")
         for input_tokens in (140, 160, 140, 160, 140):
@@ -226,7 +241,7 @@ class TestModelTokenRatioSQL:
                 harness, session.id, model=model, local_tokens=100, input_tokens=input_tokens
             )
         async with harness._pool.acquire() as conn:
-            coarse_ratio = await queries.model_token_ratio(conn, model)
+            coarse_ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
 
         for _ in range(3):
             await _seed_valid_span(
@@ -238,7 +253,7 @@ class TestModelTokenRatioSQL:
 
         queries._clear_model_token_ratio_cache()
         async with harness._pool.acquire() as conn:
-            tighter_ratio = await queries.model_token_ratio(conn, model)
+            tighter_ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
 
         assert abs(tighter_ratio - 1.5) < abs(coarse_ratio - 1.5)
 
@@ -246,6 +261,7 @@ class TestModelTokenRatioSQL:
         """The WHERE clause filters ``(data->>'local_tokens')::bigint > 0``
         so zero-local rows never contribute (shouldn't happen in practice
         but must be robust to the edge)."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         model = f"test-model-{uuid.uuid4().hex[:8]}"
         session = await harness.start("seed")
         # 30 with local_tokens=0 (all excluded).
@@ -259,5 +275,5 @@ class TestModelTokenRatioSQL:
                 harness, session.id, model=model, local_tokens=100, input_tokens=150
             )
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(conn, model)
+            ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
         assert ratio == pytest.approx(1.5, abs=0.005)

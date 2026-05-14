@@ -106,6 +106,7 @@ class TestDeferWakeExtension:
         """``defer_wake`` with ``delay_seconds`` routes through ``configure_task``'s
         ``schedule_in`` and carries ``wake_reason`` as a task kwarg.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from datetime import UTC, datetime, timedelta
 
         from procrastinate import App
@@ -125,6 +126,7 @@ class TestDeferWakeExtension:
                 cause="scheduled",
                 delay_seconds=42,
                 wake_reason="ring",
+                account_id=account_id,
             )
             after = datetime.now(UTC)
 
@@ -142,6 +144,7 @@ class TestDeferWakeExtension:
             )
 
     async def test_defer_wake_without_delay_is_immediate(self, monkeypatch: Any) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from procrastinate.testing import InMemoryConnector
 
         from aios.harness.procrastinate_app import app
@@ -150,7 +153,7 @@ class TestDeferWakeExtension:
         monkeypatch.setattr("aios.services.wake.sessions_service.append_event", AsyncMock())
 
         with app.replace_connector(InMemoryConnector()) as patched:
-            await defer_wake(MagicMock(), "sess_x", cause="message")
+            await defer_wake(MagicMock(), "sess_x", cause="message", account_id=account_id)
 
             (job,) = patched.connector.jobs.values()
             assert job["scheduled_at"] is None

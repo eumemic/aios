@@ -42,7 +42,7 @@ def temp_workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 
 
 @pytest.fixture(autouse=True)
-def _stub_supports_vision(monkeypatch: pytest.MonkeyPatch) -> Any:
+def _stub_supports_vision(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> Any:
     saved = dict(vision._VISION_OVERRIDES)
     vision._VISION_OVERRIDES.clear()
     vision._VISION_OVERRIDES["model/vision"] = True

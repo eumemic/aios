@@ -82,13 +82,16 @@ def _workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 class TestStageUploadHappyPath:
     async def test_writes_bytes_and_computes_sha256(self, _workspace: Path) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         data = b"hello world\nthis is a test upload"
         upload = _FakeUpload(data, filename="hello.txt", content_type="text/plain")
         captured: dict[str, Any] = {}
         pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
 
         with _patch_session_get(), _patch_insert_file(captured):
-            result = await stage_upload(pool, session_id="sess_x", upload=upload)
+            result = await stage_upload(
+                pool, session_id="sess_x", upload=upload, account_id=account_id
+            )
 
         assert result.size == len(data)
         assert result.sha256 == hashlib.sha256(data).hexdigest()
@@ -102,26 +105,35 @@ class TestStageUploadHappyPath:
         assert captured["host_path"] == result.host_path
 
     async def test_empty_file_accepted(self, _workspace: Path) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         upload = _FakeUpload(b"", filename="empty.bin")
         pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
         with _patch_session_get(), _patch_insert_file({}):
-            result = await stage_upload(pool, session_id="sess_x", upload=upload)
+            result = await stage_upload(
+                pool, session_id="sess_x", upload=upload, account_id=account_id
+            )
         assert result.size == 0
         assert result.sha256 == hashlib.sha256(b"").hexdigest()
         assert Path(result.host_path).read_bytes() == b""  # noqa: ASYNC240
 
     async def test_content_type_defaults_to_octet_stream(self, _workspace: Path) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         upload = _FakeUpload(b"x", filename="anon", content_type=None)
         pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
         with _patch_session_get(), _patch_insert_file({}):
-            result = await stage_upload(pool, session_id="sess_x", upload=upload)
+            result = await stage_upload(
+                pool, session_id="sess_x", upload=upload, account_id=account_id
+            )
         assert result.content_type == "application/octet-stream"
 
     async def test_unicode_filename_preserved_on_disk(self, _workspace: Path) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         upload = _FakeUpload(b"hi", filename="图片.png", content_type="image/png")
         pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
         with _patch_session_get(), _patch_insert_file({}):
-            result = await stage_upload(pool, session_id="sess_x", upload=upload)
+            result = await stage_upload(
+                pool, session_id="sess_x", upload=upload, account_id=account_id
+            )
         assert result.filename == "图片.png"
         assert Path(result.host_path).name == "图片.png"
 
@@ -130,6 +142,7 @@ class TestStageUploadOversize:
     async def test_oversize_raises_413(
         self, _workspace: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         settings = get_settings()
         monkeypatch.setattr(settings, "upload_max_size_bytes", 64)
         upload = _FakeUpload(b"a" * 256, filename="big.bin")
@@ -139,7 +152,7 @@ class TestStageUploadOversize:
             _patch_insert_file({}),
             pytest.raises(PayloadTooLargeError) as excinfo,
         ):
-            await stage_upload(pool, session_id="sess_x", upload=upload)
+            await stage_upload(pool, session_id="sess_x", upload=upload, account_id=account_id)
         assert excinfo.value.status_code == 413
         assert excinfo.value.detail["max_size_bytes"] == 64
 
@@ -149,6 +162,7 @@ class TestStageUploadOversize:
         """Drain is what lets the client see a clean 413 instead of a
         transport reset. Verifying the upstream is empty after the call
         is the easiest end-state check."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         settings = get_settings()
         monkeypatch.setattr(settings, "upload_max_size_bytes", 64)
         upload = _FakeUpload(b"a" * 4096, filename="big.bin")
@@ -158,7 +172,7 @@ class TestStageUploadOversize:
             _patch_insert_file({}),
             pytest.raises(PayloadTooLargeError),
         ):
-            await stage_upload(pool, session_id="sess_x", upload=upload)
+            await stage_upload(pool, session_id="sess_x", upload=upload, account_id=account_id)
         assert await upload.read() == b""
 
     async def test_oversize_leaves_no_artifacts(
@@ -167,6 +181,7 @@ class TestStageUploadOversize:
         """A failed upload must not leave a half-written .part or an
         empty file_id directory under _uploads/<session>/. Otherwise a
         sweeper has to reason about state instead of just deleting."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         settings = get_settings()
         monkeypatch.setattr(settings, "upload_max_size_bytes", 64)
         upload = _FakeUpload(b"a" * 256, filename="big.bin")
@@ -176,7 +191,7 @@ class TestStageUploadOversize:
             _patch_insert_file({}),
             pytest.raises(PayloadTooLargeError),
         ):
-            await stage_upload(pool, session_id="sess_x", upload=upload)
+            await stage_upload(pool, session_id="sess_x", upload=upload, account_id=account_id)
         uploads_dir = _workspace / "_uploads" / "sess_x"
         # The session-level dir exists (ensure_session_uploads_dir) but it
         # holds no per-file subdirectories.
@@ -186,10 +201,11 @@ class TestStageUploadOversize:
 
 class TestStageUploadSessionNotFound:
     async def test_nonexistent_session_propagates_404(self, _workspace: Path) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         upload = _FakeUpload(b"x", filename="ok.bin")
         pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
         with _patch_session_not_found(), pytest.raises(NotFoundError):
-            await stage_upload(pool, session_id="sess_x", upload=upload)
+            await stage_upload(pool, session_id="sess_x", upload=upload, account_id=account_id)
         # Short-circuited before any disk activity.
         uploads_dir = _workspace / "_uploads" / "sess_x"
         assert not uploads_dir.exists()

@@ -40,7 +40,7 @@ def _err(exit_code: int, stderr: str) -> CommandResult:
 
 
 @pytest.fixture
-def stub_handle() -> SandboxHandle:
+def stub_handle(**kwargs: Any) -> SandboxHandle:
     return SandboxHandle(
         session_id="sess_01TEST",
         sandbox_id="container_abc",
@@ -49,7 +49,7 @@ def stub_handle() -> SandboxHandle:
 
 
 @pytest.fixture
-def stub_registry(stub_handle: SandboxHandle) -> Any:
+def stub_registry(stub_handle: SandboxHandle, **kwargs: Any) -> Any:
     from unittest.mock import MagicMock
 
     prev_registry = runtime.sandbox_registry

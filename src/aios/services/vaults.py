@@ -84,6 +84,7 @@ async def refresh_credential(
     crypto_box: CryptoBox,
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     vault_id: str,
     mcp_server_url: str,
 ) -> None:
@@ -99,7 +100,9 @@ async def refresh_credential(
     stale token stays in place for the next attempt.
     """
     async with conn.transaction():
-        locked = await queries.lock_oauth_credential_for_refresh(conn, vault_id, mcp_server_url)
+        locked = await queries.lock_oauth_credential_for_refresh(
+            conn, vault_id, mcp_server_url, account_id=account_id
+        )
         if locked is None:
             raise OAuthRefreshError(
                 f"no active credential for {mcp_server_url!r} in vault {vault_id}",
@@ -221,46 +224,50 @@ async def refresh_credential(
 async def create_vault(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     display_name: str,
     metadata: dict[str, Any],
 ) -> Vault:
     async with pool.acquire() as conn:
-        return await queries.insert_vault(conn, display_name=display_name, metadata=metadata)
+        return await queries.insert_vault(
+            conn, display_name=display_name, metadata=metadata, account_id=account_id
+        )
 
 
-async def get_vault(pool: asyncpg.Pool[Any], vault_id: str) -> Vault:
+async def get_vault(pool: asyncpg.Pool[Any], vault_id: str, *, account_id: str) -> Vault:
     async with pool.acquire() as conn:
-        return await queries.get_vault(conn, vault_id)
+        return await queries.get_vault(conn, vault_id, account_id=account_id)
 
 
 async def list_vaults(
-    pool: asyncpg.Pool[Any], *, limit: int = 50, after: str | None = None
+    pool: asyncpg.Pool[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Vault]:
     async with pool.acquire() as conn:
-        return await queries.list_vaults(conn, limit=limit, after=after)
+        return await queries.list_vaults(conn, limit=limit, after=after, account_id=account_id)
 
 
 async def update_vault(
     pool: asyncpg.Pool[Any],
     vault_id: str,
     *,
+    account_id: str,
     display_name: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Vault:
     async with pool.acquire() as conn:
         return await queries.update_vault(
-            conn, vault_id, display_name=display_name, metadata=metadata
+            conn, vault_id, display_name=display_name, metadata=metadata, account_id=account_id
         )
 
 
-async def archive_vault(pool: asyncpg.Pool[Any], vault_id: str) -> Vault:
+async def archive_vault(pool: asyncpg.Pool[Any], vault_id: str, *, account_id: str) -> Vault:
     async with pool.acquire() as conn:
-        return await queries.archive_vault(conn, vault_id)
+        return await queries.archive_vault(conn, vault_id, account_id=account_id)
 
 
-async def delete_vault(pool: asyncpg.Pool[Any], vault_id: str) -> None:
+async def delete_vault(pool: asyncpg.Pool[Any], vault_id: str, *, account_id: str) -> None:
     async with pool.acquire() as conn:
-        await queries.delete_vault(conn, vault_id)
+        await queries.delete_vault(conn, vault_id, account_id=account_id)
 
 
 # ── vault credential CRUD ──────────────────────────────────────────────────
@@ -338,6 +345,7 @@ async def create_vault_credential(
     pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
     *,
+    account_id: str,
     vault_id: str,
     body: VaultCredentialCreate,
 ) -> VaultCredential:
@@ -356,7 +364,7 @@ async def create_vault_credential(
                 f"vault {vault_id} not found",
                 detail={"vault_id": vault_id},
             )
-        count = await queries.count_active_vault_credentials(conn, vault_id)
+        count = await queries.count_active_vault_credentials(conn, vault_id, account_id=account_id)
         if count >= MAX_CREDENTIALS_PER_VAULT:
             raise ValidationError(
                 f"vault has reached the maximum of {MAX_CREDENTIALS_PER_VAULT} credentials",
@@ -370,31 +378,42 @@ async def create_vault_credential(
             auth_type=body.auth_type,
             blob=blob,
             metadata=body.metadata,
+            account_id=account_id,
         )
 
 
 async def get_vault_credential(
-    pool: asyncpg.Pool[Any], vault_id: str, credential_id: str
+    pool: asyncpg.Pool[Any],
+    vault_id: str,
+    credential_id: str,
+    *,
+    account_id: str,
 ) -> VaultCredential:
     async with pool.acquire() as conn:
-        return await queries.get_vault_credential(conn, vault_id, credential_id)
+        return await queries.get_vault_credential(
+            conn, vault_id, credential_id, account_id=account_id
+        )
 
 
 async def list_vault_credentials(
     pool: asyncpg.Pool[Any],
     vault_id: str,
     *,
+    account_id: str,
     limit: int = 50,
     after: str | None = None,
 ) -> list[VaultCredential]:
     async with pool.acquire() as conn:
-        return await queries.list_vault_credentials(conn, vault_id, limit=limit, after=after)
+        return await queries.list_vault_credentials(
+            conn, vault_id, limit=limit, after=after, account_id=account_id
+        )
 
 
 async def update_vault_credential(
     pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
     *,
+    account_id: str,
     vault_id: str,
     credential_id: str,
     body: VaultCredentialUpdate,
@@ -402,7 +421,7 @@ async def update_vault_credential(
     async with pool.acquire() as conn:
         # Decrypt existing payload, merge provided fields, re-encrypt.
         cred, existing_blob = await queries.get_vault_credential_with_blob(
-            conn, vault_id, credential_id
+            conn, vault_id, credential_id, account_id=account_id
         )
         existing_payload = crypto_box.decrypt_dict(existing_blob)
         merged = _merge_auth_payload(existing_payload, body, cred.auth_type)
@@ -415,18 +434,29 @@ async def update_vault_credential(
             blob=new_blob,
             display_name=(body.display_name if "display_name" in body.model_fields_set else ...),
             metadata=body.metadata if "metadata" in body.model_fields_set else ...,
+            account_id=account_id,
         )
 
 
 async def archive_vault_credential(
-    pool: asyncpg.Pool[Any], vault_id: str, credential_id: str
+    pool: asyncpg.Pool[Any],
+    vault_id: str,
+    credential_id: str,
+    *,
+    account_id: str,
 ) -> VaultCredential:
     async with pool.acquire() as conn:
-        return await queries.archive_vault_credential(conn, vault_id, credential_id)
+        return await queries.archive_vault_credential(
+            conn, vault_id, credential_id, account_id=account_id
+        )
 
 
 async def delete_vault_credential(
-    pool: asyncpg.Pool[Any], vault_id: str, credential_id: str
+    pool: asyncpg.Pool[Any],
+    vault_id: str,
+    credential_id: str,
+    *,
+    account_id: str,
 ) -> None:
     async with pool.acquire() as conn:
-        await queries.delete_vault_credential(conn, vault_id, credential_id)
+        await queries.delete_vault_credential(conn, vault_id, credential_id, account_id=account_id)

@@ -104,6 +104,7 @@ class TestGhostRecovery:
         Simulates a crash between appending the assistant message and
         calling launch_tool_calls. Ghost repair should detect and fix it.
         """
+        account_id = "acc_test_stub"
         # Create a session and manually append an assistant message with
         # tool_calls, bypassing the step function entirely.
         session = await harness.start("do something", tools=[])
@@ -125,6 +126,7 @@ class TestGhostRecovery:
                 "tool_calls": [call_x],
                 "reacting_to": 1,
             },
+            account_id=account_id,
         )
 
         # No tools launched — simulates crash before dispatch.
@@ -230,6 +232,7 @@ class TestGhostRecovery:
         event, but no tool result and no in-flight task. Ghost repair
         should detect it as a dispatched-but-lost tool.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.models.agents import ToolSpec
 
         harness.script_model([assistant("The glob tool was interrupted.")])
@@ -256,6 +259,7 @@ class TestGhostRecovery:
                 ],
                 "reacting_to": 1,
             },
+            account_id=account_id,
         )
         # Append lifecycle: client confirmed allow.
         await sessions_service.append_event(
@@ -263,6 +267,7 @@ class TestGhostRecovery:
             session.id,
             "lifecycle",
             {"event": "tool_confirmed", "tool_call_id": "call_g", "result": "allow"},
+            account_id=account_id,
         )
         # No tool result, no in-flight task → ghost.
 
@@ -289,6 +294,7 @@ class TestGhostExclusions:
         Manually constructs event log: assistant calls glob (always_ask),
         no confirmation submitted. Ghost repair should skip it.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.models.agents import ToolSpec
 
         harness.script_model([])
@@ -314,6 +320,7 @@ class TestGhostExclusions:
                 ],
                 "reacting_to": 1,
             },
+            account_id=account_id,
         )
         # No confirmation, no result, no in-flight task.
         # glob is always_ask for this agent → not dispatched → NOT a ghost.
@@ -328,6 +335,7 @@ class TestGhostExclusions:
         jsonb_array_length query. The message has no tool calls, so ghost
         repair should return nothing and the inference query should not crash.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         harness.script_model([])
         session = await harness.start("hi", tools=[])
 
@@ -344,6 +352,7 @@ class TestGhostExclusions:
                 "tool_calls": None,
                 "reacting_to": 1,
             },
+            account_id=account_id,
         )
 
         # Ghost repair must not crash and must find no ghosts.

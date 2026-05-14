@@ -21,7 +21,10 @@ async def create(body: EnvironmentCreate, pool: PoolDep, _auth: AuthDep) -> Envi
     base image). Sessions reference environments by id; multiple sessions
     can share one environment.
     """
-    return await service.create_environment(pool, name=body.name, config=body.config)
+    account_id, _, _ = _auth
+    return await service.create_environment(
+        pool, name=body.name, config=body.config, account_id=account_id
+    )
 
 
 @router.get("", operation_id="list_environments")
@@ -35,7 +38,8 @@ async def list_(
 
     Cursor pagination via ``after``.
     """
-    items = await service.list_environments(pool, limit=limit, after=after)
+    account_id, _, _ = _auth
+    items = await service.list_environments(pool, limit=limit, after=after, account_id=account_id)
     return ListResponse[Environment](
         data=items,
         has_more=len(items) == limit,
@@ -46,7 +50,8 @@ async def list_(
 @router.get("/{env_id}", operation_id="get_environment")
 async def get(env_id: str, pool: PoolDep, _auth: AuthDep) -> Environment:
     """Fetch one environment by id."""
-    return await service.get_environment(pool, env_id)
+    account_id, _, _ = _auth
+    return await service.get_environment(pool, env_id, account_id=account_id)
 
 
 @router.put("/{env_id}", operation_id="update_environment")
@@ -60,7 +65,10 @@ async def update(
     container), so updates take effect for existing sessions on their next
     provision rather than at update time.
     """
-    return await service.update_environment(pool, env_id, name=body.name, config=body.config)
+    account_id, _, _ = _auth
+    return await service.update_environment(
+        pool, env_id, name=body.name, config=body.config, account_id=account_id
+    )
 
 
 @router.delete(
@@ -73,4 +81,5 @@ async def archive(env_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     sandbox provisioner reads the config by JOIN and does not filter by
     archive state. There is no API surface to un-archive currently.
     """
-    await service.archive_environment(pool, env_id)
+    account_id, _, _ = _auth
+    await service.archive_environment(pool, env_id, account_id=account_id)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -239,7 +240,7 @@ async def test_stream_litellm_tolerates_empty_choices_chunk(
     usage-summary chunk emitted by OpenRouter/Grok/vLLM/OpenAI-with-usage)
     must not crash the stream loop."""
 
-    async def fake_stream() -> AsyncIterator[object]:
+    async def fake_stream(**kwargs: Any) -> AsyncIterator[object]:
         yield _make_chunk("hello")
         yield _make_empty_choices_chunk()
 
@@ -248,7 +249,7 @@ async def test_stream_litellm_tolerates_empty_choices_chunk(
 
     captured: dict[str, list[object]] = {}
 
-    def fake_builder(chunks: list[object]) -> dict[str, object]:
+    def fake_builder(chunks: list[object], **kwargs: Any) -> dict[str, object]:
         captured["chunks"] = list(chunks)
         return {
             "usage": {"total_tokens": 42},

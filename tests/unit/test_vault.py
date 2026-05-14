@@ -259,6 +259,7 @@ class TestUpdateVaultCredentialCallSite:
 
     @pytest.mark.asyncio
     async def test_omits_display_name_when_not_in_fields_set(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         existing = _existing_credential()
         existing_blob = crypto_box.encrypt(json.dumps({"access_token": "at"}))
         conn = MagicMock()
@@ -283,6 +284,7 @@ class TestUpdateVaultCredentialCallSite:
                 vault_id="vlt_1",
                 credential_id="vc_1",
                 body=body,
+                account_id=account_id,
             )
 
         upd.assert_awaited_once()
@@ -293,6 +295,7 @@ class TestUpdateVaultCredentialCallSite:
 
     @pytest.mark.asyncio
     async def test_passes_display_name_when_set_even_to_none(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         existing = _existing_credential()
         existing_blob = crypto_box.encrypt(json.dumps({"access_token": "at"}))
         conn = MagicMock()
@@ -317,6 +320,7 @@ class TestUpdateVaultCredentialCallSite:
                 vault_id="vlt_1",
                 credential_id="vc_1",
                 body=body,
+                account_id=account_id,
             )
 
         kwargs = upd.await_args.kwargs
@@ -418,6 +422,7 @@ class TestRefreshCredential:
 
     @pytest.mark.asyncio
     async def test_skips_when_token_not_expiring(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
 
         payload = _expiring_oauth_payload(
             expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
@@ -439,6 +444,7 @@ class TestRefreshCredential:
                 conn,
                 vault_id="vlt_1",
                 mcp_server_url="https://mcp.example.com",
+                account_id=account_id,
             )
 
         client.post.assert_not_awaited()
@@ -446,6 +452,7 @@ class TestRefreshCredential:
 
     @pytest.mark.asyncio
     async def test_basic_method_uses_basic_auth(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         import httpx as _httpx
 
         payload = _expiring_oauth_payload(
@@ -468,6 +475,7 @@ class TestRefreshCredential:
                 conn,
                 vault_id="vlt_1",
                 mcp_server_url="https://mcp.example.com",
+                account_id=account_id,
             )
 
         kwargs = client.post.await_args.kwargs
@@ -479,6 +487,7 @@ class TestRefreshCredential:
 
     @pytest.mark.asyncio
     async def test_post_method_includes_secret_in_body(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload(
             token_endpoint_auth={"method": "client_secret_post", "client_secret": "shh"},
         )
@@ -499,6 +508,7 @@ class TestRefreshCredential:
                 conn,
                 vault_id="vlt_1",
                 mcp_server_url="https://mcp.example.com",
+                account_id=account_id,
             )
 
         kwargs = client.post.await_args.kwargs
@@ -508,6 +518,7 @@ class TestRefreshCredential:
 
     @pytest.mark.asyncio
     async def test_none_method_includes_only_client_id(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload(
             token_endpoint_auth={"method": "none"},
         )
@@ -528,6 +539,7 @@ class TestRefreshCredential:
                 conn,
                 vault_id="vlt_1",
                 mcp_server_url="https://mcp.example.com",
+                account_id=account_id,
             )
 
         kwargs = client.post.await_args.kwargs
@@ -543,6 +555,7 @@ class TestRefreshCredential:
         ``expires_at``, ``is_expiring`` would treat it as never-expiring, and
         the token would never refresh again — silent correctness failure.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
         blob = crypto_box.encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
@@ -563,6 +576,7 @@ class TestRefreshCredential:
                 conn,
                 vault_id="vlt_1",
                 mcp_server_url="https://mcp.example.com",
+                account_id=account_id,
             )
 
         args = conn.execute.await_args.args
@@ -574,6 +588,7 @@ class TestRefreshCredential:
 
     @pytest.mark.asyncio
     async def test_persists_new_access_token_and_expires_at(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
         blob = crypto_box.encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
@@ -594,6 +609,7 @@ class TestRefreshCredential:
                 conn,
                 vault_id="vlt_1",
                 mcp_server_url="https://mcp.example.com",
+                account_id=account_id,
             )
 
         # The UPDATE call carried fresh ciphertext+nonce. Decrypt them and
@@ -608,6 +624,7 @@ class TestRefreshCredential:
 
     @pytest.mark.asyncio
     async def test_rotates_refresh_token_when_returned(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
         blob = crypto_box.encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
@@ -628,6 +645,7 @@ class TestRefreshCredential:
                 conn,
                 vault_id="vlt_1",
                 mcp_server_url="https://mcp.example.com",
+                account_id=account_id,
             )
 
         args = conn.execute.await_args.args
@@ -636,6 +654,7 @@ class TestRefreshCredential:
 
     @pytest.mark.asyncio
     async def test_keeps_refresh_token_when_omitted(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
         blob = crypto_box.encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
@@ -655,6 +674,7 @@ class TestRefreshCredential:
                 conn,
                 vault_id="vlt_1",
                 mcp_server_url="https://mcp.example.com",
+                account_id=account_id,
             )
 
         args = conn.execute.await_args.args
@@ -663,6 +683,7 @@ class TestRefreshCredential:
 
     @pytest.mark.asyncio
     async def test_http_error_raises_oauth_refresh_error(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
         blob = crypto_box.encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
@@ -682,6 +703,7 @@ class TestRefreshCredential:
                 conn,
                 vault_id="vlt_1",
                 mcp_server_url="https://mcp.example.com",
+                account_id=account_id,
             )
 
         # Row not updated when refresh fails.
@@ -689,6 +711,7 @@ class TestRefreshCredential:
 
     @pytest.mark.asyncio
     async def test_malformed_response_raises(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
         blob = crypto_box.encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
@@ -709,10 +732,12 @@ class TestRefreshCredential:
                 conn,
                 vault_id="vlt_1",
                 mcp_server_url="https://mcp.example.com",
+                account_id=account_id,
             )
 
     @pytest.mark.asyncio
     async def test_no_credential_found_raises(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         conn = _conn_with_transaction()
         with (
             patch.object(
@@ -727,10 +752,12 @@ class TestRefreshCredential:
                 conn,
                 vault_id="vlt_1",
                 mcp_server_url="https://mcp.example.com",
+                account_id=account_id,
             )
 
     @pytest.mark.asyncio
     async def test_missing_refresh_fields_raises(self, crypto_box: CryptoBox) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         # Stored credential is expiring but lacks refresh_token / token_endpoint.
         payload = {
             "access_token": "old",
@@ -753,6 +780,7 @@ class TestRefreshCredential:
                 conn,
                 vault_id="vlt_1",
                 mcp_server_url="https://mcp.example.com",
+                account_id=account_id,
             )
 
 

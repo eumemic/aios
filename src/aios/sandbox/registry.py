@@ -114,13 +114,14 @@ class SandboxRegistry:
     async def _provision_with_span(
         self, session_id: str, *, pool: asyncpg.Pool[Any] | None
     ) -> SandboxHandle:
+        account_id = ""  # PR 3 stub; PR 4 threads real id
         if pool is None:
             return await self._provision(session_id)
 
         from aios.services import sessions as sessions_service
 
         span_start = await sessions_service.append_event(
-            pool, session_id, "span", {"event": "sandbox_provision_start"}
+            pool, session_id, "span", {"event": "sandbox_provision_start"}, account_id=account_id
         )
         is_error = False
         handle: SandboxHandle | None = None
@@ -138,7 +139,9 @@ class SandboxRegistry:
             }
             if handle is not None:
                 end_payload["container_id"] = handle.sandbox_id[:12]
-            await sessions_service.append_event(pool, session_id, "span", end_payload)
+            await sessions_service.append_event(
+                pool, session_id, "span", end_payload, account_id=account_id
+            )
 
     async def _provision(self, session_id: str) -> SandboxHandle:
         """Build the plan, ask the backend to create the sandbox, run setup."""

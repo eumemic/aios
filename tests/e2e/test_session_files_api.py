@@ -22,6 +22,7 @@ from tests.e2e.harness import Harness
 
 
 async def _make_session(harness: Harness) -> str:
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.services import agents as agents_service
     from aios.services import environments as env_svc
     from aios.services import sessions as sess_svc
@@ -39,14 +40,18 @@ async def _make_session(harness: Harness) -> str:
         metadata={},
         window_min=50_000,
         window_max=150_000,
+        account_id=account_id,
     )
-    env = await env_svc.create_environment(harness._pool, name=f"env-files-{suffix}")
+    env = await env_svc.create_environment(
+        harness._pool, name=f"env-files-{suffix}", account_id=account_id
+    )
     session = await sess_svc.create_session(
         harness._pool,
         agent_id=agent.id,
         environment_id=env.id,
         title=None,
         metadata={},
+        account_id=account_id,
     )
     return session.id
 

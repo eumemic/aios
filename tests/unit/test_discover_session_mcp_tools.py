@@ -104,7 +104,9 @@ class TestDiscoverSessionMcpTools:
 
         seen_urls: list[str] = []
 
-        async def _fake_resolve(_pool: Any, _cb: Any, _sid: str, url: str) -> dict[str, str]:
+        async def _fake_resolve(
+            _pool: Any, _cb: Any, _sid: str, url: str, **kwargs: Any
+        ) -> dict[str, str]:
             seen_urls.append(url)
             return {"Authorization": f"Bearer token-for-{url}"}
 

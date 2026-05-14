@@ -188,6 +188,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
     warning string (collected and returned).  DB errors propagate — they are
     the session's problem to recover from through the normal error channel.
     """
+    account_id = ""  # PR 3 stub; PR 4 threads real id
     # Build after snapshot as (store_id, store_path) -> bytes in one pass.
     # Using bytes avoids re-reading files during the create/modify loops.
     after_bytes = _snapshot_with_bytes(session_id)
@@ -222,6 +223,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
             path=store_path,
             content=content,
             actor=actor,
+            account_id=account_id,
         )
         runtime.set_read_sha(session_id, store_id, store_path, memory.content_sha256)
         log.info(
@@ -250,7 +252,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
             continue
         content = maybe_content
         existing = await memory_service.get_memory_by_path(
-            pool, store_id, store_path, include_content=False
+            pool, store_id, store_path, include_content=False, account_id=account_id
         )
         if existing is None:
             # Race: was in before snapshot but no DB record (e.g. previously skipped binary).
@@ -264,6 +266,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
                 path=store_path,
                 content=content,
                 actor=actor,
+                account_id=account_id,
             )
             runtime.set_read_sha(session_id, store_id, store_path, memory.content_sha256)
         else:
@@ -281,6 +284,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
                 new_content=content,
                 precondition_sha256=existing.content_sha256,
                 actor=actor,
+                account_id=account_id,
             )
             runtime.set_read_sha(session_id, store_id, store_path, memory.content_sha256)
         log.info(
@@ -295,7 +299,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
         if (store_id, store_path) in after:
             continue  # still exists
         existing = await memory_service.get_memory_by_path(
-            pool, store_id, store_path, include_content=False
+            pool, store_id, store_path, include_content=False, account_id=account_id
         )
         if existing is None:
             continue  # already gone from DB; nothing to do
@@ -306,6 +310,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
             store_id=store_id,
             memory_id=existing.id,
             actor=actor,
+            account_id=account_id,
         )
         log.info(
             "memory_reconcile.deleted",
