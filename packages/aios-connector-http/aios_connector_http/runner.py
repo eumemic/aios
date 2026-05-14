@@ -229,6 +229,8 @@ class HttpConnector:
         #     class SignalConnector(HttpConnector):
         #         state: dict[str, _SignalConnectionState]
         self.state: dict[str, Any] = {}
+        self._ready_event: asyncio.Event = asyncio.Event()
+        self._connection_served: dict[str, asyncio.Event] = {}
 
     # ─── helpers (subclasses use these) ──────────────────────────────
 
@@ -275,6 +277,23 @@ class HttpConnector:
 
     async def teardown(self) -> None:
         """Override: cleanup before the runner exits."""
+
+    async def wait_ready(self, deadline: float = 5.0) -> None:
+        """Block until run() has scheduled all background loops.
+
+        Raises TimeoutError if run() does not reach the ready state within
+        deadline seconds. Intended for test coordination.
+        """
+        await asyncio.wait_for(self._ready_event.wait(), timeout=deadline)
+
+    async def wait_connection_served(self, connection_id: str, deadline: float = 5.0) -> None:
+        """Block until serve_connection has been spawned for connection_id.
+
+        Raises TimeoutError if the connection is not added within deadline seconds.
+        Intended for test coordination.
+        """
+        event = self._connection_served.setdefault(connection_id, asyncio.Event())
+        await asyncio.wait_for(event.wait(), timeout=deadline)
 
     async def load_answered(self) -> set[str]:
         """Override: persisted tool_call_ids from a previous lifetime."""
@@ -420,7 +439,9 @@ class HttpConnector:
                     tg.create_task(self._discovery_loop(tg), name="aios-discovery")
                     tg.create_task(self._tool_loop(), name="aios-tool-loop")
                     tg.create_task(self._management_call_loop(), name="aios-management-loop")
+                    self._ready_event.set()  # all background loops scheduled
             finally:
+                self._ready_event.clear()
                 await self.teardown()
 
     async def _publish_tools_schema(self) -> None:
@@ -524,6 +545,7 @@ class HttpConnector:
             self._isolated_serve_connection(connection_id, secrets_map),
             name=f"aios-conn-{connection_id}",
         )
+        self._connection_served.setdefault(connection_id, asyncio.Event()).set()
         self._connections[connection_id] = state
         log.info(
             "connector.connection.added",

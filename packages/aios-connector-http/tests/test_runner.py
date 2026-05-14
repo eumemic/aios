@@ -711,3 +711,63 @@ class TestRunUntilStopped:
 
         c = _Connector(base_url="http://x", token="aios_runtime_x")
         await c.run_until_stopped(install_signal_handlers=False)
+
+
+class TestWaitReady:
+    async def test_times_out_if_run_never_sets_ready(self) -> None:
+        """A connector whose run() never sets _ready_event causes TimeoutError."""
+        blocked = asyncio.Event()
+
+        class _NeverReady(HttpConnector):
+            connector = "neverready"
+
+            async def run(self) -> None:
+                await blocked.wait()  # never sets _ready_event
+
+        c = _NeverReady(base_url="http://x", token="aios_runtime_x")
+        task = asyncio.create_task(c.run())
+        try:
+            with pytest.raises(TimeoutError):
+                await c.wait_ready(deadline=0.05)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def test_resolves_after_run_signals_ready(self) -> None:
+        """wait_ready() returns without raising once _ready_event is set."""
+        unblock = asyncio.Event()
+
+        class _ReadyConnector(HttpConnector):
+            connector = "readyconn"
+
+            async def run(self) -> None:
+                self._ready_event.set()
+                await unblock.wait()
+
+        c = _ReadyConnector(base_url="http://x", token="aios_runtime_x")
+        task = asyncio.create_task(c.run())
+        try:
+            # Should NOT raise — ready_event will be set quickly
+            await c.wait_ready(deadline=5.0)
+        finally:
+            unblock.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+class TestWaitConnectionServed:
+    async def test_times_out_if_connection_never_added(self) -> None:
+        """wait_connection_served raises TimeoutError when connection never appears."""
+        c = _ProbeConnector()
+        with pytest.raises(TimeoutError):
+            await c.wait_connection_served("conn_never", deadline=0.05)
+
+    async def test_resolves_after_connection_added(self) -> None:
+        """wait_connection_served returns once the event for connection_id is set."""
+        c = _ProbeConnector()
+        wait_task = asyncio.create_task(c.wait_connection_served("conn_x", deadline=5.0))
+        await asyncio.sleep(0)  # yield so wait_task starts
+        # Simulate what _on_connection_added does — set the event
+        c._connection_served.setdefault("conn_x", asyncio.Event()).set()
+        await wait_task  # should complete without TimeoutError
