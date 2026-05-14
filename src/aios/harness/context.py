@@ -33,6 +33,7 @@ import litellm
 
 from aios.harness.vision import (
     can_inline_image,
+    correct_image_mime,
     make_image_url_part,
     text_marker,
 )
@@ -316,9 +317,12 @@ def _apply_attachments(
                 )
                 marker_lines.append(text_marker(record))
                 continue
+            # Re-sniff here so historical events with a wrong declared
+            # mime (predating SDK-boundary correction) still render with
+            # the actual bytes' mime — Anthropic rejects mismatches.
             image_parts.append(
                 make_image_url_part(
-                    content_type=content_type,
+                    content_type=correct_image_mime(content_type, payload),
                     data_b64=base64.b64encode(payload).decode("ascii"),
                 )
             )

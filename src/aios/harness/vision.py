@@ -13,8 +13,22 @@ from typing import Any
 import litellm
 
 from aios.logging import get_logger
+from aios_connector_http.mime import sniff_image_mime
 
 log = get_logger("aios.harness.vision")
+
+
+def correct_image_mime(declared: str, data: bytes) -> str:
+    """Return the magic-byte-detected mime, or ``declared`` when sniffing
+    yields nothing.  Warns on substitution so operators see when a
+    persisted event's declared mime disagreed with its bytes.
+    """
+    sniffed = sniff_image_mime(data)
+    if sniffed is None or sniffed == declared:
+        return declared
+    log.warning("vision.image_mime_corrected", declared=declared, actual=sniffed)
+    return sniffed
+
 
 INLINE_SIZE_CAP_BYTES = 2 * 1024 * 1024
 
