@@ -233,7 +233,12 @@ class TestEntrySweepSpan:
     async def test_sweep_end_fires_when_find_raises(self, mock_runtime: None) -> None:
         """If ``find_sessions_needing_inference`` raises, the outer try/finally
         in ``run_session_step`` still emits ``step_end``, and the body's own
-        try/finally still emits ``sweep_end`` (with ``woken_sessions=0``)."""
+        try/finally still emits ``sweep_end`` (with ``woken_sessions=0``).
+
+        The exception propagates out of ``run_session_step`` because the
+        harness-error handler exhausts the retry budget (``_apply_retry_or_failure``
+        returns ``None``) and re-raises.
+        """
         from aios.harness.loop import run_session_step
 
         append_event = AsyncMock(return_value=SimpleNamespace(id="ev_sweep"))
@@ -243,6 +248,8 @@ class TestEntrySweepSpan:
                 AsyncMock(side_effect=RuntimeError("db down")),
             ),
             patch("aios.harness.loop.sessions_service.append_event", append_event),
+            # Budget exhausted → retry_delay=None → re-raise (original test intent preserved).
+            patch("aios.harness.loop._apply_retry_or_failure", AsyncMock(return_value=None)),
             pytest.raises(RuntimeError, match="db down"),
         ):
             await run_session_step("sess_x", cause="message")

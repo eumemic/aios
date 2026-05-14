@@ -407,8 +407,11 @@ async def list_events(
     after_seq: int = 0,
     kind: EventKind | None = None,
     limit: int = 200,
+    error_only: bool = False,
 ) -> ListResponse[Event]:
-    items = await service.read_events(pool, session_id, after_seq=after_seq, kind=kind, limit=limit)
+    items = await service.read_events(
+        pool, session_id, after_seq=after_seq, kind=kind, limit=limit, error_only=error_only
+    )
     return ListResponse[Event](
         data=items,
         has_more=len(items) == limit,
