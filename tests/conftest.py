@@ -172,18 +172,17 @@ def aios_env_minimal(
 
 
 @pytest.fixture
-def aios_env(aios_env_minimal: dict[str, str]) -> dict[str, str]:
+async def aios_env(aios_env_minimal: dict[str, str]) -> dict[str, str]:
     """Env vars + a bootstrapped root whose key is ``AIOS_API_KEY``.
 
     Auth looks the bearer token up against ``account_keys``, so any
     test that hits an authenticated route needs a matching DB row.
     This fixture seeds that row using ``AIOS_API_KEY``'s sha256 hash.
-    """
-    # ``aios_env_minimal`` is a sync Iterator (uses ``mock.patch.dict``
-    # as a context manager), so the seed step can't be ``async def``.
-    # ``asyncio.run`` is the right bridge here, not an oversight.
-    import asyncio
 
+    Async so the seed step runs on the same event loop pytest-asyncio
+    drives the test on — avoids the spurious ``asyncio.run`` event-loop
+    isolation that caused ASGI-callable teardown flakiness in CI.
+    """
     import asyncpg
 
     from aios.db import queries
@@ -192,17 +191,14 @@ def aios_env(aios_env_minimal: dict[str, str]) -> dict[str, str]:
     plaintext = aios_env_minimal["AIOS_API_KEY"]
     db_url = aios_env_minimal["AIOS_DB_URL"]
 
-    async def _seed_root() -> None:
-        conn = await asyncpg.connect(db_url)
-        try:
-            await queries.bootstrap_root_account(
-                conn,
-                display_name="root",
-                key_hash=hash_key(plaintext),
-                key_label="test-root",
-            )
-        finally:
-            await conn.close()
-
-    asyncio.run(_seed_root())
+    conn = await asyncpg.connect(db_url)
+    try:
+        await queries.bootstrap_root_account(
+            conn,
+            display_name="root",
+            key_hash=hash_key(plaintext),
+            key_label="test-root",
+        )
+    finally:
+        await conn.close()
     return aios_env_minimal
