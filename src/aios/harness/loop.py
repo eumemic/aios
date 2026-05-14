@@ -830,10 +830,14 @@ async def _apply_retry_or_failure(pool: Any, session_id: str) -> float | None:
         )
         await _append_lifecycle(pool, session_id, "turn_ended", "rescheduling", "rescheduling")
         return delay
+    # Terminal landing pad (#353): sweep skips ``errored`` (see
+    # ``CANDIDATE_ROWS_SQL`` / ``CONFIRMED_ROWS_SQL``); any in-flight
+    # tool task that completes after this point sits unreaped until a
+    # user message flips status via ``flip_quiescent_to_pending``.
     await sessions_service.set_session_status(
-        pool, session_id, "idle", stop_reason={"type": "error"}
+        pool, session_id, "errored", stop_reason={"type": "error"}
     )
-    await _append_lifecycle(pool, session_id, "turn_ended", "idle", "error")
+    await _append_lifecycle(pool, session_id, "turn_ended", "errored", "error")
     return None
 
 

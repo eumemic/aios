@@ -911,6 +911,7 @@
                     "running",
                     "idle",
                     "rescheduling",
+                    "errored",
                     "terminated"
                   ],
                   "type": "string"
@@ -8972,6 +8973,7 @@
               "running",
               "idle",
               "rescheduling",
+              "errored",
               "terminated"
             ],
             "title": "Status"
@@ -10619,6 +10621,7 @@
               "running",
               "idle",
               "rescheduling",
+              "errored",
               "terminated"
             ],
             "title": "Session Status"

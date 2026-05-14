@@ -66,7 +66,7 @@ def _validate_session_resources(resources: list[SessionResource]) -> None:
     _validate_github_resources(github)
 
 
-SessionStatus = Literal["pending", "running", "idle", "rescheduling", "terminated"]
+SessionStatus = Literal["pending", "running", "idle", "rescheduling", "errored", "terminated"]
 
 MAX_USER_MESSAGE_CHARS = 1_000_000
 
