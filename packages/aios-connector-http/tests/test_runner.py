@@ -16,7 +16,7 @@ import asyncio
 import contextlib
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -773,3 +773,27 @@ class TestWaitConnectionServed:
         # verify the coordination contract of wait_connection_served itself.
         c._connection_served.setdefault("conn_x", asyncio.Event()).set()
         await wait_task  # should complete without TimeoutError
+
+    async def test_on_connection_added_sets_event(self) -> None:
+        """_on_connection_added must set _connection_served[connection_id]."""
+        from aios_sdk._generated.types import Unset
+
+        c = _ProbeConnector()
+        # Build a minimal mock secrets response: 200, parsed body with no secrets.
+        mock_body = MagicMock()
+        mock_body.secrets = Unset()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.parsed = mock_body
+
+        mock_tg = MagicMock()
+        mock_tg.create_task = MagicMock(return_value=MagicMock())
+
+        with patch(
+            "aios_connector_http.runner._get_runtime_secrets",
+            new=AsyncMock(return_value=mock_response),
+        ):
+            await c._on_connection_added(mock_tg, "conn_direct", "account_x")
+
+        assert "conn_direct" in c._connection_served
+        assert c._connection_served["conn_direct"].is_set()

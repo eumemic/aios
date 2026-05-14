@@ -446,7 +446,10 @@ class HttpConnector:
                     self._ready_event.set()  # all background loops scheduled
             finally:
                 self._ready_event.clear()
-                self._connection_served.clear()
+                # Reset each event rather than replacing the dict, so callers
+                # holding existing Event references are not orphaned on re-run.
+                for event in self._connection_served.values():
+                    event.clear()
                 await self.teardown()
 
     async def _publish_tools_schema(self) -> None:
