@@ -15,24 +15,22 @@ _SIGNAL_CAPTCHA_URL: str = "https://signalcaptchas.org/registration/generate"
 
 
 def _is_captcha_required(exc: RpcError) -> bool:
-    # signal-cli's error shape varies by version; accept the documented code
-    # AND a message-substring fallback so the predicate survives upgrades.
-    if exc.code == -3:
-        return True
-    if isinstance(exc.data, dict) and "captcha" in str(exc.data).lower():
-        return True
-    return "captcha" in str(exc).lower()
+    return exc.code == -3
+
+
+def _captcha_url(exc: RpcError) -> str:
+    # Prefer the URL signal-cli emits in the structured ``data`` field (its
+    # exact key varies by version); fall back to the canonical endpoint.
+    if isinstance(exc.data, dict):
+        for key in ("captcha_url", "captcha"):
+            value = exc.data.get(key)
+            if isinstance(value, str) and value.startswith("http"):
+                return value
+    return _SIGNAL_CAPTCHA_URL
 
 
 class SignalManagementMixin:
     _daemon: SignalDaemon | None
-
-    def _require_daemon(self) -> SignalDaemon:
-        if self._daemon is None:
-            raise RuntimeError(
-                "signal daemon not started; setup() must run before management calls"
-            )
-        return self._daemon
 
     @management_handler()
     async def register(
@@ -42,14 +40,15 @@ class SignalManagementMixin:
         captcha: str | None = None,
         voice: bool = False,
     ) -> dict[str, Any]:
+        assert self._daemon is not None
         try:
-            await self._require_daemon().register(phone=account, captcha=captcha, voice=voice)
+            await self._daemon.register(phone=account, captcha=captcha, voice=voice)
         except RpcError as exc:
             if _is_captcha_required(exc):
                 raise ManagementHandlerError(
                     {
                         "status": "captcha_required",
-                        "captcha_url": _SIGNAL_CAPTCHA_URL,
+                        "captcha_url": _captcha_url(exc),
                         "account": account,
                     }
                 ) from exc
@@ -64,7 +63,8 @@ class SignalManagementMixin:
         code: str,
         pin: str | None = None,
     ) -> dict[str, Any]:
-        result = await self._require_daemon().verify(phone=account, code=code, pin=pin)
+        assert self._daemon is not None
+        result = await self._daemon.verify(phone=account, code=code, pin=pin)
         return {"account": account, "uuid": result.get("uuid", "")}
 
     @management_handler(method="updateProfile")
@@ -76,7 +76,8 @@ class SignalManagementMixin:
         family_name: str | None = None,
         about: str | None = None,
     ) -> dict[str, Any]:
-        await self._require_daemon().update_profile(
+        assert self._daemon is not None
+        await self._daemon.update_profile(
             phone=account,
             given_name=given_name,
             family_name=family_name,

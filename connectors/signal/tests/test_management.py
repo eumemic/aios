@@ -108,22 +108,34 @@ class TestUpdateProfile:
 
 
 class TestCaptchaPredicate:
-    def test_known_code(self) -> None:
+    def test_known_code_returns_true(self) -> None:
         assert _is_captcha_required(RpcError("denied", code=-3))
 
-    def test_captcha_keyword_in_data(self) -> None:
-        assert _is_captcha_required(RpcError("denied", data={"captcha_token": "x"}))
-
-    def test_captcha_keyword_in_message(self) -> None:
-        assert _is_captcha_required(RpcError("Captcha required"))
-
-    def test_unrelated_error_returns_false(self) -> None:
+    def test_unrelated_code_returns_false(self) -> None:
         assert not _is_captcha_required(RpcError("rate limited", code=-100))
 
+    def test_captcha_substring_in_message_no_longer_matches(self) -> None:
+        # "Captcha token invalid" must NOT be treated as captcha-required;
+        # otherwise a bad-token error would loop the operator back to the
+        # captcha page.
+        assert not _is_captcha_required(RpcError("Captcha token invalid"))
 
-class TestRequiresDaemon:
+
+class TestCaptchaUrl:
     @pytest.mark.asyncio
-    async def test_register_without_daemon_raises(self) -> None:
-        probe = _Probe(None)
-        with pytest.raises(RuntimeError, match="daemon not started"):
+    async def test_pulled_from_data_when_present(self, probe: _Probe, daemon: MagicMock) -> None:
+        daemon.register.side_effect = RpcError(
+            "Captcha required", code=-3, data={"captcha_url": "https://x.example/123"}
+        )
+        with pytest.raises(ManagementHandlerError) as exc_info:
             await probe.register(account="+1")
+        assert exc_info.value.payload["captcha_url"] == "https://x.example/123"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_canonical_when_data_absent(
+        self, probe: _Probe, daemon: MagicMock
+    ) -> None:
+        daemon.register.side_effect = RpcError("Captcha required", code=-3)
+        with pytest.raises(ManagementHandlerError) as exc_info:
+            await probe.register(account="+1")
+        assert exc_info.value.payload["captcha_url"].startswith("https://signalcaptchas.org/")

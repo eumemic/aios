@@ -639,8 +639,4 @@ async def post_runtime_management_call_result(
         )
         if not moved:
             return
-        await conn.execute(
-            "SELECT pg_notify($1, $2)",
-            f"connector_result_{body.call_id}",
-            json.dumps({"result": body.result, "is_error": body.is_error}),
-        )
+        await queries.notify_management_call_result(conn, call_id=body.call_id)

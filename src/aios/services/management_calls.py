@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -37,7 +36,6 @@ async def submit_call(
     """
     call_id = make_id("mgmt")
     expires_at = datetime.now(UTC) + timedelta(seconds=timeout_s + _EXPIRY_SLACK_S)
-    channel = f"connector_management_calls_{connector}"
 
     async with listen.listen_for_connector_result(db_url, call_id) as queue:
         async with pool.acquire() as conn:
@@ -49,16 +47,19 @@ async def submit_call(
                 params=params,
                 expires_at=expires_at,
             )
-            # pg_notify function form, not literal NOTIFY — see queries.append_event.
-            await conn.execute("SELECT pg_notify($1, $2)", channel, call_id)
+            await queries.notify_management_call_dispatch(
+                conn, connector=connector, call_id=call_id
+            )
 
         try:
-            payload = await asyncio.wait_for(queue.get(), timeout=timeout_s)
+            await asyncio.wait_for(queue.get(), timeout=timeout_s)
         except TimeoutError as exc:
             raise ManagementCallTimeoutError(
                 f"connector {connector!r} did not resolve {method!r} within {timeout_s}s",
                 detail={"call_id": call_id, "connector": connector, "method": method},
             ) from exc
 
-    envelope = json.loads(payload)
-    return envelope["result"], bool(envelope["is_error"])
+    async with pool.acquire() as conn:
+        row = await queries.get_management_call(conn, call_id)
+    assert row is not None and row["status"] != "pending"
+    return row["result"], row["is_error"]

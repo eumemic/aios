@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -29,24 +28,41 @@ async def _listener_yielding(payload: str | None) -> AsyncIterator[asyncio.Queue
     yield queue
 
 
+def _row(result: Any, *, is_error: bool, status: str = "succeeded") -> dict[str, Any]:
+    return {
+        "id": "mgmt_x",
+        "connector": "signal",
+        "method": "register",
+        "params": {},
+        "status": status,
+        "result": result,
+        "is_error": is_error,
+    }
+
+
 class TestSubmitCall:
     @pytest.mark.asyncio
-    async def test_happy_path_returns_result_and_clears_flag(self) -> None:
+    async def test_happy_path_returns_result(self) -> None:
         conn = MagicMock()
-        conn.execute = AsyncMock()
         pool = fake_pool_yielding_conn(conn)
         expected: dict[str, Any] = {"status": "sms_sent", "account": "+15551234567"}
 
         with (
             patch(
                 "aios.services.management_calls.listen.listen_for_connector_result",
-                return_value=_listener_yielding(
-                    json.dumps({"result": expected, "is_error": False})
-                ),
+                return_value=_listener_yielding(""),
             ),
             patch(
                 "aios.services.management_calls.queries.insert_management_call", AsyncMock()
             ) as insert,
+            patch(
+                "aios.services.management_calls.queries.notify_management_call_dispatch",
+                AsyncMock(),
+            ) as notify,
+            patch(
+                "aios.services.management_calls.queries.get_management_call",
+                AsyncMock(return_value=_row(expected, is_error=False)),
+            ),
         ):
             result, is_error = await submit_call(
                 "postgresql://test/test",
@@ -58,31 +74,33 @@ class TestSubmitCall:
             )
 
         assert (result, is_error) == (expected, False)
-        # NOTIFY fired on the correct channel with the same call_id we INSERTed.
-        notify_call = conn.execute.await_args
-        assert notify_call.args[0] == "SELECT pg_notify($1, $2)"
-        assert notify_call.args[1] == "connector_management_calls_signal"
-        notified_call_id = notify_call.args[2]
-        assert notified_call_id.startswith("mgmt_")
-        # ...and the INSERT used the same call_id.
         insert.assert_awaited_once()
+        notify.assert_awaited_once()
+        notified_call_id = notify.await_args.kwargs["call_id"]
+        assert notified_call_id.startswith("mgmt_")
+        assert notify.await_args.kwargs["connector"] == "signal"
         assert insert.await_args.kwargs["call_id"] == notified_call_id
-        assert insert.await_args.kwargs["connector"] == "signal"
-        assert insert.await_args.kwargs["method"] == "register"
 
     @pytest.mark.asyncio
     async def test_is_error_propagates(self) -> None:
         conn = MagicMock()
-        conn.execute = AsyncMock()
         pool = fake_pool_yielding_conn(conn)
         captcha: dict[str, Any] = {"status": "captcha_required", "captcha_url": "https://..."}
 
         with (
             patch(
                 "aios.services.management_calls.listen.listen_for_connector_result",
-                return_value=_listener_yielding(json.dumps({"result": captcha, "is_error": True})),
+                return_value=_listener_yielding(""),
             ),
             patch("aios.services.management_calls.queries.insert_management_call", AsyncMock()),
+            patch(
+                "aios.services.management_calls.queries.notify_management_call_dispatch",
+                AsyncMock(),
+            ),
+            patch(
+                "aios.services.management_calls.queries.get_management_call",
+                AsyncMock(return_value=_row(captcha, is_error=True, status="failed")),
+            ),
         ):
             result, is_error = await submit_call(
                 "postgresql://test/test",
@@ -98,7 +116,6 @@ class TestSubmitCall:
     @pytest.mark.asyncio
     async def test_timeout_raises(self) -> None:
         conn = MagicMock()
-        conn.execute = AsyncMock()
         pool = fake_pool_yielding_conn(conn)
 
         with (
@@ -107,6 +124,10 @@ class TestSubmitCall:
                 return_value=_listener_yielding(None),
             ),
             patch("aios.services.management_calls.queries.insert_management_call", AsyncMock()),
+            patch(
+                "aios.services.management_calls.queries.notify_management_call_dispatch",
+                AsyncMock(),
+            ),
             pytest.raises(ManagementCallTimeoutError) as exc_info,
         ):
             await submit_call(

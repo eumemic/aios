@@ -740,6 +740,14 @@ class HttpConnector:
 
         Shares ``self._answered`` with :meth:`_tool_loop`; ``mgmt_*`` and
         ``call_*`` ULIDs are namespace-disjoint.
+
+        Unlike :meth:`_tool_loop`, a post-result POST failure does NOT
+        propagate.  Management handlers have real side effects (signal-cli's
+        ``register`` dispatches an SMS); a wedge-and-restart loop would
+        amplify those side effects on every SSE backfill replay.  We mark
+        the call answered regardless of POST outcome and continue; the
+        audit row stays ``pending`` and the operator times out — visible
+        failure beats silent SMS-storm.
         """
         client = self._require_client()
         backoff = 1.0
@@ -755,7 +763,13 @@ class HttpConnector:
                     call_id = call.get("call_id", "")
                     if not call_id or call_id in self._answered:
                         continue
-                    await self.dispatch_management_call(call)
+                    try:
+                        await self.dispatch_management_call(call)
+                    except Exception:
+                        log.exception(
+                            "connector.management_call.dispatch_failed",
+                            call_id=call_id,
+                        )
                     self._answered.add(call_id)
                     await self.save_answered(call_id)
             except httpx.HTTPError as exc:
