@@ -91,6 +91,7 @@ jobs:
   smoke:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
@@ -120,6 +121,7 @@ jobs:
         env:
           AIOS_DOCKER_IMAGE: ${{ needs.build.outputs.sha_tag }}
       - name: Retag sha → :smoked
+        if: success()
         run: |
           docker buildx imagetools create \
             -t ghcr.io/eumemic/aios-sandbox:smoked \
