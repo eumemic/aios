@@ -31,12 +31,26 @@ IMAGE = os.environ.get("AIOS_DOCKER_IMAGE", "ghcr.io/eumemic/aios-sandbox:latest
 
 @pytest.fixture(scope="module")
 def pulled_image() -> str:
-    """Pull IMAGE once for the entire module.
+    """Ensure IMAGE is present locally; pull from registry only if absent.
 
-    Returns the image name so tests can reference it. A module-scoped
-    fixture means a single ``docker pull`` per pytest invocation, not
-    one per test.
+    Skipping the pull when the tag already resolves locally is essential
+    in CI, where the Dockerfile-changed workflow builds the image under
+    ``ghcr.io/eumemic/aios-sandbox:latest`` immediately before the e2e
+    suite runs. An unconditional ``docker pull`` would overwrite that
+    fresh local build with the older registry tag, masking the very
+    change the build was meant to validate.
+
+    Module-scoped so this check runs at most once per pytest invocation.
     """
+    check = subprocess.run(
+        ["docker", "image", "inspect", IMAGE],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    if check.returncode == 0:
+        return IMAGE
     result = subprocess.run(
         ["docker", "pull", IMAGE],
         capture_output=True,
