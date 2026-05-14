@@ -50,11 +50,7 @@ class Settings(BaseSettings):
         "labels.",
     )
 
-    # ── auth + crypto (required) ───────────────────────────────────────────
-    api_key: SecretStr = Field(
-        ...,
-        description="Shared API key clients send as `Authorization: Bearer <key>`.",
-    )
+    # ── crypto (required) ──────────────────────────────────────────────────
     vault_key: SecretStr = Field(
         ...,
         description="Base64-encoded 32-byte master key for libsodium secretbox.",
