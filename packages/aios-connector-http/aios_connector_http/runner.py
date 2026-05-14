@@ -288,29 +288,36 @@ class HttpConnector:
     # ── test-coordination primitives ──────────────────────────────────
 
     async def wait_ready(self, deadline: float = 60.0) -> None:
-        """Block until all three background loops are live and listening.
+        """Block until all three background loops have opened their SSE streams.
 
-        Specifically: each of the discovery, tool, and management-call loops
-        has successfully opened its SSE stream (2xx headers received).  The
-        readiness signal comes from a synthetic ``"_open"`` event the SDK's
+        Specifically: each of the discovery, tool, and management-call loops has
+        received the synthetic ``"_open"`` event the SDK's
         :func:`aios_sdk.streaming._stream_sse` yields right after
-        ``response.raise_for_status()`` succeeds.  At that moment the server-
-        side generator has begun running, which means its ``listen_for_*``
-        context manager is opening the LISTEN connection — any NOTIFY emitted
-        a moment later will be queued and delivered.  The remaining race
-        window (between 2xx-headers-sent and LISTEN-registered) is on the
-        order of microseconds in a single server event-loop iteration; tests
-        that POST/NOTIFY immediately after :meth:`wait_ready` returns do not
-        miss the notification in practice.
+        ``response.raise_for_status()`` succeeds — i.e. the HTTP handshake
+        returned 2xx headers.  At that moment the server-side body generator
+        has begun executing; within the same event-loop iteration its
+        ``listen_for_*`` context manager registers LISTEN, after which any
+        subsequent NOTIFY is queued and delivered to the SSE stream.
 
         We deliberately do NOT depend on a server-emitted ``"connected"``
-        event before backfill, because yielding from an sse-starlette
-        generator before any natural data chunk has surfaced an "ASGI
-        callable returned without completing response" failure mode in CI
-        (see aios#366 commit-message archaeology and the followup issue).
+        event yielded before backfill, because yielding from an sse-starlette
+        generator before any natural data chunk has surfaced an "ASGI callable
+        returned without completing response" failure mode in CI (see aios#366
+        commit-message archaeology).
 
-        The default deadline is 60 s — generous for CI scheduler lag and
-        the exponential-backoff retry cycle on the SSE connection.
+        Caveat for test authors: ``_open`` is a *best-effort* readiness
+        signal, not a strong handshake.  It fires when the client sees 2xx
+        headers, but the server-side generator may still be in the middle of
+        a slow ``asyncpg.connect()`` for its LISTEN connection.  In tests
+        that use an in-process uvicorn fixture, watch for the cross-test
+        ``sse_starlette.AppStatus.should_exit`` contamination noted in
+        :mod:`tests.conftest` (``_reset_sse_starlette_shutdown_state``);
+        without that reset, every SSE handshake after the first fixture
+        teardown can be cancelled immediately by the library's shutdown
+        watcher, defeating ``_open`` as a readiness oracle.
+
+        The default deadline is 60 s — generous for CI scheduler lag and the
+        exponential-backoff retry cycle on the SSE connection.
 
         Raises ``TimeoutError`` if the loops have not all reached the live
         phase within ``deadline`` seconds.  Intended for test coordination.
@@ -539,20 +546,25 @@ class HttpConnector:
                 async for msg in stream_connection_discovery(
                     client.get_async_httpx_client(), self.connector
                 ):
-                    backoff = 1.0
                     if msg.event == "_open":
                         # SDK-synthetic marker: the SSE handshake succeeded
                         # (2xx headers received).  The server-side generator
-                        # has begun executing, which means ``listen_for_*``
-                        # is running and any NOTIFY emitted after this point
-                        # will be delivered once LISTEN registration finishes
-                        # (microseconds later — both happen in the same
-                        # event-loop iteration on the server).  Signal our
-                        # readiness once on first successful connection.
+                        # has begun executing; its ``listen_for_*`` context
+                        # manager will register LISTEN within microseconds
+                        # of the response body's first iteration.  Signal
+                        # readiness once on the first successful connection.
+                        #
+                        # Note: we deliberately do NOT reset ``backoff`` on
+                        # ``_open`` — the synthetic event fires before any
+                        # server-side state is established, so a 2xx-then-
+                        # immediate-disconnect loop should still back off
+                        # exponentially.  Resetting only on real messages
+                        # ensures CI-side flapping doesn't pin us at 1 s.
                         if not _signalled_ready:
                             _signalled_ready = True
                             self._mark_loop_backfilled()
                         continue
+                    backoff = 1.0
                     if msg.event != "connection":
                         continue
                     payload = json.loads(msg.data)
@@ -675,13 +687,14 @@ class HttpConnector:
                 async for msg in stream_connector_calls(
                     client.get_async_httpx_client(), self.connector
                 ):
-                    backoff = 1.0
                     if msg.event == "_open":
-                        # See ``_discovery_loop`` for the readiness rationale.
+                        # See ``_discovery_loop`` for the readiness +
+                        # don't-reset-backoff rationale.
                         if not _signalled_ready:
                             _signalled_ready = True
                             self._mark_loop_backfilled()
                         continue
+                    backoff = 1.0
                     if msg.event != "call":
                         continue
                     call = json.loads(msg.data)
@@ -864,13 +877,14 @@ class HttpConnector:
                 async for msg in stream_management_calls(
                     client.get_async_httpx_client(), self.connector
                 ):
-                    backoff = 1.0
                     if msg.event == "_open":
-                        # See ``_discovery_loop`` for the readiness rationale.
+                        # See ``_discovery_loop`` for the readiness +
+                        # don't-reset-backoff rationale.
                         if not _signalled_ready:
                             _signalled_ready = True
                             self._mark_loop_backfilled()
                         continue
+                    backoff = 1.0
                     if msg.event != "call":
                         continue
                     call = json.loads(msg.data)
