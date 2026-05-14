@@ -1035,6 +1035,79 @@ class TestFocalRendering:
         content = build_messages(events, system_prompt=None).messages[0]["content"]
         assert "edited" not in content
 
+    def test_focal_match_edit_target_timestamp(self) -> None:
+        """When ``metadata.edited=True``, ``edit_target_timestamp_ms`` is
+        emitted alongside so the model can correlate the edit back to the
+        original (and react/delete/re-edit if needed).  Signal carries it
+        natively via ``editMessage.targetSentTimestamp``; telegram doesn't
+        but the field name stays platform-agnostic on the metadata.
+        """
+        md = {
+            "channel": self._CHAN_A,
+            "edited": True,
+            "edit_target_timestamp_ms": 1776400000000,
+        }
+        events = [
+            _evt(
+                1, "user", content="oops, fixed", metadata=md, focal_channel_at_arrival=self._CHAN_A
+            )
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "edited=true" in content
+        assert "edit_target_timestamp_ms=1776400000000" in content
+
+    def test_focal_match_self_mentioned_surfaced(self) -> None:
+        """Group chats use mentions to summon a response; ``self_mentioned``
+        gives the model an unambiguous "the sender's client encoded a
+        mention targeting my account" signal rather than substring-matching
+        the (placeholder-substituted) text content.
+        """
+        md = {
+            "channel": self._CHAN_A,
+            "self_mentioned": True,
+            "mentions": [
+                {"uuid": "bot-uuid", "name": "SmokeBot"},
+            ],
+        }
+        events = [
+            _evt(
+                1,
+                "user",
+                content="@SmokeBot hi",
+                metadata=md,
+                focal_channel_at_arrival=self._CHAN_A,
+            )
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "self_mentioned=true" in content
+        # Structured mention entries render on their own line so the
+        # uuid is available to the model for outbound mention encoding.
+        assert "mention: name='SmokeBot' · uuid=bot-uuid" in content
+
+    def test_focal_match_mentions_without_self_mention(self) -> None:
+        """Mentions of someone other than the bot still render so the
+        model has context (e.g. "Alice tagged Bob"), but
+        ``self_mentioned=true`` doesn't appear when the bot wasn't
+        the target.
+        """
+        md = {
+            "channel": self._CHAN_A,
+            "self_mentioned": False,
+            "mentions": [{"uuid": "alice-uuid", "name": "Alice"}],
+        }
+        events = [
+            _evt(
+                1,
+                "user",
+                content="@Alice did it",
+                metadata=md,
+                focal_channel_at_arrival=self._CHAN_A,
+            )
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "self_mentioned" not in content
+        assert "mention: name='Alice' · uuid=alice-uuid" in content
+
     def test_focal_match_sticker_emoji(self) -> None:
         """Stickers arrive with an empty body and a ``sticker_emoji`` in
         metadata — the model otherwise has no textual cue that something

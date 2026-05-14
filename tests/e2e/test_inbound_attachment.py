@@ -119,3 +119,60 @@ class TestInboundAttachmentStaging:
         assert attachments[0]["content_type"] == "image/png"
         assert attachments[0]["size"] == len(payload)
         assert attachments[0]["in_sandbox_path"] == f"/mnt/attachments/echo/{event_id}-photo.png"
+
+    async def test_empty_content_inbound_accepted(
+        self, http_client: httpx.AsyncClient, harness: Harness, aios_env: dict[str, str]
+    ) -> None:
+        """Reaction-only / attachment-only / group-update envelopes have no
+        text body and POST ``content=""`` to the runtime inbound route.
+        FastAPI's multipart ``Form`` parser treats empty values as
+        ``input=null`` (missing), so without an explicit default this would
+        422 and crash the connector container.  Pin that the route accepts
+        empty content as a first-class shape.
+        """
+        from aios.services import agents as agents_service
+        from aios.services import environments as env_svc
+        from aios.services import sessions as sess_svc
+
+        agent = await agents_service.create_agent(
+            harness._pool,
+            name=f"att-empty-{id(self)}",
+            model="fake/test",
+            system="",
+            tools=[],
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+        env = await env_svc.create_environment(harness._pool, name=f"env-att-empty-{id(self)}")
+        session = await sess_svc.create_session(
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title=None,
+            metadata={},
+        )
+        connection_id = await _create_connection(http_client, f"att-empty-{id(self)}")
+        await _attach(harness, connection_id, session.id)
+        r = await http_client.post("/v1/runtime-tokens", json={"connector": "echo"})
+        r.raise_for_status()
+        token = str(r.json()["plaintext"])
+
+        event_id = _new_event_id()
+        r = await http_client.post(
+            "/v1/connectors/runtime/inbound",
+            headers=bearer(token),
+            data={
+                "connection_id": connection_id,
+                "event_id": event_id,
+                "chat_id": "chat-empty",
+                "content": "",
+            },
+        )
+        assert r.status_code == 201, r.text
+
+        events = await harness.events(session.id)
+        user_events = [e for e in events if e.kind == "message" and e.data.get("role") == "user"]
+        assert len(user_events) == 1
+        assert user_events[0].data["content"] == ""

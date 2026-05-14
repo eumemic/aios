@@ -100,10 +100,37 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
         parts.append(f"message_id={message_id}")
     if metadata.get("edited") is True:
         parts.append("edited=true")
+    edit_target = metadata.get("edit_target_timestamp_ms")
+    if isinstance(edit_target, int):
+        parts.append(f"edit_target_timestamp_ms={edit_target}")
+    if metadata.get("self_mentioned") is True:
+        # Hoist ahead of the structured ``mentions`` list — for
+        # group chats the model often only needs to know "was I
+        # tagged?" and substring-matching ``content`` is the
+        # alternative that #5 set out to eliminate.
+        parts.append("self_mentioned=true")
     sticker_emoji = metadata.get("sticker_emoji")
     if isinstance(sticker_emoji, str) and sticker_emoji:
         parts.append(f"sticker_emoji={sticker_emoji!r}")
     header = "[" + " · ".join(parts) + "]"
+    mentions = metadata.get("mentions")
+    if isinstance(mentions, list) and mentions:
+        # One entry per line; uuid is the platform-stable identity the
+        # model needs for outbound mention encoding via signal_send.
+        mention_lines: list[str] = []
+        for m in mentions:
+            if not isinstance(m, dict):
+                continue
+            uuid = m.get("uuid")
+            if not isinstance(uuid, str) or not uuid:
+                continue
+            name = m.get("name")
+            if isinstance(name, str) and name:
+                mention_lines.append(f"[mention: name={name!r} · uuid={uuid}]")
+            else:
+                mention_lines.append(f"[mention: uuid={uuid}]")
+        if mention_lines:
+            header += "\n" + "\n".join(mention_lines)
     reaction = metadata.get("reaction")
     if isinstance(reaction, dict):
         emoji = reaction.get("emoji") or "?"

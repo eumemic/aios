@@ -57,6 +57,14 @@ class _ProbeConnector(HttpConnector):
         self.calls.append(("boom", {}))
         raise RuntimeError("kaboom")
 
+    @tool()
+    async def race(self, *, connection_id: str) -> str:
+        """Simulate the SDK's most common KeyError shape — a tool method
+        looking up its per-connection state right after a connector
+        restart, before ``serve_connection`` has registered it."""
+        self.calls.append(("race", {"connection_id": connection_id}))
+        raise KeyError(connection_id)
+
     @tool(name="say_struct")
     async def returns_dict(self, *, n: int) -> dict[str, int]:
         self.calls.append(("say_struct", {"n": n}))
@@ -408,6 +416,54 @@ class TestLogging:
             for v in r.values():
                 assert secret_body not in str(v), f"content leaked into log field: {r}"
 
+    async def test_emit_inbound_logs_response_body_on_error(
+        self, probe: _ProbeConnector
+    ) -> None:
+        """When the api rejects an inbound (e.g. FastAPI 422 validation),
+        the response body carries the diagnostic — which field, why.
+        ``response.raise_for_status()`` discards it, so the connector must
+        log the body explicitly before raising or the operator only sees a
+        bare ``HTTPStatusError: 422`` in the crash traceback with no clue
+        what triggered the rejection.
+        """
+        import httpx
+
+        validation_body = (
+            '{"error":{"type":"validation_error","detail":'
+            '{"errors":[{"type":"missing","loc":["body","content"],'
+            '"msg":"Field required","input":null}]}}}'
+        )
+        mock_response = MagicMock()
+        mock_response.is_error = True
+        mock_response.status_code = 422
+        mock_response.text = validation_body
+        mock_response.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError(
+                "422 Unprocessable Content", request=MagicMock(), response=mock_response
+            )
+        )
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        with (
+            structlog.testing.capture_logs() as records,
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await probe.emit_inbound(
+                connection_id="conn_1",
+                chat_id="c",
+                sender={"id": 1},
+                content="",
+            )
+        failed = [r for r in records if r.get("event") == "connector.inbound.failed"]
+        assert len(failed) == 1, "expected one connector.inbound.failed record"
+        assert failed[0]["status_code"] == 422
+        assert failed[0]["connection_id"] == "conn_1"
+        # The full validation body is logged so the operator can see the
+        # offending field path without replaying the request.
+        assert "content" in failed[0]["body"]
+        assert "Field required" in failed[0]["body"]
+
     async def test_dispatch_call_logs_dispatched_then_completed(
         self, probe: _ProbeConnector
     ) -> None:
@@ -428,6 +484,78 @@ class TestLogging:
         assert completed["name"] == "shout"
         assert completed["tool_call_id"] == "call_1"
         assert completed["is_error"] is False
+
+    async def test_dispatch_call_reshapes_connection_state_race(
+        self, probe: _ProbeConnector
+    ) -> None:
+        """When a tool method KeyErrors on its connection_id (the SSE
+        dispatch backfill raced ahead of ``serve_connection``'s state
+        registration), the SDK base shouldn't surface the bare quoted
+        id as the result — it should produce a structured error the
+        model can interpret and retry.
+
+        Without this special-case the model sees
+        ``{"error": "'conn_01...'"}`` and has to guess at the meaning;
+        with it the model sees
+        ``{"error": "connection not yet active; retry shortly",
+        "connection_id": "conn_X"}`` and retries sensibly.
+        """
+        with structlog.testing.capture_logs() as records:
+            await probe.dispatch_call(
+                {
+                    "connection_id": "conn_X",
+                    "tool_call_id": "call_race",
+                    "session_id": "sess_race",
+                    "name": "race",
+                    "arguments": "{}",
+                }
+            )
+        r = probe.results[0]
+        assert r.kwargs["is_error"] is True
+        payload = json.loads(r.kwargs["content"])
+        assert payload == {
+            "error": "connection not yet active; retry shortly",
+            "connection_id": "conn_X",
+        }
+        failed = [r for r in records if r["event"] == "connector.tool_call.failed"]
+        assert len(failed) == 1
+        assert failed[0]["reason"] == "connection_state_race"
+
+    async def test_dispatch_call_keyerror_unrelated_to_connection_id_passes_through(
+        self, probe: _ProbeConnector
+    ) -> None:
+        """A KeyError whose key isn't the connection_id is just a
+        regular bug — surface as the generic ``tool_exception`` error
+        rather than disguising it as a race.  Without this gate the
+        special-case would swallow real bugs."""
+
+        @tool(name="bad_dict_access")
+        async def _bad_dict(self_: _ProbeConnector) -> str:
+            raise KeyError("some_other_key")
+
+        # Inject the tool into the probe's registry.
+        from aios_connector_http.runner import _build_tool_meta
+
+        probe._tools["bad_dict_access"] = _build_tool_meta(_bad_dict.__get__(probe))  # type: ignore[attr-defined]
+
+        with structlog.testing.capture_logs() as records:
+            await probe.dispatch_call(
+                {
+                    "connection_id": "conn_X",
+                    "tool_call_id": "call_bd",
+                    "session_id": "sess_bd",
+                    "name": "bad_dict_access",
+                    "arguments": "{}",
+                }
+            )
+        r = probe.results[0]
+        assert r.kwargs["is_error"] is True
+        payload = json.loads(r.kwargs["content"])
+        # Generic shape, not the race-specific one.
+        assert "connection_id" not in payload
+        assert payload["error"] == "'some_other_key'"
+        failed = [r for r in records if r["event"] == "connector.tool_call.failed"]
+        assert failed[0]["reason"] == "tool_exception"
 
     async def test_dispatch_call_logs_failed_on_unknown_tool(
         self, probe: _ProbeConnector

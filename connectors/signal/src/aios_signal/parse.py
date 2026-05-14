@@ -55,6 +55,22 @@ class Reply:
 
 
 @dataclass(slots=True, frozen=True)
+class Mention:
+    """One structured @-mention from a Signal inbound.
+
+    The placeholder-substituted text in ``InboundMessage.text`` is what
+    the sender's UI rendered; the structured ``Mention`` list is what
+    the platform actually encoded.  Agents that need to distinguish "the
+    sender typed my name as text" from "the sender's client emitted a
+    mention targeting my UUID" read ``mentions`` (and ``self_mentioned``
+    on the metadata) rather than substring-searching ``text``.
+    """
+
+    uuid: str
+    name: str | None
+
+
+@dataclass(slots=True, frozen=True)
 class InboundMessage:
     chat_type: ChatType
     raw_chat_id: str
@@ -64,8 +80,11 @@ class InboundMessage:
     timestamp_ms: int
     text: str
     attachments: tuple[Attachment, ...]
+    mentions: tuple[Mention, ...]
     reply: Reply | None
     reaction: Reaction | None
+    edited: bool = False
+    edit_target_timestamp_ms: int | None = None
 
 
 def _substitute_mentions(text: str, mentions: list[dict[str, Any]]) -> str:
@@ -101,9 +120,30 @@ def parse_envelope(
     if envelope.get("receiptMessage") or envelope.get("typingMessage"):
         return None
 
+    # signal-cli emits two top-level shapes for inbound payloads:
+    # ``dataMessage`` for plain sends and ``editMessage.dataMessage``
+    # for edits.  An edit envelope carries the EDITED content's
+    # ``timestamp`` at the envelope root and ``targetSentTimestamp``
+    # inside ``editMessage`` pointing at the original.  Both shapes
+    # feed the same downstream parsing — only the ``edited`` /
+    # ``edit_target_timestamp_ms`` fields on the result differ.
+    edited = False
+    edit_target_ts: int | None = None
     data_message = envelope.get("dataMessage")
     if not isinstance(data_message, dict):
-        return None
+        edit_envelope = envelope.get("editMessage")
+        if isinstance(edit_envelope, dict):
+            nested = edit_envelope.get("dataMessage")
+            if isinstance(nested, dict):
+                data_message = nested
+                edited = True
+                target_raw = edit_envelope.get("targetSentTimestamp")
+                if isinstance(target_raw, int):
+                    edit_target_ts = target_raw
+            else:
+                return None
+        else:
+            return None
 
     timestamp_ms = int(envelope.get("timestamp", 0))
     sender_name = envelope.get("sourceName") or None
@@ -172,11 +212,26 @@ def parse_envelope(
     )
 
     raw_text = data_message.get("message")
-    mentions = data_message.get("mentions")
+    mentions_raw = data_message.get("mentions")
     if isinstance(raw_text, str):
-        text = _substitute_mentions(raw_text, mentions) if isinstance(mentions, list) else raw_text
+        text = (
+            _substitute_mentions(raw_text, mentions_raw)
+            if isinstance(mentions_raw, list)
+            else raw_text
+        )
     else:
         text = ""
+
+    parsed_mentions: tuple[Mention, ...] = ()
+    if isinstance(mentions_raw, list):
+        parsed_mentions = tuple(
+            Mention(
+                uuid=m["uuid"],
+                name=m.get("name") if isinstance(m.get("name"), str) else None,
+            )
+            for m in mentions_raw
+            if isinstance(m, dict) and isinstance(m.get("uuid"), str) and m.get("uuid")
+        )
 
     if not text and not attachments and reaction is None:
         return None
@@ -190,8 +245,11 @@ def parse_envelope(
         timestamp_ms=timestamp_ms,
         text=text,
         attachments=attachments,
+        mentions=parsed_mentions,
         reply=reply,
         reaction=reaction,
+        edited=edited,
+        edit_target_timestamp_ms=edit_target_ts,
     )
 
 

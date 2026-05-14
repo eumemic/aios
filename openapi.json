@@ -6642,7 +6642,8 @@
           },
           "content": {
             "type": "string",
-            "title": "Content"
+            "title": "Content",
+            "default": ""
           },
           "sender": {
             "anyOf": [
@@ -6701,8 +6702,7 @@
         "required": [
           "connection_id",
           "event_id",
-          "chat_id",
-          "content"
+          "chat_id"
         ],
         "title": "Body_post_connector_runtime_inbound"
       },

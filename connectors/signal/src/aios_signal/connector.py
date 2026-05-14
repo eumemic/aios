@@ -31,11 +31,13 @@ connection's phone + bot UUID + caches via
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import structlog
 from aios_connector_http import (
     Attachment as SDKAttachment,
@@ -50,11 +52,20 @@ from aios_connector_http import (
 from .addressing import decode_chat_id, encode_chat_id
 from .config import Settings
 from .daemon import GroupInfo, SignalDaemon
+from .errors import RpcError
 from .markdown import convert_markdown_to_signal_styles
 from .mentions import build_mention_strings, encode_mentions
 from .parse import InboundMessage, build_content_text, is_group_update_envelope, parse_envelope
 
 log = structlog.get_logger(__name__)
+
+# How long ``signal_send`` waits for the self-echo of a group send
+# to arrive on the inbound stream before degrading to the
+# no-timestamp result shape.  Signal-cli's ``send`` blocks until the
+# network round-trip completes, so the echo typically arrives within
+# tens of ms; 2.0s gives generous headroom for a slow network and
+# still keeps the model's tool-call latency reasonable on failure.
+_ECHO_WAIT_S: float = 2.0
 
 
 @dataclass
@@ -87,6 +98,17 @@ class SignalConnector(HttpConnector):
         # first — there's a natural race between an inbound arriving
         # and the connection's serve loop coming online).
         self._inbound_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        # Self-echo correlation for group sends: signal-cli 0.14.x's
+        # ``send`` JSON-RPC returns a top-level ``timestamp`` for DM
+        # sends but a bare ``null`` for groups.  The send timestamp
+        # *does* arrive on the receive stream as a self-echo envelope
+        # (source_uuid == bot_uuid + groupInfo + dataMessage.timestamp);
+        # we register a future before issuing ``send`` and resolve it
+        # from ``_handle_envelope`` when the matching echo arrives.
+        # Keyed by ``(account_phone, chat_id)``, FIFO since signal-cli's
+        # send blocks until the network round-trip completes so echoes
+        # to the same chat arrive in send order.
+        self._pending_echoes: dict[tuple[str, str], deque[asyncio.Future[int]]] = {}
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
@@ -186,9 +208,28 @@ class SignalConnector(HttpConnector):
         return self._inbound_queues[phone]
 
     async def _inbound_dispatcher(self) -> None:
-        """Fan ``daemon.listener.messages()`` out to per-account queues."""
+        """Fan ``daemon.listener.messages()`` out to per-account queues.
+
+        Self-echo resolution rides at this layer rather than inside the
+        per-account queue drain because signal-cli's group self-echoes
+        (the ``dataMessage`` with ``groupInfo`` carrying the send
+        timestamp) emit on the RECEIVING peers' account streams, not on
+        the sender's own account stream.  When the bot sends to a group
+        that includes other peers whose accounts signal-cli also serves
+        (e.g. a co-located bot like Ultron in the QA group), the echo
+        arrives on *their* stream and never reaches the bot's queue.
+        Checking each envelope's ``sourceUuid`` against every known
+        bot before routing lets us correlate regardless of which
+        account stream the envelope landed on.
+        """
         assert self._daemon is not None
         async for account, envelope in self._daemon.listener.messages():
+            source_uuid = envelope.get("sourceUuid")
+            if isinstance(source_uuid, str) and source_uuid:
+                for state in self._conn_state.values():
+                    if state.bot_uuid == source_uuid:
+                        self._maybe_resolve_self_echo(state, envelope)
+                        break
             queue = self._queue_for(account.strip())
             await queue.put(envelope)
 
@@ -220,21 +261,53 @@ class SignalConnector(HttpConnector):
             if msg.timestamp_ms
             else None
         )
-        await self.emit_inbound(
-            connection_id=connection_id,
-            # Signal's (sender_uuid, timestamp_ms) pair is the platform's
-            # canonical message identity; feeding it as ``event_id`` lets
-            # aios's ``inbound_acks`` dedupe a redelivered envelope after
-            # a runtime restart (the inbound dispatcher's queue can hold
-            # up to ``maxsize`` envelopes that signal-cli would replay).
-            event_id=f"signal-{msg.sender_uuid}-{msg.timestamp_ms}",
-            chat_id=chat_id,
-            sender=sender_payload,
-            content=build_content_text(msg),
-            attachments=attachments,
-            metadata=build_metadata(msg, chat_id, state.bot_uuid),
-            timestamp=timestamp_iso,
-        )
+        try:
+            await self.emit_inbound(
+                connection_id=connection_id,
+                # Signal's (sender_uuid, timestamp_ms) pair is the platform's
+                # canonical message identity; feeding it as ``event_id`` lets
+                # aios's ``inbound_acks`` dedupe a redelivered envelope after
+                # a runtime restart (the inbound dispatcher's queue can hold
+                # up to ``maxsize`` envelopes that signal-cli would replay).
+                event_id=f"signal-{msg.sender_uuid}-{msg.timestamp_ms}",
+                chat_id=chat_id,
+                sender=sender_payload,
+                content=build_content_text(msg),
+                attachments=attachments,
+                metadata=build_metadata(msg, chat_id, state.bot_uuid),
+                timestamp=timestamp_iso,
+            )
+        except httpx.HTTPStatusError as exc:
+            # Drop-and-continue on routine 4xx so one bad envelope can't
+            # tear down the container and every other connection it
+            # serves.  401/403 (token revoked / runtime misconfigured)
+            # and 5xx (server outage or bug) are container-level problems
+            # that warrant the crash-and-restart loop, so let them
+            # propagate.  Without this guard, a single 422 from the api's
+            # multipart validator collapses the entire TaskGroup.
+            sc = exc.response.status_code
+            if sc in (401, 403) or sc >= 500:
+                raise
+            log.warning(
+                "signal.inbound.dropped",
+                connection_id=connection_id,
+                status_code=sc,
+                sender_uuid=msg.sender_uuid,
+                timestamp_ms=msg.timestamp_ms,
+                body=exc.response.text[:500],
+            )
+            return
+        # Send a read receipt now that the message is persisted in the
+        # session event log — semantically, "the agent has seen it."
+        # signal-cli's automatic delivery receipts in daemon mode batch
+        # unpredictably (some receipts land seconds after the envelope,
+        # some get skipped until a later flush trigger), so the sender's
+        # UI checkmark state lags reality.  An explicit read receipt
+        # forces the 2nd checkmark immediately and gives the sender
+        # confirmation tied to actual consumption rather than to
+        # signal-cli's internal flush timing.  Best-effort: a failure
+        # here is cosmetic only — the inbound is already in the log.
+        await self._send_read_receipt(state, msg)
 
     # ── model-facing tools ────────────────────────────────────────────
 
@@ -283,9 +356,49 @@ class SignalConnector(HttpConnector):
             edit_timestamp_ms=edit_timestamp_ms,
         )
         assert self._daemon is not None
-        result = await self._daemon.rpc.call("send", params)
-        ts = _extract_timestamp(result)
-        return {"sent_at_ms": ts} if ts is not None else {"status": "ok"}
+        # Pre-register an echo future for group sends.  DMs get a
+        # timestamp inline from signal-cli's send result; groups
+        # return null there and we fish the timestamp out of the
+        # self-echo on the inbound stream instead.  Registering
+        # *before* issuing the RPC closes the race where the echo
+        # could arrive before we're listening.
+        chat_type, _ = decode_chat_id(chat_id)
+        echo_future: asyncio.Future[int] | None = None
+        if chat_type == "group":
+            echo_future = asyncio.get_running_loop().create_future()
+            self._pending_echoes.setdefault((state.phone, chat_id), deque()).append(
+                echo_future
+            )
+        try:
+            result = await self._daemon.rpc.call("send", params)
+            ts = _extract_timestamp(result)
+            if ts is None and echo_future is not None:
+                try:
+                    ts = await asyncio.wait_for(echo_future, timeout=_ECHO_WAIT_S)
+                except (TimeoutError, asyncio.CancelledError):
+                    # Echo never arrived in the deadline window — degrade
+                    # to the no-timestamp shape.  The cancelled future
+                    # gets pruned at next ``_maybe_resolve_self_echo``
+                    # pop-from-front.
+                    log.warning(
+                        "signal.send.echo_timeout",
+                        phone=state.phone,
+                        chat_id=chat_id,
+                    )
+            return {"sent_at_ms": ts} if ts is not None else {"status": "ok"}
+        finally:
+            # Cancel any unresolved future so the drain-stale logic in
+            # ``_maybe_resolve_self_echo`` prunes it before the NEXT
+            # successful send's echo can match it.  Without this guard,
+            # a failing rpc.call (e.g. signal-cli's libsignal
+            # ``InvalidSessionException`` when a group member has no
+            # established protocol session yet) would leak an orphan
+            # future at the head of the deque, and the next echo would
+            # resolve to the WRONG send's timestamp.  cancel() on
+            # already-done futures (resolved by the echo dispatcher or
+            # cancelled by wait_for's timeout path) is a no-op.
+            if echo_future is not None and not echo_future.done():
+                echo_future.cancel()
 
     @tool()
     async def signal_delete(
@@ -401,6 +514,89 @@ class SignalConnector(HttpConnector):
         return {"status": "ok"}
 
     # ── helpers ───────────────────────────────────────────────────────
+
+    def _maybe_resolve_self_echo(
+        self, state: _SignalConnectionState, envelope: dict[str, Any]
+    ) -> None:
+        """Resolve a pending ``signal_send`` echo future from a self-envelope.
+
+        signal-cli emits the bot's own outbound group messages back on
+        the receive stream as ``sourceUuid == bot_uuid`` envelopes with
+        ``dataMessage.groupInfo``.  The envelope's ``timestamp`` is the
+        send timestamp the model needs to edit / delete / react to the
+        message later.  We match by ``(phone, chat_id)`` FIFO since
+        signal-cli's send blocks until the network round-trip
+        completes, so echoes to the same chat arrive in send order.
+
+        Edits use a different envelope shape — ``editMessage.dataMessage``
+        nested one level deeper, with the new edit's timestamp at the
+        envelope root.  We accept both so an edit-send-then-edit-again
+        flow (model wants the new timestamp for chained edits) works.
+
+        DM echoes are silently dropped — signal-cli's DM send returns
+        the timestamp inline, so the future-registration path in
+        ``signal_send`` is groups-only.
+        """
+        if envelope.get("sourceUuid") != state.bot_uuid:
+            return
+        data = envelope.get("dataMessage")
+        if not isinstance(data, dict):
+            edit = envelope.get("editMessage")
+            if isinstance(edit, dict):
+                data = edit.get("dataMessage")
+            if not isinstance(data, dict):
+                return
+        group_info = data.get("groupInfo")
+        if not isinstance(group_info, dict):
+            return
+        raw_id = group_info.get("groupId")
+        if not isinstance(raw_id, str) or not raw_id:
+            return
+        ts = envelope.get("timestamp")
+        if not isinstance(ts, int):
+            return
+        chat_id = encode_chat_id(raw_id, "group")
+        key = (state.phone, chat_id)
+        queue = self._pending_echoes.get(key)
+        if queue is None:
+            return
+        # Drain stale (timed-out / cancelled) waiters at the front so
+        # the FIFO discipline reflects live ``signal_send`` callers.
+        while queue and queue[0].done():
+            queue.popleft()
+        if queue:
+            queue.popleft().set_result(ts)
+        if not queue:
+            self._pending_echoes.pop(key, None)
+
+    async def _send_read_receipt(
+        self, state: _SignalConnectionState, msg: InboundMessage
+    ) -> None:
+        """Send a read receipt for ``msg`` to its original sender.
+
+        Best-effort: signal-cli's daemon-mode automatic delivery
+        receipts batch unpredictably, so we fire an explicit read
+        receipt synchronously after ``emit_inbound`` succeeds.  A
+        failure here is logged and swallowed — the inbound is already
+        in the session log, so retrying or crashing would just churn.
+        """
+        assert self._daemon is not None
+        params = {
+            "account": state.phone,
+            "recipient": msg.sender_uuid,
+            "targetTimestamp": [msg.timestamp_ms],
+            "type": "read",
+        }
+        try:
+            await self._daemon.rpc.call("sendReceipt", params)
+        except RpcError as exc:
+            log.warning(
+                "signal.read_receipt.send_failed",
+                phone=state.phone,
+                sender_uuid=msg.sender_uuid,
+                target_timestamp_ms=msg.timestamp_ms,
+                error=str(exc),
+            )
 
     async def _maybe_refresh_roster(
         self, state: _SignalConnectionState, envelope: dict[str, Any]
@@ -595,6 +791,13 @@ def build_metadata(msg: InboundMessage, chat_id: str, bot_uuid: str) -> dict[str
     (e.g. ``aios sessions events`` JSON output).  Reply / reaction
     payloads are nested so the model sees them as structured siblings
     of ``content`` rather than embedded prose.
+
+    Mentions ride as a structured list plus a derived ``self_mentioned``
+    bool, so the agent can distinguish "sender typed @<name> as text"
+    from "sender's client encoded a mention targeting my UUID" without
+    substring-searching ``content``.  Group sends in particular often
+    @-tag the bot to summon a response, and the placeholder-substituted
+    text alone hides that signal.
     """
     metadata: dict[str, Any] = {
         "channel": f"signal/{bot_uuid}/{chat_id}",
@@ -606,6 +809,19 @@ def build_metadata(msg: InboundMessage, chat_id: str, bot_uuid: str) -> dict[str
         metadata["sender_name"] = msg.sender_name
     if msg.chat_name is not None:
         metadata["chat_name"] = msg.chat_name
+    if msg.edited:
+        # The harness's ``_format_channel_header`` already renders
+        # ``edited=true`` when this flag is set; pairing it with
+        # ``edit_target_timestamp_ms`` lets the model correlate the
+        # edited message back to the original it's replacing.
+        metadata["edited"] = True
+        if msg.edit_target_timestamp_ms is not None:
+            metadata["edit_target_timestamp_ms"] = msg.edit_target_timestamp_ms
+    if msg.mentions:
+        metadata["mentions"] = [
+            {"uuid": m.uuid, "name": m.name} for m in msg.mentions
+        ]
+        metadata["self_mentioned"] = any(m.uuid == bot_uuid for m in msg.mentions)
     if msg.reply is not None:
         metadata["reply_to"] = {
             "author_uuid": msg.reply.author_uuid,

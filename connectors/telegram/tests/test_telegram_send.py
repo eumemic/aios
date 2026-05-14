@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aios_connector_http import HttpConnector
+from telegram import InputFile
 
 from aios_telegram.connector import (
     TelegramConnector,
@@ -37,28 +38,38 @@ def test_classify_extensions() -> None:
     assert _classify(Path("/x/song.mp3")) == "audio"
     assert _classify(Path("/x/report.pdf")) == "document"
     assert _classify(Path("/x/no-ext")) == "document"
+    # .gif routes to send_animation, not send_photo: Telegram's Bot API
+    # treats a GIF passed to sendPhoto as a static image and only
+    # renders the first frame.  sendAnimation is the first-class
+    # animated-image surface — clients play it inline.
+    assert _classify(Path("/x/zoom.gif")) == "animation"
 
 
-def test_build_media_group_caption_on_first_only() -> None:
-    items = _build_media_group(
-        [Path("/host/a.jpg"), Path("/host/b.jpg"), Path("/host/c.jpg")],
-        caption="three pics",
-    )
+def test_build_media_group_caption_on_first_only(tmp_path: Path) -> None:
+    paths = [tmp_path / f"{name}.jpg" for name in ("a", "b", "c")]
+    for p in paths:
+        p.write_bytes(b"x")
+    items = _build_media_group(paths, caption="three pics")
     assert items[0].caption == "three pics"
     assert items[1].caption is None
     assert items[2].caption is None
 
 
-def test_build_media_group_no_caption() -> None:
-    items = _build_media_group([Path("/host/a.jpg"), Path("/host/b.jpg")], caption=None)
+def test_build_media_group_no_caption(tmp_path: Path) -> None:
+    paths = [tmp_path / "a.jpg", tmp_path / "b.jpg"]
+    for p in paths:
+        p.write_bytes(b"x")
+    items = _build_media_group(paths, caption=None)
     assert all(item.caption is None for item in items)
 
 
-def test_build_media_group_voice_demoted_to_document() -> None:
+def test_build_media_group_voice_demoted_to_document(tmp_path: Path) -> None:
     """Voice can't ride in a media group; falls back to document."""
     from telegram import InputMediaDocument
 
-    items = _build_media_group([Path("/host/v.ogg")], caption=None)
+    voice = tmp_path / "v.ogg"
+    voice.write_bytes(b"x")
+    items = _build_media_group([voice], caption=None)
     assert isinstance(items[0], InputMediaDocument)
 
 
@@ -144,7 +155,15 @@ async def test_telegram_send_single_photo_routes_to_send_photo(
     bot.send_photo.assert_awaited_once()
     kwargs = bot.send_photo.call_args.kwargs
     assert kwargs["chat_id"] == 123
-    assert kwargs["photo"] == photo
+    # Wrapped in ``InputFile`` with the source filename so PTB's
+    # multipart writer sets the right Content-Type from the
+    # extension.  Raw bytes would land as application/octet-stream
+    # and Telegram would render the attachment as a downloadable
+    # blob instead of an inline image / animation / etc.
+    photo_arg = kwargs["photo"]
+    assert isinstance(photo_arg, InputFile)
+    assert photo_arg.input_file_content == photo.read_bytes()
+    assert photo_arg.filename == "cat.jpg"
     assert kwargs["caption"] == "look"
 
 
@@ -157,6 +176,45 @@ async def test_telegram_send_single_voice_routes_to_send_voice(
     voice.write_bytes(b"x")
     await connector.telegram_send(text="", attachments=[voice], chat_id="123", connection_id=CONNECTION_ID)
     bot.send_voice.assert_awaited_once()
+
+
+async def test_telegram_send_wraps_bytes_in_input_file_with_filename(
+    connector: TelegramConnector,
+    bot: Any,
+    tmp_path: Path,
+) -> None:
+    """Pin the full upload-shape contract:
+
+    1. **Never a Path** — python-telegram-bot's HTTPX layer JSON-
+       serializes the body; ``pathlib.Path`` raises
+       ``TypeError('Object of type PosixPath is not JSON
+       serializable')``.  Surfaced live in PR 8 smoke as an outbound
+       image crash.
+    2. **Never raw bytes** — bytes survive JSON, but PTB defaults the
+       ``InputFile`` filename to ``"application.octet-stream"`` and
+       Telegram renders the attachment as a downloadable blob
+       (``Content-Type: application/octet-stream``) instead of an
+       inline image / animation / audio.  Caught live on the
+       follow-on smoke (Tom: "don't send an octet-stream") after the
+       ``.gif`` extension already routed correctly to
+       ``send_animation`` — without the filename hint, Telegram
+       still couldn't determine the type.
+
+    Right shape: ``InputFile(bytes, filename=host_path.name)`` so
+    PTB's multipart writer sets ``Content-Type`` from the extension.
+    """
+    photo = tmp_path / "img.png"
+    photo.write_bytes(b"\x89PNG\r\n\x1a\nbytes-canary")
+    await connector.telegram_send(
+        text="", attachments=[photo], chat_id="123", connection_id=CONNECTION_ID
+    )
+    photo_arg = bot.send_photo.call_args.kwargs["photo"]
+    assert isinstance(photo_arg, InputFile), (
+        f"PTB media kwarg should be InputFile so the filename drives "
+        f"Content-Type, got {type(photo_arg).__name__}: {photo_arg!r}"
+    )
+    assert photo_arg.input_file_content == b"\x89PNG\r\n\x1a\nbytes-canary"
+    assert photo_arg.filename == "img.png"
 
 
 async def test_telegram_send_single_document_routes_to_send_document(
@@ -240,6 +298,9 @@ async def test_telegram_send_dispatch_resolves_sandbox_path(
         }
     )
 
+    # The SDK resolves the ``SandboxPath`` to a real ``Path`` for the
+    # tool method; we then read it up-front (see ``_read_for_upload``)
+    # so PTB gets bytes rather than a ``PosixPath`` it can't JSON-encode.
     photo_arg: Any = bot.send_photo.call_args.kwargs["photo"]
-    assert isinstance(photo_arg, Path)
-    assert photo_arg == ws / "cat.jpg"
+    assert isinstance(photo_arg, InputFile)
+    assert photo_arg.input_file_content == (ws / "cat.jpg").read_bytes()

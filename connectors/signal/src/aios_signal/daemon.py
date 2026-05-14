@@ -362,12 +362,33 @@ class SignalDaemon:
 
 
 async def _spawn_subprocess(args: list[str]) -> asyncio.subprocess.Process:
-    """Thin wrapper for test-time monkeypatching."""
+    """Spawn signal-cli detached into its own session + process group.
+
+    ``start_new_session=True`` (POSIX ``setsid()``) makes the child a
+    session and process group leader.  Two payoffs:
+
+    1. A foreground-terminal SIGINT (Ctrl-C) does not get forwarded to
+       the daemon via the controlling terminal — the connector's own
+       SIGINT handler runs ``__aexit__``, which terminates the daemon
+       cleanly.  Without the new session, both the connector and the
+       daemon get SIGINT simultaneously and the cleanup race is
+       observable as half-shutdown state on the daemon's SQLite lock.
+    2. Hard kills targeting the connector's pgroup (e.g. an operator
+       running ``kill -TERM -<pgid>`` against the connector's group)
+       no longer cascade to the daemon, so the daemon's controlled
+       shutdown through ``__aexit__`` is not pre-empted.
+
+    The corresponding shutdown asymmetry — that ``pkill -f aios_signal``
+    only matches the Python process and not the daemon's JVM cmdline —
+    is fixed by trapping SIGTERM in :func:`aios_signal.__main__.main`
+    so ``__aexit__`` actually runs.
+    """
     spawn = asyncio.create_subprocess_exec
     return await spawn(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
 
 

@@ -46,6 +46,7 @@ from aios_connector_http import (
     tool,
 )
 from telegram import (
+    InputFile,
     InputMediaAudio,
     InputMediaDocument,
     InputMediaPhoto,
@@ -372,7 +373,7 @@ class TelegramConnector(HttpConnector):
         self,
         text: str,
         attachments: list[SandboxPath] | None = None,
-        parse_mode: Literal["plain", "html"] = "plain",
+        parse_mode: Literal["plain", "markdown", "html"] = "plain",
         reply_to_message_id: int | None = None,
         *,
         connection_id: str,
@@ -388,19 +389,25 @@ class TelegramConnector(HttpConnector):
             text: Message body.  Becomes the caption when attachments are
                 present.  See ``parse_mode``.
             attachments: Optional in-sandbox file paths.  Type is inferred
-                from extension (``.jpg``/``.png``/``.gif``/``.webp`` →
-                photo, ``.mp4``/``.mov`` → video, ``.ogg`` → voice,
-                ``.mp3``/``.m4a``/``.wav`` → audio, anything else →
-                document).  Single attachment uses ``send_photo`` /
-                ``send_voice`` / etc.; multiple attachments use
-                ``send_media_group`` with caption attached to the first
-                item only (per Telegram API).
-            parse_mode: ``"plain"`` (default) sends the text as-is —
-                literal characters, no formatting.  ``"html"`` runs
-                ``text`` through a Markdown→Telegram-HTML converter so
+                from extension (``.jpg``/``.png``/``.webp`` → photo,
+                ``.gif`` → animation (plays inline; ``send_photo``
+                would render only the first frame), ``.mp4``/``.mov``
+                → video, ``.ogg`` → voice, ``.mp3``/``.m4a``/``.wav``
+                → audio, anything else → document).  Single attachment
+                uses ``send_photo`` / ``send_animation`` / ``send_voice``
+                / etc.; multiple attachments use ``send_media_group``
+                with caption attached to the first item only (per
+                Telegram API).
+            parse_mode: How to interpret ``text``.
+                ``"plain"`` (default) — literal characters, no
+                formatting.  ``"markdown"`` — input is markdown;
                 ``**bold**``, ``*italic*``, ``[label](url)``, fenced
-                code, ``> quotes``, and ``||spoilers||`` render with
-                Telegram's native styling.
+                code, ``> quotes``, and ``||spoilers||`` are converted
+                to Telegram's native styling.  ``"html"`` — input is
+                raw HTML (``<b>``, ``<i>``, ``<a href="...">``,
+                ``<code>``, ``<blockquote>``, ``<tg-spoiler>``); passed
+                through verbatim to Telegram per its Bot API
+                ``parse_mode=HTML`` semantics.
             reply_to_message_id: When set, the message is rendered as a
                 native Telegram reply quoting that message (the client
                 UI shows the parent inline above your text).  Pass the
@@ -482,7 +489,7 @@ class TelegramConnector(HttpConnector):
         self,
         message_id: int,
         text: str,
-        parse_mode: Literal["plain", "html"] = "plain",
+        parse_mode: Literal["plain", "markdown", "html"] = "plain",
         *,
         connection_id: str,
         chat_id: str,
@@ -498,9 +505,10 @@ class TelegramConnector(HttpConnector):
             message_id: The id of the message to edit.  Returned by
                 ``telegram_send`` as ``message_id``.
             text: The new body.  See ``parse_mode``.
-            parse_mode: ``"plain"`` sends literal text; ``"html"`` runs
-                ``text`` through the same Markdown→Telegram-HTML
-                converter as ``telegram_send``.
+            parse_mode: How to interpret ``text``.  Same semantics as
+                ``telegram_send``: ``"plain"`` literal text, ``"markdown"``
+                runs the Markdown→Telegram-HTML converter, ``"html"``
+                passes raw HTML through to Telegram.
         """
         state = self._conn_state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
@@ -576,16 +584,27 @@ class TelegramConnector(HttpConnector):
         return {"status": "ok"}
 
 
-_PHOTO_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
+_PHOTO_EXTS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+_ANIMATION_EXTS = frozenset({".gif"})
 _VIDEO_EXTS = frozenset({".mp4", ".mov", ".webm"})
 _VOICE_EXTS = frozenset({".ogg", ".oga"})
 _AUDIO_EXTS = frozenset({".mp3", ".m4a", ".wav", ".flac"})
 
 
 def _classify(host_path: Path) -> str:
+    """Route an outbound attachment to the right PTB send method.
+
+    ``.gif`` rides on ``send_animation`` (not ``send_photo``) — Telegram's
+    Bot API treats a GIF passed to ``sendPhoto`` as a static image and
+    only renders the first frame, defeating the point of an animated GIF.
+    ``sendAnimation`` is Telegram's first-class animated-image surface;
+    clients render it as an inline playing animation just like a video.
+    """
     ext = host_path.suffix.lower()
     if ext in _PHOTO_EXTS:
         return "photo"
+    if ext in _ANIMATION_EXTS:
+        return "animation"
     if ext in _VIDEO_EXTS:
         return "video"
     if ext in _VOICE_EXTS:
@@ -603,15 +622,59 @@ def _coerce_chat_id(chat_id: str) -> int:
 
 
 def _prepare_text(text: str, parse_mode: str) -> tuple[str, str | None]:
-    """Map a model-facing parse_mode to (body, ptb_parse_mode)."""
-    if parse_mode == "html":
+    """Map a model-facing ``parse_mode`` to (body, ptb_parse_mode).
+
+    Three modes, named so each matches the actual *input* convention
+    being declared:
+
+    - ``"plain"`` — literal text, no formatting.  Empty PTB parse_mode.
+    - ``"markdown"`` — input is markdown; run through
+      :func:`markdown_to_telegram_html` and tell PTB to render the
+      result as HTML.  This is the new name for what used to be called
+      ``"html"`` (which collided with Telegram Bot API semantics — see
+      smoke finding #17).
+    - ``"html"`` — input IS HTML; pass through verbatim and tell PTB
+      to render as HTML.  Matches Telegram's own ``parse_mode=HTML``
+      semantics, so an agent that writes ``<a href="...">link</a>``
+      gets the expected rendering instead of literal text.
+    """
+    if parse_mode == "markdown":
         return markdown_to_telegram_html(text), "HTML"
+    if parse_mode == "html":
+        return text, "HTML"
     return text, None
 
 
 def _iso(ts_ms: int) -> str:
     """Render a unix-ms timestamp as ISO-8601 UTC."""
     return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).isoformat()
+
+
+def _read_for_upload(host_path: Path) -> InputFile:
+    """Wrap attachment bytes in a PTB :class:`InputFile` for upload.
+
+    Two problems we have to thread:
+
+    1. python-telegram-bot's HTTPX request layer JSON-serializes the
+       request body; passing a raw ``pathlib.Path`` falls into the
+       "unknown object" branch and raises ``TypeError('Object of type
+       PosixPath is not JSON serializable')``.
+    2. Passing raw ``bytes`` *does* survive the JSON path (PTB wraps
+       them in InputFile internally), but with no filename hint the
+       default falls to literal ``"application.octet-stream"`` and
+       Telegram interprets the attachment as
+       ``application/octet-stream`` — animated GIFs render as a
+       static download instead of an inline animation, photos lose
+       their image affordance, etc.  Surfaced live during PR 8 smoke
+       when a ``.gif`` attachment rendered as a downloadable blob
+       even after routing through ``send_animation``.
+
+    Wrapping in ``InputFile(bytes, filename=host_path.name)`` lets
+    PTB's multipart writer set the correct ``Content-Type`` from the
+    extension, which Telegram then uses to render the attachment in
+    its native player.
+    """
+    return InputFile(host_path.read_bytes(), filename=host_path.name)
 
 
 async def _send_single_media(
@@ -626,12 +689,13 @@ async def _send_single_media(
     kind = _classify(host_path)
     sender = {
         "photo": bot.send_photo,
+        "animation": bot.send_animation,
         "video": bot.send_video,
         "voice": bot.send_voice,
         "audio": bot.send_audio,
         "document": bot.send_document,
     }[kind]
-    kwargs: dict[str, Any] = {"chat_id": chat_id, kind: host_path}
+    kwargs: dict[str, Any] = {"chat_id": chat_id, kind: _read_for_upload(host_path)}
     if caption is not None:
         kwargs["caption"] = caption
         if parse_mode is not None:
@@ -649,7 +713,7 @@ def _build_media_group(
     items: list[Any] = []
     for idx, path in enumerate(host_paths):
         kind = _classify(path)
-        kwargs: dict[str, Any] = {"media": path}
+        kwargs: dict[str, Any] = {"media": _read_for_upload(path)}
         if idx == 0 and caption is not None:
             kwargs["caption"] = caption
             if parse_mode is not None:

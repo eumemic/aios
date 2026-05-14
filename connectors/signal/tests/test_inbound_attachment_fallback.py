@@ -31,6 +31,7 @@ def _make_msg(attachments: tuple[Attachment, ...]) -> InboundMessage:
         timestamp_ms=1700000000000,
         text="",
         attachments=attachments,
+        mentions=(),
         reply=None,
         reaction=None,
     )
