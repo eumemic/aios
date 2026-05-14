@@ -96,6 +96,7 @@ CANDIDATE_ROWS_SQL = """
       JOIN sessions s ON s.id = e.session_id
       LEFT JOIN session_max_reacting smr ON smr.session_id = e.session_id
      WHERE s.archived_at IS NULL
+       AND s.status <> 'errored'
        AND e.kind = 'message'
        AND e.role <> 'assistant'
        AND (smr.max_reacting IS NULL OR e.seq > smr.max_reacting)
@@ -107,6 +108,7 @@ CONFIRMED_ROWS_SQL = """
       FROM events lc
       JOIN sessions s ON s.id = lc.session_id
      WHERE s.archived_at IS NULL
+       AND s.status <> 'errored'
        AND lc.kind = 'lifecycle'
        AND lc.data->>'event' = 'tool_confirmed'
        AND lc.data->>'result' = 'allow'
