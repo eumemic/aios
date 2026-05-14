@@ -48,7 +48,7 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
     from aios.db.pool import create_pool
 
     settings = get_settings()
-    pool = await create_pool(settings.db_url, min_size=1, max_size=4)
+    pool = await create_pool(settings.db_url, min_size=1, max_size=8)
     app = create_app()
     app.state.pool = pool
     app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
