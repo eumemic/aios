@@ -23,10 +23,9 @@ from tests.conftest import needs_docker
 
 pytestmark = needs_docker
 
-# Read directly from env: importing Settings would fail in test environments
-# because Settings has required fields (AIOS_DB_URL, AIOS_API_KEY, etc.) with
-# no defaults. The env var name is stable -- it's derived from env_prefix="AIOS_"
-# + field name "docker_image".
+# Read directly from env to keep this file free of aios package imports.
+# The env var name is stable -- derived from env_prefix="AIOS_" + field "docker_image"
+# in src/aios/config.py.
 IMAGE = os.environ.get("AIOS_DOCKER_IMAGE", "ghcr.io/eumemic/aios-sandbox:latest")
 
 
