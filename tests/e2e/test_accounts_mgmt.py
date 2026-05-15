@@ -173,6 +173,69 @@ class TestChildScope:
         assert r.status_code == 404, r.text
 
 
+class TestByPath:
+    async def test_root_path_returns_caller(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        for path in ("", "/"):
+            r = await http_client.get(
+                "/v1/accounts/by-path",
+                params={"path": path},
+                headers=_bearer(aios_env["AIOS_API_KEY"]),
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["id"] == "acc_test_stub"
+
+    async def test_resolves_child_by_name(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "by-path-target"},
+        )
+        r = await http_client.get(
+            "/v1/accounts/by-path",
+            params={"path": "by-path-target"},
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["display_name"] == "by-path-target"
+
+    async def test_resolves_grandchild_by_two_segments(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        # Mint child with mint-children, then mint grandchild under it.
+        c = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "tenant-x", "can_mint_children": True},
+        )
+        ck = c.json()["plaintext_key"]
+        await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(ck),
+            json={"display_name": "team-a"},
+        )
+        r = await http_client.get(
+            "/v1/accounts/by-path",
+            params={"path": "tenant-x/team-a"},
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["display_name"] == "team-a"
+
+    async def test_missing_segment_404(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        r = await http_client.get(
+            "/v1/accounts/by-path",
+            params={"path": "no-such-child"},
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+        )
+        assert r.status_code == 404
+
+
 class TestKeys:
     async def test_mint_key_on_self(
         self, http_client: httpx.AsyncClient, aios_env: dict[str, str]

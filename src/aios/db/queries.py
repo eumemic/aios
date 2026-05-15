@@ -5396,6 +5396,43 @@ async def get_account(conn: asyncpg.Connection[Any], account_id: str) -> Account
     return _row_to_account(row) if row is not None else None
 
 
+async def resolve_account_by_path(
+    conn: asyncpg.Connection[Any],
+    *,
+    root_account_id: str,
+    segments: list[str],
+) -> Account | None:
+    """Resolve ``root/seg1/seg2/...`` to an account row, or ``None``.
+
+    Walks the ``parent_account_id`` chain from ``root_account_id`` down,
+    matching each segment against ``display_name`` at that depth. Returns
+    the deepest non-archived match. Empty ``segments`` returns the root
+    row itself.
+
+    The hierarchy is rooted at ``root_account_id`` (typically the
+    caller's account); ``/by-path`` doesn't traverse cross-tenant —
+    every segment lookup is scoped to the prior level's children.
+    """
+    cursor: Account | None = await get_account(conn, root_account_id)
+    if cursor is None or cursor.archived_at is not None:
+        return None
+    for seg in segments:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM accounts
+             WHERE parent_account_id = $1
+               AND display_name = $2
+               AND archived_at IS NULL
+            """,
+            cursor.id,
+            seg,
+        )
+        if row is None:
+            return None
+        cursor = _row_to_account(row)
+    return cursor
+
+
 async def list_child_accounts(
     conn: asyncpg.Connection[Any], parent_account_id: str
 ) -> list[Account]:
