@@ -11,6 +11,17 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run aios dev shutdown --quiet"
+          }
+        ]
+      }
     ]
   }
 }
