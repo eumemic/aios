@@ -29,3 +29,43 @@ class BootstrapResponse(BaseModel):
     key_id: str
     # Returned exactly once at mint; not recoverable after this response.
     plaintext_key: str
+
+
+class MintAccountRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=128)
+    # Defaults to False — child accounts can't mint grandchildren unless the
+    # parent explicitly delegates. Two-level trees are the common case.
+    can_mint_children: bool = False
+
+
+class MintAccountResponse(BaseModel):
+    account_id: str
+    key_id: str
+    # The first key on a freshly-minted account. Returned exactly once.
+    plaintext_key: str
+
+
+class MintKeyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1, max_length=64)
+
+
+class MintKeyResponse(BaseModel):
+    key_id: str
+    plaintext_key: str
+
+
+class AccountKeySummary(BaseModel):
+    """Key metadata as returned by the management API.
+
+    Intentionally omits the bytes ``hash`` column — operators have no use
+    for the on-disk hash, and surfacing it widens the audit footprint.
+    """
+
+    key_id: str
+    label: str
+    created_at: datetime
+    revoked_at: datetime | None = None

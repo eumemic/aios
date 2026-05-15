@@ -5360,3 +5360,199 @@ async def unscoped_get_session_account_id(conn: asyncpg.Connection[Any], session
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"session_id": session_id})
     return cast("str", row["account_id"])
+
+
+# ─── account management (#367 PR 7) ───────────────────────────────────────────
+
+
+async def get_account(conn: asyncpg.Connection[Any], account_id: str) -> Account | None:
+    """Look up an account by id, including archived rows. ``None`` on miss.
+
+    Caller is responsible for any authorization scoping (e.g. "is this the
+    caller's account or a descendant?"). This query is intentionally unscoped
+    so the management plane can serve both self-reads and child-reads from
+    one helper.
+    """
+    row = await conn.fetchrow("SELECT * FROM accounts WHERE id = $1", account_id)
+    return _row_to_account(row) if row is not None else None
+
+
+async def list_child_accounts(
+    conn: asyncpg.Connection[Any], parent_account_id: str
+) -> list[Account]:
+    """Return non-archived direct children of ``parent_account_id``."""
+    rows = await conn.fetch(
+        """
+        SELECT * FROM accounts
+         WHERE parent_account_id = $1
+           AND archived_at IS NULL
+         ORDER BY id DESC
+        """,
+        parent_account_id,
+    )
+    return [_row_to_account(r) for r in rows]
+
+
+async def insert_child_account(
+    conn: asyncpg.Connection[Any],
+    *,
+    parent_account_id: str,
+    display_name: str,
+    can_mint_children: bool,
+    key_hash: bytes,
+    key_label: str,
+) -> tuple[Account, str]:
+    """Atomically create a child account and its first API key.
+
+    Returns ``(account, key_id)``. The plaintext key is the caller's
+    responsibility — this helper sees only the hash.
+    """
+    account_id = make_id(ACCOUNT)
+    key_id = make_id(ACCOUNT_KEY)
+    async with conn.transaction():
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO accounts
+                    (id, parent_account_id, can_mint_children, display_name)
+                VALUES ($1, $2, $3, $4)
+                RETURNING *
+                """,
+                account_id,
+                parent_account_id,
+                can_mint_children,
+                display_name,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            # ``accounts_sibling_unique_display_name`` collision.
+            raise ConflictError(
+                f"display_name {display_name!r} is already in use under this parent",
+                detail={"display_name": display_name, "parent_account_id": parent_account_id},
+            ) from exc
+        assert row is not None
+        await conn.execute(
+            """
+            INSERT INTO account_keys (key_id, account_id, hash, label)
+            VALUES ($1, $2, $3, $4)
+            """,
+            key_id,
+            account_id,
+            key_hash,
+            key_label,
+        )
+    return _row_to_account(row), key_id
+
+
+async def insert_account_key(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    key_hash: bytes,
+    label: str,
+) -> str:
+    """Mint an additional API key on an existing account.
+
+    Returns the new ``key_id``. The plaintext key is the caller's
+    responsibility — this helper sees only the hash.
+    """
+    key_id = make_id(ACCOUNT_KEY)
+    await conn.execute(
+        """
+        INSERT INTO account_keys (key_id, account_id, hash, label)
+        VALUES ($1, $2, $3, $4)
+        """,
+        key_id,
+        account_id,
+        key_hash,
+        label,
+    )
+    return key_id
+
+
+async def list_account_keys(conn: asyncpg.Connection[Any], account_id: str) -> list[dict[str, Any]]:
+    """Return ``[{key_id, label, created_at, revoked_at}, ...]`` for the account.
+
+    Excludes the ``hash`` column on purpose — operators never need to read it
+    back, and surfacing it widens the audit footprint. Revoked keys are
+    included with their ``revoked_at`` populated so operators can see the
+    full history.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT key_id, label, created_at, revoked_at
+          FROM account_keys
+         WHERE account_id = $1
+         ORDER BY created_at DESC
+        """,
+        account_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def revoke_account_key(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    key_id: str,
+) -> bool:
+    """Revoke an API key by setting ``revoked_at = now()``.
+
+    Returns ``True`` iff a previously-unrevoked key was just revoked.
+    Returns ``False`` if the key was already revoked OR doesn't exist
+    on this account — the caller decides how to translate that.
+    """
+    result = await conn.execute(
+        """
+        UPDATE account_keys
+           SET revoked_at = now()
+         WHERE key_id = $1
+           AND account_id = $2
+           AND revoked_at IS NULL
+        """,
+        key_id,
+        account_id,
+    )
+    return bool(result.endswith(" 1"))
+
+
+async def archive_account(conn: asyncpg.Connection[Any], account_id: str) -> Account | None:
+    """Soft-archive an account by stamping ``archived_at``.
+
+    Idempotent: returns the already-archived account unchanged when called
+    twice. Returns ``None`` if the account doesn't exist at all so callers
+    can map to 404. Does NOT cascade to children — the resource-table FKs
+    use ``ON DELETE RESTRICT``, so a populated account can't be deleted at
+    the DB level; the service layer should refuse archive when active
+    children or resources exist.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE accounts
+           SET archived_at = now()
+         WHERE id = $1 AND archived_at IS NULL
+        RETURNING *
+        """,
+        account_id,
+    )
+    if row is not None:
+        return _row_to_account(row)
+    # Already archived or missing — distinguish by re-reading.
+    existing = await conn.fetchrow("SELECT * FROM accounts WHERE id = $1", account_id)
+    return _row_to_account(existing) if existing is not None else None
+
+
+async def count_active_child_accounts(conn: asyncpg.Connection[Any], parent_account_id: str) -> int:
+    """Number of non-archived direct children of ``parent_account_id``.
+
+    Used by ``archive_account`` callers to refuse archive when descendants
+    still exist (FK RESTRICT would surface as a 500 otherwise).
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT COUNT(*) AS cnt FROM accounts
+         WHERE parent_account_id = $1 AND archived_at IS NULL
+        """,
+        parent_account_id,
+    )
+    assert row is not None
+    return cast("int", row["cnt"])

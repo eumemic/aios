@@ -7,12 +7,21 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, status
 
-from aios.api.deps import PoolDep, _extract_bearer_token
+from aios.api.deps import AuthDep, PoolDep, _extract_bearer_token
 from aios.config import get_settings
 from aios.db import queries
 from aios.errors import NotFoundError, UnauthorizedError
 from aios.logging import get_logger
-from aios.models.accounts import BootstrapRequest, BootstrapResponse
+from aios.models.accounts import (
+    Account,
+    AccountKeySummary,
+    BootstrapRequest,
+    BootstrapResponse,
+    MintAccountRequest,
+    MintAccountResponse,
+    MintKeyRequest,
+    MintKeyResponse,
+)
 from aios.services import accounts as service
 
 router = APIRouter(prefix="/v1/accounts", tags=["accounts"])
@@ -63,3 +72,156 @@ async def bootstrap(
         outcome="success",
     )
     return response
+
+
+# ─── management plane — caller-or-child scoped (#367 PR 7) ──────────────────
+
+
+@router.get("/me", operation_id="get_my_account")
+async def get_my_account(pool: PoolDep, auth: AuthDep) -> Account:
+    """Return the account the bearer token resolved to."""
+    account_id, _key_id, _can_mint = auth
+    async with pool.acquire() as conn:
+        row = await queries.get_account(conn, account_id)
+    if row is None:
+        # The auth dep just resolved this id; a missing row here means
+        # someone archived the account between auth and route. Surface as
+        # 404 rather than 500 — operator-side cleanup is the right next step.
+        raise NotFoundError(f"account {account_id} not found", detail={"id": account_id})
+    return row
+
+
+@router.get("/children", operation_id="list_my_children")
+async def list_my_children(pool: PoolDep, auth: AuthDep) -> list[Account]:
+    """List direct child accounts under the caller."""
+    account_id, _key_id, _can_mint = auth
+    return await service.list_children(pool, parent_account_id=account_id)
+
+
+@router.post(
+    "/children",
+    operation_id="mint_child_account",
+    status_code=status.HTTP_201_CREATED,
+)
+async def mint_child(body: MintAccountRequest, pool: PoolDep, auth: AuthDep) -> MintAccountResponse:
+    """Mint a direct child account under the caller and its first API key.
+
+    Requires the caller's ``can_mint_children`` to be true. Returns the
+    new account id, the first key's id, and the plaintext bearer (the
+    only time that plaintext is recoverable).
+    """
+    account_id, key_id, can_mint = auth
+    response = await service.mint_child(
+        pool,
+        caller_account_id=account_id,
+        caller_can_mint_children=can_mint,
+        display_name=body.display_name,
+        can_mint_children=body.can_mint_children,
+    )
+    log.info(
+        "account.operation",
+        actor_account_id=account_id,
+        actor_key_id=key_id,
+        target_account_id=response.account_id,
+        action="account.mint_child",
+        outcome="success",
+    )
+    return response
+
+
+@router.get("/{target_id}", operation_id="get_account")
+async def get_account(target_id: str, pool: PoolDep, auth: AuthDep) -> Account:
+    """Read a specific account that's the caller or a direct child."""
+    account_id, _key_id, _can_mint = auth
+    return await service.get_account_in_scope(pool, target_id, caller_account_id=account_id)
+
+
+@router.delete(
+    "/{target_id}",
+    operation_id="archive_account",
+)
+async def archive_account(target_id: str, pool: PoolDep, auth: AuthDep) -> Account:
+    """Archive a direct child of the caller.
+
+    Refuses if the child has non-archived children of its own. Returns
+    the archived account row (idempotent — calling twice returns the
+    same row with the original ``archived_at``).
+    """
+    account_id, key_id, _can_mint = auth
+    archived = await service.archive_child(
+        pool, target_account_id=target_id, caller_account_id=account_id
+    )
+    log.info(
+        "account.operation",
+        actor_account_id=account_id,
+        actor_key_id=key_id,
+        target_account_id=target_id,
+        action="account.archive",
+        outcome="success",
+    )
+    return archived
+
+
+@router.post(
+    "/{target_id}/keys",
+    operation_id="mint_account_key",
+    status_code=status.HTTP_201_CREATED,
+)
+async def mint_account_key(
+    target_id: str, body: MintKeyRequest, pool: PoolDep, auth: AuthDep
+) -> MintKeyResponse:
+    """Mint an additional API key on a caller-or-child account."""
+    account_id, actor_key_id, _can_mint = auth
+    response = await service.mint_key(
+        pool,
+        target_account_id=target_id,
+        caller_account_id=account_id,
+        label=body.label,
+    )
+    log.info(
+        "account.operation",
+        actor_account_id=account_id,
+        actor_key_id=actor_key_id,
+        target_account_id=target_id,
+        target_key_id=response.key_id,
+        action="account.mint_key",
+        outcome="success",
+    )
+    return response
+
+
+@router.get(
+    "/{target_id}/keys",
+    operation_id="list_account_keys",
+)
+async def list_account_keys(
+    target_id: str, pool: PoolDep, auth: AuthDep
+) -> list[AccountKeySummary]:
+    """List key summaries (sans hash) for a caller-or-child account."""
+    account_id, _key_id, _can_mint = auth
+    return await service.list_keys(pool, target_account_id=target_id, caller_account_id=account_id)
+
+
+@router.delete(
+    "/{target_id}/keys/{key_id}",
+    operation_id="revoke_account_key",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def revoke_account_key(target_id: str, key_id: str, pool: PoolDep, auth: AuthDep) -> None:
+    """Revoke an API key on a caller-or-child account. Idempotent."""
+    account_id, actor_key_id, _can_mint = auth
+    await service.revoke_key(
+        pool,
+        target_account_id=target_id,
+        key_id=key_id,
+        caller_account_id=account_id,
+    )
+    log.info(
+        "account.operation",
+        actor_account_id=account_id,
+        actor_key_id=actor_key_id,
+        target_account_id=target_id,
+        target_key_id=key_id,
+        action="account.revoke_key",
+        outcome="success",
+    )

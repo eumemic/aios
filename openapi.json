@@ -94,6 +94,475 @@
         }
       }
     },
+    "/v1/accounts/me": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Get My Account",
+        "description": "Return the account the bearer token resolved to.",
+        "operationId": "get_my_account",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/children": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "List My Children",
+        "description": "List direct child accounts under the caller.",
+        "operationId": "list_my_children",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Account"
+                  },
+                  "title": "Response List My Children"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Mint Child",
+        "description": "Mint a direct child account under the caller and its first API key.\n\nRequires the caller's ``can_mint_children`` to be true. Returns the\nnew account id, the first key's id, and the plaintext bearer (the\nonly time that plaintext is recoverable).",
+        "operationId": "mint_child_account",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MintAccountRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MintAccountResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{target_id}": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Get Account",
+        "description": "Read a specific account that's the caller or a direct child.",
+        "operationId": "get_account",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Target Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Archive Account",
+        "description": "Archive a direct child of the caller.\n\nRefuses if the child has non-archived children of its own. Returns\nthe archived account row (idempotent \u2014 calling twice returns the\nsame row with the original ``archived_at``).",
+        "operationId": "archive_account",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Target Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{target_id}/keys": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Mint Account Key",
+        "description": "Mint an additional API key on a caller-or-child account.",
+        "operationId": "mint_account_key",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Target Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MintKeyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MintKeyResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "List Account Keys",
+        "description": "List key summaries (sans hash) for a caller-or-child account.",
+        "operationId": "list_account_keys",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Target Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AccountKeySummary"
+                  },
+                  "title": "Response List Account Keys"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{target_id}/keys/{key_id}": {
+      "delete": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Revoke Account Key",
+        "description": "Revoke an API key on a caller-or-child account. Idempotent.",
+        "operationId": "revoke_account_key",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Target Id"
+            }
+          },
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/environments": {
       "post": {
         "tags": [
@@ -6457,6 +6926,102 @@
   },
   "components": {
     "schemas": {
+      "Account": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "parent_account_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Account Id"
+          },
+          "can_mint_children": {
+            "type": "boolean",
+            "title": "Can Mint Children"
+          },
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "archived_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "parent_account_id",
+          "can_mint_children",
+          "display_name",
+          "metadata",
+          "created_at"
+        ],
+        "title": "Account"
+      },
+      "AccountKeySummary": {
+        "properties": {
+          "key_id": {
+            "type": "string",
+            "title": "Key Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key_id",
+          "label",
+          "created_at"
+        ],
+        "title": "AccountKeySummary",
+        "description": "Key metadata as returned by the management API.\n\nIntentionally omits the bytes ``hash`` column \u2014 operators have no use\nfor the on-disk hash, and surfacing it widens the audit footprint."
+      },
       "Actor": {
         "properties": {
           "type": {
@@ -9113,6 +9678,84 @@
         ],
         "title": "MemoryVersion",
         "description": "Read view of an immutable memory version. Redacted versions null the\n``path`` / ``content`` / ``content_sha256`` / ``content_size_bytes`` fields\nwhile preserving the audit trail."
+      },
+      "MintAccountRequest": {
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Display Name"
+          },
+          "can_mint_children": {
+            "type": "boolean",
+            "title": "Can Mint Children",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "display_name"
+        ],
+        "title": "MintAccountRequest"
+      },
+      "MintAccountResponse": {
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "title": "Account Id"
+          },
+          "key_id": {
+            "type": "string",
+            "title": "Key Id"
+          },
+          "plaintext_key": {
+            "type": "string",
+            "title": "Plaintext Key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "account_id",
+          "key_id",
+          "plaintext_key"
+        ],
+        "title": "MintAccountResponse"
+      },
+      "MintKeyRequest": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Label"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "label"
+        ],
+        "title": "MintKeyRequest"
+      },
+      "MintKeyResponse": {
+        "properties": {
+          "key_id": {
+            "type": "string",
+            "title": "Key Id"
+          },
+          "plaintext_key": {
+            "type": "string",
+            "title": "Plaintext Key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key_id",
+          "plaintext_key"
+        ],
+        "title": "MintKeyResponse"
       },
       "RecentChat": {
         "properties": {
