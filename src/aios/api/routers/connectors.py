@@ -93,24 +93,36 @@ _DEFAULT_ATTACHMENT_CONTENT_TYPE = "application/octet-stream"
 
 
 def _parse_form_json(field: str, raw: str | None, *, default: Any = None) -> Any:
-    """Decode an optional JSON-in-multipart-form field.
+    """Decode an optional JSON-in-multipart-form field that must be a dict.
 
     Multipart form values are always text; we expose ``sender`` and
     ``metadata`` as JSON-encoded strings so connector clients keep the
     shape the JSON inbound used (with JSON dicts) without hand-rolled
     field-flattening on either side. Raises :class:`ValidationError` on
-    bad JSON so connector authors see the parse error in the response,
-    not a 500.
+    bad JSON OR on a JSON value that decoded to something other than
+    a dict — downstream code (``_do_inbound`` and on into
+    ``services.inbound.handle_inbound``) drills into the value with
+    ``.get(...)``, so a list/scalar/null would crash at runtime as a
+    500 AND poison the connector's retry loop (the ``event_id`` never
+    reaches ``try_record_inbound_ack`` because the inbound flow dies
+    before the dedup write). Rejecting at the boundary keeps the
+    connector author's mistake visible as a 4xx.
     """
     if raw is None:
         return default
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except json.JSONDecodeError as err:
         raise ValidationError(
             f"{field!r} must be a JSON-encoded string",
             detail={"field": field, "error": str(err)},
         ) from err
+    if not isinstance(parsed, dict):
+        raise ValidationError(
+            f"{field!r} must decode to a JSON object",
+            detail={"field": field, "actual_type": type(parsed).__name__},
+        )
+    return parsed
 
 
 async def _do_inbound(
