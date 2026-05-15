@@ -187,6 +187,59 @@ class TestMcpSessionPool:
         await pool.close_all()
         assert len(pool._entries) == 0
 
+    async def test_idle_reaper_closes_superseded_entry(self) -> None:
+        """An OAuth-superseded entry must be reclaimed via the clean path.
+
+        When an ``mcp_oauth`` token is refreshed, the rotated bearer
+        produces a new ``headers_hash`` → a new pool key → a fresh
+        entry. Nothing ever hits the old key again, so the predecessor
+        entry (its owner task, httpx client, SSE stream) is orphaned.
+        Pre-reaper the pool had no reclamation between exception-evict
+        and worker-shutdown ``close_all``, so it leaked for the worker's
+        lifetime — one per token TTL per active connector.
+
+        The idle reaper must close the idle entry through the clean
+        ``_Entry.close()`` shutdown path (NOT a bare ``pop`` — that
+        leaves the owner task and socket dangling) and drop it, while
+        the freshly-used entry is left untouched.
+        """
+        s_old, s_new = _make_mock_session(), _make_mock_session()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_old, s_new])),
+        ):
+            pool = McpSessionPool()
+            url = "https://m.example/"
+            await pool.get_or_connect(url, {"Authorization": "Bearer old"})
+            await pool.get_or_connect(url, {"Authorization": "Bearer new"})
+            assert len(pool._entries) == 2
+
+            key_old = (url, _headers_hash({"Authorization": "Bearer old"}))
+            key_new = (url, _headers_hash({"Authorization": "Bearer new"}))
+
+            closed: list[tuple[str, str]] = []
+            for key, entry in pool._entries.items():
+                orig = entry.close
+
+                async def _tracked(k: tuple[str, str] = key, o: Any = orig) -> None:
+                    closed.append(k)
+                    await o()
+
+                entry.close = _tracked  # type: ignore[method-assign]
+
+            # Entry A idle since t=1000; B freshly used at t=9000.
+            pool._entries[key_old].last_used = 1000.0
+            pool._entries[key_new].last_used = 9000.0
+
+            await pool._reap_idle_once(idle_timeout=300.0, now=9100.0)
+
+        assert closed == [key_old], (
+            f"idle reaper must close exactly the superseded entry via the "
+            f"clean _Entry.close() path; closed={closed!r}"
+        )
+        assert key_old not in pool._entries
+        assert key_new in pool._entries
+
     async def test_contexts_exit_in_same_task_they_entered(self) -> None:
         """Cross-task close — regression for #425.
 

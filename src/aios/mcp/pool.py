@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import time
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -77,11 +78,20 @@ class _Entry:
         init_result: InitializeResult,
         shutdown: asyncio.Event,
         owner_task: asyncio.Task[None],
+        last_used: float,
     ) -> None:
         self.session = session
         self.init_result = init_result
         self._shutdown = shutdown
         self._owner_task = owner_task
+        # monotonic() of the last get_or_connect that returned this
+        # entry. The idle reaper keys off this, NOT owner-task liveness:
+        # the owner task is *always* alive (parked on `await
+        # shutdown.wait()` for the entry's whole life), so liveness is
+        # a useless staleness signal — an entry whose token was
+        # superseded by an OAuth refresh is never hit again yet its
+        # task runs forever.
+        self.last_used = last_used
 
     async def close(self) -> None:
         """Signal the owner task to exit its contexts and await its completion.
@@ -108,6 +118,7 @@ class McpSessionPool:
     def __init__(self) -> None:
         self._entries: dict[_PoolKey, _Entry] = {}
         self._locks: dict[_PoolKey, asyncio.Lock] = {}
+        self._reaper_task: asyncio.Task[None] | None = None
 
     def _lock_for(self, key: _PoolKey) -> asyncio.Lock:
         lock = self._locks.get(key)
@@ -160,7 +171,7 @@ class McpSessionPool:
             await task
             # Defensive — unreachable in practice.
             raise RuntimeError("mcp pool owner task signalled ready but produced no session")
-        return _Entry(result["session"], result["init"], shutdown, task)
+        return _Entry(result["session"], result["init"], shutdown, task, time.monotonic())
 
     async def get_or_connect(
         self, url: str, headers: dict[str, str]
@@ -175,11 +186,13 @@ class McpSessionPool:
 
         entry = self._entries.get(key)
         if entry is not None:
+            entry.last_used = time.monotonic()
             return entry.session, entry.init_result
 
         async with self._lock_for(key):
             entry = self._entries.get(key)
             if entry is not None:
+                entry.last_used = time.monotonic()
                 return entry.session, entry.init_result
 
             log.info("mcp_pool.connecting", url=url)
@@ -200,6 +213,57 @@ class McpSessionPool:
         key: _PoolKey = (url, _headers_hash(headers))
         self._entries.pop(key, None)
         log.info("mcp_pool.evicted", url=url)
+
+    async def _reap_idle_once(self, *, idle_timeout: float, now: float) -> None:
+        """Close entries idle longer than ``idle_timeout`` seconds.
+
+        Keyed on ``_Entry.last_used``, not owner-task liveness — see
+        :class:`_Entry`. Reclamation goes through ``_Entry.close()``
+        (same path as :meth:`close_all`), NOT a bare ``pop``: dropping
+        the reference alone strands the owner task, httpx client and SSE
+        stream — exactly the leak this reaps.
+        """
+        stale = [k for k, e in self._entries.items() if now - e.last_used > idle_timeout]
+        for key in stale:
+            entry = self._entries.pop(key, None)
+            if entry is None:
+                continue
+            log.info("mcp_pool.idle_close", url=key[0])
+            await entry.close()
+
+    async def _reap_idle_loop(self, idle_timeout: float, interval: float = 60.0) -> None:
+        """Background loop: close pooled sessions idle > idle_timeout.
+
+        The try/except is nested INSIDE ``while True`` (mirroring
+        :meth:`aios.sandbox.registry.SandboxRegistry._reap_idle_loop`
+        and the PR #443 fix for ``_run_interrupt_listener``): a teardown
+        error from one entry's ``close()`` must not silently disable the
+        reaper for the worker's lifetime — that would leak every
+        subsequently-superseded entry until process exit.
+        ``CancelledError`` is not an :class:`Exception` subclass, so
+        :meth:`stop_reaper`'s cancel still exits the loop cleanly.
+        """
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await self._reap_idle_once(idle_timeout=idle_timeout, now=time.monotonic())
+            except Exception:
+                log.exception("mcp_pool.reap_idle_loop_failed")
+
+    def start_reaper(self, idle_timeout: float) -> None:
+        """Start the idle-TTL reaper background task."""
+        if self._reaper_task is not None:
+            return
+        self._reaper_task = asyncio.create_task(
+            self._reap_idle_loop(idle_timeout),
+            name="mcp-pool-idle-reaper",
+        )
+
+    def stop_reaper(self) -> None:
+        """Cancel the idle-TTL reaper."""
+        if self._reaper_task is not None:
+            self._reaper_task.cancel()
+            self._reaper_task = None
 
     async def close_all(self) -> None:
         """Tear down all pooled sessions. Called at worker shutdown."""
