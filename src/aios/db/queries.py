@@ -2228,9 +2228,10 @@ async def get_vault_credential(
     account_id: str,
 ) -> VaultCredential:
     row = await conn.fetchrow(
-        "SELECT * FROM vault_credentials WHERE id = $1 AND vault_id = $2",
+        "SELECT * FROM vault_credentials WHERE id = $1 AND vault_id = $2 AND account_id = $3",
         credential_id,
         vault_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -2256,9 +2257,10 @@ async def lock_oauth_credential_for_refresh(
     row = await conn.fetchrow(
         "SELECT id, ciphertext, nonce FROM vault_credentials "
         "WHERE vault_id = $1 AND mcp_server_url = $2 AND archived_at IS NULL "
-        "FOR UPDATE",
+        "AND account_id = $3 FOR UPDATE",
         vault_id,
         mcp_server_url,
+        account_id,
     )
     if row is None:
         return None
@@ -2279,9 +2281,10 @@ async def get_vault_credential_with_blob(
     (and gets zeroed out at archive time).
     """
     row = await conn.fetchrow(
-        "SELECT * FROM vault_credentials WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL",
+        "SELECT * FROM vault_credentials WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL AND account_id = $3",
         credential_id,
         vault_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -2304,17 +2307,20 @@ async def list_vault_credentials(
     if after is None:
         rows = await conn.fetch(
             "SELECT * FROM vault_credentials "
-            "WHERE vault_id = $1 AND archived_at IS NULL ORDER BY id DESC LIMIT $2",
+            "WHERE vault_id = $1 AND archived_at IS NULL AND account_id = $2 "
+            "ORDER BY id DESC LIMIT $3",
             vault_id,
+            account_id,
             limit,
         )
     else:
         rows = await conn.fetch(
             "SELECT * FROM vault_credentials "
             "WHERE vault_id = $1 AND archived_at IS NULL AND id < $2 "
-            "ORDER BY id DESC LIMIT $3",
+            "AND account_id = $3 ORDER BY id DESC LIMIT $4",
             vault_id,
             after,
+            account_id,
             limit,
         )
     return [_row_to_vault_credential(r) for r in rows]
@@ -2346,9 +2352,10 @@ async def update_vault_credential(
     if not sets:
         return await get_vault_credential(conn, vault_id, credential_id, account_id=account_id)
     sets.append("updated_at = now()")
+    args.append(account_id)
     sql = (
         f"UPDATE vault_credentials SET {', '.join(sets)} "
-        f"WHERE id = $1 AND vault_id = $2 RETURNING *"
+        f"WHERE id = $1 AND vault_id = $2 AND account_id = ${len(args)} RETURNING *"
     )
     row = await conn.fetchrow(sql, *args)
     if row is None:
@@ -2376,9 +2383,10 @@ async def archive_vault_credential(
         "UPDATE vault_credentials "
         "SET ciphertext = ''::bytea, nonce = ''::bytea, "
         "    archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL RETURNING *",
+        "WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL AND account_id = $3 RETURNING *",
         credential_id,
         vault_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -2396,9 +2404,10 @@ async def delete_vault_credential(
     account_id: str,
 ) -> None:
     result = await conn.execute(
-        "DELETE FROM vault_credentials WHERE id = $1 AND vault_id = $2",
+        "DELETE FROM vault_credentials WHERE id = $1 AND vault_id = $2 AND account_id = $3",
         credential_id,
         vault_id,
+        account_id,
     )
     if result == "DELETE 0":
         raise NotFoundError(
@@ -2411,8 +2420,10 @@ async def count_active_vault_credentials(
     conn: asyncpg.Connection[Any], vault_id: str, *, account_id: str
 ) -> int:
     row = await conn.fetchrow(
-        "SELECT count(*) AS cnt FROM vault_credentials WHERE vault_id = $1 AND archived_at IS NULL",
+        "SELECT count(*) AS cnt FROM vault_credentials "
+        "WHERE vault_id = $1 AND archived_at IS NULL AND account_id = $2",
         vault_id,
+        account_id,
     )
     assert row is not None
     result: int = row["cnt"]
