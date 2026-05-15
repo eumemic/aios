@@ -13,29 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aios.harness import runtime
-from aios.mcp.pool import McpSessionPool, _headers_hash
-
-# ── _headers_hash ──────────────────────────────────────────────────────────
-
-
-class TestHeadersHash:
-    def test_same_headers_same_hash(self) -> None:
-        h = {"Authorization": "Bearer tok", "X-Extra": "v"}
-        assert _headers_hash(h) == _headers_hash(h)
-
-    def test_order_independent(self) -> None:
-        h1 = {"A": "1", "B": "2"}
-        h2 = {"B": "2", "A": "1"}
-        assert _headers_hash(h1) == _headers_hash(h2)
-
-    def test_different_values_different_hash(self) -> None:
-        assert _headers_hash({"Authorization": "Bearer tok1"}) != _headers_hash(
-            {"Authorization": "Bearer tok2"}
-        )
-
-    def test_empty_headers(self) -> None:
-        assert _headers_hash({}) == _headers_hash({})
-
+from aios.mcp.pool import McpSessionPool
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -88,22 +66,28 @@ class TestMcpSessionPool:
         ):
             pool = McpSessionPool()
             headers = {"Authorization": "Bearer tok"}
-            s1, _ = await pool.get_or_connect("https://m.example/", headers)
-            s2, _ = await pool.get_or_connect("https://m.example/", headers)
+            s1, _ = await pool.get_or_connect("https://m.example/", "v", headers)
+            s2, _ = await pool.get_or_connect("https://m.example/", "v", headers)
 
         assert s1 is s2
         session.initialize.assert_awaited_once()
 
-    async def test_pool_miss_different_headers(self) -> None:
-        """Different auth headers → two separate sessions."""
+    async def test_pool_miss_different_vault_ids(self) -> None:
+        """Different vault_ids on the same URL → two separate sessions
+        (the multi-tenant safety surface: per-account vaults yield
+        per-account pool entries even when sharing an MCP URL)."""
         s_a, s_b = _make_mock_session(), _make_mock_session()
         with (
             patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
         ):
             pool = McpSessionPool()
-            r1, _ = await pool.get_or_connect("https://m.example/", {"Authorization": "Bearer t1"})
-            r2, _ = await pool.get_or_connect("https://m.example/", {"Authorization": "Bearer t2"})
+            r1, _ = await pool.get_or_connect(
+                "https://m.example/", "vault_a", {"Authorization": "Bearer t1"}
+            )
+            r2, _ = await pool.get_or_connect(
+                "https://m.example/", "vault_b", {"Authorization": "Bearer t2"}
+            )
 
         assert r1 is not r2
         assert s_a.initialize.await_count == 1
@@ -118,9 +102,9 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
         ):
             pool = McpSessionPool()
-            r1, _ = await pool.get_or_connect("https://m.example/", headers)
-            pool.evict("https://m.example/", headers)
-            r2, _ = await pool.get_or_connect("https://m.example/", headers)
+            r1, _ = await pool.get_or_connect("https://m.example/", "v", headers)
+            pool.evict("https://m.example/", "v")
+            r2, _ = await pool.get_or_connect("https://m.example/", "v", headers)
 
         assert r1 is not r2
 
@@ -146,7 +130,7 @@ class TestMcpSessionPool:
             pool = McpSessionPool()
             headers = {"Authorization": "Bearer tok"}
             results = await asyncio.gather(
-                *[pool.get_or_connect("https://m.example/", headers) for _ in range(8)]
+                *[pool.get_or_connect("https://m.example/", "v", headers) for _ in range(8)]
             )
 
         assert init_count == 1
@@ -162,8 +146,8 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx(session)),
         ):
             pool = McpSessionPool()
-            await pool.get_or_connect("https://a.example/", {"Authorization": "A"})
-            await pool.get_or_connect("https://b.example/", {"Authorization": "B"})
+            await pool.get_or_connect("https://a.example/", "vault_a", {"Authorization": "A"})
+            await pool.get_or_connect("https://b.example/", "vault_b", {"Authorization": "B"})
 
             close_calls: list[str] = []
             for key, entry in pool._entries.items():
@@ -187,21 +171,60 @@ class TestMcpSessionPool:
         await pool.close_all()
         assert len(pool._entries) == 0
 
-    async def test_idle_reaper_closes_superseded_entry(self) -> None:
-        """An OAuth-superseded entry must be reclaimed via the clean path.
+    async def test_idle_reaper_closes_cold_entry(self) -> None:
+        """A cold pool entry must be reclaimed via ``_Entry.close()``.
 
-        When an ``mcp_oauth`` token is refreshed, the rotated bearer
-        produces a new ``headers_hash`` → a new pool key → a fresh
-        entry. Nothing ever hits the old key again, so the predecessor
-        entry (its owner task, httpx client, SSE stream) is orphaned.
-        Pre-reaper the pool had no reclamation between exception-evict
-        and worker-shutdown ``close_all``, so it leaked for the worker's
-        lifetime — one per token TTL per active connector.
+        Post-#459 re-key, the reaper guards the cold-entry vector: a
+        ``(url, vault_id)`` whose tenant never returns. A bare ``pop``
+        would leave the owner task + httpx + SSE stream dangling —
+        exactly the leak this defends against.
+        """
+        s_cold, s_warm = _make_mock_session(), _make_mock_session()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_cold, s_warm])),
+        ):
+            pool = McpSessionPool()
+            url = "https://m.example/"
+            await pool.get_or_connect(url, "vault_cold", {"Authorization": "Bearer A"})
+            await pool.get_or_connect(url, "vault_warm", {"Authorization": "Bearer B"})
+            assert len(pool._entries) == 2
 
-        The idle reaper must close the idle entry through the clean
-        ``_Entry.close()`` shutdown path (NOT a bare ``pop`` — that
-        leaves the owner task and socket dangling) and drop it, while
-        the freshly-used entry is left untouched.
+            # Locate each entry by the session it wraps (keying-agnostic
+            # so this test stays a pure reaper-mechanism test).
+            key_cold = next(k for k, e in pool._entries.items() if e.session is s_cold)
+            key_warm = next(k for k, e in pool._entries.items() if e.session is s_warm)
+
+            closed: list[tuple[str, str | None]] = []
+            for key, entry in pool._entries.items():
+                orig = entry.close
+
+                async def _tracked(k: tuple[str, str | None] = key, o: Any = orig) -> None:
+                    closed.append(k)
+                    await o()
+
+                entry.close = _tracked  # type: ignore[method-assign]
+
+            # Cold tenant idle since t=1000; warm tenant freshly used at t=9000.
+            pool._entries[key_cold].last_used = 1000.0
+            pool._entries[key_warm].last_used = 9000.0
+
+            await pool._reap_idle_once(idle_timeout=300.0, now=9100.0)
+
+        assert closed == [key_cold], (
+            f"idle reaper must close exactly the cold entry via the clean "
+            f"_Entry.close() path; closed={closed!r}"
+        )
+        assert key_cold not in pool._entries
+        assert key_warm in pool._entries
+
+    async def test_oauth_refresh_does_not_orphan_entry(self) -> None:
+        """A token rotation on the same vault must reuse the pool key.
+
+        Pre-#459 the pool keyed on ``(url, sha256(headers))``, so a
+        rotated bearer produced a second key while the predecessor
+        ``_Entry`` lingered. Keyed on ``(url, vault_id)``, rotation hits
+        the same key and ``len(_entries)`` stays put.
         """
         s_old, s_new = _make_mock_session(), _make_mock_session()
         with (
@@ -210,35 +233,50 @@ class TestMcpSessionPool:
         ):
             pool = McpSessionPool()
             url = "https://m.example/"
-            await pool.get_or_connect(url, {"Authorization": "Bearer old"})
-            await pool.get_or_connect(url, {"Authorization": "Bearer new"})
-            assert len(pool._entries) == 2
+            # Same vault (identity), two bearer values — the exact shape
+            # an OAuth refresh produces at the inbound boundary.
+            await pool.get_or_connect(url, "vault_a", {"Authorization": "Bearer old"})
+            await pool.get_or_connect(url, "vault_a", {"Authorization": "Bearer new"})
 
-            key_old = (url, _headers_hash({"Authorization": "Bearer old"}))
-            key_new = (url, _headers_hash({"Authorization": "Bearer new"}))
-
-            closed: list[tuple[str, str]] = []
-            for key, entry in pool._entries.items():
-                orig = entry.close
-
-                async def _tracked(k: tuple[str, str] = key, o: Any = orig) -> None:
-                    closed.append(k)
-                    await o()
-
-                entry.close = _tracked  # type: ignore[method-assign]
-
-            # Entry A idle since t=1000; B freshly used at t=9000.
-            pool._entries[key_old].last_used = 1000.0
-            pool._entries[key_new].last_used = 9000.0
-
-            await pool._reap_idle_once(idle_timeout=300.0, now=9100.0)
-
-        assert closed == [key_old], (
-            f"idle reaper must close exactly the superseded entry via the "
-            f"clean _Entry.close() path; closed={closed!r}"
+        assert len(pool._entries) == 1, (
+            f"a token refresh of the same vault must NOT orphan an entry; "
+            f"got len(_entries)={len(pool._entries)} (pre-fix the rotated "
+            f"bearer produced a second key while the predecessor lingered)"
         )
-        assert key_old not in pool._entries
-        assert key_new in pool._entries
+
+    async def test_cross_tenant_refresh_does_not_disturb_other_tenant(self) -> None:
+        """Multi-tenant invariant the #459 re-key is built on.
+
+        ``vault_id`` is account-filtered at the query layer
+        (``resolve_mcp_credential(..., account_id=...)``), so two
+        tenants sharing an MCP URL hold independent entries and one's
+        refresh reuses its OWN entry without disturbing the other.
+        Pre-fix the rotation would open a third entry under a new
+        headers_hash (orphaning A's first entry); post-fix it reuses
+        A's stable ``(url, vault_id)`` key.
+        """
+        # Exactly 2 sessions: A's, B's. Pre-fix A's rotation pulls a
+        # third → StopIteration; post-fix it reuses A's cached entry.
+        s_a, s_b = _make_mock_session(), _make_mock_session()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
+        ):
+            pool = McpSessionPool()
+            url = "https://shared.example/"
+            sess_a1, _ = await pool.get_or_connect(url, "vault_A", {"Authorization": "Bearer tokA"})
+            sess_b1, _ = await pool.get_or_connect(url, "vault_B", {"Authorization": "Bearer tokB"})
+            # A rotates: must reuse A's cached entry (no new open).
+            sess_a2, _ = await pool.get_or_connect(
+                url, "vault_A", {"Authorization": "Bearer tokA_v2"}
+            )
+
+        assert len(pool._entries) == 2, (
+            f"A's refresh must reuse A's entry, not orphan a third; "
+            f"got len(_entries)={len(pool._entries)}"
+        )
+        assert sess_a2 is sess_a1, "A's session must be reused across rotation"
+        assert sess_b1 is not sess_a1, "tenants must hold distinct entries"
 
     async def test_contexts_exit_in_same_task_they_entered(self) -> None:
         """Cross-task close — regression for #425.
@@ -281,7 +319,7 @@ class TestMcpSessionPool:
             pool = McpSessionPool()
 
             async def opener() -> None:
-                await pool.get_or_connect("https://m.example/", {"Authorization": "tok"})
+                await pool.get_or_connect("https://m.example/", "v", {"Authorization": "tok"})
 
             await asyncio.create_task(opener())
 
@@ -322,8 +360,8 @@ class TestDiscoverMcpToolsWithPool:
             patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
             patch("aios.mcp.pool.ClientSession", _session_ctx(session)),
         ):
-            await discover_mcp_tools("https://m.example/", "srv", {})
-            await discover_mcp_tools("https://m.example/", "srv", {})
+            await discover_mcp_tools("https://m.example/", "v", {}, "srv")
+            await discover_mcp_tools("https://m.example/", "v", {}, "srv")
 
         session.initialize.assert_awaited_once()
 
@@ -342,7 +380,7 @@ class TestDiscoverMcpToolsWithPool:
             patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
         ):
-            tools, _ = await discover_mcp_tools("https://m.example/", "srv", {})
+            tools, _ = await discover_mcp_tools("https://m.example/", "v", {}, "srv")
 
         assert tools == []
         assert s_a.initialize.await_count == 1
@@ -358,7 +396,7 @@ class TestDiscoverMcpToolsWithPool:
             patch("aios.mcp.client.streamable_http_client", return_value=_transport_mock()),
             patch("aios.mcp.client.ClientSession", _session_ctx(session)),
         ):
-            tools, _ = await discover_mcp_tools("https://m.example/", "srv", {})
+            tools, _ = await discover_mcp_tools("https://m.example/", "v", {}, "srv")
 
         assert tools == []
         session.initialize.assert_awaited_once()
@@ -377,8 +415,8 @@ class TestCallMcpToolWithPool:
             patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
             patch("aios.mcp.pool.ClientSession", _session_ctx(session)),
         ):
-            await call_mcp_tool("https://m.example/", {}, "do_thing", {})
-            await call_mcp_tool("https://m.example/", {}, "do_thing", {})
+            await call_mcp_tool("https://m.example/", "v", {}, "do_thing", {})
+            await call_mcp_tool("https://m.example/", "v", {}, "do_thing", {})
 
         session.initialize.assert_awaited_once()
 
@@ -397,7 +435,7 @@ class TestCallMcpToolWithPool:
             patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
         ):
-            result = await call_mcp_tool("https://m.example/", {}, "do_thing", {})
+            result = await call_mcp_tool("https://m.example/", "v", {}, "do_thing", {})
 
         assert result == {"content": ""}
         assert s_a.initialize.await_count == 1

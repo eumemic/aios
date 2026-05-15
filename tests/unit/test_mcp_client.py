@@ -42,9 +42,10 @@ class TestResolveAuthForUrl:
             new_callable=AsyncMock,
         ) as s:
             s.return_value = (blob, "static_bearer", "vlt_s1")
-            result = await resolve_auth_for_url(
+            vault_id, result = await resolve_auth_for_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
+        assert vault_id == "vlt_s1"
         assert result == {"Authorization": "Bearer session-token"}
         s.assert_awaited_once()
 
@@ -55,9 +56,10 @@ class TestResolveAuthForUrl:
             new_callable=AsyncMock,
         ) as s:
             s.return_value = None
-            result = await resolve_auth_for_url(
+            vault_id, result = await resolve_auth_for_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
+        assert vault_id is None
         assert result == {}
 
     async def test_empty_token_returns_empty(self, crypto_box: CryptoBox) -> None:
@@ -69,9 +71,12 @@ class TestResolveAuthForUrl:
             new_callable=AsyncMock,
         ) as s:
             s.return_value = (blob, "static_bearer", "vlt_s1")
-            result = await resolve_auth_for_url(
+            vault_id, result = await resolve_auth_for_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
+        # Empty-token path returns (None, {}) — a transient stateless
+        # resolution does not cache an unauth entry under an identity key.
+        assert vault_id is None
         assert result == {}
 
     async def test_mcp_oauth_static_token(self, crypto_box: CryptoBox) -> None:
@@ -83,9 +88,10 @@ class TestResolveAuthForUrl:
             new_callable=AsyncMock,
         ) as s:
             s.return_value = (blob, "mcp_oauth", "vlt_s1")
-            result = await resolve_auth_for_url(
+            vault_id, result = await resolve_auth_for_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
+        assert vault_id == "vlt_s1"
         assert result == {"Authorization": "Bearer oauth-token"}
 
     # ── OAuth refresh ─────────────────────────────────────────────────────
@@ -121,7 +127,7 @@ class TestResolveAuthForUrl:
         ):
             s.return_value = (stale_blob, "mcp_oauth", "vlt_s1")
             v.return_value = (fresh_blob, "mcp_oauth")
-            result = await resolve_auth_for_url(
+            vault_id, result = await resolve_auth_for_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
 
@@ -129,6 +135,7 @@ class TestResolveAuthForUrl:
         kwargs = refresh_mock.await_args.kwargs
         assert kwargs["vault_id"] == "vlt_s1"
         assert kwargs["mcp_server_url"] == "https://mcp.example.com"
+        assert vault_id == "vlt_s1"
         assert result == {"Authorization": "Bearer fresh"}
 
     async def test_oauth_refresh_not_triggered_when_fresh(self, crypto_box: CryptoBox) -> None:
@@ -152,11 +159,12 @@ class TestResolveAuthForUrl:
             patch("aios.mcp.client.refresh_credential", refresh_mock),
         ):
             s.return_value = (blob, "mcp_oauth", "vlt_s1")
-            result = await resolve_auth_for_url(
+            vault_id, result = await resolve_auth_for_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
 
         refresh_mock.assert_not_awaited()
+        assert vault_id == "vlt_s1"
         assert result == {"Authorization": "Bearer still-good"}
 
     async def test_oauth_refresh_failure_bubbles(self, crypto_box: CryptoBox) -> None:
@@ -234,7 +242,9 @@ class TestDiscoverMcpTools:
             mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            tools, instructions = await discover_mcp_tools("https://mcp.github.com/", "github", {})
+            tools, instructions = await discover_mcp_tools(
+                "https://mcp.github.com/", None, {}, "github"
+            )
 
         assert len(tools) == 1
         assert tools[0]["type"] == "function"
@@ -267,7 +277,7 @@ class TestDiscoverMcpTools:
             mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
             tools, _instructions = await discover_mcp_tools(
-                "https://mcp.example.com/", "myserver", {}
+                "https://mcp.example.com/", None, {}, "myserver"
             )
 
         assert len(tools) == 2
@@ -279,7 +289,7 @@ class TestDiscoverMcpTools:
             mock_transport.return_value.__aenter__ = AsyncMock(side_effect=ConnectionError("down"))
             mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            result = await discover_mcp_tools("https://bad.example.com/", "bad", {})
+            result = await discover_mcp_tools("https://bad.example.com/", None, {}, "bad")
 
         assert result == ([], None)
 
@@ -310,7 +320,9 @@ class TestDiscoverMcpTools:
             mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            tools, instructions = await discover_mcp_tools("https://mcp.signal/", "signal", {})
+            tools, instructions = await discover_mcp_tools(
+                "https://mcp.signal/", None, {}, "signal"
+            )
 
         assert len(tools) == 1
         assert instructions == "## Signal\n\nUse signal_send to reply."
@@ -345,6 +357,7 @@ class TestCallMcpTool:
 
             result = await call_mcp_tool(
                 "https://mcp.github.com/",
+                None,
                 {"Authorization": "Bearer token"},
                 "create_issue",
                 {"title": "Test"},
@@ -375,7 +388,7 @@ class TestCallMcpTool:
             mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            result = await call_mcp_tool("https://mcp.github.com/", {}, "create_issue", {})
+            result = await call_mcp_tool("https://mcp.github.com/", None, {}, "create_issue", {})
 
         assert result == {"error": "Permission denied", "code": "tool_error"}
 
@@ -386,7 +399,7 @@ class TestCallMcpTool:
             )
             mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            result = await call_mcp_tool("https://bad.example.com/", {}, "tool", {})
+            result = await call_mcp_tool("https://bad.example.com/", None, {}, "tool", {})
 
         assert "error" in result
         assert "MCP server error" in result["error"]
@@ -424,6 +437,7 @@ class TestCallMcpTool:
 
             await call_mcp_tool(
                 "https://example.com/",
+                None,
                 {},
                 "signal_send",
                 {"text": "hi"},
@@ -459,7 +473,7 @@ class TestCallMcpTool:
             mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            await call_mcp_tool("https://example.com/", {}, "tool", {})
+            await call_mcp_tool("https://example.com/", None, {}, "tool", {})
 
         mock_session.call_tool.assert_awaited_once_with("tool", {}, meta=None)
 
@@ -486,6 +500,6 @@ class TestCallMcpTool:
             mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            result = await call_mcp_tool("https://example.com/", {}, "tool", {})
+            result = await call_mcp_tool("https://example.com/", None, {}, "tool", {})
 
         assert result == {"content": "[image content]"}
