@@ -858,12 +858,13 @@ async def increment_session_usage(
         "output_tokens = output_tokens + $3, "
         "cache_read_input_tokens = cache_read_input_tokens + $4, "
         "cache_creation_input_tokens = cache_creation_input_tokens + $5 "
-        "WHERE id = $1",
+        "WHERE id = $1 AND account_id = $6",
         session_id,
         input_tokens,
         output_tokens,
         cache_read_input_tokens,
         cache_creation_input_tokens,
+        account_id,
     )
 
 
@@ -988,7 +989,11 @@ async def update_session(
         return await get_session(conn, session_id, account_id=account_id)
 
     sets.append("updated_at = now()")
-    sql = f"UPDATE sessions SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    args.append(account_id)
+    sql = (
+        f"UPDATE sessions SET {', '.join(sets)} "
+        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+    )
     row = await conn.fetchrow(sql, *args)
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
@@ -1000,8 +1005,9 @@ async def archive_session(
 ) -> Session:
     row = await conn.fetchrow(
         "UPDATE sessions SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
         session_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -1510,8 +1516,9 @@ async def append_event(
     async with conn.transaction():
         seq_row = await conn.fetchrow(
             "UPDATE sessions SET last_event_seq = last_event_seq + 1 "
-            "WHERE id = $1 RETURNING last_event_seq, focal_channel",
+            "WHERE id = $1 AND account_id = $2 RETURNING last_event_seq, focal_channel",
             session_id,
+            account_id,
         )
         if seq_row is None:
             raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
@@ -3577,8 +3584,9 @@ async def flip_quiescent_to_pending(
     """
     await conn.execute(
         "UPDATE sessions SET status = 'pending', updated_at = now() "
-        "WHERE id = $1 AND status IN ('idle', 'errored')",
+        "WHERE id = $1 AND status IN ('idle', 'errored') AND account_id = $2",
         session_id,
+        account_id,
     )
 
 
@@ -3907,10 +3915,16 @@ async def list_memory_stores(
     limit: int = 100,
 ) -> list[MemoryStore]:
     if include_archived:
-        rows = await conn.fetch("SELECT * FROM memory_stores ORDER BY id DESC LIMIT $1", limit)
+        rows = await conn.fetch(
+            "SELECT * FROM memory_stores WHERE account_id = $1 ORDER BY id DESC LIMIT $2",
+            account_id,
+            limit,
+        )
     else:
         rows = await conn.fetch(
-            "SELECT * FROM memory_stores WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            "SELECT * FROM memory_stores WHERE archived_at IS NULL AND account_id = $1 "
+            "ORDER BY id DESC LIMIT $2",
+            account_id,
             limit,
         )
     return [_row_to_memory_store(r) for r in rows]
