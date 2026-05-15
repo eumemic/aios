@@ -97,11 +97,13 @@ class Settings(BaseSettings):
     )
     sandbox_cpu_quota: float | None = Field(
         default=None,
-        gt=0,
+        ge=0.01,
         description="Maximum cumulative CPU cores a sandbox can use, in "
         "decimal core units (e.g. 2.0 = two cores at 100%, 0.5 = half "
-        "of one core). Translates to ``docker run --cpus``. ``None`` "
-        "leaves the host's default in place (unlimited).",
+        "of one core). Translates to ``docker run --cpus``. The lower "
+        "bound is Docker's effective floor — below ~0.01 the runtime "
+        "rounds the CFS quota down and the value becomes meaningless. "
+        "``None`` leaves the host's default in place (unlimited).",
     )
     sandbox_memory_bytes: int | None = Field(
         default=None,

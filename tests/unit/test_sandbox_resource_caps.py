@@ -63,6 +63,26 @@ class TestResourceCapFlags:
         assert argv[i + 1] == "1.5"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("quota", "expected"),
+        [
+            (2.0, "2"),  # whole core → no trailing ".0"
+            (0.5, "0.5"),
+            (0.01, "0.01"),  # settings floor — must stay plain-decimal
+            (0.25, "0.25"),
+        ],
+    )
+    async def test_cpu_quota_format_is_plain_decimal(self, quota: float, expected: str) -> None:
+        """Docker's ``--cpus`` parser rejects scientific notation, and
+        the previous ``:g`` format flips to ``1e-05`` around 0.0001.
+        Locks the formatter at a fixed-decimal-strip-trailing-zeros
+        shape so future drift can't reintroduce scientific notation.
+        """
+        argv = await _capture_argv(_spec(cpu_quota=quota))
+        i = argv.index("--cpus")
+        assert argv[i + 1] == expected
+
+    @pytest.mark.asyncio
     async def test_memory_bytes_emits_memory_and_memory_swap(self) -> None:
         argv = await _capture_argv(_spec(memory_bytes=256 * 1024 * 1024))
         assert "--memory" in argv
