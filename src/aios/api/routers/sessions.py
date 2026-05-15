@@ -404,13 +404,22 @@ async def list_events(
     session_id: str,
     pool: PoolDep,
     _auth: AuthDep,
-    after_seq: int = 0,
+    after: int = 0,
     kind: EventKind | None = None,
     limit: int = 200,
     error_only: bool = False,
 ) -> ListResponse[Event]:
+    """List events for a session, paginated by sequence number.
+
+    Pass the response's ``next_after`` field as ``?after=`` on the next call
+    to walk forward through the stream. (The query param was previously
+    named ``after_seq``, which didn't match the ``next_after`` response
+    field — clients following the natural roundtrip pattern sent
+    ``?after=`` and got it silently ignored, causing pagination to loop on
+    the first page. See issue #389.)
+    """
     items = await service.read_events(
-        pool, session_id, after_seq=after_seq, kind=kind, limit=limit, error_only=error_only
+        pool, session_id, after_seq=after, kind=kind, limit=limit, error_only=error_only
     )
     return ListResponse[Event](
         data=items,
@@ -519,20 +528,24 @@ async def wait_for_events(
     db_url: DbUrlDep,
     pool: PoolDep,
     _auth: AuthDep,
-    after_seq: int = 0,
+    after: int = 0,
     timeout_seconds: Annotated[int, Query(alias="timeout", ge=0, le=60)] = 30,
 ) -> WaitResponse:
-    """Long-poll for new events past ``after_seq``.
+    """Long-poll for new events past sequence number ``after``.
 
     Blocks up to ``timeout`` seconds for events to arrive; returns an empty
     list if none land in time. Alternative to SSE for clients whose HTTP
     stack can't reliably consume server-sent events (notably Node's
     ``fetch`` — see issue #40).
+
+    Pass the response's ``next_after`` as ``?after=`` on the next call to
+    resume from where you left off. (The query param was previously named
+    ``after_seq``; see issue #389.)
     """
     await service.get_session(pool, session_id)
 
     async with listen_for_events(db_url, session_id) as queue:
-        events = await service.read_events(pool, session_id, after_seq=after_seq)
+        events = await service.read_events(pool, session_id, after_seq=after)
         if not events and timeout_seconds > 0:
             # The channel carries both committed-event IDs and transient
             # streaming delta payloads (shaped like {"delta": "..."}); only
@@ -549,7 +562,7 @@ async def wait_for_events(
                     break
                 if payload.startswith("{"):
                     continue
-                events = await service.read_events(pool, session_id, after_seq=after_seq)
+                events = await service.read_events(pool, session_id, after_seq=after)
                 if events:
                     break
 
@@ -558,5 +571,5 @@ async def wait_for_events(
         events=events,
         session_status=session.status,
         session_stop_reason=session.stop_reason,
-        next_after=events[-1].seq if events else after_seq,
+        next_after=events[-1].seq if events else after,
     )
