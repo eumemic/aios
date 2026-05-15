@@ -112,3 +112,49 @@ var would mean any future compromise of that secret can re-mint root
 indefinitely. The Postgres-side recipe requires database credentials,
 which are themselves a high-trust artifact — the recovery surface is
 exactly as protected as the database itself, and no more.
+
+
+## Multi-tenancy migration (0042 → 0044)
+
+When upgrading a populated aios deployment from a pre-multi-tenancy
+build to a build that includes migrations 0042–0044, the migration
+script enforces a per-row `account_id NOT NULL` constraint on every
+tenant-scoped resource table. That constraint requires a root account
+to exist before the backfill can succeed. The order is therefore:
+
+1. **Bootstrap the root account first.** Before running `alembic
+   upgrade head`, start the API server, set `AIOS_BOOTSTRAP_TOKEN`,
+   and hit `POST /v1/accounts/bootstrap` to create the root row. Save
+   the plaintext key returned in the response.
+2. **Then run the migrations.** Migration 0044's backfill subquery
+   resolves to the root account's `id` and stamps it onto every
+   pre-existing row that doesn't have an `account_id` yet. The
+   `SET NOT NULL` step then succeeds because every row has a value.
+3. **Restart api + worker.** The auth dep changes shape between
+   pre-multi-tenancy and post-multi-tenancy (the bearer now resolves
+   to a 3-tuple including `account_id`); a restart clears any cached
+   FastAPI dependency state from the old shape.
+
+### What happens if you run migrations before bootstrapping
+
+Migration 0044 will fail at the `SET NOT NULL` step on the first table
+that contains pre-existing rows: the backfill subquery returns `NULL`
+(no root account), the `UPDATE` leaves the column as-is, and `SET
+NOT NULL` rejects the operation with a Postgres `23502` error. Roll
+back to the previous migration, bootstrap the root, and re-run.
+
+### Per-tenant resource recycling
+
+Migration 0045 reshapes the `display_name` partial unique indexes on
+`agents`, `environments`, `credentials`, and `session_templates` from
+global to `(account_id, name)`. After this migration, two tenants can
+mint a resource named `"default"` independently. There's no data
+migration for this — existing rows are left in place; the partial
+unique index just allows what was previously rejected.
+
+### Fresh installs
+
+On a fresh install (empty tables), the backfill in 0044 matches zero
+rows, `SET NOT NULL` succeeds trivially, and the bootstrap step
+happens after migrations in the usual order. The "bootstrap first"
+ordering only matters on upgrades of populated databases.
