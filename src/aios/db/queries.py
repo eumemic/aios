@@ -211,8 +211,10 @@ async def get_environment_config_for_session(
         SELECT e.config FROM environments e
         JOIN sessions s ON s.environment_id = e.id
         WHERE s.id = $1
+          AND s.account_id = $2
         """,
         session_id,
+        account_id,
     )
     if row is None:
         return None
@@ -842,7 +844,9 @@ async def set_session_status(
         and stop_reason.get("type") == "requires_action"
         and stop_reason.get("custom_tools")
     ):
-        for cid, connector in await _list_bound_connection_ids(conn, session_id):
+        for cid, connector in await _list_bound_connection_ids(
+            conn, session_id, account_id=account_id
+        ):
             await conn.execute(
                 "SELECT pg_notify($1, $2)",
                 f"connector_calls_{connector}",
@@ -912,8 +916,10 @@ async def get_session_model(
      LEFT JOIN agent_versions av
             ON av.agent_id = s.agent_id AND av.version = s.agent_version
          WHERE s.id = $1
+           AND s.account_id = $2
         """,
         session_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
@@ -1823,7 +1829,7 @@ async def _pending_calls_for_session(
 
 
 async def _list_bound_connection_ids(
-    conn: asyncpg.Connection[Any], session_id: str
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> list[tuple[str, str]]:
     """``(connection_id, connector)`` pairs for active connections bound to ``session_id``.
 
@@ -1837,9 +1843,15 @@ async def _list_bound_connection_ids(
         SELECT c.id, c.connector
           FROM connections c
          WHERE c.archived_at IS NULL
-           AND {_session_bound_to_connection_predicate(connection_alias="c", session_param_index=1)}
+           AND c.account_id = $2
+           AND {
+            _session_bound_to_connection_predicate(
+                connection_alias="c", session_param_index=1, account_id_param_index=2
+            )
+        }
         """,
         session_id,
+        account_id,
     )
     return [(row["id"], row["connector"]) for row in rows]
 
@@ -1863,11 +1875,17 @@ async def is_session_bound_to_connection(
           FROM connections c
          WHERE c.id = $1
            AND c.archived_at IS NULL
-           AND {_session_bound_to_connection_predicate(connection_alias="c", session_param_index=2)}
+           AND c.account_id = $3
+           AND {
+            _session_bound_to_connection_predicate(
+                connection_alias="c", session_param_index=2, account_id_param_index=3
+            )
+        }
          LIMIT 1
         """,
         connection_id,
         session_id,
+        account_id,
     )
     return row is not None
 
@@ -2523,8 +2541,9 @@ async def batch_get_session_vault_ids(
         return {}
     rows = await conn.fetch(
         "SELECT session_id, vault_id FROM session_vaults "
-        "WHERE session_id = ANY($1) ORDER BY session_id, rank",
+        "WHERE session_id = ANY($1) AND account_id = $2 ORDER BY session_id, rank",
         session_ids,
+        account_id,
     )
     result: dict[str, list[str]] = {sid: [] for sid in session_ids}
     for r in rows:
@@ -2798,8 +2817,10 @@ async def get_latest_skill_version(
         SELECT sv.* FROM skill_versions sv
         JOIN skills s ON s.id = sv.skill_id AND sv.version = s.latest_version
         WHERE sv.skill_id = $1
+          AND sv.account_id = $2
         """,
         skill_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(f"skill {skill_id} has no versions", detail={"skill_id": skill_id})
@@ -2863,7 +2884,10 @@ async def resolve_skill_refs(
 
 
 def _session_bound_to_connection_predicate(
-    *, connection_alias: str, session_param_index: int
+    *,
+    connection_alias: str,
+    session_param_index: int,
+    account_id_param_index: int,
 ) -> str:
     """SQL fragment for "this session is bound to ``<connection_alias>``."
 
@@ -2876,15 +2900,24 @@ def _session_bound_to_connection_predicate(
 
     * an active ``single_session`` binding whose ``session_id`` matches; or
     * a row in ``chat_sessions`` for ``(connection_id, session_id)``.
+
+    Both ``bindings`` and ``chat_sessions`` are account-scoped tables, so
+    the predicate filters on ``account_id`` defensively even when the
+    outer connections query already filtered on the same account. The
+    redundancy is cheap (covered by the existing indexes) and gives the
+    SQL layer the same tenant-isolation invariant the function signatures
+    promise.
     """
     return f"""(
         EXISTS (SELECT 1 FROM bindings b
                  WHERE b.connection_id = {connection_alias}.id
                    AND b.archived_at IS NULL
-                   AND b.session_id = ${session_param_index})
+                   AND b.session_id = ${session_param_index}
+                   AND b.account_id = ${account_id_param_index})
         OR EXISTS (SELECT 1 FROM chat_sessions cs
                     WHERE cs.connection_id = {connection_alias}.id
-                      AND cs.session_id = ${session_param_index})
+                      AND cs.session_id = ${session_param_index}
+                      AND cs.account_id = ${account_id_param_index})
     )"""
 
 
@@ -2916,8 +2949,10 @@ async def get_active_binding(
         SELECT id, connection_id, mode, session_id, session_template_id
           FROM bindings
          WHERE connection_id = $1 AND archived_at IS NULL
+           AND account_id = $2
         """,
         connection_id,
+        account_id,
     )
     if row is None:
         return None
@@ -2999,11 +3034,11 @@ async def archive_active_binding(
     in the *other* mode is left intact and the call returns ``None``;
     callers diagnose via a follow-up read.
     """
-    where = "connection_id = $1 AND archived_at IS NULL"
-    args: tuple[Any, ...] = (connection_id,)
+    where = "connection_id = $1 AND archived_at IS NULL AND account_id = $2"
+    args: tuple[Any, ...] = (connection_id, account_id)
     if expected_mode is not None:
-        where += " AND mode = $2"
-        args = (connection_id, expected_mode)
+        where += " AND mode = $3"
+        args = (connection_id, account_id, expected_mode)
     row = await conn.fetchrow(
         f"""
         UPDATE bindings
@@ -3319,10 +3354,16 @@ async def list_connection_tools_for_session(
                 SELECT DISTINCT c.connector
                   FROM connections c
                  WHERE c.archived_at IS NULL
-                   AND {_session_bound_to_connection_predicate(connection_alias="c", session_param_index=1)}
+                   AND c.account_id = $2
+                   AND {
+            _session_bound_to_connection_predicate(
+                connection_alias="c", session_param_index=1, account_id_param_index=2
+            )
+        }
             )
         """,
         session_id,
+        account_id,
     )
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -3637,6 +3678,7 @@ async def list_recent_chat_ids(
           MAX(created_at) AS last_seen_at
         FROM events
         WHERE channel LIKE $1
+          AND account_id = $3
           AND kind = 'message'
           AND data->>'role' = 'user'
         GROUP BY chat_id
@@ -3645,6 +3687,7 @@ async def list_recent_chat_ids(
         """,
         prefix + "%",
         limit,
+        account_id,
     )
     return [(r["chat_id"], r["last_seen_at"]) for r in rows if r["chat_id"]]
 
@@ -3799,15 +3842,20 @@ async def list_session_templates(
 ) -> list[SessionTemplate]:
     if after is None:
         rows = await conn.fetch(
-            "SELECT * FROM session_templates WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            "SELECT * FROM session_templates "
+            "WHERE archived_at IS NULL AND account_id = $2 "
+            "ORDER BY id DESC LIMIT $1",
             limit,
+            account_id,
         )
     else:
         rows = await conn.fetch(
-            "SELECT * FROM session_templates WHERE archived_at IS NULL AND id < $1 "
+            "SELECT * FROM session_templates "
+            "WHERE archived_at IS NULL AND id < $1 AND account_id = $3 "
             "ORDER BY id DESC LIMIT $2",
             after,
             limit,
+            account_id,
         )
     return [_row_to_session_template(r) for r in rows]
 
@@ -4293,8 +4341,8 @@ async def list_memories(
             detail={"order_by": order_by, "depth": depth},
         )
 
-    where = "memory_store_id = $1 AND deleted_at IS NULL"
-    args: list[Any] = [store_id]
+    where = "memory_store_id = $1 AND deleted_at IS NULL AND account_id = $2"
+    args: list[Any] = [store_id, account_id]
     if path_prefix:
         args.append(path_prefix)
         # Escape LIKE metacharacters so the prefix matches literally — paths
@@ -4554,9 +4602,12 @@ async def redact_memory_version(
     """
     async with conn.transaction():
         ver = await conn.fetchrow(
-            "SELECT * FROM memory_versions WHERE memory_store_id = $1 AND id = $2 FOR UPDATE",
+            "SELECT * FROM memory_versions "
+            "WHERE memory_store_id = $1 AND id = $2 AND account_id = $3 "
+            "FOR UPDATE",
             store_id,
             version_id,
+            account_id,
         )
         if ver is None:
             raise NotFoundError(
@@ -4566,10 +4617,12 @@ async def redact_memory_version(
 
         head_check = await conn.fetchrow(
             "SELECT 1 FROM memories WHERE memory_store_id = $1 AND id = $2 "
-            "AND current_version_id = $3 AND deleted_at IS NULL",
+            "AND current_version_id = $3 AND account_id = $4 "
+            "AND deleted_at IS NULL",
             store_id,
             ver["memory_id"],
             version_id,
+            account_id,
         )
         if head_check is not None:
             raise ConflictError(
@@ -4807,13 +4860,14 @@ async def update_session_github_repo_blob(
             """
             UPDATE session_github_repositories
             SET ciphertext = $1, nonce = $2, updated_at = now()
-            WHERE session_id = $3 AND id = $4
+            WHERE session_id = $3 AND id = $4 AND account_id = $5
             RETURNING *
             """,
             blob.ciphertext,
             blob.nonce,
             session_id,
             resource_id,
+            account_id,
         )
     else:
         git_user_name, git_user_email = identity
@@ -4823,7 +4877,7 @@ async def update_session_github_repo_blob(
             SET ciphertext = $1, nonce = $2,
                 git_user_name = $3, git_user_email = $4,
                 updated_at = now()
-            WHERE session_id = $5 AND id = $6
+            WHERE session_id = $5 AND id = $6 AND account_id = $7
             RETURNING *
             """,
             blob.ciphertext,
@@ -4832,6 +4886,7 @@ async def update_session_github_repo_blob(
             git_user_email,
             session_id,
             resource_id,
+            account_id,
         )
     if row is None:
         raise NotFoundError(
