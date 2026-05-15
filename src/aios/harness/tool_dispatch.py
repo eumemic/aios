@@ -63,12 +63,14 @@ def launch_tool_calls(
     pool: asyncpg.Pool[Any],
     session_id: str,
     tool_calls: list[dict[str, Any]],
+    *,
+    account_id: str,
 ) -> None:
     """Launch each tool call as an asyncio task. Returns immediately."""
     _launch_tasks(
         session_id,
         tool_calls,
-        lambda call: _execute_tool_async(pool, session_id, call),
+        lambda call: _execute_tool_async(pool, session_id, call, account_id=account_id),
         prefix="tool",
     )
 
@@ -77,12 +79,13 @@ async def _execute_tool_async(
     pool: asyncpg.Pool[Any],
     session_id: str,
     call: dict[str, Any],
+    *,
+    account_id: str,
 ) -> None:
     """Execute one tool call: parse, invoke, append result, defer wake.
 
     Brackets the lifecycle in a ``tool_execute_*`` span pair (issue #78).
     """
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
     name = function.get("name") or ""
@@ -339,6 +342,7 @@ def launch_mcp_tool_calls(
     tool_calls: list[dict[str, Any]],
     mcp_server_map: dict[str, str],
     *,
+    account_id: str,
     focal_channel: str | None = None,
 ) -> None:
     """Launch MCP tool calls as asyncio tasks. Returns immediately.
@@ -353,7 +357,12 @@ def launch_mcp_tool_calls(
         session_id,
         tool_calls,
         lambda call: _execute_mcp_tool_async(
-            pool, session_id, call, mcp_server_map, focal_channel=focal_channel
+            pool,
+            session_id,
+            call,
+            mcp_server_map,
+            focal_channel=focal_channel,
+            account_id=account_id,
         ),
         prefix="mcp_tool",
     )
@@ -376,6 +385,7 @@ async def _execute_mcp_tool_async(
     call: dict[str, Any],
     mcp_server_map: dict[str, str],
     *,
+    account_id: str,
     focal_channel: str | None = None,
 ) -> None:
     """Execute one MCP tool call: connect, invoke, append result, defer wake.
@@ -387,7 +397,6 @@ async def _execute_mcp_tool_async(
     emission-time — a concurrent ``switch_channel`` in the same
     assistant batch does not race this injection.
     """
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
     name: str = function.get("name") or ""
