@@ -63,12 +63,6 @@ log = get_logger("aios.sandbox.spec")
 # limited-networking sessions can still reach the proxy ports.
 PROXY_HOST_ALIAS = "host.docker.internal"
 
-# Host-side path of the ``mcp`` CLI bind-mounted into every sandbox.
-# ``parents[3]`` yields the repo root in both dev (worktree root) and
-# Docker (``/app``), matching the convention in
-# ``aios.db.migrations._REPO_ROOT``.
-_MCP_CLI_HOST_PATH = Path(__file__).resolve().parents[3] / "bin" / "mcp"
-
 
 @dataclass(frozen=True, slots=True)
 class ProvisioningPlan:
@@ -354,14 +348,13 @@ def _assemble_plan(
     extra_mounts: list[Mount] = [
         Mount(host_path=attachments_path, sandbox_path="/mnt/attachments", read_only=True),
         Mount(host_path=uploads_path, sandbox_path="/mnt/uploads", read_only=True),
-        # The ``mcp`` CLI script lets the agent invoke permitted MCP tools
-        # through the worker-side broker. Bind-mounted (not baked) so a
-        # script update doesn't require rebuilding the sandbox image.
-        Mount(
-            host_path=_MCP_CLI_HOST_PATH,
-            sandbox_path="/usr/local/bin/mcp",
-            read_only=True,
-        ),
+        # NOTE: the ``mcp`` CLI used to be bind-mounted from
+        # ``<repo_root>/bin/mcp`` here. That was incorrect: Docker resolves
+        # bind sources on the daemon's (host's) filesystem, not the calling
+        # container's, so the bind silently degraded to an auto-created
+        # empty directory on every host where the worker container ran.
+        # See issue #392. ``mcp`` now lives in the sandbox image directly
+        # (see ``docker/Dockerfile.sandbox``).
     ]
 
     # Bind-mount each attached memory store. Read-only attaches make the
