@@ -447,12 +447,13 @@ async def update_agent(
     ``skills_json`` is a pre-serialized JSON string (resolved by the
     service layer which snapshots concrete versions).
     """
+    # ``get_agent`` reads ``current`` for the merge below and for the
+    # archived check. The version match is *not* pre-checked here — the
+    # in-transaction UPDATE's ``AND version = $expected_version`` is the
+    # authoritative serialization point; pre-checking would just emit a
+    # different error message for the obvious-stale case while letting
+    # the racy-concurrent case slip past, which was the prior bug.
     current = await get_agent(conn, agent_id, account_id=account_id)
-    if current.version != expected_version:
-        raise ConflictError(
-            f"version mismatch: expected {expected_version}, current is {current.version}",
-            detail={"expected": expected_version, "current": current.version},
-        )
     if current.archived_at is not None:
         raise ConflictError(f"agent {agent_id} is archived", detail={"id": agent_id})
 
@@ -504,6 +505,16 @@ async def update_agent(
     extra_json = json.dumps(new_extra)
 
     async with conn.transaction():
+        # ``AND version = $expected_version`` is the authoritative
+        # optimistic-concurrency check: the pre-transaction guard above
+        # is racy because two writers can both read the same
+        # ``current.version`` and both pass. Putting the version in the
+        # UPDATE ``WHERE`` lets the DB serialize the writers — exactly
+        # one matches and bumps to ``new_version``; the other matches
+        # zero rows and we raise ConflictError. Without this, the
+        # subsequent ``INSERT INTO agent_versions`` collides on
+        # ``agent_versions_pkey`` and leaks ``UniqueViolationError``
+        # as HTTP 500 to the loser instead of a clean 409.
         row = await conn.fetchrow(
             """
             UPDATE agents
@@ -513,7 +524,7 @@ async def update_agent(
                    litellm_extra = $11::jsonb,
                    window_min = $12, window_max = $13,
                    updated_at = now()
-             WHERE id = $1 AND account_id = $14
+             WHERE id = $1 AND account_id = $14 AND version = $15
             RETURNING *
             """,
             agent_id,
@@ -530,8 +541,24 @@ async def update_agent(
             new_wmin,
             new_wmax,
             account_id,
+            expected_version,
         )
-        assert row is not None
+        if row is None:
+            # Either the caller's ``expected_version`` was already stale
+            # when ``get_agent`` ran (sequential stale write) or a
+            # concurrent writer bumped the version between then and the
+            # UPDATE (race). Re-read for an accurate ``current`` —
+            # READ COMMITTED means this statement-level snapshot sees
+            # the concurrent writer's committed bump.
+            fresh = await get_agent(conn, agent_id, account_id=account_id)
+            raise ConflictError(
+                f"version mismatch: expected {expected_version}, current is {fresh.version}",
+                detail={
+                    "expected": expected_version,
+                    "current": fresh.version,
+                    "id": agent_id,
+                },
+            )
         await conn.execute(
             """
             INSERT INTO agent_versions (
