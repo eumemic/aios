@@ -7,12 +7,20 @@ or key mismatch produces a clean error rather than silent corruption. Archived
 rows have their ciphertext and nonce zeroed out so that a future DB dump or
 query cannot leak the secret — read paths filter ``WHERE archived_at IS NULL``
 to avoid attempting to decrypt the scrubbed bytes.
+
+Multi-tenancy (#367): the master ``CryptoBox`` can derive a per-account
+subkey via HKDF-SHA256, returning a new ``CryptoBox`` whose secrets can't
+be decrypted with the master key OR any sibling tenant's derived key.
+This is the building block for per-account encryption — see
+:meth:`CryptoBox.derive_account_subkey`.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -46,7 +54,41 @@ class CryptoBox:
     def __init__(self, master_key: bytes) -> None:
         if len(master_key) != KEY_BYTES:
             raise ValueError(f"master key must be {KEY_BYTES} bytes, got {len(master_key)}")
+        self._key = master_key
         self._box = SecretBox(master_key)
+
+    def derive_account_subkey(self, account_id: str) -> CryptoBox:
+        """Return a new :class:`CryptoBox` keyed to ``account_id`` via HKDF.
+
+        Uses HKDF-SHA256 with the current box's key as IKM, an aios-specific
+        salt, and ``f"aios-account-{account_id}"`` as the info context.
+        Properties:
+
+        * Deterministic — re-deriving for the same account_id returns
+          the same subkey bytes.
+        * Domain-separated — two different account_ids produce two
+          unrelated 32-byte subkeys; an attacker holding one subkey
+          cannot recover the master or any sibling subkey.
+        * One-way — knowing a subkey doesn't reveal the master.
+
+        The returned subkey is itself a :class:`CryptoBox` and supports
+        ``encrypt`` / ``decrypt`` exactly like the master.
+        """
+        if not account_id:
+            raise ValueError("account_id must be non-empty")
+        # Single-extract HKDF-SHA256: the "extract" step normalises an
+        # arbitrary-strength IKM (always 32 bytes for us) into a PRK,
+        # then the "expand" step stretches PRK + info into the output.
+        # Salt is a fixed application-specific constant — operators
+        # rotate by reissuing keys, not by changing salt.
+        salt = b"aios-vault-hkdf-v1"
+        info = f"aios-account-{account_id}".encode()
+        prk = hmac.new(salt, self._key, hashlib.sha256).digest()
+        # Single-block expand: output is one SHA256 block (32 bytes),
+        # which matches SecretBox's KEY_BYTES so we don't need to chain
+        # multiple T(i) outputs.
+        t1 = hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
+        return CryptoBox(t1)
 
     @classmethod
     def from_base64(cls, encoded: str) -> CryptoBox:
