@@ -54,7 +54,7 @@ async def submit_call(
                 account_id=account_id,
             )
             await queries.notify_management_call_dispatch(
-                conn, connector=connector, call_id=call_id, account_id=account_id
+                conn, connector=connector, call_id=call_id
             )
 
         try:

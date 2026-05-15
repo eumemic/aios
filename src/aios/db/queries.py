@@ -5001,14 +5001,15 @@ async def insert_management_call(
     await conn.execute(
         """
         INSERT INTO pending_management_calls
-            (id, connector, method, params, expires_at)
-        VALUES ($1, $2, $3, $4::jsonb, $5)
+            (id, connector, method, params, expires_at, account_id)
+        VALUES ($1, $2, $3, $4::jsonb, $5, $6)
         """,
         call_id,
         connector,
         method,
         json.dumps(params),
         expires_at,
+        account_id,
     )
 
 
@@ -5018,26 +5019,30 @@ async def list_pending_management_calls_for_connector(
     *,
     account_id: str,
 ) -> list[dict[str, Any]]:
-    """Pending, unexpired management calls for ``connector``.
+    """Pending, unexpired management calls for ``connector`` scoped to ``account_id``.
 
     Used by the runtime SSE backfill on connector reconnect.  Output dict
     shape::
 
         {"call_id": "mgmt_...", "method": "register", "params": {...}}
 
-    The partial index ``pending_management_calls_connector_pending_idx``
-    backs this query directly.
+    Filtered by ``account_id`` so a runtime container authenticated for
+    one tenant never sees another tenant's pending calls. The partial
+    index ``pending_management_calls_connector_account_pending_idx``
+    (migration 0049) backs this query directly.
     """
     rows = await conn.fetch(
         """
         SELECT id, method, params
           FROM pending_management_calls
          WHERE connector = $1
+           AND account_id = $2
            AND status = 'pending'
            AND expires_at > now()
          ORDER BY created_at ASC
         """,
         connector,
+        account_id,
     )
     return [
         {
@@ -5120,7 +5125,6 @@ async def mark_management_call_resolved(
 async def notify_management_call_dispatch(
     conn: asyncpg.Connection[Any],
     *,
-    account_id: str,
     connector: str,
     call_id: str,
 ) -> None:
@@ -5129,6 +5133,9 @@ async def notify_management_call_dispatch(
     Payload is just ``call_id`` so subscribers re-fetch full details from
     the row; keeps the NOTIFY well under Postgres' 8000-byte cap and
     means an in-flight payload can't desync from a later UPDATE.
+
+    Carries no tenancy info — subscribers fetch the row via
+    :func:`get_management_call`, which enforces ``WHERE account_id = $N``.
     """
     await conn.execute(
         "SELECT pg_notify($1, $2)",
@@ -5140,13 +5147,13 @@ async def notify_management_call_dispatch(
 async def notify_management_call_result(
     conn: asyncpg.Connection[Any],
     *,
-    account_id: str,
     call_id: str,
 ) -> None:
     """NOTIFY the per-call result channel after resolving the row.
 
     Payload is empty — listeners re-fetch the resolved row via
-    :func:`get_management_call`, mirroring the dispatch-side convention.
+    :func:`get_management_call`, mirroring the dispatch-side convention
+    (which also lets the fetch enforce tenancy).
     """
     await conn.execute(
         "SELECT pg_notify($1, $2)",
