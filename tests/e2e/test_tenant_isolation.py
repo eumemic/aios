@@ -164,6 +164,61 @@ class TestTwoTenantIsolation:
         cross = await http_client.get(f"/v1/memory-stores/{b_id}", headers=_bearer(ka))
         assert cross.status_code == 404
 
+    async def test_session_templates_isolated(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        """Regression for the pre-#426 leak.
+
+        ``list_session_templates`` accepted ``account_id`` as a kwarg but
+        the SQL didn't filter on it; ``GET /v1/session-templates`` as
+        tenant A returned tenant B's rows. The pre-#426 e2e suite didn't
+        catch this because there was no session_templates cross-tenant
+        test. Lock it in.
+        """
+        ka = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-tmpl-a")
+        kb = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-tmpl-b")
+
+        async def _mint_template_for(key: str, suffix: str) -> str:
+            agent = await http_client.post(
+                "/v1/agents",
+                headers=_bearer(key),
+                json={"name": f"tmpl-agent-{suffix}", "model": "openrouter/test"},
+            )
+            assert agent.status_code == 201, agent.text
+            env = await http_client.post(
+                "/v1/environments",
+                headers=_bearer(key),
+                json={"name": f"tmpl-env-{suffix}"},
+            )
+            assert env.status_code == 201, env.text
+            tmpl = await http_client.post(
+                "/v1/session-templates",
+                headers=_bearer(key),
+                json={
+                    "name": f"tmpl-{suffix}",
+                    "agent_id": agent.json()["id"],
+                    "environment_id": env.json()["id"],
+                },
+            )
+            assert tmpl.status_code == 201, tmpl.text
+            return str(tmpl.json()["id"])
+
+        a_id = await _mint_template_for(ka, "a")
+        b_id = await _mint_template_for(kb, "b")
+        assert a_id != b_id
+
+        list_a = await http_client.get("/v1/session-templates", headers=_bearer(ka))
+        list_b = await http_client.get("/v1/session-templates", headers=_bearer(kb))
+        ids_a = {x["id"] for x in list_a.json()["data"]}
+        ids_b = {x["id"] for x in list_b.json()["data"]}
+        # The regression: pre-#426 ids_a would contain b_id.
+        assert a_id in ids_a and b_id not in ids_a
+        assert b_id in ids_b and a_id not in ids_b
+
+        # Cross-tenant direct fetch returns 404.
+        cross = await http_client.get(f"/v1/session-templates/{b_id}", headers=_bearer(ka))
+        assert cross.status_code == 404, cross.text
+
     async def test_keys_isolated(
         self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
     ) -> None:
