@@ -877,15 +877,38 @@ class TestToolCallSanitization:
         msgs = build_messages(events, system_prompt=None).messages
         assert msgs[1]["tool_calls"][0]["function"]["name"] == ""
 
-    def test_missing_id_defaults_empty(self) -> None:
-        """Missing tool_call id defaults to empty string."""
+    def test_missing_id_filtered_out(self) -> None:
+        """A tool_call entry without an ``id`` is unjoinable — dropped, not preserved with id=''."""
         bad_tc = {"type": "function", "function": {"name": "bash", "arguments": "{}"}}
         events = [
             _evt(1, "user", content="go"),
             _evt(2, "assistant", tool_calls=[bad_tc]),
         ]
         msgs = build_messages(events, system_prompt=None).messages
-        assert msgs[1]["tool_calls"][0]["id"] == ""
+        assert "tool_calls" not in msgs[1]
+
+    def test_empty_id_string_filtered(self) -> None:
+        """An explicit empty-string id is also unjoinable and filtered."""
+        bad_tc = {"id": "", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+        events = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[bad_tc]),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        assert "tool_calls" not in msgs[1]
+
+    def test_mid_window_malformed_filtered_among_valid(self) -> None:
+        """Mid-window assistant with mixed valid + malformed tool_calls keeps only the valid entry."""
+        malformed = {"type": "function", "function": {"name": "bash", "arguments": "{}"}}
+        events = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[_tc("call_a", "bash"), malformed]),
+            _evt(3, "tool", tool_call_id="call_a", content="done"),
+            _evt(4, "user", content="next"),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        asst = next(m for m in msgs if m.get("role") == "assistant")
+        assert asst["tool_calls"] == [_tc("call_a", "bash")]
 
     def test_extra_fields_stripped_from_tool_call(self) -> None:
         """Provider-specific fields inside tool_call dicts are excluded."""

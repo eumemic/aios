@@ -359,9 +359,17 @@ def _sanitize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any
     arguments, missing fields, extra provider keys) that break strict
     downstream providers.  Returns a cleaned copy with only spec fields
     and valid JSON arguments.
+
+    Entries without a usable ``id`` are dropped: an id-less tool_call
+    cannot be joined to any tool_result, so leaving it in the assistant
+    message produces an assistant→user transition with no paired
+    ``tool``-role message — invalid per the chat-completions schema.
     """
     sanitized = []
     for tc in tool_calls:
+        tcid = tc.get("id")
+        if not tcid:
+            continue
         fn = tc.get("function") or {}
         raw_args = fn.get("arguments", "{}")
         if isinstance(raw_args, dict):
@@ -375,7 +383,7 @@ def _sanitize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any
             raw_args = "{}"
         sanitized.append(
             {
-                "id": tc.get("id") or "",
+                "id": tcid,
                 "type": "function",
                 "function": {"name": fn.get("name") or "", "arguments": raw_args},
             }
@@ -429,8 +437,14 @@ def _strip_to_spec(
     if role == "assistant" and target_supports_thinking:
         allowed = allowed | _THINKING_FIELDS
     out = {k: v for k, v in msg.items() if k in allowed}
-    if out.get("tool_calls"):
-        out["tool_calls"] = _sanitize_tool_calls(out["tool_calls"])
+    if raw_tcs := out.get("tool_calls"):
+        sanitized = _sanitize_tool_calls(raw_tcs)
+        if sanitized:
+            out["tool_calls"] = sanitized
+        else:
+            # Strict providers reject an empty tool_calls array; drop
+            # the key so the assistant is a plain text-only turn.
+            del out["tool_calls"]
     return out
 
 
