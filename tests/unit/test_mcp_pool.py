@@ -187,6 +187,63 @@ class TestMcpSessionPool:
         await pool.close_all()
         assert len(pool._entries) == 0
 
+    async def test_contexts_exit_in_same_task_they_entered(self) -> None:
+        """Cross-task close — regression for #425.
+
+        Pre-fix, the pool held an ``AsyncExitStack`` on whatever task
+        first opened the entry. ``close_all`` called ``stack.aclose()``
+        from a different task and anyio's ``streamable_http_client``
+        raised ``RuntimeError: Attempted to exit cancel scope in a
+        different task than it was entered in``. The exception was
+        swallowed by ``close_all``'s try/except but logged a warning.
+
+        ``close_all`` still swallows post-fix (defensively, for unrelated
+        teardown failures), so this test instead checks the more
+        specific invariant: the transport's ``__aenter__`` and
+        ``__aexit__`` run in the SAME task. With the owner-task model
+        that's guaranteed; with the legacy stack-on-_Entry model it
+        wasn't.
+        """
+        entered_in: dict[str, asyncio.Task[Any] | None] = {"open": None, "close": None}
+
+        def _task_recording_transport() -> MagicMock:
+            async def _enter(*_args: Any, **_kwargs: Any) -> Any:
+                entered_in["open"] = asyncio.current_task()
+                return (MagicMock(), MagicMock(), MagicMock())
+
+            async def _exit(*_args: Any, **_kwargs: Any) -> bool:
+                entered_in["close"] = asyncio.current_task()
+                return False
+
+            t = MagicMock()
+            t.__aenter__ = AsyncMock(side_effect=_enter)
+            t.__aexit__ = AsyncMock(side_effect=_exit)
+            return t
+
+        session = _make_mock_session()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_task_recording_transport()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx(session)),
+        ):
+            pool = McpSessionPool()
+
+            async def opener() -> None:
+                await pool.get_or_connect("https://m.example/", {"Authorization": "tok"})
+
+            await asyncio.create_task(opener())
+
+            async def closer() -> None:
+                await pool.close_all()
+
+            await asyncio.create_task(closer())
+
+        assert entered_in["open"] is not None
+        assert entered_in["close"] is not None
+        # The invariant: contexts exit in the same task that entered them.
+        # Pre-fix this would have failed because __aexit__ ran in the
+        # closer task while __aenter__ ran in the opener task.
+        assert entered_in["open"] is entered_in["close"]
+
 
 # ── Pool integration via discover_mcp_tools / call_mcp_tool ────────────────
 
