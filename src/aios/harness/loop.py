@@ -811,10 +811,10 @@ async def discover_session_mcp_tools(
     crypto_box = runtime.require_crypto_box()
 
     async def _discover_one(name: str, url: str) -> tuple[list[dict[str, Any]], str | None]:
-        headers = await resolve_auth_for_url(
+        vault_id, headers = await resolve_auth_for_url(
             pool, crypto_box, session_id, url, account_id=account_id
         )
-        return await discover_mcp_tools(url, name, headers)
+        return await discover_mcp_tools(url, vault_id, headers, name)
 
     results = await asyncio.gather(*[_discover_one(n, u) for n, u in servers])
     tools: list[dict[str, Any]] = [

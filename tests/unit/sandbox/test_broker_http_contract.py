@@ -68,8 +68,8 @@ def _mock_crypto_and_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("aios.harness.runtime.require_crypto_box", lambda: object())
     monkeypatch.setattr("aios.harness.runtime.require_pool", lambda: object())
 
-    async def _stub_auth(*_args: Any, **_kwargs: Any) -> dict[str, str]:
-        return {}
+    async def _stub_auth(*_args: Any, **_kwargs: Any) -> tuple[str | None, dict[str, str]]:
+        return None, {}
 
     monkeypatch.setattr("aios.sandbox.mcp_proxy.resolve_auth_for_url", _stub_auth)
 
@@ -119,7 +119,7 @@ class TestMcpCli:
         monkeypatch.setattr(broker, "_load_agent", _load)
 
         async def _discover(
-            _url: str, name: str, _h: dict[str, str]
+            _url: str, _vault_id: str | None, _h: dict[str, str], name: str
         ) -> tuple[list[dict[str, Any]], str | None]:
             return [
                 {
@@ -174,7 +174,7 @@ class TestMcpCli:
         captured: dict[str, Any] = {}
 
         async def _call(
-            _url: str, _h: dict[str, str], _tool: str, args: dict[str, Any]
+            _url: str, _vault_id: str | None, _h: dict[str, str], _tool: str, args: dict[str, Any]
         ) -> dict[str, Any]:
             captured["args"] = args
             return {"content": "ok"}

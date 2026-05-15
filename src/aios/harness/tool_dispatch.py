@@ -463,10 +463,10 @@ async def _execute_mcp_tool_async(
             from aios.mcp.client import call_mcp_tool, resolve_auth_for_url
 
             crypto_box = runtime.require_crypto_box()
-            headers = await resolve_auth_for_url(
+            vault_id, headers = await resolve_auth_for_url(
                 pool, crypto_box, session_id, url, account_id=account_id
             )
-            result = await call_mcp_tool(url, headers, tool_name, arguments, meta=meta)
+            result = await call_mcp_tool(url, vault_id, headers, tool_name, arguments, meta=meta)
 
         content_str = json.dumps(result, ensure_ascii=False)
         mcp_is_error = "error" in result

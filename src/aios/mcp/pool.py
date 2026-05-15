@@ -1,6 +1,7 @@
 """Worker-scoped MCP session pool.
 
-Holds a persistent ``ClientSession`` per ``(url, headers_hash)`` key so
+Holds a persistent ``ClientSession`` per ``(url, vault_id)`` key (stable
+across OAuth token rotation — see :func:`get_or_connect` and #459) so
 tool discovery and invocation can reuse an already-initialized MCP
 connection instead of opening a fresh one on every call.
 
@@ -30,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import time
 from contextlib import AsyncExitStack
 from typing import Any
@@ -49,17 +49,7 @@ log = get_logger("aios.mcp.pool")
 # can't keep the worker on a dead socket indefinitely.
 _MCP_HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
 
-type _PoolKey = tuple[str, str]
-
-
-def _headers_hash(headers: dict[str, str]) -> str:
-    """Stable SHA-256 hash of a headers dict, sorted for determinism.
-
-    Using the hash (rather than the raw key material) as part of the pool
-    key avoids keeping bearer tokens in in-memory dict keys.
-    """
-    blob = "&".join(f"{k}={v}" for k, v in sorted(headers.items()))
-    return hashlib.sha256(blob.encode()).hexdigest()
+type _PoolKey = tuple[str, str | None]
 
 
 class _Entry:
@@ -85,12 +75,14 @@ class _Entry:
         self._shutdown = shutdown
         self._owner_task = owner_task
         # monotonic() of the last get_or_connect that returned this
-        # entry. The idle reaper keys off this, NOT owner-task liveness:
-        # the owner task is *always* alive (parked on `await
-        # shutdown.wait()` for the entry's whole life), so liveness is
-        # a useless staleness signal — an entry whose token was
-        # superseded by an OAuth refresh is never hit again yet its
-        # task runs forever.
+        # entry. Reaper keys off this, NOT owner-task liveness: the
+        # task parks on `await shutdown.wait()` for the entry's whole
+        # life, so liveness is a useless staleness signal.
+        #
+        # Post-#459 the pool keys on (url, vault_id), stable across
+        # OAuth refresh. The reaper's remaining job is the cold-entry
+        # vector (a vault whose tenant never returns) — defense-in-depth
+        # signed off in #459's planning round, not silent accretion.
         self.last_used = last_used
 
     async def close(self) -> None:
@@ -174,15 +166,24 @@ class McpSessionPool:
         return _Entry(result["session"], result["init"], shutdown, task, time.monotonic())
 
     async def get_or_connect(
-        self, url: str, headers: dict[str, str]
+        self, url: str, vault_id: str | None, headers: dict[str, str]
     ) -> tuple[ClientSession, InitializeResult]:
         """Return a cached session, opening a fresh one if none exists.
 
-        Double-checked locking: the fast unsynchronised check avoids lock
-        contention on the common (already-connected) path; the slow path
-        acquires the per-key lock and re-checks before opening.
+        Keyed on ``(url, vault_id)`` — stable across OAuth token rotation
+        because ``vault_id`` is the row id of the ``vault_credentials``
+        entry that ``refresh_credential`` updates in place (see #459).
+        ``vault_id`` is ``None`` for the no-credential case (an
+        unauthenticated MCP server); all such callers on the same URL
+        share one entry, which is safe because no auth identity is
+        being keyed on.
+
+        Double-checked locking: the fast unsynchronised check avoids
+        lock contention on the common (already-connected) path; the
+        slow path acquires the per-key lock and re-checks before
+        opening.
         """
-        key: _PoolKey = (url, _headers_hash(headers))
+        key: _PoolKey = (url, vault_id)
 
         entry = self._entries.get(key)
         if entry is not None:
@@ -202,7 +203,7 @@ class McpSessionPool:
 
         return entry.session, entry.init_result
 
-    def evict(self, url: str, headers: dict[str, str]) -> None:
+    def evict(self, url: str, vault_id: str | None) -> None:
         """Drop a cache entry without closing it.
 
         Called when a cached session has been found to be broken. Closing
@@ -210,7 +211,7 @@ class McpSessionPool:
         simply drop the reference and let GC handle it; the next
         :meth:`get_or_connect` for this key will open a fresh session.
         """
-        key: _PoolKey = (url, _headers_hash(headers))
+        key: _PoolKey = (url, vault_id)
         self._entries.pop(key, None)
         log.info("mcp_pool.evicted", url=url)
 

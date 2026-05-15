@@ -278,10 +278,12 @@ class McpBroker:
         pool = runtime.require_pool()
         crypto_box = runtime.require_crypto_box()
         account_id = await sessions_service.load_session_account_id(pool, session_id)
-        headers = await resolve_auth_for_url(
+        vault_id, headers = await resolve_auth_for_url(
             pool, crypto_box, session_id, server.url, account_id=account_id
         )
-        tool_dicts, _instructions = await discover_mcp_tools(server.url, server_name, headers)
+        tool_dicts, _instructions = await discover_mcp_tools(
+            server.url, vault_id, headers, server_name
+        )
 
         out: list[dict[str, Any]] = []
         for td in tool_dicts:
@@ -309,10 +311,10 @@ class McpBroker:
         pool = runtime.require_pool()
         crypto_box = runtime.require_crypto_box()
         account_id = await sessions_service.load_session_account_id(pool, session_id)
-        headers = await resolve_auth_for_url(
+        vault_id, headers = await resolve_auth_for_url(
             pool, crypto_box, session_id, server.url, account_id=account_id
         )
-        tool_dicts, _ = await discover_mcp_tools(server.url, server.name, headers)
+        tool_dicts, _ = await discover_mcp_tools(server.url, vault_id, headers, server.name)
         qualified = f"mcp__{server.name}__{tool_name}"
         for td in tool_dicts:
             fn = td.get("function", {})
@@ -346,7 +348,7 @@ class McpBroker:
         pool = runtime.require_pool()
         crypto_box = runtime.require_crypto_box()
         account_id = await sessions_service.load_session_account_id(pool, session_id)
-        headers = await resolve_auth_for_url(
+        vault_id, headers = await resolve_auth_for_url(
             pool, crypto_box, session_id, server.url, account_id=account_id
         )
         log.info(
@@ -355,7 +357,7 @@ class McpBroker:
             server=server.name,
             tool=tool_name,
         )
-        envelope = await call_mcp_tool(server.url, headers, tool_name, arguments)
+        envelope = await call_mcp_tool(server.url, vault_id, headers, tool_name, arguments)
         return JSONResponse(envelope)
 
 

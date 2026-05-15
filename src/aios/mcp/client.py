@@ -85,9 +85,17 @@ async def resolve_auth_for_url(
     mcp_server_url: str,
     *,
     account_id: str,
-) -> dict[str, str]:
-    """Resolve MCP auth headers for ``mcp_server_url`` via the session's
-    bound vaults.
+) -> tuple[str | None, dict[str, str]]:
+    """Resolve MCP auth identity + headers for ``mcp_server_url`` via
+    the session's bound vaults.
+
+    Returns ``(vault_id, headers)`` on the success path, or
+    ``(None, {})`` whenever there are no auth headers to send (no
+    credential bound, or a credential whose token is empty / a refresh
+    re-read missed). ``vault_id`` is the row id of the
+    ``vault_credentials`` entry — stable across OAuth token rotation
+    (``refresh_credential`` updates the row in place), so callers feed
+    it to the pool as a stable cache key (see #459).
 
     For ``mcp_oauth`` credentials whose ``expires_at`` falls within the
     refresh skew window, the access token is transparently refreshed
@@ -101,7 +109,7 @@ async def resolve_auth_for_url(
             conn, session_id, mcp_server_url, account_id=account_id
         )
         if session_result is None:
-            return {}
+            return None, {}
         blob, auth_type, vault_id = session_result
         subkey = crypto_box.derive_account_subkey(account_id)
 
@@ -119,7 +127,7 @@ async def resolve_auth_for_url(
                     conn, vault_id=vault_id, mcp_server_url=mcp_server_url, account_id=account_id
                 )
                 if refreshed is None:
-                    return {}
+                    return None, {}
                 blob = refreshed[0]
                 payload = json.loads(subkey.decrypt(blob))
             token = str(payload.get("access_token", ""))
@@ -128,14 +136,15 @@ async def resolve_auth_for_url(
             token = _token_from_payload(payload, auth_type)
 
     if not token:
-        return {}
-    return {"Authorization": f"Bearer {token}"}
+        return None, {}
+    return vault_id, {"Authorization": f"Bearer {token}"}
 
 
 async def discover_mcp_tools(
     url: str,
-    server_name: str,
+    vault_id: str | None,
     headers: dict[str, str],
+    server_name: str,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Connect to an MCP server and discover available tools.
 
@@ -159,11 +168,11 @@ async def discover_mcp_tools(
         if _pool is not None:
             # Pool path: reuse cached session; on failure evict + retry once.
             try:
-                session, init_result = await _pool.get_or_connect(url, headers)
+                session, init_result = await _pool.get_or_connect(url, vault_id, headers)
                 result = await session.list_tools()
             except Exception:
-                _pool.evict(url, headers)
-                session, init_result = await _pool.get_or_connect(url, headers)
+                _pool.evict(url, vault_id)
+                session, init_result = await _pool.get_or_connect(url, vault_id, headers)
                 result = await session.list_tools()
         else:
             # Fallback: fresh connection per call (API process, tests).
@@ -217,6 +226,7 @@ def shape_call_result(result: Any) -> dict[str, Any]:
 
 async def call_mcp_tool(
     url: str,
+    vault_id: str | None,
     headers: dict[str, str],
     tool_name: str,
     arguments: dict[str, Any],
@@ -239,14 +249,14 @@ async def call_mcp_tool(
 
         if _pool is not None:
             try:
-                session, _ = await _pool.get_or_connect(url, headers)
+                session, _ = await _pool.get_or_connect(url, vault_id, headers)
                 result = await asyncio.wait_for(
                     session.call_tool(tool_name, arguments, meta=meta),
                     timeout=_TOOL_CALL_TIMEOUT_S,
                 )
             except Exception:
-                _pool.evict(url, headers)
-                session, _ = await _pool.get_or_connect(url, headers)
+                _pool.evict(url, vault_id)
+                session, _ = await _pool.get_or_connect(url, vault_id, headers)
                 result = await asyncio.wait_for(
                     session.call_tool(tool_name, arguments, meta=meta),
                     timeout=_TOOL_CALL_TIMEOUT_S,

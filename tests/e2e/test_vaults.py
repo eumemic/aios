@@ -647,7 +647,7 @@ class TestOAuthRefreshE2E:
             post_calls,
             body={"access_token": "fresh-at", "expires_in": 3600},
         ):
-            headers = await resolve_auth_for_url(
+            _, headers = await resolve_auth_for_url(
                 pool, crypto_box, session_id, url, account_id="acc_test_stub"
             )
 
@@ -709,7 +709,7 @@ class TestOAuthRefreshE2E:
                 )
             )
 
-        assert all(r == {"Authorization": "Bearer fresh-at"} for r in results)
+        assert all(r[1] == {"Authorization": "Bearer fresh-at"} for r in results)
         assert len(post_calls) == 1, (
             f"expected 1 POST but got {len(post_calls)} — row lock or double-check is broken"
         )
@@ -809,7 +809,7 @@ class TestOAuthRefreshE2E:
                 resolve_auth_for_url(pool, crypto_box, sess2, url2, account_id="acc_test_stub"),
             )
 
-        assert all(r == {"Authorization": "Bearer fresh-at"} for r in results)
+        assert all(r[1] == {"Authorization": "Bearer fresh-at"} for r in results)
         # Two distinct credentials → two POSTs (one each), not one shared.
         assert len(post_calls) == 2, (
             f"expected 2 POSTs (one per credential) but got {len(post_calls)} "
