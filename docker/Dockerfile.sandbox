@@ -15,10 +15,14 @@
 # env var — no manual on-host build required.
 #
 # Local dev:
-#   docker build -t aios-sandbox:latest -f docker/Dockerfile.sandbox docker/
+#   docker build -t aios-sandbox:latest -f docker/Dockerfile.sandbox .
 # or simply:
 #   uv run python -m aios build-image
 # then point ``AIOS_DOCKER_IMAGE`` at the local tag.
+#
+# Build context is the repo root (NOT ``docker/``) because the image
+# COPYs ``bin/mcp`` from the repo root. See issue #392 for the prior
+# bind-mount approach and why it was replaced.
 #
 # The image is labelled `aios.managed=true` at runtime (not build time) via
 # `docker run --label`, so the worker's orphan reaper can find containers
@@ -48,6 +52,15 @@ RUN apt-get update \
         npm \
         ripgrep \
  && rm -rf /var/lib/apt/lists/*
+
+# The ``mcp`` CLI lets agents invoke permitted MCP server tools through
+# the worker-side broker (see ``aios/sandbox/spec.py`` for ``MCP_BROKER_URL``
+# / ``MCP_BROKER_SECRET`` injection). Baked into the image rather than
+# bind-mounted from the worker container — see issue #392 for why the
+# prior bind-mount approach was incorrect (Docker resolves bind sources
+# on the daemon's filesystem, not the calling container's).
+COPY bin/mcp /usr/local/bin/mcp
+RUN chmod 0755 /usr/local/bin/mcp
 
 # Workspace directory. The host mounts a per-session directory here at
 # container start via `-v <workspace_root>/<session_id>:/workspace`. The

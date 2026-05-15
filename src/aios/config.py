@@ -79,7 +79,7 @@ class Settings(BaseSettings):
         description="Container image used for all v1 sessions. Published from "
         "`docker/Dockerfile.sandbox` to GHCR by the build-sandbox workflow. "
         "Override to a local tag for development "
-        "(`docker build -t aios-sandbox:latest -f docker/Dockerfile.sandbox docker/`).",
+        "(`docker build -t aios-sandbox:latest -f docker/Dockerfile.sandbox .`).",
     )
     workspace_root: Path = Field(
         default=Path("/var/lib/aios/workspaces"),

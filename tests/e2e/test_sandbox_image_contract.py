@@ -92,6 +92,7 @@ def _docker_run(
         "git",
         "iptables",  # required for limited-networking mode
         "jq",  # JSON-from-bash composition, esp. piping `mcp <server> <tool>`
+        "mcp",  # sandbox-native MCP CLI bridge (baked from repo bin/mcp; #378, fixed #392)
         "node",  # so agents can run npm packages without first apt-installing the runtime
         "npm",
         "tail",  # the image CMD is `tail -f /dev/null`
