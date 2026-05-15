@@ -3155,8 +3155,9 @@ async def get_connection(
     conn: asyncpg.Connection[Any], connection_id: str, *, account_id: str
 ) -> Connection:
     row = await conn.fetchrow(
-        f"SELECT {_CONNECTION_COLUMNS} FROM {_CONNECTION_FROM} WHERE c.id = $1",
+        f"SELECT {_CONNECTION_COLUMNS} FROM {_CONNECTION_FROM} WHERE c.id = $1 AND c.account_id = $2",
         connection_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -3191,7 +3192,7 @@ async def set_connection_secrets(
                SET secrets_ciphertext = $2,
                    secrets_nonce      = $3,
                    updated_at         = now()
-             WHERE id = $1 AND archived_at IS NULL
+             WHERE id = $1 AND archived_at IS NULL AND account_id = $4
             RETURNING *
         )
         {_CONNECTION_UPDATE_CTE_TAIL}
@@ -3199,6 +3200,7 @@ async def set_connection_secrets(
         connection_id,
         ciphertext,
         nonce,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -3225,9 +3227,10 @@ async def get_connection_secret_blob(
         """
         SELECT secrets_ciphertext, secrets_nonce
           FROM connections
-         WHERE id = $1 AND archived_at IS NULL
+         WHERE id = $1 AND archived_at IS NULL AND account_id = $2
         """,
         connection_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -3289,9 +3292,11 @@ async def get_connection_for_account(
         SELECT {_CONNECTION_COLUMNS}
           FROM {_CONNECTION_FROM}
          WHERE c.connector = $1 AND c.account = $2 AND c.archived_at IS NULL
+           AND c.account_id = $3
         """,
         connector,
         account,
+        account_id,
     )
     if row is None:
         return None
@@ -3317,8 +3322,8 @@ async def list_connections(
     ``session_template_id`` instead).  ``mode`` filters on the active
     binding's mode or its absence (detached).
     """
-    clauses: list[str] = ["c.archived_at IS NULL"]
-    args: list[Any] = []
+    args: list[Any] = [account_id]
+    clauses: list[str] = ["c.archived_at IS NULL", "c.account_id = $1"]
     if connector is not None:
         args.append(connector)
         clauses.append(f"c.connector = ${len(args)}")
