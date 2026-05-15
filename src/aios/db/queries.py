@@ -2581,11 +2581,14 @@ async def resolve_mcp_credential(
          WHERE sv.session_id = $1
            AND vc.mcp_server_url = $2
            AND vc.archived_at IS NULL
+           AND sv.account_id = $3
+           AND vc.account_id = $3
          ORDER BY sv.rank
          LIMIT 1
         """,
         session_id,
         mcp_server_url,
+        account_id,
     )
     if row is None:
         return None

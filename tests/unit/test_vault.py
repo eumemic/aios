@@ -901,3 +901,44 @@ class TestServiceWiringIsAccountScoped:
                 body=VaultCredentialUpdate(display_name="renamed"),
                 account_id="acc_b",
             )
+
+    @pytest.mark.asyncio
+    async def test_same_account_decrypt_succeeds(self, crypto_box: CryptoBox) -> None:
+        """Positive case — completes the regression net.
+
+        The cross-account test above asserts a *failure* path, which a
+        hypothetical revert to ``crypto_box.decrypt_dict`` would *also*
+        satisfy (the master key can't decrypt a subkey blob either).
+        This test exercises the success path: a blob written under
+        account A's subkey must decrypt cleanly when the service is
+        called with the same account_id. If the wiring is reverted, the
+        decrypt happens with the master key against subkey-encrypted
+        bytes and this test fails.
+        """
+        blob_for_a = crypto_box.derive_account_subkey("acc_a").encrypt(
+            json.dumps({"access_token": "secret-of-a"})
+        )
+        conn = MagicMock()
+        pool = fake_pool_yielding_conn(conn)
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "get_vault_credential_with_blob",
+                AsyncMock(return_value=(_existing_credential(), blob_for_a)),
+            ),
+            patch.object(
+                vaults_service.queries,
+                "update_vault_credential",
+                AsyncMock(return_value=_existing_credential()),
+            ),
+        ):
+            # Same account_id as the blob was encrypted under — must succeed.
+            await vaults_service.update_vault_credential(
+                pool,
+                crypto_box,
+                vault_id="vlt_1",
+                credential_id="vc_1",
+                body=VaultCredentialUpdate(display_name="renamed"),
+                account_id="acc_a",
+            )
