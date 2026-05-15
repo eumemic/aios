@@ -3765,7 +3765,12 @@ async def list_recent_chat_ids(
     correctly.  We filter on user role to skip assistant / tool rows
     that share the channel.
     """
-    prefix = f"{connector}/{account}/"
+    # Escape LIKE metacharacters in operator-supplied ``connector`` and
+    # ``account``: ``_`` and ``%`` would otherwise act as wildcards
+    # against the stored channel, e.g. an operator looking up account
+    # ``bot_a`` would see chats from ``botXa`` too. Mirrors the
+    # ``_escape_like`` usage at the memory-prefix query below.
+    prefix = f"{_escape_like(connector)}/{_escape_like(account)}/"
     rows = await conn.fetch(
         """
         SELECT
