@@ -285,44 +285,56 @@ def _apply_attachments(
     image_parts: list[dict[str, Any]] = []
 
     for record in attachments:
+        if not isinstance(record, dict):
+            # ``metadata.attachments`` is ``list[Any]`` at the wire boundary
+            # (``SessionUserMessage.metadata: dict[str, Any]`` doesn't drill
+            # into the value, and connector inbound payloads can be
+            # malformed). A non-dict record here would crash
+            # ``record.get(...)`` and brick the session permanently, since
+            # the renderer is called on every wake.
+            log.warning(
+                "context.attachment_record_not_dict",
+                session_id=session_id,
+                record_type=type(record).__name__,
+            )
+            continue
         host_path = _resolve_attachment_host_path(record, session_id)
         size = record.get("size")
         content_type = record.get("content_type")
-        inline = (
-            host_path is not None
-            and model is not None
-            and isinstance(content_type, str)
-            and isinstance(size, int)
-            and can_inline_image(model=model, content_type=content_type, size_bytes=size)
-        )
-        if inline:
-            # v1 deliberately re-reads + re-base64-encodes per render: the
-            # staged bytes are typically immutable (`/mnt/attachments/` is
-            # read-only) so an LRU cache on (host_path, mtime, size) would
-            # be a clean follow-up if profiling shows pressure.  See
-            # PR #216 §14 for the discussion of cache vs. encode-at-staging
-            # alternatives we deferred for v1.
-            try:
-                payload = host_path.read_bytes()
-            except OSError as err:
-                # The staged file disappeared (manual cleanup, FS corruption,
-                # GC race). Fall back to a text marker rather than raising
-                # mid-render — losing one image shouldn't fail the whole step.
-                log.warning(
-                    "context.attachment_read_failed",
-                    path=str(host_path),
-                    error=str(err),
-                )
-                marker_lines.append(text_marker(record))
-                continue
-            image_parts.append(
-                make_image_url_part(
-                    content_type=content_type,
-                    data_b64=base64.b64encode(payload).decode("ascii"),
-                )
-            )
-        else:
+        if (
+            host_path is None
+            or model is None
+            or not isinstance(content_type, str)
+            or not isinstance(size, int)
+            or not can_inline_image(model=model, content_type=content_type, size_bytes=size)
+        ):
             marker_lines.append(text_marker(record))
+            continue
+        # v1 deliberately re-reads + re-base64-encodes per render: the
+        # staged bytes are typically immutable (`/mnt/attachments/` is
+        # read-only) so an LRU cache on (host_path, mtime, size) would
+        # be a clean follow-up if profiling shows pressure.  See
+        # PR #216 §14 for the discussion of cache vs. encode-at-staging
+        # alternatives we deferred for v1.
+        try:
+            payload = host_path.read_bytes()
+        except OSError as err:
+            # The staged file disappeared (manual cleanup, FS corruption,
+            # GC race). Fall back to a text marker rather than raising
+            # mid-render — losing one image shouldn't fail the whole step.
+            log.warning(
+                "context.attachment_read_failed",
+                path=str(host_path),
+                error=str(err),
+            )
+            marker_lines.append(text_marker(record))
+            continue
+        image_parts.append(
+            make_image_url_part(
+                content_type=content_type,
+                data_b64=base64.b64encode(payload).decode("ascii"),
+            )
+        )
 
     text = leading_text
     if marker_lines:

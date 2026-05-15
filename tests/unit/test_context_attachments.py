@@ -99,6 +99,66 @@ class TestVisionAwareRendering:
             },
         }
 
+    def test_non_dict_attachment_record_is_skipped(self, temp_workspace_root: Path) -> None:
+        """A non-dict element in ``metadata.attachments`` must not crash the renderer.
+
+        ``SessionUserMessage.metadata: dict[str, Any]`` accepts any shape;
+        Pydantic doesn't drill into the value. A connector that mis-serializes
+        attachments — ``["filename.jpg"]`` instead of ``[{...}]`` — or a
+        pre-existing event row with corrupt metadata, used to crash
+        ``_apply_attachments`` at ``record.get(...)`` with
+        ``AttributeError: 'str' object has no attribute 'get'``. Because
+        the renderer is called on every wake, the session became
+        permanently un-renderable until manual intervention.
+        """
+        # Deliberately heterogeneous list: stray strings, None, and ints
+        # are exactly the shapes a mis-serializing connector could send.
+        malformed: list[Any] = ["malformed-string", None, 42]
+        event = _user_event(content="hi", attachments=malformed)
+        # Today: raises AttributeError mid-loop, bricking the session.
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",
+            "echo/acct/chat-1",
+            model="model/vision",
+            session_id="sess-1",
+        )
+        # No crash; malformed records produce no image parts and no marker.
+        assert msg["role"] == "user"
+        assert isinstance(msg["content"], str)
+        assert "hi" in msg["content"]
+
+    def test_mixed_valid_and_malformed_attachments(self, temp_workspace_root: Path) -> None:
+        """A valid record next to malformed ones still renders correctly —
+        the malformed entries are skipped, the valid one inlines as usual."""
+        sandbox_path = _stage_image(
+            temp_workspace_root, "sess-1", "echo", "evt-1-photo.jpg", b"jpegbytes"
+        )
+        mixed: list[Any] = [
+            "stray-string",
+            {
+                "filename": "photo.jpg",
+                "content_type": "image/jpeg",
+                "size": len(b"jpegbytes"),
+                "in_sandbox_path": sandbox_path,
+            },
+            None,
+        ]
+        event = _user_event(content="hello", attachments=mixed)
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",
+            "echo/acct/chat-1",
+            model="model/vision",
+            session_id="sess-1",
+        )
+        content = msg["content"]
+        assert isinstance(content, list)
+        # The valid image was inlined; the malformed records produced nothing.
+        image_parts = [p for p in content if p.get("type") == "image_url"]
+        assert len(image_parts) == 1
+        assert image_parts[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
     def test_oversize_image_falls_back_to_marker(self, temp_workspace_root: Path) -> None:
         sandbox_path = _stage_image(
             temp_workspace_root, "sess-1", "echo", "evt-1-big.jpg", b"\0" * (3 * 1024 * 1024)
