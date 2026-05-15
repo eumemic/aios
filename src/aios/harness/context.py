@@ -403,18 +403,27 @@ def _sanitize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any
 
 def _correct_image_data_url_mimes(messages: list[dict[str, Any]]) -> None:
     """Rewrite mismatched mime declarations on ``data:<mime>;base64,...``
-    image URLs already in the assembled message list.  Mutates in place.
+    image URLs already in the assembled message list.
 
     The renderer cannot prevent persisted events from carrying a wrong
     mime — tool_result content arrives pre-formed and is appended
     verbatim, so historical events from before centralised sniffing
     will replay forever unless we re-check them every build.
+
+    Mutates the message list's content entries by *replacing* the part
+    dict (and the ``image_url`` sub-dict) with fresh copies — never
+    mutates the original dicts in place. ``build_messages`` appends
+    ``event.data`` to ``messages`` by reference (``context.py:560`` etc.)
+    before this function runs, so an in-place mutation would corrupt the
+    source-of-truth ``Event.data`` and violate the "pure function of the
+    event log" contract documented at the top of this module.
     """
-    for msg in messages:
+    for msg_idx, msg in enumerate(messages):
         content = msg.get("content")
         if not isinstance(content, list):
             continue
-        for part in content:
+        new_content: list[Any] | None = None
+        for i, part in enumerate(content):
             if not isinstance(part, dict) or part.get("type") != "image_url":
                 continue
             image_url = part.get("image_url")
@@ -429,7 +438,17 @@ def _correct_image_data_url_mimes(messages: list[dict[str, Any]]) -> None:
             declared = head.removeprefix("data:").split(";", 1)[0]
             corrected = correct_image_mime_b64(declared, data_b64)
             if corrected != declared:
-                image_url["url"] = f"data:{corrected};base64,{data_b64}"
+                if new_content is None:
+                    new_content = list(content)
+                new_content[i] = {
+                    **part,
+                    "image_url": {
+                        **image_url,
+                        "url": f"data:{corrected};base64,{data_b64}",
+                    },
+                }
+        if new_content is not None:
+            messages[msg_idx] = {**msg, "content": new_content}
 
 
 def _strip_to_spec(

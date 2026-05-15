@@ -1468,3 +1468,66 @@ class TestSeparateAdjacentUserMessagesPipeline:
 
         assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
         assert not any(m == {"role": "assistant", "content": ""} for m in msgs)
+
+
+class TestEventDataImmutability:
+    """``build_messages`` is documented (``context.py:9-12``) as a pure
+    function of the event log. Callers that hold an ``Event`` reference
+    must see its ``data`` unchanged after the build runs.
+
+    Pre-fix, ``_correct_image_data_url_mimes`` mutated ``image_url["url"]``
+    in place on dicts that shared identity with ``event.data["content"]``
+    (because ``build_messages`` appended ``e.data`` to its ``messages``
+    list directly, before the ``_strip_to_spec`` copy boundary). So a
+    tool-role event with a mis-declared image MIME got its source-of-truth
+    rewritten on every render.
+    """
+
+    def test_build_messages_does_not_mutate_tool_event_data(self) -> None:
+        import base64
+        import copy
+
+        # JPEG magic bytes (\xff\xd8\xff\xe0) declared as image/png — the
+        # historical-event corruption pattern that motivated
+        # ``_correct_image_data_url_mimes`` in the first place.
+        jpeg_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+        bad_url = f"data:image/png;base64,{base64.b64encode(jpeg_bytes).decode()}"
+
+        events = [
+            _evt(1, "user", content="show"),
+            _evt(2, "assistant", tool_calls=[_tc("a", name="read")]),
+            Event(
+                id="evt_3",
+                session_id="sess_01TEST",
+                seq=3,
+                kind="message",
+                data={
+                    "role": "tool",
+                    "tool_call_id": "a",
+                    "name": "read",
+                    "content": [{"type": "image_url", "image_url": {"url": bad_url}}],
+                },
+                created_at=datetime.now(tz=UTC),
+                orig_channel=None,
+                focal_channel_at_arrival=None,
+            ),
+        ]
+        snapshot = copy.deepcopy([e.data for e in events])
+
+        ctx = build_messages(events, system_prompt=None)
+
+        # The build's output is allowed to contain the corrected MIME —
+        # but the input events must remain pristine.
+        assert [e.data for e in events] == snapshot, (
+            "build_messages mutated event.data — the tool event's image_url URL "
+            "was rewritten in place, violating the 'pure function of the event "
+            "log' contract documented in context.py:9-12"
+        )
+        # Sanity: the correction did happen in the output messages (so the
+        # test isn't passing because correction was skipped).
+        tool_msg = next(m for m in ctx.messages if m.get("role") == "tool")
+        assert isinstance(tool_msg["content"], list)
+        out_url = tool_msg["content"][0]["image_url"]["url"]
+        assert out_url.startswith("data:image/jpeg;base64,"), (
+            f"renderer should have corrected png → jpeg in the output, got {out_url[:50]}"
+        )
