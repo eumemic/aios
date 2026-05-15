@@ -16,11 +16,13 @@ No docker, no real github, no PAT.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections.abc import AsyncIterator
 
 import httpx
 import pytest
+import uvicorn
 
 from aios.sandbox.git_proxy import GitProxy, repo_key
 
@@ -202,6 +204,26 @@ class TestUpstreamFailure:
                 assert r.status_code == 502
         finally:
             await p.stop()
+
+
+class TestStartBindFailureCleanup:
+    async def test_bind_timeout_closes_serve_task_and_httpx_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # uvicorn.Server.serve that never starts — bind never completes.
+        async def _hang(_self: uvicorn.Server, *_a: object, **_k: object) -> None:
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(uvicorn.Server, "serve", _hang)
+        monkeypatch.setattr("aios.sandbox.git_proxy._BIND_TIMEOUT_S", 0.05)
+
+        p = GitProxy({"acme/foo": "ghp_TEST"})
+        with pytest.raises(RuntimeError, match="git proxy failed to bind"):
+            await p.start()
+
+        assert p._serve_task is not None
+        assert p._serve_task.done()
+        assert p._client.is_closed
 
 
 def test_module_exports() -> None:
