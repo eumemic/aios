@@ -86,7 +86,7 @@ class TestWaitEndpoint:
 
         r = await http_client.get(
             f"/v1/sessions/{session_id}/wait",
-            params={"after_seq": 0, "timeout": 30},
+            params={"after": 0, "timeout": 30},
         )
 
         assert r.status_code == 200, r.text
@@ -103,7 +103,7 @@ class TestWaitEndpoint:
     ) -> None:
         r = await http_client.get(
             f"/v1/sessions/{session_id}/wait",
-            params={"after_seq": 9999, "timeout": 1},
+            params={"after": 9999, "timeout": 1},
         )
 
         assert r.status_code == 200, r.text
@@ -119,7 +119,7 @@ class TestWaitEndpoint:
         async def wait_call() -> httpx.Response:
             return await http_client.get(
                 f"/v1/sessions/{session_id}/wait",
-                params={"after_seq": 0, "timeout": 10},
+                params={"after": 0, "timeout": 10},
             )
 
         async def delayed_append() -> None:
@@ -144,7 +144,7 @@ class TestWaitEndpoint:
         """Request-level validation rejects out-of-range ``timeout``."""
         r = await http_client.get(
             f"/v1/sessions/{session_id}/wait",
-            params={"after_seq": 0, "timeout": 3600},
+            params={"after": 0, "timeout": 3600},
         )
         assert r.status_code == 422, r.text
 
@@ -179,7 +179,7 @@ class TestWaitEndpoint:
         async def wait_call() -> httpx.Response:
             return await http_client.get(
                 f"/v1/sessions/{session_id}/wait",
-                params={"after_seq": 0, "timeout": 5},
+                params={"after": 0, "timeout": 5},
             )
 
         wait_task = asyncio.create_task(wait_call())
