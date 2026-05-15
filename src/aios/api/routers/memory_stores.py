@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from typing import Annotated
+
+from fastapi import APIRouter, Query, status
 
 from aios.api.deps import AuthDep, PoolDep
 from aios.models.common import ListResponse
@@ -47,7 +49,7 @@ async def list_stores(
     pool: PoolDep,
     _auth: AuthDep,
     include_archived: bool = False,
-    limit: int = 100,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> ListResponse[MemoryStore]:
     """List memory stores, newest first.
 
@@ -254,7 +256,7 @@ async def list_versions(
     pool: PoolDep,
     _auth: AuthDep,
     memory_id: str | None = None,
-    limit: int = 100,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> ListResponse[MemoryVersion]:
     """List memory versions in a store, newest first.
 

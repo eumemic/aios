@@ -13,7 +13,9 @@ strand the template a per_chat binding spawns from).
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from typing import Annotated
+
+from fastapi import APIRouter, Query, status
 
 from aios.api.deps import AuthDep, CryptoBoxDep, PoolDep
 from aios.models.common import ListResponse
@@ -94,7 +96,7 @@ async def list_(
     connector: str | None = None,
     session_id: str | None = None,
     mode: ConnectionMode | None = None,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     after: str | None = None,
 ) -> ListResponse[Connection]:
     """List connections, newest first, excluding archived. Cursor pagination via ``after``.
@@ -273,7 +275,7 @@ async def recent_chats(
     connection_id: str,
     pool: PoolDep,
     _auth: AuthDep,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> ListResponse[RecentChat]:
     """List chats that recently sent inbound on this connection, newest first.
 

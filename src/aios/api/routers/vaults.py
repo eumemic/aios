@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from typing import Annotated
+
+from fastapi import APIRouter, Query, status
 
 from aios.api.deps import AuthDep, CryptoBoxDep, PoolDep
 from aios.models.common import ListResponse
@@ -38,7 +40,7 @@ async def create(body: VaultCreate, pool: PoolDep, _auth: AuthDep) -> Vault:
 async def list_(
     pool: PoolDep,
     _auth: AuthDep,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     after: str | None = None,
 ) -> ListResponse[Vault]:
     """List vaults, newest first, excluding archived.
@@ -145,7 +147,7 @@ async def list_credentials(
     vault_id: str,
     pool: PoolDep,
     _auth: AuthDep,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     after: str | None = None,
 ) -> ListResponse[VaultCredential]:
     """List credentials in a vault, newest first, excluding archived.

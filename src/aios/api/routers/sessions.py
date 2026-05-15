@@ -99,7 +99,7 @@ async def list_(
         SessionStatus | None,
         Query(alias="status"),
     ] = None,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     after: str | None = None,
 ) -> ListResponse[Session]:
     account_id, _, _ = _auth
@@ -449,7 +449,11 @@ async def list_events(
     _auth: AuthDep,
     after: int = 0,
     kind: EventKind | None = None,
-    limit: int = 200,
+    # Higher cap than the standard 200: operators paginate through full
+    # session event logs via ``aios sessions events`` (one page per
+    # request), and a 200-row cap would multiply round-trip count by 2.5x
+    # for any meaningful session. 500 is the audit-recommended ceiling.
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
     error_only: bool = False,
 ) -> ListResponse[Event]:
     """List events for a session, paginated by sequence number.

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from typing import Annotated
+
+from fastapi import APIRouter, Query, status
 
 from aios.api.deps import AuthDep, PoolDep
 from aios.models.agents import Agent, AgentCreate, AgentUpdate, AgentVersion
@@ -41,7 +43,7 @@ async def create(body: AgentCreate, pool: PoolDep, _auth: AuthDep) -> Agent:
 async def list_(
     pool: PoolDep,
     _auth: AuthDep,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     after: str | None = None,
     name: str | None = None,
 ) -> ListResponse[Agent]:
@@ -115,7 +117,7 @@ async def list_versions(
     agent_id: str,
     pool: PoolDep,
     _auth: AuthDep,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     after: int | None = None,
 ) -> ListResponse[AgentVersion]:
     """List historical versions of an agent, newest first.
