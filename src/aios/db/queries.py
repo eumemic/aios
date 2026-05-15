@@ -2149,8 +2149,9 @@ async def archive_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account
             "UPDATE vault_credentials "
             "SET ciphertext = ''::bytea, nonce = ''::bytea, "
             "    archived_at = now(), updated_at = now() "
-            "WHERE vault_id = $1 AND archived_at IS NULL",
+            "WHERE vault_id = $1 AND archived_at IS NULL AND account_id = $2",
             vault_id,
+            account_id,
         )
     return _row_to_vault(row)
 
@@ -2525,10 +2526,12 @@ async def resolve_vault_credential(
          WHERE vault_id = $1
            AND mcp_server_url = $2
            AND archived_at IS NULL
+           AND account_id = $3
          LIMIT 1
         """,
         vault_id,
         mcp_server_url,
+        account_id,
     )
     if row is None:
         return None
@@ -3857,8 +3860,9 @@ async def archive_session_template(
     """
     row = await conn.fetchrow(
         "UPDATE session_templates SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
         template_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -3956,7 +3960,11 @@ async def insert_memory_store(
 async def get_memory_store(
     conn: asyncpg.Connection[Any], store_id: str, *, account_id: str, allow_archived: bool = True
 ) -> MemoryStore:
-    row = await conn.fetchrow("SELECT * FROM memory_stores WHERE id = $1", store_id)
+    row = await conn.fetchrow(
+        "SELECT * FROM memory_stores WHERE id = $1 AND account_id = $2",
+        store_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
     store = _row_to_memory_store(row)
@@ -4056,7 +4064,9 @@ async def delete_memory_store(
 # Memory + version (single-txn helpers) ────────────────────────────────────
 
 
-async def _allocate_version_seq(conn: asyncpg.Connection[Any], store_id: str) -> int:
+async def _allocate_version_seq(
+    conn: asyncpg.Connection[Any], store_id: str, *, account_id: str
+) -> int:
     """Bump ``last_version_seq`` on the store row and return the allocated seq.
 
     Mirror of the events seq allocation at append_event: row-lock the parent,
@@ -4065,13 +4075,16 @@ async def _allocate_version_seq(conn: asyncpg.Connection[Any], store_id: str) ->
     """
     row = await conn.fetchrow(
         "UPDATE memory_stores SET last_version_seq = last_version_seq + 1, "
-        "updated_at = now() WHERE id = $1 AND archived_at IS NULL "
+        "updated_at = now() WHERE id = $1 AND archived_at IS NULL AND account_id = $2 "
         "RETURNING last_version_seq",
         store_id,
+        account_id,
     )
     if row is None:
         existing = await conn.fetchrow(
-            "SELECT archived_at FROM memory_stores WHERE id = $1", store_id
+            "SELECT archived_at FROM memory_stores WHERE id = $1 AND account_id = $2",
+            store_id,
+            account_id,
         )
         if existing is None:
             raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
@@ -4106,7 +4119,7 @@ async def insert_memory_with_version(
 
     try:
         async with conn.transaction():
-            seq = await _allocate_version_seq(conn, store_id)
+            seq = await _allocate_version_seq(conn, store_id, account_id=account_id)
 
             # Version first — its `memory_id` column is non-FK, so the
             # not-yet-inserted memory row doesn't block this. Memory row
@@ -4344,7 +4357,7 @@ async def update_memory_with_version(
             next_path: str = new_path if new_path is not None else cur["path"]
             next_path_for_conflict = next_path
 
-            seq = await _allocate_version_seq(conn, store_id)
+            seq = await _allocate_version_seq(conn, store_id, account_id=account_id)
             version_id = make_id(MEMORY_VERSION)
             await conn.execute(
                 """
@@ -4424,7 +4437,7 @@ async def delete_memory_with_version(
                 detail={"id": memory_id, "memory_store_id": store_id},
             )
 
-        seq = await _allocate_version_seq(conn, store_id)
+        seq = await _allocate_version_seq(conn, store_id, account_id=account_id)
         version_id = make_id(MEMORY_VERSION)
         await conn.execute(
             """
@@ -4943,9 +4956,10 @@ async def get_management_call(
         """
         SELECT id, connector, method, params, status, result, is_error
           FROM pending_management_calls
-         WHERE id = $1
+         WHERE id = $1 AND account_id = $2
         """,
         call_id,
+        account_id,
     )
     if row is None:
         return None
@@ -4984,12 +4998,14 @@ async def mark_management_call_resolved(
                resolved_at = now()
          WHERE id = $1
            AND status = 'pending'
+           AND account_id = $5
          RETURNING id
         """,
         call_id,
         new_status,
         json.dumps(result),
         is_error,
+        account_id,
     )
     return row is not None
 
