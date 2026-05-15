@@ -115,3 +115,22 @@ class TestModelTokenRatio:
         second = await model_token_ratio(conn, "model-cache", account_id=account_id)
         assert second == first, f"expected cached reuse, got {second} vs first={first}"
         conn.fetchrow.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_ratio_is_cached(self) -> None:
+        """The 1.0 neutral fallback gets cached too, on a shorter TTL.
+
+        Pre-fix, every windowing call on a freshly deployed model re-ran
+        the JSONB aggregate scan because the below-threshold branch
+        skipped the cache write.  The cache write now bounds the scan
+        rate at one per TTL.
+        """
+        account_id = "acc_test_stub"
+        conn = _mock_conn(n=2, mean_ratio=0.0)
+        first = await model_token_ratio(conn, "model-cold", account_id=account_id)
+        assert first == 1.0
+        # Swap the mock to verify we didn't re-fetch.
+        conn.fetchrow = AsyncMock(return_value={"n": 5, "mean_ratio": 2.0})
+        second = await model_token_ratio(conn, "model-cold", account_id=account_id)
+        assert second == 1.0
+        conn.fetchrow.assert_not_awaited()
