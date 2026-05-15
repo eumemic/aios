@@ -47,6 +47,11 @@ class InboundMessage:
     attachments: tuple[Attachment, ...]
     reply: Reply | None
     edited: bool = False
+    # Epoch-ms of the most recent edit, or None if never edited. Telegram
+    # preserves message_id across edits, so this is the only field that
+    # distinguishes one edit revision from another (and from the
+    # original) — load-bearing for inbound event_id uniqueness.
+    edit_date_ms: int | None = None
     # Emoji that came with a sticker, when the inbound was a sticker.
     # Sometimes the sticker file is non-vision-readable (animated/video),
     # and the emoji is the only text-side cue the model gets.
@@ -217,6 +222,9 @@ def parse_message(message: Message, *, bot_id: int) -> InboundMessage | None:
         attachments=attachments,
         reply=reply,
         edited=message.edit_date is not None,
+        edit_date_ms=(
+            int(message.edit_date.timestamp() * 1000) if message.edit_date is not None else None
+        ),
         sticker_emoji=sticker_emoji,
     )
 
