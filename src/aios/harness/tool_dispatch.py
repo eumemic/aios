@@ -214,7 +214,7 @@ async def _execute_tool_async(
             },
             account_id=account_id,
         )
-        await _trigger_sweep(pool, session_id, bound_log, account_id=account_id)
+        await _trigger_sweep(pool, session_id, account_id=account_id)
 
 
 def _parse_arguments(raw_args: Any) -> dict[str, Any] | None:
@@ -294,7 +294,6 @@ def _evict_session_container(session_id: str) -> None:
 async def _trigger_sweep(
     pool: asyncpg.Pool[Any],
     session_id: str,
-    bound_log: Any,
     *,
     account_id: str,
 ) -> None:
@@ -312,12 +311,9 @@ async def _trigger_sweep(
     )
     result = SweepResult(repaired_ghosts=0, woken_sessions=0)
     try:
-        try:
-            result = await wake_sessions_needing_inference(
-                pool, runtime.require_task_registry(), session_id=session_id
-            )
-        except Exception:
-            bound_log.warning("tool.sweep_failed")
+        result = await wake_sessions_needing_inference(
+            pool, runtime.require_task_registry(), session_id=session_id
+        )
     finally:
         await sessions_service.append_event(
             pool,
@@ -522,4 +518,4 @@ async def _execute_mcp_tool_async(
             },
             account_id=account_id,
         )
-        await _trigger_sweep(pool, session_id, bound_log, account_id=account_id)
+        await _trigger_sweep(pool, session_id, account_id=account_id)

@@ -54,7 +54,7 @@ class TestTailSweepSpan:
             ),
             patch("aios.harness.sweep.wake_sessions_needing_inference", wake_mock),
         ):
-            await _trigger_sweep(MagicMock(), "sess_x", MagicMock(), account_id="acc_test_stub")
+            await _trigger_sweep(MagicMock(), "sess_x", account_id="acc_test_stub")
 
         sweep_events = _sweep_events(append_event)
         assert [e["event"] for e in sweep_events] == ["sweep_start", "sweep_end"]
@@ -67,14 +67,15 @@ class TestTailSweepSpan:
         }
 
     async def test_sweep_end_fires_when_sweep_raises(self) -> None:
-        """``_trigger_sweep`` catches and logs sweep failures, so the pair
-        still closes cleanly — but the counts fall back to zero because
-        no ``SweepResult`` was produced."""
+        """Sweep failures propagate out of ``_trigger_sweep``, but the
+        ``sweep_start``/``sweep_end`` pair still closes cleanly via the
+        outer try/finally — counts fall back to zero because no
+        ``SweepResult`` was produced. Mirrors the entry-site behavior in
+        ``test_sweep_end_fires_when_find_raises``."""
         from aios.harness.tool_dispatch import _trigger_sweep
 
         append_event = AsyncMock(return_value=SimpleNamespace(id="ev_sweep"))
         wake_mock = AsyncMock(side_effect=RuntimeError("db down"))
-        bound_log = MagicMock()
 
         with (
             patch("aios.harness.tool_dispatch.sessions_service.append_event", append_event),
@@ -82,14 +83,14 @@ class TestTailSweepSpan:
                 "aios.harness.tool_dispatch.runtime.require_task_registry", return_value=MagicMock()
             ),
             patch("aios.harness.sweep.wake_sessions_needing_inference", wake_mock),
+            pytest.raises(RuntimeError, match="db down"),
         ):
-            await _trigger_sweep(MagicMock(), "sess_x", bound_log, account_id="acc_test_stub")
+            await _trigger_sweep(MagicMock(), "sess_x", account_id="acc_test_stub")
 
         sweep_events = _sweep_events(append_event)
         assert [e["event"] for e in sweep_events] == ["sweep_start", "sweep_end"]
         assert sweep_events[1]["repaired_ghosts"] == 0
         assert sweep_events[1]["woken_sessions"] == 0
-        bound_log.warning.assert_called_once_with("tool.sweep_failed")
 
 
 # ─── entry site (loop._run_session_step_body guard) ──────────────────────────
