@@ -185,7 +185,6 @@ async def aios_env(aios_env_minimal: dict[str, str]) -> dict[str, str]:
     """
     import asyncpg
 
-    from aios.db import queries
     from aios.services.accounts import hash_key
 
     plaintext = aios_env_minimal["AIOS_API_KEY"]
@@ -193,24 +192,24 @@ async def aios_env(aios_env_minimal: dict[str, str]) -> dict[str, str]:
 
     conn = await asyncpg.connect(db_url)
     try:
-        root, _key_id = await queries.bootstrap_root_account(
-            conn,
-            display_name="root",
-            key_hash=hash_key(plaintext),
-            key_label="test-root",
-        )
-        # PR 4: many tests still pass the PR 3 stub literal ``"acc_test_stub"``
-        # as the account_id arg. Now that migration 0043 enforces NOT NULL +
-        # FK on every resource table, the stub must correspond to an actual
-        # row. Insert it as a child of root so existing test bodies keep
-        # working without sweeping rewrites.
+        # PR 6: insert ``acc_test_stub`` as the root account itself and bind
+        # the bootstrap API key directly to it, so auth resolves the bearer
+        # to the same account_id every test body uses as its scoping arg.
+        # Bypasses ``bootstrap_root_account`` (which would generate a fresh
+        # ULID we'd have to thread back through 44 test files).
         await conn.execute(
             """
             INSERT INTO accounts
                 (id, parent_account_id, can_mint_children, display_name)
-            VALUES ('acc_test_stub', $1, FALSE, 'test-stub')
+            VALUES ('acc_test_stub', NULL, TRUE, 'test-root')
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO account_keys (key_id, account_id, hash, label)
+            VALUES ('akey_test', 'acc_test_stub', $1, 'test-root')
             """,
-            root.id,
+            hash_key(plaintext),
         )
     finally:
         await conn.close()
