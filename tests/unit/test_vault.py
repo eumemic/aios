@@ -261,7 +261,9 @@ class TestUpdateVaultCredentialCallSite:
     async def test_omits_display_name_when_not_in_fields_set(self, crypto_box: CryptoBox) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         existing = _existing_credential()
-        existing_blob = crypto_box.encrypt(json.dumps({"access_token": "at"}))
+        existing_blob = crypto_box.derive_account_subkey(account_id).encrypt(
+            json.dumps({"access_token": "at"})
+        )
         conn = MagicMock()
         pool = fake_pool_yielding_conn(conn)
 
@@ -297,7 +299,9 @@ class TestUpdateVaultCredentialCallSite:
     async def test_passes_display_name_when_set_even_to_none(self, crypto_box: CryptoBox) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         existing = _existing_credential()
-        existing_blob = crypto_box.encrypt(json.dumps({"access_token": "at"}))
+        existing_blob = crypto_box.derive_account_subkey(account_id).encrypt(
+            json.dumps({"access_token": "at"})
+        )
         conn = MagicMock()
         pool = fake_pool_yielding_conn(conn)
 
@@ -427,7 +431,7 @@ class TestRefreshCredential:
         payload = _expiring_oauth_payload(
             expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         )
-        blob = crypto_box.encrypt(json.dumps(payload))
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
         client = _async_client_returning(_http_response(body={"access_token": "new"}))
 
@@ -458,7 +462,7 @@ class TestRefreshCredential:
         payload = _expiring_oauth_payload(
             token_endpoint_auth={"method": "client_secret_basic", "client_secret": "shh"},
         )
-        blob = crypto_box.encrypt(json.dumps(payload))
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
         client = _async_client_returning(_http_response(body={"access_token": "new"}))
 
@@ -491,7 +495,7 @@ class TestRefreshCredential:
         payload = _expiring_oauth_payload(
             token_endpoint_auth={"method": "client_secret_post", "client_secret": "shh"},
         )
-        blob = crypto_box.encrypt(json.dumps(payload))
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
         client = _async_client_returning(_http_response(body={"access_token": "new"}))
 
@@ -522,7 +526,7 @@ class TestRefreshCredential:
         payload = _expiring_oauth_payload(
             token_endpoint_auth={"method": "none"},
         )
-        blob = crypto_box.encrypt(json.dumps(payload))
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
         client = _async_client_returning(_http_response(body={"access_token": "new"}))
 
@@ -557,7 +561,7 @@ class TestRefreshCredential:
         """
         account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
-        blob = crypto_box.encrypt(json.dumps(payload))
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
         client = _async_client_returning(
             _http_response(body={"access_token": "fresh", "expires_in": "3600"}),
@@ -581,7 +585,7 @@ class TestRefreshCredential:
 
         args = conn.execute.await_args.args
         new_blob = EncryptedBlob(ciphertext=args[1], nonce=args[2])
-        new_payload = json.loads(crypto_box.decrypt(new_blob))
+        new_payload = json.loads(crypto_box.derive_account_subkey(account_id).decrypt(new_blob))
         assert "expires_at" in new_payload
         # is_expiring on the new payload should be False (token is fresh).
         assert is_expiring(new_payload) is False
@@ -590,7 +594,7 @@ class TestRefreshCredential:
     async def test_persists_new_access_token_and_expires_at(self, crypto_box: CryptoBox) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
-        blob = crypto_box.encrypt(json.dumps(payload))
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
         client = _async_client_returning(
             _http_response(body={"access_token": "fresh-at", "expires_in": 3600})
@@ -617,7 +621,7 @@ class TestRefreshCredential:
         conn.execute.assert_awaited_once()
         args = conn.execute.await_args.args
         new_blob = EncryptedBlob(ciphertext=args[1], nonce=args[2])
-        new_payload = json.loads(crypto_box.decrypt(new_blob))
+        new_payload = json.loads(crypto_box.derive_account_subkey(account_id).decrypt(new_blob))
         assert new_payload["access_token"] == "fresh-at"
         # expires_at is updated to ~1 hour out.
         assert "expires_at" in new_payload
@@ -626,7 +630,7 @@ class TestRefreshCredential:
     async def test_rotates_refresh_token_when_returned(self, crypto_box: CryptoBox) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
-        blob = crypto_box.encrypt(json.dumps(payload))
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
         client = _async_client_returning(
             _http_response(body={"access_token": "fresh", "refresh_token": "rt-2"})
@@ -650,13 +654,18 @@ class TestRefreshCredential:
 
         args = conn.execute.await_args.args
         new_blob = EncryptedBlob(ciphertext=args[1], nonce=args[2])
-        assert json.loads(crypto_box.decrypt(new_blob))["refresh_token"] == "rt-2"
+        assert (
+            json.loads(crypto_box.derive_account_subkey(account_id).decrypt(new_blob))[
+                "refresh_token"
+            ]
+            == "rt-2"
+        )
 
     @pytest.mark.asyncio
     async def test_keeps_refresh_token_when_omitted(self, crypto_box: CryptoBox) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
-        blob = crypto_box.encrypt(json.dumps(payload))
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
         # Response omits refresh_token.
         client = _async_client_returning(_http_response(body={"access_token": "fresh"}))
@@ -679,13 +688,18 @@ class TestRefreshCredential:
 
         args = conn.execute.await_args.args
         new_blob = EncryptedBlob(ciphertext=args[1], nonce=args[2])
-        assert json.loads(crypto_box.decrypt(new_blob))["refresh_token"] == "rt-1"  # preserved
+        assert (
+            json.loads(crypto_box.derive_account_subkey(account_id).decrypt(new_blob))[
+                "refresh_token"
+            ]
+            == "rt-1"
+        )  # preserved
 
     @pytest.mark.asyncio
     async def test_http_error_raises_oauth_refresh_error(self, crypto_box: CryptoBox) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
-        blob = crypto_box.encrypt(json.dumps(payload))
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
         client = _async_client_returning(_http_response(status=401))
 
@@ -713,7 +727,7 @@ class TestRefreshCredential:
     async def test_malformed_response_raises(self, crypto_box: CryptoBox) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
-        blob = crypto_box.encrypt(json.dumps(payload))
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
         # 200 OK but missing access_token in body.
         client = _async_client_returning(_http_response(body={"expires_in": 3600}))
@@ -764,7 +778,7 @@ class TestRefreshCredential:
             "expires_at": _expiring_oauth_payload()["expires_at"],
             "client_id": "cid",
         }
-        blob = crypto_box.encrypt(json.dumps(payload))
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
         conn = _conn_with_transaction()
 
         with (
@@ -840,3 +854,91 @@ class TestDeriveAccountSubkey:
     def test_empty_account_id_rejected(self) -> None:
         with pytest.raises(ValueError, match="account_id must be non-empty"):
             self._master().derive_account_subkey("")
+
+
+class TestServiceWiringIsAccountScoped:
+    """End-to-end integration: a vault_credential blob written by the service
+    under ``account_a`` must NOT be decryptable when fetched under ``account_b``.
+
+    The unit-level isolation in :class:`TestDeriveAccountSubkey` proves the
+    primitive; this class proves the service code paths actually use the
+    primitive. A regression here would mean the wiring was reverted or a
+    new call site bypassed the subkey.
+    """
+
+    @pytest.mark.asyncio
+    async def test_update_credential_cross_account_decrypt_fails(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        # Encrypt as account_a writes (matches create_vault_credential path).
+        blob_for_a = crypto_box.derive_account_subkey("acc_a").encrypt(
+            json.dumps({"access_token": "secret-of-a"})
+        )
+        conn = MagicMock()
+        pool = fake_pool_yielding_conn(conn)
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "get_vault_credential_with_blob",
+                AsyncMock(return_value=(_existing_credential(), blob_for_a)),
+            ),
+            patch.object(
+                vaults_service.queries,
+                "update_vault_credential",
+                AsyncMock(return_value=_existing_credential()),
+            ),
+            pytest.raises(CryptoDecryptError),
+        ):
+            # account_b's service call must fail when trying to decrypt
+            # account_a's blob — proves the WHERE-clause defense is paired
+            # with crypto-layer defense.
+            await vaults_service.update_vault_credential(
+                pool,
+                crypto_box,
+                vault_id="vlt_1",
+                credential_id="vc_1",
+                body=VaultCredentialUpdate(display_name="renamed"),
+                account_id="acc_b",
+            )
+
+    @pytest.mark.asyncio
+    async def test_same_account_decrypt_succeeds(self, crypto_box: CryptoBox) -> None:
+        """Positive case — completes the regression net.
+
+        The cross-account test above asserts a *failure* path, which a
+        hypothetical revert to ``crypto_box.decrypt_dict`` would *also*
+        satisfy (the master key can't decrypt a subkey blob either).
+        This test exercises the success path: a blob written under
+        account A's subkey must decrypt cleanly when the service is
+        called with the same account_id. If the wiring is reverted, the
+        decrypt happens with the master key against subkey-encrypted
+        bytes and this test fails.
+        """
+        blob_for_a = crypto_box.derive_account_subkey("acc_a").encrypt(
+            json.dumps({"access_token": "secret-of-a"})
+        )
+        conn = MagicMock()
+        pool = fake_pool_yielding_conn(conn)
+
+        with (
+            patch.object(
+                vaults_service.queries,
+                "get_vault_credential_with_blob",
+                AsyncMock(return_value=(_existing_credential(), blob_for_a)),
+            ),
+            patch.object(
+                vaults_service.queries,
+                "update_vault_credential",
+                AsyncMock(return_value=_existing_credential()),
+            ),
+        ):
+            # Same account_id as the blob was encrypted under — must succeed.
+            await vaults_service.update_vault_credential(
+                pool,
+                crypto_box,
+                vault_id="vlt_1",
+                credential_id="vc_1",
+                body=VaultCredentialUpdate(display_name="renamed"),
+                account_id="acc_a",
+            )

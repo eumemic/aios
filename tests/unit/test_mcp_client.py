@@ -35,7 +35,7 @@ class TestResolveAuthForUrl:
 
     async def test_resolves_via_session_vaults(self, crypto_box: CryptoBox) -> None:
         payload = json.dumps({"token": "session-token"})
-        blob = crypto_box.encrypt(payload)
+        blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(payload)
         pool = fake_pool_yielding_conn(MagicMock())
         with patch(
             "aios.mcp.client.queries.resolve_mcp_credential",
@@ -62,7 +62,7 @@ class TestResolveAuthForUrl:
 
     async def test_empty_token_returns_empty(self, crypto_box: CryptoBox) -> None:
         payload = json.dumps({"token": ""})
-        blob = crypto_box.encrypt(payload)
+        blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(payload)
         pool = fake_pool_yielding_conn(MagicMock())
         with patch(
             "aios.mcp.client.queries.resolve_mcp_credential",
@@ -76,7 +76,7 @@ class TestResolveAuthForUrl:
 
     async def test_mcp_oauth_static_token(self, crypto_box: CryptoBox) -> None:
         payload = json.dumps({"access_token": "oauth-token"})
-        blob = crypto_box.encrypt(payload)
+        blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(payload)
         pool = fake_pool_yielding_conn(MagicMock())
         with patch(
             "aios.mcp.client.queries.resolve_mcp_credential",
@@ -103,8 +103,8 @@ class TestResolveAuthForUrl:
             }
         )
         fresh = json.dumps({"access_token": "fresh"})
-        stale_blob = crypto_box.encrypt(expiring)
-        fresh_blob = crypto_box.encrypt(fresh)
+        stale_blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(expiring)
+        fresh_blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(fresh)
         pool = fake_pool_yielding_conn(MagicMock())
 
         refresh_mock = AsyncMock()
@@ -140,7 +140,7 @@ class TestResolveAuthForUrl:
                 "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
             }
         )
-        blob = crypto_box.encrypt(far_future)
+        blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(far_future)
         pool = fake_pool_yielding_conn(MagicMock())
         refresh_mock = AsyncMock()
 
@@ -170,7 +170,7 @@ class TestResolveAuthForUrl:
                 "expires_at": (datetime.now(UTC) + timedelta(seconds=5)).isoformat(),
             }
         )
-        blob = crypto_box.encrypt(expiring)
+        blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(expiring)
         pool = fake_pool_yielding_conn(MagicMock())
 
         with (

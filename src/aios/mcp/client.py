@@ -103,9 +103,10 @@ async def resolve_auth_for_url(
         if session_result is None:
             return {}
         blob, auth_type, vault_id = session_result
+        subkey = crypto_box.derive_account_subkey(account_id)
 
         if auth_type == "mcp_oauth":
-            payload = json.loads(crypto_box.decrypt(blob))
+            payload = json.loads(subkey.decrypt(blob))
             if is_expiring(payload):
                 await refresh_credential(
                     crypto_box,
@@ -120,10 +121,10 @@ async def resolve_auth_for_url(
                 if refreshed is None:
                     return {}
                 blob = refreshed[0]
-                payload = json.loads(crypto_box.decrypt(blob))
+                payload = json.loads(subkey.decrypt(blob))
             token = str(payload.get("access_token", ""))
         else:
-            payload = json.loads(crypto_box.decrypt(blob))
+            payload = json.loads(subkey.decrypt(blob))
             token = _token_from_payload(payload, auth_type)
 
     if not token:

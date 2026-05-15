@@ -109,8 +109,9 @@ async def refresh_credential(
                 detail={"vault_id": vault_id, "mcp_server_url": mcp_server_url},
             )
         credential_id, blob = locked
+        subkey = crypto_box.derive_account_subkey(account_id)
         try:
-            payload = crypto_box.decrypt_dict(blob)
+            payload = subkey.decrypt_dict(blob)
         except Exception as exc:
             raise OAuthRefreshError(
                 "failed to decrypt stored credential",
@@ -207,7 +208,7 @@ async def refresh_credential(
         if seconds > 0:
             payload["expires_at"] = (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
 
-        new_blob = crypto_box.encrypt_dict(payload)
+        new_blob = subkey.encrypt_dict(payload)
         await conn.execute(
             "UPDATE vault_credentials "
             "SET ciphertext = $1, nonce = $2, updated_at = now() "
@@ -350,7 +351,7 @@ async def create_vault_credential(
     body: VaultCredentialCreate,
 ) -> VaultCredential:
     payload = _extract_auth_payload(body)
-    blob = crypto_box.encrypt_dict(payload)
+    blob = crypto_box.derive_account_subkey(account_id).encrypt_dict(payload)
     async with pool.acquire() as conn, conn.transaction():
         # Lock the parent vault row to serialize concurrent credential inserts
         # within this vault. Without it, two parallel inserts can both observe
@@ -423,9 +424,10 @@ async def update_vault_credential(
         cred, existing_blob = await queries.get_vault_credential_with_blob(
             conn, vault_id, credential_id, account_id=account_id
         )
-        existing_payload = crypto_box.decrypt_dict(existing_blob)
+        subkey = crypto_box.derive_account_subkey(account_id)
+        existing_payload = subkey.decrypt_dict(existing_blob)
         merged = _merge_auth_payload(existing_payload, body, cred.auth_type)
-        new_blob = crypto_box.encrypt_dict(merged)
+        new_blob = subkey.encrypt_dict(merged)
 
         return await queries.update_vault_credential(
             conn,

@@ -509,7 +509,7 @@ class TestQueries:
         # Verify the blob actually decrypts to the original payload.
         import json as _json
 
-        payload = _json.loads(crypto_box.decrypt(blob))
+        payload = _json.loads(crypto_box.derive_account_subkey(account_id).decrypt(blob))
         assert payload == {"token": "combo-token"}
 
     async def test_get_credential_with_blob_excludes_archived(
@@ -667,7 +667,7 @@ class TestOAuthRefreshE2E:
             ciphertext=bytes(row["ciphertext"]),
             nonce=bytes(row["nonce"]),
         )
-        new_payload = _json.loads(crypto_box.decrypt(new_blob))
+        new_payload = _json.loads(crypto_box.derive_account_subkey(account_id).decrypt(new_blob))
         assert new_payload["access_token"] == "fresh-at"
 
     async def test_concurrent_resolve_only_refreshes_once(self, pool: Any, crypto_box: Any) -> None:
