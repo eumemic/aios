@@ -4,20 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
-
-class Pagination(BaseModel):
-    """Standard cursor-paginated query parameters.
-
-    `after` is the id of the last item from the previous page (for keyset
-    pagination); `limit` caps page size.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    limit: int = Field(default=50, ge=1, le=200)
-    after: str | None = None
+from pydantic import BaseModel
 
 
 class ListResponse[T](BaseModel):

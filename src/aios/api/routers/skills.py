@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from typing import Annotated
+
+from fastapi import APIRouter, Query, status
 
 from aios.api.deps import AuthDep, PoolDep
 from aios.models.common import ListResponse
@@ -35,7 +37,7 @@ async def create(body: SkillCreate, pool: PoolDep, _auth: AuthDep) -> Skill:
 async def list_(
     pool: PoolDep,
     _auth: AuthDep,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     after: str | None = None,
 ) -> ListResponse[Skill]:
     """List skills (latest version of each), newest first, excluding archived.
@@ -99,7 +101,7 @@ async def list_versions(
     skill_id: str,
     pool: PoolDep,
     _auth: AuthDep,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     after: int | None = None,
 ) -> ListResponse[SkillVersion]:
     """List historical versions of a skill, newest first.

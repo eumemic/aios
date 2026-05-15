@@ -10,7 +10,9 @@ will fail at the inbound handler until the connection is reconfigured.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from typing import Annotated
+
+from fastapi import APIRouter, Query, status
 
 from aios.api.deps import AuthDep, PoolDep
 from aios.db.queries import _UNSET
@@ -52,7 +54,7 @@ async def create(body: SessionTemplateCreate, pool: PoolDep, _auth: AuthDep) -> 
 async def list_(
     pool: PoolDep,
     _auth: AuthDep,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     after: str | None = None,
 ) -> ListResponse[SessionTemplate]:
     """List session templates, newest first, excluding archived.

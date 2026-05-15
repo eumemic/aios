@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from typing import Annotated
+
+from fastapi import APIRouter, Query, status
 
 from aios.api.deps import AuthDep, PoolDep
 from aios.models.common import ListResponse
@@ -31,7 +33,7 @@ async def create(body: EnvironmentCreate, pool: PoolDep, _auth: AuthDep) -> Envi
 async def list_(
     pool: PoolDep,
     _auth: AuthDep,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     after: str | None = None,
 ) -> ListResponse[Environment]:
     """List environments, newest first, excluding archived.
