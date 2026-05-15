@@ -98,10 +98,11 @@ async def insert_environment(
     config_json = json.dumps((config or EnvironmentConfig()).model_dump(exclude_none=True))
     try:
         row = await conn.fetchrow(
-            "INSERT INTO environments (id, name, config) VALUES ($1, $2, $3::jsonb) RETURNING *",
+            "INSERT INTO environments (id, name, config, account_id) VALUES ($1, $2, $3::jsonb, $4) RETURNING *",
             new_id,
             name,
             config_json,
+            account_id,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -299,10 +300,10 @@ async def insert_agent(
                 INSERT INTO agents (
                     id, name, model, system, tools, skills, mcp_servers,
                     description, metadata, litellm_extra,
-                    window_min, window_max, version
+                    window_min, window_max, version, account_id
                 )
                 VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
-                        $8, $9::jsonb, $10::jsonb, $11, $12, 1)
+                        $8, $9::jsonb, $10::jsonb, $11, $12, 1, $13)
                 RETURNING *
                 """,
                 new_id,
@@ -317,6 +318,7 @@ async def insert_agent(
                 extra_json,
                 window_min,
                 window_max,
+                account_id,
             )
             assert row is not None
             # Snapshot version 1 into agent_versions.
@@ -324,10 +326,10 @@ async def insert_agent(
                 """
                 INSERT INTO agent_versions (
                     agent_id, version, model, system, tools, skills, mcp_servers,
-                    litellm_extra, window_min, window_max
+                    litellm_extra, window_min, window_max, account_id
                 )
                 VALUES ($1, 1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb,
-                        $7::jsonb, $8, $9)
+                        $7::jsonb, $8, $9, $10)
                 """,
                 new_id,
                 model,
@@ -338,6 +340,7 @@ async def insert_agent(
                 extra_json,
                 window_min,
                 window_max,
+                account_id,
             )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -489,10 +492,10 @@ async def update_agent(
             """
             INSERT INTO agent_versions (
                 agent_id, version, model, system, tools, skills, mcp_servers,
-                litellm_extra, window_min, window_max
+                litellm_extra, window_min, window_max, account_id
             )
             VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
-                    $8::jsonb, $9, $10)
+                    $8::jsonb, $9, $10, $11)
             """,
             agent_id,
             new_version,
@@ -504,6 +507,7 @@ async def update_agent(
             extra_json,
             new_wmin,
             new_wmax,
+            account_id,
         )
     return _row_to_agent(row)
 
@@ -625,9 +629,9 @@ async def insert_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 status, workspace_volume_path, env,
-                focal_channel, focal_locked
+                focal_channel, focal_locked, account_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10, $11)
             RETURNING *
             """,
             new_id,
@@ -640,6 +644,7 @@ async def insert_session(
             json.dumps(env or {}),
             focal_channel,
             focal_locked,
+            account_id,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -1057,10 +1062,11 @@ async def clone_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 status, stop_reason, workspace_volume_path, env, last_event_seq,
-                focal_channel
+                focal_channel, account_id
             )
             SELECT $1, agent_id, environment_id, agent_version, title, metadata,
-                   status, stop_reason, $2, env, last_event_seq, focal_channel
+                   status, stop_reason, $2, env, last_event_seq, focal_channel,
+                   account_id
               FROM sessions WHERE id = $3
             RETURNING *
             """,
@@ -1071,8 +1077,8 @@ async def clone_session(
         assert new_row is not None
 
         await conn.execute(
-            "INSERT INTO session_vaults (session_id, vault_id, rank) "
-            "SELECT $1, vault_id, rank FROM session_vaults WHERE session_id = $2",
+            "INSERT INTO session_vaults (session_id, vault_id, rank, account_id) "
+            "SELECT $1, vault_id, rank, account_id FROM session_vaults WHERE session_id = $2",
             new_id,
             parent_session_id,
         )
@@ -1087,12 +1093,13 @@ async def clone_session(
             INSERT INTO events (
                 id, session_id, seq, kind, data, created_at, cumulative_tokens,
                 channel, orig_channel, focal_channel_at_arrival,
-                role, tool_name, is_error, sender_name
+                role, tool_name, is_error, sender_name, account_id
             )
             SELECT i.id, $2, s.seq, s.kind, s.data, s.created_at,
                    s.cumulative_tokens,
                    s.channel, s.orig_channel, s.focal_channel_at_arrival,
-                   s.role, s.tool_name, s.is_error, s.sender_name
+                   s.role, s.tool_name, s.is_error, s.sender_name,
+                   s.account_id
               FROM (
                 SELECT *, row_number() OVER (ORDER BY seq) AS rn
                   FROM events WHERE session_id = $1
@@ -1524,9 +1531,9 @@ async def append_event(
             "INSERT INTO events "
             "(id, session_id, seq, kind, data, cumulative_tokens, "
             " orig_channel, focal_channel_at_arrival, channel, "
-            " role, tool_name, is_error, sender_name) "
+            " role, tool_name, is_error, sender_name, account_id) "
             "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, "
-            " $10, $11, $12, $13) RETURNING *",
+            " $10, $11, $12, $13, $14) RETURNING *",
             new_id,
             session_id,
             seq,
@@ -1540,6 +1547,7 @@ async def append_event(
             tool_name,
             is_error,
             sender_name,
+            account_id,
         )
         assert row is not None
 
@@ -1987,13 +1995,14 @@ async def insert_vault(
     metadata_json = json.dumps(metadata)
     row = await conn.fetchrow(
         """
-        INSERT INTO vaults (id, display_name, metadata)
-        VALUES ($1, $2, $3::jsonb)
+        INSERT INTO vaults (id, display_name, metadata, account_id)
+        VALUES ($1, $2, $3::jsonb, $4)
         RETURNING *
         """,
         new_id,
         display_name,
         metadata_json,
+        account_id,
     )
     assert row is not None
     return _row_to_vault(row)
@@ -2123,9 +2132,9 @@ async def insert_vault_credential(
             """
             INSERT INTO vault_credentials (
                 id, vault_id, display_name, mcp_server_url,
-                auth_type, ciphertext, nonce, metadata
+                auth_type, ciphertext, nonce, metadata, account_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
             RETURNING *
             """,
             new_id,
@@ -2136,6 +2145,7 @@ async def insert_vault_credential(
             blob.ciphertext,
             blob.nonce,
             metadata_json,
+            account_id,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -2366,10 +2376,11 @@ async def set_session_vaults(
         for rank, vault_id in enumerate(vault_ids):
             try:
                 await conn.execute(
-                    "INSERT INTO session_vaults (session_id, vault_id, rank) VALUES ($1, $2, $3)",
+                    "INSERT INTO session_vaults (session_id, vault_id, rank, account_id) VALUES ($1, $2, $3, $4)",
                     session_id,
                     vault_id,
                     rank,
+                    account_id,
                 )
             except asyncpg.ForeignKeyViolationError as exc:
                 raise NotFoundError(
@@ -2521,18 +2532,19 @@ async def insert_skill(
     async with conn.transaction():
         skill_row = await conn.fetchrow(
             """
-            INSERT INTO skills (id, display_title, latest_version)
-            VALUES ($1, $2, 1)
+            INSERT INTO skills (id, display_title, latest_version, account_id)
+            VALUES ($1, $2, 1, $3)
             RETURNING *
             """,
             new_id,
             display_title,
+            account_id,
         )
         assert skill_row is not None
         ver_row = await conn.fetchrow(
             """
-            INSERT INTO skill_versions (skill_id, version, directory, name, description, files)
-            VALUES ($1, 1, $2, $3, $4, $5::jsonb)
+            INSERT INTO skill_versions (skill_id, version, directory, name, description, files, account_id)
+            VALUES ($1, 1, $2, $3, $4, $5::jsonb, $6)
             RETURNING *
             """,
             new_id,
@@ -2540,6 +2552,7 @@ async def insert_skill(
             name,
             description,
             files_json,
+            account_id,
         )
         assert ver_row is not None
     return _row_to_skill(skill_row), _row_to_skill_version(ver_row)
@@ -2604,8 +2617,8 @@ async def insert_skill_version(
         new_ver = head["latest_version"] + 1
         ver_row = await conn.fetchrow(
             """
-            INSERT INTO skill_versions (skill_id, version, directory, name, description, files)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            INSERT INTO skill_versions (skill_id, version, directory, name, description, files, account_id)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
             RETURNING *
             """,
             skill_id,
@@ -2614,6 +2627,7 @@ async def insert_skill_version(
             name,
             description,
             files_json,
+            account_id,
         )
         assert ver_row is not None
         await conn.execute(
@@ -2804,14 +2818,15 @@ async def insert_binding(
         await conn.execute(
             """
             INSERT INTO bindings (id, connection_id, mode,
-                                  session_id, session_template_id)
-            VALUES ($1, $2, $3, $4, $5)
+                                  session_id, session_template_id, account_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
             """,
             new_id,
             connection_id,
             mode,
             session_id,
             session_template_id,
+            account_id,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -3019,9 +3034,9 @@ async def insert_connection(
             WITH inserted AS (
                 INSERT INTO connections (
                     id, connector, account, metadata,
-                    secrets_ciphertext, secrets_nonce
+                    secrets_ciphertext, secrets_nonce, account_id
                 )
-                VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+                VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
                 ON CONFLICT (connector, account) WHERE archived_at IS NULL DO NOTHING
                 RETURNING *
             )
@@ -3037,6 +3052,7 @@ async def insert_connection(
             json.dumps(metadata),
             ciphertext,
             nonce,
+            account_id,
         )
         if row is not None:
             return _row_to_connection(row)
@@ -3322,14 +3338,15 @@ async def insert_chat_session(
     """
     row = await conn.fetchrow(
         """
-        INSERT INTO chat_sessions (connection_id, chat_id, session_id)
-        VALUES ($1, $2, $3)
+        INSERT INTO chat_sessions (connection_id, chat_id, session_id, account_id)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (connection_id, chat_id) DO NOTHING
         RETURNING session_id
         """,
         connection_id,
         chat_id,
         session_id,
+        account_id,
     )
     if row is not None:
         return str(row["session_id"])
@@ -3586,8 +3603,8 @@ async def insert_session_template(
             """
             INSERT INTO session_templates
                 (id, name, agent_id, agent_version, environment_id,
-                 vault_ids, memory_store_ids, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6::text[], $7::text[], $8::jsonb)
+                 vault_ids, memory_store_ids, metadata, account_id)
+            VALUES ($1, $2, $3, $4, $5, $6::text[], $7::text[], $8::jsonb, $9)
             RETURNING *
             """,
             new_id,
@@ -3598,6 +3615,7 @@ async def insert_session_template(
             vault_ids,
             memory_store_ids,
             json.dumps(metadata),
+            account_id,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -3797,14 +3815,15 @@ async def insert_memory_store(
 ) -> MemoryStore:
     row = await conn.fetchrow(
         """
-        INSERT INTO memory_stores (id, name, description, metadata)
-        VALUES ($1, $2, $3, $4::jsonb)
+        INSERT INTO memory_stores (id, name, description, metadata, account_id)
+        VALUES ($1, $2, $3, $4::jsonb, $5)
         RETURNING *
         """,
         make_id(MEMORY_STORE),
         name,
         description,
         json.dumps(metadata),
+        account_id,
     )
     assert row is not None
     return _row_to_memory_store(row)
@@ -3959,8 +3978,8 @@ async def insert_memory_with_version(
                 INSERT INTO memory_versions
                     (id, memory_store_id, memory_id, seq, operation, path,
                      content, content_sha256, content_size_bytes,
-                     created_by_type, created_by_ref)
-                VALUES ($1, $2, $3, $4, 'created', $5, $6, $7, $8, $9, $10)
+                     created_by_type, created_by_ref, account_id)
+                VALUES ($1, $2, $3, $4, 'created', $5, $6, $7, $8, $9, $10, $11)
                 """,
                 version_id,
                 store_id,
@@ -3972,14 +3991,15 @@ async def insert_memory_with_version(
                 size_bytes,
                 actor_type,
                 actor_ref,
+                account_id,
             )
 
             row = await conn.fetchrow(
                 """
                 INSERT INTO memories
                     (id, memory_store_id, path, content, content_sha256,
-                     content_size_bytes, current_version_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                     content_size_bytes, current_version_id, account_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 RETURNING *
                 """,
                 memory_id,
@@ -3989,6 +4009,7 @@ async def insert_memory_with_version(
                 content_sha256,
                 size_bytes,
                 version_id,
+                account_id,
             )
     except asyncpg.UniqueViolationError as exc:
         # Re-issue the lookup outside the rolled-back transaction so the
@@ -4188,8 +4209,8 @@ async def update_memory_with_version(
                 INSERT INTO memory_versions
                     (id, memory_store_id, memory_id, seq, operation, path,
                      content, content_sha256, content_size_bytes,
-                     created_by_type, created_by_ref)
-                VALUES ($1, $2, $3, $4, 'modified', $5, $6, $7, $8, $9, $10)
+                     created_by_type, created_by_ref, account_id)
+                VALUES ($1, $2, $3, $4, 'modified', $5, $6, $7, $8, $9, $10, $11)
                 """,
                 version_id,
                 store_id,
@@ -4201,6 +4222,7 @@ async def update_memory_with_version(
                 next_size,
                 actor_type,
                 actor_ref,
+                account_id,
             )
 
             row = await conn.fetchrow(
@@ -4266,8 +4288,8 @@ async def delete_memory_with_version(
             """
             INSERT INTO memory_versions
                 (id, memory_store_id, memory_id, seq, operation, path,
-                 created_by_type, created_by_ref)
-            VALUES ($1, $2, $3, $4, 'deleted', $5, $6, $7)
+                 created_by_type, created_by_ref, account_id)
+            VALUES ($1, $2, $3, $4, 'deleted', $5, $6, $7, $8)
             """,
             version_id,
             store_id,
@@ -4276,6 +4298,7 @@ async def delete_memory_with_version(
             cur["path"],
             actor_type,
             actor_ref,
+            account_id,
         )
 
         await conn.execute(
@@ -4422,8 +4445,8 @@ async def attach_memory_stores_to_session(
             """
             INSERT INTO session_memory_stores
                 (session_id, memory_store_id, rank, access, instructions,
-                 name_at_attach, description_at_attach)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 name_at_attach, description_at_attach, account_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """,
             session_id,
             res.memory_store_id,
@@ -4432,6 +4455,7 @@ async def attach_memory_stores_to_session(
             res.instructions,
             store.name,
             store.description,
+            account_id,
         )
 
 
@@ -4495,8 +4519,8 @@ async def attach_github_repos_to_session(
             """
             INSERT INTO session_github_repositories
                 (id, session_id, rank, repo_url, mount_path, ciphertext, nonce,
-                 git_user_name, git_user_email)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 git_user_name, git_user_email, account_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
             rid,
             session_id,
@@ -4507,6 +4531,7 @@ async def attach_github_repos_to_session(
             blob.nonce,
             git_user_name,
             git_user_email,
+            account_id,
         )
 
 
@@ -4903,14 +4928,15 @@ async def insert_runtime_token(
     )
     row = await conn.fetchrow(
         """
-        INSERT INTO runtime_tokens (id, connector, label, token_hash)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO runtime_tokens (id, connector, label, token_hash, account_id)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING *
         """,
         make_id(RUNTIME_TOKEN),
         connector,
         label,
         token_hash,
+        account_id,
     )
     assert row is not None
     return _row_to_runtime_token(row)
@@ -5021,9 +5047,9 @@ async def insert_file(
             """
             INSERT INTO files (
                 id, session_id, filename, host_path, in_sandbox_path,
-                size, content_type, sha256
+                size, content_type, sha256, account_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING *
             """,
             file_id,
@@ -5034,6 +5060,7 @@ async def insert_file(
             size,
             content_type,
             sha256,
+            account_id,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(

@@ -28,11 +28,13 @@ async def _ensure_agent_and_env(pool: asyncpg.Pool[Any]) -> tuple[str, str]:
     """Idempotently seed the FK targets ``create_session`` needs."""
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO agents (id, name, model) VALUES ('agt_err', 'err', 'openrouter/x') "
+            "INSERT INTO agents (id, name, model, account_id) "
+            "VALUES ('agt_err', 'err', 'openrouter/x', 'acc_test_stub') "
             "ON CONFLICT (id) DO NOTHING"
         )
         await conn.execute(
-            "INSERT INTO environments (id, name) VALUES ('env_err', 'env_err') "
+            "INSERT INTO environments (id, name, account_id) "
+            "VALUES ('env_err', 'env_err', 'acc_test_stub') "
             "ON CONFLICT (id) DO NOTHING"
         )
     return "agt_err", "env_err"
