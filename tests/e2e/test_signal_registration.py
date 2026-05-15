@@ -117,9 +117,15 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
             await wait_for_health(url)
             yield url
         finally:
-            server.should_exit = True
+            # uvicorn's ``should_exit`` is poll-based (500 ms tick); with an
+            # open SSE stream the poll routinely loses the race and the test
+            # eats the full 5 s wait_for timeout.  ``shutdown()`` triggers
+            # the graceful drain synchronously instead, then cancel the
+            # serve task to free the asyncio bookkeeping.
+            await server.shutdown()
+            serve_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.wait_for(serve_task, timeout=5.0)
+                await serve_task
             await pool.close()
 
 

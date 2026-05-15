@@ -87,9 +87,12 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
             await _wait_for_health(url)
             yield url
         finally:
-            server.should_exit = True
+            # See test_signal_registration.py for why ``should_exit`` alone
+            # loses the race against open SSE streams.
+            await server.shutdown()
+            serve_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.wait_for(serve_task, timeout=5.0)
+                await serve_task
             await pool.close()
 
 
