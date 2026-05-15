@@ -273,7 +273,32 @@ class SandboxRegistry:
         )
 
     async def release(self, session_id: str) -> None:
-        """Tear down one session's sandbox + proxy. No-op if not cached."""
+        """Tear down one session's sandbox + proxy. No-op if not cached.
+
+        Also clears worker-process runtime caches keyed on this session
+        (``_session_memory_mounts``, ``_session_read_shas`` in
+        :mod:`aios.harness.runtime`). Without this cleanup, every
+        session that ran a step on this worker left an entry that
+        persisted for the worker's process lifetime — slow unbounded
+        growth across long-running workers handling many sessions. The
+        caches are documented as "after session unload" but had no
+        production caller until this hook. Re-populated naturally by
+        the next step if the session wakes back up.
+
+        Deferred import of ``aios.harness.runtime`` matches the existing
+        pattern at :meth:`_provision_with_span` (line 191) and
+        :meth:`_release_mcp_broker_secret`-adjacent paths — the runtime
+        module lists ``aios.sandbox.registry`` under ``TYPE_CHECKING``,
+        so a top-level import here would create a runtime cycle.
+
+        Cleanup is sequenced BEFORE ``backend.destroy`` so the
+        "registry says unloaded ⇒ runtime caches cleared" invariant
+        holds even when ``destroy`` raises (Docker hiccup): a
+        half-finished release shouldn't leave stale per-session caches
+        pretending the session is still live.
+        """
+        from aios.harness import runtime
+
         handle = self._handles.pop(session_id, None)
         self._last_used.pop(session_id, None)
         proxy = self._git_proxies.pop(session_id, None)
@@ -281,6 +306,8 @@ class SandboxRegistry:
         if proxy is not None:
             await self._stop_proxy_silently(proxy, session_id)
         self._release_mcp_broker_secret(session_id)
+        runtime.clear_session_memory_mounts(session_id)
+        runtime.clear_session_read_shas(session_id)
         if handle is None:
             return
         await self._backend.destroy(handle)
@@ -312,13 +339,12 @@ class SandboxRegistry:
                 session_id=session_id,
                 container_id=handle.sandbox_id[:12],
             )
-            self._handles.pop(session_id, None)
-            self._last_used.pop(session_id, None)
-            proxy = self._git_proxies.pop(session_id, None)
-            if proxy is not None:
-                await self._stop_proxy_silently(proxy, session_id)
-            self._release_mcp_broker_secret(session_id)
-            await self._backend.destroy(handle)
+            # Delegate to release() so the runtime-cache cleanup and any
+            # future unload-event side effects stay in one place. Holding
+            # the per-session lock guards against a tool task from a prior
+            # step racing with the release via get_or_provision (which
+            # acquires the same lock).
+            await self.release(session_id)
 
     def peek(self, session_id: str) -> SandboxHandle | None:
         """Return the cached handle without provisioning. ``None`` if not cached."""
@@ -331,6 +357,8 @@ class SandboxRegistry:
         suggests the sandbox itself is unhealthy; the next tool call will
         cold-start a fresh one.
         """
+        from aios.harness import runtime
+
         self._last_used.pop(session_id, None)
         if self._handles.pop(session_id, None) is not None:
             log.info("sandbox.evicted", session_id=session_id)
@@ -344,6 +372,13 @@ class SandboxRegistry:
         # Same story for the MCP broker secret: drop it immediately; a
         # fresh sandbox will get a fresh secret from the next provision.
         self._release_mcp_broker_secret(session_id)
+        # Drop the runtime read-sha cache so a fresh sandbox doesn't
+        # serve a stale precondition match against a different
+        # container's file state. Memory mounts are re-populated at the
+        # top of every step (loop.py:87) so leaving them is harmless,
+        # but symmetry argues for clearing both.
+        runtime.clear_session_memory_mounts(session_id)
+        runtime.clear_session_read_shas(session_id)
 
     async def release_all(self) -> None:
         """Tear down every sandbox + proxy. Called at worker shutdown."""
