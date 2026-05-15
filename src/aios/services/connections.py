@@ -31,16 +31,22 @@ from aios.models.connections import (
 )
 
 
-def _encrypt_secrets(secrets: dict[str, str] | None, crypto_box: CryptoBox) -> EncryptedBlob | None:
+def _encrypt_secrets(
+    secrets: dict[str, str] | None, crypto_box: CryptoBox, *, account_id: str
+) -> EncryptedBlob | None:
     """Encrypt a secrets dict, or ``None`` if the dict is missing or empty.
 
     Empty / missing → no blob → schema columns NULL → ``secrets_set: False``.
     The operator surface treats ``None`` and ``{}`` identically (both
     "clear secrets") so create + PUT produce the same row state.
+
+    Encryption is keyed to ``account_id`` via :meth:`CryptoBox.derive_account_subkey`
+    so a connection's secrets can't be decrypted by another tenant's
+    derived key even if the row leaks.
     """
     if not secrets:
         return None
-    return crypto_box.encrypt_dict(secrets)
+    return crypto_box.derive_account_subkey(account_id).encrypt_dict(secrets)
 
 
 async def create_connection(
@@ -59,7 +65,7 @@ async def create_connection(
             connector=connector,
             account=account,
             metadata=metadata,
-            secrets_blob=_encrypt_secrets(secrets, crypto_box),
+            secrets_blob=_encrypt_secrets(secrets, crypto_box, account_id=account_id),
             account_id=account_id,
         )
 
@@ -82,7 +88,7 @@ async def set_connection_secrets(
         return await queries.set_connection_secrets(
             conn,
             connection_id,
-            secrets_blob=_encrypt_secrets(secrets, crypto_box),
+            secrets_blob=_encrypt_secrets(secrets, crypto_box, account_id=account_id),
             account_id=account_id,
         )
 
@@ -106,7 +112,7 @@ async def get_connection_secrets(
         blob = await queries.get_connection_secret_blob(conn, connection_id, account_id=account_id)
     if blob is None:
         return {}
-    decoded = crypto_box.decrypt_dict(blob)
+    decoded = crypto_box.derive_account_subkey(account_id).decrypt_dict(blob)
     return {str(k): str(v) for k, v in decoded.items()}
 
 

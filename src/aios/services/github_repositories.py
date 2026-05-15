@@ -28,9 +28,13 @@ from aios.models.github_repositories import (
 from aios.sandbox.github_clone import remove_session_working_tree
 
 
-def _encrypt_token(crypto_box: CryptoBox, token: str) -> Any:
-    """Encrypt a github auth token. Returns an :class:`EncryptedBlob`."""
-    return crypto_box.encrypt(token)
+def _encrypt_token(crypto_box: CryptoBox, token: str, *, account_id: str) -> Any:
+    """Encrypt a github auth token. Returns an :class:`EncryptedBlob`.
+
+    Keyed to ``account_id`` via :meth:`CryptoBox.derive_account_subkey` so
+    the embedded token can't be decrypted under another tenant's key.
+    """
+    return crypto_box.derive_account_subkey(account_id).encrypt(token)
 
 
 async def _list_attached_resource_ids(
@@ -68,7 +72,9 @@ async def attach_to_session(
         return
     entries: list[tuple[str, str, Any, str | None, str | None]] = []
     for res in resources:
-        blob = _encrypt_token(crypto_box, res.authorization_token.get_secret_value())
+        blob = _encrypt_token(
+            crypto_box, res.authorization_token.get_secret_value(), account_id=account_id
+        )
         entries.append((res.url, res.mount_path, blob, res.git_user_name, res.git_user_email))
     try:
         await queries.attach_github_repos_to_session(
@@ -166,7 +172,7 @@ async def rotate_token(
     unset and the stored ``git_user_name`` / ``git_user_email`` survive
     the rotation.
     """
-    blob = _encrypt_token(crypto_box, new_token)
+    blob = _encrypt_token(crypto_box, new_token, account_id=account_id)
     async with pool.acquire() as conn, conn.transaction():
         return await queries.update_session_github_repo_blob(
             conn,
@@ -195,4 +201,4 @@ async def get_session_token(
     _, blob = await queries.get_session_github_repo_with_blob(
         conn, session_id, resource_id, account_id=account_id
     )
-    return crypto_box.decrypt(blob)
+    return crypto_box.derive_account_subkey(account_id).decrypt(blob)
