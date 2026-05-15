@@ -4306,16 +4306,25 @@ async def get_memory_by_path(
 async def list_active_memory_paths_and_content(
     conn: asyncpg.Connection[Any],
     store_id: str,
+    *,
+    account_id: str,
 ) -> list[tuple[str, str]]:
     """Bulk-fetch ``(path, content)`` for every non-deleted memory in the store.
 
     Used by sandbox materialization, which needs all live memories in one
     DB roundtrip rather than ``list_memories`` (metadata only) followed by
     a per-memory ``get_memory(include_content=True)`` fan-out.
+
+    ``account_id`` is enforced in SQL even though the upstream caller has
+    already account-validated ``store_id`` via
+    ``list_session_memory_store_echoes`` — defense in depth so the
+    materializer can't be coerced into reading another tenant's memories.
     """
     rows = await conn.fetch(
-        "SELECT path, content FROM memories WHERE memory_store_id = $1 AND deleted_at IS NULL",
+        "SELECT path, content FROM memories "
+        "WHERE memory_store_id = $1 AND account_id = $2 AND deleted_at IS NULL",
         store_id,
+        account_id,
     )
     return [(r["path"], r["content"]) for r in rows]
 
