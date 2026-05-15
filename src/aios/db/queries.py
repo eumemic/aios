@@ -844,7 +844,9 @@ async def set_session_status(
         and stop_reason.get("type") == "requires_action"
         and stop_reason.get("custom_tools")
     ):
-        for cid, connector in await _list_bound_connection_ids(conn, session_id):
+        for cid, connector in await _list_bound_connection_ids(
+            conn, session_id, account_id=account_id
+        ):
             await conn.execute(
                 "SELECT pg_notify($1, $2)",
                 f"connector_calls_{connector}",
@@ -1827,7 +1829,7 @@ async def _pending_calls_for_session(
 
 
 async def _list_bound_connection_ids(
-    conn: asyncpg.Connection[Any], session_id: str
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> list[tuple[str, str]]:
     """``(connection_id, connector)`` pairs for active connections bound to ``session_id``.
 
@@ -1841,9 +1843,15 @@ async def _list_bound_connection_ids(
         SELECT c.id, c.connector
           FROM connections c
          WHERE c.archived_at IS NULL
-           AND {_session_bound_to_connection_predicate(connection_alias="c", session_param_index=1)}
+           AND c.account_id = $2
+           AND {
+            _session_bound_to_connection_predicate(
+                connection_alias="c", session_param_index=1, account_id_param_index=2
+            )
+        }
         """,
         session_id,
+        account_id,
     )
     return [(row["id"], row["connector"]) for row in rows]
 
@@ -1867,11 +1875,17 @@ async def is_session_bound_to_connection(
           FROM connections c
          WHERE c.id = $1
            AND c.archived_at IS NULL
-           AND {_session_bound_to_connection_predicate(connection_alias="c", session_param_index=2)}
+           AND c.account_id = $3
+           AND {
+            _session_bound_to_connection_predicate(
+                connection_alias="c", session_param_index=2, account_id_param_index=3
+            )
+        }
          LIMIT 1
         """,
         connection_id,
         session_id,
+        account_id,
     )
     return row is not None
 
@@ -2870,7 +2884,10 @@ async def resolve_skill_refs(
 
 
 def _session_bound_to_connection_predicate(
-    *, connection_alias: str, session_param_index: int
+    *,
+    connection_alias: str,
+    session_param_index: int,
+    account_id_param_index: int,
 ) -> str:
     """SQL fragment for "this session is bound to ``<connection_alias>``."
 
@@ -2883,15 +2900,24 @@ def _session_bound_to_connection_predicate(
 
     * an active ``single_session`` binding whose ``session_id`` matches; or
     * a row in ``chat_sessions`` for ``(connection_id, session_id)``.
+
+    Both ``bindings`` and ``chat_sessions`` are account-scoped tables, so
+    the predicate filters on ``account_id`` defensively even when the
+    outer connections query already filtered on the same account. The
+    redundancy is cheap (covered by the existing indexes) and gives the
+    SQL layer the same tenant-isolation invariant the function signatures
+    promise.
     """
     return f"""(
         EXISTS (SELECT 1 FROM bindings b
                  WHERE b.connection_id = {connection_alias}.id
                    AND b.archived_at IS NULL
-                   AND b.session_id = ${session_param_index})
+                   AND b.session_id = ${session_param_index}
+                   AND b.account_id = ${account_id_param_index})
         OR EXISTS (SELECT 1 FROM chat_sessions cs
                     WHERE cs.connection_id = {connection_alias}.id
-                      AND cs.session_id = ${session_param_index})
+                      AND cs.session_id = ${session_param_index}
+                      AND cs.account_id = ${account_id_param_index})
     )"""
 
 
@@ -3328,10 +3354,16 @@ async def list_connection_tools_for_session(
                 SELECT DISTINCT c.connector
                   FROM connections c
                  WHERE c.archived_at IS NULL
-                   AND {_session_bound_to_connection_predicate(connection_alias="c", session_param_index=1)}
+                   AND c.account_id = $2
+                   AND {
+            _session_bound_to_connection_predicate(
+                connection_alias="c", session_param_index=1, account_id_param_index=2
+            )
+        }
             )
         """,
         session_id,
+        account_id,
     )
     out: list[dict[str, Any]] = []
     for row in rows:
