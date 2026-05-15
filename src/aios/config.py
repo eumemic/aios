@@ -152,6 +152,13 @@ class Settings(BaseSettings):
         description="Seconds of inactivity before a session's sandbox container "
         "is released. The idle reaper checks every 60s.",
     )
+    mcp_pool_idle_timeout_seconds: int = Field(
+        default=900,
+        ge=30,
+        description="Seconds of inactivity before a pooled MCP session is "
+        "closed. An OAuth token refresh rotates the bearer, orphaning the "
+        "old keyed entry; the idle reaper (checks every 60s) reclaims it.",
+    )
 
     # ── database pool ──────────────────────────────────────────────────────
     db_pool_max_size: int = Field(

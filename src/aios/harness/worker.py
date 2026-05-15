@@ -176,8 +176,9 @@ async def worker_main() -> None:
         if reaped:
             log.info("worker.reaped_orphan_containers", count=reaped)
 
-        # Start container idle-TTL reaper.
+        # Start container + MCP-pool idle-TTL reapers.
         sandbox_registry.start_reaper(idle_timeout=settings.container_idle_timeout_seconds)
+        mcp_session_pool.start_reaper(idle_timeout=settings.mcp_pool_idle_timeout_seconds)
 
         # Start periodic sweep (every 30s).
         sweep_task = asyncio.create_task(
@@ -234,6 +235,7 @@ async def worker_main() -> None:
         if sandbox_registry is not None:
             await sandbox_registry.release_all()
         if mcp_session_pool is not None:
+            mcp_session_pool.stop_reaper()
             await mcp_session_pool.close_all()
         if mcp_broker is not None:
             await mcp_broker.stop()
