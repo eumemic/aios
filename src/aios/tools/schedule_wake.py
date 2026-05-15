@@ -13,6 +13,7 @@ from typing import Any
 
 from aios.errors import AiosError
 from aios.harness import runtime
+from aios.services import sessions as sessions_service
 from aios.services.wake import defer_wake
 from aios.tools.registry import registry
 
@@ -63,7 +64,7 @@ SCHEDULE_WAKE_PARAMETERS_SCHEMA: dict[str, Any] = {
 
 
 async def schedule_wake_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    account_id = ""  # PR 4 stub; needs upstream threading
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     delay_seconds = arguments.get("delay_seconds")
     if not isinstance(delay_seconds, int):
         raise ScheduleWakeArgumentError("delay_seconds must be an integer")

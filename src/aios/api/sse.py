@@ -141,6 +141,8 @@ async def runtime_connector_calls_stream(
     db_url: str,
     pool: asyncpg.Pool[Any],
     connector: str,
+    *,
+    account_id: str,
 ) -> AsyncIterator[ServerSentEvent]:
     """Yield SSE events for pending custom tool calls across every active
     connection of ``connector`` type (#328 PR 5).
@@ -152,7 +154,6 @@ async def runtime_connector_calls_stream(
     Backfills any pending calls at subscribe time, then tails the
     ``connector_calls_<connector>`` NOTIFY channel.
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
     async with listen_for_connector_calls_by_type(db_url, connector) as queue:
         emitted: set[str] = set()
 
@@ -190,6 +191,8 @@ async def management_calls_stream(
     db_url: str,
     pool: asyncpg.Pool[Any],
     connector: str,
+    *,
+    account_id: str,
 ) -> AsyncIterator[ServerSentEvent]:
     """Yield SSE events for pending management calls of ``connector`` type.
 
@@ -197,7 +200,6 @@ async def management_calls_stream(
     ``connector_management_calls_<connector>``.  Each event:
     ``{"call_id": "mgmt_...", "method": str, "params": dict}``.
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
     async with listen_for_management_calls(db_url, connector) as queue:
         emitted: set[str] = set()
 
@@ -234,6 +236,8 @@ async def connection_discovery_stream(
     db_url: str,
     pool: asyncpg.Pool[Any],
     connector: str,
+    *,
+    account_id: str,
 ) -> AsyncIterator[ServerSentEvent]:
     """Yield ``added`` SSE events backfilling every active connection of
     ``connector`` type, then ``added`` / ``removed`` events as connections
@@ -245,7 +249,6 @@ async def connection_discovery_stream(
     side lives in :mod:`aios.services.connections.attach_connection` /
     ``archive_connection``.
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
     async with listen_for_connection_discovery(db_url, connector) as queue:
         emitted_added: set[str] = set()
 

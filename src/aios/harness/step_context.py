@@ -83,6 +83,7 @@ async def compute_step_prelude(
     pool: asyncpg.Pool[Any],
     session_id: str,
     *,
+    account_id: str,
     session: Session,
     agent: Agent | AgentVersion,
     channels: list[str],
@@ -95,7 +96,6 @@ async def compute_step_prelude(
     :func:`compose_step_context` unchanged, so the composed prompt stays
     byte-identical to what it was before the split.
     """
-    account_id = ""  # PR 4 stub; PR 5 threads from caller
     from aios.harness.channels import (
         augment_with_focal_paradigm,
         max_tail_block_local,
@@ -116,7 +116,9 @@ async def compute_step_prelude(
 
     instructions_block = ""
     if agent.mcp_servers:
-        mcp_tools, mcp_instructions = await discover_session_mcp_tools(pool, session_id, agent)
+        mcp_tools, mcp_instructions = await discover_session_mcp_tools(
+            pool, session_id, agent, account_id=account_id
+        )
         tools.extend(mcp_tools)
         instructions_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
 

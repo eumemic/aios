@@ -27,6 +27,7 @@ class ResolvedRuntimeToken(NamedTuple):
 
     token_id: str
     connector: str
+    account_id: str
 
 
 _TOKEN_PREFIX = "aios_runtime_"
@@ -77,19 +78,21 @@ async def revoke(pool: asyncpg.Pool[Any], token_id: str, *, account_id: str) -> 
         return await queries.revoke_runtime_token(conn, token_id, account_id=account_id)
 
 
-async def resolve(
-    pool: asyncpg.Pool[Any], plaintext: str, *, account_id: str
-) -> ResolvedRuntimeToken | None:
+async def resolve(pool: asyncpg.Pool[Any], plaintext: str) -> ResolvedRuntimeToken | None:
     """Resolve a plaintext bearer to a ``ResolvedRuntimeToken`` or ``None``.
 
     Touches ``last_used_at`` as a side effect.  Returns ``None`` for
     misses, revoked tokens, and plaintext lacking the prefix.
+
+    No ``account_id`` parameter: this is the auth-bootstrap entry point.
+    The matched row's account_id becomes the authenticated scope for
+    downstream queries.
     """
     if not plaintext.startswith(_TOKEN_PREFIX):
         return None
     async with pool.acquire() as conn:
-        row = await queries.resolve_runtime_token(conn, _hash(plaintext), account_id=account_id)
+        row = await queries.resolve_runtime_token(conn, _hash(plaintext))
     if row is None:
         return None
-    token_id, connector = row
-    return ResolvedRuntimeToken(token_id=token_id, connector=connector)
+    token_id, connector, account_id = row
+    return ResolvedRuntimeToken(token_id=token_id, connector=connector, account_id=account_id)

@@ -30,7 +30,6 @@ def hash_key(plaintext: str) -> bytes:
 async def bootstrap_root(
     pool: asyncpg.Pool[Any],
     *,
-    account_id: str,
     display_name: str,
 ) -> BootstrapResponse:
     """Create the root account and mint its first API key."""
@@ -42,7 +41,6 @@ async def bootstrap_root(
             display_name=display_name,
             key_hash=key_hash,
             key_label=_BOOTSTRAP_KEY_LABEL,
-            account_id=account_id,
         )
     return BootstrapResponse(
         account_id=account.id,

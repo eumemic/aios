@@ -75,7 +75,6 @@ def _make_worker_id() -> str:
 
 
 async def worker_main() -> None:
-    account_id = ""  # PR 4 stub; needs upstream threading
     settings = get_settings()
     configure_logging(settings.log_level)
     log = get_logger("aios.worker")
@@ -164,7 +163,7 @@ async def worker_main() -> None:
 
         # Reap orphaned sandbox containers.
         async with pool.acquire() as conn:
-            active_session_ids = await queries.list_running_session_ids(conn, account_id=account_id)
+            active_session_ids = await queries.list_running_session_ids(conn)
         reaped = await sandbox_registry.reap_orphans(active_session_ids)
         if reaped:
             log.info("worker.reaped_orphan_containers", count=reaped)

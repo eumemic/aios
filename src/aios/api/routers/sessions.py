@@ -506,6 +506,7 @@ async def get_context(
     prelude = await compute_step_prelude(
         pool,
         session_id,
+        account_id=account_id,
         session=session,
         agent=agent,
         channels=channels,

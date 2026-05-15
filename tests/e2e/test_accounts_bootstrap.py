@@ -213,7 +213,6 @@ class TestBootstrap:
         (404), matching the post-bootstrap behavior — otherwise the
         endpoint's stated invariant breaks under concurrency.
         """
-        account_id = "acc_test_stub"  # PR 3 scaffolding
         # Pre-seed a root to put the DB in the "already bootstrapped"
         # state, then call ``bootstrap_root_account`` directly — this is
         # the same code path the race-loser hits at the INSERT step.
@@ -233,7 +232,6 @@ class TestBootstrap:
                     display_name="loser",
                     key_hash=b"\x00" * 32,
                     key_label="bootstrap",
-                    account_id=account_id,
                 )
 
 

@@ -51,7 +51,6 @@ async def sweep_orphan_attachments(pool: asyncpg.Pool[Any]) -> int:
     files from cleanup of empty dirs (the latter is a future polish
     item alongside session deletion).
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
     root = attachments_root()
     if not root.exists():
         return 0
@@ -77,7 +76,7 @@ async def sweep_orphan_attachments(pool: asyncpg.Pool[Any]) -> int:
 
     async with pool.acquire() as conn:
         referenced_by_session = await queries.list_attachment_paths_for_sessions(
-            conn, list(on_disk_by_session), account_id=account_id
+            conn, list(on_disk_by_session)
         )
 
     deleted = 0

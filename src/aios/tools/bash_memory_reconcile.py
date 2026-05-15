@@ -28,6 +28,7 @@ from aios.models.memory_stores import MAX_CONTENT_BYTES
 from aios.sandbox.memory_mounts import MATERIALIZED_MARKER
 from aios.sandbox.volumes import memory_store_host_dir
 from aios.services import memory_stores as memory_service
+from aios.services import sessions as sessions_service
 from aios.services.memory_stores import SessionActor
 
 log = get_logger("aios.tools.bash_memory_reconcile")
@@ -188,7 +189,7 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
     warning string (collected and returned).  DB errors propagate — they are
     the session's problem to recover from through the normal error channel.
     """
-    account_id = ""  # PR 4 stub; needs upstream threading
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     # Build after snapshot as (store_id, store_path) -> bytes in one pass.
     # Using bytes avoids re-reading files during the create/modify loops.
     after_bytes = _snapshot_with_bytes(session_id)

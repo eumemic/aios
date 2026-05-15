@@ -105,6 +105,7 @@ class TestConnectionToolsInPrelude:
         prelude = await compute_step_prelude(
             pool=harness._pool,
             session_id=session.id,
+            account_id=account_id,
             session=await sess_svc.get_session(harness._pool, session.id, account_id=account_id),
             agent=agent,
             channels=[],
@@ -214,6 +215,7 @@ class TestConnectionToolsInPrelude:
         prelude = await compute_step_prelude(
             pool=harness._pool,
             session_id=session.id,
+            account_id=account_id,
             session=await sess_svc.get_session(harness._pool, session.id, account_id=account_id),
             agent=agent,
             channels=[],

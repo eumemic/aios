@@ -114,12 +114,12 @@ class SandboxRegistry:
     async def _provision_with_span(
         self, session_id: str, *, pool: asyncpg.Pool[Any] | None
     ) -> SandboxHandle:
-        account_id = ""  # PR 4 stub; PR 5 threads from caller
         if pool is None:
             return await self._provision(session_id)
 
         from aios.services import sessions as sessions_service
 
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
         span_start = await sessions_service.append_event(
             pool, session_id, "span", {"event": "sandbox_provision_start"}, account_id=account_id
         )
