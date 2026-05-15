@@ -211,8 +211,10 @@ async def get_environment_config_for_session(
         SELECT e.config FROM environments e
         JOIN sessions s ON s.environment_id = e.id
         WHERE s.id = $1
+          AND s.account_id = $2
         """,
         session_id,
+        account_id,
     )
     if row is None:
         return None
@@ -912,8 +914,10 @@ async def get_session_model(
      LEFT JOIN agent_versions av
             ON av.agent_id = s.agent_id AND av.version = s.agent_version
          WHERE s.id = $1
+           AND s.account_id = $2
         """,
         session_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
@@ -2523,8 +2527,9 @@ async def batch_get_session_vault_ids(
         return {}
     rows = await conn.fetch(
         "SELECT session_id, vault_id FROM session_vaults "
-        "WHERE session_id = ANY($1) ORDER BY session_id, rank",
+        "WHERE session_id = ANY($1) AND account_id = $2 ORDER BY session_id, rank",
         session_ids,
+        account_id,
     )
     result: dict[str, list[str]] = {sid: [] for sid in session_ids}
     for r in rows:
@@ -3801,15 +3806,20 @@ async def list_session_templates(
 ) -> list[SessionTemplate]:
     if after is None:
         rows = await conn.fetch(
-            "SELECT * FROM session_templates WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            "SELECT * FROM session_templates "
+            "WHERE archived_at IS NULL AND account_id = $2 "
+            "ORDER BY id DESC LIMIT $1",
             limit,
+            account_id,
         )
     else:
         rows = await conn.fetch(
-            "SELECT * FROM session_templates WHERE archived_at IS NULL AND id < $1 "
+            "SELECT * FROM session_templates "
+            "WHERE archived_at IS NULL AND id < $1 AND account_id = $3 "
             "ORDER BY id DESC LIMIT $2",
             after,
             limit,
+            account_id,
         )
     return [_row_to_session_template(r) for r in rows]
 
@@ -4295,8 +4305,8 @@ async def list_memories(
             detail={"order_by": order_by, "depth": depth},
         )
 
-    where = "memory_store_id = $1 AND deleted_at IS NULL"
-    args: list[Any] = [store_id]
+    where = "memory_store_id = $1 AND deleted_at IS NULL AND account_id = $2"
+    args: list[Any] = [store_id, account_id]
     if path_prefix:
         args.append(path_prefix)
         # Escape LIKE metacharacters so the prefix matches literally — paths
