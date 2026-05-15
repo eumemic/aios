@@ -4050,8 +4050,9 @@ async def archive_memory_store(
 ) -> MemoryStore:
     row = await conn.fetchrow(
         "UPDATE memory_stores SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
         store_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -5640,6 +5641,25 @@ async def update_account(
             detail={"display_name": display_name, "account_id": account_id},
         ) from exc
     return _row_to_account(row) if row is not None else None
+
+
+async def hard_delete_account(conn: asyncpg.Connection[Any], account_id: str) -> bool:
+    """Hard-delete an already-archived account row.
+
+    Returns ``True`` iff a row was actually deleted. Returns ``False``
+    when the row didn't exist, was not archived, or was prevented by a
+    ``ON DELETE RESTRICT`` FK from a resource table — the FKs all use
+    RESTRICT, so the caller must already have ensured zero archived
+    AND zero non-archived rows reference this account before invoking.
+
+    Compliance / GDPR-style hard deletes use this — the soft-archive
+    ``archive_account`` is the normal path. Idempotent.
+    """
+    result = await conn.execute(
+        "DELETE FROM accounts WHERE id = $1 AND archived_at IS NOT NULL",
+        account_id,
+    )
+    return bool(result.endswith(" 1"))
 
 
 async def count_active_child_accounts(conn: asyncpg.Connection[Any], parent_account_id: str) -> int:

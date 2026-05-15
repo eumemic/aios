@@ -238,6 +238,58 @@ async def update_account(
     return updated
 
 
+async def purge_account(
+    pool: asyncpg.Pool[Any], *, target_account_id: str, caller_account_id: str
+) -> None:
+    """Hard-delete a direct child of the caller. Refuses if not archived.
+
+    The compliance hard-delete path. Strict preconditions: the child
+    MUST already be soft-archived (call ``archive_child`` first), and
+    MUST have zero non-archived children of its own. Re-purging an
+    already-deleted account is a no-op success (idempotent — the
+    contract is "the row is gone after this call").
+
+    The caller can't purge itself: top-level purges are operator-side
+    DB work, not a management API responsibility.
+    """
+    if target_account_id == caller_account_id:
+        raise ConflictError(
+            "an account cannot purge itself via the management API",
+            detail={"account_id": caller_account_id},
+        )
+    target = await get_account_in_scope(
+        pool, target_account_id, caller_account_id=caller_account_id
+    )
+    if target.archived_at is None:
+        raise ConflictError(
+            f"account {target_account_id} is not archived; "
+            "soft-archive (DELETE /v1/accounts/{id}) before purging",
+            detail={"account_id": target_account_id},
+        )
+    async with pool.acquire() as conn:
+        active_kids = await queries.count_active_child_accounts(conn, target_account_id)
+    if active_kids > 0:
+        raise ConflictError(
+            f"account {target_account_id} has {active_kids} non-archived children; "
+            "archive them first",
+            detail={"account_id": target_account_id, "active_children": active_kids},
+        )
+    async with pool.acquire() as conn:
+        deleted = await queries.hard_delete_account(conn, target_account_id)
+    if not deleted:
+        # Row already gone (idempotent) OR a resource FK still references it.
+        # Re-read to distinguish; if the row is missing the call succeeded
+        # under a prior purge.
+        async with pool.acquire() as conn:
+            still_there = await queries.get_account(conn, target_account_id)
+        if still_there is not None:
+            raise ConflictError(
+                f"account {target_account_id} cannot be hard-deleted while "
+                "resources still reference it; archive its resources first",
+                detail={"account_id": target_account_id},
+            )
+
+
 async def archive_child(
     pool: asyncpg.Pool[Any],
     *,
