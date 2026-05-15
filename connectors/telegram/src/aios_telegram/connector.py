@@ -225,14 +225,30 @@ class TelegramConnector(HttpConnector):
         }
         metadata = build_metadata(msg, state.bot_id)
         attachments = await self._download_attachments(state, msg.attachments)
+        # Telegram's (chat_id, message_id) pair is the platform's
+        # canonical message identity; feeding it as ``event_id`` lets
+        # aios's ``inbound_acks`` dedupe a redelivered update after a
+        # runtime restart (PTB's offset rewinds replay unread updates
+        # the new container also sees). But Telegram PRESERVES
+        # message_id across edits — an edit arrives as a fresh update
+        # with the same id — so a naive (chat_id, message_id) event_id
+        # makes every edit collide with the original and get silently
+        # dropped by the dedup ledger, contradicting the documented
+        # contract (prompts.py: "Edits arrive as a fresh inbound").
+        # Suffix the edit timestamp so each revision is a distinct
+        # inbound; non-edited messages keep the bare id, preserving the
+        # restart-redelivery dedup property for the common case.
+        # Ceiling: Telegram's edit_date is second-resolution, so two
+        # edits of the same message within one wall-clock second still
+        # collide and the second is dedup-dropped. That's the platform's
+        # observability limit (no finer timestamp is exposed), not a
+        # fixable gap here.
+        event_id = f"telegram-{msg.chat_id}-{msg.message_id}"
+        if msg.edit_date_ms is not None:
+            event_id = f"{event_id}-e{msg.edit_date_ms}"
         await self.emit_inbound(
             connection_id=connection_id,
-            # Telegram's (chat_id, message_id) pair is the platform's
-            # canonical message identity; feeding it as ``event_id``
-            # lets aios's ``inbound_acks`` dedupe a redelivered update
-            # after a runtime restart (PTB's offset rewinds replay
-            # unread updates the new container also sees).
-            event_id=f"telegram-{msg.chat_id}-{msg.message_id}",
+            event_id=event_id,
             chat_id=str(msg.chat_id),
             sender=sender_payload,
             content=msg.text,
