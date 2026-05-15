@@ -125,4 +125,13 @@ jobs:
         run: docker build -t ghcr.io/eumemic/aios-sandbox:latest -f docker/Dockerfile.sandbox .
 
       - name: E2E tests
-        run: uv run pytest tests/e2e -q
+        # The signal_connector / signal_registration / telegram_connector
+        # tests need external daemon RPC infrastructure (signal-cli, a live
+        # telegram bot) that GitHub Actions doesn't supply; they are
+        # consistently failing in CI even when nothing about their code
+        # path has changed. Run them locally with the daemons up.
+        run: |
+          uv run pytest tests/e2e -q \
+            --ignore=tests/e2e/test_signal_connector.py \
+            --ignore=tests/e2e/test_signal_registration.py \
+            --ignore=tests/e2e/test_telegram_connector.py
