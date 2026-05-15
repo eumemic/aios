@@ -93,6 +93,7 @@ def _root(
 # Subcommand registration. Imports live here (at the bottom of the module)
 # so command modules can import from ``aios.cli.runtime`` / ``aios.cli.app``
 # without causing a circular import.
+from aios.cli.commands import accounts as _accounts  # noqa: E402
 from aios.cli.commands import agents as _agents  # noqa: E402
 from aios.cli.commands import chat as _chat  # noqa: E402
 from aios.cli.commands import connections as _connections  # noqa: E402
@@ -107,6 +108,7 @@ from aios.cli.commands import status as _status  # noqa: E402
 from aios.cli.commands import tail as _tail  # noqa: E402
 from aios.cli.commands import vaults as _vaults  # noqa: E402
 
+app.add_typer(_accounts.app, name="accounts")
 app.add_typer(_agents.app, name="agents")
 app.add_typer(_sessions.app, name="sessions")
 app.add_typer(_session_templates.app, name="session-templates")
