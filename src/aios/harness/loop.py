@@ -147,7 +147,7 @@ async def run_session_step(
             # fire. Force a reschedulable error state so the next wake can
             # proceed (matches what the body's litellm-error handler does).
             log.exception("step.job_timeout", session_id=session_id, timeout=_JOB_TIMEOUT_S)
-            retry_delay = await _handle_step_timeout(pool, session_id)
+            retry_delay = await _handle_step_timeout(pool, session_id, account_id=account_id)
         except Exception:
             # Unexpected harness error (not a model/tool error — those are caught
             # inside _run_session_step_body). Emit a span so the event log has a
@@ -161,7 +161,7 @@ async def run_session_step(
                 {"event": "harness_error", "is_error": True},
                 account_id=account_id,
             )
-            retry_delay = await _apply_retry_or_failure(pool, session_id)
+            retry_delay = await _apply_retry_or_failure(pool, session_id, account_id=account_id)
             if retry_delay is None:
                 raise
     finally:
@@ -305,12 +305,12 @@ async def _run_session_step_body(
 
     # Check for confirmed-but-undispatched tool calls (always_ask → allow).
     # The sweep's case (c) ensures we passed the guard above.
-    pending = await _dispatch_confirmed_tools(pool, session_id, events)
+    pending = await _dispatch_confirmed_tools(pool, session_id, events, account_id=account_id)
     if pending:
         pending_builtin = [tc for tc in pending if not _is_mcp_tool(_tc_name(tc))]
         pending_mcp = [tc for tc in pending if _is_mcp_tool(_tc_name(tc))]
         if pending_builtin:
-            launch_tool_calls(pool, session_id, pending_builtin)
+            launch_tool_calls(pool, session_id, pending_builtin, account_id=account_id)
         if pending_mcp:
             launch_mcp_tool_calls(
                 pool,
@@ -318,6 +318,7 @@ async def _run_session_step_body(
                 pending_mcp,
                 mcp_server_map,
                 focal_channel=session.focal_channel,
+                account_id=account_id,
             )
         log.info(
             "step.confirmed_tools_dispatched",
@@ -440,7 +441,7 @@ async def _run_session_step_body(
             },
             account_id=account_id,
         )
-        return await _apply_retry_or_failure(pool, session_id)
+        return await _apply_retry_or_failure(pool, session_id, account_id=account_id)
 
     # ``local_tokens`` costs the full payload (messages + tools) so it
     # matches what the provider counts.  The error branch above stays
@@ -519,7 +520,7 @@ async def _run_session_step_body(
                 unknown_mcp.append(tc)
 
         if immediate:
-            launch_tool_calls(pool, session_id, immediate)
+            launch_tool_calls(pool, session_id, immediate, account_id=account_id)
             log.info(
                 "step.tools_launched",
                 session_id=session_id,
@@ -543,6 +544,7 @@ async def _run_session_step_body(
                 immediate_mcp,
                 mcp_server_map,
                 focal_channel=session.focal_channel,
+                account_id=account_id,
             )
             log.info(
                 "step.mcp_tools_launched",
@@ -573,7 +575,14 @@ async def _run_session_step_body(
                 stop_reason=stop_reason,
                 account_id=account_id,
             )
-            await _append_lifecycle(pool, session_id, "turn_ended", "idle", "requires_action")
+            await _append_lifecycle(
+                pool,
+                session_id,
+                "turn_ended",
+                "idle",
+                "requires_action",
+                account_id=account_id,
+            )
             log.info(
                 "step.tools_pending",
                 session_id=session_id,
@@ -585,7 +594,9 @@ async def _run_session_step_body(
         await sessions_service.set_session_status(
             pool, session_id, "idle", stop_reason={"type": "end_turn"}, account_id=account_id
         )
-        await _append_lifecycle(pool, session_id, "turn_ended", "idle", "end_turn")
+        await _append_lifecycle(
+            pool, session_id, "turn_ended", "idle", "end_turn", account_id=account_id
+        )
         log.info("step.turn_ended", session_id=session_id, cause=cause)
     return None
 
@@ -815,13 +826,14 @@ async def _dispatch_confirmed_tools(
     pool: Any,
     session_id: str,
     message_events: list[Any],
+    *,
+    account_id: str,
 ) -> list[dict[str, Any]]:
     """Find tool calls that have been confirmed (allow) but not yet dispatched.
 
     Returns the original tool call dicts ready for ``launch_tool_calls``,
     or an empty list if nothing to dispatch.
     """
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
     # Find the latest assistant message with tool_calls.
     asst_tool_calls: list[dict[str, Any]] = []
     for e in reversed(message_events):
@@ -866,7 +878,7 @@ async def _dispatch_confirmed_tools(
     return pending
 
 
-async def _apply_retry_or_failure(pool: Any, session_id: str) -> float | None:
+async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str) -> float | None:
     """Apply the rescheduling state when backoff budget allows; otherwise
     mark a terminal error.
 
@@ -875,8 +887,7 @@ async def _apply_retry_or_failure(pool: Any, session_id: str) -> float | None:
     state.  Both branches advance the session's lifecycle and status;
     the caller decides whether to also propagate an exception.
     """
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
-    attempt = await _count_consecutive_rescheduling(pool, session_id)
+    attempt = await _count_consecutive_rescheduling(pool, session_id, account_id=account_id)
     delay = _retry_delay_for_attempt(attempt)
     if delay is not None:
         await sessions_service.set_session_status(
@@ -886,7 +897,14 @@ async def _apply_retry_or_failure(pool: Any, session_id: str) -> float | None:
             stop_reason={"type": "rescheduling"},
             account_id=account_id,
         )
-        await _append_lifecycle(pool, session_id, "turn_ended", "rescheduling", "rescheduling")
+        await _append_lifecycle(
+            pool,
+            session_id,
+            "turn_ended",
+            "rescheduling",
+            "rescheduling",
+            account_id=account_id,
+        )
         return delay
     # Terminal landing pad (#353): sweep skips ``errored`` (see
     # ``CANDIDATE_ROWS_SQL`` / ``CONFIRMED_ROWS_SQL``); any in-flight
@@ -895,13 +913,14 @@ async def _apply_retry_or_failure(pool: Any, session_id: str) -> float | None:
     await sessions_service.set_session_status(
         pool, session_id, "errored", stop_reason={"type": "error"}, account_id=account_id
     )
-    await _append_lifecycle(pool, session_id, "turn_ended", "errored", "error")
+    await _append_lifecycle(
+        pool, session_id, "turn_ended", "errored", "error", account_id=account_id
+    )
     return None
 
 
-async def _handle_step_timeout(pool: Any, session_id: str) -> float | None:
+async def _handle_step_timeout(pool: Any, session_id: str, *, account_id: str) -> float | None:
     """Synthesize a reschedulable error state when the job-level cap fires."""
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
     await sessions_service.append_event(
         pool,
         session_id,
@@ -909,17 +928,16 @@ async def _handle_step_timeout(pool: Any, session_id: str) -> float | None:
         {"event": "step_timeout", "timeout_seconds": _JOB_TIMEOUT_S, "is_error": True},
         account_id=account_id,
     )
-    return await _apply_retry_or_failure(pool, session_id)
+    return await _apply_retry_or_failure(pool, session_id, account_id=account_id)
 
 
-async def _count_consecutive_rescheduling(pool: Any, session_id: str) -> int:
+async def _count_consecutive_rescheduling(pool: Any, session_id: str, *, account_id: str) -> int:
     """Count consecutive rescheduling lifecycle events at the tail of the log.
 
     Returns the number of consecutive ``turn_ended`` lifecycle events
     with ``stop_reason == "rescheduling"`` at the end of the lifecycle
     event sequence. A non-rescheduling event breaks the streak.
     """
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
     # Only the tail matters; reading ASC with the default LIMIT would miss the
     # recent streak entirely on a session with >limit lifecycle events.
     lifecycle_events = await sessions_service.read_events(
@@ -945,9 +963,10 @@ async def _append_lifecycle(
     event: str,
     status: str,
     stop_reason: str,
+    *,
+    account_id: str,
 ) -> None:
     """Append a lifecycle event."""
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
     await sessions_service.append_event(
         pool,
         session_id,

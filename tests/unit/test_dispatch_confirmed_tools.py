@@ -31,7 +31,10 @@ class TestDispatchConfirmedTools:
             "aios.harness.loop.sessions_service.read_events",
             AsyncMock(return_value=[]),
         ):
-            assert await _dispatch_confirmed_tools(pool, "sess_x", []) == []
+            assert (
+                await _dispatch_confirmed_tools(pool, "sess_x", [], account_id="acc_test_stub")
+                == []
+            )
 
     async def test_returns_confirmed_but_not_completed(self) -> None:
         """Baseline: a confirmed tool call with no tool result is pending."""
@@ -41,7 +44,9 @@ class TestDispatchConfirmedTools:
             "aios.harness.loop.sessions_service.read_events",
             AsyncMock(return_value=[_confirmed("tc1")]),
         ):
-            pending = await _dispatch_confirmed_tools(pool, "sess_x", msg_events)
+            pending = await _dispatch_confirmed_tools(
+                pool, "sess_x", msg_events, account_id="acc_test_stub"
+            )
         assert [tc["id"] for tc in pending] == ["tc1"]
 
     async def test_reads_lifecycle_tail_newest_first(self) -> None:
@@ -54,6 +59,8 @@ class TestDispatchConfirmedTools:
         mock_read = AsyncMock(return_value=[_confirmed("tc1")])
         pool = MagicMock()
         with patch("aios.harness.loop.sessions_service.read_events", mock_read):
-            pending = await _dispatch_confirmed_tools(pool, "sess_x", msg_events)
+            pending = await _dispatch_confirmed_tools(
+                pool, "sess_x", msg_events, account_id="acc_test_stub"
+            )
         assert [tc["id"] for tc in pending] == ["tc1"]
         assert mock_read.call_args.kwargs["newest_first"] is True

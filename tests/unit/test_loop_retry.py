@@ -48,7 +48,10 @@ class TestCountConsecutiveRescheduling:
             "aios.harness.loop.sessions_service.read_events",
             AsyncMock(return_value=[]),
         ):
-            assert await _count_consecutive_rescheduling(pool, "sess_x") == 0
+            assert (
+                await _count_consecutive_rescheduling(pool, "sess_x", account_id="acc_test_stub")
+                == 0
+            )
 
     async def test_count_consecutive_rescheduling_resets_on_non_rescheduling_tail(
         self,
@@ -69,7 +72,10 @@ class TestCountConsecutiveRescheduling:
             "aios.harness.loop.sessions_service.read_events",
             AsyncMock(return_value=events_newest_first),
         ):
-            assert await _count_consecutive_rescheduling(pool, "sess_x") == 1
+            assert (
+                await _count_consecutive_rescheduling(pool, "sess_x", account_id="acc_test_stub")
+                == 1
+            )
 
     async def test_count_consecutive_rescheduling_reads_bounded_newest_first_tail(
         self,
@@ -87,7 +93,10 @@ class TestCountConsecutiveRescheduling:
         )
         pool = MagicMock()
         with patch("aios.harness.loop.sessions_service.read_events", mock_read):
-            assert await _count_consecutive_rescheduling(pool, "sess_x") == 5
+            assert (
+                await _count_consecutive_rescheduling(pool, "sess_x", account_id="acc_test_stub")
+                == 5
+            )
         kwargs = mock_read.call_args.kwargs
         assert kwargs["newest_first"] is True
         assert kwargs["limit"] <= 10

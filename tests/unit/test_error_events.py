@@ -51,7 +51,7 @@ class TestStepTimeoutSpanHasIsError:
             patch("aios.harness.loop.sessions_service.append_event", mock_append),
             patch("aios.harness.loop._apply_retry_or_failure", mock_retry),
         ):
-            await _handle_step_timeout(pool=pool, session_id="sess_x")
+            await _handle_step_timeout(pool=pool, session_id="sess_x", account_id="acc_test_stub")
 
         # Find the span call (there may be others from _apply_retry_or_failure path)
         span_calls = [
