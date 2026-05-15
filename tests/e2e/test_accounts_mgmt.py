@@ -240,6 +240,75 @@ class TestKeys:
         assert r.status_code == 404, r.text
 
 
+class TestUpdate:
+    async def test_update_display_name(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        m = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "before-rename"},
+        )
+        child_id = m.json()["account_id"]
+        r = await http_client.patch(
+            f"/v1/accounts/{child_id}",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "after-rename"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["display_name"] == "after-rename"
+
+    async def test_update_can_mint_children(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        m = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "mint-flag-toggle", "can_mint_children": False},
+        )
+        child_id = m.json()["account_id"]
+        r = await http_client.patch(
+            f"/v1/accounts/{child_id}",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"can_mint_children": True},
+        )
+        assert r.status_code == 200
+        assert r.json()["can_mint_children"] is True
+
+    async def test_update_cross_tenant_404(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        a = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "patch-a"},
+        )
+        b = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "patch-b"},
+        )
+        a_key = a.json()["plaintext_key"]
+        b_id = b.json()["account_id"]
+        r = await http_client.patch(
+            f"/v1/accounts/{b_id}",
+            headers=_bearer(a_key),
+            json={"display_name": "stolen"},
+        )
+        assert r.status_code == 404, r.text
+
+    async def test_update_no_fields_is_no_op(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        r = await http_client.patch(
+            "/v1/accounts/acc_test_stub",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={},
+        )
+        assert r.status_code == 200
+        assert r.json()["id"] == "acc_test_stub"
+
+
 class TestArchive:
     async def test_self_archive_409(
         self, http_client: httpx.AsyncClient, aios_env: dict[str, str]

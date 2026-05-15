@@ -314,6 +314,73 @@
           }
         }
       },
+      "patch": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Update Account",
+        "description": "Partial-update ``display_name`` / ``can_mint_children`` on a\ncaller-or-direct-child account.\n\nOmitted fields are preserved. Both fields null is a valid no-op\nthat returns the current row.",
+        "operationId": "update_account",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Target Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAccountRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "tags": [
           "accounts"
@@ -11274,6 +11341,38 @@
         "type": "object",
         "title": "UnrestrictedNetworking",
         "description": "Full outbound network access (default)."
+      },
+      "UpdateAccountRequest": {
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "can_mint_children": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Can Mint Children"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "UpdateAccountRequest",
+        "description": "Body for ``PATCH /v1/accounts/{id}``.\n\nPartial update: omitted fields are preserved. Both fields are\noptional; at least one must be non-null. Submitting both as null\nis a no-op that returns the account row unchanged."
       },
       "ValidationError": {
         "properties": {

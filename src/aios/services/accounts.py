@@ -184,6 +184,36 @@ async def revoke_key(
         )
 
 
+async def update_account(
+    pool: asyncpg.Pool[Any],
+    *,
+    target_account_id: str,
+    caller_account_id: str,
+    display_name: str | None,
+    can_mint_children: bool | None,
+) -> Account:
+    """Apply a partial update to a caller-or-direct-child account.
+
+    Both fields are optional; omitted ones are preserved. Raises
+    :class:`NotFoundError` if the target is missing, archived, or out
+    of scope — the API doesn't distinguish out-of-scope from missing.
+    """
+    await get_account_in_scope(pool, target_account_id, caller_account_id=caller_account_id)
+    async with pool.acquire() as conn:
+        updated = await queries.update_account(
+            conn,
+            target_account_id,
+            display_name=display_name,
+            can_mint_children=can_mint_children,
+        )
+    if updated is None:
+        raise NotFoundError(
+            f"account {target_account_id} not found",
+            detail={"id": target_account_id},
+        )
+    return updated
+
+
 async def archive_child(
     pool: asyncpg.Pool[Any],
     *,

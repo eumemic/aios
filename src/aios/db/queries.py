@@ -5560,6 +5560,51 @@ async def archive_account(conn: asyncpg.Connection[Any], account_id: str) -> Acc
     return _row_to_account(existing) if existing is not None else None
 
 
+async def update_account(
+    conn: asyncpg.Connection[Any],
+    account_id: str,
+    *,
+    display_name: str | None = None,
+    can_mint_children: bool | None = None,
+) -> Account | None:
+    """Apply a partial update to ``account_id``. Returns the new row.
+
+    ``None`` for either field means "leave as-is". Returns ``None`` if
+    the account doesn't exist or is archived (callers map to 404). The
+    ``accounts_sibling_unique_display_name`` partial unique index fires
+    on a same-parent rename collision — wrapped as ``ConflictError``.
+    """
+    if display_name is None and can_mint_children is None:
+        # No-op: re-read for a no-change response.
+        row = await conn.fetchrow(
+            "SELECT * FROM accounts WHERE id = $1 AND archived_at IS NULL",
+            account_id,
+        )
+        return _row_to_account(row) if row is not None else None
+
+    sets: list[str] = []
+    args: list[Any] = []
+    if display_name is not None:
+        args.append(display_name)
+        sets.append(f"display_name = ${len(args)}")
+    if can_mint_children is not None:
+        args.append(can_mint_children)
+        sets.append(f"can_mint_children = ${len(args)}")
+    args.append(account_id)
+    sql = (
+        f"UPDATE accounts SET {', '.join(sets)} "
+        f"WHERE id = ${len(args)} AND archived_at IS NULL RETURNING *"
+    )
+    try:
+        row = await conn.fetchrow(sql, *args)
+    except asyncpg.UniqueViolationError as exc:
+        raise ConflictError(
+            f"display_name {display_name!r} is already in use under this parent",
+            detail={"display_name": display_name, "account_id": account_id},
+        ) from exc
+    return _row_to_account(row) if row is not None else None
+
+
 async def count_active_child_accounts(conn: asyncpg.Connection[Any], parent_account_id: str) -> int:
     """Number of non-archived direct children of ``parent_account_id``.
 

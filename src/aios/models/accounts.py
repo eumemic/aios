@@ -69,3 +69,17 @@ class AccountKeySummary(BaseModel):
     label: str
     created_at: datetime
     revoked_at: datetime | None = None
+
+
+class UpdateAccountRequest(BaseModel):
+    """Body for ``PATCH /v1/accounts/{id}``.
+
+    Partial update: omitted fields are preserved. Both fields are
+    optional; at least one must be non-null. Submitting both as null
+    is a no-op that returns the account row unchanged.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=128)
+    can_mint_children: bool | None = None
