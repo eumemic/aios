@@ -550,6 +550,65 @@
         }
       }
     },
+    "/v1/accounts/{target_id}/usage": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Get Account Usage",
+        "description": "Per-resource non-archived counts for a caller-or-direct-child account.",
+        "operationId": "get_account_usage",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Target Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountUsage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{target_id}/keys": {
       "post": {
         "tags": [
@@ -7210,6 +7269,55 @@
         ],
         "title": "AccountKeySummary",
         "description": "Key metadata as returned by the management API.\n\nIntentionally omits the bytes ``hash`` column \u2014 operators have no use\nfor the on-disk hash, and surfacing it widens the audit footprint."
+      },
+      "AccountUsage": {
+        "properties": {
+          "agents": {
+            "type": "integer",
+            "title": "Agents"
+          },
+          "environments": {
+            "type": "integer",
+            "title": "Environments"
+          },
+          "sessions": {
+            "type": "integer",
+            "title": "Sessions"
+          },
+          "vaults": {
+            "type": "integer",
+            "title": "Vaults"
+          },
+          "memory_stores": {
+            "type": "integer",
+            "title": "Memory Stores"
+          },
+          "skills": {
+            "type": "integer",
+            "title": "Skills"
+          },
+          "session_templates": {
+            "type": "integer",
+            "title": "Session Templates"
+          },
+          "connections": {
+            "type": "integer",
+            "title": "Connections"
+          }
+        },
+        "type": "object",
+        "required": [
+          "agents",
+          "environments",
+          "sessions",
+          "vaults",
+          "memory_stores",
+          "skills",
+          "session_templates",
+          "connections"
+        ],
+        "title": "AccountUsage",
+        "description": "Per-account resource counts as returned by ``GET /v1/accounts/{id}/usage``."
       },
       "Actor": {
         "properties": {

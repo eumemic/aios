@@ -5670,6 +5670,42 @@ async def hard_delete_account(conn: asyncpg.Connection[Any], account_id: str) ->
     return bool(result.endswith(" 1"))
 
 
+async def count_account_resources(conn: asyncpg.Connection[Any], account_id: str) -> dict[str, int]:
+    """Return non-archived row counts per resource family for an account.
+
+    One round-trip via UNION ALL of per-table counts.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT 'agents' AS family, COUNT(*) AS cnt FROM agents
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'environments', COUNT(*) FROM environments
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'sessions', COUNT(*) FROM sessions
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'vaults', COUNT(*) FROM vaults
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'memory_stores', COUNT(*) FROM memory_stores
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'skills', COUNT(*) FROM skills
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'session_templates', COUNT(*) FROM session_templates
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'connections', COUNT(*) FROM connections
+         WHERE account_id = $1 AND archived_at IS NULL
+        """,
+        account_id,
+    )
+    return {r["family"]: cast("int", r["cnt"]) for r in rows}
+
+
 async def count_active_child_accounts(conn: asyncpg.Connection[Any], parent_account_id: str) -> int:
     """Number of non-archived direct children of ``parent_account_id``.
 

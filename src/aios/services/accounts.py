@@ -13,6 +13,7 @@ from aios.errors import ConflictError, ForbiddenError, NotFoundError
 from aios.models.accounts import (
     Account,
     AccountKeySummary,
+    AccountUsage,
     BootstrapResponse,
     MintAccountResponse,
     MintKeyResponse,
@@ -288,6 +289,25 @@ async def purge_account(
                 "resources still reference it; archive its resources first",
                 detail={"account_id": target_account_id},
             )
+
+
+async def get_usage(
+    pool: asyncpg.Pool[Any], *, target_account_id: str, caller_account_id: str
+) -> AccountUsage:
+    """Return per-resource counts for a caller-or-direct-child account."""
+    await get_account_in_scope(pool, target_account_id, caller_account_id=caller_account_id)
+    async with pool.acquire() as conn:
+        counts = await queries.count_account_resources(conn, target_account_id)
+    return AccountUsage(
+        agents=counts.get("agents", 0),
+        environments=counts.get("environments", 0),
+        sessions=counts.get("sessions", 0),
+        vaults=counts.get("vaults", 0),
+        memory_stores=counts.get("memory_stores", 0),
+        skills=counts.get("skills", 0),
+        session_templates=counts.get("session_templates", 0),
+        connections=counts.get("connections", 0),
+    )
 
 
 async def archive_child(

@@ -3,6 +3,7 @@
 from .account import Account
 from .account_key_summary import AccountKeySummary
 from .account_metadata import AccountMetadata
+from .account_usage import AccountUsage
 from .actor import Actor
 from .actor_type import ActorType
 from .agent import Agent
@@ -187,6 +188,7 @@ __all__ = (
     "Account",
     "AccountKeySummary",
     "AccountMetadata",
+    "AccountUsage",
     "Actor",
     "ActorType",
     "Agent",

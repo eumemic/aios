@@ -58,6 +58,19 @@ class MintKeyResponse(BaseModel):
     plaintext_key: str
 
 
+class AccountUsage(BaseModel):
+    """Per-account resource counts as returned by ``GET /v1/accounts/{id}/usage``."""
+
+    agents: int
+    environments: int
+    sessions: int
+    vaults: int
+    memory_stores: int
+    skills: int
+    session_templates: int
+    connections: int
+
+
 class AccountKeySummary(BaseModel):
     """Key metadata as returned by the management API.
 

@@ -15,6 +15,7 @@ from aios.logging import get_logger
 from aios.models.accounts import (
     Account,
     AccountKeySummary,
+    AccountUsage,
     BootstrapRequest,
     BootstrapResponse,
     MintAccountRequest,
@@ -236,6 +237,13 @@ async def purge_account(target_id: str, pool: PoolDep, auth: AuthDep) -> None:
         action="account.purge",
         outcome="success",
     )
+
+
+@router.get("/{target_id}/usage", operation_id="get_account_usage")
+async def get_account_usage(target_id: str, pool: PoolDep, auth: AuthDep) -> AccountUsage:
+    """Per-resource non-archived counts for a caller-or-direct-child account."""
+    account_id, _key_id, _can_mint = auth
+    return await service.get_usage(pool, target_account_id=target_id, caller_account_id=account_id)
 
 
 @router.post(
