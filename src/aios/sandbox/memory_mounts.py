@@ -38,6 +38,7 @@ async def materialize_store_to_host(
     conn: asyncpg.Connection[Any],
     *,
     store_id: str,
+    account_id: str,
 ) -> None:
     """Ensure ``store_id``'s host dir is populated from DB. Idempotent.
 
@@ -61,7 +62,9 @@ async def materialize_store_to_host(
                 return  # another waiter materialized while we blocked
             host_dir.mkdir(parents=True, exist_ok=True)
 
-            entries = await queries.list_active_memory_paths_and_content(conn, store_id)
+            entries = await queries.list_active_memory_paths_and_content(
+                conn, store_id, account_id=account_id
+            )
             for path, content in entries:
                 # Memory paths are guaranteed to start with "/" by the SQL CHECK.
                 atomic_write(host_dir / path.lstrip("/"), content or "")

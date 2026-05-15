@@ -142,7 +142,9 @@ async def _materialize_memory_mounts(
             conn, session_id, account_id=account_id
         )
         for echo in echoes:
-            await materialize_store_to_host(conn, store_id=echo.memory_store_id)
+            await materialize_store_to_host(
+                conn, store_id=echo.memory_store_id, account_id=account_id
+            )
     return list(echoes)
 
 
