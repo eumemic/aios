@@ -644,7 +644,11 @@ async def insert_session(
 
     new_id = make_id(SESSION)
     if workspace_path is None:
-        workspace_path = str(get_settings().workspace_root / new_id)
+        # Per-tenant subdir (#367 follow-up): each account's sessions
+        # live under ``workspace_root/{account_id}/{session_id}`` so a
+        # stray bind-mount can't reach across tenants, and so per-tenant
+        # disk quotas / backups can scope to one directory.
+        workspace_path = str(get_settings().workspace_root / account_id / new_id)
     try:
         row = await conn.fetchrow(
             """
@@ -1092,7 +1096,11 @@ async def clone_session(
 
     new_id = make_id(SESSION)
     if workspace_path is None:
-        workspace_path = str(get_settings().workspace_root / new_id)
+        # Per-tenant subdir (#367 follow-up): each account's sessions
+        # live under ``workspace_root/{account_id}/{session_id}`` so a
+        # stray bind-mount can't reach across tenants, and so per-tenant
+        # disk quotas / backups can scope to one directory.
+        workspace_path = str(get_settings().workspace_root / account_id / new_id)
 
     async with conn.transaction():
         status = await conn.fetchval(
