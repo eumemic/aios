@@ -5651,6 +5651,61 @@ async def update_account(
     return _row_to_account(row) if row is not None else None
 
 
+async def hard_delete_account(conn: asyncpg.Connection[Any], account_id: str) -> bool:
+    """Hard-delete an already-archived account row.
+
+    Returns ``True`` iff a row was actually deleted. Returns ``False``
+    when the row didn't exist, was not archived, or was prevented by a
+    ``ON DELETE RESTRICT`` FK from a resource table — the FKs all use
+    RESTRICT, so the caller must already have ensured zero archived
+    AND zero non-archived rows reference this account before invoking.
+
+    Compliance / GDPR-style hard deletes use this — the soft-archive
+    ``archive_account`` is the normal path. Idempotent.
+    """
+    result = await conn.execute(
+        "DELETE FROM accounts WHERE id = $1 AND archived_at IS NOT NULL",
+        account_id,
+    )
+    return bool(result.endswith(" 1"))
+
+
+async def count_account_resources(conn: asyncpg.Connection[Any], account_id: str) -> dict[str, int]:
+    """Return non-archived row counts per resource family for an account.
+
+    One round-trip via UNION ALL of per-table counts.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT 'agents' AS family, COUNT(*) AS cnt FROM agents
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'environments', COUNT(*) FROM environments
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'sessions', COUNT(*) FROM sessions
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'vaults', COUNT(*) FROM vaults
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'memory_stores', COUNT(*) FROM memory_stores
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'skills', COUNT(*) FROM skills
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'session_templates', COUNT(*) FROM session_templates
+         WHERE account_id = $1 AND archived_at IS NULL
+        UNION ALL
+        SELECT 'connections', COUNT(*) FROM connections
+         WHERE account_id = $1 AND archived_at IS NULL
+        """,
+        account_id,
+    )
+    return {r["family"]: cast("int", r["cnt"]) for r in rows}
+
+
 async def count_active_child_accounts(conn: asyncpg.Connection[Any], parent_account_id: str) -> int:
     """Number of non-archived direct children of ``parent_account_id``.
 

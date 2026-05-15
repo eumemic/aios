@@ -15,6 +15,7 @@ from aios.logging import get_logger
 from aios.models.accounts import (
     Account,
     AccountKeySummary,
+    AccountUsage,
     BootstrapRequest,
     BootstrapResponse,
     MintAccountRequest,
@@ -207,6 +208,42 @@ async def archive_account(target_id: str, pool: PoolDep, auth: AuthDep) -> Accou
         outcome="success",
     )
     return archived
+
+
+@router.post(
+    "/{target_id}/purge",
+    operation_id="purge_account",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def purge_account(target_id: str, pool: PoolDep, auth: AuthDep) -> None:
+    """Hard-delete a direct child that has already been soft-archived.
+
+    Two-step ceremony: \
+    1. ``DELETE /v1/accounts/{id}`` soft-archives (sets ``archived_at``).\
+    2. ``POST /v1/accounts/{id}/purge`` hard-deletes the row.
+
+    Refuses with 409 if the account is not yet archived, has non-archived
+    children, has any resources (FK RESTRICT will refuse the DELETE), or
+    is the caller's own account. Compliance / GDPR path; the normal
+    lifecycle stops at archive.
+    """
+    account_id, key_id, _can_mint = auth
+    await service.purge_account(pool, target_account_id=target_id, caller_account_id=account_id)
+    log.info(
+        "account.operation",
+        actor_account_id=account_id,
+        actor_key_id=key_id,
+        target_account_id=target_id,
+        action="account.purge",
+        outcome="success",
+    )
+
+
+@router.get("/{target_id}/usage", operation_id="get_account_usage")
+async def get_account_usage(target_id: str, pool: PoolDep, auth: AuthDep) -> AccountUsage:
+    """Per-resource non-archived counts for a caller-or-direct-child account."""
+    account_id, _key_id, _can_mint = auth
+    return await service.get_usage(pool, target_account_id=target_id, caller_account_id=account_id)
 
 
 @router.post(

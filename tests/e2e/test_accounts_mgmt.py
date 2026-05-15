@@ -372,6 +372,148 @@ class TestUpdate:
         assert r.json()["id"] == "acc_test_stub"
 
 
+class TestPurge:
+    async def test_purge_unarchived_409(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        """Cannot purge a non-archived account — must archive first."""
+        m = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "purge-not-yet-archived"},
+        )
+        child_id = m.json()["account_id"]
+        r = await http_client.post(
+            f"/v1/accounts/{child_id}/purge",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+        )
+        assert r.status_code == 409, r.text
+
+    async def test_archive_then_purge_succeeds(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        m = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "purge-target"},
+        )
+        child_id = m.json()["account_id"]
+        # Step 1: archive.
+        r = await http_client.delete(
+            f"/v1/accounts/{child_id}", headers=_bearer(aios_env["AIOS_API_KEY"])
+        )
+        assert r.status_code == 200
+        # Step 2: purge.
+        r = await http_client.post(
+            f"/v1/accounts/{child_id}/purge",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+        )
+        assert r.status_code == 204, r.text
+        # Step 3: confirm the row is gone.
+        r = await http_client.get(
+            f"/v1/accounts/{child_id}",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+        )
+        assert r.status_code == 404
+
+    async def test_purge_self_409(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        r = await http_client.post(
+            "/v1/accounts/acc_test_stub/purge",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+        )
+        assert r.status_code == 409
+
+    async def test_purge_cross_tenant_404(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        a = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "purge-isolated-a"},
+        )
+        b = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "purge-isolated-b"},
+        )
+        a_key = a.json()["plaintext_key"]
+        b_id = b.json()["account_id"]
+        r = await http_client.post(f"/v1/accounts/{b_id}/purge", headers=_bearer(a_key))
+        assert r.status_code == 404, r.text
+
+
+class TestUsage:
+    async def test_usage_zero_baseline(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        m = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "usage-baseline"},
+        )
+        ck = m.json()["plaintext_key"]
+        r = await http_client.get("/v1/accounts/me", headers=_bearer(ck))
+        assert r.status_code == 200
+        cid = r.json()["id"]
+        r = await http_client.get(
+            f"/v1/accounts/{cid}/usage", headers=_bearer(aios_env["AIOS_API_KEY"])
+        )
+        assert r.status_code == 200, r.text
+        for k in (
+            "agents",
+            "environments",
+            "sessions",
+            "vaults",
+            "memory_stores",
+            "skills",
+            "session_templates",
+            "connections",
+        ):
+            assert r.json()[k] == 0, f"{k} expected 0"
+
+    async def test_usage_counts_minted_resources(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        m = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "usage-resourced"},
+        )
+        ck = m.json()["plaintext_key"]
+        cid = m.json()["account_id"]
+        await http_client.post(
+            "/v1/agents",
+            headers=_bearer(ck),
+            json={"name": "u-agent", "model": "openrouter/test"},
+        )
+        await http_client.post("/v1/environments", headers=_bearer(ck), json={"name": "u-env"})
+        r = await http_client.get(
+            f"/v1/accounts/{cid}/usage", headers=_bearer(aios_env["AIOS_API_KEY"])
+        )
+        assert r.json()["agents"] == 1
+        assert r.json()["environments"] == 1
+
+    async def test_usage_cross_tenant_404(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        a = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "usage-a"},
+        )
+        b = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "usage-b"},
+        )
+        ak = a.json()["plaintext_key"]
+        b_id = b.json()["account_id"]
+        r = await http_client.get(f"/v1/accounts/{b_id}/usage", headers=_bearer(ak))
+        assert r.status_code == 404
+
+
 class TestArchive:
     async def test_self_archive_409(
         self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
