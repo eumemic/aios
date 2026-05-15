@@ -537,9 +537,10 @@ async def get_agent_version(
     account_id: str,
 ) -> AgentVersion:
     row = await conn.fetchrow(
-        "SELECT * FROM agent_versions WHERE agent_id = $1 AND version = $2",
+        "SELECT * FROM agent_versions WHERE agent_id = $1 AND version = $2 AND account_id = $3",
         agent_id,
         version,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -3376,12 +3377,13 @@ async def archive_connection(
                    updated_at         = now(),
                    secrets_ciphertext = NULL,
                    secrets_nonce      = NULL
-             WHERE id = $1 AND archived_at IS NULL
+             WHERE id = $1 AND archived_at IS NULL AND account_id = $2
             RETURNING *
         )
         {_CONNECTION_UPDATE_CTE_TAIL}
         """,
         connection_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -3464,9 +3466,10 @@ async def delete_chat_session(
     it returns the chat to the connection's mode-default fallback.
     """
     result = await conn.execute(
-        "DELETE FROM chat_sessions WHERE connection_id = $1 AND chat_id = $2",
+        "DELETE FROM chat_sessions WHERE connection_id = $1 AND chat_id = $2 AND account_id = $3",
         connection_id,
         chat_id,
+        account_id,
     )
     return bool(result.endswith(" 1"))
 
@@ -3488,10 +3491,11 @@ async def get_chat_session_row(
         """
         SELECT chat_id, session_id, created_at
           FROM chat_sessions
-         WHERE connection_id = $1 AND chat_id = $2
+         WHERE connection_id = $1 AND chat_id = $2 AND account_id = $3
         """,
         connection_id,
         chat_id,
+        account_id,
     )
     if row is None:
         return None
@@ -3515,10 +3519,11 @@ async def list_chat_sessions_for_connection(
         """
         SELECT chat_id, session_id, created_at
           FROM chat_sessions
-         WHERE connection_id = $1
+         WHERE connection_id = $1 AND account_id = $2
          ORDER BY chat_id
         """,
         connection_id,
+        account_id,
     )
     return [(r["chat_id"], r["session_id"], r["created_at"]) for r in rows]
 
@@ -3547,8 +3552,10 @@ async def list_routing_rules_for_connection(
           JOIN bindings b ON b.id = rr.binding_id
          WHERE b.connection_id = $1
            AND b.archived_at IS NULL
+           AND b.account_id = $2
         """,
         connection_id,
+        account_id,
     )
     return [(row["prefix"], row["target_type"], row["target_id"]) for row in rows]
 
@@ -5060,10 +5067,11 @@ async def list_runtime_tokens(
     rows = await conn.fetch(
         """
         SELECT * FROM runtime_tokens
-         WHERE connector = $1
+         WHERE connector = $1 AND account_id = $2
          ORDER BY created_at DESC
         """,
         connector,
+        account_id,
     )
     return [_row_to_runtime_token(r) for r in rows]
 
@@ -5076,10 +5084,11 @@ async def revoke_runtime_token(
         """
         UPDATE runtime_tokens
            SET revoked_at = now()
-         WHERE id = $1 AND revoked_at IS NULL
+         WHERE id = $1 AND revoked_at IS NULL AND account_id = $2
         RETURNING *
         """,
         token_id,
+        account_id,
     )
     if row is not None:
         return _row_to_runtime_token(row)
