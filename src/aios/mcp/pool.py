@@ -15,11 +15,21 @@ Pool lifecycle:
   broken session — closing a half-dead stack may hang.
 - :meth:`close_all` is called from ``worker_main``'s ``finally`` at
   shutdown to tear everything down.
+
+Owner-task model (#425): each entry's ``AsyncExitStack`` lives inside a
+dedicated long-lived task. The task opens the contexts, signals the
+caller they're ready, then awaits a shutdown event. ``close()`` sets the
+event and the contexts exit in the same task that entered them. This
+avoids the anyio "Attempted to exit cancel scope in a different task
+than it was entered in" error that would otherwise fire on
+:meth:`close_all` because the streamable-http client binds its cancel
+scope to the opening task.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 from contextlib import AsyncExitStack
 from typing import Any
@@ -52,21 +62,40 @@ def _headers_hash(headers: dict[str, str]) -> str:
 
 
 class _Entry:
-    """A single pooled MCP session with its associated resource stack."""
+    """A single pooled MCP session with its associated owner task.
+
+    The session's contexts (httpx client, streamable-http client,
+    ClientSession) all live inside ``_owner_task``. ``close()`` sets
+    ``_shutdown`` so the task exits the contexts in the same task that
+    entered them — see the module docstring for the anyio cancel-scope
+    background.
+    """
 
     def __init__(
         self,
         session: ClientSession,
         init_result: InitializeResult,
-        stack: AsyncExitStack,
+        shutdown: asyncio.Event,
+        owner_task: asyncio.Task[None],
     ) -> None:
         self.session = session
         self.init_result = init_result
-        self._stack = stack
+        self._shutdown = shutdown
+        self._owner_task = owner_task
 
     async def close(self) -> None:
-        """Tear down this entry's session and all its async contexts."""
-        await self._stack.aclose()
+        """Signal the owner task to exit its contexts and await its completion.
+
+        Safe to call repeatedly; the owner task only sees the first set().
+
+        The owner task's contexts may raise during exit (e.g. the remote
+        MCP server already closed the socket). The caller —
+        :meth:`McpSessionPool.close_all` — already swallows and logs such
+        errors; we surface as if shutdown completed.
+        """
+        self._shutdown.set()
+        with contextlib.suppress(Exception):
+            await self._owner_task
 
 
 class McpSessionPool:
@@ -88,24 +117,50 @@ class McpSessionPool:
         return lock
 
     async def _open_entry(self, url: str, headers: dict[str, str]) -> _Entry:
-        """Open a fresh session. Stack must outlive this frame (entry owns it)."""
-        stack: AsyncExitStack = AsyncExitStack()
-        await stack.__aenter__()
-        try:
-            http_client: Any = await stack.enter_async_context(
-                httpx.AsyncClient(headers=headers, timeout=_MCP_HTTPX_TIMEOUT)
-            )
-            read_stream, write_stream, _ = await stack.enter_async_context(
-                streamable_http_client(url, http_client=http_client)
-            )
-            session: ClientSession = await stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
-            )
-            init_result: InitializeResult = await session.initialize()
-        except BaseException:
-            await stack.aclose()
-            raise
-        return _Entry(session, init_result, stack)
+        """Open a fresh session inside a dedicated long-lived owner task.
+
+        The contexts (httpx client, streamable-http client, ClientSession)
+        all enter and exit in the same task — see the module docstring on
+        the anyio cancel-scope constraint. The task signals ``ready`` once
+        the session is initialized, then awaits ``shutdown`` so the
+        contexts stay open for the entry's lifetime.
+        """
+        ready = asyncio.Event()
+        shutdown = asyncio.Event()
+        result: dict[str, Any] = {}
+
+        async def _own() -> None:
+            try:
+                async with AsyncExitStack() as stack:
+                    http_client: Any = await stack.enter_async_context(
+                        httpx.AsyncClient(headers=headers, timeout=_MCP_HTTPX_TIMEOUT)
+                    )
+                    read_stream, write_stream, _ = await stack.enter_async_context(
+                        streamable_http_client(url, http_client=http_client)
+                    )
+                    session = await stack.enter_async_context(
+                        ClientSession(read_stream, write_stream)
+                    )
+                    result["session"] = session
+                    result["init"] = await session.initialize()
+                    ready.set()
+                    await shutdown.wait()
+            except BaseException as exc:
+                result["error"] = exc
+                # Unblock the caller waiting on ready so it doesn't hang
+                # forever when the open path failed.
+                ready.set()
+                raise
+
+        task = asyncio.create_task(_own(), name=f"mcp-pool:{url}")
+        await ready.wait()
+        if "error" in result:
+            # The task already raised; await it to surface the original
+            # exception cleanly (and clear the unhandled-exception slot).
+            await task
+            # Defensive — unreachable in practice.
+            raise RuntimeError("mcp pool owner task signalled ready but produced no session")
+        return _Entry(result["session"], result["init"], shutdown, task)
 
     async def get_or_connect(
         self, url: str, headers: dict[str, str]
