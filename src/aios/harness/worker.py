@@ -361,11 +361,18 @@ async def _run_interrupt_listener(
     db_url: str,
     task_registry: TaskRegistry,
 ) -> None:
-    """Drain pg_notify on the session-interrupt channel and cancel matching steps."""
+    """Drain pg_notify on the session-interrupt channel and cancel matching steps.
+
+    The try/except is nested INSIDE ``while True`` (mirroring
+    :func:`_periodic_sweep`): a transient failure dispatching one
+    interrupt must not silently disable the listener for the worker's
+    lifetime. ``CancelledError`` is not an :class:`Exception` subclass
+    and propagates through, so worker shutdown still exits cleanly.
+    """
     log = get_logger("aios.worker.interrupt_listener")
-    try:
-        async with listen_for_session_interrupts(db_url) as queue:
-            while True:
+    async with listen_for_session_interrupts(db_url) as queue:
+        while True:
+            try:
                 session_id = await queue.get()
                 step_cancelled = task_registry.cancel_step(session_id)
                 tools_cancelled = task_registry.cancel_session(session_id)
@@ -375,5 +382,5 @@ async def _run_interrupt_listener(
                     step_cancelled=step_cancelled,
                     tools_cancelled=tools_cancelled,
                 )
-    except Exception:
-        log.exception("interrupt_listener.failed")
+            except Exception:
+                log.exception("interrupt_listener.dispatch_failed")
