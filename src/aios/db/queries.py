@@ -1642,6 +1642,7 @@ async def list_pending_calls_for_connector(
         }
     """
     # The connector type's tool schema gates which tool_calls we surface.
+    # ``connectors`` is global per-type; no account scoping on its row.
     cat_row = await conn.fetchrow(
         "SELECT tools_schema AS tools FROM connectors WHERE connector = $1",
         connector,
@@ -1656,6 +1657,10 @@ async def list_pending_calls_for_connector(
     # The lineage predicate joins ``s.id`` not a parameter, so we inline
     # rather than calling ``_session_bound_to_connection_predicate``
     # (which expects a $N param index for the session).
+    # Tenant isolation: both ``connections.account_id`` and
+    # ``sessions.account_id`` must match the bearer's account, otherwise
+    # a runtime token for tenant A could see pending tool calls (with
+    # arguments) from tenants B, C, D under the same connector type.
     rows = await conn.fetch(
         """
         SELECT c.id AS connection_id,
@@ -1665,6 +1670,7 @@ async def list_pending_calls_for_connector(
             ON s.archived_at IS NULL
            AND s.status = 'idle'
            AND s.stop_reason->>'type' = 'requires_action'
+           AND s.account_id = $2
            AND (EXISTS (SELECT 1 FROM bindings b
                          WHERE b.connection_id = c.id
                            AND b.archived_at IS NULL
@@ -1672,9 +1678,12 @@ async def list_pending_calls_for_connector(
                 OR EXISTS (SELECT 1 FROM chat_sessions cs
                             WHERE cs.connection_id = c.id
                               AND cs.session_id = s.id))
-         WHERE c.connector = $1 AND c.archived_at IS NULL
+         WHERE c.connector = $1
+           AND c.archived_at IS NULL
+           AND c.account_id = $2
         """,
         connector,
+        account_id,
     )
 
     out: list[dict[str, Any]] = []
@@ -1709,9 +1718,10 @@ async def list_pending_calls_for_session_and_connection(
         SELECT cat.tools_schema AS tools
           FROM connections c
           JOIN connectors cat ON cat.connector = c.connector
-         WHERE c.id = $1 AND c.archived_at IS NULL
+         WHERE c.id = $1 AND c.archived_at IS NULL AND c.account_id = $2
         """,
         connection_id,
+        account_id,
     )
     if conn_row is None:
         return []
@@ -1861,8 +1871,8 @@ async def read_events(
     error_only: bool = False,
 ) -> list[Event]:
     order = "DESC" if newest_first else "ASC"
-    params: list[Any] = [session_id, after_seq]
-    where = "session_id = $1 AND seq > $2"
+    params: list[Any] = [session_id, after_seq, account_id]
+    where = "session_id = $1 AND seq > $2 AND account_id = $3"
     if kind is not None:
         params.append(kind)
         where += f" AND kind = ${len(params)}"
@@ -4832,16 +4842,16 @@ async def notify_connection_change(
 ) -> None:
     """Emit a ``connections_<connector>`` NOTIFY for discovery SSE consumers.
 
-    Payload: ``"<event>|<connection_id>|<account>"`` — the SSE
-    generator parses this into an ``added``/``removed`` event. Caller
-    runs this on a pool-acquired (autocommit) connection OUTSIDE any
-    transaction so subscribers never see a payload for an uncommitted
-    row.
+    Payload: ``"<event>|<connection_id>|<account_id>|<account>"`` — the
+    SSE generator parses this into an ``added``/``removed`` event and uses
+    ``account_id`` to filter cross-tenant events. Caller runs this on a
+    pool-acquired (autocommit) connection OUTSIDE any transaction so
+    subscribers never see a payload for an uncommitted row.
     """
     await conn.execute(
         "SELECT pg_notify($1, $2)",
         f"connections_{connector}",
-        f"{event}|{connection_id}|{account}",
+        f"{event}|{connection_id}|{account_id}|{account}",
     )
 
 

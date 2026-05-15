@@ -279,12 +279,18 @@ async def connection_discovery_stream(
 
         while True:
             payload = await queue.get()
-            # Payload format: "<event>|<connection_id>|<account>".
-            parts = payload.split("|", 2)
-            if len(parts) != 3:
+            # Payload format: "<event>|<connection_id>|<event_account_id>|<account>".
+            parts = payload.split("|", 3)
+            if len(parts) != 4:
                 log.warning("sse.discovery.malformed_payload", payload=payload)
                 continue
-            event, connection_id, account = parts
+            event, connection_id, event_account_id, account = parts
+            # Tenant isolation: a runtime token scopes a subscriber to one
+            # account; drop NOTIFY events for other tenants on the same
+            # connector type. Pre-fix this was an existence-leak (sibling
+            # account_ids surfaced via the tail).
+            if event_account_id != account_id:
+                continue
             if event == "added" and connection_id in emitted_added:
                 continue
             if event == "added":

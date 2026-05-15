@@ -462,6 +462,12 @@ async def list_events(
     the first page. See issue #389.)
     """
     account_id, _, _ = _auth
+    # Scope check: 404 cross-tenant probes before reading events. The
+    # ``read_events`` query also filters by account_id, so this is
+    # belt-and-suspenders against a future query that forgets the
+    # filter — but ``get_session`` is what gives the caller a clean
+    # 404 rather than an empty list for a cross-tenant session id.
+    await service.get_session(pool, session_id, account_id=account_id)
     items = await service.read_events(
         pool,
         session_id,
