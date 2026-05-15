@@ -591,7 +591,15 @@ def shutdown(
         if not quiet:
             print_note("no aios dev instance for this worktree (idempotent no-op)")
         return
-    validate_instance_id_for_db(instance_id)
+    try:
+        validate_instance_id_for_db(instance_id)
+    except ValueError as exc:
+        # ``shutdown`` runs from the SessionEnd hook; a malformed env value
+        # shouldn't make the hook crash on its way out of a Claude Code
+        # session. Print a quiet note and exit clean.
+        if not quiet:
+            print_note(f"AIOS_INSTANCE_ID looks malformed; skipping shutdown ({exc})")
+        return
 
     # pkill matches against the full command line via `-f`. Match the
     # worktree path so we don't accidentally kill processes belonging to
