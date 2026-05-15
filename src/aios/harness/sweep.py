@@ -27,6 +27,7 @@ import asyncpg
 if TYPE_CHECKING:
     from aios.models.agents import ToolSpec
 
+from aios.db.queries import parse_jsonb
 from aios.harness.task_registry import TaskRegistry
 from aios.logging import get_logger
 from aios.services import sessions as sessions_service
@@ -212,7 +213,7 @@ async def find_and_repair_ghosts(
 
     for row in asst_rows:
         sid = row["session_id"]
-        data = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+        data = parse_jsonb(row["data"])
         existing_results = results_by_session.get(sid, set())
         session_in_flight = in_flight.get(sid, set())
 
@@ -248,7 +249,7 @@ async def find_and_repair_ghosts(
     agent_tools_by_session: dict[str, list[ToolSpec]] = {}
     for r in agent_rows:
         raw = r["tools"]
-        tools_list = json.loads(raw) if isinstance(raw, str) else raw
+        tools_list = parse_jsonb(raw)
         agent_tools_by_session[r["session_id"]] = [
             ToolSpec.model_validate(t) for t in (tools_list or [])
         ]
@@ -426,7 +427,7 @@ async def _filter_incomplete_batches(
 def _group_event_data(rows: list[Any]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
-        data = json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]
+        data = parse_jsonb(r["data"])
         grouped.setdefault(r["session_id"], []).append(data)
     return grouped
 
