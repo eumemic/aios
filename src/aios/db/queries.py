@@ -380,8 +380,8 @@ async def list_agents(
     after: str | None = None,
     name: str | None = None,
 ) -> list[Agent]:
-    where = ["archived_at IS NULL"]
-    args: list[Any] = []
+    args: list[Any] = [account_id]
+    where = ["archived_at IS NULL", "account_id = $1"]
     if name is not None:
         args.append(name)
         where.append(f"name = ${len(args)}")
@@ -560,16 +560,19 @@ async def list_agent_versions(
     """List versions in descending order (newest first)."""
     if after is None:
         rows = await conn.fetch(
-            "SELECT * FROM agent_versions WHERE agent_id = $1 ORDER BY version DESC LIMIT $2",
+            "SELECT * FROM agent_versions WHERE agent_id = $1 AND account_id = $2 "
+            "ORDER BY version DESC LIMIT $3",
             agent_id,
+            account_id,
             limit,
         )
     else:
         rows = await conn.fetch(
             "SELECT * FROM agent_versions WHERE agent_id = $1 AND version < $2 "
-            "ORDER BY version DESC LIMIT $3",
+            "AND account_id = $3 ORDER BY version DESC LIMIT $4",
             agent_id,
             after,
+            account_id,
             limit,
         )
     return [_row_to_agent_version(r) for r in rows]
@@ -783,8 +786,8 @@ async def list_sessions(
     limit: int = 50,
     after: str | None = None,
 ) -> list[Session]:
-    clauses: list[str] = ["archived_at IS NULL"]
-    args: list[Any] = []
+    args: list[Any] = [account_id]
+    clauses: list[str] = ["archived_at IS NULL", "account_id = $1"]
     if agent_id is not None:
         args.append(agent_id)
         clauses.append(f"agent_id = ${len(args)}")
@@ -2051,13 +2054,17 @@ async def list_vaults(
 ) -> list[Vault]:
     if after is None:
         rows = await conn.fetch(
-            "SELECT * FROM vaults WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            "SELECT * FROM vaults WHERE archived_at IS NULL AND account_id = $1 "
+            "ORDER BY id DESC LIMIT $2",
+            account_id,
             limit,
         )
     else:
         rows = await conn.fetch(
-            "SELECT * FROM vaults WHERE archived_at IS NULL AND id < $1 ORDER BY id DESC LIMIT $2",
+            "SELECT * FROM vaults WHERE archived_at IS NULL AND id < $1 AND account_id = $2 "
+            "ORDER BY id DESC LIMIT $3",
             after,
+            account_id,
             limit,
         )
     return [_row_to_vault(r) for r in rows]
@@ -2609,13 +2616,17 @@ async def list_skills(
 ) -> list[Skill]:
     if after is None:
         rows = await conn.fetch(
-            "SELECT * FROM skills WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            "SELECT * FROM skills WHERE archived_at IS NULL AND account_id = $1 "
+            "ORDER BY id DESC LIMIT $2",
+            account_id,
             limit,
         )
     else:
         rows = await conn.fetch(
-            "SELECT * FROM skills WHERE archived_at IS NULL AND id < $1 ORDER BY id DESC LIMIT $2",
+            "SELECT * FROM skills WHERE archived_at IS NULL AND id < $1 AND account_id = $2 "
+            "ORDER BY id DESC LIMIT $3",
             after,
+            account_id,
             limit,
         )
     return [_row_to_skill(r) for r in rows]
@@ -2727,16 +2738,19 @@ async def list_skill_versions(
     """List versions in descending order (newest first)."""
     if after is None:
         rows = await conn.fetch(
-            "SELECT * FROM skill_versions WHERE skill_id = $1 ORDER BY version DESC LIMIT $2",
+            "SELECT * FROM skill_versions WHERE skill_id = $1 AND account_id = $2 "
+            "ORDER BY version DESC LIMIT $3",
             skill_id,
+            account_id,
             limit,
         )
     else:
         rows = await conn.fetch(
             "SELECT * FROM skill_versions WHERE skill_id = $1 AND version < $2 "
-            "ORDER BY version DESC LIMIT $3",
+            "AND account_id = $3 ORDER BY version DESC LIMIT $4",
             skill_id,
             after,
+            account_id,
             limit,
         )
     return [_row_to_skill_version(r) for r in rows]
