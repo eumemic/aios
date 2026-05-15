@@ -4050,8 +4050,9 @@ async def archive_memory_store(
 ) -> MemoryStore:
     row = await conn.fetchrow(
         "UPDATE memory_stores SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
         store_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
