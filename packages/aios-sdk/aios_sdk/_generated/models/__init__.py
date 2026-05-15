@@ -162,6 +162,7 @@ from .tool_spec_type_type_1 import ToolSpecTypeType1
 from .tools_schema_update import ToolsSchemaUpdate
 from .tools_schema_update_tools_item import ToolsSchemaUpdateToolsItem
 from .unrestricted_networking import UnrestrictedNetworking
+from .update_account_request import UpdateAccountRequest
 from .validation_error import ValidationError
 from .validation_error_context import ValidationErrorContext
 from .vault import Vault
@@ -339,6 +340,7 @@ __all__ = (
     "ToolsSchemaUpdate",
     "ToolsSchemaUpdateToolsItem",
     "UnrestrictedNetworking",
+    "UpdateAccountRequest",
     "ValidationError",
     "ValidationErrorContext",
     "Vault",

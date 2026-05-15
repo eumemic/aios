@@ -21,6 +21,7 @@ from aios.models.accounts import (
     MintAccountResponse,
     MintKeyRequest,
     MintKeyResponse,
+    UpdateAccountRequest,
 )
 from aios.services import accounts as service
 
@@ -134,6 +135,35 @@ async def get_account(target_id: str, pool: PoolDep, auth: AuthDep) -> Account:
     """Read a specific account that's the caller or a direct child."""
     account_id, _key_id, _can_mint = auth
     return await service.get_account_in_scope(pool, target_id, caller_account_id=account_id)
+
+
+@router.patch("/{target_id}", operation_id="update_account")
+async def update_account(
+    target_id: str, body: UpdateAccountRequest, pool: PoolDep, auth: AuthDep
+) -> Account:
+    """Partial-update ``display_name`` / ``can_mint_children`` on a
+    caller-or-direct-child account.
+
+    Omitted fields are preserved. Both fields null is a valid no-op
+    that returns the current row.
+    """
+    account_id, key_id, _can_mint = auth
+    updated = await service.update_account(
+        pool,
+        target_account_id=target_id,
+        caller_account_id=account_id,
+        display_name=body.display_name,
+        can_mint_children=body.can_mint_children,
+    )
+    log.info(
+        "account.operation",
+        actor_account_id=account_id,
+        actor_key_id=key_id,
+        target_account_id=target_id,
+        action="account.update",
+        outcome="success",
+    )
+    return updated
 
 
 @router.delete(
