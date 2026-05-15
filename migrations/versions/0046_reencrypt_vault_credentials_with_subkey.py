@@ -14,8 +14,10 @@ fail or produce a meaningless blob.
 Operator requirements:
 
 * ``AIOS_VAULT_KEY`` must be set in the environment when ``alembic
-  upgrade`` runs. The application already requires this at boot, so the
-  migration inherits the same constraint.
+  upgrade`` runs against a database that has existing ``vault_credentials``
+  rows. The application already requires this at boot, so the migration
+  inherits the same constraint. Empty databases (fresh deployments,
+  ``alembic upgrade head`` in CI) skip the env-var check.
 * Failure mode is fail-loud: a decrypt error on any row aborts the
   migration. The row is most likely encrypted with a different master
   key than the operator has configured, which is exactly the case where
@@ -57,13 +59,19 @@ def _load_master() -> CryptoBox:
 
 
 def _rekey(
-    src_for: Callable[[str], CryptoBox],
-    dst_for: Callable[[str], CryptoBox],
+    build_src: Callable[[CryptoBox], Callable[[str], CryptoBox]],
+    build_dst: Callable[[CryptoBox], Callable[[str], CryptoBox]],
 ) -> None:
     """Walk active vault_credentials, decrypt with ``src_for(account_id)``,
     encrypt with ``dst_for(account_id)``, and write the new (ciphertext,
-    nonce) back. Both lookups take the row's ``account_id`` so the same
-    helper covers upgrade (master→subkey) and downgrade (subkey→master)."""
+    nonce) back.
+
+    The master key is only loaded if there are rows to re-encrypt. An
+    empty database — the common case for ``alembic upgrade head`` in CI
+    and fresh deployments — skips the env-var check entirely. ``build_src``
+    and ``build_dst`` take the master and return ``account_id → CryptoBox``
+    so upgrade (master→subkey) and downgrade (subkey→master) share the
+    walker."""
     bind = op.get_bind()
     rows = bind.execute(
         sa.text(
@@ -72,6 +80,11 @@ def _rekey(
             "WHERE archived_at IS NULL"
         )
     ).fetchall()
+    if not rows:
+        return
+    master = _load_master()
+    src_for = build_src(master)
+    dst_for = build_dst(master)
     for row in rows:
         plaintext = src_for(row.account_id).decrypt(
             EncryptedBlob(ciphertext=row.ciphertext, nonce=row.nonce)
@@ -88,16 +101,14 @@ def _rekey(
 
 
 def upgrade() -> None:
-    master = _load_master()
     _rekey(
-        src_for=lambda _account_id: master,
-        dst_for=master.derive_account_subkey,
+        build_src=lambda master: lambda _account_id: master,
+        build_dst=lambda master: master.derive_account_subkey,
     )
 
 
 def downgrade() -> None:
-    master = _load_master()
     _rekey(
-        src_for=master.derive_account_subkey,
-        dst_for=lambda _account_id: master,
+        build_src=lambda master: master.derive_account_subkey,
+        build_dst=lambda master: lambda _account_id: master,
     )
