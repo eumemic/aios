@@ -1471,6 +1471,7 @@ async def lookup_tool_name_by_call_id(
     raw = await conn.fetchval(
         "SELECT data->'tool_calls' FROM events "
         "WHERE session_id = $1 "
+        "  AND account_id = $3 "
         "  AND kind = 'message' "
         "  AND data->>'role' = 'assistant' "
         "  AND data ? 'tool_calls' "
@@ -1479,6 +1480,7 @@ async def lookup_tool_name_by_call_id(
         "ORDER BY seq DESC LIMIT 1",
         session_id,
         tool_call_id,
+        account_id,
     )
     if raw is None:
         return None
@@ -1927,11 +1929,13 @@ async def list_session_channels(
         SELECT DISTINCT channel
           FROM events
          WHERE session_id = $1
+           AND account_id = $2
            AND kind = 'message'
            AND channel IS NOT NULL
          ORDER BY channel
         """,
         session_id,
+        account_id,
     )
     return [str(r["channel"]) for r in rows]
 
@@ -2033,11 +2037,12 @@ async def read_windowed_events(
     # Bounded range scan: only events past the boundary.
     rows = await conn.fetch(
         "SELECT * FROM events "
-        "WHERE session_id = $1 AND kind = 'message' "
+        "WHERE session_id = $1 AND account_id = $3 AND kind = 'message' "
         "AND cumulative_tokens > $2 "
         "ORDER BY seq ASC",
         session_id,
         drop,
+        account_id,
     )
     return [_row_to_event(r) for r in rows]
 
