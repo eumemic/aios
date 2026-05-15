@@ -49,7 +49,7 @@ async def _capture_argv(spec: SandboxSpec) -> list[str]:
         captured["argv"] = argv
         return 0, b"deadbeef1234\n", b""
 
-    with patch("aios.sandbox.backends.docker._run_docker", side_effect=fake_run_docker):
+    with patch("aios.sandbox.backends.docker.run_docker_cli", side_effect=fake_run_docker):
         await DockerBackend().create(spec)
     return captured["argv"]
 

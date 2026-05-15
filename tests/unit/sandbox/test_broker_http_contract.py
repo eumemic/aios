@@ -1,14 +1,8 @@
-"""Integration tests for the ``bin/mcp`` CLI against a real broker.
-
-Boots a real :class:`aios.sandbox.mcp_proxy.McpBroker` on a loopback
-port, mocks the upstream MCP discovery/invocation, then shells out to
-``bin/mcp`` as a subprocess with ``MCP_BROKER_URL`` / ``MCP_BROKER_SECRET``
-pointed at the test broker. Verifies the CLI parses the broker's
-JSON envelope correctly and surfaces the right exit codes.
-
-No Docker — this exercises the binary end-to-end at the HTTP/subprocess
-boundary, which is what a real sandbox sees.
-"""
+"""Contract tests for the HTTP/JSON envelope between ``bin/mcp`` and
+:class:`aios.sandbox.mcp_proxy.McpBroker`. Pins request/response shape,
+exit codes, and secret validation. Runs over loopback — cross-container
+reachability is covered by
+:mod:`tests.e2e.test_sandbox_broker_reachability`."""
 
 from __future__ import annotations
 

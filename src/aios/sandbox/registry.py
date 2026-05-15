@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 from aios.logging import get_logger
 from aios.sandbox.backends.base import CommandResult, SandboxBackend, SandboxHandle
 from aios.sandbox.git_proxy import GitProxy
+from aios.sandbox.network import WORKER_NETWORK_ALIAS
 from aios.sandbox.setup import (
     apply_network_lockdown,
     ensure_workspace_runtime_dirs,
@@ -193,16 +194,11 @@ class SandboxRegistry:
         networking = plan.env_config.networking if plan.env_config else None
         if not isinstance(networking, LimitedNetworking):
             return
-        # ``host_gateway_alias`` is always set on plans the worker
-        # produces (every sandbox has access to the MCP broker), so the
-        # host-port allowlist always includes the broker; ``git_proxy``
-        # is added conditionally.
-        assert plan.spec.host_gateway_alias is not None
         extra_host_ports: list[tuple[str, int]] = [
-            (plan.spec.host_gateway_alias, runtime.require_mcp_broker().port),
+            (WORKER_NETWORK_ALIAS, runtime.require_mcp_broker().port),
         ]
         if plan.git_proxy is not None:
-            extra_host_ports.append((plan.spec.host_gateway_alias, plan.git_proxy.port))
+            extra_host_ports.append((WORKER_NETWORK_ALIAS, plan.git_proxy.port))
         await apply_network_lockdown(
             self._backend,
             handle,

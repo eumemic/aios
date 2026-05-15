@@ -1,8 +1,8 @@
-"""Per-session HTTP proxy that holds GitHub PATs on the host side and
+"""Per-session HTTP proxy that holds GitHub PATs on the worker side and
 injects them into outbound git traffic from the sandbox.
 
 The token never enters the container. The container's working tree has
-``origin = http://host.docker.internal:<port>/git/<secret>/<owner>/<repo>``;
+``origin = http://aios-worker:<port>/git/<secret>/<owner>/<repo>``;
 git speaks smart-HTTP to that URL; the proxy forwards each request to
 ``https://github.com/<owner>/<repo>/...`` with the ``Authorization``
 header injected from the precomputed per-repo basic-auth map.
@@ -147,11 +147,11 @@ class GitProxy:
         return f"http://{host}:{self.port}/git/{self._secret}/{repo_key(repo_url)}"
 
     async def start(self) -> None:
-        """Bind ``0.0.0.0:0`` (ephemeral port, all interfaces) and begin
-        serving. Binding to 0.0.0.0 is required for the docker container
-        to reach the proxy via ``host.docker.internal``; per-session
-        secret + per-repo path keep the blast radius bounded if the port
-        is exposed."""
+        """Bind ``0.0.0.0:0`` and begin serving. ``0.0.0.0`` covers every
+        interface the worker has — the sandbox may reach in via any of
+        them depending on deployment topology. Per-session secret +
+        per-repo path keep the blast radius bounded if the port is
+        exposed."""
         app = Starlette(
             routes=[
                 Route(

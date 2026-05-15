@@ -51,19 +51,11 @@ from aios.sandbox.github_clone import (
     ensure_cache_clone,
     ensure_session_working_tree,
 )
+from aios.sandbox.network import WORKER_NETWORK_ALIAS, is_running_in_container
 from aios.sandbox.setup import WORKSPACE_RUNTIME_ENV
 from aios.services import sessions as sessions_service
 
 log = get_logger("aios.sandbox.spec")
-
-
-# Hostname the sandbox uses to reach host-side proxies (``git_proxy`` for
-# GitHub PAT injection, ``mcp_proxy`` for MCP tool invocations). Docker
-# maps this to the host gateway IP via ``--add-host``; on Docker Desktop
-# the name auto-resolves but the explicit alias is required on Linux.
-# The registry threads the same string through the iptables script so
-# limited-networking sessions can still reach the proxy ports.
-PROXY_HOST_ALIAS = "host.docker.internal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +201,7 @@ async def _materialize_github_clones(
                 repo_url=echo.url,
                 token=token,
                 cache_dir=cache_dir,
-                proxy_url=proxy.proxy_url(echo.url, host=PROXY_HOST_ALIAS),
+                proxy_url=proxy.proxy_url(echo.url, host=WORKER_NETWORK_ALIAS),
                 git_user_name=echo.git_user_name,
                 git_user_email=echo.git_user_email,
             )
@@ -282,7 +274,7 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     mcp_broker = runtime.require_mcp_broker()
     mcp_broker_secret = secrets.token_urlsafe(32)
     mcp_broker.register_session(session_id, mcp_broker_secret)
-    mcp_broker_url = f"http://{PROXY_HOST_ALIAS}:{mcp_broker.port}"
+    mcp_broker_url = f"http://{WORKER_NETWORK_ALIAS}:{mcp_broker.port}"
 
     try:
         return _assemble_plan(
@@ -358,13 +350,6 @@ def _assemble_plan(
     extra_mounts: list[Mount] = [
         Mount(host_path=attachments_path, sandbox_path="/mnt/attachments", read_only=True),
         Mount(host_path=uploads_path, sandbox_path="/mnt/uploads", read_only=True),
-        # NOTE: the ``mcp`` CLI used to be bind-mounted from
-        # ``<repo_root>/bin/mcp`` here. That was incorrect: Docker resolves
-        # bind sources on the daemon's (host's) filesystem, not the calling
-        # container's, so the bind silently degraded to an auto-created
-        # empty directory on every host where the worker container ran.
-        # See issue #392. ``mcp`` now lives in the sandbox image directly
-        # (see ``docker/Dockerfile.sandbox``).
     ]
 
     # Bind-mount each attached memory store. Read-only attaches make the
@@ -407,10 +392,7 @@ def _assemble_plan(
         environment=merged_env,
         labels=labels,
         network_policy=_network_policy_from_config(env_config),
-        # Always set: every sandbox can reach the MCP broker on the host
-        # gateway; ``git_proxy`` and any other host-side proxies share the
-        # same alias.
-        host_gateway_alias=PROXY_HOST_ALIAS,
+        host_gateway_alias=None if is_running_in_container() else WORKER_NETWORK_ALIAS,
         image=image,
         mount_snapshot=snapshot,
         # Resource caps come from deployment-wide settings (multi-tenancy

@@ -69,7 +69,7 @@ async def _run_with_captured_git(
             repo_url="https://github.com/octocat/Hello-World",
             token="ghp_secret",
             cache_dir=repos_root / "cache",
-            proxy_url="http://host.docker.internal:9090/o/r",
+            proxy_url="http://aios-worker:9090/o/r",
             git_user_name=git_user_name,
             git_user_email=git_user_email,
         )

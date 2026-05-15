@@ -20,9 +20,8 @@ expected to run arbitrary shell inside the sandbox.
 
 from __future__ import annotations
 
-from aios.config import get_settings
 from aios.logging import get_logger
-from aios.sandbox._subprocess import run_subprocess_with_timeout
+from aios.sandbox._subprocess import run_docker_cli, run_subprocess_with_timeout
 from aios.sandbox.backends.base import (
     INSTANCE_LABEL_KEY,
     MANAGED_LABEL_KEY,
@@ -36,30 +35,9 @@ from aios.sandbox.backends.base import (
     SandboxHandle,
     SandboxSpec,
 )
+from aios.sandbox.network import SANDBOX_NETWORK_NAME
 
 log = get_logger("aios.sandbox.backends.docker")
-
-# Bound every ``docker`` management call so a stalled daemon can't wedge
-# the worker step path (per issue #179 / commit e675ed2).
-_DOCKER_CLI_TIMEOUT_S = 30.0
-
-
-async def _run_docker(
-    argv: list[str], *, timeout_s: float = _DOCKER_CLI_TIMEOUT_S
-) -> tuple[int, bytes, bytes]:
-    """Run a ``docker`` CLI invocation and return (exit_code, stdout, stderr).
-
-    Raises :class:`SandboxBackendError` if the subprocess cannot be
-    launched (missing binary, OS error) or if it runs longer than
-    ``timeout_s`` (stalled daemon). A nonzero exit from docker itself is
-    returned as a regular tuple — callers decide whether it's fatal.
-    """
-    rc, stdout_bytes, stderr_bytes, timed_out = await run_subprocess_with_timeout(
-        argv, timeout_s=timeout_s
-    )
-    if timed_out:
-        raise SandboxBackendError(f"docker cli timed out after {timeout_s}s: {' '.join(argv)}")
-    return rc, stdout_bytes, stderr_bytes
 
 
 def _decode_and_truncate(raw: bytes, max_bytes: int) -> tuple[str, bool]:
@@ -82,7 +60,6 @@ class DockerBackend:
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Run ``docker run`` per ``spec`` and return a handle to the started container."""
-        settings = get_settings()
         argv: list[str] = [
             "docker",
             "run",
@@ -106,21 +83,16 @@ class DockerBackend:
         for key, value in spec.labels.items():
             argv.extend(["--label", f"{key}={value}"])
 
-        # Network mode: Disabled overrides the deployment-wide default.
         if isinstance(spec.network_policy, Disabled):
             argv.extend(["--network", "none"])
         else:
-            argv.extend(["--network", settings.sandbox_network_mode])
+            argv.extend(["--network", SANDBOX_NETWORK_NAME])
 
         # Limited policy needs NET_ADMIN so the iptables script (applied
         # later by the registry via aios.sandbox.setup) can install rules.
         if isinstance(spec.network_policy, Limited):
             argv.extend(["--cap-add", "NET_ADMIN"])
 
-        # Host gateway alias — Docker maps it to host-gateway so the
-        # sandbox can reach host-side services (e.g. the credential proxy).
-        # The explicit alias is required on Linux; on Docker Desktop the
-        # name auto-resolves but ``--add-host`` is harmless.
         if spec.host_gateway_alias is not None:
             argv.extend(["--add-host", f"{spec.host_gateway_alias}:host-gateway"])
 
@@ -152,7 +124,7 @@ class DockerBackend:
 
         argv.append(spec.image)
 
-        rc, stdout_bytes, stderr_bytes = await _run_docker(argv)
+        rc, stdout_bytes, stderr_bytes = await run_docker_cli(argv)
         if rc != 0:
             raise SandboxBackendError(
                 f"docker run failed (exit {rc}): "
@@ -207,7 +179,7 @@ class DockerBackend:
         """``docker rm --force`` the container. No-op if already gone."""
         argv = ["docker", "rm", "--force", handle.sandbox_id]
         try:
-            rc, _, stderr_bytes = await _run_docker(argv)
+            rc, _, stderr_bytes = await run_docker_cli(argv)
         except SandboxBackendError as err:
             log.warning(
                 "sandbox.destroy_launch_failed",
@@ -242,7 +214,7 @@ class DockerBackend:
             "--filter",
             f"label={INSTANCE_LABEL_KEY}={instance_id}",
         ]
-        rc, stdout_bytes, stderr_bytes = await _run_docker(ps_argv)
+        rc, stdout_bytes, stderr_bytes = await run_docker_cli(ps_argv)
         if rc != 0:
             raise SandboxBackendError(
                 f"docker ps failed (exit {rc}): "
@@ -256,7 +228,7 @@ class DockerBackend:
 
         fmt = '{{.Id}}\t{{index .Config.Labels "' + SESSION_LABEL_KEY + '"}}'
         inspect_argv = ["docker", "inspect", "--format", fmt, *container_ids]
-        rc, stdout_bytes, stderr_bytes = await _run_docker(inspect_argv)
+        rc, stdout_bytes, stderr_bytes = await run_docker_cli(inspect_argv)
         if rc != 0:
             raise SandboxBackendError(
                 f"docker inspect failed (exit {rc}): "
@@ -276,7 +248,7 @@ class DockerBackend:
         """``docker rm --force`` a container by id. Logs but does not raise."""
         argv = ["docker", "rm", "--force", sandbox_id]
         try:
-            rc, _, stderr_bytes = await _run_docker(argv)
+            rc, _, stderr_bytes = await run_docker_cli(argv)
         except SandboxBackendError as err:
             log.warning(
                 "sandbox.force_remove_launch_failed",
