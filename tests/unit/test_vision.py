@@ -32,7 +32,7 @@ def _patch_get_model_info(
             raise Exception(f"unknown model: {model}")
         return mapping[model]
 
-    monkeypatch.setattr("aios.harness.vision.litellm.get_model_info", fake)
+    monkeypatch.setattr("litellm.get_model_info", fake)
 
 
 class TestSupportsVision:
