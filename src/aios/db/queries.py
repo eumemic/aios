@@ -4667,8 +4667,17 @@ async def list_memory_versions(
         args.append(memory_id)
         where += f" AND memory_id = ${len(args)}"
     args.append(limit)
+    # ``seq DESC`` is the load-bearing tiebreaker: ``created_at`` defaults
+    # to transaction-start ``now()``, so rows written in the same
+    # transaction (any bulk-edit flow, e.g. multiple ``update_memory``
+    # calls under one HTTP request) share ``created_at`` to the
+    # microsecond. The ``UNIQUE (memory_store_id, seq)`` constraint makes
+    # ``seq`` per-store-monotonic and unambiguous, and it's allocated in
+    # write order by ``_allocate_version_seq`` — so ``seq DESC`` agrees
+    # with "newest first" within the tied group.
     rows = await conn.fetch(
-        f"SELECT * FROM memory_versions WHERE {where} ORDER BY created_at DESC LIMIT ${len(args)}",
+        f"SELECT * FROM memory_versions WHERE {where} "
+        f"ORDER BY created_at DESC, seq DESC LIMIT ${len(args)}",
         *args,
     )
     return [_row_to_memory_version(r, include_content=False) for r in rows]
