@@ -754,9 +754,10 @@ async def set_session_focal_channel(
     focal attention.
     """
     await conn.execute(
-        "UPDATE sessions SET focal_channel = $1 WHERE id = $2",
+        "UPDATE sessions SET focal_channel = $1 WHERE id = $2 AND account_id = $3",
         focal,
         session_id,
+        account_id,
     )
 
 
@@ -817,10 +818,12 @@ async def set_session_status(
 ) -> None:
     stop_json = json.dumps(stop_reason) if stop_reason is not None else None
     await conn.execute(
-        "UPDATE sessions SET status = $1, stop_reason = $2::jsonb, updated_at = now() WHERE id = $3",
+        "UPDATE sessions SET status = $1, stop_reason = $2::jsonb, updated_at = now() "
+        "WHERE id = $3 AND account_id = $4",
         status,
         stop_json,
         session_id,
+        account_id,
     )
 
     # Connector-calls fan-out (#328 PR 5): when a session parks in
