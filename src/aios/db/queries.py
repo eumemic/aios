@@ -1037,8 +1037,16 @@ async def delete_session(
                 f"session {session_id} is running and cannot be deleted",
                 detail={"id": session_id},
             )
-        await conn.execute("DELETE FROM session_vaults WHERE session_id = $1", session_id)
-        await conn.execute("DELETE FROM events WHERE session_id = $1", session_id)
+        await conn.execute(
+            "DELETE FROM session_vaults WHERE session_id = $1 AND account_id = $2",
+            session_id,
+            account_id,
+        )
+        await conn.execute(
+            "DELETE FROM events WHERE session_id = $1 AND account_id = $2",
+            session_id,
+            account_id,
+        )
         await conn.execute(
             "DELETE FROM sessions WHERE id = $1 AND account_id = $2",
             session_id,
@@ -2464,8 +2472,9 @@ async def get_session_vault_ids(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> list[str]:
     rows = await conn.fetch(
-        "SELECT vault_id FROM session_vaults WHERE session_id = $1 ORDER BY rank",
+        "SELECT vault_id FROM session_vaults WHERE session_id = $1 AND account_id = $2 ORDER BY rank",
         session_id,
+        account_id,
     )
     return [str(r["vault_id"]) for r in rows]
 
@@ -2690,8 +2699,9 @@ async def insert_skill_version(
     files_json = json.dumps(files)
     async with conn.transaction():
         head = await conn.fetchrow(
-            "SELECT latest_version FROM skills WHERE id = $1 FOR UPDATE",
+            "SELECT latest_version FROM skills WHERE id = $1 AND account_id = $2 FOR UPDATE",
             skill_id,
+            account_id,
         )
         if head is None:
             raise NotFoundError(f"skill {skill_id} not found", detail={"id": skill_id})
@@ -2712,9 +2722,10 @@ async def insert_skill_version(
         )
         assert ver_row is not None
         await conn.execute(
-            "UPDATE skills SET latest_version = $2, updated_at = now() WHERE id = $1",
+            "UPDATE skills SET latest_version = $2, updated_at = now() WHERE id = $1 AND account_id = $3",
             skill_id,
             new_ver,
+            account_id,
         )
     return _row_to_skill_version(ver_row)
 
@@ -2727,9 +2738,10 @@ async def get_skill_version(
     account_id: str,
 ) -> SkillVersion:
     row = await conn.fetchrow(
-        "SELECT * FROM skill_versions WHERE skill_id = $1 AND version = $2",
+        "SELECT * FROM skill_versions WHERE skill_id = $1 AND version = $2 AND account_id = $3",
         skill_id,
         version,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -3405,9 +3417,10 @@ async def lookup_chat_session(
 ) -> str | None:
     """Existing session_id for ``(connection_id, chat_id)``, else ``None``."""
     val: str | None = await conn.fetchval(
-        "SELECT session_id FROM chat_sessions WHERE connection_id = $1 AND chat_id = $2",
+        "SELECT session_id FROM chat_sessions WHERE connection_id = $1 AND chat_id = $2 AND account_id = $3",
         connection_id,
         chat_id,
+        account_id,
     )
     return val
 
