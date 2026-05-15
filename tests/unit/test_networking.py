@@ -129,9 +129,9 @@ class TestBuildIptablesScript:
     def test_extra_host_ports_added(self) -> None:
         script = build_iptables_script(
             allowed_hosts=set(),
-            extra_host_ports=[("host.docker.internal", 8765)],
+            extra_host_ports=[("aios-worker", 8765)],
         )
-        assert "host.docker.internal:8765" in script
+        assert "aios-worker:8765" in script
         assert "--dport 8765 -j ACCEPT" in script
 
 
@@ -161,7 +161,7 @@ async def _capture_docker_argv(spec: SandboxSpec) -> list[str]:
         captured.append(argv)
         return 0, b"container_abc123\n", b""
 
-    with patch("aios.sandbox.backends.docker._run_docker", fake_run_docker):
+    with patch("aios.sandbox.backends.docker.run_docker_cli", fake_run_docker):
         await DockerBackend().create(spec)
     return captured[0]
 
@@ -247,11 +247,11 @@ class TestApplyNetworkLockdown:
             backend,
             handle,
             networking,
-            extra_host_ports=[("host.docker.internal", 8765)],
+            extra_host_ports=[("aios-worker", 8765)],
         )
 
         script = backend.calls[0][1]["command"]
-        assert "host.docker.internal:8765" in script
+        assert "aios-worker:8765" in script
 
     def test_package_registry_hosts_constant_is_populated(self) -> None:
         # Sanity: the constant exists and contains representative hosts.

@@ -116,9 +116,9 @@ class McpBroker:
             self._secrets.pop(s, None)
 
     async def start(self) -> None:
-        """Bind ``0.0.0.0:0`` and begin serving. Binding to 0.0.0.0 is
-        required for sandbox containers to reach the broker via
-        ``host.docker.internal``."""
+        """Bind ``0.0.0.0:0`` and begin serving. ``0.0.0.0`` covers every
+        interface the worker has — the sandbox may reach in via any of
+        them depending on deployment topology."""
         app = Starlette(
             routes=[
                 Route("/v1/{secret}/servers", self._list_servers, methods=["GET"]),

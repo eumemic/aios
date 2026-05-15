@@ -52,6 +52,7 @@ from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
 from aios.sandbox.backends import make_backend
 from aios.sandbox.mcp_proxy import McpBroker
+from aios.sandbox.network import ensure_sandbox_network
 from aios.sandbox.registry import SandboxRegistry
 
 # Hashed (via Postgres ``hashtextextended($1, 0)``) into the 64-bit
@@ -113,6 +114,8 @@ async def worker_main() -> None:
         sandbox_registry = SandboxRegistry(backend=make_backend(settings.sandbox_backend))
         task_registry = TaskRegistry()
         mcp_session_pool = McpSessionPool()
+        if settings.sandbox_backend == "docker":
+            await ensure_sandbox_network()
         mcp_broker = McpBroker()
         await mcp_broker.start()
 

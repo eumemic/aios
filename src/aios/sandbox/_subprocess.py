@@ -22,6 +22,10 @@ from aios.sandbox.backends.base import SandboxBackendError
 # state can't hold the worker indefinitely past the wait_for timeout.
 _DRAIN_AFTER_KILL_TIMEOUT_S = 2.0
 
+# Bound every ``docker`` management call so a stalled daemon can't wedge
+# the worker step path (per issue #179 / commit e675ed2).
+DOCKER_CLI_TIMEOUT_S = 30.0
+
 
 async def run_subprocess_with_timeout(
     argv: list[str], *, timeout_s: float
@@ -59,3 +63,20 @@ async def run_subprocess_with_timeout(
         except (TimeoutError, OSError):
             stdout_bytes, stderr_bytes = b"", b""
         return -1, stdout_bytes, stderr_bytes, True
+
+
+async def run_docker_cli(
+    argv: list[str], *, timeout_s: float = DOCKER_CLI_TIMEOUT_S
+) -> tuple[int, bytes, bytes]:
+    """Run a ``docker`` CLI invocation. Returns ``(exit_code, stdout, stderr)``.
+
+    Raises :class:`SandboxBackendError` on launch failure or timeout. A
+    nonzero ``docker`` exit is returned as a regular tuple — callers
+    decide whether it's fatal.
+    """
+    rc, stdout_bytes, stderr_bytes, timed_out = await run_subprocess_with_timeout(
+        argv, timeout_s=timeout_s
+    )
+    if timed_out:
+        raise SandboxBackendError(f"docker cli timed out after {timeout_s}s: {' '.join(argv)}")
+    return rc, stdout_bytes, stderr_bytes

@@ -68,7 +68,7 @@ def _make_spec(environment: dict[str, str]) -> SandboxSpec:
 
 
 async def _capture_docker_argv(spec: SandboxSpec, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Call DockerBackend.create(spec) with _run_docker patched; return argv."""
+    """Call DockerBackend.create(spec) with run_docker_cli patched; return argv."""
     captured: list[list[str]] = []
 
     async def fake_run_docker(
@@ -77,7 +77,7 @@ async def _capture_docker_argv(spec: SandboxSpec, monkeypatch: pytest.MonkeyPatc
         captured.append(argv)
         return 0, b"container_abc123\n", b""
 
-    monkeypatch.setattr("aios.sandbox.backends.docker._run_docker", fake_run_docker)
+    monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", fake_run_docker)
     await DockerBackend().create(spec)
     return captured[0]
 

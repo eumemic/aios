@@ -89,12 +89,6 @@ class Settings(BaseSettings):
         "Each session gets <workspace_root>/<session_id> bind-mounted to /workspace "
         "inside its sandbox container.",
     )
-    sandbox_network_mode: str = Field(
-        default="bridge",
-        description="Docker network mode for sandbox containers. 'bridge' (default) "
-        "gives full outbound internet access, which the HN demo needs. 'none' "
-        "disables networking entirely; 'host' shares the host network namespace.",
-    )
     sandbox_cpu_quota: float | None = Field(
         default=None,
         ge=0.01,
