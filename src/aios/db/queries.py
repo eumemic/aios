@@ -2803,8 +2803,10 @@ async def get_latest_skill_version(
         SELECT sv.* FROM skill_versions sv
         JOIN skills s ON s.id = sv.skill_id AND sv.version = s.latest_version
         WHERE sv.skill_id = $1
+          AND sv.account_id = $2
         """,
         skill_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(f"skill {skill_id} has no versions", detail={"skill_id": skill_id})
@@ -2921,8 +2923,10 @@ async def get_active_binding(
         SELECT id, connection_id, mode, session_id, session_template_id
           FROM bindings
          WHERE connection_id = $1 AND archived_at IS NULL
+           AND account_id = $2
         """,
         connection_id,
+        account_id,
     )
     if row is None:
         return None
@@ -3004,11 +3008,11 @@ async def archive_active_binding(
     in the *other* mode is left intact and the call returns ``None``;
     callers diagnose via a follow-up read.
     """
-    where = "connection_id = $1 AND archived_at IS NULL"
-    args: tuple[Any, ...] = (connection_id,)
+    where = "connection_id = $1 AND archived_at IS NULL AND account_id = $2"
+    args: tuple[Any, ...] = (connection_id, account_id)
     if expected_mode is not None:
-        where += " AND mode = $2"
-        args = (connection_id, expected_mode)
+        where += " AND mode = $3"
+        args = (connection_id, account_id, expected_mode)
     row = await conn.fetchrow(
         f"""
         UPDATE bindings
@@ -4566,9 +4570,12 @@ async def redact_memory_version(
     """
     async with conn.transaction():
         ver = await conn.fetchrow(
-            "SELECT * FROM memory_versions WHERE memory_store_id = $1 AND id = $2 FOR UPDATE",
+            "SELECT * FROM memory_versions "
+            "WHERE memory_store_id = $1 AND id = $2 AND account_id = $3 "
+            "FOR UPDATE",
             store_id,
             version_id,
+            account_id,
         )
         if ver is None:
             raise NotFoundError(
@@ -4578,10 +4585,12 @@ async def redact_memory_version(
 
         head_check = await conn.fetchrow(
             "SELECT 1 FROM memories WHERE memory_store_id = $1 AND id = $2 "
-            "AND current_version_id = $3 AND deleted_at IS NULL",
+            "AND current_version_id = $3 AND account_id = $4 "
+            "AND deleted_at IS NULL",
             store_id,
             ver["memory_id"],
             version_id,
+            account_id,
         )
         if head_check is not None:
             raise ConflictError(
@@ -4819,13 +4828,14 @@ async def update_session_github_repo_blob(
             """
             UPDATE session_github_repositories
             SET ciphertext = $1, nonce = $2, updated_at = now()
-            WHERE session_id = $3 AND id = $4
+            WHERE session_id = $3 AND id = $4 AND account_id = $5
             RETURNING *
             """,
             blob.ciphertext,
             blob.nonce,
             session_id,
             resource_id,
+            account_id,
         )
     else:
         git_user_name, git_user_email = identity
@@ -4835,7 +4845,7 @@ async def update_session_github_repo_blob(
             SET ciphertext = $1, nonce = $2,
                 git_user_name = $3, git_user_email = $4,
                 updated_at = now()
-            WHERE session_id = $5 AND id = $6
+            WHERE session_id = $5 AND id = $6 AND account_id = $7
             RETURNING *
             """,
             blob.ciphertext,
@@ -4844,6 +4854,7 @@ async def update_session_github_repo_blob(
             git_user_email,
             session_id,
             resource_id,
+            account_id,
         )
     if row is None:
         raise NotFoundError(
