@@ -3,8 +3,12 @@
 * ``postgres_container`` — session-scoped testcontainer running Postgres 16
 * ``migrated_db_url`` — runs alembic upgrade head + applies the procrastinate
   schema and aios lock-release trigger against the testcontainer
+* ``_truncate_sql`` — session-scoped: the ``TRUNCATE`` statement covering
+  every public-schema table, computed once after migrations
 * ``_reset_db_state`` — function-scoped: TRUNCATEs all public-schema tables
-  before each test so the session-scoped DB stays isolated between tests
+  before each test so the session-scoped DB stays isolated between tests.
+  Yields the asyncpg connection so downstream fixtures (``aios_env``) can
+  reuse it without paying a second connect round-trip
 * ``aios_env_minimal`` — env vars only, no DB seeding. For tests that
   exercise pre-bootstrap state (bootstrap endpoint tests, etc.)
 * ``aios_env`` — ``aios_env_minimal`` plus a bootstrapped root account
@@ -21,7 +25,7 @@ import base64
 import os
 import secrets
 import subprocess
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -122,22 +126,50 @@ def migrated_db_url(db_url: str) -> str:
     return db_url
 
 
+@pytest.fixture(scope="session")
+def _truncate_sql(migrated_db_url: str) -> str:
+    """Pre-built ``TRUNCATE`` statement covering every public-schema table.
+
+    The schema is fixed once :func:`migrated_db_url` has run, so the
+    ``pg_tables`` lookup belongs at session scope, not in every
+    :func:`_reset_db_state` call.  Eliminating the per-test catalog scan
+    shaves ~3 ms per test off the e2e suite.
+    """
+    import asyncio
+
+    import asyncpg
+
+    async def fetch() -> str:
+        conn = await asyncpg.connect(migrated_db_url)
+        try:
+            rows = await conn.fetch("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+        finally:
+            await conn.close()
+        if not rows:
+            return ""
+        quoted = ", ".join(f'"{r["tablename"]}"' for r in rows)
+        return f"TRUNCATE {quoted} RESTART IDENTITY CASCADE"
+
+    return asyncio.run(fetch())
+
+
 @pytest.fixture
-async def _reset_db_state(migrated_db_url: str) -> None:
-    """TRUNCATE every public-schema table before each test.
+async def _reset_db_state(migrated_db_url: str, _truncate_sql: str) -> AsyncIterator[Any]:
+    """TRUNCATE every public-schema table before each test, yielding the
+    connection so downstream fixtures (``aios_env``) can reuse it instead
+    of opening their own.
 
     Restores the cross-test isolation that module-scoped Postgres used to
-    provide.  ``TRUNCATE`` is metadata-only in Postgres, so this is O(tables)
-    regardless of row count.
+    provide.  ``TRUNCATE`` is metadata-only in Postgres, so this is
+    O(tables) regardless of row count.
     """
     import asyncpg
 
     conn = await asyncpg.connect(migrated_db_url)
     try:
-        rows = await conn.fetch("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
-        if rows:
-            quoted = ", ".join(f'"{r["tablename"]}"' for r in rows)
-            await conn.execute(f"TRUNCATE {quoted} RESTART IDENTITY CASCADE")
+        if _truncate_sql:
+            await conn.execute(_truncate_sql)
+        yield conn
     finally:
         await conn.close()
 
@@ -178,7 +210,7 @@ def _reset_sse_starlette_shutdown_state() -> Iterator[None]:
 
 @pytest.fixture
 def aios_env_minimal(
-    migrated_db_url: str, _reset_db_state: None, tmp_path: Path
+    migrated_db_url: str, _reset_db_state: Any, tmp_path: Path
 ) -> Iterator[dict[str, str]]:
     """Set the env vars the FastAPI app needs, without seeding any data.
 
@@ -206,45 +238,42 @@ def aios_env_minimal(
 
 
 @pytest.fixture
-async def aios_env(aios_env_minimal: dict[str, str]) -> dict[str, str]:
+async def aios_env(aios_env_minimal: dict[str, str], _reset_db_state: Any) -> dict[str, str]:
     """Env vars + a bootstrapped root whose key is ``AIOS_API_KEY``.
 
     Auth looks the bearer token up against ``account_keys``, so any
     test that hits an authenticated route needs a matching DB row.
     This fixture seeds that row using ``AIOS_API_KEY``'s sha256 hash.
 
+    Reuses the connection yielded by :func:`_reset_db_state` to dodge
+    a second ``asyncpg.connect`` round-trip per test (~27 ms).
+
     Async so the seed step runs on the same event loop pytest-asyncio
     drives the test on — avoids the spurious ``asyncio.run`` event-loop
     isolation that caused ASGI-callable teardown flakiness in CI.
     """
-    import asyncpg
-
     from aios.services.accounts import hash_key
 
     plaintext = aios_env_minimal["AIOS_API_KEY"]
-    db_url = aios_env_minimal["AIOS_DB_URL"]
+    conn = _reset_db_state
 
-    conn = await asyncpg.connect(db_url)
-    try:
-        # PR 6: insert ``acc_test_stub`` as the root account itself and bind
-        # the bootstrap API key directly to it, so auth resolves the bearer
-        # to the same account_id every test body uses as its scoping arg.
-        # Bypasses ``bootstrap_root_account`` (which would generate a fresh
-        # ULID we'd have to thread back through 44 test files).
-        await conn.execute(
-            """
-            INSERT INTO accounts
-                (id, parent_account_id, can_mint_children, display_name)
-            VALUES ('acc_test_stub', NULL, TRUE, 'test-root')
-            """
-        )
-        await conn.execute(
-            """
-            INSERT INTO account_keys (key_id, account_id, hash, label)
-            VALUES ('akey_test', 'acc_test_stub', $1, 'test-root')
-            """,
-            hash_key(plaintext),
-        )
-    finally:
-        await conn.close()
+    # PR 6: insert ``acc_test_stub`` as the root account itself and bind
+    # the bootstrap API key directly to it, so auth resolves the bearer
+    # to the same account_id every test body uses as its scoping arg.
+    # Bypasses ``bootstrap_root_account`` (which would generate a fresh
+    # ULID we'd have to thread back through 44 test files).
+    await conn.execute(
+        """
+        INSERT INTO accounts
+            (id, parent_account_id, can_mint_children, display_name)
+        VALUES ('acc_test_stub', NULL, TRUE, 'test-root')
+        """
+    )
+    await conn.execute(
+        """
+        INSERT INTO account_keys (key_id, account_id, hash, label)
+        VALUES ('akey_test', 'acc_test_stub', $1, 'test-root')
+        """,
+        hash_key(plaintext),
+    )
     return aios_env_minimal
