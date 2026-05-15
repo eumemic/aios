@@ -124,6 +124,25 @@ class DockerBackend:
         if spec.host_gateway_alias is not None:
             argv.extend(["--add-host", f"{spec.host_gateway_alias}:host-gateway"])
 
+        # Per-sandbox resource caps (#367 PR 9). All three are best-effort:
+        # when unset (None) we leave Docker's host-default behavior in
+        # place. The kernel OOM-kills the container when memory is
+        # breached; CPU is throttled, not killed; pids-limit denies fork
+        # past the cap with a clear errno.
+        if spec.cpu_quota is not None:
+            # ``f"{x:g}"`` flips to scientific notation around 1e-4
+            # (e.g. ``"5e-05"``), which Docker rejects on ``--cpus``.
+            # The settings floor is 0.01 so the printable range stays
+            # plain-decimal, but format explicitly to avoid future drift.
+            argv.extend(["--cpus", f"{spec.cpu_quota:.4f}".rstrip("0").rstrip(".")])
+        if spec.memory_bytes is not None:
+            argv.extend(["--memory", str(spec.memory_bytes)])
+            # Pin swap to the same value so the sandbox can't lean on
+            # swap to exceed the resident cap.
+            argv.extend(["--memory-swap", str(spec.memory_bytes)])
+        if spec.pids_limit is not None:
+            argv.extend(["--pids-limit", str(spec.pids_limit)])
+
         # Keep stdin open so the container doesn't exit on empty stdin.
         argv.append("--interactive")
 

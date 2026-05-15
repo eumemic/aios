@@ -375,6 +375,7 @@ def _assemble_plan(
     }
 
     snapshot = mount_snapshot_from_echoes(memory_echoes, github_echoes)
+    settings = get_settings()
     spec = SandboxSpec(
         session_id=session_id,
         instance_id=instance_id,
@@ -386,6 +387,13 @@ def _assemble_plan(
         host_gateway_alias=PROXY_HOST_ALIAS if git_proxy is not None else None,
         image=image,
         mount_snapshot=snapshot,
+        # Resource caps come from deployment-wide settings (multi-tenancy
+        # hardening — #367 PR 9). A future revision will let an account
+        # override these via the management API; the spec-layer plumbing
+        # is what makes that override-point cheap to add.
+        cpu_quota=settings.sandbox_cpu_quota,
+        memory_bytes=settings.sandbox_memory_bytes,
+        pids_limit=settings.sandbox_pids_limit,
     )
 
     return ProvisioningPlan(
