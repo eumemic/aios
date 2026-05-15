@@ -72,6 +72,15 @@ async def run_subprocess_with_timeout(
             proc._transport.close()  # type: ignore[attr-defined]  # typeshed omits Process._transport
             stdout_bytes, stderr_bytes = b"", b""
         return -1, stdout_bytes, stderr_bytes, True
+    except BaseException:
+        # CancelledError is a BaseException, not a TimeoutError, so the
+        # outer-cancel path (caller's job timeout, worker shutdown)
+        # skips the give-up cleanup above — child keeps running and
+        # pipe FDs leak. SIGKILL + close the transport before propagating.
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        proc._transport.close()  # type: ignore[attr-defined]
+        raise
 
 
 async def run_docker_cli(
