@@ -787,3 +787,56 @@ class TestRefreshCredential:
 def test_refresh_skew_seconds_is_positive() -> None:
     """Sanity check the constant — 0 would cause infinite refresh churn."""
     assert REFRESH_SKEW_SECONDS > 0
+
+
+class TestDeriveAccountSubkey:
+    """``CryptoBox.derive_account_subkey`` — HKDF-SHA256 per-account key
+    derivation (#367 follow-up). The building block for moving from a
+    single deployment-wide vault key to per-account encryption."""
+
+    def _master(self) -> CryptoBox:
+        # Use a fixed master so the derive output is deterministic across runs.
+        return CryptoBox(b"\xab" * 32)
+
+    def test_returns_a_cryptobox(self) -> None:
+        sub = self._master().derive_account_subkey("acc_alpha")
+        assert isinstance(sub, CryptoBox)
+
+    def test_subkey_round_trips_plaintext(self) -> None:
+        sub = self._master().derive_account_subkey("acc_alpha")
+        blob = sub.encrypt("secret payload")
+        assert sub.decrypt(blob) == "secret payload"
+
+    def test_deterministic_per_account(self) -> None:
+        """Same account_id → same subkey bytes (allowing the same blob
+        to decrypt across process restarts)."""
+        a1 = self._master().derive_account_subkey("acc_alpha")
+        a2 = self._master().derive_account_subkey("acc_alpha")
+        blob = a1.encrypt("payload")
+        assert a2.decrypt(blob) == "payload"
+
+    def test_subkeys_for_different_accounts_diverge(self) -> None:
+        """Two tenants get two unrelated keys — a payload encrypted with
+        one cannot be decrypted with the other."""
+        from aios.errors import CryptoDecryptError
+
+        a = self._master().derive_account_subkey("acc_alpha")
+        b = self._master().derive_account_subkey("acc_beta")
+        blob = a.encrypt("payload")
+        with pytest.raises(CryptoDecryptError):
+            b.decrypt(blob)
+
+    def test_master_cannot_decrypt_subkey_ciphertext(self) -> None:
+        """One-way property: a subkey is unreachable from the master
+        even though it was derived from it."""
+        from aios.errors import CryptoDecryptError
+
+        master = self._master()
+        sub = master.derive_account_subkey("acc_alpha")
+        blob = sub.encrypt("payload")
+        with pytest.raises(CryptoDecryptError):
+            master.decrypt(blob)
+
+    def test_empty_account_id_rejected(self) -> None:
+        with pytest.raises(ValueError, match="account_id must be non-empty"):
+            self._master().derive_account_subkey("")
