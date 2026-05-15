@@ -116,7 +116,11 @@ async def insert_environment(
 async def get_environment(
     conn: asyncpg.Connection[Any], env_id: str, *, account_id: str
 ) -> Environment:
-    row = await conn.fetchrow("SELECT * FROM environments WHERE id = $1", env_id)
+    row = await conn.fetchrow(
+        "SELECT * FROM environments WHERE id = $1 AND account_id = $2",
+        env_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(f"environment {env_id} not found", detail={"id": env_id})
     return _row_to_environment(row)
@@ -127,14 +131,17 @@ async def list_environments(
 ) -> list[Environment]:
     if after is None:
         rows = await conn.fetch(
-            "SELECT * FROM environments WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            "SELECT * FROM environments WHERE archived_at IS NULL AND account_id = $1 "
+            "ORDER BY id DESC LIMIT $2",
+            account_id,
             limit,
         )
     else:
         rows = await conn.fetch(
             "SELECT * FROM environments WHERE archived_at IS NULL AND id < $1 "
-            "ORDER BY id DESC LIMIT $2",
+            "AND account_id = $2 ORDER BY id DESC LIMIT $3",
             after,
+            account_id,
             limit,
         )
     return [_row_to_environment(r) for r in rows]
@@ -144,8 +151,10 @@ async def archive_environment(
     conn: asyncpg.Connection[Any], env_id: str, *, account_id: str
 ) -> None:
     result = await conn.execute(
-        "UPDATE environments SET archived_at = now() WHERE id = $1 AND archived_at IS NULL",
+        "UPDATE environments SET archived_at = now() "
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
         env_id,
+        account_id,
     )
     if result == "UPDATE 0":
         raise NotFoundError(f"environment {env_id} not found or already archived")
@@ -174,10 +183,12 @@ async def update_environment(
     config_json = json.dumps(new_config.model_dump(exclude_none=True))
     try:
         row = await conn.fetchrow(
-            "UPDATE environments SET name = $2, config = $3::jsonb WHERE id = $1 RETURNING *",
+            "UPDATE environments SET name = $2, config = $3::jsonb "
+            "WHERE id = $1 AND account_id = $4 RETURNING *",
             env_id,
             new_name,
             config_json,
+            account_id,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -351,7 +362,11 @@ async def insert_agent(
 
 
 async def get_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str) -> Agent:
-    row = await conn.fetchrow("SELECT * FROM agents WHERE id = $1", agent_id)
+    row = await conn.fetchrow(
+        "SELECT * FROM agents WHERE id = $1 AND account_id = $2",
+        agent_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(f"agent {agent_id} not found", detail={"id": agent_id})
     return _row_to_agent(row)
@@ -381,8 +396,10 @@ async def list_agents(
 
 async def archive_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str) -> None:
     result = await conn.execute(
-        "UPDATE agents SET archived_at = now() WHERE id = $1 AND archived_at IS NULL",
+        "UPDATE agents SET archived_at = now() "
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
         agent_id,
+        account_id,
     )
     if result == "UPDATE 0":
         raise NotFoundError(f"agent {agent_id} not found or already archived")
@@ -661,7 +678,11 @@ async def insert_session(
 async def get_session(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> Session:
-    row = await conn.fetchrow("SELECT * FROM sessions WHERE id = $1", session_id)
+    row = await conn.fetchrow(
+        "SELECT * FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
     return _row_to_session(row)
@@ -672,7 +693,9 @@ async def get_session_workspace_path(
 ) -> str:
     """Return the host-side workspace path stored on the session row."""
     val: str | None = await conn.fetchval(
-        "SELECT workspace_volume_path FROM sessions WHERE id = $1", session_id
+        "SELECT workspace_volume_path FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
     )
     if val is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
@@ -684,8 +707,9 @@ async def get_session_focal_channel(
 ) -> str | None:
     """Return the session's current ``focal_channel`` (or NULL = phone down)."""
     focal: str | None = await conn.fetchval(
-        "SELECT focal_channel FROM sessions WHERE id = $1",
+        "SELECT focal_channel FROM sessions WHERE id = $1 AND account_id = $2",
         session_id,
+        account_id,
     )
     return focal
 
@@ -704,8 +728,9 @@ async def is_session_focal_locked(
     session id, so a missing row is a real bug, not a permission state.
     """
     locked: bool | None = await conn.fetchval(
-        "SELECT focal_locked FROM sessions WHERE id = $1",
+        "SELECT focal_locked FROM sessions WHERE id = $1 AND account_id = $2",
         session_id,
+        account_id,
     )
     if locked is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
@@ -738,7 +763,9 @@ async def get_session_provisioning(
 ) -> tuple[str, dict[str, str]]:
     """Return ``(workspace_volume_path, env)`` for provisioning a session's container."""
     row = await conn.fetchrow(
-        "SELECT workspace_volume_path, env FROM sessions WHERE id = $1", session_id
+        "SELECT workspace_volume_path, env FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
@@ -2009,7 +2036,11 @@ async def insert_vault(
 
 
 async def get_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_id: str) -> Vault:
-    row = await conn.fetchrow("SELECT * FROM vaults WHERE id = $1", vault_id)
+    row = await conn.fetchrow(
+        "SELECT * FROM vaults WHERE id = $1 AND account_id = $2",
+        vault_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
     return _row_to_vault(row)
@@ -2090,7 +2121,11 @@ async def archive_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account
 
 async def delete_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_id: str) -> None:
     # Child credentials are removed by ``ON DELETE CASCADE`` (migration 0015).
-    result = await conn.execute("DELETE FROM vaults WHERE id = $1", vault_id)
+    result = await conn.execute(
+        "DELETE FROM vaults WHERE id = $1 AND account_id = $2",
+        vault_id,
+        account_id,
+    )
     if result == "DELETE 0":
         raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
 
@@ -2559,7 +2594,11 @@ async def insert_skill(
 
 
 async def get_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id: str) -> Skill:
-    row = await conn.fetchrow("SELECT * FROM skills WHERE id = $1", skill_id)
+    row = await conn.fetchrow(
+        "SELECT * FROM skills WHERE id = $1 AND account_id = $2",
+        skill_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(f"skill {skill_id} not found", detail={"id": skill_id})
     return _row_to_skill(row)
@@ -2584,8 +2623,10 @@ async def list_skills(
 
 async def archive_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id: str) -> None:
     result = await conn.execute(
-        "UPDATE skills SET archived_at = now() WHERE id = $1 AND archived_at IS NULL",
+        "UPDATE skills SET archived_at = now() "
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
         skill_id,
+        account_id,
     )
     if result == "UPDATE 0":
         raise NotFoundError(f"skill {skill_id} not found or already archived")
