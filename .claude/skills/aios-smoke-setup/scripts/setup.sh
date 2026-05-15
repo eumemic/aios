@@ -154,8 +154,11 @@ start_runtime() {
   sleep 0.5
 
   say "starting api + worker"
-  : > "$WORKTREE/.logs/api.log"
-  : > "$WORKTREE/.logs/worker.log"
+  # Unlink rather than truncate: the previous worker's still-open stdout
+  # fd keeps appending to the inode it opened, which is now anonymous,
+  # so its shutdown traceback can't bleed into the new log file. The
+  # new processes open a fresh inode at the same path. See #298.
+  rm -f "$WORKTREE/.logs/api.log" "$WORKTREE/.logs/worker.log"
   ( set -a; source "$WORKTREE/.env"; set +a
     nohup uv run python -m aios api > "$WORKTREE/.logs/api.log" 2>&1 &
     nohup uv run python -m aios worker > "$WORKTREE/.logs/worker.log" 2>&1 & )
