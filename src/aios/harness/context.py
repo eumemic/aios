@@ -654,14 +654,16 @@ def _prune_leading_orphans(messages: list[dict[str, Any]]) -> list[dict[str, Any
             break  # clean start
 
         if role == "assistant":
-            tc_ids = {tc["id"] for tc in (msg.get("tool_calls") or [])}
-            if not tc_ids:
+            raw_tcs = msg.get("tool_calls") or []
+            if not raw_tcs:
                 break  # assistant with no tool_calls — clean start
-            # Check that all tool_calls have matching results in the rest.
+            # An entry without an ``id`` is unjoinable to any tool result
+            # — treat it like a tool_call whose pair was dropped by the
+            # window, falling into the "incomplete group" path below.
             remaining_result_ids = {
                 m.get("tool_call_id") for m in messages[start + 1 :] if m.get("role") == "tool"
             }
-            if tc_ids <= remaining_result_ids:
+            if all(tc.get("id") in remaining_result_ids for tc in raw_tcs):
                 break  # complete group — clean start
             # Incomplete group — drop the assistant and its partial results.
             start += 1

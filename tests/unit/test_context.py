@@ -345,6 +345,21 @@ class TestBuildMessages:
                 )
                 assert has_parent, f"orphan tool result for {tc_id}"
 
+    def test_prune_handles_leading_assistant_with_malformed_tool_call(self) -> None:
+        """Leading assistant with a tool_call missing ``id`` is unjoinable and
+        must be dropped, not crash the prune."""
+        events = [
+            _evt(
+                1,
+                "assistant",
+                tool_calls=[{"type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+            ),
+            _evt(2, "user", content="next"),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        assert [m["role"] for m in msgs] == ["user"]
+        assert msgs[0]["content"] == "next"
+
 
 # ─── monotonicity ──────────────────────────────────────────────────────────
 
