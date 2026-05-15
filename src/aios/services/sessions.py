@@ -531,6 +531,13 @@ async def confirm_tool_deny(
     Appends a tool-role error event that the model will see in its next
     context window. The deny message is formatted to match Anthropic's
     ``"Permission to use <tool> has been rejected."`` pattern.
+
+    Idempotent on ``(session_id, tool_call_id)``: a retried POST
+    returns the original event instead of appending a duplicate that
+    would violate the monotonic-context invariant (CLAUDE.md #2).
+    Delegates to :func:`append_tool_result`, which carries the dedup
+    machinery (#445) — same event shape (``role:"tool"`` with
+    ``is_error=True``), so the dedup applies uniformly to the deny path.
     """
     # Find the tool name from the event log for the error message.
     events = await read_message_events(pool, session_id, account_id=account_id)
@@ -546,16 +553,12 @@ async def confirm_tool_deny(
         },
         ensure_ascii=False,
     )
-    return await append_event(
-        pool,
-        session_id,
-        "message",
-        {
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "name": tool_name,
-            "content": content,
-            "is_error": True,
-        },
-        account_id=account_id,
-    )
+    async with pool.acquire() as conn:
+        return await append_tool_result(
+            conn,
+            account_id=account_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            content=content,
+            is_error=True,
+        )
