@@ -305,7 +305,13 @@ async def _run_session_step_body(
 
     # Check for confirmed-but-undispatched tool calls (always_ask → allow).
     # The sweep's case (c) ensures we passed the guard above.
-    pending = await _dispatch_confirmed_tools(pool, session_id, events, account_id=account_id)
+    pending = await _dispatch_confirmed_tools(
+        pool,
+        session_id,
+        events,
+        account_id=account_id,
+        task_registry=task_registry,
+    )
     if pending:
         pending_builtin = [tc for tc in pending if not _is_mcp_tool(_tc_name(tc))]
         pending_mcp = [tc for tc in pending if _is_mcp_tool(_tc_name(tc))]
@@ -828,11 +834,20 @@ async def _dispatch_confirmed_tools(
     message_events: list[Any],
     *,
     account_id: str,
+    task_registry: TaskRegistry,
 ) -> list[dict[str, Any]]:
     """Find tool calls that have been confirmed (allow) but not yet dispatched.
 
     Returns the original tool call dicts ready for ``launch_tool_calls``,
     or an empty list if nothing to dispatch.
+
+    Skips ``tool_call_id``s whose asyncio task is still in flight per
+    *task_registry*: procrastinate releases the per-session lock when
+    step N's job body returns, but the fire-and-forget tool task
+    outlives the body — any wake firing step N+1 before the task
+    appends its result would otherwise re-launch the same tool and
+    write a second ``tool_result`` event (violates CLAUDE.md
+    invariant #4).
     """
     # Find the latest assistant message with tool_calls.
     asst_tool_calls: list[dict[str, Any]] = []
@@ -871,9 +886,13 @@ async def _dispatch_confirmed_tools(
             if tcid:
                 confirmed.add(tcid)
 
-    # Return tool calls that are confirmed but have no result yet.
+    in_flight = task_registry.in_flight_tool_call_ids(session_id)
     pending = [
-        tc for tc in asst_tool_calls if tc.get("id") in confirmed and tc.get("id") not in completed
+        tc
+        for tc in asst_tool_calls
+        if tc.get("id") in confirmed
+        and tc.get("id") not in completed
+        and tc.get("id") not in in_flight
     ]
     return pending
 
