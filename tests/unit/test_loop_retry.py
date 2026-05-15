@@ -227,25 +227,22 @@ class TestRunSessionStepOnModelError:
         assert "rescheduling" in status_calls
         assert "idle" not in status_calls
 
-    async def test_exhausted_budget_raises_and_sets_errored_status(
+    async def test_exhausted_budget_sets_errored_status_without_raising(
         self, mock_step_dependencies: Any
     ) -> None:
         """Budget exhaustion parks the session in ``errored`` status (#353).
 
-        Setting ``idle`` (the prior behavior) left the periodic sweep free
-        to re-fire on any unreacted user message, restarting the budget
-        from zero because the trailing lifecycle is ``stop_reason='error'``
-        (not ``'rescheduling'``). The terminal ``errored`` status is the
-        sweep's stop signal.
+        After the fix, the inner model-call handler returns ``None`` instead of
+        re-raising, so ``run_session_step`` completes cleanly. The outer
+        ``harness_error`` handler never fires for model-call errors, preventing
+        an extra unintended ``_apply_retry_or_failure`` call that would
+        flip the session from ``errored`` back to ``rescheduling``.
         """
-        with (
-            patch(
-                "aios.harness.loop._count_consecutive_rescheduling",
-                AsyncMock(return_value=4),
-            ),
-            pytest.raises(RuntimeError, match="provider boom"),
+        with patch(
+            "aios.harness.loop._count_consecutive_rescheduling",
+            AsyncMock(return_value=4),
         ):
-            await run_session_step("sess_x")
+            await run_session_step("sess_x")  # must NOT raise
 
         mock_step_dependencies.defer_wake.assert_not_awaited()
         statuses = [call.args[2] for call in mock_step_dependencies.set_status.call_args_list]

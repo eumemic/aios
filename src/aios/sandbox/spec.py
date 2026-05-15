@@ -23,6 +23,7 @@ backend, or anything else is decided by the worker's selected backend.
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,11 +57,12 @@ from aios.services import sessions as sessions_service
 log = get_logger("aios.sandbox.spec")
 
 
-# Hostname the sandbox uses to reach the host-side credential proxy.
-# Docker maps this to the host gateway IP via ``--add-host``; on Docker
-# Desktop the name auto-resolves but the explicit alias is required on
-# Linux. The registry threads the same string through the iptables script
-# so limited-networking sessions can still reach the proxy.
+# Hostname the sandbox uses to reach host-side proxies (``git_proxy`` for
+# GitHub PAT injection, ``mcp_proxy`` for MCP tool invocations). Docker
+# maps this to the host gateway IP via ``--add-host``; on Docker Desktop
+# the name auto-resolves but the explicit alias is required on Linux.
+# The registry threads the same string through the iptables script so
+# limited-networking sessions can still reach the proxy ports.
 PROXY_HOST_ALIAS = "host.docker.internal"
 
 
@@ -258,13 +260,15 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
 
     Reads the session row, loads the environment config, materializes
     memory stores and github clones (starting a GitProxy if any github
-    repos are attached), then assembles the :class:`SandboxSpec` and
-    related artifacts.
+    repos are attached), mints a per-session MCP-broker secret, then
+    assembles the :class:`SandboxSpec` and related artifacts.
 
-    On any failure after the GitProxy is started, the proxy is stopped
-    before the exception propagates so the port + token map don't leak
-    for the worker's lifetime.
+    On any failure after the GitProxy is started or the broker secret
+    is registered, both are cleaned up before the exception propagates
+    so the port, token map, and secret map don't leak for the worker's
+    lifetime.
     """
+    from aios.harness import runtime
     from aios.sandbox.volumes import ensure_workspace_path
 
     settings = get_settings()
@@ -274,6 +278,11 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     env_config = await _load_environment_config(session_id, account_id=account_id)
     memory_echoes = await _materialize_memory_mounts(session_id, account_id=account_id)
     github_echoes, git_proxy = await _materialize_github_clones(session_id, account_id=account_id)
+
+    mcp_broker = runtime.require_mcp_broker()
+    mcp_broker_secret = secrets.token_urlsafe(32)
+    mcp_broker.register_session(session_id, mcp_broker_secret)
+    mcp_broker_url = f"http://{PROXY_HOST_ALIAS}:{mcp_broker.port}"
 
     try:
         return _assemble_plan(
@@ -286,12 +295,15 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
             memory_echoes=memory_echoes,
             github_echoes=github_echoes,
             git_proxy=git_proxy,
+            mcp_broker_url=mcp_broker_url,
+            mcp_broker_secret=mcp_broker_secret,
         )
     except BaseException:
-        # The proxy holds an open port + in-memory token map. Anything
-        # that raises before we hand back a plan must stop the proxy on
-        # the way out, otherwise the port and tokens leak for the
-        # worker's lifetime.
+        # Both proxies hold worker-process state (ports, token maps,
+        # secret-to-session bindings). Anything that raises before we
+        # hand back a plan must clean up both on the way out, otherwise
+        # state leaks for the worker's lifetime.
+        mcp_broker.unregister_session(session_id)
         if git_proxy is not None:
             try:
                 await git_proxy.stop()
@@ -315,6 +327,8 @@ def _assemble_plan(
     memory_echoes: list[MemoryStoreResourceEcho],
     github_echoes: list[GithubRepositoryResourceEcho],
     git_proxy: GitProxy | None,
+    mcp_broker_url: str,
+    mcp_broker_secret: str,
 ) -> ProvisioningPlan:
     """Pure assembly of the plan from already-materialized inputs."""
     from aios.sandbox.volumes import (
@@ -328,6 +342,8 @@ def _assemble_plan(
         **WORKSPACE_RUNTIME_ENV,
         **(env_config.env if env_config and env_config.env else {}),
         **session_env,
+        "MCP_BROKER_URL": mcp_broker_url,
+        "MCP_BROKER_SECRET": mcp_broker_secret,
     }
 
     # Bind the per-session attachments and uploads dirs at every provision
@@ -342,6 +358,13 @@ def _assemble_plan(
     extra_mounts: list[Mount] = [
         Mount(host_path=attachments_path, sandbox_path="/mnt/attachments", read_only=True),
         Mount(host_path=uploads_path, sandbox_path="/mnt/uploads", read_only=True),
+        # NOTE: the ``mcp`` CLI used to be bind-mounted from
+        # ``<repo_root>/bin/mcp`` here. That was incorrect: Docker resolves
+        # bind sources on the daemon's (host's) filesystem, not the calling
+        # container's, so the bind silently degraded to an auto-created
+        # empty directory on every host where the worker container ran.
+        # See issue #392. ``mcp`` now lives in the sandbox image directly
+        # (see ``docker/Dockerfile.sandbox``).
     ]
 
     # Bind-mount each attached memory store. Read-only attaches make the
@@ -384,7 +407,10 @@ def _assemble_plan(
         environment=merged_env,
         labels=labels,
         network_policy=_network_policy_from_config(env_config),
-        host_gateway_alias=PROXY_HOST_ALIAS if git_proxy is not None else None,
+        # Always set: every sandbox can reach the MCP broker on the host
+        # gateway; ``git_proxy`` and any other host-side proxies share the
+        # same alias.
+        host_gateway_alias=PROXY_HOST_ALIAS,
         image=image,
         mount_snapshot=snapshot,
         # Resource caps come from deployment-wide settings (multi-tenancy

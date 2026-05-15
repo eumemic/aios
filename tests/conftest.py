@@ -142,6 +142,40 @@ async def _reset_db_state(migrated_db_url: str) -> None:
         await conn.close()
 
 
+@pytest.fixture(autouse=True)
+def _reset_sse_starlette_shutdown_state() -> Iterator[None]:
+    """Neutralize sse-starlette's cross-test ``AppStatus.should_exit`` contamination.
+
+    ``sse-starlette.sse.AppStatus`` is a module-level class with a class-attribute
+    ``should_exit`` flag plus a per-thread background watcher that polls a captured
+    ``uvicorn.Server`` instance.  When an in-process uvicorn fixture's teardown sets
+    ``server.should_exit = True``, the watcher (if it has had time to poll —
+    interval is 0.5 s) latches the global ``AppStatus.should_exit = True`` and is
+    never reset.  Every later test's first SSE request then sees
+    ``AppStatus.should_exit`` is True at the top of
+    :func:`sse_starlette.sse._listen_for_exit_signal`, which returns immediately,
+    triggering :func:`cancel_on_finish` in the SSE :class:`EventSourceResponse`'s
+    task group and killing the SSE generator before its body iterator yields
+    anything.  The client sees ``peer closed connection without sending complete
+    message body``; the server logs ``ASGI callable returned without completing
+    response.``
+
+    The watcher firing is timing-dependent — fast hosts (developer laptops) often
+    finish a test before the next 0.5 s poll, so contamination doesn't latch.  CI
+    hosts (slower Ubuntu runners) routinely lose the race, which is why the three
+    connector e2e tests (signal register/captcha, telegram multi-connection) flaked
+    in CI but never locally.  Tearing the flag back to False before each test
+    breaks the contamination chain without disabling the watcher entirely (kept
+    on so production deployments still observe SIGTERM-triggered graceful drain).
+    See aios#365.
+    """
+    from sse_starlette.sse import AppStatus
+
+    AppStatus.should_exit = False
+    yield
+    AppStatus.should_exit = False
+
+
 @pytest.fixture
 def aios_env_minimal(
     migrated_db_url: str, _reset_db_state: None, tmp_path: Path

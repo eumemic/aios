@@ -14,7 +14,7 @@ from ...types import UNSET, Response, Unset
 def _get_kwargs(
     session_id: str,
     *,
-    after_seq: int | Unset = 0,
+    after: int | Unset = 0,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
@@ -24,7 +24,7 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
-    params["after_seq"] = after_seq
+    params["after"] = after
 
     params["timeout"] = timeout
 
@@ -76,22 +76,26 @@ def sync_detailed(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after_seq: int | Unset = 0,
+    after: int | Unset = 0,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | WaitResponse]:
     """Wait For Events
 
-     Long-poll for new events past ``after_seq``.
+     Long-poll for new events past sequence number ``after``.
 
     Blocks up to ``timeout`` seconds for events to arrive; returns an empty
     list if none land in time. Alternative to SSE for clients whose HTTP
     stack can't reliably consume server-sent events (notably Node's
     ``fetch`` — see issue #40).
 
+    Pass the response's ``next_after`` as ``?after=`` on the next call to
+    resume from where you left off. (The query param was previously named
+    ``after_seq``; see issue #389.)
+
     Args:
         session_id (str):
-        after_seq (int | Unset):  Default: 0.
+        after (int | Unset):  Default: 0.
         timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
 
@@ -105,7 +109,7 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         session_id=session_id,
-        after_seq=after_seq,
+        after=after,
         timeout=timeout,
         authorization=authorization,
     )
@@ -121,22 +125,26 @@ def sync(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after_seq: int | Unset = 0,
+    after: int | Unset = 0,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | WaitResponse | None:
     """Wait For Events
 
-     Long-poll for new events past ``after_seq``.
+     Long-poll for new events past sequence number ``after``.
 
     Blocks up to ``timeout`` seconds for events to arrive; returns an empty
     list if none land in time. Alternative to SSE for clients whose HTTP
     stack can't reliably consume server-sent events (notably Node's
     ``fetch`` — see issue #40).
 
+    Pass the response's ``next_after`` as ``?after=`` on the next call to
+    resume from where you left off. (The query param was previously named
+    ``after_seq``; see issue #389.)
+
     Args:
         session_id (str):
-        after_seq (int | Unset):  Default: 0.
+        after (int | Unset):  Default: 0.
         timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
 
@@ -151,7 +159,7 @@ def sync(
     return sync_detailed(
         session_id=session_id,
         client=client,
-        after_seq=after_seq,
+        after=after,
         timeout=timeout,
         authorization=authorization,
     ).parsed
@@ -161,22 +169,26 @@ async def asyncio_detailed(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after_seq: int | Unset = 0,
+    after: int | Unset = 0,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | WaitResponse]:
     """Wait For Events
 
-     Long-poll for new events past ``after_seq``.
+     Long-poll for new events past sequence number ``after``.
 
     Blocks up to ``timeout`` seconds for events to arrive; returns an empty
     list if none land in time. Alternative to SSE for clients whose HTTP
     stack can't reliably consume server-sent events (notably Node's
     ``fetch`` — see issue #40).
 
+    Pass the response's ``next_after`` as ``?after=`` on the next call to
+    resume from where you left off. (The query param was previously named
+    ``after_seq``; see issue #389.)
+
     Args:
         session_id (str):
-        after_seq (int | Unset):  Default: 0.
+        after (int | Unset):  Default: 0.
         timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
 
@@ -190,7 +202,7 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         session_id=session_id,
-        after_seq=after_seq,
+        after=after,
         timeout=timeout,
         authorization=authorization,
     )
@@ -204,22 +216,26 @@ async def asyncio(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after_seq: int | Unset = 0,
+    after: int | Unset = 0,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | WaitResponse | None:
     """Wait For Events
 
-     Long-poll for new events past ``after_seq``.
+     Long-poll for new events past sequence number ``after``.
 
     Blocks up to ``timeout`` seconds for events to arrive; returns an empty
     list if none land in time. Alternative to SSE for clients whose HTTP
     stack can't reliably consume server-sent events (notably Node's
     ``fetch`` — see issue #40).
 
+    Pass the response's ``next_after`` as ``?after=`` on the next call to
+    resume from where you left off. (The query param was previously named
+    ``after_seq``; see issue #389.)
+
     Args:
         session_id (str):
-        after_seq (int | Unset):  Default: 0.
+        after (int | Unset):  Default: 0.
         timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
 
@@ -235,7 +251,7 @@ async def asyncio(
         await asyncio_detailed(
             session_id=session_id,
             client=client,
-            after_seq=after_seq,
+            after=after,
             timeout=timeout,
             authorization=authorization,
         )

@@ -190,7 +190,7 @@ def fetch_all_events(
         page = client.request(
             "GET",
             f"/v1/sessions/{session_id}/events",
-            params={"after_seq": cursor_seq, "kind": kind, "limit": page_size},
+            params={"after": cursor_seq, "kind": kind, "limit": page_size},
         )
         assert isinstance(page, dict)
         page_data = page.get("data", [])

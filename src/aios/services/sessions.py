@@ -288,6 +288,7 @@ async def read_events(
     kind: EventKind | None = None,
     limit: int = 200,
     newest_first: bool = False,
+    error_only: bool = False,
 ) -> list[Event]:
     async with pool.acquire() as conn:
         return await queries.read_events(
@@ -298,6 +299,7 @@ async def read_events(
             limit=limit,
             newest_first=newest_first,
             account_id=account_id,
+            error_only=error_only,
         )
 
 

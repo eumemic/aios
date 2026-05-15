@@ -77,7 +77,9 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: docker
+          # Build context is the repo root (not ``docker/``) so the
+          # Dockerfile can COPY ``bin/mcp`` — see issue #392.
+          context: .
           file: docker/Dockerfile.sandbox
           # Multi-arch so developer machines on Apple Silicon (linux/arm64
           # under Docker Desktop) pull a native image without ``no matching

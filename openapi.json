@@ -2382,6 +2382,7 @@
           "sessions"
         ],
         "summary": "List Events",
+        "description": "List events for a session, paginated by sequence number.\n\nPass the response's ``next_after`` field as ``?after=`` on the next call\nto walk forward through the stream. (The query param was previously\nnamed ``after_seq``, which didn't match the ``next_after`` response\nfield \u2014 clients following the natural roundtrip pattern sent\n``?after=`` and got it silently ignored, causing pagination to loop on\nthe first page. See issue #389.)",
         "operationId": "list_session_events",
         "parameters": [
           {
@@ -2394,13 +2395,13 @@
             }
           },
           {
-            "name": "after_seq",
+            "name": "after",
             "in": "query",
             "required": false,
             "schema": {
               "type": "integer",
               "default": 0,
-              "title": "After Seq"
+              "title": "After"
             }
           },
           {
@@ -2433,6 +2434,16 @@
               "type": "integer",
               "default": 200,
               "title": "Limit"
+            }
+          },
+          {
+            "name": "error_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Error Only"
             }
           },
           {
@@ -2611,7 +2622,7 @@
           "sessions"
         ],
         "summary": "Wait For Events",
-        "description": "Long-poll for new events past ``after_seq``.\n\nBlocks up to ``timeout`` seconds for events to arrive; returns an empty\nlist if none land in time. Alternative to SSE for clients whose HTTP\nstack can't reliably consume server-sent events (notably Node's\n``fetch`` \u2014 see issue #40).",
+        "description": "Long-poll for new events past sequence number ``after``.\n\nBlocks up to ``timeout`` seconds for events to arrive; returns an empty\nlist if none land in time. Alternative to SSE for clients whose HTTP\nstack can't reliably consume server-sent events (notably Node's\n``fetch`` \u2014 see issue #40).\n\nPass the response's ``next_after`` as ``?after=`` on the next call to\nresume from where you left off. (The query param was previously named\n``after_seq``; see issue #389.)",
         "operationId": "wait_for_events_v1_sessions__session_id__wait_get",
         "parameters": [
           {
@@ -2624,13 +2635,13 @@
             }
           },
           {
-            "name": "after_seq",
+            "name": "after",
             "in": "query",
             "required": false,
             "schema": {
               "type": "integer",
               "default": 0,
-              "title": "After Seq"
+              "title": "After"
             }
           },
           {

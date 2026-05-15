@@ -1375,14 +1375,14 @@ def _derive_sender_name(kind: str, data: dict[str, Any]) -> str | None:
 
 
 def _derive_is_error(kind: str, data: dict[str, Any]) -> bool | None:
-    """Error flag on tool-result events; NULL when unset.
+    """Error flag on events that carry ``is_error``; NULL when absent.
 
-    The field is written only when truthy — successful results omit it —
-    so the column is TRUE on failure and NULL otherwise.  Matches the
-    existing semantics in ``src/aios/harness/tool_dispatch.py``.
+    Originally restricted to message-kind events (tool-result rows), but
+    span events also carry ``is_error`` (e.g. ``model_request_end``,
+    ``step_timeout``, ``harness_error``).  We now write the physical column
+    for any kind that includes the field so that ``?error_only=true``
+    filtering works across all event kinds.
     """
-    if kind != "message":
-        return None
     flag = data.get("is_error")
     if flag is None:
         return None
@@ -1858,24 +1858,21 @@ async def read_events(
     kind: EventKind | None = None,
     limit: int = 200,
     newest_first: bool = False,
+    error_only: bool = False,
 ) -> list[Event]:
     order = "DESC" if newest_first else "ASC"
-    if kind is None:
-        rows = await conn.fetch(
-            f"SELECT * FROM events WHERE session_id = $1 AND seq > $2 ORDER BY seq {order} LIMIT $3",
-            session_id,
-            after_seq,
-            limit,
-        )
-    else:
-        rows = await conn.fetch(
-            f"SELECT * FROM events WHERE session_id = $1 AND seq > $2 AND kind = $3 "
-            f"ORDER BY seq {order} LIMIT $4",
-            session_id,
-            after_seq,
-            kind,
-            limit,
-        )
+    params: list[Any] = [session_id, after_seq]
+    where = "session_id = $1 AND seq > $2"
+    if kind is not None:
+        params.append(kind)
+        where += f" AND kind = ${len(params)}"
+    if error_only:
+        where += " AND is_error IS TRUE"
+    params.append(limit)
+    rows = await conn.fetch(
+        f"SELECT * FROM events WHERE {where} ORDER BY seq {order} LIMIT ${len(params)}",
+        *params,
+    )
     return [_row_to_event(r) for r in rows]
 
 

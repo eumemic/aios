@@ -15,9 +15,10 @@ from ...types import UNSET, Response, Unset
 def _get_kwargs(
     session_id: str,
     *,
-    after_seq: int | Unset = 0,
+    after: int | Unset = 0,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
+    error_only: bool | Unset = False,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -26,7 +27,7 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
-    params["after_seq"] = after_seq
+    params["after"] = after
 
     json_kind: None | str | Unset
     if isinstance(kind, Unset):
@@ -38,6 +39,8 @@ def _get_kwargs(
     params["kind"] = json_kind
 
     params["limit"] = limit
+
+    params["error_only"] = error_only
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -87,18 +90,29 @@ def sync_detailed(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after_seq: int | Unset = 0,
+    after: int | Unset = 0,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
+    error_only: bool | Unset = False,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseEvent]:
     """List Events
 
+     List events for a session, paginated by sequence number.
+
+    Pass the response's ``next_after`` field as ``?after=`` on the next call
+    to walk forward through the stream. (The query param was previously
+    named ``after_seq``, which didn't match the ``next_after`` response
+    field — clients following the natural roundtrip pattern sent
+    ``?after=`` and got it silently ignored, causing pagination to loop on
+    the first page. See issue #389.)
+
     Args:
         session_id (str):
-        after_seq (int | Unset):  Default: 0.
+        after (int | Unset):  Default: 0.
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
+        error_only (bool | Unset):  Default: False.
         authorization (None | str | Unset):
 
     Raises:
@@ -111,9 +125,10 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         session_id=session_id,
-        after_seq=after_seq,
+        after=after,
         kind=kind,
         limit=limit,
+        error_only=error_only,
         authorization=authorization,
     )
 
@@ -128,18 +143,29 @@ def sync(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after_seq: int | Unset = 0,
+    after: int | Unset = 0,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
+    error_only: bool | Unset = False,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseEvent | None:
     """List Events
 
+     List events for a session, paginated by sequence number.
+
+    Pass the response's ``next_after`` field as ``?after=`` on the next call
+    to walk forward through the stream. (The query param was previously
+    named ``after_seq``, which didn't match the ``next_after`` response
+    field — clients following the natural roundtrip pattern sent
+    ``?after=`` and got it silently ignored, causing pagination to loop on
+    the first page. See issue #389.)
+
     Args:
         session_id (str):
-        after_seq (int | Unset):  Default: 0.
+        after (int | Unset):  Default: 0.
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
+        error_only (bool | Unset):  Default: False.
         authorization (None | str | Unset):
 
     Raises:
@@ -153,9 +179,10 @@ def sync(
     return sync_detailed(
         session_id=session_id,
         client=client,
-        after_seq=after_seq,
+        after=after,
         kind=kind,
         limit=limit,
+        error_only=error_only,
         authorization=authorization,
     ).parsed
 
@@ -164,18 +191,29 @@ async def asyncio_detailed(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after_seq: int | Unset = 0,
+    after: int | Unset = 0,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
+    error_only: bool | Unset = False,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseEvent]:
     """List Events
 
+     List events for a session, paginated by sequence number.
+
+    Pass the response's ``next_after`` field as ``?after=`` on the next call
+    to walk forward through the stream. (The query param was previously
+    named ``after_seq``, which didn't match the ``next_after`` response
+    field — clients following the natural roundtrip pattern sent
+    ``?after=`` and got it silently ignored, causing pagination to loop on
+    the first page. See issue #389.)
+
     Args:
         session_id (str):
-        after_seq (int | Unset):  Default: 0.
+        after (int | Unset):  Default: 0.
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
+        error_only (bool | Unset):  Default: False.
         authorization (None | str | Unset):
 
     Raises:
@@ -188,9 +226,10 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         session_id=session_id,
-        after_seq=after_seq,
+        after=after,
         kind=kind,
         limit=limit,
+        error_only=error_only,
         authorization=authorization,
     )
 
@@ -203,18 +242,29 @@ async def asyncio(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after_seq: int | Unset = 0,
+    after: int | Unset = 0,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
+    error_only: bool | Unset = False,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseEvent | None:
     """List Events
 
+     List events for a session, paginated by sequence number.
+
+    Pass the response's ``next_after`` field as ``?after=`` on the next call
+    to walk forward through the stream. (The query param was previously
+    named ``after_seq``, which didn't match the ``next_after`` response
+    field — clients following the natural roundtrip pattern sent
+    ``?after=`` and got it silently ignored, causing pagination to loop on
+    the first page. See issue #389.)
+
     Args:
         session_id (str):
-        after_seq (int | Unset):  Default: 0.
+        after (int | Unset):  Default: 0.
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
+        error_only (bool | Unset):  Default: False.
         authorization (None | str | Unset):
 
     Raises:
@@ -229,9 +279,10 @@ async def asyncio(
         await asyncio_detailed(
             session_id=session_id,
             client=client,
-            after_seq=after_seq,
+            after=after,
             kind=kind,
             limit=limit,
+            error_only=error_only,
             authorization=authorization,
         )
     ).parsed

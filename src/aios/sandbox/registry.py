@@ -155,12 +155,13 @@ class SandboxRegistry:
         try:
             handle = await self._backend.create(plan.spec)
         except BaseException:
-            # Spec was built (proxy may be running) but the backend
-            # couldn't create the sandbox. Stop the proxy so its port +
-            # token map don't leak.
+            # Spec was built (proxy may be running, broker secret is
+            # registered) but the backend couldn't create the sandbox.
+            # Drop both so their port + token map + secret map don't leak.
             self._git_proxies.pop(session_id, None)
             if plan.git_proxy is not None:
                 await self._stop_proxy_silently(plan.git_proxy, session_id)
+            self._release_mcp_broker_secret(session_id)
             raise
 
         # Setup steps after create. If any of these raise, tear the
@@ -186,13 +187,21 @@ class SandboxRegistry:
 
     async def _maybe_apply_lockdown(self, handle: SandboxHandle, plan: ProvisioningPlan) -> None:
         """Apply network lockdown if the plan calls for it."""
+        from aios.harness import runtime
         from aios.models.environments import LimitedNetworking
 
         networking = plan.env_config.networking if plan.env_config else None
         if not isinstance(networking, LimitedNetworking):
             return
-        extra_host_ports: list[tuple[str, int]] = []
-        if plan.git_proxy is not None and plan.spec.host_gateway_alias is not None:
+        # ``host_gateway_alias`` is always set on plans the worker
+        # produces (every sandbox has access to the MCP broker), so the
+        # host-port allowlist always includes the broker; ``git_proxy``
+        # is added conditionally.
+        assert plan.spec.host_gateway_alias is not None
+        extra_host_ports: list[tuple[str, int]] = [
+            (plan.spec.host_gateway_alias, runtime.require_mcp_broker().port),
+        ]
+        if plan.git_proxy is not None:
             extra_host_ports.append((plan.spec.host_gateway_alias, plan.git_proxy.port))
         await apply_network_lockdown(
             self._backend,
@@ -217,6 +226,17 @@ class SandboxRegistry:
                 error=str(err),
             )
 
+    def _release_mcp_broker_secret(self, session_id: str) -> None:
+        """Drop the per-session entry from the MCP broker's secret map.
+
+        Idempotent: a missing entry is silently ignored. Called at every
+        sandbox teardown site so the broker doesn't accumulate dangling
+        secrets for sessions whose sandboxes are gone.
+        """
+        from aios.harness import runtime
+
+        runtime.require_mcp_broker().unregister_session(session_id)
+
     async def _destroy_quietly(self, handle: SandboxHandle, session_id: str) -> None:
         """Tear down the handle's sandbox and stop the session's proxy.
 
@@ -236,6 +256,7 @@ class SandboxRegistry:
         proxy = self._git_proxies.pop(session_id, None)
         if proxy is not None:
             await self._stop_proxy_silently(proxy, session_id)
+        self._release_mcp_broker_secret(session_id)
 
     async def exec(
         self,
@@ -263,6 +284,7 @@ class SandboxRegistry:
 
         if proxy is not None:
             await self._stop_proxy_silently(proxy, session_id)
+        self._release_mcp_broker_secret(session_id)
         if handle is None:
             return
         await self._backend.destroy(handle)
@@ -299,6 +321,7 @@ class SandboxRegistry:
             proxy = self._git_proxies.pop(session_id, None)
             if proxy is not None:
                 await self._stop_proxy_silently(proxy, session_id)
+            self._release_mcp_broker_secret(session_id)
             await self._backend.destroy(handle)
 
     def peek(self, session_id: str) -> SandboxHandle | None:
@@ -322,6 +345,9 @@ class SandboxRegistry:
             # Fire-and-forget — eviction is best-effort cleanup; worker
             # shutdown's ``release_all`` is the authoritative final stop.
             asyncio.create_task(self._stop_proxy_silently(proxy, session_id))  # noqa: RUF006
+        # Same story for the MCP broker secret: drop it immediately; a
+        # fresh sandbox will get a fresh secret from the next provision.
+        self._release_mcp_broker_secret(session_id)
 
     async def release_all(self) -> None:
         """Tear down every sandbox + proxy. Called at worker shutdown."""
