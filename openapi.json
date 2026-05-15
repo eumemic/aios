@@ -256,6 +256,65 @@
         }
       }
     },
+    "/v1/accounts/by-path": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Resolve By Path",
+        "description": "Resolve a slash-separated path of ``display_name`` segments under the\ncaller's account.\n\nExamples:\n* ``?path=`` \u2192 the caller's account row.\n* ``?path=tenant-a`` \u2192 the direct child named ``tenant-a``.\n* ``?path=tenant-a/team-1`` \u2192 the grandchild ``team-1`` under\n  ``tenant-a``.\n\nPaths that walk outside the caller's subtree 404 (no existence leak).",
+        "operationId": "resolve_account_by_path",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{target_id}": {
       "get": {
         "tags": [

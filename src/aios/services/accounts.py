@@ -74,6 +74,30 @@ async def get_account_in_scope(
     return row
 
 
+async def resolve_by_path(pool: asyncpg.Pool[Any], *, caller_account_id: str, path: str) -> Account:
+    """Look up ``path`` (slash-separated display names) under the caller.
+
+    The caller's own account is the implicit root. Empty path (or just
+    "/") returns the caller. Each segment is matched against
+    ``display_name`` at the next depth. Raises :class:`NotFoundError`
+    if any segment doesn't resolve — including for paths that walk
+    outside the caller's subtree.
+    """
+    segments = [s for s in path.strip("/").split("/") if s]
+    async with pool.acquire() as conn:
+        resolved = await queries.resolve_account_by_path(
+            conn,
+            root_account_id=caller_account_id,
+            segments=segments,
+        )
+    if resolved is None:
+        raise NotFoundError(
+            f"account path {path!r} not found",
+            detail={"path": path, "caller_account_id": caller_account_id},
+        )
+    return resolved
+
+
 async def list_children(pool: asyncpg.Pool[Any], *, parent_account_id: str) -> list[Account]:
     """Return non-archived direct children of ``parent_account_id``."""
     async with pool.acquire() as conn:

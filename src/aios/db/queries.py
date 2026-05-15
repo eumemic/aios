@@ -1898,8 +1898,10 @@ async def read_message_events(
     ``confirm_tool_deny`` searching for a tool_call_id).
     """
     rows = await conn.fetch(
-        "SELECT * FROM events WHERE session_id = $1 AND kind = 'message' ORDER BY seq ASC",
+        "SELECT * FROM events WHERE session_id = $1 AND account_id = $2 "
+        "AND kind = 'message' ORDER BY seq ASC",
         session_id,
+        account_id,
     )
     return [_row_to_event(r) for r in rows]
 
@@ -4632,8 +4634,9 @@ async def list_session_memory_store_echoes(
     account_id: str,
 ) -> list[MemoryStoreResourceEcho]:
     rows = await conn.fetch(
-        "SELECT * FROM session_memory_stores WHERE session_id = $1 ORDER BY rank",
+        "SELECT * FROM session_memory_stores WHERE session_id = $1 AND account_id = $2 ORDER BY rank",
         session_id,
+        account_id,
     )
     return [
         MemoryStoreResourceEcho(
@@ -4708,8 +4711,9 @@ async def list_session_github_repo_echoes(
     account_id: str,
 ) -> list[GithubRepositoryResourceEcho]:
     rows = await conn.fetch(
-        "SELECT * FROM session_github_repositories WHERE session_id = $1 ORDER BY rank",
+        "SELECT * FROM session_github_repositories WHERE session_id = $1 AND account_id = $2 ORDER BY rank",
         session_id,
+        account_id,
     )
     return [_row_to_github_repo_echo(r) for r in rows]
 
@@ -4722,9 +4726,11 @@ async def get_session_github_repo(
     account_id: str,
 ) -> GithubRepositoryResourceEcho:
     row = await conn.fetchrow(
-        "SELECT * FROM session_github_repositories WHERE session_id = $1 AND id = $2",
+        "SELECT * FROM session_github_repositories "
+        "WHERE session_id = $1 AND id = $2 AND account_id = $3",
         session_id,
         resource_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -4744,9 +4750,11 @@ async def get_session_github_repo_with_blob(
     """Read view + encrypted token blob, for the rotation path which needs
     both."""
     row = await conn.fetchrow(
-        "SELECT * FROM session_github_repositories WHERE session_id = $1 AND id = $2",
+        "SELECT * FROM session_github_repositories "
+        "WHERE session_id = $1 AND id = $2 AND account_id = $3",
         session_id,
         resource_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -4826,8 +4834,9 @@ async def delete_session_github_repos(
     same transaction.
     """
     await conn.execute(
-        "DELETE FROM session_github_repositories WHERE session_id = $1",
+        "DELETE FROM session_github_repositories WHERE session_id = $1 AND account_id = $2",
         session_id,
+        account_id,
     )
 
 
@@ -5385,6 +5394,43 @@ async def get_account(conn: asyncpg.Connection[Any], account_id: str) -> Account
     """
     row = await conn.fetchrow("SELECT * FROM accounts WHERE id = $1", account_id)
     return _row_to_account(row) if row is not None else None
+
+
+async def resolve_account_by_path(
+    conn: asyncpg.Connection[Any],
+    *,
+    root_account_id: str,
+    segments: list[str],
+) -> Account | None:
+    """Resolve ``root/seg1/seg2/...`` to an account row, or ``None``.
+
+    Walks the ``parent_account_id`` chain from ``root_account_id`` down,
+    matching each segment against ``display_name`` at that depth. Returns
+    the deepest non-archived match. Empty ``segments`` returns the root
+    row itself.
+
+    The hierarchy is rooted at ``root_account_id`` (typically the
+    caller's account); ``/by-path`` doesn't traverse cross-tenant —
+    every segment lookup is scoped to the prior level's children.
+    """
+    cursor: Account | None = await get_account(conn, root_account_id)
+    if cursor is None or cursor.archived_at is not None:
+        return None
+    for seg in segments:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM accounts
+             WHERE parent_account_id = $1
+               AND display_name = $2
+               AND archived_at IS NULL
+            """,
+            cursor.id,
+            seg,
+        )
+        if row is None:
+            return None
+        cursor = _row_to_account(row)
+    return cursor
 
 
 async def list_child_accounts(

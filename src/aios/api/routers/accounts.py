@@ -129,6 +129,23 @@ async def mint_child(body: MintAccountRequest, pool: PoolDep, auth: AuthDep) -> 
     return response
 
 
+@router.get("/by-path", operation_id="resolve_account_by_path")
+async def resolve_by_path(path: str, pool: PoolDep, auth: AuthDep) -> Account:
+    """Resolve a slash-separated path of ``display_name`` segments under the
+    caller's account.
+
+    Examples:
+    * ``?path=`` → the caller's account row.
+    * ``?path=tenant-a`` → the direct child named ``tenant-a``.
+    * ``?path=tenant-a/team-1`` → the grandchild ``team-1`` under
+      ``tenant-a``.
+
+    Paths that walk outside the caller's subtree 404 (no existence leak).
+    """
+    account_id, _key_id, _can_mint = auth
+    return await service.resolve_by_path(pool, caller_account_id=account_id, path=path)
+
+
 @router.get("/{target_id}", operation_id="get_account")
 async def get_account(target_id: str, pool: PoolDep, auth: AuthDep) -> Account:
     """Read a specific account that's the caller or a direct child."""
