@@ -61,6 +61,7 @@ class InboundResult(NamedTuple):
 async def handle_inbound(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     connection_id: str,
     event_id: str,
     chat_id: str,
@@ -83,7 +84,7 @@ async def handle_inbound(
         return InboundResult(None, None, InboundDrop.PAYLOAD_TOO_LARGE, False)
 
     async with pool.acquire() as conn:
-        connection = await queries.get_connection(conn, connection_id)
+        connection = await queries.get_connection(conn, connection_id, account_id=account_id)
 
     # Session resolution: three-tier resolver in the connector subsystem
     # (chat_sessions → routing_rules → bindings.mode). Imported inside the
@@ -92,7 +93,9 @@ async def handle_inbound(
     # convention (see ``aios_connectors/__init__.py``).
     from aios_connectors.resolver import ResolveDrop, resolve_target_session
 
-    resolution = await resolve_target_session(pool, connection=connection, chat_id=chat_id)
+    resolution = await resolve_target_session(
+        pool, connection=connection, chat_id=chat_id, account_id=account_id
+    )
     if resolution.drop is not None:
         drop = (
             InboundDrop.DETACHED
@@ -126,6 +129,7 @@ async def handle_inbound(
             attachments=staged_attachments,
             connector_metadata=connector_metadata,
             platform_timestamp=platform_timestamp,
+            account_id=account_id,
         )
     except NotFoundError:
         # Session vanished between resolution and append: clean up freshly
@@ -138,7 +142,7 @@ async def handle_inbound(
 
     # Defer wake unconditionally — both first-append and dedup paths
     # heal the case where a prior attempt committed but failed to wake.
-    await defer_wake(pool, target_session_id, cause="inbound")
+    await defer_wake(pool, target_session_id, cause="inbound", account_id=account_id)
 
     return InboundResult(
         appended_event_id=event_id,
@@ -151,6 +155,7 @@ async def handle_inbound(
 async def _append_with_dedup(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     connector: str,
     account: str,
     event_id: str,
@@ -190,6 +195,7 @@ async def _append_with_dedup(
                 kind="message",
                 data=data,
                 orig_channel=channel,
+                account_id=account_id,
             )
             inserted = await queries.try_record_inbound_ack(
                 conn,
@@ -197,10 +203,11 @@ async def _append_with_dedup(
                 account=account,
                 event_id=event_id,
                 appended_seq=event.seq,
+                account_id=account_id,
             )
             if not inserted:
                 raise _DedupRollback()
-            await queries.flip_quiescent_to_pending(conn, session_id)
+            await queries.flip_quiescent_to_pending(conn, session_id, account_id=account_id)
     except _DedupRollback:
         return False
     return True

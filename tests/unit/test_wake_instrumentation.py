@@ -39,46 +39,54 @@ class TestE2EConftestMockSignatures:
 
 class TestWakeDeferredEvent:
     async def test_defer_wake_emits_span_with_cause(self, in_memory_app: App) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services.wake import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
         with patch("aios.services.wake.sessions_service.append_event", mock_append):
-            await defer_wake(pool, "sess_x", cause="message")
+            await defer_wake(pool, "sess_x", cause="message", account_id=account_id)
 
         mock_append.assert_awaited_once_with(
-            pool,
-            "sess_x",
-            "span",
-            {"event": "wake_deferred", "cause": "message"},
+            pool, "sess_x", "span", {"event": "wake_deferred", "cause": "message"}, account_id=ANY
         )
 
     async def test_defer_wake_span_carries_delay_when_scheduled(self, in_memory_app: App) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services.wake import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
         with patch("aios.services.wake.sessions_service.append_event", mock_append):
-            await defer_wake(pool, "sess_x", cause="scheduled", delay_seconds=30, wake_reason="r")
+            await defer_wake(
+                pool,
+                "sess_x",
+                cause="scheduled",
+                delay_seconds=30,
+                wake_reason="r",
+                account_id=account_id,
+            )
 
         mock_append.assert_awaited_once_with(
             pool,
             "sess_x",
             "span",
             {"event": "wake_deferred", "cause": "scheduled", "delay_seconds": 30},
+            account_id=ANY,
         )
 
     async def test_defer_wake_emits_span_even_when_coalesced(self, in_memory_app: App) -> None:
         """N deferrals must all emit ``wake_deferred``, even if procrastinate
         coalesces them — the profiler observes coalescing as N deferred → 1 step."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services.wake import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
         with patch("aios.services.wake.sessions_service.append_event", mock_append):
-            await defer_wake(pool, "sess_x", cause="message")
-            await defer_wake(pool, "sess_x", cause="sweep")
-            await defer_wake(pool, "sess_x", cause="tool_confirmation")
+            await defer_wake(pool, "sess_x", cause="message", account_id=account_id)
+            await defer_wake(pool, "sess_x", cause="sweep", account_id=account_id)
+            await defer_wake(pool, "sess_x", cause="tool_confirmation", account_id=account_id)
 
         assert mock_append.await_count == 3
         causes = [call.args[3]["cause"] for call in mock_append.await_args_list]
@@ -89,18 +97,22 @@ class TestWakeDeferredEvent:
     async def test_defer_wake_with_reschedule_cause_emits_reschedule_span(
         self, in_memory_app: App
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services.wake import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
         with patch("aios.services.wake.sessions_service.append_event", mock_append):
-            await defer_wake(pool, "sess_x", cause="reschedule", delay_seconds=2)
+            await defer_wake(
+                pool, "sess_x", cause="reschedule", delay_seconds=2, account_id=account_id
+            )
 
         mock_append.assert_awaited_once_with(
             pool,
             "sess_x",
             "span",
             {"event": "wake_deferred", "cause": "reschedule", "delay_seconds": 2},
+            account_id=ANY,
         )
 
 
@@ -264,7 +276,9 @@ class TestStepStartEndSpans:
             f"reschedule defer_wake must be called after step_end; "
             f"got step_end at {last_append}, defer_wake at {first_defer}"
         )
-        defer_wake_mock.assert_awaited_once_with(ANY, "sess_x", cause="reschedule", delay_seconds=2)
+        defer_wake_mock.assert_awaited_once_with(
+            ANY, "sess_x", cause="reschedule", delay_seconds=2, account_id=ANY
+        )
 
     async def test_happy_path_span_ordering(self) -> None:
         """Regression fence: on a clean end-turn, spans nest in the expected order."""

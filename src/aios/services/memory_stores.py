@@ -86,27 +86,28 @@ def _mirror_delete_from_host(store_id: str, path: str) -> None:
 async def create_store(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     name: str,
     description: str,
     metadata: dict[str, Any],
 ) -> MemoryStore:
     async with pool.acquire() as conn:
         return await queries.insert_memory_store(
-            conn, name=name, description=description, metadata=metadata
+            conn, name=name, description=description, metadata=metadata, account_id=account_id
         )
 
 
-async def get_store(pool: asyncpg.Pool[Any], store_id: str) -> MemoryStore:
+async def get_store(pool: asyncpg.Pool[Any], store_id: str, *, account_id: str) -> MemoryStore:
     async with pool.acquire() as conn:
-        return await queries.get_memory_store(conn, store_id)
+        return await queries.get_memory_store(conn, store_id, account_id=account_id)
 
 
 async def list_stores(
-    pool: asyncpg.Pool[Any], *, include_archived: bool = False, limit: int = 100
+    pool: asyncpg.Pool[Any], *, account_id: str, include_archived: bool = False, limit: int = 100
 ) -> list[MemoryStore]:
     async with pool.acquire() as conn:
         return await queries.list_memory_stores(
-            conn, include_archived=include_archived, limit=limit
+            conn, include_archived=include_archived, limit=limit, account_id=account_id
         )
 
 
@@ -114,12 +115,13 @@ async def update_store(
     pool: asyncpg.Pool[Any],
     store_id: str,
     *,
+    account_id: str,
     name: str | None = None,
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> MemoryStore:
     async with pool.acquire() as conn:
-        store = await queries.get_memory_store(conn, store_id)
+        store = await queries.get_memory_store(conn, store_id, account_id=account_id)
         if store.archived_at is not None:
             raise MemoryStoreArchivedError(
                 f"memory store {store_id} is archived",
@@ -131,17 +133,18 @@ async def update_store(
             name=name,
             description=description,
             metadata=metadata,
+            account_id=account_id,
         )
 
 
-async def archive_store(pool: asyncpg.Pool[Any], store_id: str) -> MemoryStore:
+async def archive_store(pool: asyncpg.Pool[Any], store_id: str, *, account_id: str) -> MemoryStore:
     async with pool.acquire() as conn:
-        return await queries.archive_memory_store(conn, store_id)
+        return await queries.archive_memory_store(conn, store_id, account_id=account_id)
 
 
-async def delete_store(pool: asyncpg.Pool[Any], store_id: str) -> None:
+async def delete_store(pool: asyncpg.Pool[Any], store_id: str, *, account_id: str) -> None:
     async with pool.acquire() as conn:
-        await queries.delete_memory_store(conn, store_id)
+        await queries.delete_memory_store(conn, store_id, account_id=account_id)
     # Drop the shared host dir after the DB cascade. ignore_errors=True
     # because it's a best-effort cleanup — a missing dir means no session
     # ever provisioned for this store, which is fine.
@@ -154,6 +157,7 @@ async def delete_store(pool: asyncpg.Pool[Any], store_id: str) -> None:
 async def create_memory(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     store_id: str,
     path: str,
     content: str,
@@ -170,6 +174,7 @@ async def create_memory(
             content_sha256=sha,
             actor_type=actor_type,
             actor_ref=actor_ref,
+            account_id=account_id,
         )
     _mirror_to_host(store_id, path, content)
     return memory
@@ -180,10 +185,13 @@ async def get_memory(
     store_id: str,
     memory_id: str,
     *,
+    account_id: str,
     include_content: bool = True,
 ) -> Memory:
     async with pool.acquire() as conn:
-        return await queries.get_memory(conn, store_id, memory_id, include_content=include_content)
+        return await queries.get_memory(
+            conn, store_id, memory_id, include_content=include_content, account_id=account_id
+        )
 
 
 async def get_memory_by_path(
@@ -191,11 +199,12 @@ async def get_memory_by_path(
     store_id: str,
     path: str,
     *,
+    account_id: str,
     include_content: bool = True,
 ) -> Memory | None:
     async with pool.acquire() as conn:
         return await queries.get_memory_by_path(
-            conn, store_id, path, include_content=include_content
+            conn, store_id, path, include_content=include_content, account_id=account_id
         )
 
 
@@ -203,6 +212,7 @@ async def list_memories(
     pool: asyncpg.Pool[Any],
     store_id: str,
     *,
+    account_id: str,
     path_prefix: str | None = None,
     order_by: str = "created_at",
     depth: int | None = None,
@@ -214,12 +224,14 @@ async def list_memories(
             path_prefix=path_prefix,
             order_by=order_by,
             depth=depth,
+            account_id=account_id,
         )
 
 
 async def update_memory(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     store_id: str,
     memory_id: str,
     new_content: str | None = None,
@@ -234,7 +246,7 @@ async def update_memory(
     need_prior_content = new_content is None and new_path is not None
     async with pool.acquire() as conn:
         prior = await queries.get_memory(
-            conn, store_id, memory_id, include_content=need_prior_content
+            conn, store_id, memory_id, include_content=need_prior_content, account_id=account_id
         )
         prior_path = prior.path
         memory = await queries.update_memory_with_version(
@@ -247,6 +259,7 @@ async def update_memory(
             precondition_sha256=precondition_sha256,
             actor_type=actor_type,
             actor_ref=actor_ref,
+            account_id=account_id,
         )
     if memory.path != prior_path:
         _mirror_delete_from_host(store_id, prior_path)
@@ -260,19 +273,23 @@ async def update_memory(
 async def delete_memory(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     store_id: str,
     memory_id: str,
     actor: Actor,
 ) -> None:
     actor_type, actor_ref = _actor_columns(actor)
     async with pool.acquire() as conn:
-        prior = await queries.get_memory(conn, store_id, memory_id, include_content=False)
+        prior = await queries.get_memory(
+            conn, store_id, memory_id, include_content=False, account_id=account_id
+        )
         await queries.delete_memory_with_version(
             conn,
             store_id=store_id,
             memory_id=memory_id,
             actor_type=actor_type,
             actor_ref=actor_ref,
+            account_id=account_id,
         )
     _mirror_delete_from_host(store_id, prior.path)
 
@@ -284,21 +301,27 @@ async def list_versions(
     pool: asyncpg.Pool[Any],
     store_id: str,
     *,
+    account_id: str,
     memory_id: str | None = None,
     limit: int = 100,
 ) -> list[MemoryVersion]:
     async with pool.acquire() as conn:
-        return await queries.list_memory_versions(conn, store_id, memory_id=memory_id, limit=limit)
+        return await queries.list_memory_versions(
+            conn, store_id, memory_id=memory_id, limit=limit, account_id=account_id
+        )
 
 
-async def get_version(pool: asyncpg.Pool[Any], store_id: str, version_id: str) -> MemoryVersion:
+async def get_version(
+    pool: asyncpg.Pool[Any], store_id: str, version_id: str, *, account_id: str
+) -> MemoryVersion:
     async with pool.acquire() as conn:
-        return await queries.get_memory_version(conn, store_id, version_id)
+        return await queries.get_memory_version(conn, store_id, version_id, account_id=account_id)
 
 
 async def redact_version(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     store_id: str,
     version_id: str,
     actor: Actor,
@@ -311,6 +334,7 @@ async def redact_version(
             version_id=version_id,
             actor_type=actor_type,
             actor_ref=actor_ref,
+            account_id=account_id,
         )
 
 
@@ -318,31 +342,44 @@ async def redact_version(
 
 
 async def list_session_echoes(
-    pool: asyncpg.Pool[Any], session_id: str
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    account_id: str,
 ) -> list[MemoryStoreResourceEcho]:
     async with pool.acquire() as conn:
-        return await queries.list_session_memory_store_echoes(conn, session_id)
+        return await queries.list_session_memory_store_echoes(
+            conn, session_id, account_id=account_id
+        )
 
 
 async def attach_to_session(
     conn: asyncpg.Connection[Any],
     session_id: str,
     resources: list[MemoryStoreResource],
+    *,
+    account_id: str,
 ) -> None:
     """Attach resources within an open transaction (caller controls the txn).
 
     Used by the sessions service so that session insert + memory-store
     attaches commit atomically.
     """
-    await queries.attach_memory_stores_to_session(conn, session_id, resources)
+    await queries.attach_memory_stores_to_session(
+        conn, session_id, resources, account_id=account_id
+    )
 
 
 async def set_session_resources(
     conn: asyncpg.Connection[Any],
     session_id: str,
     resources: list[MemoryStoreResource],
+    *,
+    account_id: str,
 ) -> None:
     """Replace attached stores atomically. A failed attach rolls back the delete."""
     async with conn.transaction():
         await conn.execute("DELETE FROM session_memory_stores WHERE session_id = $1", session_id)
-        await queries.attach_memory_stores_to_session(conn, session_id, resources)
+        await queries.attach_memory_stores_to_session(
+            conn, session_id, resources, account_id=account_id
+        )

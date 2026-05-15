@@ -195,12 +195,13 @@ class McpBroker:
         from aios.services import sessions as sessions_service
 
         pool = runtime.require_pool()
-        session = await sessions_service.get_session(pool, session_id)
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        session = await sessions_service.get_session(pool, session_id, account_id=account_id)
         if session.agent_version is not None:
             return await agents_service.get_agent_version(
-                pool, session.agent_id, session.agent_version
+                pool, session.agent_id, session.agent_version, account_id=account_id
             )
-        return await agents_service.get_agent(pool, session.agent_id)
+        return await agents_service.get_agent(pool, session.agent_id, account_id=account_id)
 
     async def _list_servers(self, request: Request) -> Response:
         resolved = await self._resolve_session(request)
@@ -272,10 +273,14 @@ class McpBroker:
             return _err(404, f"server '{server_name}' has no URL configured")
 
         from aios.harness import runtime
+        from aios.services import sessions as sessions_service
 
         pool = runtime.require_pool()
         crypto_box = runtime.require_crypto_box()
-        headers = await resolve_auth_for_url(pool, crypto_box, session_id, server.url)
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        headers = await resolve_auth_for_url(
+            pool, crypto_box, session_id, server.url, account_id=account_id
+        )
         tool_dicts, _instructions = await discover_mcp_tools(server.url, server_name, headers)
 
         out: list[dict[str, Any]] = []
@@ -299,10 +304,14 @@ class McpBroker:
         session_id, server, _toolset, tool_name = resolved
 
         from aios.harness import runtime
+        from aios.services import sessions as sessions_service
 
         pool = runtime.require_pool()
         crypto_box = runtime.require_crypto_box()
-        headers = await resolve_auth_for_url(pool, crypto_box, session_id, server.url)
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        headers = await resolve_auth_for_url(
+            pool, crypto_box, session_id, server.url, account_id=account_id
+        )
         tool_dicts, _ = await discover_mcp_tools(server.url, server.name, headers)
         qualified = f"mcp__{server.name}__{tool_name}"
         for td in tool_dicts:
@@ -332,10 +341,14 @@ class McpBroker:
         session_id, server, _toolset, tool_name = resolved
 
         from aios.harness import runtime
+        from aios.services import sessions as sessions_service
 
         pool = runtime.require_pool()
         crypto_box = runtime.require_crypto_box()
-        headers = await resolve_auth_for_url(pool, crypto_box, session_id, server.url)
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        headers = await resolve_auth_for_url(
+            pool, crypto_box, session_id, server.url, account_id=account_id
+        )
         log.info(
             "mcp_broker.invoke",
             session_id=session_id,

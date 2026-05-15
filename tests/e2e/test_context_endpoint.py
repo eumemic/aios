@@ -66,12 +66,15 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
 
 @pytest.fixture
 async def seeded_session(pool: Any) -> dict[str, Any]:
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.db import queries
     from aios.services import agents as agents_svc
     from aios.services import sessions as sessions_svc
 
     async with pool.acquire() as conn:
-        env = await queries.insert_environment(conn, name=f"ctx-env-{_uniq()}")
+        env = await queries.insert_environment(
+            conn, name=f"ctx-env-{_uniq()}", account_id=account_id
+        )
     agent = await agents_svc.create_agent(
         pool,
         name=f"ctx-agent-{_uniq()}",
@@ -82,11 +85,17 @@ async def seeded_session(pool: Any) -> dict[str, Any]:
         metadata={},
         window_min=50_000,
         window_max=150_000,
+        account_id=account_id,
     )
     session = await sessions_svc.create_session(
-        pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+        pool,
+        agent_id=agent.id,
+        environment_id=env.id,
+        title=None,
+        metadata={},
+        account_id=account_id,
     )
-    await sessions_svc.append_user_message(pool, session.id, "hello")
+    await sessions_svc.append_user_message(pool, session.id, "hello", account_id=account_id)
     return {"agent_id": agent.id, "session_id": session.id, "model": agent.model}
 
 
@@ -136,16 +145,21 @@ class TestContextEndpoint:
     ) -> None:
         """Dry-run semantics: hitting /context must not append events, bump status,
         or write skill files.  Side-effect-free by design."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
-        session = await sessions_svc.get_session(pool, seeded_session["session_id"])
+        session = await sessions_svc.get_session(
+            pool, seeded_session["session_id"], account_id=account_id
+        )
         seq_before = session.last_event_seq
         status_before = session.status
 
         r = await http_client.get(f"/v1/sessions/{seeded_session['session_id']}/context")
         assert r.status_code == 200
 
-        session = await sessions_svc.get_session(pool, seeded_session["session_id"])
+        session = await sessions_svc.get_session(
+            pool, seeded_session["session_id"], account_id=account_id
+        )
         assert session.last_event_seq == seq_before
         assert session.status == status_before
 
@@ -156,13 +170,16 @@ class TestContextEndpoint:
         ``discover_session_mcp_tools``.  The endpoint runs in the API process,
         so ``runtime.crypto_box`` must be wired up there — otherwise this
         endpoint 500s on any non-trivial agent."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.db import queries
         from aios.models.agents import McpServerSpec
         from aios.services import agents as agents_svc
         from aios.services import sessions as sessions_svc
 
         async with pool.acquire() as conn:
-            env = await queries.insert_environment(conn, name=f"ctx-mcp-env-{_uniq()}")
+            env = await queries.insert_environment(
+                conn, name=f"ctx-mcp-env-{_uniq()}", account_id=account_id
+            )
         agent = await agents_svc.create_agent(
             pool,
             name=f"ctx-mcp-agent-{_uniq()}",
@@ -174,6 +191,7 @@ class TestContextEndpoint:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
         session = await sessions_svc.create_session(
             pool,
@@ -181,6 +199,7 @@ class TestContextEndpoint:
             environment_id=env.id,
             title=None,
             metadata={},
+            account_id=account_id,
         )
 
         # Stub discovery so we don't depend on a running MCP server.  The

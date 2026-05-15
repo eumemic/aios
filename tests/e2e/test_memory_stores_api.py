@@ -301,12 +301,15 @@ async def _create_session_for_resources_test(
     Returns the session as a serializable dict so call-sites can read .id
     without importing the model.
     """
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.models.memory_stores import MemoryStoreResource
     from aios.services import agents as agents_svc
     from aios.services import environments as env_svc
     from aios.services import sessions as sess_svc
 
-    env = await env_svc.create_environment(pool, name=f"resources-update-{_uniq()}")
+    env = await env_svc.create_environment(
+        pool, name=f"resources-update-{_uniq()}", account_id=account_id
+    )
     agent = await agents_svc.create_agent(
         pool,
         name=f"resources-update-agent-{_uniq()}",
@@ -317,6 +320,7 @@ async def _create_session_for_resources_test(
         metadata={},
         window_min=50_000,
         window_max=150_000,
+        account_id=account_id,
     )
     resources = (
         None
@@ -330,6 +334,7 @@ async def _create_session_for_resources_test(
         title="resources-update",
         metadata={},
         resources=resources,
+        account_id=account_id,
     )
     return {"id": session.id, "agent_id": agent.id, "env_id": env.id}
 

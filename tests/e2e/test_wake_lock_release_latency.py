@@ -26,6 +26,7 @@ class TestWakeLockReleaseLatencyE2E:
     ) -> None:
         """When a lock-blocked wake becomes eligible, the worker must pick
         it up within a single LISTEN/NOTIFY round-trip (<200ms)."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.harness.procrastinate_app import app as procrastinate_app
         from aios.services.wake import defer_wake
 
@@ -41,10 +42,18 @@ class TestWakeLockReleaseLatencyE2E:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await environments_service.create_environment(pool, name="lock-release-test-env")
+        env = await environments_service.create_environment(
+            pool, name="lock-release-test-env", account_id=account_id
+        )
         session = await sessions_service.create_session(
-            pool, agent_id=agent.id, environment_id=env.id, title="lock-release-test", metadata={}
+            pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title="lock-release-test",
+            metadata={},
+            account_id=account_id,
         )
         session_id = session.id
 
@@ -78,7 +87,7 @@ class TestWakeLockReleaseLatencyE2E:
                     install_signal_handlers=False,
                 )
 
-                await defer_wake(pool, session_id, cause="message")
+                await defer_wake(pool, session_id, cause="message", account_id=account_id)
                 worker_task = asyncio.create_task(worker.run())
 
                 async def _count_wakes(statuses: tuple[str, ...]) -> int:
@@ -101,7 +110,7 @@ class TestWakeLockReleaseLatencyE2E:
                     return await _count_wakes(("succeeded", "failed", "aborted", "cancelled")) >= 2
 
                 await wait_for_predicate(_has_doing, max_wait_s=5.0, interval_s=0.02)
-                await defer_wake(pool, session_id, cause="message")
+                await defer_wake(pool, session_id, cause="message", account_id=account_id)
                 await wait_for_predicate(_both_terminal, max_wait_s=15.0, interval_s=0.02)
                 worker.stop()
                 await asyncio.wait_for(worker_task, timeout=5.0)

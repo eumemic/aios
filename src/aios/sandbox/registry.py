@@ -119,8 +119,9 @@ class SandboxRegistry:
 
         from aios.services import sessions as sessions_service
 
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
         span_start = await sessions_service.append_event(
-            pool, session_id, "span", {"event": "sandbox_provision_start"}
+            pool, session_id, "span", {"event": "sandbox_provision_start"}, account_id=account_id
         )
         is_error = False
         handle: SandboxHandle | None = None
@@ -138,7 +139,9 @@ class SandboxRegistry:
             }
             if handle is not None:
                 end_payload["container_id"] = handle.sandbox_id[:12]
-            await sessions_service.append_event(pool, session_id, "span", end_payload)
+            await sessions_service.append_event(
+                pool, session_id, "span", end_payload, account_id=account_id
+            )
 
     async def _provision(self, session_id: str) -> SandboxHandle:
         """Build the plan, ask the backend to create the sandbox, run setup."""

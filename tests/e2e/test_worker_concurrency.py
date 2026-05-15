@@ -30,12 +30,14 @@ from tests.conftest import needs_docker
 
 
 async def _create_session(pool: asyncpg.Pool[Any], agent_id: str, env_id: str) -> str:
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     session = await sessions_service.create_session(
         pool,
         agent_id=agent_id,
         environment_id=env_id,
         title="conc-test",
         metadata={},
+        account_id=account_id,
     )
     return session.id
 
@@ -45,6 +47,7 @@ class TestWorkerConcurrencyE2E:
     async def test_n_sessions_dispatch_concurrently(
         self, real_wake_setup: asyncpg.Pool[Any], aios_env: dict[str, str]
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.harness.procrastinate_app import app as procrastinate_app
         from aios.services.wake import defer_wake
 
@@ -63,8 +66,11 @@ class TestWorkerConcurrencyE2E:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await environments_service.create_environment(pool, name="conc-test-env")
+        env = await environments_service.create_environment(
+            pool, name="conc-test-env", account_id=account_id
+        )
 
         session_ids = await asyncio.gather(
             *(_create_session(pool, agent.id, env.id) for _ in range(n_sessions))
@@ -92,7 +98,10 @@ class TestWorkerConcurrencyE2E:
                 mock.patch("aios.harness.loop.run_session_step", fake_step),
             ):
                 await asyncio.gather(
-                    *(defer_wake(pool, sid, cause="message") for sid in session_ids)
+                    *(
+                        defer_wake(pool, sid, cause="message", account_id=account_id)
+                        for sid in session_ids
+                    )
                 )
 
                 # ``wait=False`` exits when ``fetch_job`` returns ``None``;

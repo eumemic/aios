@@ -238,6 +238,7 @@ class TestPromotedColumns:
 
     async def test_channel_column_stamped_and_queryable(self, harness: Harness) -> None:
         """User events carry the metadata.channel through to events.channel."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_service
 
         session_id = await self._bare_session(harness)
@@ -247,12 +248,14 @@ class TestPromotedColumns:
             session_id,
             "hello on A",
             metadata={"channel": "slack:CHANA", "sender_name": "alice"},
+            account_id=account_id,
         )
         await sessions_service.append_user_message(
             pool,
             session_id,
             "hello on B",
             metadata={"channel": "slack:CHANB", "sender_name": "bob"},
+            account_id=account_id,
         )
 
         # Direct column read via the pool to sidestep the
@@ -288,6 +291,7 @@ class TestPromotedColumns:
     async def test_tool_name_column_for_assistant_and_tool_rows(self, harness: Harness) -> None:
         """Assistant turns with tool_calls promote the first name;
         tool-result rows promote data.name."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.db import queries
 
         session_id = await self._bare_session(harness)
@@ -313,6 +317,7 @@ class TestPromotedColumns:
                         },
                     ],
                 },
+                account_id=account_id,
             )
             await queries.append_event(
                 conn,
@@ -324,6 +329,7 @@ class TestPromotedColumns:
                     "name": "bash",
                     "content": "hello",
                 },
+                account_id=account_id,
             )
 
         result = await search_events_handler(
@@ -351,6 +357,7 @@ class TestPromotedColumns:
 
     async def test_is_error_column_nullable_true_only(self, harness: Harness) -> None:
         """is_error is TRUE on failures, NULL on success — never FALSE."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.db import queries
 
         session_id = await self._bare_session(harness)
@@ -366,6 +373,7 @@ class TestPromotedColumns:
                     "name": "bash",
                     "content": "ok",
                 },
+                account_id=account_id,
             )
             await queries.append_event(
                 conn,
@@ -378,6 +386,7 @@ class TestPromotedColumns:
                     "content": '{"error": "nope"}',
                     "is_error": True,
                 },
+                account_id=account_id,
             )
 
         # Direct column read — the view formatter stringifies NULLs to

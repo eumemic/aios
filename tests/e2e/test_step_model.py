@@ -781,6 +781,7 @@ class TestStreamingInference:
 class TestAgentVersioning:
     async def test_create_agent_starts_at_version_1(self, harness: Harness) -> None:
         """Newly created agents are version 1."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import agents as agents_service
 
         agent = await agents_service.create_agent(
@@ -793,11 +794,13 @@ class TestAgentVersioning:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
         assert agent.version == 1
 
     async def test_update_bumps_version(self, harness: Harness) -> None:
         """Updating an agent creates a new version."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import agents as agents_service
 
         agent = await agents_service.create_agent(
@@ -810,15 +813,17 @@ class TestAgentVersioning:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
         updated = await agents_service.update_agent(
-            harness._pool, agent.id, expected_version=1, system="updated"
+            harness._pool, agent.id, expected_version=1, system="updated", account_id=account_id
         )
         assert updated.version == 2
         assert updated.system == "updated"
 
     async def test_update_noop_keeps_version(self, harness: Harness) -> None:
         """Updating with no changes doesn't bump the version."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import agents as agents_service
 
         agent = await agents_service.create_agent(
@@ -831,12 +836,16 @@ class TestAgentVersioning:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        result = await agents_service.update_agent(harness._pool, agent.id, expected_version=1)
+        result = await agents_service.update_agent(
+            harness._pool, agent.id, expected_version=1, account_id=account_id
+        )
         assert result.version == 1  # no bump
 
     async def test_update_wrong_version_raises(self, harness: Harness) -> None:
         """Optimistic concurrency: wrong version raises ConflictError."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.errors import ConflictError
         from aios.services import agents as agents_service
 
@@ -850,14 +859,16 @@ class TestAgentVersioning:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
         with pytest.raises(ConflictError, match="version mismatch"):
             await agents_service.update_agent(
-                harness._pool, agent.id, expected_version=99, system="bad"
+                harness._pool, agent.id, expected_version=99, system="bad", account_id=account_id
             )
 
     async def test_version_history(self, harness: Harness) -> None:
         """Version history tracks all updates."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import agents as agents_service
 
         agent = await agents_service.create_agent(
@@ -870,10 +881,17 @@ class TestAgentVersioning:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        await agents_service.update_agent(harness._pool, agent.id, expected_version=1, system="v2")
-        await agents_service.update_agent(harness._pool, agent.id, expected_version=2, system="v3")
-        versions = await agents_service.list_agent_versions(harness._pool, agent.id)
+        await agents_service.update_agent(
+            harness._pool, agent.id, expected_version=1, system="v2", account_id=account_id
+        )
+        await agents_service.update_agent(
+            harness._pool, agent.id, expected_version=2, system="v3", account_id=account_id
+        )
+        versions = await agents_service.list_agent_versions(
+            harness._pool, agent.id, account_id=account_id
+        )
         assert len(versions) == 3
         # Newest first
         assert versions[0].version == 3
@@ -883,6 +901,7 @@ class TestAgentVersioning:
 
     async def test_get_specific_version(self, harness: Harness) -> None:
         """Can retrieve a specific historical version."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import agents as agents_service
 
         agent = await agents_service.create_agent(
@@ -895,13 +914,18 @@ class TestAgentVersioning:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
         await agents_service.update_agent(
-            harness._pool, agent.id, expected_version=1, system="changed"
+            harness._pool, agent.id, expected_version=1, system="changed", account_id=account_id
         )
-        v1 = await agents_service.get_agent_version(harness._pool, agent.id, 1)
+        v1 = await agents_service.get_agent_version(
+            harness._pool, agent.id, 1, account_id=account_id
+        )
         assert v1.system == "original"
-        v2 = await agents_service.get_agent_version(harness._pool, agent.id, 2)
+        v2 = await agents_service.get_agent_version(
+            harness._pool, agent.id, 2, account_id=account_id
+        )
         assert v2.system == "changed"
 
 
@@ -915,6 +939,7 @@ class TestSessionVersionBinding:
 
     async def test_session_uses_latest_after_agent_update(self, harness: Harness) -> None:
         """Unpinned session uses updated agent config on next step."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import agents as agents_service
 
         # Create agent + session with system="original"
@@ -928,9 +953,15 @@ class TestSessionVersionBinding:
         await harness.run_until_idle(session.id)
 
         # Update the agent's system prompt
-        agent = await agents_service.get_agent(harness._pool, session.agent_id)
+        agent = await agents_service.get_agent(
+            harness._pool, session.agent_id, account_id=account_id
+        )
         await agents_service.update_agent(
-            harness._pool, agent.id, expected_version=agent.version, system="updated"
+            harness._pool,
+            agent.id,
+            expected_version=agent.version,
+            system="updated",
+            account_id=account_id,
         )
 
         # Send another message — step should use the updated system prompt
@@ -945,6 +976,7 @@ class TestSessionVersionBinding:
 
     async def test_pinned_session_ignores_agent_update(self, harness: Harness) -> None:
         """Pinned session keeps using the old version after agent update."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import agents as agents_service
         from aios.services import sessions as sessions_service
 
@@ -958,12 +990,20 @@ class TestSessionVersionBinding:
         await harness.run_until_idle(session.id)
 
         # Pin session to version 1
-        await sessions_service.update_session(harness._pool, session.id, agent_version=1)
+        await sessions_service.update_session(
+            harness._pool, session.id, agent_version=1, account_id=account_id
+        )
 
         # Update agent to version 2
-        agent = await agents_service.get_agent(harness._pool, session.agent_id)
+        agent = await agents_service.get_agent(
+            harness._pool, session.agent_id, account_id=account_id
+        )
         await agents_service.update_agent(
-            harness._pool, agent.id, expected_version=agent.version, system="v2 system"
+            harness._pool,
+            agent.id,
+            expected_version=agent.version,
+            system="v2 system",
+            account_id=account_id,
         )
 
         # Send another message — pinned session should still use v1 system prompt
@@ -976,6 +1016,7 @@ class TestSessionVersionBinding:
 
     async def test_session_update_changes_agent(self, harness: Harness) -> None:
         """Sessions can be updated to point at a different agent."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import agents as agents_service
         from aios.services import sessions as sessions_service
 
@@ -1001,10 +1042,13 @@ class TestSessionVersionBinding:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
 
         # Switch session to agent 2
-        await sessions_service.update_session(harness._pool, session.id, agent_id=agent2.id)
+        await sessions_service.update_session(
+            harness._pool, session.id, agent_id=agent2.id, account_id=account_id
+        )
 
         # Next step should use agent 2's system prompt
         await harness.inject_message(session.id, "hello from agent 2")
@@ -1022,6 +1066,7 @@ class TestSessionVersionBinding:
 class TestCustomTools:
     async def test_custom_tool_idles_with_requires_action(self, harness: Harness) -> None:
         """When the model calls a custom tool, the session idles with requires_action."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
 
@@ -1046,6 +1091,7 @@ class TestCustomTools:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
 
         # Script model to call the custom tool
@@ -1061,7 +1107,7 @@ class TestCustomTools:
 
         if harness._env_id is None:
             env = await env_svc.create_environment(
-                harness._pool, name=f"test-env-{make_id('env')[-8:]}"
+                harness._pool, name=f"test-env-{make_id('env')[-8:]}", account_id=account_id
             )
             harness._env_id = env.id
 
@@ -1071,8 +1117,11 @@ class TestCustomTools:
             environment_id=harness._env_id,
             title="custom-tool-test",
             metadata={},
+            account_id=account_id,
         )
-        await sess_svc.append_user_message(harness._pool, session.id, "What's the weather in SF?")
+        await sess_svc.append_user_message(
+            harness._pool, session.id, "What's the weather in SF?", account_id=account_id
+        )
 
         # Run one step — model calls custom tool
         await harness.run_step(session.id)
@@ -1086,6 +1135,7 @@ class TestCustomTools:
 
     async def test_custom_tool_result_resumes_session(self, harness: Harness) -> None:
         """Submitting a custom tool result via the API resumes the session."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
 
@@ -1110,6 +1160,7 @@ class TestCustomTools:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
 
         harness.script_model(
@@ -1125,7 +1176,7 @@ class TestCustomTools:
 
         if harness._env_id is None:
             env = await env_svc.create_environment(
-                harness._pool, name=f"test-env-{make_id('env')[-8:]}"
+                harness._pool, name=f"test-env-{make_id('env')[-8:]}", account_id=account_id
             )
             harness._env_id = env.id
 
@@ -1135,8 +1186,11 @@ class TestCustomTools:
             environment_id=harness._env_id,
             title="custom-resume-test",
             metadata={},
+            account_id=account_id,
         )
-        await sess_svc.append_user_message(harness._pool, session.id, "Weather in SF?")
+        await sess_svc.append_user_message(
+            harness._pool, session.id, "Weather in SF?", account_id=account_id
+        )
 
         # Step 1: model calls custom tool → session idles
         await harness.run_step(session.id)
@@ -1147,6 +1201,7 @@ class TestCustomTools:
             session.id,
             "message",
             {"role": "tool", "tool_call_id": "call_w2", "content": "Sunny, 72°F"},
+            account_id=account_id,
         )
 
         # Step 2: model sees the tool result and responds
@@ -1160,6 +1215,7 @@ class TestCustomTools:
         assert s.stop_reason == {"type": "end_turn"}
 
     async def test_mixed_builtin_and_custom_tools(self, harness: Harness) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         """Model calls both a built-in tool and a custom tool in the same response."""
 
         async def echo_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1187,6 +1243,7 @@ class TestCustomTools:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
 
         harness.script_model(
@@ -1207,8 +1264,9 @@ class TestCustomTools:
         from aios.services import sessions as sess_svc
 
         if harness._env_id is None:
+            account_id = "acc_test_stub"  # PR 3 scaffolding
             env = await env_svc.create_environment(
-                harness._pool, name=f"test-env-{make_id('env')[-8:]}"
+                harness._pool, name=f"test-env-{make_id('env')[-8:]}", account_id=account_id
             )
             harness._env_id = env.id
 
@@ -1218,8 +1276,11 @@ class TestCustomTools:
             environment_id=harness._env_id,
             title="mixed-tools-test",
             metadata={},
+            account_id=account_id,
         )
-        await sess_svc.append_user_message(harness._pool, session.id, "Do both")
+        await sess_svc.append_user_message(
+            harness._pool, session.id, "Do both", account_id=account_id
+        )
 
         # Step 1: model calls both tools
         await harness.run_step(session.id)
@@ -1249,6 +1310,7 @@ class TestCustomTools:
             session.id,
             "message",
             {"role": "tool", "tool_call_id": "call_lookup", "content": '{"value": "bar"}'},
+            account_id=account_id,
         )
 
         # Step 2: model sees both results
@@ -1282,7 +1344,9 @@ class TestPermissionPolicies:
         """Model calls an always_ask tool → session idles with requires_action."""
         from aios.models.agents import ToolSpec
 
-        async def fake_glob(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        async def fake_glob(
+            session_id: str, arguments: dict[str, Any], **kwargs: Any
+        ) -> dict[str, Any]:
             return {"matches": ["a.txt"]}
 
         self._override_tool("glob", fake_glob)
@@ -1311,7 +1375,9 @@ class TestPermissionPolicies:
         """Confirm allow → tool executes → model sees result → responds."""
         from aios.models.agents import ToolSpec
 
-        async def fake_glob(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        async def fake_glob(
+            session_id: str, arguments: dict[str, Any], **kwargs: Any
+        ) -> dict[str, Any]:
             return {"matches": ["found.txt"]}
 
         self._override_tool("glob", fake_glob)
@@ -1356,7 +1422,9 @@ class TestPermissionPolicies:
         """Confirm deny → model sees error with deny message → responds."""
         from aios.models.agents import ToolSpec
 
-        async def fake_glob(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        async def fake_glob(
+            session_id: str, arguments: dict[str, Any], **kwargs: Any
+        ) -> dict[str, Any]:
             return {"matches": []}
 
         self._override_tool("glob", fake_glob)
@@ -1403,10 +1471,14 @@ class TestPermissionPolicies:
         """Model calls always_allow + always_ask → immediate executes, ask waits."""
         from aios.models.agents import ToolSpec
 
-        async def fake_glob(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        async def fake_glob(
+            session_id: str, arguments: dict[str, Any], **kwargs: Any
+        ) -> dict[str, Any]:
             return {"matches": ["a.txt"]}
 
-        async def fake_grep(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        async def fake_grep(
+            session_id: str, arguments: dict[str, Any], **kwargs: Any
+        ) -> dict[str, Any]:
             return {"matches": ["line 1: hello"]}
 
         self._override_tool("glob", fake_glob)

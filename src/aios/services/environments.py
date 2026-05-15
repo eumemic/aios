@@ -13,36 +13,44 @@ from aios.models.environments import Environment, EnvironmentConfig
 async def create_environment(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     name: str,
     config: EnvironmentConfig | None = None,
 ) -> Environment:
     async with pool.acquire() as conn:
-        return await queries.insert_environment(conn, name=name, config=config)
+        return await queries.insert_environment(
+            conn, name=name, config=config, account_id=account_id
+        )
 
 
-async def get_environment(pool: asyncpg.Pool[Any], env_id: str) -> Environment:
+async def get_environment(pool: asyncpg.Pool[Any], env_id: str, *, account_id: str) -> Environment:
     async with pool.acquire() as conn:
-        return await queries.get_environment(conn, env_id)
+        return await queries.get_environment(conn, env_id, account_id=account_id)
 
 
 async def list_environments(
-    pool: asyncpg.Pool[Any], *, limit: int = 50, after: str | None = None
+    pool: asyncpg.Pool[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Environment]:
     async with pool.acquire() as conn:
-        return await queries.list_environments(conn, limit=limit, after=after)
+        return await queries.list_environments(
+            conn, limit=limit, after=after, account_id=account_id
+        )
 
 
 async def update_environment(
     pool: asyncpg.Pool[Any],
     env_id: str,
     *,
+    account_id: str,
     name: str | None = None,
     config: EnvironmentConfig | None = None,
 ) -> Environment:
     async with pool.acquire() as conn:
-        return await queries.update_environment(conn, env_id, name=name, config=config)
+        return await queries.update_environment(
+            conn, env_id, name=name, config=config, account_id=account_id
+        )
 
 
-async def archive_environment(pool: asyncpg.Pool[Any], env_id: str) -> None:
+async def archive_environment(pool: asyncpg.Pool[Any], env_id: str, *, account_id: str) -> None:
     async with pool.acquire() as conn:
-        await queries.archive_environment(conn, env_id)
+        await queries.archive_environment(conn, env_id, account_id=account_id)

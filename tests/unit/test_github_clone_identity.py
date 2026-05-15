@@ -16,6 +16,7 @@ without spinning up a real container — ``_run_git`` is patched so each
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -24,16 +25,16 @@ from aios.sandbox.github_clone import ensure_session_working_tree
 
 
 @pytest.fixture
-def _stub_volumes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+def _stub_volumes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **kwargs: Any) -> Path:
     """Redirect the working-tree dirs into ``tmp_path`` so the test
     doesn't touch the operator's real workspace."""
     repos_root = tmp_path / "session-repos"
 
-    def fake_repos_root(_session_id: str) -> Path:
+    def fake_repos_root(_session_id: str, **kwargs: Any) -> Path:
         repos_root.mkdir(parents=True, exist_ok=True)
         return repos_root
 
-    def fake_working_tree_dir(_session_id: str, resource_id: str) -> Path:
+    def fake_working_tree_dir(_session_id: str, resource_id: str, **kwargs: Any) -> Path:
         return repos_root / resource_id
 
     monkeypatch.setattr("aios.sandbox.github_clone.session_repos_root", fake_repos_root)
@@ -55,7 +56,7 @@ async def _run_with_captured_git(
     captured: list[list[str]] = []
 
     async def fake_run_git(
-        argv: list[str], *, cwd: Path | None = None, op: str = "git"
+        argv: list[str], *, cwd: Path | None = None, op: str = "git", **kwargs: Any
     ) -> tuple[int, bytes, bytes]:
         full_argv = ["git", *argv] if cwd is None else ["git", "-C", str(cwd), *argv]
         captured.append(full_argv)

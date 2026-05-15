@@ -50,6 +50,7 @@ async def _noop_defer_wake(
     pool: Any,
     session_id: str,
     *,
+    account_id: str,
     cause: str = "message",
     delay_seconds: float | None = None,
     wake_reason: str | None = None,

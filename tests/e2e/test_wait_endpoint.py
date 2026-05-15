@@ -53,12 +53,15 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
 
 @pytest.fixture
 async def session_id(pool: Any) -> str:
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.db import queries
     from aios.services import agents as agents_svc
     from aios.services import sessions as sessions_svc
 
     async with pool.acquire() as conn:
-        env = await queries.insert_environment(conn, name=f"wait-env-{_uniq()}")
+        env = await queries.insert_environment(
+            conn, name=f"wait-env-{_uniq()}", account_id=account_id
+        )
     agent = await agents_svc.create_agent(
         pool,
         name=f"wait-agent-{_uniq()}",
@@ -69,9 +72,15 @@ async def session_id(pool: Any) -> str:
         metadata={},
         window_min=50_000,
         window_max=150_000,
+        account_id=account_id,
     )
     session = await sessions_svc.create_session(
-        pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+        pool,
+        agent_id=agent.id,
+        environment_id=env.id,
+        title=None,
+        metadata={},
+        account_id=account_id,
     )
     return session.id
 
@@ -80,9 +89,10 @@ class TestWaitEndpoint:
     async def test_returns_existing_events_immediately(
         self, http_client: httpx.AsyncClient, pool: Any, session_id: str
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
-        await sessions_svc.append_user_message(pool, session_id, "hello")
+        await sessions_svc.append_user_message(pool, session_id, "hello", account_id=account_id)
 
         r = await http_client.get(
             f"/v1/sessions/{session_id}/wait",
@@ -123,8 +133,11 @@ class TestWaitEndpoint:
             )
 
         async def delayed_append() -> None:
+            account_id = "acc_test_stub"  # PR 3 scaffolding
             await asyncio.sleep(0.3)
-            await sessions_svc.append_user_message(pool, session_id, "late hello")
+            await sessions_svc.append_user_message(
+                pool, session_id, "late hello", account_id=account_id
+            )
 
         wait_task = asyncio.create_task(wait_call())
         post_task = asyncio.create_task(delayed_append())
@@ -161,6 +174,7 @@ class TestWaitEndpoint:
         """
 
         async def fire_delta_then_append() -> None:
+            account_id = "acc_test_stub"  # PR 3 scaffolding
             from aios.services import sessions as sessions_svc
 
             async with pool.acquire() as conn:
@@ -174,7 +188,7 @@ class TestWaitEndpoint:
             # Real event arrives later; the wait should latch onto this,
             # not any of the deltas.
             await asyncio.sleep(0.3)
-            await sessions_svc.append_user_message(pool, session_id, "real")
+            await sessions_svc.append_user_message(pool, session_id, "real", account_id=account_id)
 
         async def wait_call() -> httpx.Response:
             return await http_client.get(

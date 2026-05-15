@@ -27,6 +27,7 @@ from tests.e2e.harness import Harness, assistant
 
 class TestWindowingOverhead:
     async def test_full_payload_fits_window_max(self, harness: Harness) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         # Agent with a meaningfully chunky system prompt plus the
         # standard built-in tool set → non-trivial per-step overhead.
         system = (
@@ -39,7 +40,9 @@ class TestWindowingOverhead:
         # — otherwise leftover model_request_end spans from earlier tests
         # can activate a per-fake/test R that perturbs the windowing math.
         model = f"fake/overhead-{uuid.uuid4().hex[:8]}"
-        env = await environments_service.create_environment(harness._pool, name="overhead-env")
+        env = await environments_service.create_environment(
+            harness._pool, name="overhead-env", account_id=account_id
+        )
         agent = await agents_service.create_agent(
             harness._pool,
             name="overhead-agent",
@@ -52,6 +55,7 @@ class TestWindowingOverhead:
             # ~1-2k for kept events.  Windowing is forced to drop.
             window_min=4_000,
             window_max=6_000,
+            account_id=account_id,
         )
         session = await sessions_service.create_session(
             harness._pool,
@@ -59,6 +63,7 @@ class TestWindowingOverhead:
             environment_id=env.id,
             title="overhead-test",
             metadata={},
+            account_id=account_id,
         )
         # Pile enough user messages to force drops.
         for i in range(80):
@@ -66,6 +71,7 @@ class TestWindowingOverhead:
                 harness._pool,
                 session.id,
                 f"message {i:03d}: " + "word " * 40,
+                account_id=account_id,
             )
 
         harness.script_model([assistant("ack")])
@@ -90,6 +96,7 @@ class TestWindowingOverhead:
         tail's size was not subtracted from the window budget, so its
         contents would push the send-time payload past ``window_max``.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         system = (
             "You are a test assistant. Be helpful, harmless, and honest. "
             "Use tools when appropriate. "
@@ -98,7 +105,9 @@ class TestWindowingOverhead:
         # is shared across e2e cases by default if the model string isn't
         # unique.
         model = f"fake/overhead-tail-{uuid.uuid4().hex[:8]}"
-        env = await environments_service.create_environment(harness._pool, name="overhead-tail-env")
+        env = await environments_service.create_environment(
+            harness._pool, name="overhead-tail-env", account_id=account_id
+        )
         agent = await agents_service.create_agent(
             harness._pool,
             name="overhead-tail-agent",
@@ -111,6 +120,7 @@ class TestWindowingOverhead:
             # the cap if they aren't reserved during windowing.
             window_min=3_500,
             window_max=4_500,
+            account_id=account_id,
         )
         session = await sessions_service.create_session(
             harness._pool,
@@ -118,6 +128,7 @@ class TestWindowingOverhead:
             environment_id=env.id,
             title="overhead-tail-test",
             metadata={},
+            account_id=account_id,
         )
 
         # Six channels with Signal-realistic address widths (UUID + base64
@@ -143,6 +154,7 @@ class TestWindowingOverhead:
                 harness._pool,
                 session.id,
                 f"direct message {i:03d}: " + "word " * 40,
+                account_id=account_id,
             )
 
         # Per-channel inbound so the tail shows non-zero unread + a preview
@@ -155,6 +167,7 @@ class TestWindowingOverhead:
                     session.id,
                     f"inbound on {addr} — body number {j} " + "word " * 8,
                     metadata={"channel": addr},
+                    account_id=account_id,
                 )
 
         harness.script_model([assistant("ack")])

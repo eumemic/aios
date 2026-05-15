@@ -83,6 +83,8 @@ async def resolve_auth_for_url(
     crypto_box: CryptoBox,
     session_id: str,
     mcp_server_url: str,
+    *,
+    account_id: str,
 ) -> dict[str, str]:
     """Resolve MCP auth headers for ``mcp_server_url`` via the session's
     bound vaults.
@@ -95,7 +97,9 @@ async def resolve_auth_for_url(
     to the stale token.
     """
     async with pool.acquire() as conn:
-        session_result = await queries.resolve_mcp_credential(conn, session_id, mcp_server_url)
+        session_result = await queries.resolve_mcp_credential(
+            conn, session_id, mcp_server_url, account_id=account_id
+        )
         if session_result is None:
             return {}
         blob, auth_type, vault_id = session_result
@@ -104,10 +108,14 @@ async def resolve_auth_for_url(
             payload = json.loads(crypto_box.decrypt(blob))
             if is_expiring(payload):
                 await refresh_credential(
-                    crypto_box, conn, vault_id=vault_id, mcp_server_url=mcp_server_url
+                    crypto_box,
+                    conn,
+                    vault_id=vault_id,
+                    mcp_server_url=mcp_server_url,
+                    account_id=account_id,
                 )
                 refreshed = await queries.resolve_vault_credential(
-                    conn, vault_id=vault_id, mcp_server_url=mcp_server_url
+                    conn, vault_id=vault_id, mcp_server_url=mcp_server_url, account_id=account_id
                 )
                 if refreshed is None:
                     return {}

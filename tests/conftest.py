@@ -5,8 +5,11 @@
   schema and aios lock-release trigger against the testcontainer
 * ``_reset_db_state`` — function-scoped: TRUNCATEs all public-schema tables
   before each test so the session-scoped DB stays isolated between tests
-* ``aios_env`` — sets the env vars the FastAPI app needs (api key, vault key,
-  db url) and depends on ``_reset_db_state``
+* ``aios_env_minimal`` — env vars only, no DB seeding. For tests that
+  exercise pre-bootstrap state (bootstrap endpoint tests, etc.)
+* ``aios_env`` — ``aios_env_minimal`` plus a bootstrapped root account
+  whose key is ``AIOS_API_KEY``. The default for tests that need an
+  authenticated route to work without manual setup
 
 Tests that need Docker are marked ``integration``; pytest -m "not integration"
 runs only the unit tests, which is what most local dev iterations use.
@@ -174,18 +177,24 @@ def _reset_sse_starlette_shutdown_state() -> Iterator[None]:
 
 
 @pytest.fixture
-def aios_env(
+def aios_env_minimal(
     migrated_db_url: str, _reset_db_state: None, tmp_path: Path
 ) -> Iterator[dict[str, str]]:
-    """Set the env vars the FastAPI app needs."""
+    """Set the env vars the FastAPI app needs, without seeding any data.
+
+    Use this when the test specifically needs a fresh-install state —
+    e.g. the bootstrap-endpoint tests, which expect no root account
+    to exist yet. Most tests want :func:`aios_env`, which layers a
+    bootstrapped root on top so the auth dep accepts ``AIOS_API_KEY``
+    as a bearer token without further setup.
+    """
     env_vars = {
-        "AIOS_API_KEY": secrets.token_urlsafe(32),
+        "AIOS_API_KEY": "aios_" + secrets.token_urlsafe(32),
         "AIOS_VAULT_KEY": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
         "AIOS_DB_URL": migrated_db_url,
         "AIOS_WORKSPACE_ROOT": str(tmp_path / "workspaces"),
     }
     with mock.patch.dict(os.environ, env_vars):
-        # Reset the cached settings singleton
         from aios.config import get_settings
         from aios.db import pool
 
@@ -194,3 +203,48 @@ def aios_env(
         yield env_vars
         get_settings.cache_clear()
         pool._pool = None
+
+
+@pytest.fixture
+async def aios_env(aios_env_minimal: dict[str, str]) -> dict[str, str]:
+    """Env vars + a bootstrapped root whose key is ``AIOS_API_KEY``.
+
+    Auth looks the bearer token up against ``account_keys``, so any
+    test that hits an authenticated route needs a matching DB row.
+    This fixture seeds that row using ``AIOS_API_KEY``'s sha256 hash.
+
+    Async so the seed step runs on the same event loop pytest-asyncio
+    drives the test on — avoids the spurious ``asyncio.run`` event-loop
+    isolation that caused ASGI-callable teardown flakiness in CI.
+    """
+    import asyncpg
+
+    from aios.services.accounts import hash_key
+
+    plaintext = aios_env_minimal["AIOS_API_KEY"]
+    db_url = aios_env_minimal["AIOS_DB_URL"]
+
+    conn = await asyncpg.connect(db_url)
+    try:
+        # PR 6: insert ``acc_test_stub`` as the root account itself and bind
+        # the bootstrap API key directly to it, so auth resolves the bearer
+        # to the same account_id every test body uses as its scoping arg.
+        # Bypasses ``bootstrap_root_account`` (which would generate a fresh
+        # ULID we'd have to thread back through 44 test files).
+        await conn.execute(
+            """
+            INSERT INTO accounts
+                (id, parent_account_id, can_mint_children, display_name)
+            VALUES ('acc_test_stub', NULL, TRUE, 'test-root')
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO account_keys (key_id, account_id, hash, label)
+            VALUES ('akey_test', 'acc_test_stub', $1, 'test-root')
+            """,
+            hash_key(plaintext),
+        )
+    finally:
+        await conn.close()
+    return aios_env_minimal

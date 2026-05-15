@@ -23,8 +23,13 @@ from tests.e2e.harness import Harness
 
 async def _attach_store(harness: Harness, store_name: str) -> str:
     """Create a memory store and seed /seed.md. Returns the store id."""
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     store = await memory_service.create_store(
-        harness._pool, name=store_name, description="x-session sync probe", metadata={}
+        harness._pool,
+        name=store_name,
+        description="x-session sync probe",
+        metadata={},
+        account_id=account_id,
     )
     await memory_service.create_memory(
         harness._pool,
@@ -32,6 +37,7 @@ async def _attach_store(harness: Harness, store_name: str) -> str:
         path="/seed.md",
         content="seed\n",
         actor=memory_service.ApiActor(),
+        account_id=account_id,
     )
     return store.id
 
@@ -46,6 +52,7 @@ async def _start_session(
     same helper the worker step body uses, so tests follow the production
     path for mount visibility.
     """
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.harness.loop import refresh_session_mount_state
     from aios.ids import make_id
     from aios.models.agents import ToolSpec
@@ -54,7 +61,7 @@ async def _start_session(
 
     if harness._env_id is None:
         env = await environments_service.create_environment(
-            harness._pool, name=f"test-env-{make_id('env')[-8:]}"
+            harness._pool, name=f"test-env-{make_id('env')[-8:]}", account_id=account_id
         )
         harness._env_id = env.id
 
@@ -68,6 +75,7 @@ async def _start_session(
         metadata={},
         window_min=50_000,
         window_max=150_000,
+        account_id=account_id,
     )
     session = await sessions_service.create_session(
         harness._pool,
@@ -76,8 +84,9 @@ async def _start_session(
         title="memory test",
         metadata={},
         resources=resources,
+        account_id=account_id,
     )
-    await refresh_session_mount_state(harness._pool, session.id)
+    await refresh_session_mount_state(harness._pool, session.id, account_id="acc_test_stub")
     return session
 
 
@@ -211,6 +220,7 @@ class TestCrossSessionSync:
     async def test_api_write_visible_to_attached_session(self, docker_harness: Harness) -> None:
         """API-driven create_memory mirrors to host dir; attached session's
         read tool sees the new content."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         store_id = await _attach_store(docker_harness, "xsync-api")
         a = await _start_session_with_store(docker_harness, store_id)
 
@@ -224,6 +234,7 @@ class TestCrossSessionSync:
             path="/api_made.md",
             content="from-api",
             actor=memory_service.ApiActor(),
+            account_id=account_id,
         )
 
         # Session's read tool sees it via the shared FS.
@@ -233,6 +244,7 @@ class TestCrossSessionSync:
 
     async def test_bash_create_reconciles_to_version(self, docker_harness: Harness) -> None:
         """bash writes to memory mounts are reconciled into memory_versions by the post-exec hook."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.db import queries
         from aios.tools.bash import bash_handler
 
@@ -257,7 +269,7 @@ class TestCrossSessionSync:
 
         # Post-exec reconcile created a memory_versions row.
         async with docker_harness._pool.acquire() as conn:
-            versions = await queries.list_memory_versions(conn, store_id)
+            versions = await queries.list_memory_versions(conn, store_id, account_id=account_id)
         paths = [v.path for v in versions]
         assert "/from_bash.md" in paths
 
@@ -267,6 +279,7 @@ class TestCrossSessionSync:
 
     async def test_bash_modify_reconciles_version(self, docker_harness: Harness) -> None:
         """bash modifies existing file; a 'modified' version row appears."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.db import queries
         from aios.tools.bash import bash_handler
 
@@ -285,7 +298,7 @@ class TestCrossSessionSync:
         assert result.get("exit_code", 0) == 0, result
 
         async with docker_harness._pool.acquire() as conn:
-            versions = await queries.list_memory_versions(conn, store_id)
+            versions = await queries.list_memory_versions(conn, store_id, account_id=account_id)
         # There should be at least 2 versions: created (from seed) + modified (from bash).
         seed_versions = [v for v in versions if v.path == "/seed.md"]
         operations = {v.operation for v in seed_versions}
@@ -293,6 +306,7 @@ class TestCrossSessionSync:
 
     async def test_bash_delete_reconciles_version(self, docker_harness: Harness) -> None:
         """bash rm's a file; a 'deleted' version row appears."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.db import queries
         from aios.tools.bash import bash_handler
 
@@ -310,13 +324,14 @@ class TestCrossSessionSync:
         assert result.get("exit_code", 0) == 0, result
 
         async with docker_harness._pool.acquire() as conn:
-            versions = await queries.list_memory_versions(conn, store_id)
+            versions = await queries.list_memory_versions(conn, store_id, account_id=account_id)
         seed_versions = [v for v in versions if v.path == "/seed.md"]
         operations = {v.operation for v in seed_versions}
         assert "deleted" in operations
 
     async def test_bash_binary_file_reconcile_warning(self, docker_harness: Harness) -> None:
         """bash writes binary bytes; stderr contains reconcile warning; no version row created."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.db import queries
         from aios.tools.bash import bash_handler
 
@@ -338,7 +353,7 @@ class TestCrossSessionSync:
 
         # No version row created for the binary file.
         async with docker_harness._pool.acquire() as conn:
-            versions = await queries.list_memory_versions(conn, store_id)
+            versions = await queries.list_memory_versions(conn, store_id, account_id=account_id)
         paths = [v.path for v in versions]
         assert "/binary.bin" not in paths
 
@@ -375,6 +390,7 @@ class TestMountUpdateRecyclesContainer:
     new mount set takes effect."""
 
     async def test_attach_via_update_makes_mount_visible(self, docker_harness: Harness) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.harness.loop import refresh_session_mount_state
         from aios.tools.bash import bash_handler
 
@@ -393,6 +409,7 @@ class TestMountUpdateRecyclesContainer:
             name="attach-mount",
             description="attach probe",
             metadata={},
+            account_id=account_id,
         )
         await sessions_service.update_session(
             docker_harness._pool,
@@ -402,8 +419,11 @@ class TestMountUpdateRecyclesContainer:
                     type="memory_store", memory_store_id=store.id, access="read_write"
                 ),
             ],
+            account_id=account_id,
         )
-        await refresh_session_mount_state(docker_harness._pool, session.id)
+        await refresh_session_mount_state(
+            docker_harness._pool, session.id, account_id="acc_test_stub"
+        )
 
         after = await bash_handler(
             session.id, {"command": "ls -d /mnt/memory/attach-mount && echo OK"}
@@ -412,6 +432,7 @@ class TestMountUpdateRecyclesContainer:
         assert "OK" in after["stdout"]
 
     async def test_detach_via_update_drops_mount(self, docker_harness: Harness) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.harness.loop import refresh_session_mount_state
         from aios.tools.bash import bash_handler
 
@@ -432,13 +453,18 @@ class TestMountUpdateRecyclesContainer:
         )
         assert "OK" in before["stdout"], before
 
-        await sessions_service.update_session(docker_harness._pool, session.id, resources=[])
-        await refresh_session_mount_state(docker_harness._pool, session.id)
+        await sessions_service.update_session(
+            docker_harness._pool, session.id, resources=[], account_id=account_id
+        )
+        await refresh_session_mount_state(
+            docker_harness._pool, session.id, account_id="acc_test_stub"
+        )
 
         after = await bash_handler(session.id, {"command": "ls /mnt/memory 2>&1; true"})
         assert "detach-mount" not in after["stdout"]
 
     async def test_idempotent_update_does_not_recycle(self, docker_harness: Harness) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.harness.loop import refresh_session_mount_state
         from aios.tools.bash import bash_handler
 
@@ -456,8 +482,11 @@ class TestMountUpdateRecyclesContainer:
                     type="memory_store", memory_store_id=store_id, access="read_write"
                 ),
             ],
+            account_id=account_id,
         )
-        await refresh_session_mount_state(docker_harness._pool, session.id)
+        await refresh_session_mount_state(
+            docker_harness._pool, session.id, account_id="acc_test_stub"
+        )
 
         cached = sandbox.peek(session.id)
         assert cached is not None

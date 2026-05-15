@@ -27,6 +27,7 @@ class ResolvedRuntimeToken(NamedTuple):
 
     token_id: str
     connector: str
+    account_id: str
 
 
 _TOKEN_PREFIX = "aios_runtime_"
@@ -44,6 +45,7 @@ def _hash(plaintext: str) -> str:
 async def issue(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     connector: str,
     label: str | None,
 ) -> tuple[RuntimeToken, str]:
@@ -59,18 +61,21 @@ async def issue(
             connector=connector,
             label=label,
             token_hash=_hash(plaintext),
+            account_id=account_id,
         )
     return token, plaintext
 
 
-async def list_tokens(pool: asyncpg.Pool[Any], *, connector: str) -> list[RuntimeToken]:
+async def list_tokens(
+    pool: asyncpg.Pool[Any], *, account_id: str, connector: str
+) -> list[RuntimeToken]:
     async with pool.acquire() as conn:
-        return await queries.list_runtime_tokens(conn, connector=connector)
+        return await queries.list_runtime_tokens(conn, connector=connector, account_id=account_id)
 
 
-async def revoke(pool: asyncpg.Pool[Any], token_id: str) -> RuntimeToken:
+async def revoke(pool: asyncpg.Pool[Any], token_id: str, *, account_id: str) -> RuntimeToken:
     async with pool.acquire() as conn:
-        return await queries.revoke_runtime_token(conn, token_id)
+        return await queries.revoke_runtime_token(conn, token_id, account_id=account_id)
 
 
 async def resolve(pool: asyncpg.Pool[Any], plaintext: str) -> ResolvedRuntimeToken | None:
@@ -78,6 +83,10 @@ async def resolve(pool: asyncpg.Pool[Any], plaintext: str) -> ResolvedRuntimeTok
 
     Touches ``last_used_at`` as a side effect.  Returns ``None`` for
     misses, revoked tokens, and plaintext lacking the prefix.
+
+    No ``account_id`` parameter: this is the auth-bootstrap entry point.
+    The matched row's account_id becomes the authenticated scope for
+    downstream queries.
     """
     if not plaintext.startswith(_TOKEN_PREFIX):
         return None
@@ -85,5 +94,5 @@ async def resolve(pool: asyncpg.Pool[Any], plaintext: str) -> ResolvedRuntimeTok
         row = await queries.resolve_runtime_token(conn, _hash(plaintext))
     if row is None:
         return None
-    token_id, connector = row
-    return ResolvedRuntimeToken(token_id=token_id, connector=connector)
+    token_id, connector, account_id = row
+    return ResolvedRuntimeToken(token_id=token_id, connector=connector, account_id=account_id)

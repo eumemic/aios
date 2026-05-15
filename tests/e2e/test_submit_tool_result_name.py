@@ -68,12 +68,15 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
 
 @pytest.fixture
 async def session_id(pool: Any) -> str:
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.db import queries
     from aios.services import agents as agents_svc
     from aios.services import sessions as sessions_svc
 
     async with pool.acquire() as conn:
-        env = await queries.insert_environment(conn, name=f"custom-tool-env-{_uniq()}")
+        env = await queries.insert_environment(
+            conn, name=f"custom-tool-env-{_uniq()}", account_id=account_id
+        )
     agent = await agents_svc.create_agent(
         pool,
         name=f"custom-tool-agent-{_uniq()}",
@@ -84,9 +87,15 @@ async def session_id(pool: Any) -> str:
         metadata={},
         window_min=50_000,
         window_max=150_000,
+        account_id=account_id,
     )
     session = await sessions_svc.create_session(
-        pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+        pool,
+        agent_id=agent.id,
+        environment_id=env.id,
+        title=None,
+        metadata={},
+        account_id=account_id,
     )
     return session.id
 
@@ -99,9 +108,12 @@ async def _seed_assistant_tool_call(
     tool_name: str,
 ) -> None:
     """Append an assistant event that requests a single custom tool call."""
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.services import sessions as sessions_svc
 
-    await sessions_svc.append_user_message(pool, session_id, "what is the weather?")
+    await sessions_svc.append_user_message(
+        pool, session_id, "what is the weather?", account_id=account_id
+    )
     await sessions_svc.append_event(
         pool,
         session_id,
@@ -120,6 +132,7 @@ async def _seed_assistant_tool_call(
                 }
             ],
         },
+        account_id=account_id,
     )
 
 

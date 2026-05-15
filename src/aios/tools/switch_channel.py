@@ -30,6 +30,7 @@ from aios.harness.channels import (
 from aios.harness.context import render_user_event
 from aios.harness.tokens import approx_tokens
 from aios.models.events import Event
+from aios.services import sessions as sessions_service
 from aios.tools.registry import ToolResult, registry
 
 # Minimum rendered-content size the recap pads up to when there isn't
@@ -87,6 +88,7 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
     current focal) return a terse ack with empty metadata — they didn't
     actually change the agent's attention and shouldn't anchor anything.
     """
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     target = arguments.get("channel_id")
     if target is not None and not isinstance(target, str):
         return ToolResult(
@@ -116,7 +118,7 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
         # contradict the "one session per chat partner" invariant. Today
         # the connector subsystem sets ``focal_locked`` on per_chat-mode
         # spawns (#328).
-        if await queries.is_session_focal_locked(conn, session_id):
+        if await queries.is_session_focal_locked(conn, session_id, account_id=account_id):
             return ToolResult(
                 content=(
                     "switch_channel is unavailable on this session: its focal channel is locked."
@@ -127,7 +129,9 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
                 is_error=True,
             )
 
-        current_focal = await queries.get_session_focal_channel(conn, session_id)
+        current_focal = await queries.get_session_focal_channel(
+            conn, session_id, account_id=account_id
+        )
 
         if target == current_focal:
             return ToolResult(
@@ -136,7 +140,7 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
             )
 
         if target is None:
-            await queries.set_session_focal_channel(conn, session_id, None)
+            await queries.set_session_focal_channel(conn, session_id, None, account_id=account_id)
             return ToolResult(
                 content="Focal cleared.",
                 metadata={
@@ -144,7 +148,9 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
                 },
             )
 
-        valid_targets = set(await queries.list_session_channels(conn, session_id))
+        valid_targets = set(
+            await queries.list_session_channels(conn, session_id, account_id=account_id)
+        )
         if target not in valid_targets:
             return ToolResult(
                 content=(
@@ -157,9 +163,9 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
                 is_error=True,
             )
 
-        await queries.set_session_focal_channel(conn, session_id, target)
-        all_events = await queries.read_message_events(conn, session_id)
-        model = await queries.get_session_model(conn, session_id)
+        await queries.set_session_focal_channel(conn, session_id, target, account_id=account_id)
+        all_events = await queries.read_message_events(conn, session_id, account_id=account_id)
+        model = await queries.get_session_model(conn, session_id, account_id=account_id)
 
     content = render_reorient_block(all_events, target, model=model, session_id=session_id)
     return ToolResult(

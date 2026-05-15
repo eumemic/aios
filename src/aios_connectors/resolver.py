@@ -51,7 +51,7 @@ class ResolveResult(NamedTuple):
 
 
 async def resolve_target_session(
-    pool: asyncpg.Pool[Any], *, connection: Connection, chat_id: str
+    pool: asyncpg.Pool[Any], *, account_id: str, connection: Connection, chat_id: str
 ) -> ResolveResult:
     """Resolve ``(connection, chat_id)`` → ``ResolveResult``.
 
@@ -60,13 +60,17 @@ async def resolve_target_session(
     """
     # Tier 1: chat_sessions ledger — fast path, no spawn.
     async with pool.acquire() as conn:
-        existing = await queries.lookup_chat_session(conn, connection.id, chat_id)
+        existing = await queries.lookup_chat_session(
+            conn, connection.id, chat_id, account_id=account_id
+        )
     if existing is not None:
         return ResolveResult(session_id=existing, drop=None)
 
     # Tier 2: routing_rules prefix demux on the active binding.
     async with pool.acquire() as conn:
-        rules = await queries.list_routing_rules_for_connection(conn, connection.id)
+        rules = await queries.list_routing_rules_for_connection(
+            conn, connection.id, account_id=account_id
+        )
     for prefix, target_type, target_id in rules:
         if not chat_id.startswith(prefix):
             continue
@@ -76,11 +80,12 @@ async def resolve_target_session(
             chat_id=chat_id,
             target_type=target_type,
             target_id=target_id,
+            account_id=account_id,
         )
 
     # Tier 3: active binding's mode + target.
     async with pool.acquire() as conn:
-        binding = await queries.get_active_binding(conn, connection.id)
+        binding = await queries.get_active_binding(conn, connection.id, account_id=account_id)
     if binding is None:
         return ResolveResult(session_id=None, drop=ResolveDrop.DETACHED)
     if binding.mode == "single_session":
@@ -94,12 +99,14 @@ async def resolve_target_session(
         connection=connection,
         chat_id=chat_id,
         template_id=binding.session_template_id,
+        account_id=account_id,
     )
 
 
 async def _dispatch_routing_target(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     connection: Connection,
     chat_id: str,
     target_type: str,
@@ -112,7 +119,11 @@ async def _dispatch_routing_target(
         target_session_id = target_id
     elif target_type == "session_template":
         spawn = await _spawn_per_chat_session(
-            pool, connection=connection, chat_id=chat_id, template_id=target_id
+            pool,
+            connection=connection,
+            chat_id=chat_id,
+            template_id=target_id,
+            account_id=account_id,
         )
         # Spawn already stamped the ledger; surface its result verbatim.
         return spawn
@@ -130,6 +141,7 @@ async def _dispatch_routing_target(
             connection_id=connection.id,
             chat_id=chat_id,
             session_id=target_session_id,
+            account_id=account_id,
         )
     return ResolveResult(session_id=registered, drop=None)
 
@@ -137,13 +149,14 @@ async def _dispatch_routing_target(
 async def _spawn_per_chat_session(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     connection: Connection,
     chat_id: str,
     template_id: str,
 ) -> ResolveResult:
     """Spawn a fresh per_chat session from ``template_id`` and stamp the ledger."""
     async with pool.acquire() as conn:
-        template = await queries.get_session_template(conn, template_id)
+        template = await queries.get_session_template(conn, template_id, account_id=account_id)
     if template.archived_at is not None:
         return ResolveResult(session_id=None, drop=ResolveDrop.ARCHIVED_TEMPLATE)
 
@@ -158,6 +171,7 @@ async def _spawn_per_chat_session(
         vault_ids=template.vault_ids or None,
         focal_channel=focal_channel,
         focal_locked=True,
+        account_id=account_id,
     )
 
     # Race-safe register: loser gets the winner's session_id; just-spawned
@@ -169,6 +183,7 @@ async def _spawn_per_chat_session(
             connection_id=connection.id,
             chat_id=chat_id,
             session_id=session.id,
+            account_id=account_id,
         )
     return ResolveResult(session_id=registered, drop=None)
 

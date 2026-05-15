@@ -144,6 +144,7 @@ def _extract_skill_metadata(
 async def create_skill(
     pool: asyncpg.Pool[Any],
     *,
+    account_id: str,
     display_title: str,
     files: dict[str, str],
 ) -> tuple[Skill, SkillVersion]:
@@ -161,30 +162,32 @@ async def create_skill(
             name=name,
             description=description,
             files=normalized,
+            account_id=account_id,
         )
 
 
-async def get_skill(pool: asyncpg.Pool[Any], skill_id: str) -> Skill:
+async def get_skill(pool: asyncpg.Pool[Any], skill_id: str, *, account_id: str) -> Skill:
     async with pool.acquire() as conn:
-        return await queries.get_skill(conn, skill_id)
+        return await queries.get_skill(conn, skill_id, account_id=account_id)
 
 
 async def list_skills(
-    pool: asyncpg.Pool[Any], *, limit: int = 50, after: str | None = None
+    pool: asyncpg.Pool[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Skill]:
     async with pool.acquire() as conn:
-        return await queries.list_skills(conn, limit=limit, after=after)
+        return await queries.list_skills(conn, limit=limit, after=after, account_id=account_id)
 
 
-async def archive_skill(pool: asyncpg.Pool[Any], skill_id: str) -> None:
+async def archive_skill(pool: asyncpg.Pool[Any], skill_id: str, *, account_id: str) -> None:
     async with pool.acquire() as conn:
-        await queries.archive_skill(conn, skill_id)
+        await queries.archive_skill(conn, skill_id, account_id=account_id)
 
 
 async def create_skill_version(
     pool: asyncpg.Pool[Any],
     skill_id: str,
     *,
+    account_id: str,
     files: dict[str, str],
 ) -> SkillVersion:
     """Create a new version of an existing skill."""
@@ -197,23 +200,29 @@ async def create_skill_version(
             name=name,
             description=description,
             files=normalized,
+            account_id=account_id,
         )
 
 
-async def get_skill_version(pool: asyncpg.Pool[Any], skill_id: str, version: int) -> SkillVersion:
+async def get_skill_version(
+    pool: asyncpg.Pool[Any], skill_id: str, version: int, *, account_id: str
+) -> SkillVersion:
     async with pool.acquire() as conn:
-        return await queries.get_skill_version(conn, skill_id, version)
+        return await queries.get_skill_version(conn, skill_id, version, account_id=account_id)
 
 
 async def list_skill_versions(
     pool: asyncpg.Pool[Any],
     skill_id: str,
     *,
+    account_id: str,
     limit: int = 50,
     after: int | None = None,
 ) -> list[SkillVersion]:
     async with pool.acquire() as conn:
-        return await queries.list_skill_versions(conn, skill_id, limit=limit, after=after)
+        return await queries.list_skill_versions(
+            conn, skill_id, limit=limit, after=after, account_id=account_id
+        )
 
 
 # ── agent skill resolution ────────────────────────────────────────────────
@@ -222,6 +231,8 @@ async def list_skill_versions(
 async def resolve_skill_refs(
     pool: asyncpg.Pool[Any],
     refs: list[AgentSkillRef],
+    *,
+    account_id: str,
 ) -> list[SkillVersion]:
     """Resolve skill refs to concrete SkillVersion objects.
 
@@ -237,7 +248,7 @@ async def resolve_skill_refs(
             detail={"count": len(refs)},
         )
     async with pool.acquire() as conn:
-        return await queries.resolve_skill_refs(conn, refs)
+        return await queries.resolve_skill_refs(conn, refs, account_id=account_id)
 
 
 def serialize_skills_for_snapshot(

@@ -50,14 +50,16 @@ class Settings(BaseSettings):
         "labels.",
     )
 
-    # ── auth + crypto (required) ───────────────────────────────────────────
-    api_key: SecretStr = Field(
-        ...,
-        description="Shared API key clients send as `Authorization: Bearer <key>`.",
-    )
+    # ── crypto (required) ──────────────────────────────────────────────────
     vault_key: SecretStr = Field(
         ...,
         description="Base64-encoded 32-byte master key for libsodium secretbox.",
+    )
+    bootstrap_token: SecretStr | None = Field(
+        default=None,
+        description="Unlocks ``POST /v1/accounts/bootstrap`` while the ``accounts`` table "
+        "has no root row; the endpoint is 404 once a root exists. Generate with "
+        "``openssl rand -base64 32``.",
     )
 
     # ── database (required) ────────────────────────────────────────────────
@@ -92,6 +94,34 @@ class Settings(BaseSettings):
         description="Docker network mode for sandbox containers. 'bridge' (default) "
         "gives full outbound internet access, which the HN demo needs. 'none' "
         "disables networking entirely; 'host' shares the host network namespace.",
+    )
+    sandbox_cpu_quota: float | None = Field(
+        default=None,
+        ge=0.01,
+        description="Maximum cumulative CPU cores a sandbox can use, in "
+        "decimal core units (e.g. 2.0 = two cores at 100%, 0.5 = half "
+        "of one core). Translates to ``docker run --cpus``. The lower "
+        "bound is Docker's effective floor — below ~0.01 the runtime "
+        "rounds the CFS quota down and the value becomes meaningless. "
+        "``None`` leaves the host's default in place (unlimited).",
+    )
+    sandbox_memory_bytes: int | None = Field(
+        default=None,
+        ge=4 * 1024 * 1024,
+        description="Maximum resident memory a sandbox can use, in bytes. "
+        "Translates to ``docker run --memory`` and ``--memory-swap`` "
+        "(swap pinned to the same value so the sandbox can't lean on "
+        "swap to exceed the cap). The kernel OOM-kills the offending "
+        "process when this is breached. ``None`` leaves the host's "
+        "default (unlimited) in place. Minimum 4 MiB to satisfy Docker's "
+        "own floor.",
+    )
+    sandbox_pids_limit: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum number of PIDs the sandbox cgroup can hold. "
+        "Translates to ``docker run --pids-limit``. Mitigates fork-bomb "
+        "denial-of-service; ``None`` leaves the host's default in place.",
     )
     bash_default_timeout_seconds: int = Field(
         default=120,

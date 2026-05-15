@@ -21,6 +21,7 @@ async def submit_call(
     db_url: str,
     pool: asyncpg.Pool[asyncpg.Record],
     *,
+    account_id: str,
     connector: str,
     method: str,
     params: dict[str, Any],
@@ -50,9 +51,10 @@ async def submit_call(
                 method=method,
                 params=params,
                 expires_at=expires_at,
+                account_id=account_id,
             )
             await queries.notify_management_call_dispatch(
-                conn, connector=connector, call_id=call_id
+                conn, connector=connector, call_id=call_id, account_id=account_id
             )
 
         try:
@@ -64,6 +66,6 @@ async def submit_call(
             ) from exc
 
     async with pool.acquire() as conn:
-        row = await queries.get_management_call(conn, call_id)
+        row = await queries.get_management_call(conn, call_id, account_id=account_id)
     assert row is not None and row["status"] != "pending"
     return row["result"], row["is_error"]

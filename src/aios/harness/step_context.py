@@ -132,6 +132,7 @@ async def compute_step_prelude(
     pool: asyncpg.Pool[Any],
     session_id: str,
     *,
+    account_id: str,
     session: Session,
     agent: Agent | AgentVersion,
     channels: list[str],
@@ -164,7 +165,9 @@ async def compute_step_prelude(
 
     mcp_servers_block = ""
     if agent.mcp_servers:
-        mcp_tools, mcp_instructions = await discover_session_mcp_tools(pool, session_id, agent)
+        mcp_tools, mcp_instructions = await discover_session_mcp_tools(
+            pool, session_id, agent, account_id=account_id
+        )
         tools.extend(mcp_tools)
         mcp_servers_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
     cli_hint = _MCP_CLI_HINT if _has_always_allow_mcp_tool(agent.tools) else ""
@@ -187,7 +190,9 @@ async def compute_step_prelude(
         tools.extend(to_openai_tools(connection_tools))
 
     skill_versions = (
-        await skills_service.resolve_skill_refs(pool, agent.skills) if agent.skills else []
+        await skills_service.resolve_skill_refs(pool, agent.skills, account_id=account_id)
+        if agent.skills
+        else []
     )
     system_prompt = augment_system_prompt(agent.system, skill_versions)
     system_prompt = augment_with_focal_paradigm(system_prompt, channels)

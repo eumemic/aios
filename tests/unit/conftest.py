@@ -93,7 +93,7 @@ async def in_memory_app() -> AsyncIterator[App]:
         yield patched
 
 
-def fake_pool_yielding_conn(conn: Any) -> Any:
+def fake_pool_yielding_conn(conn: Any, **kwargs: Any) -> Any:
     """Stand-in for ``asyncpg.Pool`` whose ``async with pool.acquire()`` yields *conn*."""
     pool = MagicMock()
     cm = MagicMock()
@@ -101,3 +101,21 @@ def fake_pool_yielding_conn(conn: Any) -> Any:
     cm.__aexit__ = AsyncMock(return_value=None)
     pool.acquire.return_value = cm
     return pool
+
+
+@pytest.fixture(autouse=True)
+def _unit_load_session_account_id_stub() -> Iterator[None]:
+    """Auto-mock the worker-side account_id bootstrap.
+
+    Most unit tests mock ``pool`` and ``conn`` to MagicMocks; the real
+    ``load_session_account_id`` calls ``conn.fetchrow`` which a MagicMock
+    can't await. Patching the function globally with an AsyncMock that
+    returns the test stub means tests don't have to know about the
+    bootstrap helper at all.
+    """
+    with mock.patch(
+        "aios.services.sessions.load_session_account_id",
+        new_callable=AsyncMock,
+        return_value="acc_test_stub",
+    ):
+        yield

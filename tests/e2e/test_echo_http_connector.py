@@ -96,6 +96,7 @@ async def _create_connection(api_key: str, base_url: str, account: str) -> str:
 async def _publish_echo_tools_schema(harness: Harness) -> None:
     """Stamp ``connectors.tools_schema`` for the echo connector type
     (post-PR-7 source of truth for what the model sees)."""
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.db import queries as db_queries
 
     async with harness._pool.acquire() as db_conn:
@@ -134,6 +135,7 @@ async def _publish_echo_tools_schema(harness: Harness) -> None:
                     },
                 },
             ],
+            account_id=account_id,
         )
 
 
@@ -149,6 +151,7 @@ class TestSdkAgainstLiveServer:
     ) -> None:
         """Pre-seed a pending call → open per-type calls SSE → confirm
         we receive it with the right ``connection_id``."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         import json as _json
 
         from aios.services import agents as agents_service
@@ -167,16 +170,24 @@ class TestSdkAgainstLiveServer:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-sse-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-sse-{id(self)}", account_id=account_id
+        )
         session = await sess_svc.create_session(
-            harness._pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title=None,
+            metadata={},
+            account_id=account_id,
         )
 
         api_key = aios_env["AIOS_API_KEY"]
         connection_id = await _create_connection(api_key, live_server, f"acct-sse-{id(self)}")
         await connections_service.attach_connection(
-            harness._pool, connection_id, session_id=session.id
+            harness._pool, connection_id, session_id=session.id, account_id=account_id
         )
         await _publish_echo_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "echo")
@@ -197,6 +208,7 @@ class TestSdkAgainstLiveServer:
                     }
                 ],
             },
+            account_id=account_id,
         )
         await sess_svc.set_session_status(
             harness._pool,
@@ -207,6 +219,7 @@ class TestSdkAgainstLiveServer:
                 "event_ids": ["call_sse_bf"],
                 "custom_tools": ["call_sse_bf"],
             },
+            account_id=account_id,
         )
 
         async with Client(base_url=live_server, token=token) as client:
@@ -234,6 +247,7 @@ class TestEchoHttpConnectorEndToEnd:
         live_server: str,
         aios_env: dict[str, str],
     ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
         from aios.services import environments as env_svc
@@ -249,20 +263,24 @@ class TestEchoHttpConnectorEndToEnd:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-e2e-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-e2e-{id(self)}", account_id=account_id
+        )
         session = await sess_svc.create_session(
             harness._pool,
             agent_id=agent.id,
             environment_id=env.id,
             title=None,
             metadata={},
+            account_id=account_id,
         )
 
         api_key = aios_env["AIOS_API_KEY"]
         connection_id = await _create_connection(api_key, live_server, f"acct-{id(self)}")
         await connections_service.attach_connection(
-            harness._pool, connection_id, session_id=session.id
+            harness._pool, connection_id, session_id=session.id, account_id=account_id
         )
         await _publish_echo_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "echo")
@@ -279,7 +297,9 @@ class TestEchoHttpConnectorEndToEnd:
                 assistant("All done."),
             ]
         )
-        await sess_svc.append_user_message(harness._pool, session.id, "say hello")
+        await sess_svc.append_user_message(
+            harness._pool, session.id, "say hello", account_id=account_id
+        )
 
         connector_task = asyncio.create_task(connector.run())
         try:
@@ -333,6 +353,7 @@ class TestEchoHttpConnectorEndToEnd:
     ) -> None:
         """Driver: model calls trigger_inbound → connector POSTs to
         /v1/connectors/runtime/inbound (multipart) → user-message event lands."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import agents as agents_service
         from aios.services import connections as connections_service
         from aios.services import environments as env_svc
@@ -348,16 +369,24 @@ class TestEchoHttpConnectorEndToEnd:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-e2e-i-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-e2e-i-{id(self)}", account_id=account_id
+        )
         session = await sess_svc.create_session(
-            harness._pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title=None,
+            metadata={},
+            account_id=account_id,
         )
 
         api_key = aios_env["AIOS_API_KEY"]
         connection_id = await _create_connection(api_key, live_server, f"acct-i-{id(self)}")
         await connections_service.attach_connection(
-            harness._pool, connection_id, session_id=session.id
+            harness._pool, connection_id, session_id=session.id, account_id=account_id
         )
         await _publish_echo_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "echo")
@@ -382,7 +411,9 @@ class TestEchoHttpConnectorEndToEnd:
                 assistant("ack"),
             ]
         )
-        await sess_svc.append_user_message(harness._pool, session.id, "fire trigger")
+        await sess_svc.append_user_message(
+            harness._pool, session.id, "fire trigger", account_id=account_id
+        )
 
         connector_task = asyncio.create_task(connector.run())
         try:

@@ -18,7 +18,7 @@ import math
 import time
 from datetime import datetime
 from types import EllipsisType
-from typing import Any, NamedTuple, NoReturn
+from typing import Any, NamedTuple, NoReturn, cast
 
 import asyncpg
 
@@ -31,6 +31,8 @@ from aios.errors import (
     NotFoundError,
 )
 from aios.ids import (
+    ACCOUNT,
+    ACCOUNT_KEY,
     AGENT,
     BINDING,
     CONNECTION,
@@ -48,6 +50,7 @@ from aios.ids import (
     VAULT_CREDENTIAL,
     make_id,
 )
+from aios.models.accounts import Account
 from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
 from aios.models.connections import BindingMode, Connection, ConnectionMode
 from aios.models.environments import Environment, EnvironmentConfig
@@ -87,6 +90,7 @@ def _row_to_environment(row: asyncpg.Record) -> Environment:
 async def insert_environment(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     name: str,
     config: EnvironmentConfig | None = None,
 ) -> Environment:
@@ -94,10 +98,11 @@ async def insert_environment(
     config_json = json.dumps((config or EnvironmentConfig()).model_dump(exclude_none=True))
     try:
         row = await conn.fetchrow(
-            "INSERT INTO environments (id, name, config) VALUES ($1, $2, $3::jsonb) RETURNING *",
+            "INSERT INTO environments (id, name, config, account_id) VALUES ($1, $2, $3::jsonb, $4) RETURNING *",
             new_id,
             name,
             config_json,
+            account_id,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -108,35 +113,48 @@ async def insert_environment(
     return _row_to_environment(row)
 
 
-async def get_environment(conn: asyncpg.Connection[Any], env_id: str) -> Environment:
-    row = await conn.fetchrow("SELECT * FROM environments WHERE id = $1", env_id)
+async def get_environment(
+    conn: asyncpg.Connection[Any], env_id: str, *, account_id: str
+) -> Environment:
+    row = await conn.fetchrow(
+        "SELECT * FROM environments WHERE id = $1 AND account_id = $2",
+        env_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(f"environment {env_id} not found", detail={"id": env_id})
     return _row_to_environment(row)
 
 
 async def list_environments(
-    conn: asyncpg.Connection[Any], *, limit: int = 50, after: str | None = None
+    conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Environment]:
     if after is None:
         rows = await conn.fetch(
-            "SELECT * FROM environments WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            "SELECT * FROM environments WHERE archived_at IS NULL AND account_id = $1 "
+            "ORDER BY id DESC LIMIT $2",
+            account_id,
             limit,
         )
     else:
         rows = await conn.fetch(
             "SELECT * FROM environments WHERE archived_at IS NULL AND id < $1 "
-            "ORDER BY id DESC LIMIT $2",
+            "AND account_id = $2 ORDER BY id DESC LIMIT $3",
             after,
+            account_id,
             limit,
         )
     return [_row_to_environment(r) for r in rows]
 
 
-async def archive_environment(conn: asyncpg.Connection[Any], env_id: str) -> None:
+async def archive_environment(
+    conn: asyncpg.Connection[Any], env_id: str, *, account_id: str
+) -> None:
     result = await conn.execute(
-        "UPDATE environments SET archived_at = now() WHERE id = $1 AND archived_at IS NULL",
+        "UPDATE environments SET archived_at = now() "
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
         env_id,
+        account_id,
     )
     if result == "UPDATE 0":
         raise NotFoundError(f"environment {env_id} not found or already archived")
@@ -146,11 +164,12 @@ async def update_environment(
     conn: asyncpg.Connection[Any],
     env_id: str,
     *,
+    account_id: str,
     name: str | None = None,
     config: EnvironmentConfig | None = None,
 ) -> Environment:
     """Update an environment. Omitted fields are preserved."""
-    current = await get_environment(conn, env_id)
+    current = await get_environment(conn, env_id, account_id=account_id)
     if current.archived_at is not None:
         raise ConflictError(f"environment {env_id} is archived", detail={"id": env_id})
 
@@ -164,10 +183,12 @@ async def update_environment(
     config_json = json.dumps(new_config.model_dump(exclude_none=True))
     try:
         row = await conn.fetchrow(
-            "UPDATE environments SET name = $2, config = $3::jsonb WHERE id = $1 RETURNING *",
+            "UPDATE environments SET name = $2, config = $3::jsonb "
+            "WHERE id = $1 AND account_id = $4 RETURNING *",
             env_id,
             new_name,
             config_json,
+            account_id,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -179,7 +200,10 @@ async def update_environment(
 
 
 async def get_environment_config_for_session(
-    conn: asyncpg.Connection[Any], session_id: str
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
 ) -> EnvironmentConfig | None:
     """Return the environment config for a session, or None if not found."""
     row = await conn.fetchrow(
@@ -262,6 +286,7 @@ def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
 async def insert_agent(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     name: str,
     model: str,
     system: str,
@@ -286,10 +311,10 @@ async def insert_agent(
                 INSERT INTO agents (
                     id, name, model, system, tools, skills, mcp_servers,
                     description, metadata, litellm_extra,
-                    window_min, window_max, version
+                    window_min, window_max, version, account_id
                 )
                 VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
-                        $8, $9::jsonb, $10::jsonb, $11, $12, 1)
+                        $8, $9::jsonb, $10::jsonb, $11, $12, 1, $13)
                 RETURNING *
                 """,
                 new_id,
@@ -304,6 +329,7 @@ async def insert_agent(
                 extra_json,
                 window_min,
                 window_max,
+                account_id,
             )
             assert row is not None
             # Snapshot version 1 into agent_versions.
@@ -311,10 +337,10 @@ async def insert_agent(
                 """
                 INSERT INTO agent_versions (
                     agent_id, version, model, system, tools, skills, mcp_servers,
-                    litellm_extra, window_min, window_max
+                    litellm_extra, window_min, window_max, account_id
                 )
                 VALUES ($1, 1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb,
-                        $7::jsonb, $8, $9)
+                        $7::jsonb, $8, $9, $10)
                 """,
                 new_id,
                 model,
@@ -325,6 +351,7 @@ async def insert_agent(
                 extra_json,
                 window_min,
                 window_max,
+                account_id,
             )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -334,8 +361,12 @@ async def insert_agent(
     return _row_to_agent(row)
 
 
-async def get_agent(conn: asyncpg.Connection[Any], agent_id: str) -> Agent:
-    row = await conn.fetchrow("SELECT * FROM agents WHERE id = $1", agent_id)
+async def get_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str) -> Agent:
+    row = await conn.fetchrow(
+        "SELECT * FROM agents WHERE id = $1 AND account_id = $2",
+        agent_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(f"agent {agent_id} not found", detail={"id": agent_id})
     return _row_to_agent(row)
@@ -344,12 +375,13 @@ async def get_agent(conn: asyncpg.Connection[Any], agent_id: str) -> Agent:
 async def list_agents(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     limit: int = 50,
     after: str | None = None,
     name: str | None = None,
 ) -> list[Agent]:
-    where = ["archived_at IS NULL"]
-    args: list[Any] = []
+    args: list[Any] = [account_id]
+    where = ["archived_at IS NULL", "account_id = $1"]
     if name is not None:
         args.append(name)
         where.append(f"name = ${len(args)}")
@@ -362,10 +394,12 @@ async def list_agents(
     return [_row_to_agent(r) for r in rows]
 
 
-async def archive_agent(conn: asyncpg.Connection[Any], agent_id: str) -> None:
+async def archive_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str) -> None:
     result = await conn.execute(
-        "UPDATE agents SET archived_at = now() WHERE id = $1 AND archived_at IS NULL",
+        "UPDATE agents SET archived_at = now() "
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
         agent_id,
+        account_id,
     )
     if result == "UPDATE 0":
         raise NotFoundError(f"agent {agent_id} not found or already archived")
@@ -375,6 +409,7 @@ async def update_agent(
     conn: asyncpg.Connection[Any],
     agent_id: str,
     *,
+    account_id: str,
     expected_version: int,
     name: str | None = None,
     model: str | None = None,
@@ -397,7 +432,7 @@ async def update_agent(
     ``skills_json`` is a pre-serialized JSON string (resolved by the
     service layer which snapshots concrete versions).
     """
-    current = await get_agent(conn, agent_id)
+    current = await get_agent(conn, agent_id, account_id=account_id)
     if current.version != expected_version:
         raise ConflictError(
             f"version mismatch: expected {expected_version}, current is {current.version}",
@@ -452,7 +487,7 @@ async def update_agent(
                    litellm_extra = $11::jsonb,
                    window_min = $12, window_max = $13,
                    updated_at = now()
-             WHERE id = $1
+             WHERE id = $1 AND account_id = $14
             RETURNING *
             """,
             agent_id,
@@ -468,16 +503,17 @@ async def update_agent(
             extra_json,
             new_wmin,
             new_wmax,
+            account_id,
         )
         assert row is not None
         await conn.execute(
             """
             INSERT INTO agent_versions (
                 agent_id, version, model, system, tools, skills, mcp_servers,
-                litellm_extra, window_min, window_max
+                litellm_extra, window_min, window_max, account_id
             )
             VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
-                    $8::jsonb, $9, $10)
+                    $8::jsonb, $9, $10, $11)
             """,
             agent_id,
             new_version,
@@ -489,17 +525,23 @@ async def update_agent(
             extra_json,
             new_wmin,
             new_wmax,
+            account_id,
         )
     return _row_to_agent(row)
 
 
 async def get_agent_version(
-    conn: asyncpg.Connection[Any], agent_id: str, version: int
+    conn: asyncpg.Connection[Any],
+    agent_id: str,
+    version: int,
+    *,
+    account_id: str,
 ) -> AgentVersion:
     row = await conn.fetchrow(
-        "SELECT * FROM agent_versions WHERE agent_id = $1 AND version = $2",
+        "SELECT * FROM agent_versions WHERE agent_id = $1 AND version = $2 AND account_id = $3",
         agent_id,
         version,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -513,22 +555,26 @@ async def list_agent_versions(
     conn: asyncpg.Connection[Any],
     agent_id: str,
     *,
+    account_id: str,
     limit: int = 50,
     after: int | None = None,
 ) -> list[AgentVersion]:
     """List versions in descending order (newest first)."""
     if after is None:
         rows = await conn.fetch(
-            "SELECT * FROM agent_versions WHERE agent_id = $1 ORDER BY version DESC LIMIT $2",
+            "SELECT * FROM agent_versions WHERE agent_id = $1 AND account_id = $2 "
+            "ORDER BY version DESC LIMIT $3",
             agent_id,
+            account_id,
             limit,
         )
     else:
         rows = await conn.fetch(
             "SELECT * FROM agent_versions WHERE agent_id = $1 AND version < $2 "
-            "ORDER BY version DESC LIMIT $3",
+            "AND account_id = $3 ORDER BY version DESC LIMIT $4",
             agent_id,
             after,
+            account_id,
             limit,
         )
     return [_row_to_agent_version(r) for r in rows]
@@ -563,13 +609,13 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         archived_at=row["archived_at"],
         focal_channel=row["focal_channel"],
         focal_locked=row["focal_locked"],
-        owner_id=row["owner_id"],
     )
 
 
 async def insert_session(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     agent_id: str,
     environment_id: str,
     agent_version: int | None,
@@ -605,9 +651,9 @@ async def insert_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 status, workspace_volume_path, env,
-                focal_channel, focal_locked
+                focal_channel, focal_locked, account_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10, $11)
             RETURNING *
             """,
             new_id,
@@ -620,6 +666,7 @@ async def insert_session(
             json.dumps(env or {}),
             focal_channel,
             focal_locked,
+            account_id,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -633,33 +680,48 @@ async def insert_session(
     return _row_to_session(row)
 
 
-async def get_session(conn: asyncpg.Connection[Any], session_id: str) -> Session:
-    row = await conn.fetchrow("SELECT * FROM sessions WHERE id = $1", session_id)
+async def get_session(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> Session:
+    row = await conn.fetchrow(
+        "SELECT * FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
     return _row_to_session(row)
 
 
-async def get_session_workspace_path(conn: asyncpg.Connection[Any], session_id: str) -> str:
+async def get_session_workspace_path(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> str:
     """Return the host-side workspace path stored on the session row."""
     val: str | None = await conn.fetchval(
-        "SELECT workspace_volume_path FROM sessions WHERE id = $1", session_id
+        "SELECT workspace_volume_path FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
     )
     if val is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
     return val
 
 
-async def get_session_focal_channel(conn: asyncpg.Connection[Any], session_id: str) -> str | None:
+async def get_session_focal_channel(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> str | None:
     """Return the session's current ``focal_channel`` (or NULL = phone down)."""
     focal: str | None = await conn.fetchval(
-        "SELECT focal_channel FROM sessions WHERE id = $1",
+        "SELECT focal_channel FROM sessions WHERE id = $1 AND account_id = $2",
         session_id,
+        account_id,
     )
     return focal
 
 
-async def is_session_focal_locked(conn: asyncpg.Connection[Any], session_id: str) -> bool:
+async def is_session_focal_locked(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> bool:
     """Return whether the session's focal channel is locked.
 
     The flag is set at session creation by per_chat-mode spawns (and any
@@ -671,8 +733,9 @@ async def is_session_focal_locked(conn: asyncpg.Connection[Any], session_id: str
     session id, so a missing row is a real bug, not a permission state.
     """
     locked: bool | None = await conn.fetchval(
-        "SELECT focal_locked FROM sessions WHERE id = $1",
+        "SELECT focal_locked FROM sessions WHERE id = $1 AND account_id = $2",
         session_id,
+        account_id,
     )
     if locked is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
@@ -680,25 +743,35 @@ async def is_session_focal_locked(conn: asyncpg.Connection[Any], session_id: str
 
 
 async def set_session_focal_channel(
-    conn: asyncpg.Connection[Any], session_id: str, focal: str | None
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    focal: str | None,
+    *,
+    account_id: str,
 ) -> None:
     """Mutate the session's ``focal_channel``.  Only ``switch_channel``
     should call this — it's the single source of truth for the agent's
     focal attention.
     """
     await conn.execute(
-        "UPDATE sessions SET focal_channel = $1 WHERE id = $2",
+        "UPDATE sessions SET focal_channel = $1 WHERE id = $2 AND account_id = $3",
         focal,
         session_id,
+        account_id,
     )
 
 
 async def get_session_provisioning(
-    conn: asyncpg.Connection[Any], session_id: str
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
 ) -> tuple[str, dict[str, str]]:
     """Return ``(workspace_volume_path, env)`` for provisioning a session's container."""
     row = await conn.fetchrow(
-        "SELECT workspace_volume_path, env FROM sessions WHERE id = $1", session_id
+        "SELECT workspace_volume_path, env FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
@@ -710,13 +783,14 @@ async def get_session_provisioning(
 async def list_sessions(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     agent_id: str | None = None,
     status: SessionStatus | None = None,
     limit: int = 50,
     after: str | None = None,
 ) -> list[Session]:
-    clauses: list[str] = ["archived_at IS NULL"]
-    args: list[Any] = []
+    args: list[Any] = [account_id]
+    clauses: list[str] = ["archived_at IS NULL", "account_id = $1"]
     if agent_id is not None:
         args.append(agent_id)
         clauses.append(f"agent_id = ${len(args)}")
@@ -739,13 +813,17 @@ async def set_session_status(
     session_id: str,
     status: SessionStatus,
     stop_reason: dict[str, Any] | None = None,
+    *,
+    account_id: str,
 ) -> None:
     stop_json = json.dumps(stop_reason) if stop_reason is not None else None
     await conn.execute(
-        "UPDATE sessions SET status = $1, stop_reason = $2::jsonb, updated_at = now() WHERE id = $3",
+        "UPDATE sessions SET status = $1, stop_reason = $2::jsonb, updated_at = now() "
+        "WHERE id = $3 AND account_id = $4",
         status,
         stop_json,
         session_id,
+        account_id,
     )
 
     # Connector-calls fan-out (#328 PR 5): when a session parks in
@@ -772,6 +850,7 @@ async def increment_session_usage(
     conn: asyncpg.Connection[Any],
     session_id: str,
     *,
+    account_id: str,
     input_tokens: int,
     output_tokens: int,
     cache_read_input_tokens: int = 0,
@@ -784,12 +863,13 @@ async def increment_session_usage(
         "output_tokens = output_tokens + $3, "
         "cache_read_input_tokens = cache_read_input_tokens + $4, "
         "cache_creation_input_tokens = cache_creation_input_tokens + $5 "
-        "WHERE id = $1",
+        "WHERE id = $1 AND account_id = $6",
         session_id,
         input_tokens,
         output_tokens,
         cache_read_input_tokens,
         cache_creation_input_tokens,
+        account_id,
     )
 
 
@@ -812,7 +892,9 @@ async def list_running_session_ids(conn: asyncpg.Connection[Any]) -> list[str]:
     return [str(r["id"]) for r in rows]
 
 
-async def get_session_model(conn: asyncpg.Connection[Any], session_id: str) -> str:
+async def get_session_model(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> str:
     """Return the bound model for ``session_id`` in one round trip.
 
     Pinned ``agent_version`` wins when set; otherwise the live agent's
@@ -835,7 +917,8 @@ async def get_session_model(conn: asyncpg.Connection[Any], session_id: str) -> s
 
 
 async def list_attachment_paths_for_sessions(
-    conn: asyncpg.Connection[Any], session_ids: list[str]
+    conn: asyncpg.Connection[Any],
+    session_ids: list[str],
 ) -> dict[str, set[str]]:
     """Return ``in_sandbox_path`` values referenced by each session's events.
 
@@ -880,6 +963,7 @@ async def update_session(
     conn: asyncpg.Connection[Any],
     session_id: str,
     *,
+    account_id: str,
     agent_id: str | None = None,
     agent_version: int | None = _UNSET,
     title: str | None = _UNSET,
@@ -907,21 +991,28 @@ async def update_session(
         sets.append(f"metadata = ${len(args)}::jsonb")
 
     if not sets:
-        return await get_session(conn, session_id)
+        return await get_session(conn, session_id, account_id=account_id)
 
     sets.append("updated_at = now()")
-    sql = f"UPDATE sessions SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    args.append(account_id)
+    sql = (
+        f"UPDATE sessions SET {', '.join(sets)} "
+        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+    )
     row = await conn.fetchrow(sql, *args)
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
     return _row_to_session(row)
 
 
-async def archive_session(conn: asyncpg.Connection[Any], session_id: str) -> Session:
+async def archive_session(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> Session:
     row = await conn.fetchrow(
         "UPDATE sessions SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
         session_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -931,11 +1022,14 @@ async def archive_session(conn: asyncpg.Connection[Any], session_id: str) -> Ses
     return _row_to_session(row)
 
 
-async def delete_session(conn: asyncpg.Connection[Any], session_id: str) -> None:
+async def delete_session(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> None:
     async with conn.transaction():
         row = await conn.fetchrow(
-            "SELECT status FROM sessions WHERE id = $1",
+            "SELECT status FROM sessions WHERE id = $1 AND account_id = $2",
             session_id,
+            account_id,
         )
         if row is None:
             raise NotFoundError(
@@ -947,9 +1041,21 @@ async def delete_session(conn: asyncpg.Connection[Any], session_id: str) -> None
                 f"session {session_id} is running and cannot be deleted",
                 detail={"id": session_id},
             )
-        await conn.execute("DELETE FROM session_vaults WHERE session_id = $1", session_id)
-        await conn.execute("DELETE FROM events WHERE session_id = $1", session_id)
-        await conn.execute("DELETE FROM sessions WHERE id = $1", session_id)
+        await conn.execute(
+            "DELETE FROM session_vaults WHERE session_id = $1 AND account_id = $2",
+            session_id,
+            account_id,
+        )
+        await conn.execute(
+            "DELETE FROM events WHERE session_id = $1 AND account_id = $2",
+            session_id,
+            account_id,
+        )
+        await conn.execute(
+            "DELETE FROM sessions WHERE id = $1 AND account_id = $2",
+            session_id,
+            account_id,
+        )
 
 
 _CLONEABLE_STATUSES: tuple[SessionStatus, ...] = ("idle", "terminated")
@@ -959,6 +1065,7 @@ async def clone_session(
     conn: asyncpg.Connection[Any],
     parent_session_id: str,
     *,
+    account_id: str,
     workspace_path: str | None = None,
 ) -> Session:
     """Clone a session into a new one with the same prefix of events.
@@ -989,8 +1096,9 @@ async def clone_session(
 
     async with conn.transaction():
         status = await conn.fetchval(
-            "SELECT status FROM sessions WHERE id = $1 FOR UPDATE",
+            "SELECT status FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
             parent_session_id,
+            account_id,
         )
         if status is None:
             raise NotFoundError(
@@ -1009,10 +1117,11 @@ async def clone_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 status, stop_reason, workspace_volume_path, env, last_event_seq,
-                focal_channel
+                focal_channel, account_id
             )
             SELECT $1, agent_id, environment_id, agent_version, title, metadata,
-                   status, stop_reason, $2, env, last_event_seq, focal_channel
+                   status, stop_reason, $2, env, last_event_seq, focal_channel,
+                   account_id
               FROM sessions WHERE id = $3
             RETURNING *
             """,
@@ -1023,8 +1132,8 @@ async def clone_session(
         assert new_row is not None
 
         await conn.execute(
-            "INSERT INTO session_vaults (session_id, vault_id, rank) "
-            "SELECT $1, vault_id, rank FROM session_vaults WHERE session_id = $2",
+            "INSERT INTO session_vaults (session_id, vault_id, rank, account_id) "
+            "SELECT $1, vault_id, rank, account_id FROM session_vaults WHERE session_id = $2",
             new_id,
             parent_session_id,
         )
@@ -1039,12 +1148,13 @@ async def clone_session(
             INSERT INTO events (
                 id, session_id, seq, kind, data, created_at, cumulative_tokens,
                 channel, orig_channel, focal_channel_at_arrival,
-                role, tool_name, is_error, sender_name
+                role, tool_name, is_error, sender_name, account_id
             )
             SELECT i.id, $2, s.seq, s.kind, s.data, s.created_at,
                    s.cumulative_tokens,
                    s.channel, s.orig_channel, s.focal_channel_at_arrival,
-                   s.role, s.tool_name, s.is_error, s.sender_name
+                   s.role, s.tool_name, s.is_error, s.sender_name,
+                   s.account_id
               FROM (
                 SELECT *, row_number() OVER (ORDER BY seq) AS rn
                   FROM events WHERE session_id = $1
@@ -1116,6 +1226,7 @@ async def model_token_ratio(
     conn: asyncpg.Connection[Any],
     model: str,
     *,
+    account_id: str,
     k_bucket: float = 2.0,
 ) -> float:
     """Per-model actual/local token correction.
@@ -1337,6 +1448,8 @@ async def lookup_tool_name_by_call_id(
     conn: asyncpg.Connection[Any],
     session_id: str,
     tool_call_id: str,
+    *,
+    account_id: str,
 ) -> str | None:
     """Return the function name of the matching ``tool_call`` on the parent
     assistant event, or None if no parent is found.
@@ -1378,6 +1491,7 @@ async def lookup_tool_name_by_call_id(
 async def append_event(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     session_id: str,
     kind: EventKind,
     data: dict[str, Any],
@@ -1421,8 +1535,9 @@ async def append_event(
     async with conn.transaction():
         seq_row = await conn.fetchrow(
             "UPDATE sessions SET last_event_seq = last_event_seq + 1 "
-            "WHERE id = $1 RETURNING last_event_seq, focal_channel",
+            "WHERE id = $1 AND account_id = $2 RETURNING last_event_seq, focal_channel",
             session_id,
+            account_id,
         )
         if seq_row is None:
             raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
@@ -1472,9 +1587,9 @@ async def append_event(
             "INSERT INTO events "
             "(id, session_id, seq, kind, data, cumulative_tokens, "
             " orig_channel, focal_channel_at_arrival, channel, "
-            " role, tool_name, is_error, sender_name) "
+            " role, tool_name, is_error, sender_name, account_id) "
             "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, "
-            " $10, $11, $12, $13) RETURNING *",
+            " $10, $11, $12, $13, $14) RETURNING *",
             new_id,
             session_id,
             seq,
@@ -1488,6 +1603,7 @@ async def append_event(
             tool_name,
             is_error,
             sender_name,
+            account_id,
         )
         assert row is not None
 
@@ -1503,7 +1619,10 @@ async def append_event(
 
 
 async def list_pending_calls_for_connector(
-    conn: asyncpg.Connection[Any], connector: str
+    conn: asyncpg.Connection[Any],
+    connector: str,
+    *,
+    account_id: str,
 ) -> list[dict[str, Any]]:
     """Pending custom tool calls across every active connection of ``connector`` type.
 
@@ -1526,6 +1645,7 @@ async def list_pending_calls_for_connector(
         }
     """
     # The connector type's tool schema gates which tool_calls we surface.
+    # ``connectors`` is global per-type; no account scoping on its row.
     cat_row = await conn.fetchrow(
         "SELECT tools_schema AS tools FROM connectors WHERE connector = $1",
         connector,
@@ -1540,6 +1660,10 @@ async def list_pending_calls_for_connector(
     # The lineage predicate joins ``s.id`` not a parameter, so we inline
     # rather than calling ``_session_bound_to_connection_predicate``
     # (which expects a $N param index for the session).
+    # Tenant isolation: both ``connections.account_id`` and
+    # ``sessions.account_id`` must match the bearer's account, otherwise
+    # a runtime token for tenant A could see pending tool calls (with
+    # arguments) from tenants B, C, D under the same connector type.
     rows = await conn.fetch(
         """
         SELECT c.id AS connection_id,
@@ -1549,6 +1673,7 @@ async def list_pending_calls_for_connector(
             ON s.archived_at IS NULL
            AND s.status = 'idle'
            AND s.stop_reason->>'type' = 'requires_action'
+           AND s.account_id = $2
            AND (EXISTS (SELECT 1 FROM bindings b
                          WHERE b.connection_id = c.id
                            AND b.archived_at IS NULL
@@ -1556,9 +1681,12 @@ async def list_pending_calls_for_connector(
                 OR EXISTS (SELECT 1 FROM chat_sessions cs
                             WHERE cs.connection_id = c.id
                               AND cs.session_id = s.id))
-         WHERE c.connector = $1 AND c.archived_at IS NULL
+         WHERE c.connector = $1
+           AND c.archived_at IS NULL
+           AND c.account_id = $2
         """,
         connector,
+        account_id,
     )
 
     out: list[dict[str, Any]] = []
@@ -1579,6 +1707,7 @@ async def list_pending_calls_for_connector(
 async def list_pending_calls_for_session_and_connection(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     session_id: str,
     connection_id: str,
 ) -> list[dict[str, Any]]:
@@ -1592,9 +1721,10 @@ async def list_pending_calls_for_session_and_connection(
         SELECT cat.tools_schema AS tools
           FROM connections c
           JOIN connectors cat ON cat.connector = c.connector
-         WHERE c.id = $1 AND c.archived_at IS NULL
+         WHERE c.id = $1 AND c.archived_at IS NULL AND c.account_id = $2
         """,
         connection_id,
+        account_id,
     )
     if conn_row is None:
         return []
@@ -1605,8 +1735,9 @@ async def list_pending_calls_for_session_and_connection(
 
     sess_row = await conn.fetchrow(
         "SELECT stop_reason, status, focal_channel FROM sessions "
-        "WHERE id = $1 AND archived_at IS NULL",
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
         session_id,
+        account_id,
     )
     if sess_row is None:
         return []
@@ -1704,7 +1835,7 @@ async def _list_bound_connection_ids(
 
 
 async def is_session_bound_to_connection(
-    conn: asyncpg.Connection[Any], *, connection_id: str, session_id: str
+    conn: asyncpg.Connection[Any], *, account_id: str, connection_id: str, session_id: str
 ) -> bool:
     """True iff ``connection_id`` is bound to ``session_id`` via either
     of the two lineage paths:
@@ -1735,6 +1866,7 @@ async def read_events(
     conn: asyncpg.Connection[Any],
     session_id: str,
     *,
+    account_id: str,
     after_seq: int = 0,
     kind: EventKind | None = None,
     limit: int = 200,
@@ -1742,8 +1874,8 @@ async def read_events(
     error_only: bool = False,
 ) -> list[Event]:
     order = "DESC" if newest_first else "ASC"
-    params: list[Any] = [session_id, after_seq]
-    where = "session_id = $1 AND seq > $2"
+    params: list[Any] = [session_id, after_seq, account_id]
+    where = "session_id = $1 AND seq > $2 AND account_id = $3"
     if kind is not None:
         params.append(kind)
         where += f" AND kind = ${len(params)}"
@@ -1757,7 +1889,9 @@ async def read_events(
     return [_row_to_event(r) for r in rows]
 
 
-async def read_message_events(conn: asyncpg.Connection[Any], session_id: str) -> list[Event]:
+async def read_message_events(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> list[Event]:
     """Read every message-kind event for a session in chronological order.
 
     Used by callers that need the full unwindowed log (e.g.
@@ -1770,7 +1904,9 @@ async def read_message_events(conn: asyncpg.Connection[Any], session_id: str) ->
     return [_row_to_event(r) for r in rows]
 
 
-async def list_session_channels(conn: asyncpg.Connection[Any], session_id: str) -> list[str]:
+async def list_session_channels(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> list[str]:
     """Distinct channel addresses the session has interacted with, sorted.
 
     Derived from the event log's ``channel`` column (stamped at append
@@ -1794,6 +1930,7 @@ async def read_windowed_events(
     conn: asyncpg.Connection[Any],
     session_id: str,
     *,
+    account_id: str,
     window_min: int,
     window_max: int,
     model: str,
@@ -1848,9 +1985,9 @@ async def read_windowed_events(
 
     # Fallback: no cumulative data yet — load everything.
     if total is None:
-        return await read_message_events(conn, session_id)
+        return await read_message_events(conn, session_id, account_id=account_id)
 
-    ratio = await model_token_ratio(conn, model)
+    ratio = await model_token_ratio(conn, model, account_id=account_id)
 
     # Shrink the effective window by the caller's overhead contribution.
     # Apply R to overhead_local up-front so the subtraction happens in the
@@ -1866,7 +2003,7 @@ async def read_windowed_events(
 
     total_effective = round(total * ratio)
     if total_effective <= events_window_max:
-        return await read_message_events(conn, session_id)
+        return await read_message_events(conn, session_id, account_id=account_id)
 
     from aios.harness.tokens import tokens_to_drop
 
@@ -1879,7 +2016,7 @@ async def read_windowed_events(
         total_effective, window_min=events_window_min, window_max=events_window_max
     )
     if drop_effective == 0:
-        return await read_message_events(conn, session_id)
+        return await read_message_events(conn, session_id, account_id=account_id)
 
     drop = math.ceil(drop_effective / ratio)
 
@@ -1914,6 +2051,7 @@ def _row_to_vault(row: asyncpg.Record) -> Vault:
 async def insert_vault(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     display_name: str,
     metadata: dict[str, Any],
 ) -> Vault:
@@ -1921,37 +2059,46 @@ async def insert_vault(
     metadata_json = json.dumps(metadata)
     row = await conn.fetchrow(
         """
-        INSERT INTO vaults (id, display_name, metadata)
-        VALUES ($1, $2, $3::jsonb)
+        INSERT INTO vaults (id, display_name, metadata, account_id)
+        VALUES ($1, $2, $3::jsonb, $4)
         RETURNING *
         """,
         new_id,
         display_name,
         metadata_json,
+        account_id,
     )
     assert row is not None
     return _row_to_vault(row)
 
 
-async def get_vault(conn: asyncpg.Connection[Any], vault_id: str) -> Vault:
-    row = await conn.fetchrow("SELECT * FROM vaults WHERE id = $1", vault_id)
+async def get_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_id: str) -> Vault:
+    row = await conn.fetchrow(
+        "SELECT * FROM vaults WHERE id = $1 AND account_id = $2",
+        vault_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
     return _row_to_vault(row)
 
 
 async def list_vaults(
-    conn: asyncpg.Connection[Any], *, limit: int = 50, after: str | None = None
+    conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Vault]:
     if after is None:
         rows = await conn.fetch(
-            "SELECT * FROM vaults WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            "SELECT * FROM vaults WHERE archived_at IS NULL AND account_id = $1 "
+            "ORDER BY id DESC LIMIT $2",
+            account_id,
             limit,
         )
     else:
         rows = await conn.fetch(
-            "SELECT * FROM vaults WHERE archived_at IS NULL AND id < $1 ORDER BY id DESC LIMIT $2",
+            "SELECT * FROM vaults WHERE archived_at IS NULL AND id < $1 AND account_id = $2 "
+            "ORDER BY id DESC LIMIT $3",
             after,
+            account_id,
             limit,
         )
     return [_row_to_vault(r) for r in rows]
@@ -1961,6 +2108,7 @@ async def update_vault(
     conn: asyncpg.Connection[Any],
     vault_id: str,
     *,
+    account_id: str,
     display_name: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Vault:
@@ -1973,16 +2121,20 @@ async def update_vault(
         args.append(json.dumps(metadata))
         sets.append(f"metadata = ${len(args)}::jsonb")
     if not sets:
-        return await get_vault(conn, vault_id)
+        return await get_vault(conn, vault_id, account_id=account_id)
     sets.append("updated_at = now()")
-    sql = f"UPDATE vaults SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    args.append(account_id)
+    sql = (
+        f"UPDATE vaults SET {', '.join(sets)} "
+        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+    )
     row = await conn.fetchrow(sql, *args)
     if row is None:
         raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
     return _row_to_vault(row)
 
 
-async def archive_vault(conn: asyncpg.Connection[Any], vault_id: str) -> Vault:
+async def archive_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_id: str) -> Vault:
     """Archive a vault and purge the encrypted blobs of its active credentials.
 
     Archive is an UPDATE, so ``ON DELETE CASCADE`` on the FK does not fire
@@ -1992,8 +2144,9 @@ async def archive_vault(conn: asyncpg.Connection[Any], vault_id: str) -> Vault:
     async with conn.transaction():
         row = await conn.fetchrow(
             "UPDATE vaults SET archived_at = now(), updated_at = now() "
-            "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+            "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
             vault_id,
+            account_id,
         )
         if row is None:
             raise NotFoundError(
@@ -2006,15 +2159,20 @@ async def archive_vault(conn: asyncpg.Connection[Any], vault_id: str) -> Vault:
             "UPDATE vault_credentials "
             "SET ciphertext = ''::bytea, nonce = ''::bytea, "
             "    archived_at = now(), updated_at = now() "
-            "WHERE vault_id = $1 AND archived_at IS NULL",
+            "WHERE vault_id = $1 AND archived_at IS NULL AND account_id = $2",
             vault_id,
+            account_id,
         )
     return _row_to_vault(row)
 
 
-async def delete_vault(conn: asyncpg.Connection[Any], vault_id: str) -> None:
+async def delete_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_id: str) -> None:
     # Child credentials are removed by ``ON DELETE CASCADE`` (migration 0015).
-    result = await conn.execute("DELETE FROM vaults WHERE id = $1", vault_id)
+    result = await conn.execute(
+        "DELETE FROM vaults WHERE id = $1 AND account_id = $2",
+        vault_id,
+        account_id,
+    )
     if result == "DELETE 0":
         raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
 
@@ -2041,6 +2199,7 @@ def _row_to_vault_credential(row: asyncpg.Record) -> VaultCredential:
 async def insert_vault_credential(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     vault_id: str,
     display_name: str | None,
     mcp_server_url: str,
@@ -2055,9 +2214,9 @@ async def insert_vault_credential(
             """
             INSERT INTO vault_credentials (
                 id, vault_id, display_name, mcp_server_url,
-                auth_type, ciphertext, nonce, metadata
+                auth_type, ciphertext, nonce, metadata, account_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
             RETURNING *
             """,
             new_id,
@@ -2068,6 +2227,7 @@ async def insert_vault_credential(
             blob.ciphertext,
             blob.nonce,
             metadata_json,
+            account_id,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -2084,12 +2244,17 @@ async def insert_vault_credential(
 
 
 async def get_vault_credential(
-    conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
+    conn: asyncpg.Connection[Any],
+    vault_id: str,
+    credential_id: str,
+    *,
+    account_id: str,
 ) -> VaultCredential:
     row = await conn.fetchrow(
-        "SELECT * FROM vault_credentials WHERE id = $1 AND vault_id = $2",
+        "SELECT * FROM vault_credentials WHERE id = $1 AND vault_id = $2 AND account_id = $3",
         credential_id,
         vault_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -2100,7 +2265,11 @@ async def get_vault_credential(
 
 
 async def lock_oauth_credential_for_refresh(
-    conn: asyncpg.Connection[Any], vault_id: str, mcp_server_url: str
+    conn: asyncpg.Connection[Any],
+    vault_id: str,
+    mcp_server_url: str,
+    *,
+    account_id: str,
 ) -> tuple[str, EncryptedBlob] | None:
     """``SELECT FOR UPDATE`` the active credential for ``(vault_id, url)``.
 
@@ -2111,9 +2280,10 @@ async def lock_oauth_credential_for_refresh(
     row = await conn.fetchrow(
         "SELECT id, ciphertext, nonce FROM vault_credentials "
         "WHERE vault_id = $1 AND mcp_server_url = $2 AND archived_at IS NULL "
-        "FOR UPDATE",
+        "AND account_id = $3 FOR UPDATE",
         vault_id,
         mcp_server_url,
+        account_id,
     )
     if row is None:
         return None
@@ -2122,7 +2292,11 @@ async def lock_oauth_credential_for_refresh(
 
 
 async def get_vault_credential_with_blob(
-    conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
+    conn: asyncpg.Connection[Any],
+    vault_id: str,
+    credential_id: str,
+    *,
+    account_id: str,
 ) -> tuple[VaultCredential, EncryptedBlob]:
     """Fetch the credential metadata and decrypted-blob inputs in one round-trip.
 
@@ -2130,9 +2304,10 @@ async def get_vault_credential_with_blob(
     (and gets zeroed out at archive time).
     """
     row = await conn.fetchrow(
-        "SELECT * FROM vault_credentials WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL",
+        "SELECT * FROM vault_credentials WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL AND account_id = $3",
         credential_id,
         vault_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -2148,23 +2323,27 @@ async def list_vault_credentials(
     conn: asyncpg.Connection[Any],
     vault_id: str,
     *,
+    account_id: str,
     limit: int = 50,
     after: str | None = None,
 ) -> list[VaultCredential]:
     if after is None:
         rows = await conn.fetch(
             "SELECT * FROM vault_credentials "
-            "WHERE vault_id = $1 AND archived_at IS NULL ORDER BY id DESC LIMIT $2",
+            "WHERE vault_id = $1 AND archived_at IS NULL AND account_id = $2 "
+            "ORDER BY id DESC LIMIT $3",
             vault_id,
+            account_id,
             limit,
         )
     else:
         rows = await conn.fetch(
             "SELECT * FROM vault_credentials "
             "WHERE vault_id = $1 AND archived_at IS NULL AND id < $2 "
-            "ORDER BY id DESC LIMIT $3",
+            "AND account_id = $3 ORDER BY id DESC LIMIT $4",
             vault_id,
             after,
+            account_id,
             limit,
         )
     return [_row_to_vault_credential(r) for r in rows]
@@ -2175,6 +2354,7 @@ async def update_vault_credential(
     vault_id: str,
     credential_id: str,
     *,
+    account_id: str,
     blob: EncryptedBlob | None = None,
     display_name: str | None | EllipsisType = ...,
     metadata: dict[str, Any] | None | EllipsisType = ...,
@@ -2193,11 +2373,12 @@ async def update_vault_credential(
         args.append(json.dumps(metadata))
         sets.append(f"metadata = ${len(args)}::jsonb")
     if not sets:
-        return await get_vault_credential(conn, vault_id, credential_id)
+        return await get_vault_credential(conn, vault_id, credential_id, account_id=account_id)
     sets.append("updated_at = now()")
+    args.append(account_id)
     sql = (
         f"UPDATE vault_credentials SET {', '.join(sets)} "
-        f"WHERE id = $1 AND vault_id = $2 RETURNING *"
+        f"WHERE id = $1 AND vault_id = $2 AND account_id = ${len(args)} RETURNING *"
     )
     row = await conn.fetchrow(sql, *args)
     if row is None:
@@ -2209,7 +2390,11 @@ async def update_vault_credential(
 
 
 async def archive_vault_credential(
-    conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
+    conn: asyncpg.Connection[Any],
+    vault_id: str,
+    credential_id: str,
+    *,
+    account_id: str,
 ) -> VaultCredential:
     """Archive a credential and zero out its encrypted secret payload.
 
@@ -2221,9 +2406,10 @@ async def archive_vault_credential(
         "UPDATE vault_credentials "
         "SET ciphertext = ''::bytea, nonce = ''::bytea, "
         "    archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL RETURNING *",
+        "WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL AND account_id = $3 RETURNING *",
         credential_id,
         vault_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -2234,12 +2420,17 @@ async def archive_vault_credential(
 
 
 async def delete_vault_credential(
-    conn: asyncpg.Connection[Any], vault_id: str, credential_id: str
+    conn: asyncpg.Connection[Any],
+    vault_id: str,
+    credential_id: str,
+    *,
+    account_id: str,
 ) -> None:
     result = await conn.execute(
-        "DELETE FROM vault_credentials WHERE id = $1 AND vault_id = $2",
+        "DELETE FROM vault_credentials WHERE id = $1 AND vault_id = $2 AND account_id = $3",
         credential_id,
         vault_id,
+        account_id,
     )
     if result == "DELETE 0":
         raise NotFoundError(
@@ -2248,10 +2439,14 @@ async def delete_vault_credential(
         )
 
 
-async def count_active_vault_credentials(conn: asyncpg.Connection[Any], vault_id: str) -> int:
+async def count_active_vault_credentials(
+    conn: asyncpg.Connection[Any], vault_id: str, *, account_id: str
+) -> int:
     row = await conn.fetchrow(
-        "SELECT count(*) AS cnt FROM vault_credentials WHERE vault_id = $1 AND archived_at IS NULL",
+        "SELECT count(*) AS cnt FROM vault_credentials "
+        "WHERE vault_id = $1 AND archived_at IS NULL AND account_id = $2",
         vault_id,
+        account_id,
     )
     assert row is not None
     result: int = row["cnt"]
@@ -2262,18 +2457,27 @@ async def count_active_vault_credentials(conn: asyncpg.Connection[Any], vault_id
 
 
 async def set_session_vaults(
-    conn: asyncpg.Connection[Any], session_id: str, vault_ids: list[str]
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    vault_ids: list[str],
+    *,
+    account_id: str,
 ) -> None:
     """Replace the session's vault bindings. Order is preserved via rank."""
     async with conn.transaction():
-        await conn.execute("DELETE FROM session_vaults WHERE session_id = $1", session_id)
+        await conn.execute(
+            "DELETE FROM session_vaults WHERE session_id = $1 AND account_id = $2",
+            session_id,
+            account_id,
+        )
         for rank, vault_id in enumerate(vault_ids):
             try:
                 await conn.execute(
-                    "INSERT INTO session_vaults (session_id, vault_id, rank) VALUES ($1, $2, $3)",
+                    "INSERT INTO session_vaults (session_id, vault_id, rank, account_id) VALUES ($1, $2, $3, $4)",
                     session_id,
                     vault_id,
                     rank,
+                    account_id,
                 )
             except asyncpg.ForeignKeyViolationError as exc:
                 raise NotFoundError(
@@ -2282,16 +2486,22 @@ async def set_session_vaults(
                 ) from exc
 
 
-async def get_session_vault_ids(conn: asyncpg.Connection[Any], session_id: str) -> list[str]:
+async def get_session_vault_ids(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> list[str]:
     rows = await conn.fetch(
-        "SELECT vault_id FROM session_vaults WHERE session_id = $1 ORDER BY rank",
+        "SELECT vault_id FROM session_vaults WHERE session_id = $1 AND account_id = $2 ORDER BY rank",
         session_id,
+        account_id,
     )
     return [str(r["vault_id"]) for r in rows]
 
 
 async def batch_get_session_vault_ids(
-    conn: asyncpg.Connection[Any], session_ids: list[str]
+    conn: asyncpg.Connection[Any],
+    session_ids: list[str],
+    *,
+    account_id: str,
 ) -> dict[str, list[str]]:
     """Batch-fetch vault_ids for multiple sessions. Returns a dict keyed by session_id."""
     if not session_ids:
@@ -2313,6 +2523,7 @@ async def batch_get_session_vault_ids(
 async def resolve_vault_credential(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     vault_id: str,
     mcp_server_url: str,
 ) -> tuple[EncryptedBlob, str] | None:
@@ -2325,10 +2536,12 @@ async def resolve_vault_credential(
          WHERE vault_id = $1
            AND mcp_server_url = $2
            AND archived_at IS NULL
+           AND account_id = $3
          LIMIT 1
         """,
         vault_id,
         mcp_server_url,
+        account_id,
     )
     if row is None:
         return None
@@ -2339,6 +2552,8 @@ async def resolve_mcp_credential(
     conn: asyncpg.Connection[Any],
     session_id: str,
     mcp_server_url: str,
+    *,
+    account_id: str,
 ) -> tuple[EncryptedBlob, str, str] | None:
     """Find the first matching MCP credential across a session's bound vaults.
 
@@ -2401,6 +2616,7 @@ def _row_to_skill_version(row: asyncpg.Record) -> SkillVersion:
 async def insert_skill(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     display_title: str,
     directory: str,
     name: str,
@@ -2416,18 +2632,19 @@ async def insert_skill(
     async with conn.transaction():
         skill_row = await conn.fetchrow(
             """
-            INSERT INTO skills (id, display_title, latest_version)
-            VALUES ($1, $2, 1)
+            INSERT INTO skills (id, display_title, latest_version, account_id)
+            VALUES ($1, $2, 1, $3)
             RETURNING *
             """,
             new_id,
             display_title,
+            account_id,
         )
         assert skill_row is not None
         ver_row = await conn.fetchrow(
             """
-            INSERT INTO skill_versions (skill_id, version, directory, name, description, files)
-            VALUES ($1, 1, $2, $3, $4, $5::jsonb)
+            INSERT INTO skill_versions (skill_id, version, directory, name, description, files, account_id)
+            VALUES ($1, 1, $2, $3, $4, $5::jsonb, $6)
             RETURNING *
             """,
             new_id,
@@ -2435,39 +2652,50 @@ async def insert_skill(
             name,
             description,
             files_json,
+            account_id,
         )
         assert ver_row is not None
     return _row_to_skill(skill_row), _row_to_skill_version(ver_row)
 
 
-async def get_skill(conn: asyncpg.Connection[Any], skill_id: str) -> Skill:
-    row = await conn.fetchrow("SELECT * FROM skills WHERE id = $1", skill_id)
+async def get_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id: str) -> Skill:
+    row = await conn.fetchrow(
+        "SELECT * FROM skills WHERE id = $1 AND account_id = $2",
+        skill_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(f"skill {skill_id} not found", detail={"id": skill_id})
     return _row_to_skill(row)
 
 
 async def list_skills(
-    conn: asyncpg.Connection[Any], *, limit: int = 50, after: str | None = None
+    conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Skill]:
     if after is None:
         rows = await conn.fetch(
-            "SELECT * FROM skills WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            "SELECT * FROM skills WHERE archived_at IS NULL AND account_id = $1 "
+            "ORDER BY id DESC LIMIT $2",
+            account_id,
             limit,
         )
     else:
         rows = await conn.fetch(
-            "SELECT * FROM skills WHERE archived_at IS NULL AND id < $1 ORDER BY id DESC LIMIT $2",
+            "SELECT * FROM skills WHERE archived_at IS NULL AND id < $1 AND account_id = $2 "
+            "ORDER BY id DESC LIMIT $3",
             after,
+            account_id,
             limit,
         )
     return [_row_to_skill(r) for r in rows]
 
 
-async def archive_skill(conn: asyncpg.Connection[Any], skill_id: str) -> None:
+async def archive_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id: str) -> None:
     result = await conn.execute(
-        "UPDATE skills SET archived_at = now() WHERE id = $1 AND archived_at IS NULL",
+        "UPDATE skills SET archived_at = now() "
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
         skill_id,
+        account_id,
     )
     if result == "UPDATE 0":
         raise NotFoundError(f"skill {skill_id} not found or already archived")
@@ -2476,6 +2704,7 @@ async def archive_skill(conn: asyncpg.Connection[Any], skill_id: str) -> None:
 async def insert_skill_version(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     skill_id: str,
     directory: str,
     name: str,
@@ -2490,16 +2719,17 @@ async def insert_skill_version(
     files_json = json.dumps(files)
     async with conn.transaction():
         head = await conn.fetchrow(
-            "SELECT latest_version FROM skills WHERE id = $1 FOR UPDATE",
+            "SELECT latest_version FROM skills WHERE id = $1 AND account_id = $2 FOR UPDATE",
             skill_id,
+            account_id,
         )
         if head is None:
             raise NotFoundError(f"skill {skill_id} not found", detail={"id": skill_id})
         new_ver = head["latest_version"] + 1
         ver_row = await conn.fetchrow(
             """
-            INSERT INTO skill_versions (skill_id, version, directory, name, description, files)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            INSERT INTO skill_versions (skill_id, version, directory, name, description, files, account_id)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
             RETURNING *
             """,
             skill_id,
@@ -2508,23 +2738,30 @@ async def insert_skill_version(
             name,
             description,
             files_json,
+            account_id,
         )
         assert ver_row is not None
         await conn.execute(
-            "UPDATE skills SET latest_version = $2, updated_at = now() WHERE id = $1",
+            "UPDATE skills SET latest_version = $2, updated_at = now() WHERE id = $1 AND account_id = $3",
             skill_id,
             new_ver,
+            account_id,
         )
     return _row_to_skill_version(ver_row)
 
 
 async def get_skill_version(
-    conn: asyncpg.Connection[Any], skill_id: str, version: int
+    conn: asyncpg.Connection[Any],
+    skill_id: str,
+    version: int,
+    *,
+    account_id: str,
 ) -> SkillVersion:
     row = await conn.fetchrow(
-        "SELECT * FROM skill_versions WHERE skill_id = $1 AND version = $2",
+        "SELECT * FROM skill_versions WHERE skill_id = $1 AND version = $2 AND account_id = $3",
         skill_id,
         version,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -2534,7 +2771,9 @@ async def get_skill_version(
     return _row_to_skill_version(row)
 
 
-async def get_latest_skill_version(conn: asyncpg.Connection[Any], skill_id: str) -> SkillVersion:
+async def get_latest_skill_version(
+    conn: asyncpg.Connection[Any], skill_id: str, *, account_id: str
+) -> SkillVersion:
     """Get the latest version of a skill by joining with the head row."""
     row = await conn.fetchrow(
         """
@@ -2553,22 +2792,26 @@ async def list_skill_versions(
     conn: asyncpg.Connection[Any],
     skill_id: str,
     *,
+    account_id: str,
     limit: int = 50,
     after: int | None = None,
 ) -> list[SkillVersion]:
     """List versions in descending order (newest first)."""
     if after is None:
         rows = await conn.fetch(
-            "SELECT * FROM skill_versions WHERE skill_id = $1 ORDER BY version DESC LIMIT $2",
+            "SELECT * FROM skill_versions WHERE skill_id = $1 AND account_id = $2 "
+            "ORDER BY version DESC LIMIT $3",
             skill_id,
+            account_id,
             limit,
         )
     else:
         rows = await conn.fetch(
             "SELECT * FROM skill_versions WHERE skill_id = $1 AND version < $2 "
-            "ORDER BY version DESC LIMIT $3",
+            "AND account_id = $3 ORDER BY version DESC LIMIT $4",
             skill_id,
             after,
+            account_id,
             limit,
         )
     return [_row_to_skill_version(r) for r in rows]
@@ -2577,6 +2820,8 @@ async def list_skill_versions(
 async def resolve_skill_refs(
     conn: asyncpg.Connection[Any],
     refs: list[AgentSkillRef],
+    *,
+    account_id: str,
 ) -> list[SkillVersion]:
     """Resolve a list of skill references to concrete versions.
 
@@ -2587,9 +2832,9 @@ async def resolve_skill_refs(
     results: list[SkillVersion] = []
     for ref in refs:
         if ref.version is None:
-            sv = await get_latest_skill_version(conn, ref.skill_id)
+            sv = await get_latest_skill_version(conn, ref.skill_id, account_id=account_id)
         else:
-            sv = await get_skill_version(conn, ref.skill_id, ref.version)
+            sv = await get_skill_version(conn, ref.skill_id, ref.version, account_id=account_id)
         results.append(sv)
     return results
 
@@ -2636,7 +2881,10 @@ class ActiveBinding(NamedTuple):
 
 
 async def get_active_binding(
-    conn: asyncpg.Connection[Any], connection_id: str
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    account_id: str,
 ) -> ActiveBinding | None:
     """Return the connection's active binding, if one exists.
 
@@ -2667,6 +2915,7 @@ async def get_active_binding(
 async def insert_binding(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     connection_id: str,
     mode: BindingMode,
     session_id: str | None = None,
@@ -2685,14 +2934,15 @@ async def insert_binding(
         await conn.execute(
             """
             INSERT INTO bindings (id, connection_id, mode,
-                                  session_id, session_template_id)
-            VALUES ($1, $2, $3, $4, $5)
+                                  session_id, session_template_id, account_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
             """,
             new_id,
             connection_id,
             mode,
             session_id,
             session_template_id,
+            account_id,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -2720,6 +2970,7 @@ async def archive_active_binding(
     conn: asyncpg.Connection[Any],
     connection_id: str,
     *,
+    account_id: str,
     expected_mode: BindingMode | None = None,
 ) -> ActiveBinding | None:
     """Soft-archive the connection's active binding.
@@ -2852,6 +3103,7 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
 async def insert_connection(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     connector: str,
     account: str,
     metadata: dict[str, Any],
@@ -2898,9 +3150,9 @@ async def insert_connection(
             WITH inserted AS (
                 INSERT INTO connections (
                     id, connector, account, metadata,
-                    secrets_ciphertext, secrets_nonce
+                    secrets_ciphertext, secrets_nonce, account_id
                 )
-                VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+                VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
                 ON CONFLICT (connector, account) WHERE archived_at IS NULL DO NOTHING
                 RETURNING *
             )
@@ -2916,10 +3168,13 @@ async def insert_connection(
             json.dumps(metadata),
             ciphertext,
             nonce,
+            account_id,
         )
         if row is not None:
             return _row_to_connection(row)
-        existing = await get_connection_for_account(conn, connector=connector, account=account)
+        existing = await get_connection_for_account(
+            conn, connector=connector, account=account, account_id=account_id
+        )
         if existing is not None:
             return existing
         # Active row was archived between INSERT and re-read; loop to retry the
@@ -2929,10 +3184,13 @@ async def insert_connection(
     )
 
 
-async def get_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
+async def get_connection(
+    conn: asyncpg.Connection[Any], connection_id: str, *, account_id: str
+) -> Connection:
     row = await conn.fetchrow(
-        f"SELECT {_CONNECTION_COLUMNS} FROM {_CONNECTION_FROM} WHERE c.id = $1",
+        f"SELECT {_CONNECTION_COLUMNS} FROM {_CONNECTION_FROM} WHERE c.id = $1 AND c.account_id = $2",
         connection_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -2946,6 +3204,7 @@ async def set_connection_secrets(
     conn: asyncpg.Connection[Any],
     connection_id: str,
     *,
+    account_id: str,
     secrets_blob: EncryptedBlob | None,
 ) -> Connection:
     """Replace a connection's encrypted secret blob.  Bumps ``updated_at``.
@@ -2966,7 +3225,7 @@ async def set_connection_secrets(
                SET secrets_ciphertext = $2,
                    secrets_nonce      = $3,
                    updated_at         = now()
-             WHERE id = $1 AND archived_at IS NULL
+             WHERE id = $1 AND archived_at IS NULL AND account_id = $4
             RETURNING *
         )
         {_CONNECTION_UPDATE_CTE_TAIL}
@@ -2974,6 +3233,7 @@ async def set_connection_secrets(
         connection_id,
         ciphertext,
         nonce,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -2984,7 +3244,10 @@ async def set_connection_secrets(
 
 
 async def get_connection_secret_blob(
-    conn: asyncpg.Connection[Any], connection_id: str
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    account_id: str,
 ) -> EncryptedBlob | None:
     """Read the encrypted secrets blob for a connection.
 
@@ -2997,9 +3260,10 @@ async def get_connection_secret_blob(
         """
         SELECT secrets_ciphertext, secrets_nonce
           FROM connections
-         WHERE id = $1 AND archived_at IS NULL
+         WHERE id = $1 AND archived_at IS NULL AND account_id = $2
         """,
         connection_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -3014,7 +3278,10 @@ async def get_connection_secret_blob(
 
 
 async def list_connection_tools_for_session(
-    conn: asyncpg.Connection[Any], session_id: str
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
 ) -> list[dict[str, Any]]:
     """Custom tool specs from every active connection bound to ``session_id``.
 
@@ -3046,7 +3313,11 @@ async def list_connection_tools_for_session(
 
 
 async def get_connection_for_account(
-    conn: asyncpg.Connection[Any], connector: str, account: str
+    conn: asyncpg.Connection[Any],
+    connector: str,
+    account: str,
+    *,
+    account_id: str,
 ) -> Connection | None:
     """Active connection for ``(connector, account)``, or ``None``."""
     row = await conn.fetchrow(
@@ -3054,9 +3325,11 @@ async def get_connection_for_account(
         SELECT {_CONNECTION_COLUMNS}
           FROM {_CONNECTION_FROM}
          WHERE c.connector = $1 AND c.account = $2 AND c.archived_at IS NULL
+           AND c.account_id = $3
         """,
         connector,
         account,
+        account_id,
     )
     if row is None:
         return None
@@ -3066,6 +3339,7 @@ async def get_connection_for_account(
 async def list_connections(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     connector: str | None = None,
     session_id: str | None = None,
     mode: ConnectionMode | None = None,
@@ -3081,8 +3355,8 @@ async def list_connections(
     ``session_template_id`` instead).  ``mode`` filters on the active
     binding's mode or its absence (detached).
     """
-    clauses: list[str] = ["c.archived_at IS NULL"]
-    args: list[Any] = []
+    args: list[Any] = [account_id]
+    clauses: list[str] = ["c.archived_at IS NULL", "c.account_id = $1"]
     if connector is not None:
         args.append(connector)
         clauses.append(f"c.connector = ${len(args)}")
@@ -3115,7 +3389,9 @@ _MODE_PREDICATES: dict[ConnectionMode, str] = {
 }
 
 
-async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) -> Connection:
+async def archive_connection(
+    conn: asyncpg.Connection[Any], connection_id: str, *, account_id: str
+) -> Connection:
     """Soft-archive a connection AND scrub its encrypted secrets.
 
     Setting ``secrets_ciphertext = NULL`` / ``secrets_nonce = NULL``
@@ -3133,12 +3409,13 @@ async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) 
                    updated_at         = now(),
                    secrets_ciphertext = NULL,
                    secrets_nonce      = NULL
-             WHERE id = $1 AND archived_at IS NULL
+             WHERE id = $1 AND archived_at IS NULL AND account_id = $2
             RETURNING *
         )
         {_CONNECTION_UPDATE_CTE_TAIL}
         """,
         connection_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -3152,13 +3429,18 @@ async def archive_connection(conn: asyncpg.Connection[Any], connection_id: str) 
 
 
 async def lookup_chat_session(
-    conn: asyncpg.Connection[Any], connection_id: str, chat_id: str
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    chat_id: str,
+    *,
+    account_id: str,
 ) -> str | None:
     """Existing session_id for ``(connection_id, chat_id)``, else ``None``."""
     val: str | None = await conn.fetchval(
-        "SELECT session_id FROM chat_sessions WHERE connection_id = $1 AND chat_id = $2",
+        "SELECT session_id FROM chat_sessions WHERE connection_id = $1 AND chat_id = $2 AND account_id = $3",
         connection_id,
         chat_id,
+        account_id,
     )
     return val
 
@@ -3166,6 +3448,7 @@ async def lookup_chat_session(
 async def insert_chat_session(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     connection_id: str,
     chat_id: str,
     session_id: str,
@@ -3178,18 +3461,19 @@ async def insert_chat_session(
     """
     row = await conn.fetchrow(
         """
-        INSERT INTO chat_sessions (connection_id, chat_id, session_id)
-        VALUES ($1, $2, $3)
+        INSERT INTO chat_sessions (connection_id, chat_id, session_id, account_id)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (connection_id, chat_id) DO NOTHING
         RETURNING session_id
         """,
         connection_id,
         chat_id,
         session_id,
+        account_id,
     )
     if row is not None:
         return str(row["session_id"])
-    existing = await lookup_chat_session(conn, connection_id, chat_id)
+    existing = await lookup_chat_session(conn, connection_id, chat_id, account_id=account_id)
     if existing is None:
         # CONFLICT means the row existed at INSERT time; if it's gone now
         # the chat session was hard-deleted between the two queries.
@@ -3201,7 +3485,11 @@ async def insert_chat_session(
 
 
 async def delete_chat_session(
-    conn: asyncpg.Connection[Any], connection_id: str, chat_id: str
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    chat_id: str,
+    *,
+    account_id: str,
 ) -> bool:
     """Remove a ``chat_sessions`` row.  Returns ``True`` iff a row was
     actually deleted.
@@ -3211,15 +3499,20 @@ async def delete_chat_session(
     it returns the chat to the connection's mode-default fallback.
     """
     result = await conn.execute(
-        "DELETE FROM chat_sessions WHERE connection_id = $1 AND chat_id = $2",
+        "DELETE FROM chat_sessions WHERE connection_id = $1 AND chat_id = $2 AND account_id = $3",
         connection_id,
         chat_id,
+        account_id,
     )
     return bool(result.endswith(" 1"))
 
 
 async def get_chat_session_row(
-    conn: asyncpg.Connection[Any], connection_id: str, chat_id: str
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    chat_id: str,
+    *,
+    account_id: str,
 ) -> tuple[str, str, datetime] | None:
     """Return ``(chat_id, session_id, created_at)`` for one row, or ``None``.
 
@@ -3231,10 +3524,11 @@ async def get_chat_session_row(
         """
         SELECT chat_id, session_id, created_at
           FROM chat_sessions
-         WHERE connection_id = $1 AND chat_id = $2
+         WHERE connection_id = $1 AND chat_id = $2 AND account_id = $3
         """,
         connection_id,
         chat_id,
+        account_id,
     )
     if row is None:
         return None
@@ -3242,7 +3536,10 @@ async def get_chat_session_row(
 
 
 async def list_chat_sessions_for_connection(
-    conn: asyncpg.Connection[Any], connection_id: str
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    account_id: str,
 ) -> list[tuple[str, str, datetime]]:
     """List ``(chat_id, session_id, created_at)`` rows in chat_id order.
 
@@ -3255,10 +3552,11 @@ async def list_chat_sessions_for_connection(
         """
         SELECT chat_id, session_id, created_at
           FROM chat_sessions
-         WHERE connection_id = $1
+         WHERE connection_id = $1 AND account_id = $2
          ORDER BY chat_id
         """,
         connection_id,
+        account_id,
     )
     return [(r["chat_id"], r["session_id"], r["created_at"]) for r in rows]
 
@@ -3267,7 +3565,10 @@ async def list_chat_sessions_for_connection(
 
 
 async def list_routing_rules_for_connection(
-    conn: asyncpg.Connection[Any], connection_id: str
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    account_id: str,
 ) -> list[tuple[str, str, str]]:
     """Return ``(prefix, target_type, target_id)`` rules for the active binding.
 
@@ -3284,14 +3585,16 @@ async def list_routing_rules_for_connection(
           JOIN bindings b ON b.id = rr.binding_id
          WHERE b.connection_id = $1
            AND b.archived_at IS NULL
+           AND b.account_id = $2
         """,
         connection_id,
+        account_id,
     )
     return [(row["prefix"], row["target_type"], row["target_id"]) for row in rows]
 
 
 async def list_recent_chat_ids(
-    conn: asyncpg.Connection[Any], connector: str, account: str, *, limit: int
+    conn: asyncpg.Connection[Any], connector: str, account: str, *, account_id: str, limit: int
 ) -> list[tuple[str, datetime]]:
     """Distinct ``(chat_id, last_seen_at)`` for inbound user events
     matching the ``<connector>/<account>/<chat_id>`` channel prefix.
@@ -3331,7 +3634,9 @@ async def list_recent_chat_ids(
 # ─── connector_inbound_acks (dedup ledger) ──────────────────────────────────
 
 
-async def flip_quiescent_to_pending(conn: asyncpg.Connection[Any], session_id: str) -> None:
+async def flip_quiescent_to_pending(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> None:
     """Flip ``sessions.status`` to ``pending`` if currently quiescent.
 
     Quiescent here means either ``idle`` (clean turn end) or ``errored``
@@ -3345,14 +3650,16 @@ async def flip_quiescent_to_pending(conn: asyncpg.Connection[Any], session_id: s
     """
     await conn.execute(
         "UPDATE sessions SET status = 'pending', updated_at = now() "
-        "WHERE id = $1 AND status IN ('idle', 'errored')",
+        "WHERE id = $1 AND status IN ('idle', 'errored') AND account_id = $2",
         session_id,
+        account_id,
     )
 
 
 async def try_record_inbound_ack(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     connector: str,
     account: str,
     event_id: str,
@@ -3410,6 +3717,7 @@ def _row_to_session_template(row: asyncpg.Record) -> SessionTemplate:
 async def insert_session_template(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     name: str,
     agent_id: str,
     environment_id: str,
@@ -3424,8 +3732,8 @@ async def insert_session_template(
             """
             INSERT INTO session_templates
                 (id, name, agent_id, agent_version, environment_id,
-                 vault_ids, memory_store_ids, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6::text[], $7::text[], $8::jsonb)
+                 vault_ids, memory_store_ids, metadata, account_id)
+            VALUES ($1, $2, $3, $4, $5, $6::text[], $7::text[], $8::jsonb, $9)
             RETURNING *
             """,
             new_id,
@@ -3436,6 +3744,7 @@ async def insert_session_template(
             vault_ids,
             memory_store_ids,
             json.dumps(metadata),
+            account_id,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -3451,8 +3760,14 @@ async def insert_session_template(
     return _row_to_session_template(row)
 
 
-async def get_session_template(conn: asyncpg.Connection[Any], template_id: str) -> SessionTemplate:
-    row = await conn.fetchrow("SELECT * FROM session_templates WHERE id = $1", template_id)
+async def get_session_template(
+    conn: asyncpg.Connection[Any], template_id: str, *, account_id: str
+) -> SessionTemplate:
+    row = await conn.fetchrow(
+        "SELECT * FROM session_templates WHERE id = $1 AND account_id = $2",
+        template_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(
             f"session template {template_id} not found",
@@ -3462,7 +3777,7 @@ async def get_session_template(conn: asyncpg.Connection[Any], template_id: str) 
 
 
 async def list_session_templates(
-    conn: asyncpg.Connection[Any], *, limit: int = 50, after: str | None = None
+    conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[SessionTemplate]:
     if after is None:
         rows = await conn.fetch(
@@ -3483,6 +3798,7 @@ async def update_session_template(
     conn: asyncpg.Connection[Any],
     template_id: str,
     *,
+    account_id: str,
     name: str | None = None,
     agent_id: str | None = None,
     agent_version: int | None = _UNSET,
@@ -3515,9 +3831,13 @@ async def update_session_template(
         args.append(json.dumps(metadata))
         sets.append(f"metadata = ${len(args)}::jsonb")
     if not sets:
-        return await get_session_template(conn, template_id)
+        return await get_session_template(conn, template_id, account_id=account_id)
     sets.append("updated_at = now()")
-    sql = f"UPDATE session_templates SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    args.append(account_id)
+    sql = (
+        f"UPDATE session_templates SET {', '.join(sets)} "
+        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+    )
     try:
         row = await conn.fetchrow(sql, *args)
     except asyncpg.UniqueViolationError as exc:
@@ -3539,7 +3859,10 @@ async def update_session_template(
 
 
 async def archive_session_template(
-    conn: asyncpg.Connection[Any], template_id: str
+    conn: asyncpg.Connection[Any],
+    template_id: str,
+    *,
+    account_id: str,
 ) -> SessionTemplate:
     """Soft-delete the template.  Already-spawned per_chat sessions keep
     working; new chat sessions on connections referencing this template
@@ -3547,8 +3870,9 @@ async def archive_session_template(
     """
     row = await conn.fetchrow(
         "UPDATE session_templates SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
         template_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -3622,29 +3946,35 @@ def _build_actor(actor_type: str, actor_ref: str) -> Actor:
 async def insert_memory_store(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     name: str,
     description: str,
     metadata: dict[str, Any],
 ) -> MemoryStore:
     row = await conn.fetchrow(
         """
-        INSERT INTO memory_stores (id, name, description, metadata)
-        VALUES ($1, $2, $3, $4::jsonb)
+        INSERT INTO memory_stores (id, name, description, metadata, account_id)
+        VALUES ($1, $2, $3, $4::jsonb, $5)
         RETURNING *
         """,
         make_id(MEMORY_STORE),
         name,
         description,
         json.dumps(metadata),
+        account_id,
     )
     assert row is not None
     return _row_to_memory_store(row)
 
 
 async def get_memory_store(
-    conn: asyncpg.Connection[Any], store_id: str, *, allow_archived: bool = True
+    conn: asyncpg.Connection[Any], store_id: str, *, account_id: str, allow_archived: bool = True
 ) -> MemoryStore:
-    row = await conn.fetchrow("SELECT * FROM memory_stores WHERE id = $1", store_id)
+    row = await conn.fetchrow(
+        "SELECT * FROM memory_stores WHERE id = $1 AND account_id = $2",
+        store_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
     store = _row_to_memory_store(row)
@@ -3657,13 +3987,23 @@ async def get_memory_store(
 
 
 async def list_memory_stores(
-    conn: asyncpg.Connection[Any], *, include_archived: bool = False, limit: int = 100
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    include_archived: bool = False,
+    limit: int = 100,
 ) -> list[MemoryStore]:
     if include_archived:
-        rows = await conn.fetch("SELECT * FROM memory_stores ORDER BY id DESC LIMIT $1", limit)
+        rows = await conn.fetch(
+            "SELECT * FROM memory_stores WHERE account_id = $1 ORDER BY id DESC LIMIT $2",
+            account_id,
+            limit,
+        )
     else:
         rows = await conn.fetch(
-            "SELECT * FROM memory_stores WHERE archived_at IS NULL ORDER BY id DESC LIMIT $1",
+            "SELECT * FROM memory_stores WHERE archived_at IS NULL AND account_id = $1 "
+            "ORDER BY id DESC LIMIT $2",
+            account_id,
             limit,
         )
     return [_row_to_memory_store(r) for r in rows]
@@ -3673,6 +4013,7 @@ async def update_memory_store(
     conn: asyncpg.Connection[Any],
     store_id: str,
     *,
+    account_id: str,
     name: str | None = None,
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
@@ -3689,16 +4030,22 @@ async def update_memory_store(
         args.append(json.dumps(metadata))
         sets.append(f"metadata = ${len(args)}::jsonb")
     if not sets:
-        return await get_memory_store(conn, store_id)
+        return await get_memory_store(conn, store_id, account_id=account_id)
     sets.append("updated_at = now()")
-    sql = f"UPDATE memory_stores SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    args.append(account_id)
+    sql = (
+        f"UPDATE memory_stores SET {', '.join(sets)} "
+        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+    )
     row = await conn.fetchrow(sql, *args)
     if row is None:
         raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
     return _row_to_memory_store(row)
 
 
-async def archive_memory_store(conn: asyncpg.Connection[Any], store_id: str) -> MemoryStore:
+async def archive_memory_store(
+    conn: asyncpg.Connection[Any], store_id: str, *, account_id: str
+) -> MemoryStore:
     row = await conn.fetchrow(
         "UPDATE memory_stores SET archived_at = now(), updated_at = now() "
         "WHERE id = $1 AND archived_at IS NULL RETURNING *",
@@ -3712,8 +4059,14 @@ async def archive_memory_store(conn: asyncpg.Connection[Any], store_id: str) -> 
     return _row_to_memory_store(row)
 
 
-async def delete_memory_store(conn: asyncpg.Connection[Any], store_id: str) -> None:
-    result = await conn.execute("DELETE FROM memory_stores WHERE id = $1", store_id)
+async def delete_memory_store(
+    conn: asyncpg.Connection[Any], store_id: str, *, account_id: str
+) -> None:
+    result = await conn.execute(
+        "DELETE FROM memory_stores WHERE id = $1 AND account_id = $2",
+        store_id,
+        account_id,
+    )
     if result == "DELETE 0":
         raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
 
@@ -3721,7 +4074,9 @@ async def delete_memory_store(conn: asyncpg.Connection[Any], store_id: str) -> N
 # Memory + version (single-txn helpers) ────────────────────────────────────
 
 
-async def _allocate_version_seq(conn: asyncpg.Connection[Any], store_id: str) -> int:
+async def _allocate_version_seq(
+    conn: asyncpg.Connection[Any], store_id: str, *, account_id: str
+) -> int:
     """Bump ``last_version_seq`` on the store row and return the allocated seq.
 
     Mirror of the events seq allocation at append_event: row-lock the parent,
@@ -3730,13 +4085,16 @@ async def _allocate_version_seq(conn: asyncpg.Connection[Any], store_id: str) ->
     """
     row = await conn.fetchrow(
         "UPDATE memory_stores SET last_version_seq = last_version_seq + 1, "
-        "updated_at = now() WHERE id = $1 AND archived_at IS NULL "
+        "updated_at = now() WHERE id = $1 AND archived_at IS NULL AND account_id = $2 "
         "RETURNING last_version_seq",
         store_id,
+        account_id,
     )
     if row is None:
         existing = await conn.fetchrow(
-            "SELECT archived_at FROM memory_stores WHERE id = $1", store_id
+            "SELECT archived_at FROM memory_stores WHERE id = $1 AND account_id = $2",
+            store_id,
+            account_id,
         )
         if existing is None:
             raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
@@ -3751,6 +4109,7 @@ async def _allocate_version_seq(conn: asyncpg.Connection[Any], store_id: str) ->
 async def insert_memory_with_version(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     store_id: str,
     path: str,
     content: str,
@@ -3770,7 +4129,7 @@ async def insert_memory_with_version(
 
     try:
         async with conn.transaction():
-            seq = await _allocate_version_seq(conn, store_id)
+            seq = await _allocate_version_seq(conn, store_id, account_id=account_id)
 
             # Version first — its `memory_id` column is non-FK, so the
             # not-yet-inserted memory row doesn't block this. Memory row
@@ -3780,8 +4139,8 @@ async def insert_memory_with_version(
                 INSERT INTO memory_versions
                     (id, memory_store_id, memory_id, seq, operation, path,
                      content, content_sha256, content_size_bytes,
-                     created_by_type, created_by_ref)
-                VALUES ($1, $2, $3, $4, 'created', $5, $6, $7, $8, $9, $10)
+                     created_by_type, created_by_ref, account_id)
+                VALUES ($1, $2, $3, $4, 'created', $5, $6, $7, $8, $9, $10, $11)
                 """,
                 version_id,
                 store_id,
@@ -3793,14 +4152,15 @@ async def insert_memory_with_version(
                 size_bytes,
                 actor_type,
                 actor_ref,
+                account_id,
             )
 
             row = await conn.fetchrow(
                 """
                 INSERT INTO memories
                     (id, memory_store_id, path, content, content_sha256,
-                     content_size_bytes, current_version_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                     content_size_bytes, current_version_id, account_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 RETURNING *
                 """,
                 memory_id,
@@ -3810,6 +4170,7 @@ async def insert_memory_with_version(
                 content_sha256,
                 size_bytes,
                 version_id,
+                account_id,
             )
     except asyncpg.UniqueViolationError as exc:
         # Re-issue the lookup outside the rolled-back transaction so the
@@ -3837,12 +4198,15 @@ async def get_memory(
     store_id: str,
     memory_id: str,
     *,
+    account_id: str,
     include_content: bool = True,
 ) -> Memory:
     row = await conn.fetchrow(
-        "SELECT * FROM memories WHERE memory_store_id = $1 AND id = $2 AND deleted_at IS NULL",
+        "SELECT * FROM memories WHERE memory_store_id = $1 AND id = $2 "
+        "AND deleted_at IS NULL AND account_id = $3",
         store_id,
         memory_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -3857,12 +4221,15 @@ async def get_memory_by_path(
     store_id: str,
     path: str,
     *,
+    account_id: str,
     include_content: bool = True,
 ) -> Memory | None:
     row = await conn.fetchrow(
-        "SELECT * FROM memories WHERE memory_store_id = $1 AND path = $2 AND deleted_at IS NULL",
+        "SELECT * FROM memories WHERE memory_store_id = $1 AND path = $2 "
+        "AND deleted_at IS NULL AND account_id = $3",
         store_id,
         path,
+        account_id,
     )
     if row is None:
         return None
@@ -3870,7 +4237,8 @@ async def get_memory_by_path(
 
 
 async def list_active_memory_paths_and_content(
-    conn: asyncpg.Connection[Any], store_id: str
+    conn: asyncpg.Connection[Any],
+    store_id: str,
 ) -> list[tuple[str, str]]:
     """Bulk-fetch ``(path, content)`` for every non-deleted memory in the store.
 
@@ -3889,6 +4257,7 @@ async def list_memories(
     conn: asyncpg.Connection[Any],
     store_id: str,
     *,
+    account_id: str,
     path_prefix: str | None = None,
     order_by: str = "created_at",
     depth: int | None = None,
@@ -3941,6 +4310,7 @@ async def list_memories(
 async def update_memory_with_version(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     store_id: str,
     memory_id: str,
     new_content: str | None,
@@ -3957,7 +4327,9 @@ async def update_memory_with_version(
     the call is a no-op and returns the current row.
     """
     if new_content is None and new_path is None:
-        return await get_memory(conn, store_id, memory_id, include_content=False)
+        return await get_memory(
+            conn, store_id, memory_id, include_content=False, account_id=account_id
+        )
 
     next_path_for_conflict: str | None = None
     try:
@@ -3995,15 +4367,15 @@ async def update_memory_with_version(
             next_path: str = new_path if new_path is not None else cur["path"]
             next_path_for_conflict = next_path
 
-            seq = await _allocate_version_seq(conn, store_id)
+            seq = await _allocate_version_seq(conn, store_id, account_id=account_id)
             version_id = make_id(MEMORY_VERSION)
             await conn.execute(
                 """
                 INSERT INTO memory_versions
                     (id, memory_store_id, memory_id, seq, operation, path,
                      content, content_sha256, content_size_bytes,
-                     created_by_type, created_by_ref)
-                VALUES ($1, $2, $3, $4, 'modified', $5, $6, $7, $8, $9, $10)
+                     created_by_type, created_by_ref, account_id)
+                VALUES ($1, $2, $3, $4, 'modified', $5, $6, $7, $8, $9, $10, $11)
                 """,
                 version_id,
                 store_id,
@@ -4015,6 +4387,7 @@ async def update_memory_with_version(
                 next_size,
                 actor_type,
                 actor_ref,
+                account_id,
             )
 
             row = await conn.fetchrow(
@@ -4054,6 +4427,7 @@ async def update_memory_with_version(
 async def delete_memory_with_version(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     store_id: str,
     memory_id: str,
     actor_type: str,
@@ -4073,14 +4447,14 @@ async def delete_memory_with_version(
                 detail={"id": memory_id, "memory_store_id": store_id},
             )
 
-        seq = await _allocate_version_seq(conn, store_id)
+        seq = await _allocate_version_seq(conn, store_id, account_id=account_id)
         version_id = make_id(MEMORY_VERSION)
         await conn.execute(
             """
             INSERT INTO memory_versions
                 (id, memory_store_id, memory_id, seq, operation, path,
-                 created_by_type, created_by_ref)
-            VALUES ($1, $2, $3, $4, 'deleted', $5, $6, $7)
+                 created_by_type, created_by_ref, account_id)
+            VALUES ($1, $2, $3, $4, 'deleted', $5, $6, $7, $8)
             """,
             version_id,
             store_id,
@@ -4089,6 +4463,7 @@ async def delete_memory_with_version(
             cur["path"],
             actor_type,
             actor_ref,
+            account_id,
         )
 
         await conn.execute(
@@ -4106,11 +4481,12 @@ async def list_memory_versions(
     conn: asyncpg.Connection[Any],
     store_id: str,
     *,
+    account_id: str,
     memory_id: str | None = None,
     limit: int = 100,
 ) -> list[MemoryVersion]:
-    where = "memory_store_id = $1"
-    args: list[Any] = [store_id]
+    args: list[Any] = [store_id, account_id]
+    where = "memory_store_id = $1 AND account_id = $2"
     if memory_id is not None:
         args.append(memory_id)
         where += f" AND memory_id = ${len(args)}"
@@ -4123,12 +4499,17 @@ async def list_memory_versions(
 
 
 async def get_memory_version(
-    conn: asyncpg.Connection[Any], store_id: str, version_id: str
+    conn: asyncpg.Connection[Any],
+    store_id: str,
+    version_id: str,
+    *,
+    account_id: str,
 ) -> MemoryVersion:
     row = await conn.fetchrow(
-        "SELECT * FROM memory_versions WHERE memory_store_id = $1 AND id = $2",
+        "SELECT * FROM memory_versions WHERE memory_store_id = $1 AND id = $2 AND account_id = $3",
         store_id,
         version_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -4141,6 +4522,7 @@ async def get_memory_version(
 async def redact_memory_version(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     store_id: str,
     version_id: str,
     actor_type: str,
@@ -4201,6 +4583,8 @@ async def attach_memory_stores_to_session(
     conn: asyncpg.Connection[Any],
     session_id: str,
     resources: list[MemoryStoreResource],
+    *,
+    account_id: str,
 ) -> None:
     """Insert ``session_memory_stores`` rows for each resource, snapshotting
     name + description from the parent store at attach time. Validates that
@@ -4210,7 +4594,9 @@ async def attach_memory_stores_to_session(
         return
     seen_names: set[str] = set()
     for rank, res in enumerate(resources):
-        store = await get_memory_store(conn, res.memory_store_id, allow_archived=False)
+        store = await get_memory_store(
+            conn, res.memory_store_id, allow_archived=False, account_id=account_id
+        )
         if store.name in seen_names:
             raise ConflictError(
                 f"two attached memory stores share the name {store.name!r}; "
@@ -4225,8 +4611,8 @@ async def attach_memory_stores_to_session(
             """
             INSERT INTO session_memory_stores
                 (session_id, memory_store_id, rank, access, instructions,
-                 name_at_attach, description_at_attach)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 name_at_attach, description_at_attach, account_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """,
             session_id,
             res.memory_store_id,
@@ -4235,11 +4621,15 @@ async def attach_memory_stores_to_session(
             res.instructions,
             store.name,
             store.description,
+            account_id,
         )
 
 
 async def list_session_memory_store_echoes(
-    conn: asyncpg.Connection[Any], session_id: str
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
 ) -> list[MemoryStoreResourceEcho]:
     rows = await conn.fetch(
         "SELECT * FROM session_memory_stores WHERE session_id = $1 ORDER BY rank",
@@ -4277,6 +4667,8 @@ async def attach_github_repos_to_session(
     conn: asyncpg.Connection[Any],
     session_id: str,
     entries: list[tuple[str, str, EncryptedBlob, str | None, str | None]],
+    *,
+    account_id: str,
 ) -> None:
     """Insert pre-encrypted github_repository attachments for a session.
 
@@ -4293,8 +4685,8 @@ async def attach_github_repos_to_session(
             """
             INSERT INTO session_github_repositories
                 (id, session_id, rank, repo_url, mount_path, ciphertext, nonce,
-                 git_user_name, git_user_email)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 git_user_name, git_user_email, account_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
             rid,
             session_id,
@@ -4305,11 +4697,15 @@ async def attach_github_repos_to_session(
             blob.nonce,
             git_user_name,
             git_user_email,
+            account_id,
         )
 
 
 async def list_session_github_repo_echoes(
-    conn: asyncpg.Connection[Any], session_id: str
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
 ) -> list[GithubRepositoryResourceEcho]:
     rows = await conn.fetch(
         "SELECT * FROM session_github_repositories WHERE session_id = $1 ORDER BY rank",
@@ -4319,7 +4715,11 @@ async def list_session_github_repo_echoes(
 
 
 async def get_session_github_repo(
-    conn: asyncpg.Connection[Any], session_id: str, resource_id: str
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    resource_id: str,
+    *,
+    account_id: str,
 ) -> GithubRepositoryResourceEcho:
     row = await conn.fetchrow(
         "SELECT * FROM session_github_repositories WHERE session_id = $1 AND id = $2",
@@ -4335,7 +4735,11 @@ async def get_session_github_repo(
 
 
 async def get_session_github_repo_with_blob(
-    conn: asyncpg.Connection[Any], session_id: str, resource_id: str
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    resource_id: str,
+    *,
+    account_id: str,
 ) -> tuple[GithubRepositoryResourceEcho, EncryptedBlob]:
     """Read view + encrypted token blob, for the rotation path which needs
     both."""
@@ -4360,6 +4764,7 @@ async def update_session_github_repo_blob(
     resource_id: str,
     blob: EncryptedBlob,
     *,
+    account_id: str,
     identity: tuple[str | None, str | None] | None = None,
 ) -> GithubRepositoryResourceEcho:
     """Replace the encrypted token blob and bump ``updated_at``.
@@ -4411,7 +4816,9 @@ async def update_session_github_repo_blob(
     return _row_to_github_repo_echo(row)
 
 
-async def delete_session_github_repos(conn: asyncpg.Connection[Any], session_id: str) -> None:
+async def delete_session_github_repos(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> None:
     """Delete all github_repository attachments for a session.
 
     Used by the full-list-replace path on session update — paired with
@@ -4430,6 +4837,7 @@ async def delete_session_github_repos(conn: asyncpg.Connection[Any], session_id:
 async def notify_connection_change(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     connector: str,
     connection_id: str,
     account: str,
@@ -4437,16 +4845,16 @@ async def notify_connection_change(
 ) -> None:
     """Emit a ``connections_<connector>`` NOTIFY for discovery SSE consumers.
 
-    Payload: ``"<event>|<connection_id>|<account>"`` — the SSE
-    generator parses this into an ``added``/``removed`` event. Caller
-    runs this on a pool-acquired (autocommit) connection OUTSIDE any
-    transaction so subscribers never see a payload for an uncommitted
-    row.
+    Payload: ``"<event>|<connection_id>|<account_id>|<account>"`` — the
+    SSE generator parses this into an ``added``/``removed`` event and uses
+    ``account_id`` to filter cross-tenant events. Caller runs this on a
+    pool-acquired (autocommit) connection OUTSIDE any transaction so
+    subscribers never see a payload for an uncommitted row.
     """
     await conn.execute(
         "SELECT pg_notify($1, $2)",
         f"connections_{connector}",
-        f"{event}|{connection_id}|{account}",
+        f"{event}|{connection_id}|{account_id}|{account}",
     )
 
 
@@ -4454,6 +4862,7 @@ async def update_connector_tools_schema(
     conn: asyncpg.Connection[Any],
     connector: str,
     *,
+    account_id: str,
     tools_schema: list[dict[str, Any]],
 ) -> None:
     """Upsert ``connectors.tools_schema`` for ``connector`` wholesale.
@@ -4484,6 +4893,7 @@ async def update_connector_tools_schema(
 async def insert_management_call(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     call_id: str,
     connector: str,
     method: str,
@@ -4506,7 +4916,10 @@ async def insert_management_call(
 
 
 async def list_pending_management_calls_for_connector(
-    conn: asyncpg.Connection[Any], connector: str
+    conn: asyncpg.Connection[Any],
+    connector: str,
+    *,
+    account_id: str,
 ) -> list[dict[str, Any]]:
     """Pending, unexpired management calls for ``connector``.
 
@@ -4539,7 +4952,9 @@ async def list_pending_management_calls_for_connector(
     ]
 
 
-async def get_management_call(conn: asyncpg.Connection[Any], call_id: str) -> dict[str, Any] | None:
+async def get_management_call(
+    conn: asyncpg.Connection[Any], call_id: str, *, account_id: str
+) -> dict[str, Any] | None:
     """Fetch one management call by id, or ``None`` if missing.
 
     Used by both the runtime SSE NOTIFY tail (to assemble the emit
@@ -4551,9 +4966,10 @@ async def get_management_call(conn: asyncpg.Connection[Any], call_id: str) -> di
         """
         SELECT id, connector, method, params, status, result, is_error
           FROM pending_management_calls
-         WHERE id = $1
+         WHERE id = $1 AND account_id = $2
         """,
         call_id,
+        account_id,
     )
     if row is None:
         return None
@@ -4571,6 +4987,7 @@ async def get_management_call(conn: asyncpg.Connection[Any], call_id: str) -> di
 async def mark_management_call_resolved(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     call_id: str,
     result: Any,
     is_error: bool,
@@ -4591,12 +5008,14 @@ async def mark_management_call_resolved(
                resolved_at = now()
          WHERE id = $1
            AND status = 'pending'
+           AND account_id = $5
          RETURNING id
         """,
         call_id,
         new_status,
         json.dumps(result),
         is_error,
+        account_id,
     )
     return row is not None
 
@@ -4604,6 +5023,7 @@ async def mark_management_call_resolved(
 async def notify_management_call_dispatch(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     connector: str,
     call_id: str,
 ) -> None:
@@ -4623,6 +5043,7 @@ async def notify_management_call_dispatch(
 async def notify_management_call_result(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     call_id: str,
 ) -> None:
     """NOTIFY the per-call result channel after resolving the row.
@@ -4658,6 +5079,7 @@ def _row_to_runtime_token(row: asyncpg.Record) -> RuntimeToken:
 async def insert_runtime_token(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     connector: str,
     label: str | None,
     token_hash: str,
@@ -4675,48 +5097,57 @@ async def insert_runtime_token(
     )
     row = await conn.fetchrow(
         """
-        INSERT INTO runtime_tokens (id, connector, label, token_hash)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO runtime_tokens (id, connector, label, token_hash, account_id)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING *
         """,
         make_id(RUNTIME_TOKEN),
         connector,
         label,
         token_hash,
+        account_id,
     )
     assert row is not None
     return _row_to_runtime_token(row)
 
 
 async def list_runtime_tokens(
-    conn: asyncpg.Connection[Any], *, connector: str
+    conn: asyncpg.Connection[Any], *, account_id: str, connector: str
 ) -> list[RuntimeToken]:
     """All tokens (revoked included) for a connector type, newest first."""
     rows = await conn.fetch(
         """
         SELECT * FROM runtime_tokens
-         WHERE connector = $1
+         WHERE connector = $1 AND account_id = $2
          ORDER BY created_at DESC
         """,
         connector,
+        account_id,
     )
     return [_row_to_runtime_token(r) for r in rows]
 
 
-async def revoke_runtime_token(conn: asyncpg.Connection[Any], token_id: str) -> RuntimeToken:
+async def revoke_runtime_token(
+    conn: asyncpg.Connection[Any], token_id: str, *, account_id: str
+) -> RuntimeToken:
     """Soft-delete a token by setting ``revoked_at = now()``.  Idempotent."""
     row = await conn.fetchrow(
         """
         UPDATE runtime_tokens
            SET revoked_at = now()
-         WHERE id = $1 AND revoked_at IS NULL
+         WHERE id = $1 AND revoked_at IS NULL AND account_id = $2
         RETURNING *
         """,
         token_id,
+        account_id,
     )
     if row is not None:
         return _row_to_runtime_token(row)
-    existing = await conn.fetchrow("SELECT * FROM runtime_tokens WHERE id = $1", token_id)
+    existing = await conn.fetchrow(
+        "SELECT * FROM runtime_tokens WHERE id = $1 AND account_id = $2",
+        token_id,
+        account_id,
+    )
     if existing is None:
         raise NotFoundError(
             f"runtime_token {token_id} not found",
@@ -4726,24 +5157,28 @@ async def revoke_runtime_token(conn: asyncpg.Connection[Any], token_id: str) -> 
 
 
 async def resolve_runtime_token(
-    conn: asyncpg.Connection[Any], token_hash: str
-) -> tuple[str, str] | None:
+    conn: asyncpg.Connection[Any],
+    token_hash: str,
+) -> tuple[str, str, str] | None:
     """Look up an unrevoked token by hash; touch ``last_used_at`` in one round-trip.
 
-    Returns ``(token_id, connector)`` on hit, ``None`` on miss/revoked.
+    Returns ``(token_id, connector, account_id)`` on hit, ``None`` on miss/revoked.
+    The token hash is globally unique (one row owns the secret), so the lookup
+    does not filter by account; account_id is read off the matched row and
+    becomes the authenticated scope for the request.
     """
     row = await conn.fetchrow(
         """
         UPDATE runtime_tokens
            SET last_used_at = now()
          WHERE token_hash = $1 AND revoked_at IS NULL
-        RETURNING id, connector
+        RETURNING id, connector, account_id
         """,
         token_hash,
     )
     if row is None:
         return None
-    return (row["id"], row["connector"])
+    return (row["id"], row["connector"], row["account_id"])
 
 
 # ─── files ───────────────────────────────────────────────────────────────────
@@ -4766,6 +5201,7 @@ def _row_to_file(row: asyncpg.Record) -> File:
 async def insert_file(
     conn: asyncpg.Connection[Any],
     *,
+    account_id: str,
     file_id: str,
     session_id: str,
     filename: str,
@@ -4786,9 +5222,9 @@ async def insert_file(
             """
             INSERT INTO files (
                 id, session_id, filename, host_path, in_sandbox_path,
-                size, content_type, sha256
+                size, content_type, sha256, account_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING *
             """,
             file_id,
@@ -4799,6 +5235,7 @@ async def insert_file(
             size,
             content_type,
             sha256,
+            account_id,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -4807,3 +5244,325 @@ async def insert_file(
         ) from exc
     assert row is not None
     return _row_to_file(row)
+
+
+# ─── accounts + account_keys ─────────────────────────────────────────────────
+
+
+def _row_to_account(row: asyncpg.Record) -> Account:
+    raw_metadata = row["metadata"]
+    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    return Account(
+        id=row["id"],
+        parent_account_id=row["parent_account_id"],
+        can_mint_children=row["can_mint_children"],
+        display_name=row["display_name"],
+        metadata=metadata,
+        created_at=row["created_at"],
+        archived_at=row["archived_at"],
+    )
+
+
+async def has_active_root_account(conn: asyncpg.Connection[Any]) -> bool:
+    """Whether a non-archived root account exists.
+
+    The bootstrap endpoint gates on this — once a root exists, the
+    endpoint is 404 regardless of the bootstrap token. The
+    ``accounts_one_active_root`` partial unique index enforces the
+    "at most one active root" invariant at the DB level too.
+    """
+    row = await conn.fetchrow(
+        "SELECT 1 FROM accounts WHERE parent_account_id IS NULL AND archived_at IS NULL LIMIT 1"
+    )
+    return row is not None
+
+
+async def bootstrap_root_account(
+    conn: asyncpg.Connection[Any],
+    *,
+    display_name: str,
+    key_hash: bytes,
+    key_label: str,
+) -> tuple[Account, str]:
+    """Atomically create the root account and its first API key.
+
+    Returns ``(account, key_id)``. The plaintext key isn't stored —
+    caller is responsible for returning it to the operator exactly once.
+
+    Raises :class:`NotFoundError` if a root already exists at INSERT
+    time (the ``accounts_one_active_root`` partial unique index fires).
+    Mapping to ``NotFoundError`` rather than ``ConflictError`` preserves
+    the bootstrap endpoint's "404 if root exists" invariant under
+    concurrent bootstrap attempts — the loser of the race sees the same
+    404 as a caller arriving after the winner committed.
+    """
+    account_id = make_id(ACCOUNT)
+    key_id = make_id(ACCOUNT_KEY)
+    async with conn.transaction():
+        try:
+            account_row = await conn.fetchrow(
+                """
+                INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
+                VALUES ($1, NULL, TRUE, $2)
+                RETURNING *
+                """,
+                account_id,
+                display_name,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise NotFoundError(
+                "bootstrap endpoint closed: root account already exists",
+                detail={"display_name": display_name},
+            ) from exc
+        assert account_row is not None
+        await conn.execute(
+            """
+            INSERT INTO account_keys (key_id, account_id, hash, label)
+            VALUES ($1, $2, $3, $4)
+            """,
+            key_id,
+            account_id,
+            key_hash,
+            key_label,
+        )
+    return _row_to_account(account_row), key_id
+
+
+async def lookup_account_by_key_hash(
+    conn: asyncpg.Connection[Any],
+    *,
+    key_hash: bytes,
+) -> tuple[Account, str] | None:
+    """Resolve a bearer-key sha256 hash to its account and key_id.
+
+    Returns ``(account, key_id)`` if the hash matches an active key
+    on an active account; ``None`` otherwise. Filters out revoked
+    keys and archived accounts so the auth path never accepts them.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT
+            accounts.*,
+            account_keys.key_id AS _key_id
+        FROM account_keys
+        JOIN accounts ON accounts.id = account_keys.account_id
+        WHERE account_keys.hash = $1
+          AND account_keys.revoked_at IS NULL
+          AND accounts.archived_at IS NULL
+        """,
+        key_hash,
+    )
+    if row is None:
+        return None
+    return _row_to_account(row), row["_key_id"]
+
+
+# ─── unscoped account_id bootstrap ────────────────────────────────────────────
+# After PR 4, every other query in this module filters by account_id. But the
+# worker side needs to know account_id BEFORE it can call those queries — it
+# starts with only a session_id. This helper is the bootstrap: it looks up
+# sessions.account_id without filtering on account_id, so the worker can
+# discover the account context for a session.
+
+
+async def unscoped_get_session_account_id(conn: asyncpg.Connection[Any], session_id: str) -> str:
+    row = await conn.fetchrow("SELECT account_id FROM sessions WHERE id = $1", session_id)
+    if row is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"session_id": session_id})
+    return cast("str", row["account_id"])
+
+
+# ─── account management (#367 PR 7) ───────────────────────────────────────────
+
+
+async def get_account(conn: asyncpg.Connection[Any], account_id: str) -> Account | None:
+    """Look up an account by id, including archived rows. ``None`` on miss.
+
+    Caller is responsible for any authorization scoping (e.g. "is this the
+    caller's account or a descendant?"). This query is intentionally unscoped
+    so the management plane can serve both self-reads and child-reads from
+    one helper.
+    """
+    row = await conn.fetchrow("SELECT * FROM accounts WHERE id = $1", account_id)
+    return _row_to_account(row) if row is not None else None
+
+
+async def list_child_accounts(
+    conn: asyncpg.Connection[Any], parent_account_id: str
+) -> list[Account]:
+    """Return non-archived direct children of ``parent_account_id``."""
+    rows = await conn.fetch(
+        """
+        SELECT * FROM accounts
+         WHERE parent_account_id = $1
+           AND archived_at IS NULL
+         ORDER BY id DESC
+        """,
+        parent_account_id,
+    )
+    return [_row_to_account(r) for r in rows]
+
+
+async def insert_child_account(
+    conn: asyncpg.Connection[Any],
+    *,
+    parent_account_id: str,
+    display_name: str,
+    can_mint_children: bool,
+    key_hash: bytes,
+    key_label: str,
+) -> tuple[Account, str]:
+    """Atomically create a child account and its first API key.
+
+    Returns ``(account, key_id)``. The plaintext key is the caller's
+    responsibility — this helper sees only the hash.
+    """
+    account_id = make_id(ACCOUNT)
+    key_id = make_id(ACCOUNT_KEY)
+    async with conn.transaction():
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO accounts
+                    (id, parent_account_id, can_mint_children, display_name)
+                VALUES ($1, $2, $3, $4)
+                RETURNING *
+                """,
+                account_id,
+                parent_account_id,
+                can_mint_children,
+                display_name,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            # ``accounts_sibling_unique_display_name`` collision.
+            raise ConflictError(
+                f"display_name {display_name!r} is already in use under this parent",
+                detail={"display_name": display_name, "parent_account_id": parent_account_id},
+            ) from exc
+        assert row is not None
+        await conn.execute(
+            """
+            INSERT INTO account_keys (key_id, account_id, hash, label)
+            VALUES ($1, $2, $3, $4)
+            """,
+            key_id,
+            account_id,
+            key_hash,
+            key_label,
+        )
+    return _row_to_account(row), key_id
+
+
+async def insert_account_key(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    key_hash: bytes,
+    label: str,
+) -> str:
+    """Mint an additional API key on an existing account.
+
+    Returns the new ``key_id``. The plaintext key is the caller's
+    responsibility — this helper sees only the hash.
+    """
+    key_id = make_id(ACCOUNT_KEY)
+    await conn.execute(
+        """
+        INSERT INTO account_keys (key_id, account_id, hash, label)
+        VALUES ($1, $2, $3, $4)
+        """,
+        key_id,
+        account_id,
+        key_hash,
+        label,
+    )
+    return key_id
+
+
+async def list_account_keys(conn: asyncpg.Connection[Any], account_id: str) -> list[dict[str, Any]]:
+    """Return ``[{key_id, label, created_at, revoked_at}, ...]`` for the account.
+
+    Excludes the ``hash`` column on purpose — operators never need to read it
+    back, and surfacing it widens the audit footprint. Revoked keys are
+    included with their ``revoked_at`` populated so operators can see the
+    full history.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT key_id, label, created_at, revoked_at
+          FROM account_keys
+         WHERE account_id = $1
+         ORDER BY created_at DESC
+        """,
+        account_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def revoke_account_key(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    key_id: str,
+) -> bool:
+    """Revoke an API key by setting ``revoked_at = now()``.
+
+    Returns ``True`` iff a previously-unrevoked key was just revoked.
+    Returns ``False`` if the key was already revoked OR doesn't exist
+    on this account — the caller decides how to translate that.
+    """
+    result = await conn.execute(
+        """
+        UPDATE account_keys
+           SET revoked_at = now()
+         WHERE key_id = $1
+           AND account_id = $2
+           AND revoked_at IS NULL
+        """,
+        key_id,
+        account_id,
+    )
+    return bool(result.endswith(" 1"))
+
+
+async def archive_account(conn: asyncpg.Connection[Any], account_id: str) -> Account | None:
+    """Soft-archive an account by stamping ``archived_at``.
+
+    Idempotent: returns the already-archived account unchanged when called
+    twice. Returns ``None`` if the account doesn't exist at all so callers
+    can map to 404. Does NOT cascade to children — the resource-table FKs
+    use ``ON DELETE RESTRICT``, so a populated account can't be deleted at
+    the DB level; the service layer should refuse archive when active
+    children or resources exist.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE accounts
+           SET archived_at = now()
+         WHERE id = $1 AND archived_at IS NULL
+        RETURNING *
+        """,
+        account_id,
+    )
+    if row is not None:
+        return _row_to_account(row)
+    # Already archived or missing — distinguish by re-reading.
+    existing = await conn.fetchrow("SELECT * FROM accounts WHERE id = $1", account_id)
+    return _row_to_account(existing) if existing is not None else None
+
+
+async def count_active_child_accounts(conn: asyncpg.Connection[Any], parent_account_id: str) -> int:
+    """Number of non-archived direct children of ``parent_account_id``.
+
+    Used by ``archive_account`` callers to refuse archive when descendants
+    still exist (FK RESTRICT would surface as a 500 otherwise).
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT COUNT(*) AS cnt FROM accounts
+         WHERE parent_account_id = $1 AND archived_at IS NULL
+        """,
+        parent_account_id,
+    )
+    assert row is not None
+    return cast("int", row["cnt"])

@@ -245,6 +245,7 @@ class Harness:
         that config (e.g. for networking tests). When omitted, a shared
         default environment is reused across calls.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.ids import make_id
 
         if environment_config is not None:
@@ -252,12 +253,13 @@ class Harness:
                 self._pool,
                 name=f"test-env-{make_id('env')[-8:]}",
                 config=environment_config,
+                account_id=account_id,
             )
             env_id = env.id
         else:
             if self._env_id is None:
                 env = await environments_service.create_environment(
-                    self._pool, name=f"test-env-{make_id('env')[-8:]}"
+                    self._pool, name=f"test-env-{make_id('env')[-8:]}", account_id=account_id
                 )
                 self._env_id = env.id
             env_id = self._env_id
@@ -278,6 +280,7 @@ class Harness:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
         session = await sessions_service.create_session(
             self._pool,
@@ -285,13 +288,19 @@ class Harness:
             environment_id=env_id,
             title="e2e-test",
             metadata={},
+            account_id=account_id,
         )
-        await sessions_service.append_user_message(self._pool, session.id, message)
-        return await sessions_service.get_session(self._pool, session.id)
+        await sessions_service.append_user_message(
+            self._pool, session.id, message, account_id=account_id
+        )
+        return await sessions_service.get_session(self._pool, session.id, account_id=account_id)
 
     async def inject_message(self, session_id: str, content: str) -> None:
         """Append a user message mid-turn."""
-        await sessions_service.append_user_message(self._pool, session_id, content)
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        await sessions_service.append_user_message(
+            self._pool, session_id, content, account_id=account_id
+        )
 
     async def confirm_tool(
         self,
@@ -301,14 +310,18 @@ class Harness:
         deny_message: str | None = None,
     ) -> None:
         """Submit a tool confirmation (allow or deny) and wake the session."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         if result == "allow":
-            await sessions_service.confirm_tool_allow(self._pool, session_id, tool_call_id)
+            await sessions_service.confirm_tool_allow(
+                self._pool, session_id, tool_call_id, account_id=account_id
+            )
         else:
             await sessions_service.confirm_tool_deny(
                 self._pool,
                 session_id,
                 tool_call_id,
                 deny_message or "Denied.",
+                account_id=account_id,
             )
 
     # ── step execution ───────────────────────────────────────────────────
@@ -383,15 +396,22 @@ class Harness:
 
     async def events(self, session_id: str) -> list[Event]:
         """Read all message events for the session."""
-        return await sessions_service.read_message_events(self._pool, session_id)
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        return await sessions_service.read_message_events(
+            self._pool, session_id, account_id=account_id
+        )
 
     async def all_events(self, session_id: str) -> list[Event]:
         """Read all events (all kinds) for the session."""
-        return await sessions_service.read_events(self._pool, session_id, limit=500)
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        return await sessions_service.read_events(
+            self._pool, session_id, limit=500, account_id=account_id
+        )
 
     async def session(self, session_id: str) -> Session:
         """Fetch the current session record."""
-        return await sessions_service.get_session(self._pool, session_id)
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        return await sessions_service.get_session(self._pool, session_id, account_id=account_id)
 
     # ── internal ─────────────────────────────────────────────────────────
 

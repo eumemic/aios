@@ -167,7 +167,7 @@ class TestReadEventsErrorOnlyFilter:
         conn = MagicMock()
         conn.fetch = AsyncMock(return_value=[])
 
-        await read_events(conn, "sess_x", error_only=True)
+        await read_events(conn, "sess_x", error_only=True, account_id="acc_test_stub")
 
         query = conn.fetch.call_args[0][0]
         assert "is_error IS TRUE" in query
@@ -178,7 +178,7 @@ class TestReadEventsErrorOnlyFilter:
         conn = MagicMock()
         conn.fetch = AsyncMock(return_value=[])
 
-        await read_events(conn, "sess_x", error_only=False)
+        await read_events(conn, "sess_x", error_only=False, account_id="acc_test_stub")
 
         query = conn.fetch.call_args[0][0]
         assert "is_error IS TRUE" not in query
@@ -189,7 +189,7 @@ class TestReadEventsErrorOnlyFilter:
         conn = MagicMock()
         conn.fetch = AsyncMock(return_value=[])
 
-        await read_events(conn, "sess_x", kind="span", error_only=True)
+        await read_events(conn, "sess_x", kind="span", error_only=True, account_id="acc_test_stub")
 
         query = conn.fetch.call_args[0][0]
         assert "kind" in query

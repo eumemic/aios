@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import AsyncIterator
 from typing import Any
+from unittest import mock
 
 import httpx
 
@@ -54,6 +56,33 @@ async def issue_runtime_token(api_key: str, base_url: str, connector: str) -> st
         r = await c.post("/v1/runtime-tokens", json={"connector": connector})
         r.raise_for_status()
         return str(r.json()["plaintext"])
+
+
+@contextlib.asynccontextmanager
+async def asgi_client(pool: Any) -> AsyncIterator[httpx.AsyncClient]:
+    """In-process ``httpx.AsyncClient`` wired to a fresh FastAPI app.
+
+    The app's pool / crypto_box / db_url are populated from settings
+    (which the caller's ``aios_env*`` fixture has already mocked); the
+    procrastinate handle is a mock since e2e auth tests don't run jobs.
+    Shared by tests that build the app themselves rather than going
+    through a running uvicorn — see ``tests/e2e/test_account_auth.py``
+    and ``tests/e2e/test_accounts_bootstrap.py``.
+    """
+    from aios.api.app import create_app
+    from aios.config import get_settings
+    from aios.crypto.vault import CryptoBox
+
+    settings = get_settings()
+    app = create_app()
+    app.state.pool = pool
+    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
+    app.state.db_url = settings.db_url
+    app.state.procrastinate = mock.MagicMock()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(base_url="http://testserver", transport=transport) as client:
+        yield client
 
 
 async def wait_for_health(url: str, *, deadline_s: float = 5.0) -> None:

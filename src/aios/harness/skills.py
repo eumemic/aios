@@ -20,20 +20,22 @@ model inference call.
 from __future__ import annotations
 
 from aios.db import queries
+from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.skills import SkillVersion
 from aios.sandbox.volumes import ensure_workspace_path
+from aios.services import sessions as sessions_service
 
 log = get_logger("aios.harness.skills")
 
 
 async def _load_workspace_path(session_id: str) -> str:
     """Load the workspace volume path for a session from the DB."""
-    from aios.harness import runtime
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
-        return await queries.get_session_workspace_path(conn, session_id)
+        return await queries.get_session_workspace_path(conn, session_id, account_id=account_id)
 
 
 # ── system prompt augmentation ─────────────────────────────────────────────

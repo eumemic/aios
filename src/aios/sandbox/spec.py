@@ -29,6 +29,7 @@ from pathlib import Path
 
 from aios.config import get_settings
 from aios.db import queries
+from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.models.github_repositories import GithubRepositoryResourceEcho
@@ -51,6 +52,7 @@ from aios.sandbox.github_clone import (
     ensure_session_working_tree,
 )
 from aios.sandbox.setup import WORKSPACE_RUNTIME_ENV
+from aios.services import sessions as sessions_service
 
 log = get_logger("aios.sandbox.spec")
 
@@ -104,30 +106,34 @@ def mount_snapshot_from_echoes(
     return frozenset(items)
 
 
-async def _load_environment_config(session_id: str) -> EnvironmentConfig | None:
+async def _load_environment_config(session_id: str, *, account_id: str) -> EnvironmentConfig | None:
     """Load the environment config for a session from the DB.
 
     Returns ``None`` if the session or environment doesn't exist (shouldn't
     happen in normal flow, but callers handle it gracefully).
     """
-    from aios.harness import runtime
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
-        return await queries.get_environment_config_for_session(conn, session_id)
+        return await queries.get_environment_config_for_session(
+            conn, session_id, account_id=account_id
+        )
 
 
-async def _load_session_provisioning(session_id: str) -> tuple[str, dict[str, str]]:
+async def _load_session_provisioning(
+    session_id: str, *, account_id: str
+) -> tuple[str, dict[str, str]]:
     """Load workspace path and env from the session row in one query."""
-    from aios.harness import runtime
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
-        return await queries.get_session_provisioning(conn, session_id)
+        return await queries.get_session_provisioning(conn, session_id, account_id=account_id)
 
 
 async def _materialize_memory_mounts(
     session_id: str,
+    *,
+    account_id: str,
 ) -> list[MemoryStoreResourceEcho]:
     """Materialize each attached memory store and return the echo list.
 
@@ -136,12 +142,13 @@ async def _materialize_memory_mounts(
     the unit-test mocking surface tight — tests mock this single
     function and don't need a live pool.
     """
-    from aios.harness import runtime
     from aios.sandbox.memory_mounts import materialize_store_to_host
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
-        echoes = await queries.list_session_memory_store_echoes(conn, session_id)
+        echoes = await queries.list_session_memory_store_echoes(
+            conn, session_id, account_id=account_id
+        )
         for echo in echoes:
             await materialize_store_to_host(conn, store_id=echo.memory_store_id)
     return list(echoes)
@@ -149,6 +156,8 @@ async def _materialize_memory_mounts(
 
 async def _materialize_github_clones(
     session_id: str,
+    *,
+    account_id: str,
 ) -> tuple[list[GithubRepositoryResourceEcho], GitProxy | None]:
     """Decrypt tokens, start a per-session :class:`GitProxy`, then run
     the host-side clone for each attached github_repository — rewriting
@@ -163,7 +172,6 @@ async def _materialize_github_clones(
     working tree won't be bind-mounted). The proxy stays alive for
     sibling repos.
     """
-    from aios.harness import runtime
     from aios.sandbox.git_proxy import repo_key
     from aios.services import github_repositories as github_repo_service
 
@@ -173,14 +181,16 @@ async def _materialize_github_clones(
     # Load echoes and decrypt all tokens up front so the proxy can be
     # initialized with the full token map before any clone runs.
     async with pool.acquire() as conn:
-        echoes = await queries.list_session_github_repo_echoes(conn, session_id)
+        echoes = await queries.list_session_github_repo_echoes(
+            conn, session_id, account_id=account_id
+        )
         if not echoes:
             return [], None
         echo_tokens: list[tuple[GithubRepositoryResourceEcho, str]] = []
         repos_map: dict[str, str] = {}
         for echo in echoes:
             token = await github_repo_service.get_session_token(
-                conn, crypto_box, session_id, echo.id
+                conn, crypto_box, session_id, echo.id, account_id=account_id
             )
             echo_tokens.append((echo, token))
             repos_map[repo_key(echo.url)] = token
@@ -211,8 +221,6 @@ async def _materialize_github_clones(
     # Log + append failure events outside the conn block so we don't
     # hold one connection while acquiring a second from the same pool.
     if failures:
-        from aios.services import sessions as sessions_service
-
         for failed_echo, failure in failures:
             log.warning(
                 "sandbox.github_clone_failed",
@@ -231,6 +239,7 @@ async def _materialize_github_clones(
                     "repo_url": failed_echo.url,
                     "message": str(failure),
                 },
+                account_id=account_id,
             )
     return materialized, proxy
 
@@ -263,11 +272,12 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     from aios.sandbox.volumes import ensure_workspace_path
 
     settings = get_settings()
-    raw_path, session_env = await _load_session_provisioning(session_id)
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
+    raw_path, session_env = await _load_session_provisioning(session_id, account_id=account_id)
     workspace_path = ensure_workspace_path(raw_path)
-    env_config = await _load_environment_config(session_id)
-    memory_echoes = await _materialize_memory_mounts(session_id)
-    github_echoes, git_proxy = await _materialize_github_clones(session_id)
+    env_config = await _load_environment_config(session_id, account_id=account_id)
+    memory_echoes = await _materialize_memory_mounts(session_id, account_id=account_id)
+    github_echoes, git_proxy = await _materialize_github_clones(session_id, account_id=account_id)
 
     mcp_broker = runtime.require_mcp_broker()
     mcp_broker_secret = secrets.token_urlsafe(32)
@@ -388,6 +398,7 @@ def _assemble_plan(
     }
 
     snapshot = mount_snapshot_from_echoes(memory_echoes, github_echoes)
+    settings = get_settings()
     spec = SandboxSpec(
         session_id=session_id,
         instance_id=instance_id,
@@ -402,6 +413,13 @@ def _assemble_plan(
         host_gateway_alias=PROXY_HOST_ALIAS,
         image=image,
         mount_snapshot=snapshot,
+        # Resource caps come from deployment-wide settings (multi-tenancy
+        # hardening — #367 PR 9). A future revision will let an account
+        # override these via the management API; the spec-layer plumbing
+        # is what makes that override-point cheap to add.
+        cpu_quota=settings.sandbox_cpu_quota,
+        memory_bytes=settings.sandbox_memory_bytes,
+        pids_limit=settings.sandbox_pids_limit,
     )
 
     return ProvisioningPlan(

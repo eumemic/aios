@@ -28,7 +28,10 @@ async def create(body: VaultCreate, pool: PoolDep, _auth: AuthDep) -> Vault:
 
     Credentials are added separately via ``create_vault_credential``.
     """
-    return await service.create_vault(pool, display_name=body.display_name, metadata=body.metadata)
+    account_id, _, _ = _auth
+    return await service.create_vault(
+        pool, display_name=body.display_name, metadata=body.metadata, account_id=account_id
+    )
 
 
 @router.get("", operation_id="list_vaults")
@@ -43,7 +46,8 @@ async def list_(
     Cursor pagination: pass ``after`` from a previous response's
     ``next_after`` to get the next page.
     """
-    items = await service.list_vaults(pool, limit=limit, after=after)
+    account_id, _, _ = _auth
+    items = await service.list_vaults(pool, limit=limit, after=after, account_id=account_id)
     return ListResponse[Vault](
         data=items,
         has_more=len(items) == limit,
@@ -54,7 +58,8 @@ async def list_(
 @router.get("/{vault_id}", operation_id="get_vault")
 async def get(vault_id: str, pool: PoolDep, _auth: AuthDep) -> Vault:
     """Fetch one vault by id."""
-    return await service.get_vault(pool, vault_id)
+    account_id, _, _ = _auth
+    return await service.get_vault(pool, vault_id, account_id=account_id)
 
 
 @router.put("/{vault_id}", operation_id="update_vault")
@@ -63,8 +68,13 @@ async def update(vault_id: str, body: VaultUpdate, pool: PoolDep, _auth: AuthDep
 
     Omitted fields are preserved.
     """
+    account_id, _, _ = _auth
     return await service.update_vault(
-        pool, vault_id, display_name=body.display_name, metadata=body.metadata
+        pool,
+        vault_id,
+        display_name=body.display_name,
+        metadata=body.metadata,
+        account_id=account_id,
     )
 
 
@@ -84,7 +94,8 @@ async def archive(vault_id: str, pool: PoolDep, _auth: AuthDep) -> Vault:
 
     Use ``delete_vault`` instead if you want to remove the rows entirely.
     """
-    return await service.archive_vault(pool, vault_id)
+    account_id, _, _ = _auth
+    return await service.archive_vault(pool, vault_id, account_id=account_id)
 
 
 @router.delete("/{vault_id}", operation_id="delete_vault", status_code=status.HTTP_204_NO_CONTENT)
@@ -95,7 +106,8 @@ async def delete(vault_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     and leaves no audit trail. Prefer archive unless you specifically need
     the rows gone.
     """
-    await service.delete_vault(pool, vault_id)
+    account_id, _, _ = _auth
+    await service.delete_vault(pool, vault_id, account_id=account_id)
 
 
 # ── Vault credential endpoints ──────────────────────────────────────────────
@@ -122,7 +134,10 @@ async def create_credential(
     a credential, archive the existing one and create a new credential at
     the new URL.
     """
-    return await service.create_vault_credential(pool, crypto_box, vault_id=vault_id, body=body)
+    account_id, _, _ = _auth
+    return await service.create_vault_credential(
+        pool, crypto_box, vault_id=vault_id, body=body, account_id=account_id
+    )
 
 
 @router.get("/{vault_id}/credentials", operation_id="list_vault_credentials")
@@ -138,7 +153,10 @@ async def list_credentials(
     Cursor pagination via ``after``. Secret material is never returned —
     only metadata (display name, mcp_server_url, auth_type, timestamps).
     """
-    items = await service.list_vault_credentials(pool, vault_id, limit=limit, after=after)
+    account_id, _, _ = _auth
+    items = await service.list_vault_credentials(
+        pool, vault_id, limit=limit, after=after, account_id=account_id
+    )
     return ListResponse[VaultCredential](
         data=items,
         has_more=len(items) == limit,
@@ -155,7 +173,8 @@ async def get_credential(
     Internal MCP clients resolve the secret directly through the service
     layer (with OAuth refresh as needed); the HTTP API never exposes it.
     """
-    return await service.get_vault_credential(pool, vault_id, credential_id)
+    account_id, _, _ = _auth
+    return await service.get_vault_credential(pool, vault_id, credential_id, account_id=account_id)
 
 
 @router.put("/{vault_id}/credentials/{credential_id}", operation_id="update_vault_credential")
@@ -175,8 +194,14 @@ async def update_credential(
     only the new ``refresh_token`` (and optional ``access_token`` /
     ``expires_at``); other auth fields stay intact.
     """
+    account_id, _, _ = _auth
     return await service.update_vault_credential(
-        pool, crypto_box, vault_id=vault_id, credential_id=credential_id, body=body
+        pool,
+        crypto_box,
+        vault_id=vault_id,
+        credential_id=credential_id,
+        body=body,
+        account_id=account_id,
     )
 
 
@@ -194,7 +219,10 @@ async def archive_credential(
     encrypted blob is scrubbed at archive time so a future DB dump cannot
     leak the secret. Use ``delete_vault_credential`` for full removal.
     """
-    return await service.archive_vault_credential(pool, vault_id, credential_id)
+    account_id, _, _ = _auth
+    return await service.archive_vault_credential(
+        pool, vault_id, credential_id, account_id=account_id
+    )
 
 
 @router.delete(
@@ -211,4 +239,5 @@ async def delete_credential(
     leaves no audit trail. Prefer archive unless you specifically need the
     row gone.
     """
-    await service.delete_vault_credential(pool, vault_id, credential_id)
+    account_id, _, _ = _auth
+    await service.delete_vault_credential(pool, vault_id, credential_id, account_id=account_id)

@@ -52,15 +52,15 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
         # Dependencies for the session FK chain.
         await conn.execute(
             """
-            INSERT INTO agents (id, name, model)
-            VALUES ('agt_perf', 'perf', 'openrouter/x')
+            INSERT INTO agents (id, name, model, account_id)
+            VALUES ('agt_perf', 'perf', 'openrouter/x', 'acc_test_stub')
             ON CONFLICT (id) DO NOTHING
             """
         )
         await conn.execute(
             """
-            INSERT INTO environments (id, name)
-            VALUES ('env_perf', 'env_perf')
+            INSERT INTO environments (id, name, account_id)
+            VALUES ('env_perf', 'env_perf', 'acc_test_stub')
             ON CONFLICT (id) DO NOTHING
             """
         )
@@ -68,8 +68,8 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
         for sid in session_ids:
             await conn.execute(
                 """
-                INSERT INTO sessions (id, agent_id, environment_id, status, workspace_volume_path)
-                VALUES ($1, 'agt_perf', 'env_perf', 'idle', '/tmp/ws_' || $1)
+                INSERT INTO sessions (id, agent_id, environment_id, status, workspace_volume_path, account_id)
+                VALUES ($1, 'agt_perf', 'env_perf', 'idle', '/tmp/ws_' || $1, 'acc_test_stub')
                 ON CONFLICT (id) DO NOTHING
                 """,
                 sid,
@@ -124,8 +124,8 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
                 )
                 seq += 1
             await conn.executemany(
-                "INSERT INTO events (id, session_id, seq, kind, data, role) "
-                "VALUES ($1, $2, $3, $4, $5::jsonb, $6) "
+                "INSERT INTO events (id, session_id, seq, kind, data, role, account_id) "
+                "VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'acc_test_stub') "
                 "ON CONFLICT (id) DO NOTHING",
                 rows,
             )

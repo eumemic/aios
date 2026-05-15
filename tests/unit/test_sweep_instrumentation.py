@@ -54,7 +54,7 @@ class TestTailSweepSpan:
             ),
             patch("aios.harness.sweep.wake_sessions_needing_inference", wake_mock),
         ):
-            await _trigger_sweep(MagicMock(), "sess_x", MagicMock())
+            await _trigger_sweep(MagicMock(), "sess_x", MagicMock(), account_id="acc_test_stub")
 
         sweep_events = _sweep_events(append_event)
         assert [e["event"] for e in sweep_events] == ["sweep_start", "sweep_end"]
@@ -83,7 +83,7 @@ class TestTailSweepSpan:
             ),
             patch("aios.harness.sweep.wake_sessions_needing_inference", wake_mock),
         ):
-            await _trigger_sweep(MagicMock(), "sess_x", bound_log)
+            await _trigger_sweep(MagicMock(), "sess_x", bound_log, account_id="acc_test_stub")
 
         sweep_events = _sweep_events(append_event)
         assert [e["event"] for e in sweep_events] == ["sweep_start", "sweep_end"]

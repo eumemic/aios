@@ -67,7 +67,7 @@ def _retry_delay_for_attempt(attempt: int) -> float | None:
 
 
 async def refresh_session_mount_state(
-    pool: asyncpg.Pool[Any], session_id: str
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
 ) -> list[MemoryStoreResourceEcho]:
     """Refresh the cached resource echoes and the sandbox drift check.
 
@@ -78,8 +78,12 @@ async def refresh_session_mount_state(
     from aios.db import queries
 
     async with pool.acquire() as conn:
-        memory_echoes = await queries.list_session_memory_store_echoes(conn, session_id)
-        github_echoes = await queries.list_session_github_repo_echoes(conn, session_id)
+        memory_echoes = await queries.list_session_memory_store_echoes(
+            conn, session_id, account_id=account_id
+        )
+        github_echoes = await queries.list_session_github_repo_echoes(
+            conn, session_id, account_id=account_id
+        )
     runtime.set_session_memory_mounts(session_id, memory_echoes)
     if runtime.sandbox_registry is not None:
         await runtime.sandbox_registry.release_if_mounts_changed(
@@ -105,6 +109,7 @@ async def run_session_step(
     appended before the sweep guard so the model has something to
     react to on this step.
     """
+    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     pool = runtime.require_pool()
     task_registry = runtime.require_task_registry()
 
@@ -118,6 +123,7 @@ async def run_session_step(
         session_id,
         "span",
         {"event": "step_start", "cause": cause},
+        account_id=account_id,
     )
     current_task = asyncio.current_task()
     assert current_task is not None
@@ -127,7 +133,12 @@ async def run_session_step(
         try:
             retry_delay = await asyncio.wait_for(
                 _run_session_step_body(
-                    pool, task_registry, session_id, cause=cause, wake_reason=wake_reason
+                    pool,
+                    task_registry,
+                    session_id,
+                    cause=cause,
+                    wake_reason=wake_reason,
+                    account_id=account_id,
                 ),
                 timeout=_JOB_TIMEOUT_S,
             )
@@ -148,6 +159,7 @@ async def run_session_step(
                 session_id,
                 "span",
                 {"event": "harness_error", "is_error": True},
+                account_id=account_id,
             )
             retry_delay = await _apply_retry_or_failure(pool, session_id)
             if retry_delay is None:
@@ -159,6 +171,7 @@ async def run_session_step(
             session_id,
             "span",
             {"event": "step_end", "step_start_id": step_start.id},
+            account_id=account_id,
         )
 
     # Fire retry deferral AFTER ``step_end`` so its ``wake_deferred`` lands
@@ -168,7 +181,9 @@ async def run_session_step(
     # step's queue-latency calculation — the one path where delay is
     # a known quantity (the retry backoff).
     if retry_delay is not None:
-        await defer_wake(pool, session_id, cause="reschedule", delay_seconds=retry_delay)
+        await defer_wake(
+            pool, session_id, cause="reschedule", delay_seconds=retry_delay, account_id=account_id
+        )
 
 
 async def _run_session_step_body(
@@ -178,6 +193,7 @@ async def _run_session_step_body(
     *,
     cause: str,
     wake_reason: str | None,
+    account_id: str,
 ) -> float | None:
     """Returns the retry backoff delay when the model errored and the
     outer function should defer a ``cause="reschedule"`` wake after
@@ -193,6 +209,7 @@ async def _run_session_step_body(
                 "role": "user",
                 "content": f"[Your scheduled wake fired. Reason: {wake_reason}]",
             },
+            account_id=account_id,
         )
 
     # Sweep-based guard: does this session actually need work?
@@ -208,6 +225,7 @@ async def _run_session_step_body(
         session_id,
         "span",
         {"event": "sweep_start", "site": "entry"},
+        account_id=account_id,
     )
     needs: set[str] = set()
     try:
@@ -223,12 +241,13 @@ async def _run_session_step_body(
                 "repaired_ghosts": 0,
                 "woken_sessions": 1 if session_id in needs else 0,
             },
+            account_id=account_id,
         )
     if session_id not in needs:
         log.debug("step.early_out", session_id=session_id, cause=cause)
         return None
 
-    session = await sessions_service.get_session(pool, session_id)
+    session = await sessions_service.get_session(pool, session_id, account_id=account_id)
 
     from aios.models.agents import Agent, AgentVersion
     from aios.services.channels import list_session_channels
@@ -236,14 +255,18 @@ async def _run_session_step_body(
     agent_task: asyncio.Task[Agent | AgentVersion]
     if session.agent_version is not None:
         agent_task = asyncio.create_task(
-            agents_service.get_agent_version(pool, session.agent_id, session.agent_version)
+            agents_service.get_agent_version(
+                pool, session.agent_id, session.agent_version, account_id=account_id
+            )
         )
     else:
-        agent_task = asyncio.create_task(agents_service.get_agent(pool, session.agent_id))
+        agent_task = asyncio.create_task(
+            agents_service.get_agent(pool, session.agent_id, account_id=account_id)
+        )
     agent, channels, memory_echoes = await asyncio.gather(
         agent_task,
-        list_session_channels(pool, session_id),
-        refresh_session_mount_state(pool, session_id),
+        list_session_channels(pool, session_id, account_id=account_id),
+        refresh_session_mount_state(pool, session_id, account_id=account_id),
     )
 
     mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
@@ -255,6 +278,7 @@ async def _run_session_step_body(
     prelude = await compute_step_prelude(
         pool,
         session_id,
+        account_id=account_id,
         session=session,
         agent=agent,
         channels=channels,
@@ -276,6 +300,7 @@ async def _run_session_step_body(
         window_max=agent.window_max,
         model=agent.model,
         overhead_local=overhead_local,
+        account_id=account_id,
     )
 
     # Check for confirmed-but-undispatched tool calls (always_ask → allow).
@@ -312,6 +337,7 @@ async def _run_session_step_body(
         session_id,
         "span",
         {"event": "context_build_start"},
+        account_id=account_id,
     )
 
     try:
@@ -332,6 +358,7 @@ async def _run_session_step_body(
                 "context_build_start_id": context_build_start.id,
                 "is_error": True,
             },
+            account_id=account_id,
         )
         raise
 
@@ -356,6 +383,7 @@ async def _run_session_step_body(
             "message_count": len(messages),
             "tools_count": len(tools),
         },
+        account_id=account_id,
     )
 
     # Dump the exact chat-completions payload we're about to send to LiteLLM
@@ -364,7 +392,7 @@ async def _run_session_step_body(
     await _dump_context_if_enabled(session_id, agent.model, messages, tools)
 
     # Mark session as running.
-    await sessions_service.set_session_status(pool, session_id, "running")
+    await sessions_service.set_session_status(pool, session_id, "running", account_id=account_id)
 
     # Emit span start so consumers can measure inference latency.
     start_event = await sessions_service.append_event(
@@ -372,6 +400,7 @@ async def _run_session_step_body(
         session_id,
         "span",
         {"event": "model_request_start"},
+        account_id=account_id,
     )
 
     # Call the model exactly once.  Stream deltas via pg_notify only when
@@ -409,6 +438,7 @@ async def _run_session_step_body(
                 "model_usage": {},
                 "cost_usd": None,
             },
+            account_id=account_id,
         )
         return await _apply_retry_or_failure(pool, session_id)
 
@@ -431,6 +461,7 @@ async def _run_session_step_body(
             "local_tokens": local_tokens,
             "model": agent.model,
         },
+        account_id=account_id,
     )
 
     # Increment cumulative session-level token counters.
@@ -441,6 +472,7 @@ async def _run_session_step_body(
         output_tokens=usage.get("output_tokens", 0),
         cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
         cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+        account_id=account_id,
     )
 
     if channels:
@@ -455,7 +487,9 @@ async def _run_session_step_body(
 
     # Append assistant message to the session log (unfenced — procrastinate
     # lock provides mutual exclusion).
-    await sessions_service.append_event(pool, session_id, "message", assistant_msg)
+    await sessions_service.append_event(
+        pool, session_id, "message", assistant_msg, account_id=account_id
+    )
 
     # Check for tool calls — partition into four buckets:
     #   immediate       — built-in with always_allow (execute now)
@@ -537,6 +571,7 @@ async def _run_session_step_body(
                 session_id,
                 "idle",
                 stop_reason=stop_reason,
+                account_id=account_id,
             )
             await _append_lifecycle(pool, session_id, "turn_ended", "idle", "requires_action")
             log.info(
@@ -548,7 +583,7 @@ async def _run_session_step_body(
     else:
         # No tool calls — the model's turn is done.
         await sessions_service.set_session_status(
-            pool, session_id, "idle", stop_reason={"type": "end_turn"}
+            pool, session_id, "idle", stop_reason={"type": "end_turn"}, account_id=account_id
         )
         await _append_lifecycle(pool, session_id, "turn_ended", "idle", "end_turn")
         log.info("step.turn_ended", session_id=session_id, cause=cause)
@@ -733,6 +768,8 @@ async def discover_session_mcp_tools(
     pool: Any,
     session_id: str,
     agent: Any,
+    *,
+    account_id: str,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Discover MCP tools from agent-declared servers, filtered by enabled
     ``mcp_toolset`` entries.
@@ -757,7 +794,9 @@ async def discover_session_mcp_tools(
     crypto_box = runtime.require_crypto_box()
 
     async def _discover_one(name: str, url: str) -> tuple[list[dict[str, Any]], str | None]:
-        headers = await resolve_auth_for_url(pool, crypto_box, session_id, url)
+        headers = await resolve_auth_for_url(
+            pool, crypto_box, session_id, url, account_id=account_id
+        )
         return await discover_mcp_tools(url, name, headers)
 
     results = await asyncio.gather(*[_discover_one(n, u) for n, u in servers])
@@ -782,6 +821,7 @@ async def _dispatch_confirmed_tools(
     Returns the original tool call dicts ready for ``launch_tool_calls``,
     or an empty list if nothing to dispatch.
     """
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     # Find the latest assistant message with tool_calls.
     asst_tool_calls: list[dict[str, Any]] = []
     for e in reversed(message_events):
@@ -810,6 +850,7 @@ async def _dispatch_confirmed_tools(
         kind="lifecycle",
         newest_first=True,
         limit=200,
+        account_id=account_id,
     )
     confirmed: set[str] = set()
     for e in lifecycle_events:
@@ -834,11 +875,16 @@ async def _apply_retry_or_failure(pool: Any, session_id: str) -> float | None:
     state.  Both branches advance the session's lifecycle and status;
     the caller decides whether to also propagate an exception.
     """
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     attempt = await _count_consecutive_rescheduling(pool, session_id)
     delay = _retry_delay_for_attempt(attempt)
     if delay is not None:
         await sessions_service.set_session_status(
-            pool, session_id, "rescheduling", stop_reason={"type": "rescheduling"}
+            pool,
+            session_id,
+            "rescheduling",
+            stop_reason={"type": "rescheduling"},
+            account_id=account_id,
         )
         await _append_lifecycle(pool, session_id, "turn_ended", "rescheduling", "rescheduling")
         return delay
@@ -847,7 +893,7 @@ async def _apply_retry_or_failure(pool: Any, session_id: str) -> float | None:
     # tool task that completes after this point sits unreaped until a
     # user message flips status via ``flip_quiescent_to_pending``.
     await sessions_service.set_session_status(
-        pool, session_id, "errored", stop_reason={"type": "error"}
+        pool, session_id, "errored", stop_reason={"type": "error"}, account_id=account_id
     )
     await _append_lifecycle(pool, session_id, "turn_ended", "errored", "error")
     return None
@@ -855,11 +901,13 @@ async def _apply_retry_or_failure(pool: Any, session_id: str) -> float | None:
 
 async def _handle_step_timeout(pool: Any, session_id: str) -> float | None:
     """Synthesize a reschedulable error state when the job-level cap fires."""
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     await sessions_service.append_event(
         pool,
         session_id,
         "span",
         {"event": "step_timeout", "timeout_seconds": _JOB_TIMEOUT_S, "is_error": True},
+        account_id=account_id,
     )
     return await _apply_retry_or_failure(pool, session_id)
 
@@ -871,6 +919,7 @@ async def _count_consecutive_rescheduling(pool: Any, session_id: str) -> int:
     with ``stop_reason == "rescheduling"`` at the end of the lifecycle
     event sequence. A non-rescheduling event breaks the streak.
     """
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     # Only the tail matters; reading ASC with the default LIMIT would miss the
     # recent streak entirely on a session with >limit lifecycle events.
     lifecycle_events = await sessions_service.read_events(
@@ -879,6 +928,7 @@ async def _count_consecutive_rescheduling(pool: Any, session_id: str) -> int:
         kind="lifecycle",
         newest_first=True,
         limit=len(_RETRY_BACKOFF_SECONDS) + 1,
+        account_id=account_id,
     )
     count = 0
     for e in lifecycle_events:
@@ -897,9 +947,11 @@ async def _append_lifecycle(
     stop_reason: str,
 ) -> None:
     """Append a lifecycle event."""
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
     await sessions_service.append_event(
         pool,
         session_id,
         "lifecycle",
         {"event": event, "status": status, "stop_reason": stop_reason},
+        account_id=account_id,
     )

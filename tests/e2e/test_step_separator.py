@@ -22,6 +22,7 @@ class TestSeparatorAtLiteLLMBoundary:
         table with this view).  An inbound with ``metadata.channel`` set
         gives the session its single bound channel.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sess_svc
 
         harness.script_model([assistant("ok")])
@@ -33,6 +34,7 @@ class TestSeparatorAtLiteLLMBoundary:
             session.id,
             "channel inbound",
             metadata={"channel": "signal/test/1"},
+            account_id=account_id,
         )
         await harness.run_until_idle(session.id)
 

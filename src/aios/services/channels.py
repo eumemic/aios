@@ -14,7 +14,9 @@ import asyncpg
 from aios.db import queries
 
 
-async def list_session_channels(pool: asyncpg.Pool[Any], session_id: str) -> list[str]:
+async def list_session_channels(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> list[str]:
     """Channel addresses the session has interacted with, sorted.
 
     Thin wrapper over :func:`aios.db.queries.list_session_channels`.
@@ -23,4 +25,4 @@ async def list_session_channels(pool: asyncpg.Pool[Any], session_id: str) -> lis
     :mod:`aios.harness.channels`.
     """
     async with pool.acquire() as conn:
-        return await queries.list_session_channels(conn, session_id)
+        return await queries.list_session_channels(conn, session_id, account_id=account_id)

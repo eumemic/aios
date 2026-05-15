@@ -27,7 +27,7 @@ def _clear_vision_overrides() -> Any:
 def _patch_get_model_info(
     monkeypatch: pytest.MonkeyPatch, mapping: dict[str, dict[str, Any]]
 ) -> None:
-    def fake(model: str) -> dict[str, Any]:
+    def fake(model: str, **kwargs: Any) -> dict[str, Any]:
         if model not in mapping:
             raise Exception(f"unknown model: {model}")
         return mapping[model]

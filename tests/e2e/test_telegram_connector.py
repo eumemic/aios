@@ -46,7 +46,7 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
     from aios.db.pool import create_pool
 
     settings = get_settings()
-    pool = await create_pool(settings.db_url, min_size=1, max_size=4)
+    pool = await create_pool(settings.db_url, min_size=1, max_size=8)
     app = create_app()
     app.state.pool = pool
     app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
@@ -98,6 +98,7 @@ async def _create_telegram_connection(
 async def _publish_telegram_tools_schema(harness: Harness) -> None:
     """Stamp ``connectors.tools_schema`` for the telegram type (post-PR-7
     source of truth for what the model sees)."""
+    account_id = "acc_test_stub"  # PR 3 scaffolding
     from aios.db import queries as db_queries
 
     async with harness._pool.acquire() as db_conn:
@@ -116,6 +117,7 @@ async def _publish_telegram_tools_schema(harness: Harness) -> None:
                     },
                 },
             ],
+            account_id=account_id,
         )
 
 
@@ -193,6 +195,7 @@ class TestTelegramMultiConnection:
         """The model calling ``telegram_send`` on session A's tool call
         invokes bot A's ``send_message`` exactly once, and never bot B's.
         """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios_telegram.connector import TelegramConnector
 
         from aios.services import agents as agents_service
@@ -210,13 +213,26 @@ class TestTelegramMultiConnection:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            account_id=account_id,
         )
-        env = await env_svc.create_environment(harness._pool, name=f"env-tg-{id(self)}")
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-tg-{id(self)}", account_id=account_id
+        )
         session_a = await sess_svc.create_session(
-            harness._pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title=None,
+            metadata={},
+            account_id=account_id,
         )
         session_b = await sess_svc.create_session(
-            harness._pool, agent_id=agent.id, environment_id=env.id, title=None, metadata={}
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title=None,
+            metadata={},
+            account_id=account_id,
         )
 
         api_key = aios_env["AIOS_API_KEY"]
@@ -226,8 +242,12 @@ class TestTelegramMultiConnection:
         conn_b = await _create_telegram_connection(
             api_key, live_server, f"botB-{id(self)}", {"bot_token": BOT_TOKEN_B}
         )
-        await connections_service.attach_connection(harness._pool, conn_a, session_id=session_a.id)
-        await connections_service.attach_connection(harness._pool, conn_b, session_id=session_b.id)
+        await connections_service.attach_connection(
+            harness._pool, conn_a, session_id=session_a.id, account_id=account_id
+        )
+        await connections_service.attach_connection(
+            harness._pool, conn_b, session_id=session_b.id, account_id=account_id
+        )
         await _publish_telegram_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "telegram")
 
@@ -252,7 +272,9 @@ class TestTelegramMultiConnection:
                 assistant("done"),
             ]
         )
-        await sess_svc.append_user_message(harness._pool, session_a.id, "ping")
+        await sess_svc.append_user_message(
+            harness._pool, session_a.id, "ping", account_id=account_id
+        )
 
         connector_task = asyncio.create_task(connector.run())
         try:

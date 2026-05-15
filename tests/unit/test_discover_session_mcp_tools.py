@@ -46,6 +46,7 @@ class TestDiscoverSessionMcpTools:
             pool=AsyncMock(),
             session_id="sess_x",
             agent=_agent(),
+            account_id="acc_test_stub",
         )
         assert tools == []
         assert instructions == {}
@@ -81,6 +82,7 @@ class TestDiscoverSessionMcpTools:
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
+                account_id="acc_test_stub",
             )
         names = {t["name"] for t in tools}
         assert names == {"mcp__gh__t"}
@@ -104,7 +106,9 @@ class TestDiscoverSessionMcpTools:
 
         seen_urls: list[str] = []
 
-        async def _fake_resolve(_pool: Any, _cb: Any, _sid: str, url: str) -> dict[str, str]:
+        async def _fake_resolve(
+            _pool: Any, _cb: Any, _sid: str, url: str, **kwargs: Any
+        ) -> dict[str, str]:
             seen_urls.append(url)
             return {"Authorization": f"Bearer token-for-{url}"}
 
@@ -121,6 +125,7 @@ class TestDiscoverSessionMcpTools:
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
+                account_id="acc_test_stub",
             )
         assert sorted(seen_urls) == ["https://mcp.github", "https://mcp.linear"]
         auths = {t["auth"] for t in tools}
@@ -163,6 +168,7 @@ class TestDiscoverSessionMcpTools:
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
+                account_id="acc_test_stub",
             )
         # 'gh' returned None → omitted; 'ln' returned prose → present.
         assert instructions == {"ln": "## linear\n\nbe brief"}
@@ -193,5 +199,6 @@ class TestDiscoverSessionMcpTools:
                 pool=AsyncMock(),
                 session_id="sess_x",
                 agent=agent,
+                account_id="acc_test_stub",
             )
         assert instructions == {}
