@@ -658,6 +658,4 @@ async def post_runtime_management_call_result(
         )
         if not moved:
             return
-        await queries.notify_management_call_result(
-            conn, call_id=body.call_id, account_id=account_id
-        )
+        await queries.notify_management_call_result(conn, call_id=body.call_id)
