@@ -487,7 +487,7 @@ async def update_agent(
                    litellm_extra = $11::jsonb,
                    window_min = $12, window_max = $13,
                    updated_at = now()
-             WHERE id = $1
+             WHERE id = $1 AND account_id = $14
             RETURNING *
             """,
             agent_id,
@@ -503,6 +503,7 @@ async def update_agent(
             extra_json,
             new_wmin,
             new_wmax,
+            account_id,
         )
         assert row is not None
         await conn.execute(
@@ -1092,8 +1093,9 @@ async def clone_session(
 
     async with conn.transaction():
         status = await conn.fetchval(
-            "SELECT status FROM sessions WHERE id = $1 FOR UPDATE",
+            "SELECT status FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
             parent_session_id,
+            account_id,
         )
         if status is None:
             raise NotFoundError(
@@ -1720,8 +1722,9 @@ async def list_pending_calls_for_session_and_connection(
 
     sess_row = await conn.fetchrow(
         "SELECT stop_reason, status, focal_channel FROM sessions "
-        "WHERE id = $1 AND archived_at IS NULL",
+        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
         session_id,
+        account_id,
     )
     if sess_row is None:
         return []
@@ -2451,7 +2454,11 @@ async def set_session_vaults(
 ) -> None:
     """Replace the session's vault bindings. Order is preserved via rank."""
     async with conn.transaction():
-        await conn.execute("DELETE FROM session_vaults WHERE session_id = $1", session_id)
+        await conn.execute(
+            "DELETE FROM session_vaults WHERE session_id = $1 AND account_id = $2",
+            session_id,
+            account_id,
+        )
         for rank, vault_id in enumerate(vault_ids):
             try:
                 await conn.execute(
