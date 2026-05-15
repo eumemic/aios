@@ -101,6 +101,13 @@ class SandboxSpec:
     host_gateway_alias: str | None
     image: str
     mount_snapshot: frozenset[tuple[str, ...]] = frozenset()
+    # Per-sandbox resource caps (multi-tenancy hardening — #367 PR 9).
+    # ``None`` leaves the host's default in place. The spec builder
+    # populates these from the AIOS_SANDBOX_* settings; the backend
+    # injects the corresponding ``docker run`` flags.
+    cpu_quota: float | None = None
+    memory_bytes: int | None = None
+    pids_limit: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
