@@ -102,7 +102,7 @@ async def test_insufficient_ratio_1_matches_today() -> None:
     )
     assert conn.fetch_calls, "expected bounded range scan to be called"
     # Second positional arg to conn.fetch is the drop value.
-    _session_id, drop_local = conn.fetch_calls[-1]
+    _session_id, drop_local, *_ = conn.fetch_calls[-1]
     assert drop_local == 1_000
 
 
@@ -130,7 +130,7 @@ async def test_ratio_above_1_drops_more() -> None:
         overhead_local=0,
         account_id=account_id,
     )
-    _session_id, drop_local = conn.fetch_calls[-1]
+    _session_id, drop_local, *_ = conn.fetch_calls[-1]
     assert drop_local == 667
 
 
