@@ -1493,6 +1493,39 @@ async def _derive_event_channel(
     return None
 
 
+async def find_tool_result_event(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_call_id: str,
+    *,
+    account_id: str,
+) -> Event | None:
+    """Return the existing tool-role event for ``tool_call_id``, or ``None``.
+
+    Used by ``services.append_tool_result`` to make the intake idempotent
+    on ``(session_id, tool_call_id)``: a retried POST returns the original
+    event instead of appending a duplicate that would later violate the
+    monotonic-context invariant (``harness/context.py:499-506`` keeps the
+    latest tool_result per id by dict-overwrite — duplicates silently
+    rewrite history).
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT * FROM events
+         WHERE session_id = $1
+           AND account_id = $2
+           AND kind = 'message'
+           AND data->>'role' = 'tool'
+           AND data->>'tool_call_id' = $3
+         LIMIT 1
+        """,
+        session_id,
+        account_id,
+        tool_call_id,
+    )
+    return _row_to_event(row) if row is not None else None
+
+
 async def lookup_tool_name_by_call_id(
     conn: asyncpg.Connection[Any],
     session_id: str,

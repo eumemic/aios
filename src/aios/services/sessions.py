@@ -246,6 +246,13 @@ async def append_tool_result(
 ) -> Event:
     """Append a tool-role event for a custom tool call (#133).
 
+    Idempotent on ``(session_id, tool_call_id)``: a retried POST (network
+    blip, 502, mid-flight client disconnect) returns the existing event
+    instead of appending a duplicate that would violate the
+    monotonic-context invariant (CLAUDE.md #2) by silently rewriting the
+    model's view of an earlier turn. Mirrors the ``WHERE status =
+    'pending'`` guard in :func:`queries.mark_management_call_resolved`.
+
     Stamps the tool's ``name`` from the parent assistant's ``tool_calls``
     array so the derived ``tool_name`` column on ``events`` stays
     populated for custom tools.  Raises :class:`NotFoundError` if there's
@@ -258,25 +265,50 @@ async def append_tool_result(
     """
     from aios.errors import NotFoundError
 
-    name = await queries.lookup_tool_name_by_call_id(
-        conn, session_id, tool_call_id, account_id=account_id
-    )
-    if name is None:
-        raise NotFoundError(
-            f"tool_call_id {tool_call_id!r} not found",
-            detail={"session_id": session_id, "tool_call_id": tool_call_id},
+    async with conn.transaction():
+        # Lock the session row up-front so a concurrent retry serializes
+        # behind us and observes the appended event on its check. The
+        # ``WHERE … RETURNING`` shape gives us the row-presence check
+        # as a free side effect — the primary purpose is the lock.
+        locked = await conn.fetchval(
+            "SELECT id FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            session_id,
+            account_id,
         )
-    data: dict[str, Any] = {
-        "role": "tool",
-        "tool_call_id": tool_call_id,
-        "content": content,
-        "name": name,
-    }
-    if is_error:
-        data["is_error"] = True
-    return await queries.append_event(
-        conn, session_id=session_id, kind="message", data=data, account_id=account_id
-    )
+        if locked is None:
+            raise NotFoundError(
+                f"session {session_id} not found",
+                detail={"session_id": session_id},
+            )
+        existing = await queries.find_tool_result_event(
+            conn, session_id, tool_call_id, account_id=account_id
+        )
+        if existing is not None:
+            return existing
+
+        name = await queries.lookup_tool_name_by_call_id(
+            conn, session_id, tool_call_id, account_id=account_id
+        )
+        if name is None:
+            raise NotFoundError(
+                f"tool_call_id {tool_call_id!r} not found",
+                detail={"session_id": session_id, "tool_call_id": tool_call_id},
+            )
+        data: dict[str, Any] = {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content,
+            "name": name,
+        }
+        if is_error:
+            data["is_error"] = True
+        return await queries.append_event(
+            conn,
+            session_id=session_id,
+            kind="message",
+            data=data,
+            account_id=account_id,
+        )
 
 
 async def read_events(
