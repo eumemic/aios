@@ -416,17 +416,30 @@ class SandboxRegistry:
     # ── idle-TTL reaper ──────────────────────────────────────────────────
 
     async def _reap_idle_loop(self, idle_timeout: float, interval: float = 60.0) -> None:
-        """Background loop: release sandboxes idle > idle_timeout seconds."""
+        """Background loop: release sandboxes idle > idle_timeout seconds.
+
+        The try/except is nested INSIDE ``while True`` (mirroring
+        :func:`aios.harness.worker._periodic_sweep` and the PR #443 fix
+        for ``_run_interrupt_listener``): a Docker daemon hiccup raising
+        ``SandboxBackendError`` from ``release()`` must not silently
+        disable the reaper for the worker's lifetime — that would
+        leak every subsequent idle sandbox until process exit.
+        ``CancelledError`` is not an :class:`Exception` subclass, so
+        ``stop_reaper()``'s cancel still exits the loop cleanly.
+        """
         while True:
-            await asyncio.sleep(interval)
-            now = time.monotonic()
-            to_release: list[str] = []
-            for sid, last in list(self._last_used.items()):
-                if now - last > idle_timeout:
-                    to_release.append(sid)
-            for sid in to_release:
-                log.info("sandbox.idle_release", session_id=sid)
-                await self.release(sid)
+            try:
+                await asyncio.sleep(interval)
+                now = time.monotonic()
+                to_release: list[str] = []
+                for sid, last in list(self._last_used.items()):
+                    if now - last > idle_timeout:
+                        to_release.append(sid)
+                for sid in to_release:
+                    log.info("sandbox.idle_release", session_id=sid)
+                    await self.release(sid)
+            except Exception:
+                log.exception("sandbox.reap_idle_loop_failed")
 
     def start_reaper(self, idle_timeout: float = 300.0) -> None:
         """Start the idle-TTL reaper background task."""
