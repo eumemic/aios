@@ -29,6 +29,7 @@ from aios.errors import (
     MemoryPreconditionFailedError,
     MemoryStoreArchivedError,
     NotFoundError,
+    ValidationError,
 )
 from aios.ids import (
     ACCOUNT,
@@ -308,6 +309,11 @@ async def insert_agent(
     window_min: int,
     window_max: int,
 ) -> Agent:
+    if window_min >= window_max:
+        raise ValidationError(
+            "window_min must be strictly less than window_max",
+            detail={"window_min": window_min, "window_max": window_max},
+        )
     new_id = make_id(AGENT)
     tools_json = json.dumps([t.model_dump() for t in tools])
     mcp_json = json.dumps([s.model_dump() for s in mcp_servers])
@@ -463,6 +469,17 @@ async def update_agent(
     new_extra = litellm_extra if litellm_extra is not None else current.litellm_extra
     new_wmin = window_min if window_min is not None else current.window_min
     new_wmax = window_max if window_max is not None else current.window_max
+    if new_wmin >= new_wmax:
+        # Partial-merge semantics: a one-sided update (e.g. ``window_max``
+        # alone, set at-or-below the current ``window_min``) only
+        # produces an invalid pair AFTER the merge, so the check has to
+        # live on the resolved values rather than the input kwargs.
+        # Without this, the row commits and the next session step
+        # ``ZeroDivisionError``s in :func:`aios.harness.tokens.tokens_to_drop`.
+        raise ValidationError(
+            "window_min must be strictly less than window_max",
+            detail={"window_min": new_wmin, "window_max": new_wmax},
+        )
 
     # No-op detection.
     if (

@@ -33,13 +33,6 @@ async def create_agent(
     window_min: int,
     window_max: int,
 ) -> Agent:
-    if window_min >= window_max:
-        from aios.errors import ValidationError
-
-        raise ValidationError(
-            "window_min must be strictly less than window_max",
-            detail={"window_min": window_min, "window_max": window_max},
-        )
     skill_refs = skills or []
     resolved = await skills_service.resolve_skill_refs(pool, skill_refs, account_id=account_id)
     snapshot_json = skills_service.serialize_skills_for_snapshot(skill_refs, resolved)
