@@ -13,7 +13,6 @@ Usage::
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 
@@ -21,6 +20,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from aios.db.pool import create_pool
+from aios.db.queries import parse_jsonb
 from aios.harness.tokens import approx_tokens
 
 
@@ -47,7 +47,7 @@ async def backfill(db_url: str) -> None:
             running = 0
             updates: list[tuple[int, str]] = []
             for evt in events:
-                data = json.loads(evt["data"]) if isinstance(evt["data"], str) else evt["data"]
+                data = parse_jsonb(evt["data"])
                 running += approx_tokens([data])
                 updates.append((running, evt["id"]))
 

@@ -72,12 +72,23 @@ from aios.models.sessions import Session, SessionStatus, SessionUsage
 from aios.models.skills import AgentSkillRef, Skill, SkillVersion
 from aios.models.vaults import Vault, VaultCredential
 
+
+def parse_jsonb(raw: Any) -> Any:
+    """Normalize a JSONB cell to its parsed Python form.
+
+    asyncpg returns JSONB as a raw JSON string by default (no codec is
+    registered on the pool); the ``isinstance`` guard also accepts an
+    already-parsed dict/list, which is what callers want either way.
+    """
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
 # ─── environments ─────────────────────────────────────────────────────────────
 
 
 def _row_to_environment(row: asyncpg.Record) -> Environment:
     raw_config = row["config"]
-    config_data = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+    config_data = parse_jsonb(raw_config)
     return Environment(
         id=row["id"],
         name=row["name"],
@@ -219,15 +230,11 @@ async def get_environment_config_for_session(
     if row is None:
         return None
     raw_config = row["config"]
-    config_data = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+    config_data = parse_jsonb(raw_config)
     return EnvironmentConfig.model_validate(config_data)
 
 
 # ─── agents ───────────────────────────────────────────────────────────────────
-
-
-def _parse_jsonb(raw: Any) -> Any:
-    return json.loads(raw) if isinstance(raw, str) else raw
 
 
 def _escape_like(value: str) -> str:
@@ -240,11 +247,11 @@ def _escape_like(value: str) -> str:
 
 
 def _row_to_agent(row: asyncpg.Record) -> Agent:
-    tools_data = _parse_jsonb(row["tools"])
-    skills_data = _parse_jsonb(row["skills"])
-    mcp_data = _parse_jsonb(row.get("mcp_servers", []))
-    metadata = _parse_jsonb(row["metadata"])
-    litellm_extra = _parse_jsonb(row["litellm_extra"])
+    tools_data = parse_jsonb(row["tools"])
+    skills_data = parse_jsonb(row["skills"])
+    mcp_data = parse_jsonb(row.get("mcp_servers", []))
+    metadata = parse_jsonb(row["metadata"])
+    litellm_extra = parse_jsonb(row["litellm_extra"])
     return Agent(
         id=row["id"],
         version=row["version"],
@@ -266,10 +273,10 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
 
 
 def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
-    tools_data = _parse_jsonb(row["tools"])
-    skills_data = _parse_jsonb(row["skills"])
-    mcp_data = _parse_jsonb(row.get("mcp_servers", []))
-    litellm_extra = _parse_jsonb(row["litellm_extra"])
+    tools_data = parse_jsonb(row["tools"])
+    skills_data = parse_jsonb(row["skills"])
+    mcp_data = parse_jsonb(row.get("mcp_servers", []))
+    litellm_extra = parse_jsonb(row["litellm_extra"])
     return AgentVersion(
         agent_id=row["agent_id"],
         version=row["version"],
@@ -587,9 +594,9 @@ async def list_agent_versions(
 
 def _row_to_session(row: asyncpg.Record) -> Session:
     raw_metadata = row["metadata"]
-    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    metadata = parse_jsonb(raw_metadata)
     raw_stop = row["stop_reason"]
-    stop_reason = json.loads(raw_stop) if isinstance(raw_stop, str) else raw_stop
+    stop_reason = parse_jsonb(raw_stop)
     return Session(
         id=row["id"],
         agent_id=row["agent_id"],
@@ -782,7 +789,7 @@ async def get_session_provisioning(
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
     raw_env = row["env"]
-    env: dict[str, str] = json.loads(raw_env) if isinstance(raw_env, str) else raw_env
+    env: dict[str, str] = parse_jsonb(raw_env)
     return row["workspace_volume_path"], env
 
 
@@ -1188,7 +1195,7 @@ async def clone_session(
 
 def _row_to_event(row: asyncpg.Record) -> Event:
     raw_data = row["data"]
-    data = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
+    data = parse_jsonb(raw_data)
     return Event(
         id=row["id"],
         session_id=row["session_id"],
@@ -1490,7 +1497,7 @@ async def lookup_tool_name_by_call_id(
     )
     if raw is None:
         return None
-    tool_calls = _parse_jsonb(raw)
+    tool_calls = parse_jsonb(raw)
     if not isinstance(tool_calls, list):
         return None
     for tc in tool_calls:
@@ -1668,7 +1675,7 @@ async def list_pending_calls_for_connector(
     )
     if cat_row is None:
         return []
-    tools_data = _parse_jsonb(cat_row["tools"])
+    tools_data = parse_jsonb(cat_row["tools"])
     tool_names = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
     if not tool_names:
         return []
@@ -1710,7 +1717,7 @@ async def list_pending_calls_for_connector(
         calls = await _pending_calls_for_session(
             conn,
             session_id=row["session_id"],
-            stop_reason=_parse_jsonb(row["stop_reason"]),
+            stop_reason=parse_jsonb(row["stop_reason"]),
             focal_channel=row["focal_channel"],
             tool_names=tool_names,
         )
@@ -1744,7 +1751,7 @@ async def list_pending_calls_for_session_and_connection(
     )
     if conn_row is None:
         return []
-    tools_data = _parse_jsonb(conn_row["tools"])
+    tools_data = parse_jsonb(conn_row["tools"])
     tool_names = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
     if not tool_names:
         return []
@@ -1759,7 +1766,7 @@ async def list_pending_calls_for_session_and_connection(
         return []
     if sess_row["status"] != "idle":
         return []
-    stop_reason = _parse_jsonb(sess_row["stop_reason"])
+    stop_reason = parse_jsonb(sess_row["stop_reason"])
     if not isinstance(stop_reason, dict) or stop_reason.get("type") != "requires_action":
         return []
 
@@ -1807,7 +1814,7 @@ async def _pending_calls_for_session(
     pending_set = set(pending_ids)
     out: list[dict[str, Any]] = []
     for row in rows:
-        data = _parse_jsonb(row["data"])
+        data = parse_jsonb(row["data"])
         for tc in data.get("tool_calls") or []:
             tc_id = tc.get("id")
             if tc_id not in pending_set:
@@ -2070,7 +2077,7 @@ async def read_windowed_events(
 
 def _row_to_vault(row: asyncpg.Record) -> Vault:
     raw_metadata = row["metadata"]
-    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    metadata = parse_jsonb(raw_metadata)
     return Vault(
         id=row["id"],
         display_name=row["display_name"],
@@ -2215,7 +2222,7 @@ async def delete_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_
 
 def _row_to_vault_credential(row: asyncpg.Record) -> VaultCredential:
     raw_metadata = row["metadata"]
-    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    metadata = parse_jsonb(raw_metadata)
     return VaultCredential(
         id=row["id"],
         vault_id=row["vault_id"],
@@ -2638,7 +2645,7 @@ def _row_to_skill(row: asyncpg.Record) -> Skill:
 
 
 def _row_to_skill_version(row: asyncpg.Record) -> SkillVersion:
-    files_data = _parse_jsonb(row["files"])
+    files_data = parse_jsonb(row["files"])
     return SkillVersion(
         skill_id=row["skill_id"],
         version=row["version"],
@@ -3144,7 +3151,7 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         account=row["account"],
         session_id=row["binding_session_id"],
         session_template_id=row["binding_session_template_id"],
-        metadata=_parse_jsonb(row["metadata"]),
+        metadata=parse_jsonb(row["metadata"]),
         secrets_set=row["secrets_ciphertext"] is not None,
         created_at=row["created_at"],
         attached_at=row["binding_created_at"],
@@ -3367,7 +3374,7 @@ async def list_connection_tools_for_session(
     )
     out: list[dict[str, Any]] = []
     for row in rows:
-        out.extend(_parse_jsonb(row["tools"]))
+        out.extend(parse_jsonb(row["tools"]))
     return out
 
 
@@ -3759,7 +3766,7 @@ async def try_record_inbound_ack(
 
 def _row_to_session_template(row: asyncpg.Record) -> SessionTemplate:
     raw_metadata = row["metadata"]
-    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    metadata = parse_jsonb(raw_metadata)
     return SessionTemplate(
         id=row["id"],
         name=row["name"],
@@ -3953,7 +3960,7 @@ async def archive_session_template(
 
 def _row_to_memory_store(row: asyncpg.Record) -> MemoryStore:
     raw_metadata = row["metadata"]
-    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    metadata = parse_jsonb(raw_metadata)
     return MemoryStore(
         id=row["id"],
         name=row["name"],
@@ -5027,7 +5034,7 @@ async def list_pending_management_calls_for_connector(
         {
             "call_id": row["id"],
             "method": row["method"],
-            "params": _parse_jsonb(row["params"]),
+            "params": parse_jsonb(row["params"]),
         }
         for row in rows
     ]
@@ -5058,9 +5065,9 @@ async def get_management_call(
         "id": row["id"],
         "connector": row["connector"],
         "method": row["method"],
-        "params": _parse_jsonb(row["params"]),
+        "params": parse_jsonb(row["params"]),
         "status": row["status"],
-        "result": _parse_jsonb(row["result"]) if row["result"] is not None else None,
+        "result": parse_jsonb(row["result"]) if row["result"] is not None else None,
         "is_error": row["is_error"],
     }
 
@@ -5332,7 +5339,7 @@ async def insert_file(
 
 def _row_to_account(row: asyncpg.Record) -> Account:
     raw_metadata = row["metadata"]
-    metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    metadata = parse_jsonb(raw_metadata)
     return Account(
         id=row["id"],
         parent_account_id=row["parent_account_id"],
