@@ -3637,6 +3637,7 @@ async def list_recent_chat_ids(
           MAX(created_at) AS last_seen_at
         FROM events
         WHERE channel LIKE $1
+          AND account_id = $3
           AND kind = 'message'
           AND data->>'role' = 'user'
         GROUP BY chat_id
@@ -3645,6 +3646,7 @@ async def list_recent_chat_ids(
         """,
         prefix + "%",
         limit,
+        account_id,
     )
     return [(r["chat_id"], r["last_seen_at"]) for r in rows if r["chat_id"]]
 
