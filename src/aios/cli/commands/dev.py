@@ -560,6 +560,82 @@ def teardown(
     print_note(f"teardown complete: instance={instance_id}")
 
 
+@app.command(
+    "shutdown",
+    help="Stop this worktree's aios api + worker processes and pause its sandbox containers.",
+)
+def shutdown(
+    quiet: Annotated[
+        bool,
+        typer.Option(
+            "--quiet", help="Suppress status output (used by Claude Code SessionEnd hook)."
+        ),
+    ] = False,
+) -> None:
+    """Stop processes and pause containers, leaving DB and workspace intact.
+
+    Idempotent — safe to run repeatedly; nothing to stop is a clean exit.
+
+    Used by the ``SessionEnd`` hook in ``.claude/settings.json`` so a
+    closed Claude Code session doesn't leave orphan api/worker processes
+    or running sandbox containers behind. See #311.
+    """
+    repo_root = get_git_repo_root()
+    # Pre-check the .env directly rather than calling load_instance_env
+    # — the latter raises typer.Exit on missing keys, which is the right
+    # behavior for teardown/status but the wrong one for an idempotent
+    # shutdown that should silently no-op when no instance exists.
+    env = parse_env_file(repo_root / ".env")
+    instance_id = env.get("AIOS_INSTANCE_ID")
+    if not instance_id:
+        if not quiet:
+            print_note("no aios dev instance for this worktree (idempotent no-op)")
+        return
+    validate_instance_id_for_db(instance_id)
+
+    # pkill matches against the full command line via `-f`. Match the
+    # worktree path so we don't accidentally kill processes belonging to
+    # a sibling worktree's instance.
+    worktree_path = str(repo_root)
+    api_killed = _pkill_pattern(f"{worktree_path}.*-m aios api")
+    worker_killed = _pkill_pattern(f"{worktree_path}.*-m aios worker")
+
+    container_ids = _list_instance_containers(instance_id)
+    if container_ids:
+        # Stop, don't remove — `teardown` is the destructive path. A
+        # subsequent `aios api` / `aios worker` will respawn fresh
+        # sandboxes from the recorded labels.
+        subprocess.call(
+            ["docker", "stop", *container_ids],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    if not quiet:
+        print_note(
+            f"shutdown: instance={instance_id} "
+            f"api={'stopped' if api_killed else 'not-running'} "
+            f"worker={'stopped' if worker_killed else 'not-running'} "
+            f"containers_stopped={len(container_ids)}"
+        )
+
+
+def _pkill_pattern(pattern: str) -> bool:
+    """SIGTERM every process whose full cmdline matches ``pattern``.
+
+    Returns ``True`` if pkill found at least one match (exit code 0),
+    ``False`` if no match (exit code 1). Other exit codes are treated
+    as "no match" — pkill on macOS / Linux returns 1 for "no processes
+    found" which is the dominant case for idempotent shutdown.
+    """
+    rc = subprocess.call(
+        ["pkill", "-f", pattern],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return rc == 0
+
+
 @app.command("status", help="Show this worktree's aios dev instance status.")
 def status() -> None:
     repo_root = get_git_repo_root()
