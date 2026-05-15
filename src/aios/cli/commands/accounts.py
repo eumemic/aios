@@ -34,10 +34,15 @@ from aios_sdk._generated.api.accounts import (
     list_my_children,
     mint_account_key,
     mint_child_account,
+    purge_account,
+    resolve_account_by_path,
     revoke_account_key,
+    update_account,
 )
 from aios_sdk._generated.models.mint_account_request import MintAccountRequest
 from aios_sdk._generated.models.mint_key_request import MintKeyRequest
+from aios_sdk._generated.models.update_account_request import UpdateAccountRequest
+from aios_sdk._generated.types import UNSET
 
 app = typer.Typer(
     name="accounts",
@@ -140,6 +145,74 @@ def archive(ctx: typer.Context, target_id: str) -> None:
         with get_state(ctx).sdk_client() as client:
             obj = unwrap(archive_account.sync_detailed(client=client, target_id=target_id))
         render_single(obj.to_dict())
+
+    run_or_die(_run)
+
+
+@app.command("update", help="Partial-update a caller-or-direct-child account.")
+def update(
+    ctx: typer.Context,
+    target_id: str,
+    display_name: Annotated[
+        str | None, typer.Option("--display-name", "-n", help="New display name.")
+    ] = None,
+    can_mint_children: Annotated[
+        bool | None,
+        typer.Option(
+            "--can-mint-children/--no-can-mint-children",
+            help="Toggle the can-mint-children capability.",
+        ),
+    ] = None,
+) -> None:
+    """Both options are optional; omitted fields stay as-is. With no
+    options, the call is a no-op that just re-reads the account row."""
+
+    def _run() -> None:
+        body = UpdateAccountRequest(
+            display_name=display_name if display_name is not None else UNSET,
+            can_mint_children=can_mint_children if can_mint_children is not None else UNSET,
+        )
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                update_account.sync_detailed(client=client, target_id=target_id, body=body)
+            )
+        render_single(obj.to_dict())
+
+    run_or_die(_run)
+
+
+@app.command(
+    "by-path",
+    help="Resolve a slash-separated display-name path under the caller's account.",
+)
+def by_path(
+    ctx: typer.Context,
+    path: Annotated[
+        str,
+        typer.Argument(help="Slash-separated display names (empty / `/` returns the caller)."),
+    ] = "",
+) -> None:
+    def _run() -> None:
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(resolve_account_by_path.sync_detailed(client=client, path=path))
+        render_single(obj.to_dict())
+
+    run_or_die(_run)
+
+
+@app.command(
+    "purge",
+    help="Hard-delete an already-archived direct child (compliance / GDPR path).",
+)
+def purge(ctx: typer.Context, target_id: str) -> None:
+    """Two-step ceremony: ``archive`` first, then ``purge``. Refuses when
+    the target isn't archived, has non-archived children, has any
+    resources, or is the caller's own account."""
+
+    def _run() -> None:
+        with get_state(ctx).sdk_client() as client:
+            unwrap(purge_account.sync_detailed(client=client, target_id=target_id))
+        print_note(f"purged {target_id}")
 
     run_or_die(_run)
 
