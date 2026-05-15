@@ -1022,8 +1022,9 @@ async def delete_session(
 ) -> None:
     async with conn.transaction():
         row = await conn.fetchrow(
-            "SELECT status FROM sessions WHERE id = $1",
+            "SELECT status FROM sessions WHERE id = $1 AND account_id = $2",
             session_id,
+            account_id,
         )
         if row is None:
             raise NotFoundError(
@@ -1037,7 +1038,11 @@ async def delete_session(
             )
         await conn.execute("DELETE FROM session_vaults WHERE session_id = $1", session_id)
         await conn.execute("DELETE FROM events WHERE session_id = $1", session_id)
-        await conn.execute("DELETE FROM sessions WHERE id = $1", session_id)
+        await conn.execute(
+            "DELETE FROM sessions WHERE id = $1 AND account_id = $2",
+            session_id,
+            account_id,
+        )
 
 
 _CLONEABLE_STATUSES: tuple[SessionStatus, ...] = ("idle", "terminated")
@@ -2096,7 +2101,11 @@ async def update_vault(
     if not sets:
         return await get_vault(conn, vault_id, account_id=account_id)
     sets.append("updated_at = now()")
-    sql = f"UPDATE vaults SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    args.append(account_id)
+    sql = (
+        f"UPDATE vaults SET {', '.join(sets)} "
+        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+    )
     row = await conn.fetchrow(sql, *args)
     if row is None:
         raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
@@ -2113,8 +2122,9 @@ async def archive_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account
     async with conn.transaction():
         row = await conn.fetchrow(
             "UPDATE vaults SET archived_at = now(), updated_at = now() "
-            "WHERE id = $1 AND archived_at IS NULL RETURNING *",
+            "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
             vault_id,
+            account_id,
         )
         if row is None:
             raise NotFoundError(
@@ -3697,7 +3707,11 @@ async def insert_session_template(
 async def get_session_template(
     conn: asyncpg.Connection[Any], template_id: str, *, account_id: str
 ) -> SessionTemplate:
-    row = await conn.fetchrow("SELECT * FROM session_templates WHERE id = $1", template_id)
+    row = await conn.fetchrow(
+        "SELECT * FROM session_templates WHERE id = $1 AND account_id = $2",
+        template_id,
+        account_id,
+    )
     if row is None:
         raise NotFoundError(
             f"session template {template_id} not found",
@@ -3763,7 +3777,11 @@ async def update_session_template(
     if not sets:
         return await get_session_template(conn, template_id, account_id=account_id)
     sets.append("updated_at = now()")
-    sql = f"UPDATE session_templates SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    args.append(account_id)
+    sql = (
+        f"UPDATE session_templates SET {', '.join(sets)} "
+        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+    )
     try:
         row = await conn.fetchrow(sql, *args)
     except asyncpg.UniqueViolationError as exc:
@@ -3953,7 +3971,11 @@ async def update_memory_store(
     if not sets:
         return await get_memory_store(conn, store_id, account_id=account_id)
     sets.append("updated_at = now()")
-    sql = f"UPDATE memory_stores SET {', '.join(sets)} WHERE id = $1 RETURNING *"
+    args.append(account_id)
+    sql = (
+        f"UPDATE memory_stores SET {', '.join(sets)} "
+        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+    )
     row = await conn.fetchrow(sql, *args)
     if row is None:
         raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
@@ -3979,7 +4001,11 @@ async def archive_memory_store(
 async def delete_memory_store(
     conn: asyncpg.Connection[Any], store_id: str, *, account_id: str
 ) -> None:
-    result = await conn.execute("DELETE FROM memory_stores WHERE id = $1", store_id)
+    result = await conn.execute(
+        "DELETE FROM memory_stores WHERE id = $1 AND account_id = $2",
+        store_id,
+        account_id,
+    )
     if result == "DELETE 0":
         raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
 
@@ -5041,7 +5067,11 @@ async def revoke_runtime_token(
     )
     if row is not None:
         return _row_to_runtime_token(row)
-    existing = await conn.fetchrow("SELECT * FROM runtime_tokens WHERE id = $1", token_id)
+    existing = await conn.fetchrow(
+        "SELECT * FROM runtime_tokens WHERE id = $1 AND account_id = $2",
+        token_id,
+        account_id,
+    )
     if existing is None:
         raise NotFoundError(
             f"runtime_token {token_id} not found",
