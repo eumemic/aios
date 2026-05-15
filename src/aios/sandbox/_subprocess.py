@@ -61,6 +61,15 @@ async def run_subprocess_with_timeout(
                 proc.communicate(), timeout=_DRAIN_AFTER_KILL_TIMEOUT_S
             )
         except (TimeoutError, OSError):
+            # Child wedged in uninterruptible D-state: the SIGKILL above
+            # stays pending until it leaves the syscall, so communicate()
+            # never reaches its pipe-close/reap. The cancelled
+            # communicate() left the parent-side stdout/stderr pipe FDs
+            # open, and the loop only reclaims them on a child-exit EOF
+            # that won't come. Close the transport to free them now —
+            # await proc.wait() would re-introduce the very hang this
+            # branch defends against.
+            proc._transport.close()  # type: ignore[attr-defined]  # typeshed omits Process._transport
             stdout_bytes, stderr_bytes = b"", b""
         return -1, stdout_bytes, stderr_bytes, True
 
