@@ -1226,6 +1226,11 @@ _MODEL_TOKEN_RATIO_MIN_SAMPLES = 5
 _MODEL_TOKEN_RATIO_MIN = 0.5
 _MODEL_TOKEN_RATIO_BUCKET_FLOOR = 0.001
 _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS = 60.0
+# Shorter TTL for the "not enough samples yet" path: every step on a freshly
+# deployed model fired this aggregate JSONB scan otherwise, because the
+# below-threshold branch used to skip the cache write entirely.  10 s bounds
+# the activation lag once the model crosses the sample threshold.
+_MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS = 10.0
 # Fixed per-sample stddev prior for the tokenizer ratio.  Empirically,
 # observed per-span CV is ~0.5-1.5 % across the models we've measured
 # (Opus 4.7: 0.75 %; Haiku 4.5: ~1 %), so 0.02 is a conservative upper
@@ -1274,8 +1279,10 @@ async def model_token_ratio(
     Mature calibrated ratios are cached in-process for 60 seconds.  The
     lifetime aggregate is intentionally slow-moving, and caching prevents
     every windowing call from rescanning all historical calibration spans.
-    Below-threshold results are not cached, so newly accumulating models
-    can activate as soon as the minimum sample count is reached.
+    Below-threshold results (returning the neutral ``1.0``) are cached for
+    a shorter 10-second TTL so a freshly deployed model doesn't pay the
+    aggregate scan on every step before calibration kicks in; activation
+    once samples accumulate is therefore delayed by at most one TTL.
 
     ``model`` is the raw model string (``agent.model``) — NO NORMALIZATION.
     Different LiteLLM routes (``anthropic/...`` vs
@@ -1340,6 +1347,10 @@ async def model_token_ratio(
     )
     assert row is not None
     if row["n"] < _MODEL_TOKEN_RATIO_MIN_SAMPLES:
+        _model_token_ratio_cache[cache_key] = (
+            now + _MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS,
+            1.0,
+        )
         return 1.0
 
     raw = float(row["mean_ratio"])

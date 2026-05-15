@@ -12,8 +12,6 @@ import base64
 import binascii
 from typing import Any
 
-import litellm
-
 from aios.logging import get_logger
 from aios_connector_http.mime import sniff_image_mime
 
@@ -53,6 +51,11 @@ def supports_vision(model: str) -> bool:
     """
     if model in _VISION_OVERRIDES:
         return _VISION_OVERRIDES[model]
+    # Defer the heavy ``litellm`` import: every harness consumer of this
+    # module pays ~1.18s of bootstrap otherwise, and most call sites never
+    # reach this branch.
+    import litellm
+
     try:
         info = litellm.get_model_info(model)
     except Exception as err:

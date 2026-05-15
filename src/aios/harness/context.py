@@ -29,8 +29,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-import litellm
-
 from aios.harness.vision import (
     can_inline_image,
     correct_image_mime_b64,
@@ -633,6 +631,11 @@ def build_messages(
         messages.insert(0, {"role": "system", "content": system_prompt})
 
     _correct_image_data_url_mimes(messages)
+
+    # Defer the heavy ``litellm`` import: every consumer of this module
+    # pays ~1.18s of bootstrap otherwise, and most call sites either
+    # exit before this point or run under tests that never reach it.
+    import litellm
 
     target_supports_thinking = bool(model) and litellm.supports_reasoning(model)
     return ContextResult(

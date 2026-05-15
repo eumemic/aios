@@ -19,14 +19,29 @@ from typing import Any
 import pytest
 
 
-@pytest.fixture
-def polished_mcp() -> Any:
-    """Live ``FastApiMCP`` against ``create_app()``'s spec, with polish applied.
+@pytest.fixture(scope="module")
+def app() -> Any:
+    """A ``FastAPI`` instance shared across every test in this module.
 
-    Same code path as ``_mount_mcp`` minus the HTTP mount. Imports are
-    inside the fixture body because ``aios.harness.procrastinate_app``
-    runs ``get_settings()`` at module-import time and the conftest
-    env-var fixture only fires after collection.
+    ``create_app()`` is idempotent and costs ~470 ms — paying for it once
+    instead of five times saves ~2s on the unit suite.  Import is inside
+    the fixture body because ``aios.harness.procrastinate_app`` runs
+    ``get_settings()`` at module-import time and the conftest env-var
+    fixture only fires after collection.
+    """
+    from aios.api.app import create_app
+
+    return create_app()
+
+
+@pytest.fixture(scope="module")
+def polished_mcp(app: Any) -> Any:
+    """Live ``FastApiMCP`` against ``app``'s spec, with polish applied.
+
+    Same code path as ``_mount_mcp`` minus the HTTP mount.  Polish
+    mutates the MCP instance, not the app, so sharing the underlying
+    app across this fixture and the route-shape assertions below is
+    safe.
     """
     from fastapi import Depends
     from fastapi_mcp import AuthConfig, FastApiMCP
@@ -35,11 +50,9 @@ def polished_mcp() -> Any:
         MCP_INSTRUCTIONS,
         _apply_mcp_polish,
         _compute_mcp_excluded_operations,
-        create_app,
     )
     from aios.api.deps import require_bearer_auth
 
-    app = create_app()
     mcp = FastApiMCP(
         app,
         name="test",
@@ -51,16 +64,13 @@ def polished_mcp() -> Any:
     return mcp
 
 
-def test_mcp_route_is_mounted() -> None:
-    from aios.api.app import create_app
-
-    app = create_app()
+def test_mcp_route_is_mounted(app: Any) -> None:
     assert any(getattr(r, "path", None) == "/mcp" for r in app.routes), (
         "FastApiMCP did not register a /mcp route during create_app()"
     )
 
 
-def test_excluded_operations_match_x_codegen_annotations() -> None:
+def test_excluded_operations_match_x_codegen_annotations(app: Any) -> None:
     """Routes annotated with ``x-codegen.targets: []`` must be excluded from MCP.
 
     Today that's the 2 SSE / long-poll session-event routes (no JSON
@@ -68,9 +78,8 @@ def test_excluded_operations_match_x_codegen_annotations() -> None:
     envelopes deferred per #267). Routes without the annotation default
     to included.
     """
-    from aios.api.app import _compute_mcp_excluded_operations, create_app
+    from aios.api.app import _compute_mcp_excluded_operations
 
-    app = create_app()
     excluded = set(_compute_mcp_excluded_operations(app))
 
     spec = app.openapi()

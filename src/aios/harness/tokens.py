@@ -15,8 +15,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from litellm import token_counter
-
 # ─── estimator (delegates to litellm's local tokenizers) ──────────────────
 
 
@@ -52,6 +50,11 @@ def approx_tokens(
     ``model=...``), re-run the backfill script to keep stored values
     honest.
     """
+    # Defer the heavy ``litellm`` import: every consumer of this module
+    # pays ~1.18s of bootstrap otherwise, and many CLI / test code paths
+    # never call into this helper.
+    from litellm import token_counter
+
     return int(
         token_counter(
             messages=list(messages),
