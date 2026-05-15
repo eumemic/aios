@@ -4159,9 +4159,11 @@ async def get_memory(
     include_content: bool = True,
 ) -> Memory:
     row = await conn.fetchrow(
-        "SELECT * FROM memories WHERE memory_store_id = $1 AND id = $2 AND deleted_at IS NULL",
+        "SELECT * FROM memories WHERE memory_store_id = $1 AND id = $2 "
+        "AND deleted_at IS NULL AND account_id = $3",
         store_id,
         memory_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
@@ -4180,9 +4182,11 @@ async def get_memory_by_path(
     include_content: bool = True,
 ) -> Memory | None:
     row = await conn.fetchrow(
-        "SELECT * FROM memories WHERE memory_store_id = $1 AND path = $2 AND deleted_at IS NULL",
+        "SELECT * FROM memories WHERE memory_store_id = $1 AND path = $2 "
+        "AND deleted_at IS NULL AND account_id = $3",
         store_id,
         path,
+        account_id,
     )
     if row is None:
         return None
@@ -4438,8 +4442,8 @@ async def list_memory_versions(
     memory_id: str | None = None,
     limit: int = 100,
 ) -> list[MemoryVersion]:
-    where = "memory_store_id = $1"
-    args: list[Any] = [store_id]
+    args: list[Any] = [store_id, account_id]
+    where = "memory_store_id = $1 AND account_id = $2"
     if memory_id is not None:
         args.append(memory_id)
         where += f" AND memory_id = ${len(args)}"
@@ -4459,9 +4463,10 @@ async def get_memory_version(
     account_id: str,
 ) -> MemoryVersion:
     row = await conn.fetchrow(
-        "SELECT * FROM memory_versions WHERE memory_store_id = $1 AND id = $2",
+        "SELECT * FROM memory_versions WHERE memory_store_id = $1 AND id = $2 AND account_id = $3",
         store_id,
         version_id,
+        account_id,
     )
     if row is None:
         raise NotFoundError(
