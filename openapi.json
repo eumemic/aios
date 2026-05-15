@@ -498,6 +498,58 @@
         }
       }
     },
+    "/v1/accounts/{target_id}/purge": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Purge Account",
+        "description": "Hard-delete a direct child that has already been soft-archived.\n\nTwo-step ceremony:     1. ``DELETE /v1/accounts/{id}`` soft-archives (sets ``archived_at``).    2. ``POST /v1/accounts/{id}/purge`` hard-deletes the row.\n\nRefuses with 409 if the account is not yet archived, has non-archived\nchildren, has any resources (FK RESTRICT will refuse the DELETE), or\nis the caller's own account. Compliance / GDPR path; the normal\nlifecycle stops at archive.",
+        "operationId": "purge_account",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Target Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{target_id}/keys": {
       "post": {
         "tags": [
