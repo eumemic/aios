@@ -28,6 +28,7 @@ on:
 jobs:
   promote:
     runs-on: ubuntu-latest
+    environment: stable  # scopes EUMEMIC_OPS_DISPATCH_TOKEN; no protection rules configured
     permissions:
       contents: read
     steps:
