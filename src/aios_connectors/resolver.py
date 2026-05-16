@@ -90,6 +90,25 @@ async def resolve_target_session(
         return ResolveResult(session_id=None, drop=ResolveDrop.DETACHED)
     if binding.mode == "single_session":
         assert binding.session_id is not None
+        # Check whether the bound session was archived after this
+        # binding was created. Without this, the resolver would return
+        # the archived id, ``handle_inbound`` would fail at
+        # ``append_event`` (post-#523) with ``SESSION_MISSING`` (mapped
+        # to 500), and well-behaved connectors would retry forever
+        # because 5xx looks transient. ``DETACHED`` (→ 422) is the
+        # correct terminal signal — same shape the resolver already
+        # uses for ``ARCHIVED_TEMPLATE`` upstream of the append. No
+        # ledger stamp here so the next inbound goes through the same
+        # check (no poisoning), and if the operator detaches+rebinds
+        # to a live session the resolver picks it up immediately.
+        async with pool.acquire() as conn:
+            session_archived_at = await conn.fetchval(
+                "SELECT archived_at FROM sessions WHERE id = $1 AND account_id = $2",
+                binding.session_id,
+                account_id,
+            )
+        if session_archived_at is not None:
+            return ResolveResult(session_id=None, drop=ResolveDrop.DETACHED)
         # No ledger insert — operators opt into per-chat overrides explicitly.
         return ResolveResult(session_id=binding.session_id, drop=None)
     assert binding.mode == "per_chat"
