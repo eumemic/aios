@@ -181,51 +181,45 @@ async def discover_mcp_tools(
       any. Used by the harness to compose per-connector affordance prose
       into the system prompt.
 
-    On any error, logs a warning and returns ``([], None)`` — the model
-    simply doesn't see those tools (or that connector's instructions).
+    Raises on transport / protocol / auth failure. Callers decide how to
+    surface the error: the step prelude (``discover_session_mcp_tools``)
+    logs at WARN and filters the failed server out of the tools and
+    instructions it returns, since the model didn't consciously initiate
+    that discovery. The broker HTTP handlers translate it into a 502
+    response because the sandboxed model DID initiate the call.
     """
-    try:
-        from aios.harness import runtime
+    from aios.harness import runtime
 
-        _pool = runtime.mcp_session_pool
+    _pool = runtime.mcp_session_pool
 
-        if _pool is not None:
-            # Pool path: reuse cached session; on failure evict + retry once.
-            try:
-                session, init_result = await _pool.get_or_connect(url, vault_id, headers)
-                result = await session.list_tools()
-            except Exception:
-                _pool.evict(url, vault_id)
-                session, init_result = await _pool.get_or_connect(url, vault_id, headers)
-                result = await session.list_tools()
-        else:
-            # Fallback: fresh connection per call (API process, tests).
-            async with AsyncExitStack() as stack:
-                session, init_result = await _open_session(url, headers, stack)
-                result = await session.list_tools()
+    if _pool is not None:
+        # Pool path: reuse cached session; on failure evict + retry once.
+        try:
+            session, init_result = await _pool.get_or_connect(url, vault_id, headers)
+            result = await session.list_tools()
+        except Exception:
+            _pool.evict(url, vault_id)
+            session, init_result = await _pool.get_or_connect(url, vault_id, headers)
+            result = await session.list_tools()
+    else:
+        # Fallback: fresh connection per call (API process, tests).
+        async with AsyncExitStack() as stack:
+            session, init_result = await _open_session(url, headers, stack)
+            result = await session.list_tools()
 
-        if len(result.tools) > MAX_TOOLS_PER_SERVER:
-            log.warning(
-                "mcp.tools_truncated",
-                server_name=server_name,
-                total=len(result.tools),
-                limit=MAX_TOOLS_PER_SERVER,
-            )
-
-        tools: list[dict[str, Any]] = [
-            make_function_tool(f"mcp__{server_name}__{tool.name}", tool)
-            for tool in result.tools[:MAX_TOOLS_PER_SERVER]
-        ]
-        return tools, init_result.instructions
-
-    except Exception:
+    if len(result.tools) > MAX_TOOLS_PER_SERVER:
         log.warning(
-            "mcp.discovery_failed",
+            "mcp.tools_truncated",
             server_name=server_name,
-            url=url,
-            exc_info=True,
+            total=len(result.tools),
+            limit=MAX_TOOLS_PER_SERVER,
         )
-        return [], None
+
+    tools: list[dict[str, Any]] = [
+        make_function_tool(f"mcp__{server_name}__{tool.name}", tool)
+        for tool in result.tools[:MAX_TOOLS_PER_SERVER]
+    ]
+    return tools, init_result.instructions
 
 
 def shape_call_result(result: Any) -> dict[str, Any]:

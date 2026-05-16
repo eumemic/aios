@@ -203,6 +203,31 @@ class TestListTools:
             resp = await client.get(f"{base_url}/v1/s/servers/nope/tools")
         assert resp.status_code == 404
 
+    async def test_discovery_failure_returns_502(
+        self, broker: McpBroker, base_url: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the model runs ``mcp list-tools <server>`` and the upstream
+        server is unreachable, the broker must surface the transport
+        failure as a 502 so the sandboxed model sees that its conscious
+        action failed — not a 200 with an empty tools list, which would
+        be indistinguishable from a server that genuinely has no tools.
+        """
+        agent = _agent(
+            mcp_servers=[_server()], tools=[_toolset("tav", default_policy="always_allow")]
+        )
+        broker.register_session("sess_X", "s")
+        monkeypatch.setattr(broker, "_load_agent", _async_returning(agent))
+
+        async def _discover(*_args: object, **_kwargs: object) -> object:
+            raise ConnectionError("simulated upstream down")
+
+        monkeypatch.setattr("aios.sandbox.mcp_proxy.discover_mcp_tools", _discover)
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{base_url}/v1/s/servers/tav/tools")
+        assert resp.status_code == 502
+        assert resp.json().get("code") == "transport_error"
+
 
 class TestToolHelp:
     async def test_returns_schema_for_always_allow_tool(
@@ -276,6 +301,28 @@ class TestToolHelp:
             resp = await client.get(f"{base_url}/v1/s/servers/tav/tools/dangerous")
         assert resp.status_code == 403
         assert "disabled" in resp.json()["error"]
+
+    async def test_discovery_failure_returns_502(
+        self, broker: McpBroker, base_url: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mcp tool-help <server> <tool>`` is a conscious model action;
+        a discovery transport failure must surface as 502, not silently
+        masquerade as 'tool not found'."""
+        agent = _agent(
+            mcp_servers=[_server()], tools=[_toolset("tav", default_policy="always_allow")]
+        )
+        broker.register_session("sess_X", "s")
+        monkeypatch.setattr(broker, "_load_agent", _async_returning(agent))
+
+        async def _discover(*_args: object, **_kwargs: object) -> object:
+            raise ConnectionError("simulated upstream down")
+
+        monkeypatch.setattr("aios.sandbox.mcp_proxy.discover_mcp_tools", _discover)
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{base_url}/v1/s/servers/tav/tools/web_search")
+        assert resp.status_code == 502
+        assert resp.json().get("code") == "transport_error"
 
 
 class TestInvoke:
