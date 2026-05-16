@@ -9,12 +9,14 @@ happy-path listing / --help / invocation flow.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
+import uvicorn
 
 from aios.models.agents import (
     McpPermissionPolicy,
@@ -355,3 +357,20 @@ def _async_returning(value: Any) -> Any:
         return value
 
     return _impl
+
+
+class TestStartBindFailureCleanup:
+    async def test_bind_timeout_releases_serve_task(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # uvicorn.Server.serve that never starts — bind never completes.
+        async def _hang(_self: uvicorn.Server, *_a: object, **_k: object) -> None:
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(uvicorn.Server, "serve", _hang)
+        monkeypatch.setattr("aios.sandbox.mcp_proxy._BIND_TIMEOUT_S", 0.05)
+
+        b = McpBroker()
+        with pytest.raises(RuntimeError, match="mcp broker failed to bind"):
+            await b.start()
+
+        assert b._serve_task is not None
+        assert b._serve_task.done()

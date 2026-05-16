@@ -150,25 +150,38 @@ class McpBroker:
         self._server = uvicorn.Server(config)
         self._serve_task = asyncio.create_task(self._server.serve(), name="mcp-broker-serve")
 
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _BIND_TIMEOUT_S
-        while loop.time() < deadline:
-            await asyncio.sleep(0.01)
-            if self._server.started and self._server.servers:
-                sockets = self._server.servers[0].sockets
-                if sockets:
-                    self._port = sockets[0].getsockname()[1]
-                    log.info("mcp_broker.started", port=self._port)
-                    return
-        raise RuntimeError(f"mcp broker failed to bind within {_BIND_TIMEOUT_S}s")
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + _BIND_TIMEOUT_S
+            while loop.time() < deadline:
+                await asyncio.sleep(0.01)
+                if self._server.started and self._server.servers:
+                    sockets = self._server.servers[0].sockets
+                    if sockets:
+                        self._port = sockets[0].getsockname()[1]
+                        log.info("mcp_broker.started", port=self._port)
+                        return
+            raise RuntimeError(f"mcp broker failed to bind within {_BIND_TIMEOUT_S}s")
+        except BaseException:
+            # Bind never completed; the caller drops its reference, so
+            # nothing else will call stop() — without this the serve
+            # task and the half-bound socket leak for the worker's
+            # lifetime.
+            await self.stop()
+            raise
 
     async def stop(self) -> None:
-        if self._server is not None:
-            self._server.should_exit = True
         try:
-            if self._serve_task is not None:
-                with contextlib.suppress(TimeoutError, asyncio.CancelledError):
-                    await asyncio.wait_for(self._serve_task, timeout=5.0)
+            # Graceful drain only matters once the server actually
+            # bound — ``should_exit`` is checked inside the uvicorn
+            # main loop, which never runs on a failed-bind path, so
+            # without this gate the failed-bind cleanup pays a
+            # pointless 5s wait on every retry.
+            if self._server is not None and self._server.started:
+                self._server.should_exit = True
+                if self._serve_task is not None:
+                    with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                        await asyncio.wait_for(self._serve_task, timeout=5.0)
         finally:
             if self._serve_task is not None and not self._serve_task.done():
                 self._serve_task.cancel()
