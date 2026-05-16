@@ -3,9 +3,8 @@
 When the wake-step retry budget is spent (4 consecutive ``rescheduling``
 turn_ends) the harness now parks the session in ``errored`` instead of
 ``idle`` so the periodic sweep stops re-firing wakes that just time out
-again.  ``flip_quiescent_to_pending`` is widened in the same change to
-also clear ``errored`` on the next user message, preserving the operator
-recovery contract from #353.
+again.  The user-message append path is widened to clear ``errored`` as
+well as ``idle``, preserving the operator recovery contract from #353.
 
 Downgrade rewrites ``errored`` to ``terminated`` rather than ``idle`` —
 the original constraint can't represent the parked-after-budget state,

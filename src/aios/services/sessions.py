@@ -205,7 +205,7 @@ async def append_user_message(
         if isinstance(channel, str):
             orig_channel = channel
     async with pool.acquire() as conn:
-        event = await queries.append_event(
+        return await queries.append_event(
             conn,
             session_id=session_id,
             kind="message",
@@ -213,12 +213,6 @@ async def append_user_message(
             orig_channel=orig_channel,
             account_id=account_id,
         )
-        # Narrow scope by design: the tool-result and tool-confirmation
-        # paths have the same race but are deferred; an orchestrator
-        # resolving those still has to combine status polling with
-        # event-cursor tracking.  See issue #39.
-        await queries.flip_quiescent_to_pending(conn, session_id, account_id=account_id)
-        return event
 
 
 async def append_event(
