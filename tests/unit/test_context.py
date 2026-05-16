@@ -1081,6 +1081,42 @@ class TestFocalRendering:
         assert "[reaction='👍'" in content
         assert "target_author_uuid=bot" in content
 
+    def test_focal_match_telegram_reaction_surfaces_new_emojis(self) -> None:
+        """Telegram reactions arrive as ``new_emojis: list[str]`` (current
+        post-reaction state) rather than Signal's ``emoji: str``. The
+        renderer must surface the emoji from either shape — pre-fix the
+        Telegram shape rendered as ``[reaction='?']`` and the model could
+        not tell what was reacted with."""
+        md = {
+            "channel": self._CHAN_A,
+            "reaction": {
+                "target_message_id": 42,
+                "old_emojis": [],
+                "new_emojis": ["👍"],
+            },
+        }
+        events = [_evt(1, "user", content="", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "[reaction='👍'" in content
+
+    def test_focal_match_telegram_reaction_cleared_rendered_distinctly(self) -> None:
+        """Empty ``new_emojis`` means the user cleared their reaction.
+        The model needs that signal distinctly — silently dropping it
+        would leave the model believing the prior reaction is still
+        active."""
+        md = {
+            "channel": self._CHAN_A,
+            "reaction": {
+                "target_message_id": 42,
+                "old_emojis": ["👍"],
+                "new_emojis": [],
+            },
+        }
+        events = [_evt(1, "user", content="", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "reaction" in content
+        assert "'?'" not in content
+
     def test_focal_match_iso_timestamp(self) -> None:
         md = {"channel": self._CHAN_A, "timestamp_ms": 1776401210703}
         events = [_evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
@@ -1286,6 +1322,25 @@ class TestFocalRendering:
             "channel": self._CHAN_B,
             "sender_name": "Bob",
             "reaction": {"emoji": "👍"},
+        }
+        events = [_evt(1, "user", content="", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "reacted 👍" in content
+
+    def test_notification_telegram_reaction_shows_new_emoji(self) -> None:
+        """Cross-channel Telegram reactions render via the notification
+        marker; the preview must surface the emoji from ``new_emojis``,
+        mirroring the Signal-shape ``reaction.emoji`` fallback. Pre-fix
+        the model saw a bare ``🔔 channel_id=…`` with no hint anything
+        was reacted."""
+        md = {
+            "channel": self._CHAN_B,
+            "sender_name": "Bob",
+            "reaction": {
+                "target_message_id": 42,
+                "old_emojis": [],
+                "new_emojis": ["👍"],
+            },
         }
         events = [_evt(1, "user", content="", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
         content = build_messages(events, system_prompt=None).messages[0]["content"]
