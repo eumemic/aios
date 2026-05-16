@@ -178,21 +178,6 @@ class Settings(BaseSettings):
         description="Tavily API key for web_fetch and web_search tools.",
     )
 
-    connectors_auto_create: dict[str, bool] = Field(
-        default_factory=dict,
-        description="Per-connector ``auto_create_connections`` knob (plan §13). "
-        "Inbound for an unknown ``(connector, account)`` pair auto-creates a "
-        "detached connection row by default; setting ``{name: false}`` disables "
-        "that for ``name``, dropping such inbounds with a ``no_connection`` "
-        "counter increment instead.  Names not present in the dict default to "
-        "``True``.\n\n"
-        "Shape note: the plan documented this as nested "
-        "``connectors.<name>.auto_create_connections``, but pydantic-settings "
-        "doesn't compose well with that shape under the ``AIOS_`` env prefix; "
-        "a flat ``AIOS_CONNECTORS_AUTO_CREATE='{\"signal\":false}'`` is "
-        "operationally equivalent and easier to override from systemd / env.",
-    )
-
     default_mcp_permission_policy: Literal["always_allow", "always_ask"] | None = Field(
         default=None,
         description="Fallback permission policy for MCP tools whose server "
