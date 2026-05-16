@@ -29,6 +29,13 @@ from aios.services.attachment_staging import (
 )
 from aios.services.wake import defer_wake
 
+# Metadata keys the trusted server-side path writes from request / state.
+# Stripped from connector-supplied ``metadata`` before the merge so a
+# crafted payload can't plant fields the renderer / logging trusts —
+# most acutely ``attachments``, which the harness's vision renderer
+# resolves through ``resolve_to_host_path`` and reads from disk.
+_RESERVED_METADATA_KEYS = frozenset({"channel", "sender", "attachments", "platform_timestamp"})
+
 
 class _DedupRollback(Exception):
     """Internal: signals the dedup-ledger conflict path inside the txn."""
@@ -177,7 +184,20 @@ async def _append_with_dedup(
     sender_name = sender.get("display_name")
     metadata: dict[str, Any] = {}
     if connector_metadata is not None:
-        metadata.update(connector_metadata)
+        # Strip keys the trusted server-side path also writes. Most acutely
+        # ``attachments``: a connector-supplied record with
+        # ``in_sandbox_path="/workspace/..."`` would otherwise be picked up
+        # by the harness's vision renderer, which resolves the path through
+        # ``resolve_to_host_path`` (accepts ``/workspace`` + ``/mnt/attachments``),
+        # ``read_bytes`` it, and inlines as a base64 ``image_url`` part to
+        # the model provider — exfiltration of arbitrary /workspace files
+        # via the model's vision capability and reply. ``sender`` and
+        # ``platform_timestamp`` are similarly server-side state the
+        # connector has no business overriding; ``channel`` is already
+        # unconditionally overwritten below, but list it here for clarity.
+        metadata.update(
+            {k: v for k, v in connector_metadata.items() if k not in _RESERVED_METADATA_KEYS}
+        )
     metadata["channel"] = channel
     if isinstance(sender_name, str):
         metadata["sender"] = sender_name
