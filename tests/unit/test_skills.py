@@ -209,6 +209,40 @@ class TestExtractSkillMetadata:
                 }
             )
 
+    def test_rejects_path_traversal_key(self) -> None:
+        """A skill upload with a key containing ``..`` segments would,
+        when ``provision_skill_files`` does
+        ``Path(<workspace>/skills/<dir>) / key``, resolve to a host-side
+        path outside the workspace at ``write_text`` time (the OS
+        normalizes ``..`` in ``open(2)``). Worker writes attacker-chosen
+        bytes to attacker-chosen worker-host paths — sandbox escape via
+        the management plane.
+
+        Reject at the server boundary. Same threat-class as #497 / #505
+        (symlink-follow exfiltration) but for the path-construction-side
+        of the symlink-vs-traversal duality.
+        """
+        files = {
+            "my-skill/SKILL.md": "---\nname: my-skill\ndescription: x\n---\n",
+            "../../../etc/aios_pwned": "EVIL",
+        }
+        with pytest.raises(ValidationError, match=r"\.\.|traversal|escape|relative"):
+            _extract_skill_metadata(files)
+
+    def test_rejects_absolute_path_key(self) -> None:
+        """An absolute-path key (``/etc/aios_rooted``) is even worse:
+        Python's ``Path("/a/b") / "/c"`` discards the left operand
+        entirely and returns ``Path("/c")``. ``write_text`` then writes
+        directly to the absolute path with worker-process privileges.
+        Reject at the boundary.
+        """
+        files = {
+            "my-skill/SKILL.md": "---\nname: my-skill\ndescription: x\n---\n",
+            "/etc/aios_rooted": "EVIL",
+        }
+        with pytest.raises(ValidationError, match=r"absolute|relative|escape"):
+            _extract_skill_metadata(files)
+
 
 # ── TestSkillModels ────────────────────────────────────────────────────────
 
