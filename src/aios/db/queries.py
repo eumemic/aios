@@ -4444,12 +4444,16 @@ async def list_memories(
     path_prefix: str | None = None,
     order_by: str = "created_at",
     depth: int | None = None,
+    limit: int = 100,
 ) -> list[Memory | MemoryPrefix]:
     """List memories, optionally filtered by ``path_prefix`` and depth-clipped.
 
     ``depth`` requires ``order_by='path'`` (matches Anthropic's wire validation).
     With depth set, paths whose component count under the prefix exceeds
-    ``depth`` are collapsed into ``memory_prefix`` synthetic entries.
+    ``depth`` are collapsed into ``memory_prefix`` synthetic entries. The
+    ``limit`` caps the raw-row fetch — depth aggregation may then collapse
+    that into fewer response entries, but the SQL bound prevents unbounded
+    payloads on stores with thousands of memories.
     """
     if depth is not None and order_by != "path":
         raise ConflictError(
@@ -4466,7 +4470,10 @@ async def list_memories(
         args.append(_escape_like(path_prefix))
         where += f" AND (path = ${len(args) - 1} OR path LIKE ${len(args)} || '%')"
     order_sql = "path ASC" if order_by == "path" else "created_at DESC"
-    rows = await conn.fetch(f"SELECT * FROM memories WHERE {where} ORDER BY {order_sql}", *args)
+    args.append(limit)
+    rows = await conn.fetch(
+        f"SELECT * FROM memories WHERE {where} ORDER BY {order_sql} LIMIT ${len(args)}", *args
+    )
 
     memories = [_row_to_memory(r, include_content=False) for r in rows]
     if depth is None:
