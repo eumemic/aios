@@ -65,20 +65,6 @@ class ConflictError(AiosError):
     status_code = 409
 
 
-class AccountDriftError(ConflictError):
-    """Operator tried to attach a connection for an identity the connector no longer serves.
-
-    Raised by :func:`aios.services.connections.attach_connection` when
-    the supervisor's current account snapshot doesn't include the
-    connection's ``external_account_id``.  Without this guard the
-    attach would succeed silently and inbound for that identity would
-    drop forever with the ``account_drift`` reason — operator pain
-    that's better surfaced at attach time than discovered hours later.
-    """
-
-    error_type = "account_drift"
-
-
 class PayloadTooLargeError(AiosError):
     error_type = "payload_too_large"
     status_code = 413
@@ -92,17 +78,6 @@ class UnauthorizedError(AiosError):
 class ForbiddenError(AiosError):
     error_type = "forbidden"
     status_code = 403
-
-
-class NoRouteError(AiosError):
-    """Raised when a channel address has no matching binding or routing rule.
-
-    Translates to 404 with envelope ``type="no_route"`` so callers (the
-    inbound-message endpoint, connectors) can branch on the type.
-    """
-
-    error_type = "no_route"
-    status_code = 404
 
 
 class CryptoDecryptError(AiosError):

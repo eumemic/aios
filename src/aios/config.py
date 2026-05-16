@@ -211,10 +211,6 @@ class Settings(BaseSettings):
     # ── observability ──────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")
 
-    # ── windowing defaults (per-agent overrides live on the agent record) ──
-    default_window_min: int = Field(default=50_000, ge=1)
-    default_window_max: int = Field(default=150_000, ge=1)
-
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
