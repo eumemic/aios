@@ -181,31 +181,35 @@ async def update_environment(
     config: EnvironmentConfig | None = None,
 ) -> Environment:
     """Update an environment. Omitted fields are preserved."""
+    # Upfront read so "not found" vs "archived" produce distinct errors;
+    # folding archived into the UPDATE WHERE collapses them.
     current = await get_environment(conn, env_id, account_id=account_id)
     if current.archived_at is not None:
         raise ConflictError(f"environment {env_id} is archived", detail={"id": env_id})
 
-    new_name = name if name is not None else current.name
-    new_config = config if config is not None else current.config
+    sets: list[str] = []
+    args: list[Any] = [env_id]
+    if name is not None:
+        args.append(name)
+        sets.append(f"name = ${len(args)}")
+    if config is not None:
+        args.append(json.dumps(config.model_dump(exclude_none=True)))
+        sets.append(f"config = ${len(args)}::jsonb")
 
-    # No-op detection.
-    if new_name == current.name and new_config == current.config:
+    if not sets:
         return current
 
-    config_json = json.dumps(new_config.model_dump(exclude_none=True))
+    args.append(account_id)
+    sql = (
+        f"UPDATE environments SET {', '.join(sets)} "
+        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+    )
     try:
-        row = await conn.fetchrow(
-            "UPDATE environments SET name = $2, config = $3::jsonb "
-            "WHERE id = $1 AND account_id = $4 RETURNING *",
-            env_id,
-            new_name,
-            config_json,
-            account_id,
-        )
+        row = await conn.fetchrow(sql, *args)
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
-            f"an environment named {new_name!r} already exists",
-            detail={"name": new_name},
+            f"an environment named {name!r} already exists",
+            detail={"name": name},
         ) from exc
     assert row is not None
     return _row_to_environment(row)
