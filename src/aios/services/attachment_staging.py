@@ -109,12 +109,18 @@ async def stage_inbound_attachments(
                 # re-reading the stream.
                 size = target.stat().st_size
             else:
-                # Register the destination path with the cleanup list
-                # *before* we touch the disk so a partial write
-                # (e.g. mid-stream cancellation) is still reachable for
-                # the compensating unlink.
-                newly_staged_paths.append(target)
+                # Register the destination AFTER ``_stream_to_disk``
+                # successfully renames our ``.part`` into place. If we
+                # registered before and ``_stream_to_disk`` raised mid-
+                # stream, the caller's cleanup would unlink ``target`` —
+                # but in the concurrent-same-event_id race (webhook
+                # retries) ``target`` may have just been atomically
+                # renamed into place by the winning invocation, so
+                # unlinking would DELETE the winner's bytes the renderer
+                # later expects. Post-rename is the only point where
+                # this invocation truly owns ``target``.
                 size = await _stream_to_disk(attachment.stream, target)
+                newly_staged_paths.append(target)
 
             staged_records.append(
                 {
@@ -155,9 +161,15 @@ async def _stream_to_disk(stream: UploadStream, target: Path) -> int:
         os.rename(temp_path, target)
     except BaseException:
         # BaseException so partial state is cleaned up under task cancellation.
-        # ASYNC240: tmpfs unlinks are sub-microsecond; threading them
-        # would cost more than the syscall.
+        # Only unlink ``temp_path`` — never ``target``. The ``target`` slot may
+        # have been atomically renamed into by a concurrent invocation
+        # (webhook retry with same event_id) that won the race past our
+        # ``target.exists()`` check; unlinking it would delete the winner's
+        # bytes the renderer later expects via the ``staged_records``
+        # ``in_sandbox_path``. Cleanup of ``target`` for the failure path
+        # in which THIS invocation owned it (rename succeeded, caller
+        # raised later) is the caller's job via ``newly_staged_paths``.
+        # tmpfs unlink is sub-microsecond; not worth threading.
         temp_path.unlink(missing_ok=True)
-        target.unlink(missing_ok=True)  # noqa: ASYNC240
         raise
     return size
