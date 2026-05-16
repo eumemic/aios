@@ -18,7 +18,7 @@ import asyncio
 import base64
 import json
 from contextlib import AsyncExitStack
-from typing import Any, assert_never, cast
+from typing import Any, assert_never
 
 import asyncpg
 import httpx
@@ -126,10 +126,7 @@ async def resolve_auth_for_target_url(
         )
         if session_result is None:
             return None, {}
-        blob, auth_type_str, vault_id = session_result
-        # The CHECK constraint on vault_credentials.auth_type guarantees the
-        # DB-stored string is one of the AuthType literals.
-        auth_type = cast(AuthType, auth_type_str)
+        blob, auth_type, vault_id = session_result
         subkey = crypto_box.derive_account_subkey(account_id)
 
         if auth_type == "oauth2_refresh":

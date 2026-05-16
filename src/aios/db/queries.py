@@ -71,7 +71,7 @@ from aios.models.runtime_tokens import RuntimeToken
 from aios.models.session_templates import SessionTemplate
 from aios.models.sessions import Session, SessionStatus, SessionUsage
 from aios.models.skills import AgentSkillRef, Skill, SkillVersion
-from aios.models.vaults import Vault, VaultCredential
+from aios.models.vaults import AuthType, Vault, VaultCredential
 
 
 def parse_jsonb(raw: Any) -> Any:
@@ -2350,7 +2350,7 @@ async def insert_vault_credential(
     vault_id: str,
     display_name: str | None,
     target_url: str,
-    auth_type: str,
+    auth_type: AuthType,
     blob: EncryptedBlob,
     metadata: dict[str, Any],
 ) -> VaultCredential:
@@ -2674,9 +2674,12 @@ async def resolve_vault_credential(
     account_id: str,
     vault_id: str,
     target_url: str,
-) -> tuple[EncryptedBlob, str] | None:
+) -> tuple[EncryptedBlob, AuthType] | None:
     """Look up a credential in a specific vault by ``target_url`` — no
-    ``session_vaults`` join."""
+    ``session_vaults`` join.  The DB's CHECK constraint guarantees
+    ``auth_type`` is one of the ``AuthType`` literals, so the cast on
+    the way out is exhaustively safe.
+    """
     row = await conn.fetchrow(
         """
         SELECT ciphertext, nonce, auth_type
@@ -2693,7 +2696,10 @@ async def resolve_vault_credential(
     )
     if row is None:
         return None
-    return EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]), str(row["auth_type"])
+    return (
+        EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]),
+        cast(AuthType, str(row["auth_type"])),
+    )
 
 
 async def resolve_session_credential(
@@ -2702,7 +2708,7 @@ async def resolve_session_credential(
     target_url: str,
     *,
     account_id: str,
-) -> tuple[EncryptedBlob, str, str] | None:
+) -> tuple[EncryptedBlob, AuthType, str] | None:
     """Find the first matching credential across a session's bound vaults.
 
     Joins ``session_vaults`` (rank-ordered) with ``vault_credentials``
@@ -2710,6 +2716,8 @@ async def resolve_session_credential(
     ``(EncryptedBlob, auth_type, vault_id)`` for the first match, or
     ``None`` if no credential exists. The ``vault_id`` is needed by the
     OAuth refresh path to scope ``SELECT … FOR UPDATE`` to a specific row.
+    The DB's CHECK constraint guarantees ``auth_type`` is one of the
+    ``AuthType`` literals, so the cast on the way out is exhaustively safe.
     """
     row = await conn.fetchrow(
         """
@@ -2732,7 +2740,7 @@ async def resolve_session_credential(
         return None
     return (
         EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]),
-        str(row["auth_type"]),
+        cast(AuthType, str(row["auth_type"])),
         str(row["vault_id"]),
     )
 
