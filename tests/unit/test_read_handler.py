@@ -143,3 +143,30 @@ class TestErrorPath:
         assert "error" in result
         assert "No such file" in result["error"]
         assert result["path"] == "/nope"
+
+    async def test_cmd_uses_pipefail_so_cat_failure_propagates(
+        self, stub_registry: Any, stub_handle: SandboxHandle
+    ) -> None:
+        """``cat -n -- path | sed -n A,Bp`` is a pipe whose final exit code is
+        ``sed``'s — which is 0 even when ``cat`` failed (e.g., path doesn't
+        exist) because ``sed`` happily consumes empty input and exits 0. Without
+        ``set -o pipefail`` the result returned to the model is
+        ``{path: ..., content: ""}`` — empty content, no error — indistinguishable
+        from reading an empty file. For memory targets it's worse: the empty
+        sha line is then cached into the read-sha map (poisoning the next
+        write's precondition).
+
+        The fix prepends ``set -o pipefail`` to the bash invocation so any
+        non-zero exit anywhere in the pipe (or in either side of the ``&&``)
+        is surfaced as the overall exit code, which the existing
+        ``result.exit_code != 0`` branch then turns into the error dict the
+        previous test expects.
+        """
+        await read_handler("sess_01TEST", {"path": "/workspace/a.txt"})
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        assert "pipefail" in cmd, (
+            f"cmd must enable ``pipefail`` so a failing ``cat`` (e.g., missing "
+            f"file) propagates through the ``| sed -n ...`` to the overall "
+            f"pipe exit code; without it, missing files silently return empty "
+            f"content. Got: {cmd!r}"
+        )

@@ -106,17 +106,26 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     end = offset + limit - 1
     quoted_path = shlex.quote(path)
     sed_arg = shlex.quote(f"{offset},{end}p")
-    # cat -n numbers lines (1-indexed) with the format `   N\tCONTENT`;
-    # sed -n 'START,ENDp' slices by line number against the already-
+    # ``cat -n`` numbers lines (1-indexed) with the format ``   N\tCONTENT``;
+    # ``sed -n 'START,ENDp'`` slices by line number against the already-
     # numbered output so the visible numbers are the file's actual line
     # numbers, not relative to the slice.
+    #
+    # ``set -o pipefail`` is load-bearing: without it the pipe's exit code
+    # is ``sed``'s (0) even when ``cat`` failed (e.g., missing path), and
+    # the existing ``exit_code != 0`` branch silently returns empty content
+    # to the model. For memory targets it's worse — the empty sha line gets
+    # cached into the read-sha map and poisons the next write-tool
+    # precondition. ``bash -c`` is the sandbox exec shell so the option is
+    # supported.
     if target is None:
-        cmd = f"cat -n -- {quoted_path} | sed -n {sed_arg}"
+        cmd = f"set -o pipefail; cat -n -- {quoted_path} | sed -n {sed_arg}"
     else:
         # Memory mounts: prepend the raw-file sha (one line, 64 hex chars)
         # so the write-tool precondition can be gated against the FS state
         # the model just observed. One docker-exec round-trip total.
         cmd = (
+            f"set -o pipefail; "
             f"sha256sum -- {quoted_path} | cut -d' ' -f1 && "
             f"cat -n -- {quoted_path} | sed -n {sed_arg}"
         )
