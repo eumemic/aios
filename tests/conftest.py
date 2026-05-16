@@ -228,13 +228,10 @@ def aios_env_minimal(
     }
     with mock.patch.dict(os.environ, env_vars):
         from aios.config import get_settings
-        from aios.db import pool
 
         get_settings.cache_clear()
-        pool._pool = None
         yield env_vars
         get_settings.cache_clear()
-        pool._pool = None
 
 
 @pytest.fixture
