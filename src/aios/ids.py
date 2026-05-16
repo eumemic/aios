@@ -24,12 +24,10 @@ ENVIRONMENT: Final = "env"
 SESSION: Final = "sess"
 EVENT: Final = "evt"
 CREDENTIAL: Final = "cred"
-AGENT_VERSION: Final = "agver"  # reserved for phase 4
 VAULT: Final = "vlt"
 VAULT_CREDENTIAL: Final = "vcr"
 SKILL: Final = "skl"
 CONNECTION: Final = "conn"
-CONNECTOR_TOKEN: Final = "ctok"
 SESSION_TEMPLATE: Final = "stpl"
 # Connector subsystem (#328 PR 2+). The aios_connectors module uses
 # these prefixes to mint ids via ``make_id``; the PR 2 migration
@@ -58,12 +56,10 @@ _PREFIXES: Final = frozenset(
         SESSION,
         EVENT,
         CREDENTIAL,
-        AGENT_VERSION,
         VAULT,
         VAULT_CREDENTIAL,
         SKILL,
         CONNECTION,
-        CONNECTOR_TOKEN,
         SESSION_TEMPLATE,
         MEMORY_STORE,
         MEMORY,
