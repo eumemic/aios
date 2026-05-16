@@ -103,11 +103,20 @@ async def get_store(pool: asyncpg.Pool[Any], store_id: str, *, account_id: str) 
 
 
 async def list_stores(
-    pool: asyncpg.Pool[Any], *, account_id: str, include_archived: bool = False, limit: int = 100
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    include_archived: bool = False,
+    limit: int = 100,
+    after: str | None = None,
 ) -> list[MemoryStore]:
     async with pool.acquire() as conn:
         return await queries.list_memory_stores(
-            conn, include_archived=include_archived, limit=limit, account_id=account_id
+            conn,
+            include_archived=include_archived,
+            limit=limit,
+            after=after,
+            account_id=account_id,
         )
 
 

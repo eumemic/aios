@@ -50,16 +50,22 @@ async def list_stores(
     _auth: AuthDep,
     include_archived: bool = False,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    after: str | None = None,
 ) -> ListResponse[MemoryStore]:
     """List memory stores, newest first.
 
     Unlike most resources, archived stores can be included via
-    ``include_archived=true`` (default false). No cursor pagination — bumps
-    the default limit to 100 since stores are typically few.
+    ``include_archived=true`` (default false). Cursor pagination: pass
+    ``after`` from a previous response's ``next_after`` to get the next
+    page. The default limit is 100 since stores are typically few.
     """
     account_id, _, _ = _auth
     items = await service.list_stores(
-        pool, include_archived=include_archived, limit=limit, account_id=account_id
+        pool,
+        include_archived=include_archived,
+        limit=limit,
+        after=after,
+        account_id=account_id,
     )
     return ListResponse[MemoryStore](
         data=items,
