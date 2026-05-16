@@ -830,15 +830,31 @@ async def discover_session_mcp_tools(
         )
         return await discover_mcp_tools(url, vault_id, headers, name)
 
-    results = await asyncio.gather(*[_discover_one(n, u) for n, u in servers])
-    tools: list[dict[str, Any]] = [
-        tool for (tool_list, _instructions) in results for tool in tool_list
-    ]
-    instructions_by_server: dict[str, str] = {
-        name: instructions
-        for (name, _url), (_tools, instructions) in zip(servers, results, strict=True)
-        if instructions
-    }
+    # Discovery runs as part of the step prelude — a process the model
+    # didn't consciously initiate — so a single server's transport
+    # failure is logged at WARN for ops visibility but does NOT surface
+    # as a model-visible event. The failed server contributes neither
+    # tools nor an instructions entry, so the system prompt's
+    # mcp_servers_block reflects only servers the model can actually
+    # use. Healthy servers' discoveries proceed unaffected.
+    raw_results = await asyncio.gather(
+        *[_discover_one(n, u) for n, u in servers], return_exceptions=True
+    )
+    tools: list[dict[str, Any]] = []
+    instructions_by_server: dict[str, str] = {}
+    for (name, url), result in zip(servers, raw_results, strict=True):
+        if isinstance(result, BaseException):
+            log.warning(
+                "mcp.discovery_failed",
+                server_name=name,
+                url=url,
+                error=f"{type(result).__name__}: {result}",
+            )
+            continue
+        tool_list, instructions = result
+        tools.extend(tool_list)
+        if instructions:
+            instructions_by_server[name] = instructions
     return tools, instructions_by_server
 
 

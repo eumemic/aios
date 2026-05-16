@@ -321,14 +321,19 @@ class TestDiscoverMcpTools:
         assert tools[0]["function"]["name"] == "mcp__myserver__tool_a"
         assert tools[1]["function"]["name"] == "mcp__myserver__tool_b"
 
-    async def test_discovery_failure_returns_empty(self) -> None:
+    async def test_discovery_raises_on_transport_failure(self) -> None:
+        """Discovery propagates the underlying transport exception so the
+        caller can decide how to surface it. The previous silent
+        ``([], None)`` fallback hid server-down failures from the model:
+        the system prompt listed the server but no tools were callable,
+        leaving the model unable to self-correct.
+        """
         with patch("aios.mcp.client.streamable_http_client") as mock_transport:
             mock_transport.return_value.__aenter__ = AsyncMock(side_effect=ConnectionError("down"))
             mock_transport.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            result = await discover_mcp_tools("https://bad.example.com/", None, {}, "bad")
-
-        assert result == ([], None)
+            with pytest.raises(ConnectionError, match="down"):
+                await discover_mcp_tools("https://bad.example.com/", None, {}, "bad")
 
     async def test_discovery_propagates_server_instructions(self) -> None:
         """``InitializeResult.instructions`` is the standard MCP transport

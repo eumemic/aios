@@ -202,3 +202,55 @@ class TestDiscoverSessionMcpTools:
                 account_id="acc_test_stub",
             )
         assert instructions == {}
+
+    async def test_failed_server_filtered_from_tools_and_instructions(self) -> None:
+        """When one server's discovery raises, the others still succeed:
+        partial-success preserved, the failed server contributes neither
+        tools nor an instructions entry. The discovery failure happens in
+        the step prelude — a process the model didn't consciously initiate —
+        so it's logged at WARN for ops, not surfaced as a model-visible
+        event. The model sees a consistent view: only servers that are
+        actually usable appear in its tools list and instructions block.
+        """
+        from aios.harness.loop import discover_session_mcp_tools
+
+        agent = _agent(
+            mcp_servers=[
+                McpServerSpec(name="gh", url="https://mcp.github"),
+                McpServerSpec(name="broken", url="https://mcp.broken"),
+                McpServerSpec(name="ln", url="https://mcp.linear"),
+            ],
+            tools=[
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="gh"),
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="broken"),
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="ln"),
+            ],
+        )
+
+        async def _discover(
+            _url: str, _vault_id: str | None, _headers: dict[str, str], name: str
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            if name == "broken":
+                raise ConnectionError("simulated discovery failure")
+            return [{"name": f"mcp__{name}__t"}], f"{name}-instructions"
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            resolve.return_value = (None, {})
+            tools, instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+                account_id="acc_test_stub",
+            )
+
+        tool_names = {t["name"] for t in tools}
+        assert tool_names == {"mcp__gh__t", "mcp__ln__t"}, (
+            "Failed server's tools must be omitted; healthy servers must still appear"
+        )
+        assert set(instructions) == {"gh", "ln"}, (
+            "Failed server must NOT appear in the instructions dict — the system "
+            "prompt would otherwise list a server the model can't actually use"
+        )

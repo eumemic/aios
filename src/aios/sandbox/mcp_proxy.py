@@ -86,6 +86,24 @@ def _err(status: int, message: str) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
 
 
+def _transport_err(server_name: str, exc: BaseException) -> JSONResponse:
+    """502 response shape for an upstream MCP discovery failure.
+
+    Mirrors :func:`aios.mcp.client.call_mcp_tool`'s error envelope
+    (``{"error": ..., "code": "transport_error"}``) so the sandboxed
+    model sees the same shape whether discovery or invocation hit the
+    upstream blip — and so its CLI wrapper can branch on ``code``
+    rather than substring-matching the human-readable message.
+    """
+    return JSONResponse(
+        {
+            "error": f"MCP server '{server_name}' error: {type(exc).__name__}: {exc}",
+            "code": "transport_error",
+        },
+        status_code=502,
+    )
+
+
 class McpBroker:
     """One shared HTTP broker per worker.
 
@@ -288,9 +306,18 @@ class McpBroker:
         vault_id, headers = await resolve_auth_for_target_url(
             pool, crypto_box, session_id, server.url, account_id=account_id
         )
-        tool_dicts, _instructions = await discover_mcp_tools(
-            server.url, vault_id, headers, server_name
-        )
+        try:
+            tool_dicts, _instructions = await discover_mcp_tools(
+                server.url, vault_id, headers, server_name
+            )
+        except Exception as exc:
+            log.warning(
+                "mcp_broker.discovery_failed",
+                server_name=server_name,
+                url=server.url,
+                exc_info=True,
+            )
+            return _transport_err(server_name, exc)
 
         out: list[dict[str, Any]] = []
         for td in tool_dicts:
@@ -321,7 +348,16 @@ class McpBroker:
         vault_id, headers = await resolve_auth_for_target_url(
             pool, crypto_box, session_id, server.url, account_id=account_id
         )
-        tool_dicts, _ = await discover_mcp_tools(server.url, vault_id, headers, server.name)
+        try:
+            tool_dicts, _ = await discover_mcp_tools(server.url, vault_id, headers, server.name)
+        except Exception as exc:
+            log.warning(
+                "mcp_broker.discovery_failed",
+                server_name=server.name,
+                url=server.url,
+                exc_info=True,
+            )
+            return _transport_err(server.name, exc)
         qualified = f"mcp__{server.name}__{tool_name}"
         for td in tool_dicts:
             fn = td.get("function", {})
