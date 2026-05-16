@@ -67,7 +67,23 @@ async def materialize_store_to_host(
             )
             for path, content in entries:
                 # Memory paths are guaranteed to start with "/" by the SQL CHECK.
-                atomic_write(host_dir / path.lstrip("/"), content or "")
+                target = host_dir / path.lstrip("/")
+                # Defer to concurrent writers. host_dir was created empty
+                # just above (mkdir), so any file already at ``target`` was
+                # placed there by an ``_mirror_to_host`` call that fired
+                # during this function's snapshot-read yield — i.e. by a
+                # caller who committed to DB AFTER our snapshot. Their
+                # value supersedes ours. Without this guard the stale-
+                # snapshot ``atomic_write`` clobbers the fresher mirror
+                # and leaves DB/disk permanently inconsistent.
+                if target.exists():
+                    log.info(
+                        "memory.materialize_skipped_existing",
+                        store_id=store_id,
+                        path=path,
+                    )
+                    continue
+                atomic_write(target, content or "")
 
             # Marker last so a crash mid-materialization leaves an unmarked
             # dir that the next attempt will redo.
