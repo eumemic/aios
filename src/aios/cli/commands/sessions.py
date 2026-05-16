@@ -289,7 +289,7 @@ def events(
                 envelope = client.request(
                     "GET",
                     f"/v1/sessions/{session_id}/events",
-                    params={"after_seq": after_seq, "kind": kind, "limit": limit},
+                    params={"after": after_seq, "kind": kind, "limit": limit},
                 )
         render_list(
             state.output_format,
