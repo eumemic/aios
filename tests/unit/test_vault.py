@@ -290,6 +290,43 @@ class TestMergeAuthPayload:
         assert "client_id" not in merged
         assert merged["access_token"] == "at"
 
+    def test_unsetting_required_bearer_token_is_rejected(self) -> None:
+        """A PUT with ``{"token": null}`` on a bearer_header credential
+        previously silently dropped the token from the merged payload,
+        leaving an "active" credential with no token. Downstream
+        rendering produced ``Authorization`` headers with an empty bearer
+        token and the upstream reliably 401'd. Reject at the merge site
+        so the operator gets a clear ``ValidationError`` instead of a
+        silently-broken credential."""
+        existing = {"token": "secret"}
+        update = VaultCredentialUpdate(token=None)
+        with pytest.raises(ValidationError, match="bearer_header"):
+            _merge_auth_payload(existing, update, "bearer_header")
+
+    def test_unsetting_required_basic_username_is_rejected(self) -> None:
+        existing = {"username": "alice", "password": "secret"}
+        update = VaultCredentialUpdate(username=None)
+        with pytest.raises(ValidationError, match="basic"):
+            _merge_auth_payload(existing, update, "basic")
+
+    def test_unsetting_required_basic_password_is_rejected(self) -> None:
+        existing = {"username": "alice", "password": "secret"}
+        update = VaultCredentialUpdate(password=None)
+        with pytest.raises(ValidationError, match="basic"):
+            _merge_auth_payload(existing, update, "basic")
+
+    def test_unsetting_required_custom_header_value_is_rejected(self) -> None:
+        existing = {"header_name": "X-Api-Key", "header_value": "sekrit"}
+        update = VaultCredentialUpdate(header_value=None)
+        with pytest.raises(ValidationError, match="custom_header"):
+            _merge_auth_payload(existing, update, "custom_header")
+
+    def test_unsetting_required_oauth_access_token_is_rejected(self) -> None:
+        existing = {"access_token": "at", "client_id": "cid"}
+        update = VaultCredentialUpdate(access_token=None)
+        with pytest.raises(ValidationError, match="oauth2_refresh"):
+            _merge_auth_payload(existing, update, "oauth2_refresh")
+
 
 # ── update_vault_credential: no private sentinel leaks into queries ──────────
 

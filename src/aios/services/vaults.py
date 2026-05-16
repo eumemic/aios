@@ -345,6 +345,13 @@ def _merge_auth_payload(
     """Merge update fields into the existing decrypted payload.
 
     Only fields present in model_fields_set replace existing values.
+    Fields explicitly set to ``None`` are unset from the merged payload
+    (the documented unset-via-null behavior). After the merge, the
+    payload is re-validated against ``auth_type``'s required-fields list:
+    a PUT that unsets a required-by-auth-type field (e.g. ``token`` for
+    ``bearer_header``) raises ``ValidationError`` rather than landing a
+    silently-broken credential whose downstream auth-header rendering
+    would emit an empty bearer.
     """
     fields = _fields_for(auth_type)
     merged = dict(existing)
@@ -362,7 +369,41 @@ def _merge_auth_payload(
             merged[field] = val.isoformat()
         else:
             merged[field] = val
+    _validate_required_in_payload(merged, auth_type)
     return merged
+
+
+def _validate_required_in_payload(payload: dict[str, Any], auth_type: AuthType) -> None:
+    """Raise ``ValidationError`` if any field required by ``auth_type`` is
+    missing or empty in ``payload``. Mirrors the create-side checks in
+    :func:`_extract_auth_payload`; the merge path delegates here so a
+    PUT can't land an incomplete credential under the unset-via-null
+    contract.
+    """
+    if auth_type == "bearer_header" and not payload.get("token"):
+        raise ValidationError(
+            "bearer_header credentials require 'token'",
+            detail={"auth_type": auth_type},
+        )
+    if auth_type == "basic":
+        missing = [f for f in _BASIC_FIELDS if not payload.get(f)]
+        if missing:
+            raise ValidationError(
+                f"basic credentials require {missing}",
+                detail={"auth_type": auth_type, "missing": missing},
+            )
+    if auth_type == "custom_header":
+        missing = [f for f in _CUSTOM_HEADER_FIELDS if not payload.get(f)]
+        if missing:
+            raise ValidationError(
+                f"custom_header credentials require {missing}",
+                detail={"auth_type": auth_type, "missing": missing},
+            )
+    if auth_type == "oauth2_refresh" and not payload.get("access_token"):
+        raise ValidationError(
+            "oauth2_refresh credentials require 'access_token'",
+            detail={"auth_type": auth_type},
+        )
 
 
 async def create_vault_credential(
