@@ -73,7 +73,6 @@ async def shared_docker_harness(
     import aios.tools  # noqa: F401  — register built-in tools
     from aios.config import get_settings
     from aios.crypto.vault import CryptoBox
-    from aios.db import pool as pool_module
     from aios.db.pool import create_pool
     from aios.harness.task_registry import TaskRegistry
     from aios.sandbox.backends import make_backend
@@ -93,7 +92,6 @@ async def shared_docker_harness(
 
     with mock.patch.dict(os.environ, env_vars):
         get_settings.cache_clear()
-        pool_module._pool = None
 
         # Seed acc_test_stub once.  Cleaner than the conftest aios_env
         # path since this fixture runs at module scope: a fresh asyncpg
@@ -174,7 +172,6 @@ async def shared_docker_harness(
         await mcp_broker.stop()
         await pool.close()
         get_settings.cache_clear()
-        pool_module._pool = None
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="module")

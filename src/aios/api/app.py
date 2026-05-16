@@ -31,7 +31,7 @@ from aios.api.routers import (
 )
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
-from aios.db.pool import close_pool, create_pool
+from aios.db.pool import create_pool
 from aios.errors import install_exception_handlers
 from aios.harness import runtime
 from aios.harness.procrastinate_app import app as procrastinate_app
@@ -74,7 +74,6 @@ def create_app() -> FastAPI:
             runtime.tool_provider = prev_tool_provider
             await procrastinate_app.close_async()
             await pool.close()
-            await close_pool()
 
     app = FastAPI(
         title="aios",

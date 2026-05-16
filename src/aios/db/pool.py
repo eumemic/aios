@@ -1,8 +1,8 @@
-"""asyncpg connection pool singleton.
+"""asyncpg connection pool helpers.
 
-The pool is created on first call to :func:`get_pool` and lives for the
-process lifetime. Tests construct their own pools via :func:`create_pool`
-and bypass the singleton.
+The API and worker processes each construct their own pool via
+:func:`create_pool` at startup and stash it on their own state
+(``app.state.pool`` / ``runtime.pool``).  Tests do the same.
 """
 
 from __future__ import annotations
@@ -10,10 +10,6 @@ from __future__ import annotations
 from typing import Any
 
 import asyncpg
-
-from aios.config import get_settings
-
-_pool: asyncpg.Pool[Any] | None = None
 
 
 def normalize_dsn(db_url: str) -> str:
@@ -32,20 +28,3 @@ async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 16) -> 
     if pool is None:
         raise RuntimeError(f"asyncpg.create_pool returned None for {db_url}")
     return pool
-
-
-async def get_pool() -> asyncpg.Pool[Any]:
-    """Return the process-wide pool, creating it on first call."""
-    global _pool
-    if _pool is None:
-        settings = get_settings()
-        _pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
-    return _pool
-
-
-async def close_pool() -> None:
-    """Close the process-wide pool. Idempotent."""
-    global _pool
-    if _pool is not None:
-        await _pool.close()
-        _pool = None
