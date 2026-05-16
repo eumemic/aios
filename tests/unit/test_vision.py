@@ -140,6 +140,53 @@ class TestMakeImageUrlPart:
         part = vision.make_image_url_part(content_type="image/png", data_b64="ZmFrZQ==")
         assert part["image_url"]["url"].startswith("data:image/png;base64,")
 
+    def test_strips_content_type_parameters_from_data_uri(self) -> None:
+        """RFC-7231 content-types can carry parameters
+        (``image/jpeg; charset=utf-8``, ``image/webp ; foo=bar``). When a
+        connector POSTs an inbound attachment whose multipart
+        ``Content-Type`` header includes parameters, the staging layer
+        persists the value verbatim into ``metadata.attachments[i]
+        .content_type``. The renderer then calls ``make_image_url_part``
+        which only sniff-corrects for PNG/JPEG/GIF magic bytes — for
+        WEBP/SVG/HEIC/AVIF/BMP (and ANY other non-sniffable image type)
+        the declared value flows through unchanged into
+        ``data:image/webp; charset=utf-8;base64,...``.
+
+        Anthropic's ``/v1/messages`` and most other providers reject
+        non-canonical image mimes — the inference call 400s on every
+        wake of any session whose context includes such a part. Since
+        the renderer's monotonicity invariant means the part stays in
+        context once added, this bricks the session indefinitely.
+
+        Fix: strip the parameter portion in ``make_image_url_part``
+        (after sniff correction). Cheapest correct-by-construction
+        guard at the renderer boundary.
+        """
+        part = vision.make_image_url_part(
+            content_type="image/webp; charset=utf-8",
+            data_b64="UklGRg==",
+        )
+        url = part["image_url"]["url"]
+        assert url == "data:image/webp;base64,UklGRg==", (
+            f"data URI must carry only the bare mime (no RFC-7231 parameters); "
+            f"got {url!r}. Pre-fix the renderer would build "
+            f"``data:image/webp; charset=utf-8;base64,...`` which Anthropic "
+            f"and most other providers reject, bricking the session on every "
+            f"wake."
+        )
+
+    def test_strips_content_type_parameters_with_whitespace(self) -> None:
+        """Defensive: providers can send ``image/jpeg ; foo=bar`` with
+        a space before the semicolon. The strip must trim the surrounding
+        whitespace too."""
+        # Use bytes that don't match any sniffer table entry so the
+        # declared value survives through correct_image_mime_b64.
+        part = vision.make_image_url_part(
+            content_type="image/heic ; profile=main",
+            data_b64="ZmFrZQ==",
+        )
+        assert part["image_url"]["url"] == "data:image/heic;base64,ZmFrZQ=="
+
 
 class TestTextMarker:
     def test_image_with_path(self) -> None:
