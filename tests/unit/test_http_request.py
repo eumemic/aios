@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from aios.models.agents import HttpPermissionPolicy, HttpRouteSpec, HttpServerSpec
+from aios.models.agents import HttpPermissionPolicy, HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.tools.http_request import (
     _classify_permission,
     _decode_body,
@@ -23,8 +23,10 @@ from aios.tools.http_request import (
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 
-def _agent(*, http_servers: list[HttpServerSpec]) -> SimpleNamespace:
-    return SimpleNamespace(http_servers=http_servers)
+def _agent(
+    *, http_servers: list[HttpServerSpec], tools: list[ToolSpec] | None = None
+) -> SimpleNamespace:
+    return SimpleNamespace(http_servers=http_servers, tools=tools or [])
 
 
 def _server(
@@ -106,6 +108,47 @@ class TestClassifyPermission:
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
         assert _classify_permission({"server_ref": "hue"}, agent) is None
         assert _classify_permission({"server_ref": 123, "path": "/lights/1"}, agent) is None
+
+
+# ── _classify_tool_call (loop.py) over http_request ──────────────────────────
+
+
+class TestClassifyToolCallArguments:
+    """``_classify_tool_call`` must accept both string- and dict-form
+    ``function.arguments`` (providers differ on which shape they emit)."""
+
+    @staticmethod
+    def _make_agent() -> SimpleNamespace:
+        return _agent(
+            http_servers=[_server(routes=[_route("/lights/*", policy="always_allow")])],
+            tools=[ToolSpec(type="http_request")],
+        )
+
+    def test_string_arguments_classify_as_immediate(self) -> None:
+        from aios.harness.loop import _classify_tool_call
+
+        tc = {
+            "id": "c1",
+            "type": "function",
+            "function": {
+                "name": "http_request",
+                "arguments": '{"server_ref": "hue", "path": "/lights/1", "method": "GET"}',
+            },
+        }
+        assert _classify_tool_call(tc, self._make_agent(), {}) == "immediate"
+
+    def test_dict_arguments_classify_as_immediate(self) -> None:
+        from aios.harness.loop import _classify_tool_call
+
+        tc = {
+            "id": "c1",
+            "type": "function",
+            "function": {
+                "name": "http_request",
+                "arguments": {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            },
+        }
+        assert _classify_tool_call(tc, self._make_agent(), {}) == "immediate"
 
 
 # ── _decode_body ────────────────────────────────────────────────────────────
