@@ -35,20 +35,31 @@ class _ManagementProbeConnector(HttpConnector):
         self._client = MagicMock()
 
     @management_handler()
-    async def register(self, *, account: str) -> dict[str, str]:
-        self.calls.append(("register", {"account": account}))
-        return {"status": "sms_sent", "account": account}
+    async def register(self, *, external_account_id: str) -> dict[str, str]:
+        self.calls.append(("register", {"external_account_id": external_account_id}))
+        return {"status": "sms_sent", "external_account_id": external_account_id}
 
     @management_handler()
-    async def captcha_path(self, *, account: str) -> dict[str, str]:
-        self.calls.append(("captcha_path", {"account": account}))
+    async def captcha_path(self, *, external_account_id: str) -> dict[str, str]:
+        self.calls.append(("captcha_path", {"external_account_id": external_account_id}))
         raise ManagementHandlerError(
-            {"status": "captcha_required", "captcha_url": "https://x", "account": account}
+            {
+                "status": "captcha_required",
+                "captcha_url": "https://x",
+                "external_account_id": external_account_id,
+            }
         )
 
     @management_handler(method="updateProfile")
-    async def update_profile(self, *, account: str, given_name: str) -> dict[str, str]:
-        self.calls.append(("update_profile", {"account": account, "given_name": given_name}))
+    async def update_profile(
+        self, *, external_account_id: str, given_name: str
+    ) -> dict[str, str]:
+        self.calls.append(
+            (
+                "update_profile",
+                {"external_account_id": external_account_id, "given_name": given_name},
+            )
+        )
         raise RuntimeError("daemon down")
 
     async def _post_management_call_result(  # type: ignore[override]
@@ -72,13 +83,17 @@ class TestDispatchManagementCall:
     @pytest.mark.asyncio
     async def test_routes_call_to_decorated_handler(self, probe: _ManagementProbeConnector) -> None:
         await probe.dispatch_management_call(
-            {"call_id": "mgmt_1", "method": "register", "params": {"account": "+15551234567"}}
+            {
+                "call_id": "mgmt_1",
+                "method": "register",
+                "params": {"external_account_id": "+15551234567"},
+            }
         )
-        assert probe.calls == [("register", {"account": "+15551234567"})]
+        assert probe.calls == [("register", {"external_account_id": "+15551234567"})]
         r = probe.results[0]
         assert r.kwargs == {
             "call_id": "mgmt_1",
-            "result": {"status": "sms_sent", "account": "+15551234567"},
+            "result": {"status": "sms_sent", "external_account_id": "+15551234567"},
             "is_error": False,
         }
 
@@ -87,14 +102,18 @@ class TestDispatchManagementCall:
         self, probe: _ManagementProbeConnector
     ) -> None:
         await probe.dispatch_management_call(
-            {"call_id": "mgmt_2", "method": "captcha_path", "params": {"account": "+1"}}
+            {
+                "call_id": "mgmt_2",
+                "method": "captcha_path",
+                "params": {"external_account_id": "+1"},
+            }
         )
         r = probe.results[0]
         assert r.kwargs["is_error"] is True
         assert r.kwargs["result"] == {
             "status": "captcha_required",
             "captcha_url": "https://x",
-            "account": "+1",
+            "external_account_id": "+1",
         }
 
     @pytest.mark.asyncio
@@ -105,7 +124,7 @@ class TestDispatchManagementCall:
             {
                 "call_id": "mgmt_3",
                 "method": "updateProfile",
-                "params": {"account": "+1", "given_name": "X"},
+                "params": {"external_account_id": "+1", "given_name": "X"},
             }
         )
         r = probe.results[0]

@@ -46,7 +46,7 @@ class TestSubmitCall:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         conn = MagicMock()
         pool = fake_pool_yielding_conn(conn)
-        expected: dict[str, Any] = {"status": "sms_sent", "account": "+15551234567"}
+        expected: dict[str, Any] = {"status": "sms_sent", "external_account_id": "+15551234567"}
 
         with (
             patch(
@@ -70,7 +70,7 @@ class TestSubmitCall:
                 pool,
                 connector="signal",
                 method="register",
-                params={"account": "+15551234567"},
+                params={"external_account_id": "+15551234567"},
                 timeout_s=1.0,
                 account_id=account_id,
             )
@@ -110,7 +110,7 @@ class TestSubmitCall:
                 pool,
                 connector="signal",
                 method="register",
-                params={"account": "+15551234567"},
+                params={"external_account_id": "+15551234567"},
                 timeout_s=1.0,
                 account_id=account_id,
             )
@@ -140,7 +140,7 @@ class TestSubmitCall:
                 pool,
                 connector="signal",
                 method="register",
-                params={"account": "+15551234567"},
+                params={"external_account_id": "+15551234567"},
                 timeout_s=0.05,
                 account_id=account_id,
             )

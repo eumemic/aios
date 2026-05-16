@@ -19,18 +19,18 @@ class SignalRegisterResponse:
     the URL inside FastAPI's error envelope.
 
         Attributes:
-            account (str):
+            external_account_id (str):
             status (SignalRegisterResponseStatus):
             captcha_url (None | str | Unset):
     """
 
-    account: str
+    external_account_id: str
     status: SignalRegisterResponseStatus
     captcha_url: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        account = self.account
+        external_account_id = self.external_account_id
 
         status = self.status.value
 
@@ -44,7 +44,7 @@ class SignalRegisterResponse:
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
-                "account": account,
+                "external_account_id": external_account_id,
                 "status": status,
             }
         )
@@ -56,7 +56,7 @@ class SignalRegisterResponse:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        account = d.pop("account")
+        external_account_id = d.pop("external_account_id")
 
         status = SignalRegisterResponseStatus(d.pop("status"))
 
@@ -70,7 +70,7 @@ class SignalRegisterResponse:
         captcha_url = _parse_captcha_url(d.pop("captcha_url", UNSET))
 
         signal_register_response = cls(
-            account=account,
+            external_account_id=external_account_id,
             status=status,
             captcha_url=captcha_url,
         )

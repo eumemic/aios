@@ -58,7 +58,7 @@ def test_create_ergonomic(mocked_cli):
             "create",
             "--connector",
             "signal",
-            "--account",
+            "--external-account-id",
             "acct-123",
         ],
     )
@@ -67,7 +67,7 @@ def test_create_ergonomic(mocked_cli):
     assert mocked_cli.captured.path == "/v1/connections"
     assert mocked_cli.captured.body == {
         "connector": "signal",
-        "account": "acct-123",
+        "external_account_id": "acct-123",
     }
 
 
@@ -82,7 +82,7 @@ def test_create_ergonomic_with_metadata_json(mocked_cli):
             "create",
             "--connector",
             "signal",
-            "--account",
+            "--external-account-id",
             "acct-123",
             "--metadata-json",
             '{"region": "us-east"}',
@@ -98,7 +98,7 @@ def test_create_missing_ergonomic_flag(mocked_cli):
         ["connections", "create", "--connector", "signal"],
     )
     assert result.exit_code == 64
-    assert "--account" in result.output
+    assert "--external-account-id" in result.output
 
 
 def test_create_rejects_mixed_sources(mocked_cli):
@@ -109,7 +109,7 @@ def test_create_rejects_mixed_sources(mocked_cli):
             "create",
             "--connector",
             "signal",
-            "--account",
+            "--external-account-id",
             "acct-1",
             "--data",
             "{}",

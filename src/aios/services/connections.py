@@ -54,7 +54,7 @@ async def create_connection(
     *,
     account_id: str,
     connector: str,
-    account: str,
+    external_account_id: str,
     metadata: dict[str, Any],
     secrets: dict[str, str] | None = None,
     crypto_box: CryptoBox,
@@ -63,7 +63,7 @@ async def create_connection(
         return await queries.insert_connection(
             conn,
             connector=connector,
-            account=account,
+            external_account_id=external_account_id,
             metadata=metadata,
             secrets_blob=_encrypt_secrets(secrets, crypto_box, account_id=account_id),
             account_id=account_id,
@@ -189,7 +189,7 @@ async def attach_connection(
             conn,
             connector=connection.connector,
             connection_id=connection.id,
-            account=connection.account,
+            external_account_id=connection.external_account_id,
             event="added",
             account_id=account_id,
         )
@@ -358,14 +358,18 @@ async def list_recent_chats(
     pool: asyncpg.Pool[Any], connection_id: str, *, account_id: str, limit: int = 50
 ) -> list[RecentChat]:
     """Distinct chat_ids that have produced inbound on this connection's
-    account, ordered most-recent first.  Used as the input to
+    external identity, ordered most-recent first.  Used as the input to
     ``bind-chat`` when an operator needs to find a specific chat's
     ``chat_id`` without digging through event logs.
     """
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, connection_id, account_id=account_id)
         rows = await queries.list_recent_chat_ids(
-            conn, connection.connector, connection.account, limit=limit, account_id=account_id
+            conn,
+            connection.connector,
+            connection.external_account_id,
+            limit=limit,
+            account_id=account_id,
         )
     return [
         RecentChat(chat_id=chat_id, last_seen_at=last_seen_at) for chat_id, last_seen_at in rows
@@ -399,7 +403,7 @@ async def archive_connection(
             conn,
             connector=archived.connector,
             connection_id=archived.id,
-            account=archived.account,
+            external_account_id=archived.external_account_id,
             event="removed",
             account_id=account_id,
         )

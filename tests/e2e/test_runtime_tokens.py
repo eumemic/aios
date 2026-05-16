@@ -61,7 +61,7 @@ class TestRuntimeTokensRoundtrip:
         # has a valid connection_id; the runtime token is revoked, so
         # the failure must come from auth, not from the connection check.
         r = await http_client.post(  # type: ignore[attr-defined]
-            "/v1/connections", json={"connector": "echo", "account": "acct-rev"}
+            "/v1/connections", json={"connector": "echo", "external_account_id": "acct-rev"}
         )
         r.raise_for_status()
         connection_id = r.json()["id"]
@@ -83,11 +83,11 @@ class TestRuntimeTokensRoundtrip:
         route.  This is the headline guard on the new auth path."""
         # Echo connection + telegram connection (different connector types).
         r = await http_client.post(  # type: ignore[attr-defined]
-            "/v1/connections", json={"connector": "echo", "account": "acct-cross-e"}
+            "/v1/connections", json={"connector": "echo", "external_account_id": "acct-cross-e"}
         )
         r.raise_for_status()
         r = await http_client.post(  # type: ignore[attr-defined]
-            "/v1/connections", json={"connector": "telegram", "account": "acct-cross-t"}
+            "/v1/connections", json={"connector": "telegram", "external_account_id": "acct-cross-t"}
         )
         r.raise_for_status()
         telegram_conn_id = r.json()["id"]

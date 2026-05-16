@@ -2,7 +2,7 @@
 
 Returned in the ``InitializeResult.instructions`` field of the MCP
 ``initialize`` response; the aios harness concatenates it into the
-session's system prompt under a ``## Connector: telegram/<account>``
+session's system prompt under a ``## Connector: telegram/<external_account_id>``
 heading.
 
 Covers the tools this server exposes.  Telling the model about tools
@@ -29,16 +29,17 @@ def build_instructions(
     startup.  ``bot_id`` and ``first_name`` are guaranteed by Telegram's
     schema; ``username`` is optional (a bot can exist without one during
     BotFather setup) and its bullet is omitted when absent or empty.
-    ``bot_id`` doubles as the ``<account>`` segment of this connector's
-    channel addresses.
+    ``bot_id`` doubles as the ``<external_account_id>`` segment of this
+    connector's channel addresses.
     """
     lines = [
         "## Your identity on this Telegram bot account",
         "",
         f"- **bot_id**: `{bot_id}` — this is YOU.  In group chats, any "
         f"inbound whose header shows this id is your own prior message, "
-        f"not another participant.  It also appears as the ``<account>`` "
-        f"segment of every ``telegram/<account>/<chat_id>`` address.",
+        f"not another participant.  It also appears as the "
+        f"``<external_account_id>`` segment of every "
+        f"``telegram/<external_account_id>/<chat_id>`` address.",
     ]
     if username:
         lines.append(
@@ -54,7 +55,8 @@ def build_instructions(
 TELEGRAM_SERVER_INSTRUCTIONS = """\
 ## chat_id
 
-Each Telegram channel address is path-shaped: ``telegram/<bot_id>/<chat_id>``.
+Each Telegram channel address is path-shaped: ``telegram/<external_account_id>/<chat_id>``
+(``<external_account_id>`` is the bot_id above).
 The ``chat_id`` segment is a signed integer:
 
 - Positive for direct messages (the counterparty's user id).

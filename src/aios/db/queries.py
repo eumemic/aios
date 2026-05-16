@@ -3236,7 +3236,7 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
     return Connection(
         id=row["id"],
         connector=row["connector"],
-        account=row["account"],
+        external_account_id=row["external_account_id"],
         session_id=row["binding_session_id"],
         session_template_id=row["binding_session_template_id"],
         metadata=parse_jsonb(row["metadata"]),
@@ -3253,7 +3253,7 @@ async def insert_connection(
     *,
     account_id: str,
     connector: str,
-    account: str,
+    external_account_id: str,
     metadata: dict[str, Any],
     secrets_blob: EncryptedBlob | None = None,
 ) -> Connection:
@@ -3262,10 +3262,13 @@ async def insert_connection(
     Per plan decision #5, both the explicit ``POST /v1/connections`` and
     the supervisor's auto-create-on-first-inbound path race-safely
     converge on a single row via ``INSERT ... ON CONFLICT DO NOTHING
-    RETURNING``: empty RETURNING means another writer beat us, so we
-    re-read the existing active row and hand it back.  The unique index
-    is ``(connector, account) WHERE archived_at IS NULL`` — an archived
-    row with the same pair will not collide; a fresh insert will land.
+    RETURNING``. The unique index
+    ``(connector, external_account_id) WHERE archived_at IS NULL`` is
+    globally exclusive across tenants, mirroring real-world identities
+    (Signal phone numbers, Telegram bot tokens, etc. are universally
+    unique by construction). On conflict, re-read within the tenant; a
+    same-tenant miss is either an archive race (loop once) or a
+    cross-tenant collision (raise :class:`ConflictError`).
 
     ``secrets_blob`` carries the encrypted credential dict.  ``None``
     leaves both secret columns NULL; the schema's
@@ -3275,12 +3278,6 @@ async def insert_connection(
     Use ``attach_connection`` or ``configure_per_chat_connection`` to bind
     a routing mode after creation.
     """
-    # Retry loop: each iteration is INSERT-then-(if-conflict)-re-read.  Three
-    # concurrent writers + an archive-between-attempts can force a second
-    # round-trip, but the loop converges within at most two iterations under
-    # any realistic contention pattern.  The bound is defensive — three
-    # iterations is enough that exhaustion would mean the system is wedged
-    # in a hot insert/archive cycle that no retry strategy can resolve.
     ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
     nonce = secrets_blob.nonce if secrets_blob is not None else None
     # Upsert into the connectors catalog so the runtime_tokens /
@@ -3292,16 +3289,19 @@ async def insert_connection(
         "INSERT INTO connectors (connector) VALUES ($1) ON CONFLICT DO NOTHING",
         connector,
     )
-    for _ in range(3):
+    # Two attempts: the second only fires on the archive-race path
+    # (same-tenant row archived between our INSERT and re-read).
+    for _ in range(2):
         row = await conn.fetchrow(
             """
             WITH inserted AS (
                 INSERT INTO connections (
-                    id, connector, account, metadata,
+                    id, connector, external_account_id, metadata,
                     secrets_ciphertext, secrets_nonce, account_id
                 )
                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
-                ON CONFLICT (connector, account) WHERE archived_at IS NULL DO NOTHING
+                ON CONFLICT (connector, external_account_id)
+                    WHERE archived_at IS NULL DO NOTHING
                 RETURNING *
             )
             SELECT i.*,
@@ -3312,7 +3312,7 @@ async def insert_connection(
             """,
             make_id(CONNECTION),
             connector,
-            account,
+            external_account_id,
             json.dumps(metadata),
             ciphertext,
             nonce,
@@ -3321,14 +3321,29 @@ async def insert_connection(
         if row is not None:
             return _row_to_connection(row)
         existing = await get_connection_for_account(
-            conn, connector=connector, account=account, account_id=account_id
+            conn,
+            connector=connector,
+            external_account_id=external_account_id,
+            account_id=account_id,
         )
         if existing is not None:
             return existing
-        # Active row was archived between INSERT and re-read; loop to retry the
-        # INSERT, which the partial unique index now permits.
+        other_row = await conn.fetchrow(
+            "SELECT 1 FROM connections "
+            "WHERE connector = $1 AND external_account_id = $2 AND archived_at IS NULL",
+            connector,
+            external_account_id,
+        )
+        if other_row is not None:
+            raise ConflictError(
+                "connector external_account_id already registered",
+                detail={"connector": connector, "external_account_id": external_account_id},
+            )
+    # The archive race converges within two iterations under any realistic
+    # contention pattern; if a third attempt would still be needed, the
+    # system is in a hot insert/archive cycle that no retry resolves.
     raise RuntimeError(
-        f"insert_connection({connector=}, {account=}) failed to converge after 3 attempts"
+        f"insert_connection({connector=}, {external_account_id=}) exhausted archive-race retries"
     )
 
 
@@ -3469,20 +3484,21 @@ async def list_connection_tools_for_session(
 async def get_connection_for_account(
     conn: asyncpg.Connection[Any],
     connector: str,
-    account: str,
+    external_account_id: str,
     *,
     account_id: str,
 ) -> Connection | None:
-    """Active connection for ``(connector, account)``, or ``None``."""
+    """Active connection for ``(connector, external_account_id)`` within
+    the caller's tenant, or ``None``."""
     row = await conn.fetchrow(
         f"""
         SELECT {_CONNECTION_COLUMNS}
           FROM {_CONNECTION_FROM}
-         WHERE c.connector = $1 AND c.account = $2 AND c.archived_at IS NULL
+         WHERE c.connector = $1 AND c.external_account_id = $2 AND c.archived_at IS NULL
            AND c.account_id = $3
         """,
         connector,
-        account,
+        external_account_id,
         account_id,
     )
     if row is None:
@@ -3748,15 +3764,20 @@ async def list_routing_rules_for_connection(
 
 
 async def list_recent_chat_ids(
-    conn: asyncpg.Connection[Any], connector: str, account: str, *, account_id: str, limit: int
+    conn: asyncpg.Connection[Any],
+    connector: str,
+    external_account_id: str,
+    *,
+    account_id: str,
+    limit: int,
 ) -> list[tuple[str, datetime]]:
     """Distinct ``(chat_id, last_seen_at)`` for inbound user events
-    matching the ``<connector>/<account>/<chat_id>`` channel prefix.
+    matching the ``<connector>/<external_account_id>/<chat_id>`` channel prefix.
 
-    Used by the operator's "what chats has this account produced
-    inbound on?" helper — the input to ``aios connections bind-chat``
-    when the operator doesn't know the chat_id off the top of their
-    head.
+    Used by the operator's "what chats has this external identity
+    produced inbound on?" helper — the input to ``aios connections
+    bind-chat`` when the operator doesn't know the chat_id off the top
+    of their head.
 
     The chat_id is the third path segment of the derived
     ``events.channel`` column; events arriving on a different
@@ -3766,11 +3787,11 @@ async def list_recent_chat_ids(
     that share the channel.
     """
     # Escape LIKE metacharacters in operator-supplied ``connector`` and
-    # ``account``: ``_`` and ``%`` would otherwise act as wildcards
-    # against the stored channel, e.g. an operator looking up account
-    # ``bot_a`` would see chats from ``botXa`` too. Mirrors the
+    # ``external_account_id``: ``_`` and ``%`` would otherwise act as
+    # wildcards against the stored channel, e.g. an operator looking up
+    # identity ``bot_a`` would see chats from ``botXa`` too. Mirrors the
     # ``_escape_like`` usage at the memory-prefix query below.
-    prefix = f"{_escape_like(connector)}/{_escape_like(account)}/"
+    prefix = f"{_escape_like(connector)}/{_escape_like(external_account_id)}/"
     rows = await conn.fetch(
         """
         SELECT
@@ -3822,18 +3843,19 @@ async def try_record_inbound_ack(
     *,
     account_id: str,
     connector: str,
-    account: str,
+    external_account_id: str,
     event_id: str,
     appended_seq: int,
 ) -> bool:
     """Insert a dedup-ledger row, returning ``True`` iff it actually inserted.
 
     Called from the worker's inbound handler in the same transaction as
-    :func:`append_event`.  The PK ``(connector, account, event_id)``
-    enforces at-most-once event append: a duplicate inbound (same ULID
-    re-emitted on connector reconnect because the previous worker
-    crashed before acking) hits ``ON CONFLICT DO NOTHING`` and the
-    caller rolls back the txn so no second event lands.
+    :func:`append_event`.  The PK
+    ``(connector, external_account_id, event_id)`` enforces at-most-once
+    event append: a duplicate inbound (same ULID re-emitted on connector
+    reconnect because the previous worker crashed before acking) hits
+    ``ON CONFLICT DO NOTHING`` and the caller rolls back the txn so no
+    second event lands.
 
     The ``appended_seq`` is the gapless seq the in-flight ``append_event``
     just allocated; it makes the ledger row queryable for the operator
@@ -3841,13 +3863,15 @@ async def try_record_inbound_ack(
     """
     row = await conn.fetchrow(
         """
-        INSERT INTO connector_inbound_acks (connector, account, event_id, appended_seq)
+        INSERT INTO connector_inbound_acks (
+            connector, external_account_id, event_id, appended_seq
+        )
         VALUES ($1, $2, $3, $4)
         ON CONFLICT DO NOTHING
         RETURNING 1
         """,
         connector,
-        account,
+        external_account_id,
         event_id,
         appended_seq,
     )
@@ -5039,21 +5063,22 @@ async def notify_connection_change(
     account_id: str,
     connector: str,
     connection_id: str,
-    account: str,
+    external_account_id: str,
     event: str,
 ) -> None:
     """Emit a ``connections_<connector>`` NOTIFY for discovery SSE consumers.
 
-    Payload: ``"<event>|<connection_id>|<account_id>|<account>"`` — the
-    SSE generator parses this into an ``added``/``removed`` event and uses
-    ``account_id`` to filter cross-tenant events. Caller runs this on a
-    pool-acquired (autocommit) connection OUTSIDE any transaction so
-    subscribers never see a payload for an uncommitted row.
+    Payload: ``"<event>|<connection_id>|<account_id>|<external_account_id>"``
+    — the SSE generator parses this into an ``added``/``removed`` event
+    and uses ``account_id`` (tenant) to filter cross-tenant events.
+    Caller runs this on a pool-acquired (autocommit) connection OUTSIDE
+    any transaction so subscribers never see a payload for an
+    uncommitted row.
     """
     await conn.execute(
         "SELECT pg_notify($1, $2)",
         f"connections_{connector}",
-        f"{event}|{connection_id}|{account_id}|{account}",
+        f"{event}|{connection_id}|{account_id}|{external_account_id}",
     )
 
 

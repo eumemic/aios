@@ -1,19 +1,20 @@
 """Integration test: ``list_recent_chat_ids`` escapes LIKE wildcards in
-``account``.
+``external_account_id``.
 
 Pre-fix: ``list_recent_chat_ids`` (``db/queries.py:3750``) built the
 LIKE pattern by f-string concatenation:
 
-    prefix = f"{connector}/{account}/"
+    prefix = f"{connector}/{external_account_id}/"
     ... WHERE channel LIKE $1 ..., prefix + "%", ...
 
-``account`` is operator-supplied (``ConnectionCreate.account`` allows
-``%``, ``_``, ``\\``). SQL ``LIKE`` treats ``_`` as "any single char"
-and ``%`` as "any string". So an operator with two connections under
-the same tenant — e.g. accounts ``bot_a`` and ``botXa`` — calling the
-helper for ``bot_a`` would match channel ``telegram/botXa/...`` too,
-since ``_`` in the pattern position matches the ``X`` literal in the
-stored channel. The result is same-tenant data confusion: chats from
+``external_account_id`` is operator-supplied
+(``ConnectionCreate.external_account_id`` allows ``%``, ``_``, ``\\``).
+SQL ``LIKE`` treats ``_`` as "any single char" and ``%`` as "any
+string". So an operator with two connections under the same tenant —
+e.g. identities ``bot_a`` and ``botXa`` — calling the helper for
+``bot_a`` would match channel ``telegram/botXa/...`` too, since ``_``
+in the pattern position matches the ``X`` literal in the stored
+channel. The result is same-tenant data confusion: chats from
 ``botXa`` get reported as belonging to ``bot_a``.
 
 The sibling helper at ``queries.py:4454`` already escapes with

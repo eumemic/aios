@@ -42,8 +42,20 @@ from aios_sdk._generated.models.list_connections_mode_type_0 import ListConnecti
 
 app = typer.Typer(name="connections", help="Manage connector connections.", no_args_is_help=True)
 
-_COLS = ("id", "connector", "account", "session_id", "session_template_id", "updated_at")
-_MAXW = {"connector": 20, "account": 40, "session_id": 24, "session_template_id": 24}
+_COLS = (
+    "id",
+    "connector",
+    "external_account_id",
+    "session_id",
+    "session_template_id",
+    "updated_at",
+)
+_MAXW = {
+    "connector": 20,
+    "external_account_id": 40,
+    "session_id": 24,
+    "session_template_id": 24,
+}
 
 
 @app.command("list")
@@ -109,8 +121,12 @@ def create(
     connector: Annotated[
         str | None, typer.Option("--connector", help="Connector type (e.g. signal).")
     ] = None,
-    account: Annotated[
-        str | None, typer.Option("--account", help="Account identifier (e.g. bot uuid).")
+    external_account_id: Annotated[
+        str | None,
+        typer.Option(
+            "--external-account-id",
+            help="External messaging identity (e.g. Signal phone, Telegram bot id).",
+        ),
     ] = None,
     metadata_json: Annotated[
         str | None,
@@ -133,11 +149,11 @@ def create(
 ) -> None:
     def _run() -> int | None:
         ergonomic: dict[str, Any] | None = None
-        if connector is not None or account is not None or secret:
-            if connector is None or account is None:
-                print_error("--connector and --account are both required")
+        if connector is not None or external_account_id is not None or secret:
+            if connector is None or external_account_id is None:
+                print_error("--connector and --external-account-id are both required")
                 return 64
-            ergonomic = {"connector": connector, "account": account}
+            ergonomic = {"connector": connector, "external_account_id": external_account_id}
             if metadata_json is not None:
                 try:
                     ergonomic["metadata"] = load_json_object(metadata_json, "--metadata-json")

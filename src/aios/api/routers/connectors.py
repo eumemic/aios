@@ -267,7 +267,9 @@ async def get_connection_discovery(
     ``connections_<connector>`` NOTIFY channel.  Each event is keyed
     ``connection`` with a JSON body shaped::
 
-        {"event": "added" | "removed", "connection_id": "...", "account": "..."}
+        {"event": "added" | "removed",
+         "connection_id": "...",
+         "external_account_id": "..."}
 
     The runtime container subscribes once per ``connector`` type and
     fans out to per-connection workers on ``added``; tears them down
@@ -471,7 +473,7 @@ async def get_runtime_management_calls(
 class SignalRegisterRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    account: str
+    external_account_id: str
     captcha: str | None = None
     voice: bool = False
 
@@ -481,7 +483,7 @@ class SignalRegisterResponse(BaseModel):
     next step (solve the captcha, repost with the token), and 4xx would bury
     the URL inside FastAPI's error envelope."""
 
-    account: str
+    external_account_id: str
     status: Literal["sms_sent", "voice_sent", "captcha_required"]
     captcha_url: str | None = None
 
@@ -489,20 +491,20 @@ class SignalRegisterResponse(BaseModel):
 class SignalVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    account: str
+    external_account_id: str
     code: str
     pin: str | None = None
 
 
 class SignalVerifyResponse(BaseModel):
-    account: str
+    external_account_id: str
     uuid: str
 
 
 class SignalProfileRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    account: str
+    external_account_id: str
     given_name: str | None = None
     family_name: str | None = None
     about: str | None = None
@@ -565,12 +567,12 @@ async def post_signal_register(
     )
     if _is_captcha_required(result):
         return SignalRegisterResponse(
-            account=body.account,
+            external_account_id=body.external_account_id,
             status="captcha_required",
             captcha_url=result["captcha_url"],
         )
     return SignalRegisterResponse(
-        account=body.account,
+        external_account_id=body.external_account_id,
         status="voice_sent" if body.voice else "sms_sent",
     )
 
@@ -600,7 +602,9 @@ async def post_signal_verify(
         params=body.model_dump(exclude_none=True),
         timeout_s=60.0,
     )
-    return SignalVerifyResponse(account=body.account, uuid=str(result.get("uuid", "")))
+    return SignalVerifyResponse(
+        external_account_id=body.external_account_id, uuid=str(result.get("uuid", ""))
+    )
 
 
 @router.post(

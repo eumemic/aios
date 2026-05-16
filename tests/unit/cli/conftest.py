@@ -110,7 +110,7 @@ _RESOURCE_BASES: dict[str, dict[str, Any]] = {
     "connection": {
         "id": "conn_01",
         "connector": "signal",
-        "account": "acct-1",
+        "external_account_id": "acct-1",
         "metadata": {},
         "created_at": _FIXED_TS,
         "updated_at": _FIXED_TS,

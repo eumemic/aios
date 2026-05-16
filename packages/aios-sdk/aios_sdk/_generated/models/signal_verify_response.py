@@ -13,16 +13,16 @@ T = TypeVar("T", bound="SignalVerifyResponse")
 class SignalVerifyResponse:
     """
     Attributes:
-        account (str):
+        external_account_id (str):
         uuid (str):
     """
 
-    account: str
+    external_account_id: str
     uuid: str
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        account = self.account
+        external_account_id = self.external_account_id
 
         uuid = self.uuid
 
@@ -30,7 +30,7 @@ class SignalVerifyResponse:
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
-                "account": account,
+                "external_account_id": external_account_id,
                 "uuid": uuid,
             }
         )
@@ -40,12 +40,12 @@ class SignalVerifyResponse:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        account = d.pop("account")
+        external_account_id = d.pop("external_account_id")
 
         uuid = d.pop("uuid")
 
         signal_verify_response = cls(
-            account=account,
+            external_account_id=external_account_id,
             uuid=uuid,
         )
 

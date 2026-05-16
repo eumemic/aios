@@ -23,13 +23,14 @@ class ConnectionCreate:
     ``session_template_id`` is set.  Use ``POST .../attach`` or
     ``POST .../configure-per-chat`` afterward to bind a routing mode.
 
-    ``connector`` and ``account`` may not contain ``/`` — they're used
-    in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
-    and a ``/`` would create ambiguous segment boundaries.
+    ``connector`` and ``external_account_id`` may not contain ``/`` —
+    they're used in the focal-channel address scheme
+    ``{connector}/{external_account_id}/{chat_id}`` and a ``/`` would
+    create ambiguous segment boundaries.
 
         Attributes:
             connector (str):
-            account (str):
+            external_account_id (str):
             metadata (ConnectionCreateMetadata | Unset):
             secrets (ConnectionCreateSecretsType0 | None | Unset): Platform credentials (e.g. ``bot_token``).  Encrypted at
                 rest via the server's ``AIOS_VAULT_KEY``; only ever read back via the runtime-scoped ``GET
@@ -37,7 +38,7 @@ class ConnectionCreate:
     """
 
     connector: str
-    account: str
+    external_account_id: str
     metadata: ConnectionCreateMetadata | Unset = UNSET
     secrets: ConnectionCreateSecretsType0 | None | Unset = UNSET
 
@@ -48,7 +49,7 @@ class ConnectionCreate:
 
         connector = self.connector
 
-        account = self.account
+        external_account_id = self.external_account_id
 
         metadata: dict[str, Any] | Unset = UNSET
         if not isinstance(self.metadata, Unset):
@@ -67,7 +68,7 @@ class ConnectionCreate:
         field_dict.update(
             {
                 "connector": connector,
-                "account": account,
+                "external_account_id": external_account_id,
             }
         )
         if metadata is not UNSET:
@@ -87,7 +88,7 @@ class ConnectionCreate:
         d = dict(src_dict)
         connector = d.pop("connector")
 
-        account = d.pop("account")
+        external_account_id = d.pop("external_account_id")
 
         _metadata = d.pop("metadata", UNSET)
         metadata: ConnectionCreateMetadata | Unset
@@ -115,7 +116,7 @@ class ConnectionCreate:
 
         connection_create = cls(
             connector=connector,
-            account=account,
+            external_account_id=external_account_id,
             metadata=metadata,
             secrets=secrets,
         )

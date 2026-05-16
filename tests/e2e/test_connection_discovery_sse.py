@@ -98,7 +98,9 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
 
 async def _create_connection(api_key: str, base_url: str, account: str) -> str:
     async with authed_client(base_url, api_key) as c:
-        r = await c.post("/v1/connections", json={"connector": "echo", "account": account})
+        r = await c.post(
+            "/v1/connections", json={"connector": "echo", "external_account_id": account}
+        )
         r.raise_for_status()
         return str(r.json()["id"])
 

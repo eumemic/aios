@@ -190,7 +190,7 @@ class _ConnectionState:
     """Per-connection runtime state.  One row per active connection."""
 
     connection_id: str
-    account: str
+    external_account_id: str
     secrets: dict[str, str] = field(default_factory=dict)
     worker: asyncio.Task[None] | None = None
 
@@ -241,14 +241,15 @@ class HttpConnector:
 
     # ─── helpers (subclasses use these) ──────────────────────────────
 
-    def focal_channel(self, account: str, chat_id: str) -> str:
-        """Return the canonical ``<connector>/<account>/<chat_id>`` string.
+    def focal_channel(self, external_account_id: str, chat_id: str) -> str:
+        """Return the canonical ``<connector>/<external_account_id>/<chat_id>`` string.
 
         Outbound tool methods write this to messages they edit/react to;
-        the runtime parses it back into ``account`` / ``chat_id`` kwargs
-        on the next call (see :func:`_inject_focal_kwargs`).
+        the runtime parses it back into ``external_account_id`` /
+        ``chat_id`` kwargs on the next call (see
+        :func:`_inject_focal_kwargs`).
         """
-        return f"{self.connector}/{account}/{chat_id}"
+        return f"{self.connector}/{external_account_id}/{chat_id}"
 
     # ─── lifecycle hooks (override as needed) ────────────────────────
 
@@ -570,9 +571,9 @@ class HttpConnector:
                     payload = json.loads(msg.data)
                     event = payload.get("event")
                     connection_id = payload.get("connection_id", "")
-                    account = payload.get("account", "")
+                    external_account_id = payload.get("external_account_id", "")
                     if event == "added":
-                        await self._on_connection_added(tg, connection_id, account)
+                        await self._on_connection_added(tg, connection_id, external_account_id)
                     elif event == "removed":
                         await self._on_connection_removed(connection_id)
             # Only retry on transport-level errors (timeouts, dropped
@@ -593,7 +594,7 @@ class HttpConnector:
             backoff = min(backoff * 2, 60.0)
 
     async def _on_connection_added(
-        self, tg: asyncio.TaskGroup, connection_id: str, account: str
+        self, tg: asyncio.TaskGroup, connection_id: str, external_account_id: str
     ) -> None:
         """Fetch secrets, then spawn ``serve_connection`` in its own task.
 
@@ -628,7 +629,11 @@ class HttpConnector:
             secrets_map: dict[str, str] = {}
         else:
             secrets_map = {str(k): str(v) for k, v in raw_secrets.additional_properties.items()}
-        state = _ConnectionState(connection_id=connection_id, account=account, secrets=secrets_map)
+        state = _ConnectionState(
+            connection_id=connection_id,
+            external_account_id=external_account_id,
+            secrets=secrets_map,
+        )
         state.worker = tg.create_task(
             self._isolated_serve_connection(connection_id, secrets_map),
             name=f"aios-conn-{connection_id}",
@@ -639,7 +644,7 @@ class HttpConnector:
             "connector.connection.added",
             connector=self.connector,
             connection_id=connection_id,
-            account=account,
+            external_account_id=external_account_id,
         )
 
     async def _isolated_serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
@@ -726,10 +731,11 @@ class HttpConnector:
         """Run the tool method for ``call`` and POST the result.
 
         Tool method signatures may accept any subset of the
-        focal-injectable kwargs: ``connection_id``, ``account``,
-        ``chat_id``.  ``connection_id`` comes from the call payload;
-        ``account`` and ``chat_id`` are parsed out of
-        ``focal_channel`` (``<connector>/<account>/<chat_id>``).
+        focal-injectable kwargs: ``connection_id``,
+        ``external_account_id``, ``chat_id``.  ``connection_id`` comes
+        from the call payload; ``external_account_id`` and ``chat_id``
+        are parsed out of ``focal_channel``
+        (``<connector>/<external_account_id>/<chat_id>``).
 
         ``SandboxPath``-annotated params get their in-sandbox path
         strings resolved to host :class:`Path`s before the body runs.
@@ -1058,7 +1064,9 @@ class HttpConnector:
         return out
 
 
-_FOCAL_INJECTABLE: frozenset[str] = frozenset({"connection_id", "account", "chat_id"})
+_FOCAL_INJECTABLE: frozenset[str] = frozenset(
+    {"connection_id", "external_account_id", "chat_id"}
+)
 
 
 def _build_tool_meta(fn: ToolFn) -> _ToolMeta:
@@ -1152,23 +1160,26 @@ def _inject_focal_kwargs(
     focal_channel: str,
     connection_id: str,
 ) -> dict[str, Any]:
-    """Inject ``connection_id`` / ``account`` / ``chat_id`` kwargs.
+    """Inject ``connection_id`` / ``external_account_id`` / ``chat_id`` kwargs.
 
     The runtime SSE payload includes ``connection_id`` directly;
-    ``account`` and ``chat_id`` are parsed out of ``focal_channel``
-    (``<connector>/<account>/<chat_id>``).  Each is injected only when
-    the tool's signature accepts it AND the caller didn't already
-    pass it explicitly.
+    ``external_account_id`` and ``chat_id`` are parsed out of
+    ``focal_channel`` (``<connector>/<external_account_id>/<chat_id>``).
+    Each is injected only when the tool's signature accepts it AND the
+    caller didn't already pass it explicitly.
     """
     out = dict(args)
     if connection_id and "connection_id" in meta.focal_params and "connection_id" not in out:
         out["connection_id"] = connection_id
-    if focal_channel and meta.focal_params & {"account", "chat_id"}:
+    if focal_channel and meta.focal_params & {"external_account_id", "chat_id"}:
         parts = focal_channel.split("/", 2)
         if len(parts) >= 3:
-            _connector, account, chat_id = parts
-            if "account" in meta.focal_params and "account" not in out:
-                out["account"] = account
+            _connector, external_account_id, chat_id = parts
+            if (
+                "external_account_id" in meta.focal_params
+                and "external_account_id" not in out
+            ):
+                out["external_account_id"] = external_account_id
             if "chat_id" in meta.focal_params and "chat_id" not in out:
                 out["chat_id"] = chat_id
     return out

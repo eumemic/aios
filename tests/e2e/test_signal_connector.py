@@ -94,7 +94,7 @@ async def _create_signal_connection(
     async with authed_client(base_url, api_key) as c:
         r = await c.post(
             "/v1/connections",
-            json={"connector": "signal", "account": account, "secrets": secrets},
+            json={"connector": "signal", "external_account_id": account, "secrets": secrets},
         )
         r.raise_for_status()
         return str(r.json()["id"])

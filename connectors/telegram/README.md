@@ -4,7 +4,7 @@ Telegram connector for [aios](../../README.md).  Built on
 ``aios-connector-http``.  Each connector container is one bot — the
 container's bearer token resolves to a single ``connection_id`` on
 the management API, and that connection holds the bot's identity
-(``connector="telegram"``, ``account=<bot_id>``) plus the encrypted
+(``connector="telegram"``, ``external_account_id=<bot_id>``) plus the encrypted
 ``bot_token`` secret the connector reads at startup.  Multi-bot
 deployments run multiple containers, each with its own connector
 token.
@@ -26,7 +26,7 @@ Copy the token.  Repeat for each bot you want to deploy.
 ```bash
 aios connections create \
     --connector telegram \
-    --account <bot_id> \
+    --external-account-id <bot_id> \
     --secret bot_token=<token>
 # → returns connection_id
 ```
