@@ -74,14 +74,14 @@ def register(app: typer.Typer) -> None:
             state = get_state(ctx)
             client = state.client()
             try:
-                session_id = _resolve_session(
+                session_id, last_seq = _resolve_session(
                     client,
                     agent=agent,
                     environment_id=environment_id,
                     session=session,
                     title=title,
                 )
-                _run_repl(client, session_id, initial=initial, verbose=state.verbose)
+                _run_repl(client, session_id, last_seq, initial=initial, verbose=state.verbose)
             finally:
                 client.close()
             return None
@@ -96,13 +96,22 @@ def _resolve_session(
     environment_id: str | None,
     session: str | None,
     title: str | None,
-) -> str:
+) -> tuple[str, int]:
+    """Return ``(session_id, last_event_seq)`` for the join or create path.
+
+    ``last_event_seq`` becomes the SSE backfill cursor: passing it as the
+    first ``stream_session(after_seq=...)`` argument means a join of an
+    existing long-running session doesn't replay its entire event log
+    into the REPL before the user can type. For a freshly-created
+    session ``last_event_seq`` will be the seq of the initial user/system
+    events — backfill is small, no UX impact.
+    """
     if session is not None:
         obj = client.request("GET", f"/v1/sessions/{session}")
         sys.stdout.write(
             f"joined session {cyan(obj['id'])} (agent={obj['agent_id']}, status={obj['status']})\n"
         )
-        return str(obj["id"])
+        return str(obj["id"]), int(obj["last_event_seq"])
 
     assert agent is not None
     if environment_id is None:
@@ -119,23 +128,27 @@ def _resolve_session(
         f"created session {cyan(obj['id'])} (agent={obj['agent_id']}, "
         f"version={obj.get('agent_version')})\n"
     )
-    return str(obj["id"])
+    return str(obj["id"]), int(obj["last_event_seq"])
 
 
 def _run_repl(
     client: AiosClient,
     session_id: str,
+    last_seq: int,
     *,
     initial: str | None,
     verbose: bool,
 ) -> None:
+    """Run the chat REPL. ``last_seq`` is the SSE backfill cursor — pass
+    the joined session's current ``last_event_seq`` so a rejoin doesn't
+    replay the entire event history before the first live event.
+    """
     sys.stdout.write(
         dim(
             "type a message and press Enter. /exit quits, /interrupt cancels an in-flight turn, "
             "/help shows commands.\n"
         )
     )
-    last_seq = 0
 
     # One-shot initial message: send, stream, then exit without prompting.
     if initial is not None:
