@@ -121,6 +121,14 @@ def walk_skill_dir(root: Path) -> dict[str, str]:
 
     files: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
+        # Reject symlinks before any operation that follows them
+        # (``is_file()``, ``read_text()`` both do). A planted symlink
+        # inside a skill dir pointing at ``~/.ssh/id_rsa`` would otherwise
+        # be silently read and uploaded — confused-deputy exfiltration of
+        # local files through whatever registry ``AIOS_URL`` points at.
+        # Authors who actually need duplication can copy the file.
+        if path.is_symlink():
+            raise PayloadError(f"skill files must not be symlinks: {path}")
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()

@@ -110,3 +110,44 @@ def test_walk_skill_dir_not_a_directory(tmp_path: Path):
     f.write_text("x")
     with pytest.raises(PayloadError, match="not a directory"):
         walk_skill_dir(f)
+
+
+def test_walk_skill_dir_rejects_symlinked_file(tmp_path: Path):
+    """A symlink in a skill dir pointing OUTSIDE the dir must be
+    rejected. ``Path.is_file()`` and ``Path.read_text()`` both follow
+    symlinks by default; without an explicit guard a planted symlink
+    (e.g. ``ln -s ~/.ssh/id_rsa skill/notes.txt``) gets read and
+    uploaded to whatever ``AIOS_URL`` points at when the operator runs
+    ``aios skills create --dir skill``. Confused-deputy exfiltration of
+    arbitrary local files via misconfigured / hostile registry URL.
+
+    Reject at the walk site (``fail hard, no fallbacks``) — silently
+    skipping would let a planted symlink go unnoticed.
+    """
+    secret = tmp_path / "secret.txt"
+    secret.write_text("sensitive: aws_access_key_id=AKIA...")
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# my skill")
+    (skill / "leak").symlink_to(secret)
+
+    with pytest.raises(PayloadError, match=r"symlink"):
+        walk_skill_dir(skill)
+
+
+def test_walk_skill_dir_rejects_symlinked_file_pointing_inside(
+    tmp_path: Path,
+) -> None:
+    """Even an in-tree symlink is rejected — the policy is strict at
+    the walk site rather than relying on ``resolve().is_relative_to``
+    containment checks (which are racy under TOCTOU on the workspace
+    directory). The author can simply duplicate the file content
+    instead of using a symlink."""
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# my skill")
+    (skill / "helper.py").write_text("print('hi')")
+    (skill / "alias.py").symlink_to(skill / "helper.py")
+
+    with pytest.raises(PayloadError, match=r"symlink"):
+        walk_skill_dir(skill)
