@@ -318,11 +318,31 @@ class TestProvisionSkillFiles:
             assert script.read_text() == "print('hello')"
 
     @pytest.mark.asyncio
-    async def test_idempotent_skips_if_exists(self) -> None:
+    async def test_writes_files_even_when_skills_dir_preexists(self) -> None:
+        """``provision_skill_files`` must write its files even when the
+        ``skills`` directory already exists from another source. The bug:
+        the model inside the sandbox can ``mkdir /workspace/skills`` via
+        bash (legitimately or accidentally); since ``/workspace`` is
+        bind-mounted, that creates the dir on the host. The old
+        ``if skills_dir.exists(): return`` early-out then skipped
+        provisioning forever — the system prompt advertised
+        ``/workspace/skills/<dir>/SKILL.md`` but the file never
+        appeared, leaving the model permanently confused. The same
+        early-out also hid partial-write failures: if write #2 of N
+        raised on disk-full or EACCES, subsequent steps short-circuited
+        with the partial state intact rather than retrying.
+
+        Reachability: HIGH — any bash invocation that creates
+        ``/workspace/skills`` (model exploration, package install
+        scripts, build tooling) triggers the skip. Pre-fix the only
+        recovery is restarting the container.
+        """
         sv = _sv()
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "sess_01TEST"
             skills_dir = workspace / "skills"
+            # Simulate the model's bash creating the dir before the
+            # harness's first provision step.
             skills_dir.mkdir(parents=True)
             with (
                 patch(
@@ -333,7 +353,44 @@ class TestProvisionSkillFiles:
             ):
                 await provision_skill_files("sess_01TEST", [sv])
 
-            assert not (skills_dir / "code-review").exists()
+            skill_md = skills_dir / sv.directory / "SKILL.md"
+            assert skill_md.exists(), (
+                f"provision_skill_files must write files even when the "
+                f"``skills`` directory already exists; pre-fix the "
+                f"``if skills_dir.exists(): return`` early-out skipped "
+                f"writes entirely, leaving the system prompt advertising "
+                f"a SKILL.md path the model can never find. Dir contents: "
+                f"{list(skills_dir.iterdir())!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_overwrites_existing_files_idempotently(self) -> None:
+        """Calling provision twice succeeds — second call is harmless
+        and ends with the correct state. Replaces the prior
+        ``test_idempotent_skips_if_exists`` which pinned the buggy
+        early-out behavior. ``write_text`` is overwrite-safe; the
+        replacement idempotency contract is "calling twice produces
+        the same on-disk state as calling once," not "second call
+        skips."
+        """
+        sv = _sv()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "sess_01TEST"
+            with (
+                patch(
+                    "aios.harness.skills._load_workspace_path",
+                    AsyncMock(return_value=str(workspace)),
+                ),
+                patch("aios.harness.skills.ensure_workspace_path", return_value=workspace),
+            ):
+                await provision_skill_files("sess_01TEST", [sv])
+                await provision_skill_files("sess_01TEST", [sv])
+
+            skill_md = workspace / "skills" / sv.directory / "SKILL.md"
+            assert skill_md.exists()
+            # The on-disk content matches the second call's input —
+            # exactly what overwrite-with-same-content yields.
+            assert skill_md.read_text() == sv.files["SKILL.md"]
 
     @pytest.mark.asyncio
     async def test_empty_list_noop(self) -> None:
