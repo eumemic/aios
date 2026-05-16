@@ -42,11 +42,7 @@ async def list_(
     """
     account_id, _, _ = _auth
     items = await service.list_environments(pool, limit=limit, after=after, account_id=account_id)
-    return ListResponse[Environment](
-        data=items,
-        has_more=len(items) == limit,
-        next_after=items[-1].id if items else None,
-    )
+    return ListResponse[Environment].paginate(items, limit, cursor=lambda x: x.id)
 
 
 @router.get("/{env_id}", operation_id="get_environment")

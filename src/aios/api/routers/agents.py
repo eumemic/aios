@@ -58,11 +58,7 @@ async def list_(
     items = await service.list_agents(
         pool, limit=limit, after=after, name=name, account_id=account_id
     )
-    return ListResponse[Agent](
-        data=items,
-        has_more=len(items) == limit,
-        next_after=items[-1].id if items else None,
-    )
+    return ListResponse[Agent].paginate(items, limit, cursor=lambda x: x.id)
 
 
 @router.get("/{agent_id}", operation_id="get_agent")
@@ -132,11 +128,7 @@ async def list_versions(
     items = await service.list_agent_versions(
         pool, agent_id, limit=limit, after=after, account_id=account_id
     )
-    return ListResponse[AgentVersion](
-        data=items,
-        has_more=len(items) == limit,
-        next_after=str(items[-1].version) if items else None,
-    )
+    return ListResponse[AgentVersion].paginate(items, limit, cursor=lambda x: str(x.version))
 
 
 @router.get("/{agent_id}/versions/{version}", operation_id="get_agent_version")

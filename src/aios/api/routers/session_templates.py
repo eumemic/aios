@@ -64,11 +64,7 @@ async def list_(
     items = await service.list_session_templates(
         pool, limit=limit, after=after, account_id=account_id
     )
-    return ListResponse[SessionTemplate](
-        data=items,
-        has_more=len(items) == limit,
-        next_after=items[-1].id if items else None,
-    )
+    return ListResponse[SessionTemplate].paginate(items, limit, cursor=lambda x: x.id)
 
 
 @router.get("/{template_id}", operation_id="get_session_template")

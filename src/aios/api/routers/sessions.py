@@ -111,11 +111,7 @@ async def list_(
         after=after,
         account_id=account_id,
     )
-    return ListResponse[Session](
-        data=items,
-        has_more=len(items) == limit,
-        next_after=items[-1].id if items else None,
-    )
+    return ListResponse[Session].paginate(items, limit, cursor=lambda x: x.id)
 
 
 @router.get("/{session_id}", operation_id="get_session")
@@ -480,11 +476,7 @@ async def list_events(
         error_only=error_only,
         account_id=account_id,
     )
-    return ListResponse[Event](
-        data=items,
-        has_more=len(items) == limit,
-        next_after=str(items[-1].seq) if items else None,
-    )
+    return ListResponse[Event].paginate(items, limit, cursor=lambda x: str(x.seq))
 
 
 @router.get("/{session_id}/context", operation_id="get_session_context")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel
@@ -13,6 +14,21 @@ class ListResponse[T](BaseModel):
     data: list[T]
     has_more: bool = False
     next_after: str | None = None
+
+    @classmethod
+    def paginate(
+        cls,
+        items: list[T],
+        limit: int,
+        *,
+        cursor: Callable[[T], str],
+    ) -> ListResponse[T]:
+        """Wrap a windowed query result in the pagination envelope."""
+        return cls(
+            data=items,
+            has_more=len(items) == limit,
+            next_after=cursor(items[-1]) if items else None,
+        )
 
 
 class ErrorBody(BaseModel):
