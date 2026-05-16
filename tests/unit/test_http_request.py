@@ -356,6 +356,55 @@ class TestHttpRequestHandler:
         assert sent["Authorization"] == "Bearer broker-token"
         assert sent["X-Other"] == "ok"
 
+    async def test_caller_host_header_dropped(self, _stub_runtime: Any) -> None:
+        """An agent-supplied ``Host`` header must not reach the dispatched
+        request. The route allowlist scopes by ``base_url`` — i.e. by the
+        TCP host the connection lands on — but with name-based virtual
+        hosting (a near-universal production HTTP pattern: NGINX, Cloudflare,
+        AWS ALB, Kubernetes Ingress) the upstream routes by the ``Host``
+        header, not by the destination IP. A caller_headers passthrough of
+        ``Host: admin.internal`` would land the request on an upstream
+        vhost the operator never approved, bypassing the route allowlist's
+        intent.
+
+        Same shape as #485 (query string in path) and #477 (Telegram
+        reaction emoji): a worker-managed protocol element (here: the
+        TCP host derived from base_url) gets silently overridden by an
+        agent-controlled field. Strip ``Host`` at the same site that
+        strips ``Authorization``.
+        """
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        captured: dict[str, Any] = {}
+        response = httpx.Response(200, content=b"ok")
+        stub = _make_stub_client(response=response, capture=captured)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth({"Authorization": "Bearer broker-token"}),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            await http_request_handler(
+                "sess_x",
+                {
+                    "server_ref": "hue",
+                    "path": "/lights/1",
+                    "method": "GET",
+                    # Case-mixed to verify the strip is case-insensitive,
+                    # matching the ``Authorization`` filter's semantics.
+                    "headers": {"HoSt": "admin.internal", "X-Other": "ok"},
+                },
+            )
+        sent = captured["kwargs"]["headers"]
+        # The agent's Host (under any casing) must not be present.
+        assert all(k.lower() != "host" for k in sent), (
+            f"caller Host header must be stripped before dispatch; got {sent!r}. "
+            f"Pre-fix symptom: the only stripped header was Authorization, so "
+            f"a Host override slipped through to httpx and onto the wire — "
+            f"bypassing the operator's base_url scoping under name-based vhosting."
+        )
+        # Other agent-supplied headers should still pass through.
+        assert sent["X-Other"] == "ok"
+
     async def test_timeout_returns_error(self, _stub_runtime: Any) -> None:
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
         stub = _make_stub_client(exc=httpx.ReadTimeout("timed out"))

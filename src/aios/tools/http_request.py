@@ -35,6 +35,11 @@ _MAX_RESPONSE_CHARS = 100_000
 _TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
 _ALLOWED_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH")
 
+# Headers the worker manages on the agent's behalf. Agent-supplied values
+# under any casing are stripped before dispatch so the route allowlist's
+# intent (path-only + base_url-scoped) isn't bypassed.
+_RESERVED_HEADERS = frozenset({"authorization", "host"})
+
 
 HTTP_REQUEST_DESCRIPTION = (
     "Make an authenticated HTTP request to one of the agent's declared "
@@ -202,7 +207,15 @@ async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> di
         pool, crypto_box, session_id, server.base_url, account_id=account_id
     )
 
-    request_headers = {k: v for k, v in caller_headers.items() if k.lower() != "authorization"}
+    # Strip headers the worker manages on the agent's behalf. ``Authorization``
+    # is rendered from the session vault below. ``Host`` is derived from the
+    # request URL by httpx; an agent override would land the request on a
+    # different name-based virtual host than the operator's base_url scopes
+    # to (NGINX, Cloudflare, ALB, Ingress — all route by Host header), so
+    # leaving it caller-controlled effectively defeats the route allowlist.
+    request_headers = {
+        k: v for k, v in caller_headers.items() if k.lower() not in _RESERVED_HEADERS
+    }
     request_headers.update(auth_headers)
 
     try:
