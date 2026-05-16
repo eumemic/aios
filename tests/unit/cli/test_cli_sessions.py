@@ -138,3 +138,18 @@ def test_profile_empty_session_gracefully(mocked_cli):
     result = runner.invoke(app, ["sessions", "profile", "sess_empty"])
     assert result.exit_code == 0, result.output
     assert "no steps" in result.output
+
+
+def test_events_sends_after_param_not_after_seq(mocked_cli):
+    """The server renamed the events-pagination query param to ``after``
+    so it matches the ``next_after`` response field; ``?after_seq=`` is
+    silently ignored, which makes pagination loop from seq 0. The CLI
+    must send ``after``, not the pre-rename ``after_seq``."""
+    mocked_cli.queue_response(
+        httpx.Response(200, json={"data": [], "has_more": False, "next_after": None})
+    )
+    result = runner.invoke(app, ["sessions", "events", "sess_1", "--after-seq", "42"])
+    assert result.exit_code == 0, result.output
+    assert mocked_cli.captured.path == "/v1/sessions/sess_1/events"
+    assert mocked_cli.captured.query.get("after") == ["42"]
+    assert "after_seq" not in mocked_cli.captured.query
