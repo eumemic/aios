@@ -108,6 +108,53 @@ class TestMcpSessionPool:
 
         assert r1 is not r2
 
+    async def test_evict_closes_evicted_entry(self) -> None:
+        """``evict`` must reclaim the entry, not just drop the reference.
+
+        The idle reaper's docstring spells out the leak shape: dropping a
+        reference without going through ``_Entry.close()`` strands the
+        owner task, the httpx client, and the SSE stream — exactly what
+        the reaper exists to prevent. The reaper iterates ``_entries``,
+        so an evicted entry (popped from the map) is invisible to it
+        and the leak survives until process exit. Every transient MCP
+        failure produces one such evict, so over a long-running worker
+        the leak is unbounded.
+        """
+        url = "https://m.example/"
+        headers = {"Authorization": "Bearer tok"}
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx(_make_mock_session())),
+        ):
+            pool = McpSessionPool()
+            await pool.get_or_connect(url, "v", headers)
+            entry = pool._entries[(url, "v")]
+
+            closed = False
+            orig_close = entry.close
+
+            async def _tracked() -> None:
+                nonlocal closed
+                closed = True
+                await orig_close()
+
+            entry.close = _tracked  # type: ignore[method-assign]
+
+            pool.evict(url, "v")
+            # Allow any background close task scheduled by evict to run.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        assert closed, (
+            "evict must close the entry through _Entry.close() to release "
+            "the owner task + httpx client + SSE stream; a bare pop strands "
+            "them for the worker's lifetime"
+        )
+        assert entry._owner_task.done(), (
+            "the owner task must exit after evict; while parked on "
+            "shutdown.wait() it holds the httpx client and SSE stream open"
+        )
+
     async def test_thundering_herd_single_initialize(self) -> None:
         """N concurrent ``get_or_connect`` calls → exactly one ``initialize()``."""
         session = _make_mock_session()
