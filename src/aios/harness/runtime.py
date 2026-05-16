@@ -6,7 +6,7 @@ workaround is a small module that holds module-level globals — set once at
 worker startup, read by every task invocation.
 
 The values are ``None`` between import and ``worker_main`` initialization, so
-task bodies must check / call :func:`require` to fail loudly if a task fires
+task bodies use the ``require_*`` family to fail loudly if a task fires
 before the worker has finished setting up. The api process never sets these;
 attempting to read them from inside an api request handler will raise.
 
@@ -94,73 +94,42 @@ def clear_session_read_shas(session_id: str) -> None:
     _session_read_shas.pop(session_id, None)
 
 
-def require_pool() -> asyncpg.Pool[Any]:
-    if pool is None:
+def _require[T](name: str, value: T | None) -> T:
+    if value is None:
         raise RuntimeError(
-            "aios.harness.runtime.pool is not initialized; "
-            "this code is running outside a worker_main context"
+            f"aios.harness.runtime.{name} is not initialized; "
+            f"this code is running outside a worker_main context"
         )
-    return pool
+    return value
+
+
+def require_pool() -> asyncpg.Pool[Any]:
+    return _require("pool", pool)
 
 
 def require_crypto_box() -> CryptoBox:
-    if crypto_box is None:
-        raise RuntimeError(
-            "aios.harness.runtime.crypto_box is not initialized; "
-            "this code is running outside a worker_main context"
-        )
-    return crypto_box
+    return _require("crypto_box", crypto_box)
 
 
 def require_worker_id() -> str:
-    if worker_id is None:
-        raise RuntimeError(
-            "aios.harness.runtime.worker_id is not initialized; "
-            "this code is running outside a worker_main context"
-        )
-    return worker_id
+    return _require("worker_id", worker_id)
 
 
 def require_sandbox_registry() -> SandboxRegistry:
-    if sandbox_registry is None:
-        raise RuntimeError(
-            "aios.harness.runtime.sandbox_registry is not initialized; "
-            "this code is running outside a worker_main context"
-        )
-    return sandbox_registry
+    return _require("sandbox_registry", sandbox_registry)
 
 
 def require_task_registry() -> TaskRegistry:
-    if task_registry is None:
-        raise RuntimeError(
-            "aios.harness.runtime.task_registry is not initialized; "
-            "this code is running outside a worker_main context"
-        )
-    return task_registry
+    return _require("task_registry", task_registry)
 
 
 def require_mcp_session_pool() -> McpSessionPool:
-    if mcp_session_pool is None:
-        raise RuntimeError(
-            "aios.harness.runtime.mcp_session_pool is not initialized; "
-            "this code is running outside a worker_main context"
-        )
-    return mcp_session_pool
+    return _require("mcp_session_pool", mcp_session_pool)
 
 
 def require_mcp_broker() -> McpBroker:
-    if mcp_broker is None:
-        raise RuntimeError(
-            "aios.harness.runtime.mcp_broker is not initialized; "
-            "this code is running outside a worker_main context"
-        )
-    return mcp_broker
+    return _require("mcp_broker", mcp_broker)
 
 
 def require_tool_provider() -> ToolProvider:
-    if tool_provider is None:
-        raise RuntimeError(
-            "aios.harness.runtime.tool_provider is not initialized; "
-            "this code is running outside a worker_main context"
-        )
-    return tool_provider
+    return _require("tool_provider", tool_provider)
