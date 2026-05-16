@@ -278,6 +278,17 @@ async def call_mcp_tool(
                     session.call_tool(tool_name, arguments, meta=meta),
                     timeout=_TOOL_CALL_TIMEOUT_S,
                 )
+            except TimeoutError:
+                # Don't retry on timeout: the wait_for fires while we
+                # wait for the response, but the request may already
+                # have reached the server and been processed. A retry
+                # would duplicate the side effect — e.g. ``signal_send``
+                # / ``telegram_send`` delivering the same message twice.
+                # Evict so the next caller doesn't reuse the same
+                # session; surface the error so the model can decide
+                # whether to retry.
+                _pool.evict(url, vault_id)
+                raise
             except Exception:
                 _pool.evict(url, vault_id)
                 session, _ = await _pool.get_or_connect(url, vault_id, headers)

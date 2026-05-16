@@ -487,3 +487,38 @@ class TestCallMcpToolWithPool:
         assert result == {"content": ""}
         assert s_a.initialize.await_count == 1
         assert s_b.initialize.await_count == 1
+
+    async def test_does_not_retry_call_tool_on_timeout(
+        self, restore_runtime_pool: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A timeout in ``call_tool`` may mean the request reached the server
+        and was processed; retrying would duplicate the side effect. For
+        connector-provided tools like ``signal_send``/``telegram_send``
+        that's a duplicate user-visible message. The wrapper must NOT
+        retry on ``asyncio.TimeoutError`` — evict + surface the error
+        so the model decides whether to retry."""
+        from aios.mcp import client as mcp_client
+        from aios.mcp.client import call_mcp_tool
+
+        # Shrink the timeout so the test runs fast.
+        monkeypatch.setattr(mcp_client, "_TOOL_CALL_TIMEOUT_S", 0.05)
+
+        s_a = _make_mock_session()
+
+        async def _hang(*_args: object, **_kwargs: object) -> object:
+            await asyncio.sleep(60)
+            return None
+
+        s_a.call_tool = AsyncMock(side_effect=_hang)
+
+        runtime.mcp_session_pool = McpSessionPool()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx(s_a)),
+        ):
+            result = await call_mcp_tool("https://m.example/", "v", {}, "do_thing", {})
+
+        # The wrapper returns a transport-error envelope on timeout.
+        assert result.get("code") == "transport_error"
+        # And crucially, ``call_tool`` was invoked EXACTLY ONCE — no retry.
+        assert s_a.call_tool.await_count == 1
