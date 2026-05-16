@@ -111,6 +111,11 @@ class McpSessionPool:
         self._entries: dict[_PoolKey, _Entry] = {}
         self._locks: dict[_PoolKey, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task[None] | None = None
+        # Strong refs for evict()'s fire-and-forget close tasks. asyncio
+        # only weak-refs tasks, so without this the task can be GC'd
+        # before close() unwinds the owner task's contexts — defeating
+        # the leak fix.
+        self._evict_close_tasks: set[asyncio.Task[None]] = set()
 
     def _lock_for(self, key: _PoolKey) -> asyncio.Lock:
         lock = self._locks.get(key)
@@ -204,15 +209,23 @@ class McpSessionPool:
         return entry.session, entry.init_result
 
     def evict(self, url: str, vault_id: str | None) -> None:
-        """Drop a cache entry without closing it.
+        """Drop a cache entry and close it in the background.
 
-        Called when a cached session has been found to be broken. Closing
-        a broken session may hang or raise in unexpected ways, so we
-        simply drop the reference and let GC handle it; the next
-        :meth:`get_or_connect` for this key will open a fresh session.
+        Called when a cached session has been found to be broken. The
+        caller is on a retry path and can't block on close (the owner
+        task may wait up to the httpx read timeout before unwinding), so
+        the close is fire-and-forget. Skipping close entirely would
+        strand the owner task + httpx client + SSE stream — same leak
+        shape the idle reaper exists to prevent, except evict pops the
+        entry from ``_entries`` so the reaper can't reach it.
         """
         key: _PoolKey = (url, vault_id)
-        self._entries.pop(key, None)
+        entry = self._entries.pop(key, None)
+        if entry is None:
+            return
+        task = asyncio.create_task(entry.close(), name=f"mcp-pool-evict:{url}")
+        self._evict_close_tasks.add(task)
+        task.add_done_callback(self._evict_close_tasks.discard)
         log.info("mcp_pool.evicted", url=url)
 
     async def _reap_idle_once(self, *, idle_timeout: float, now: float) -> None:
