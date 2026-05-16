@@ -353,11 +353,15 @@ class Harness:
 
     async def simulate_sigkill(self, session_id: str) -> None:
         """Simulate SIGKILL: cancel all in-flight tasks for a session
-        without letting their CancelledError handlers append results.
+        without letting any cancel-path code append events.
 
-        Mocks ``append_event`` to suppress writes during cancellation
-        cleanup, then restores it. After this call, the tasks are gone
-        and no tool results were appended.
+        Mocks the lowest-level ``queries.append_event`` so every write
+        path — the cancellation handler's tool_result, the finally
+        block's ``tool_execute_end`` span, and the tail
+        ``_trigger_sweep``'s ghost-repair via ``append_tool_result`` —
+        is suppressed during cancellation cleanup, then restores it.
+        After this call, the tasks are gone and the log shows what a
+        real SIGKILL would leave: no events from the cancelled tasks.
         """
         from unittest import mock
 
@@ -366,8 +370,11 @@ class Harness:
         # Remove from registry first so shutdown won't find them.
         self._task_registry._tasks.pop(session_id, None)
         if raw_tasks:
-            # Suppress DB writes during cancellation cleanup.
-            with mock.patch("aios.services.sessions.append_event"):
+            # Suppress DB writes during cancellation cleanup. Patch at the
+            # queries layer rather than the service layer so both
+            # ``services.append_event`` and ``services.append_tool_result``
+            # (used by the sweep's ghost-repair path) are covered.
+            with mock.patch("aios.db.queries.append_event"):
                 for t in raw_tasks:
                     if not t.done():
                         t.cancel()

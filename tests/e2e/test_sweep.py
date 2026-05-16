@@ -147,6 +147,75 @@ class TestGhostRecovery:
         )
         await harness.run_step(session.id)
 
+    async def test_concurrent_ghost_repair_emits_single_result(self, harness: Harness) -> None:
+        """Two concurrent ``find_and_repair_ghosts`` calls must produce
+        exactly one synthetic tool_result per ghost — not two.
+
+        Pre-fix the ghost-repair append goes through ``append_event``
+        directly (sweep.py:273), bypassing the session row-lock +
+        ``find_tool_result_event`` idempotency check that
+        ``append_tool_result`` enforces (services/sessions.py:233-282).
+        There is a TOCTOU window between the read of ``result_rows``
+        (line 200) and the append (line 273) — both sweeps can pass
+        the "no result yet" check before either writes, then both
+        write. The duplicate violates CLAUDE.md invariant #4
+        (tool-always-appends-EXACTLY-one result) and pollutes the
+        monotonic-context log.
+
+        In production the two sweeps that race here are the periodic
+        all-sessions sweep on the worker (`worker.py`) and the tail
+        sweep fired by each tool task's ``_trigger_sweep``
+        (`tool_dispatch.py`) — both share the worker event loop and
+        interleave at any ``await`` between the read and the append.
+        """
+        account_id = "acc_test_stub"
+        session = await harness.start("do something", tools=[])
+
+        async def dummy_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return {"result": "done"}
+
+        harness.register_tool("my_tool", dummy_handler)
+
+        call_x = tool_call("my_tool", {}, call_id="call_x")
+        await sessions_service.append_event(
+            harness._pool,
+            session.id,
+            "message",
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [call_x],
+                "reacting_to": 1,
+            },
+            account_id=account_id,
+        )
+
+        # Two concurrent repairs. asyncio.gather starts both immediately;
+        # they interleave at every ``await`` inside find_and_repair_ghosts
+        # (pool.acquire, fetch result_rows, fetch lifecycle_rows, fetch
+        # agent_rows, load_session_account_id, append_event), so at least
+        # one scheduling order will leave both sweeps believing the ghost
+        # is unresolved when they reach the append.
+        await asyncio.gather(
+            harness.run_ghost_repair(session.id),
+            harness.run_ghost_repair(session.id),
+        )
+
+        events = await harness.events(session.id)
+        tool_results_for_call_x = [
+            e
+            for e in events
+            if e.kind == "message"
+            and e.data.get("role") == "tool"
+            and e.data.get("tool_call_id") == "call_x"
+        ]
+        assert len(tool_results_for_call_x) == 1, (
+            f"got {len(tool_results_for_call_x)} synthetic tool_result events "
+            f"for call_x; only one is permitted by invariant #4. Pre-fix "
+            f"symptom: the unlocked read-then-append in find_and_repair_ghosts "
+            f"admits both concurrent sweeps to write."
+        )
+
     async def test_ghost_in_earlier_batch(self, harness: Harness) -> None:
         """Multi-batch conversation. Tool lost from first batch.
 
