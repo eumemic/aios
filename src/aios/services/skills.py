@@ -125,6 +125,34 @@ def _extract_skill_metadata(
             detail={"path": skill_md_path},
         )
 
+    # Reject absolute paths and ``..`` traversal at the upload boundary.
+    # ``provision_skill_files`` later does
+    # ``Path(<workspace>/sess/skills/<dir>) / key``; Python's ``Path``
+    # operator ``/`` discards the left operand for absolute right sides
+    # (so ``/etc/aios_pwned`` → writes to ``/etc/aios_pwned`` directly)
+    # and the OS resolves ``..`` segments at ``open(2)`` time (so a key
+    # like ``../../../etc/aios_pwned`` escapes the per-session skills
+    # subtree). Either path lets an authenticated ``POST /v1/skills``
+    # caller write attacker-controlled bytes to attacker-chosen worker-
+    # host paths — sandbox escape via the management plane. Same threat
+    # class as PR #497 / #505 (symlink follow), different mechanism.
+    for path in files:
+        if path.startswith("/"):
+            raise ValidationError(
+                f"skill file keys must be relative; got absolute path {path!r}",
+                detail={"path": path},
+            )
+        if ".." in path.split("/"):
+            raise ValidationError(
+                f"skill file keys must not contain '..' traversal segments; got {path!r}",
+                detail={"path": path},
+            )
+    if directory == ".." or directory == "" or "\x00" in directory:
+        raise ValidationError(
+            f"skill directory must be a single safe path segment; got {directory!r}",
+            detail={"directory": directory},
+        )
+
     name, description = parse_skill_md(files[skill_md_path])
 
     normalized: dict[str, str] = {}
