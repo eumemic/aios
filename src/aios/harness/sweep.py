@@ -270,19 +270,24 @@ async def find_and_repair_ghosts(
         # cross-session sweeper (session_id=None) doesn't stamp empty
         # account_id onto repair events for real tenants.
         sid_account_id = await sessions_service.load_session_account_id(pool, sid)
-        await sessions_service.append_event(
-            pool,
-            sid,
-            "message",
-            {
-                "role": "tool",
-                "tool_call_id": tcid,
-                "name": name,
-                "content": content,
-                "is_error": True,
-            },
-            account_id=sid_account_id,
-        )
+        # Route through ``append_tool_result`` (services/sessions.py) rather
+        # than a bare ``append_event``: the FOR UPDATE session lock +
+        # ``find_tool_result_event`` check inside that function serialise
+        # concurrent repairs. The bare-append path had a TOCTOU window
+        # between the result-rows read above and the write here that
+        # admitted two duplicate synthetic results for the same
+        # ``tool_call_id`` under concurrent sweep invocation (periodic
+        # all-sessions sweep racing the per-tool tail sweep), violating
+        # invariant #4 (tool-always-appends-EXACTLY-one result).
+        async with pool.acquire() as conn:
+            await sessions_service.append_tool_result(
+                conn,
+                account_id=sid_account_id,
+                session_id=sid,
+                tool_call_id=tcid,
+                content=content,
+                is_error=True,
+            )
         log.info("sweep.ghost_repaired", session_id=sid, tool_call_id=tcid, tool_name=name)
 
     return [(sid, tcid) for sid, tcid, _ in ghosts]
