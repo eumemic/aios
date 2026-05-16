@@ -1,0 +1,46 @@
+name: Promote aios-api → Coolify
+
+# Track G: explicit, gated deploy of the aios-api service container.
+#
+# Replaces Coolify's "auto-deploy from master push" with an explicit
+# operator-triggered promote. Master merges remain candidates-for-promotion;
+# this workflow fires only on workflow_dispatch and requires reviewer approval
+# via the ``stable`` GitHub environment before the dispatch is sent.
+#
+# This workflow fires a repository_dispatch event into eumemic/eumemic-ops,
+# which runs ``./scripts/deploy aios-api``, polls Coolify for deploy
+# completion, runs the audit suite, and appends a row to deploy-ledger.jsonl.
+# If anything in that chain fails, production stays on the prior known-good
+# build.
+#
+# Spec: eumemic/eumemic-ops#19 (deploy-gate v2 step 7).
+# Receiver: eumemic/eumemic-ops .github/workflows/deploy-app.yml.
+#
+# Security note: this workflow does not interpolate any untrusted input
+# into ``run:`` commands (there are no run: commands). Only trusted contexts
+# (github.actor, github.sha, secrets.EUMEMIC_OPS_DISPATCH_TOKEN) are
+# referenced, all inside the client-payload of a pinned action.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: stable  # requires reviewer approval
+    permissions:
+      contents: read
+    steps:
+      - name: Trigger eumemic-ops deploy receiver
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.EUMEMIC_OPS_DISPATCH_TOKEN }}
+          repository: eumemic/eumemic-ops
+          event-type: deploy-app
+          client-payload: |
+            {
+              "app": "aios-api",
+              "track": "G",
+              "sha": "${{ github.sha }}",
+              "promoted_by": "${{ github.actor }}"
+            }
