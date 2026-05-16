@@ -157,3 +157,100 @@ class TestErrorPath:
         assert "error" in result
         assert "Permission denied" in result["error"]
         assert result["path"] == "/readonly/a.txt"
+
+
+class TestMemoryReadShaCacheRefresh:
+    """A successful write to a memory-mount target must refresh the per-
+    session ``read_sha`` cache so a subsequent write doesn't fail its
+    precondition check with the now-stale pre-write sha.
+
+    Edit already does this (`tools/edit.py` after `update_memory` /
+    `create_memory`); write skipped it. Without the refresh, a model that
+    writes the same memory file twice in a row sees its second write
+    fail with "the file at X changed since your last read; re-read it
+    and retry the write" — but nothing changed externally, the model
+    wrote both times itself. The error message is also misleading,
+    blaming an external change when the cache is the actual source of
+    the staleness.
+    """
+
+    @pytest.fixture
+    def memory_session(self, stub_registry: Any) -> Any:
+        """Attach a memory mount and seed the read_sha cache as if the
+        session had read the file once before."""
+        import hashlib
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from aios.models.memory_stores import MemoryStoreResourceEcho
+        from aios.services import memory_stores as memory_service
+
+        SESSION = "sess_01TEST"
+        STORE = "memstore_01STORE0000000000000000001"
+        PATH = "/notes/x.md"
+        MOUNT = "/mnt/memory/notes"
+
+        runtime.set_session_memory_mounts(
+            SESSION,
+            [
+                MemoryStoreResourceEcho(
+                    memory_store_id=STORE,
+                    access="read_write",
+                    instructions="",
+                    name="notes",
+                    description="",
+                    mount_path=MOUNT,
+                )
+            ],
+        )
+
+        seed_content = "first body\n"
+        seed_sha = hashlib.sha256(seed_content.encode("utf-8")).hexdigest()
+        runtime.set_read_sha(SESSION, STORE, PATH, seed_sha)
+
+        existing = MagicMock()
+        existing.id = "mem_01EXISTING000000000000000001"
+        existing.content_sha256 = seed_sha
+        existing.content = seed_content
+
+        with (
+            patch.object(
+                memory_service,
+                "get_memory_by_path",
+                AsyncMock(return_value=existing),
+            ),
+            patch.object(
+                memory_service,
+                "update_memory",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            yield SESSION, STORE, PATH, MOUNT
+
+        runtime.clear_session_memory_mounts(SESSION)
+        runtime.clear_session_read_shas(SESSION)
+
+    async def test_write_refreshes_read_sha_to_new_content(
+        self, memory_session: tuple[str, str, str, str]
+    ) -> None:
+        import hashlib
+
+        session, store, store_path, mount_path = memory_session
+        new_content = "second body — completely different\n"
+
+        result = await write_handler(
+            session,
+            {"path": f"{mount_path}{store_path}", "content": new_content},
+        )
+        assert "error" not in result, result
+
+        expected_sha = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
+        actual_sha = runtime.get_read_sha(session, store, store_path)
+        assert actual_sha == expected_sha, (
+            f"write must refresh read_sha to the new content's sha so a "
+            f"subsequent write doesn't false-fail its precondition; got "
+            f"cached sha {actual_sha!r}, expected {expected_sha!r}. Pre-fix "
+            f"the cache still holds the pre-write sha, so the next "
+            f"`update_memory(precondition_sha256=stale_sha)` would raise "
+            f"MemoryPreconditionFailedError and the handler would return "
+            f"the misleading 'file changed since your last read' error."
+        )
