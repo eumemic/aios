@@ -1,0 +1,316 @@
+"""Unit tests for the ``http_request`` built-in tool."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
+
+from aios.models.agents import HttpPermissionPolicy, HttpRouteSpec, HttpServerSpec
+from aios.tools.http_request import (
+    _classify_permission,
+    _decode_body,
+    http_request_handler,
+)
+
+# Capture the real httpx.AsyncClient before any patch in this file replaces it.
+# A stub that calls ``httpx.AsyncClient(...)`` after a patch would otherwise
+# recurse into itself.
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+def _agent(*, http_servers: list[HttpServerSpec]) -> SimpleNamespace:
+    return SimpleNamespace(http_servers=http_servers)
+
+
+def _server(
+    *,
+    name: str = "hue",
+    base_url: str = "https://api.example.com/v1",
+    routes: list[HttpRouteSpec] | None = None,
+    description: str | None = None,
+) -> HttpServerSpec:
+    return HttpServerSpec(
+        name=name, base_url=base_url, routes=routes or [], description=description
+    )
+
+
+def _route(
+    pattern: str,
+    *,
+    enabled: bool = True,
+    policy: str | None = None,
+    description: str | None = None,
+) -> HttpRouteSpec:
+    permission = HttpPermissionPolicy(type=policy) if policy else None  # type: ignore[arg-type]
+    return HttpRouteSpec(
+        path_pattern=pattern,
+        enabled=enabled,
+        permission_policy=permission,
+        description=description,
+    )
+
+
+# ── _classify_permission ────────────────────────────────────────────────────
+
+
+class TestClassifyPermission:
+    def test_unknown_server_returns_none(self) -> None:
+        agent = _agent(http_servers=[_server(name="hue", routes=[_route("/lights/*")])])
+        assert _classify_permission({"server_ref": "missing", "path": "/lights/1"}, agent) is None
+
+    def test_no_matching_route_returns_none(self) -> None:
+        agent = _agent(http_servers=[_server(name="hue", routes=[_route("/lights/*")])])
+        assert _classify_permission({"server_ref": "hue", "path": "/sensors/1"}, agent) is None
+
+    def test_matched_route_with_always_ask(self) -> None:
+        agent = _agent(
+            http_servers=[
+                _server(
+                    name="hue",
+                    routes=[_route("/lights/*/state", policy="always_ask")],
+                )
+            ]
+        )
+        assert (
+            _classify_permission({"server_ref": "hue", "path": "/lights/1/state"}, agent)
+            == "always_ask"
+        )
+
+    def test_matched_route_with_always_allow(self) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*", policy="always_allow")])])
+        assert (
+            _classify_permission({"server_ref": "hue", "path": "/lights/1"}, agent)
+            == "always_allow"
+        )
+
+    def test_matched_route_with_no_policy_returns_none(self) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        assert _classify_permission({"server_ref": "hue", "path": "/lights/1"}, agent) is None
+
+    def test_disabled_route_does_not_match(self) -> None:
+        agent = _agent(
+            http_servers=[
+                _server(
+                    routes=[_route("/lights/*", enabled=False, policy="always_ask")],
+                )
+            ]
+        )
+        assert _classify_permission({"server_ref": "hue", "path": "/lights/1"}, agent) is None
+
+    def test_bad_args_returns_none(self) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        assert _classify_permission({"server_ref": "hue"}, agent) is None
+        assert _classify_permission({"server_ref": 123, "path": "/lights/1"}, agent) is None
+
+
+# ── _decode_body ────────────────────────────────────────────────────────────
+
+
+class TestDecodeBody:
+    def _response(self, content_type: str, body: bytes) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": content_type},
+            content=body,
+        )
+
+    def test_text_passthrough(self) -> None:
+        r = self._response("text/plain", b"hello")
+        assert _decode_body(r) == "hello"
+
+    def test_json_passthrough(self) -> None:
+        r = self._response("application/json", b'{"k": "v"}')
+        assert _decode_body(r) == '{"k": "v"}'
+
+    def test_binary_refused(self) -> None:
+        r = self._response("application/octet-stream", b"\x00\x01\x02\x03")
+        decoded = _decode_body(r)
+        assert decoded.startswith("<binary content of type application/octet-stream")
+        assert "4 bytes" in decoded
+
+    def test_truncates_at_cap(self) -> None:
+        large = b"x" * 200_000
+        r = self._response("text/plain", large)
+        assert len(_decode_body(r)) == 100_000
+
+
+# ── http_request_handler ────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def _stub_runtime() -> Iterator[SimpleNamespace]:
+    """Patch out the runtime pool/crypto_box accessors used by the handler."""
+    pool = MagicMock()
+    crypto_box = MagicMock()
+    with (
+        patch("aios.tools.http_request.runtime.require_pool", return_value=pool),
+        patch("aios.tools.http_request.runtime.require_crypto_box", return_value=crypto_box),
+    ):
+        yield SimpleNamespace(pool=pool, crypto_box=crypto_box)
+
+
+def _patch_load_agent(agent: SimpleNamespace) -> Any:
+    return patch(
+        "aios.tools.http_request._load_session_agent",
+        AsyncMock(return_value=(agent, "acc_test_stub")),
+    )
+
+
+def _patch_resolve_auth(headers: dict[str, str] | None = None) -> Any:
+    return patch(
+        "aios.tools.http_request.resolve_auth_for_target_url",
+        AsyncMock(return_value=("vlt_x", headers or {})),
+    )
+
+
+def _patch_safe_url(safe: bool = True) -> Any:
+    return patch("aios.tools.http_request.is_safe_url", return_value=safe)
+
+
+def _make_stub_client(
+    *,
+    response: httpx.Response | None = None,
+    exc: Exception | None = None,
+    capture: dict[str, Any] | None = None,
+) -> type:
+    """Build a stand-in for ``httpx.AsyncClient`` that returns ``response``
+    (or raises ``exc``) on ``.request``.  Uses the *real* AsyncClient class
+    captured at import time so the patch doesn't recurse into itself."""
+
+    class _Stub:
+        def __init__(self, **_: Any) -> None:
+            if response is not None:
+                self._inner: httpx.AsyncClient | None = _REAL_ASYNC_CLIENT(
+                    transport=httpx.MockTransport(lambda _req: response)
+                )
+            else:
+                self._inner = None
+
+        async def __aenter__(self) -> _Stub:
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            if self._inner is not None:
+                await self._inner.aclose()
+
+        async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+            if capture is not None:
+                capture.update({"method": method, "url": url, "kwargs": kwargs})
+            if exc is not None:
+                raise exc
+            assert self._inner is not None
+            return await self._inner.request(method, url, **kwargs)
+
+    return _Stub
+
+
+class TestHttpRequestHandler:
+    async def test_unknown_server_returns_error(self, _stub_runtime: Any) -> None:
+        agent = _agent(http_servers=[_server(name="hue", routes=[_route("/lights/*")])])
+        with _patch_load_agent(agent):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "missing", "path": "/lights/1", "method": "GET"},
+            )
+        assert "error" in result
+        assert "unknown server_ref" in result["error"]
+
+    async def test_no_route_match_returns_error(self, _stub_runtime: Any) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        with _patch_load_agent(agent):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/sensors/1", "method": "GET"},
+            )
+        assert "error" in result
+        assert "does not match any enabled route" in result["error"]
+
+    async def test_successful_get(self, _stub_runtime: Any) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        response = httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"on": true}',
+        )
+        stub = _make_stub_client(response=response)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth({"Authorization": "Bearer xyz"}),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        assert result["status"] == 200
+        assert result["body"] == '{"on": true}'
+
+    async def test_upstream_4xx_returns_status(self, _stub_runtime: Any) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        response = httpx.Response(
+            404,
+            headers={"content-type": "text/plain"},
+            content=b"not found",
+        )
+        stub = _make_stub_client(response=response)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/99", "method": "GET"},
+            )
+        # Upstream 4xx surfaces via `status`, not the `error` envelope —
+        # the model reads the status code and can react accordingly.
+        assert result["status"] == 404
+        assert result["body"] == "not found"
+        assert "error" not in result
+
+    async def test_caller_authorization_header_dropped(self, _stub_runtime: Any) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        captured: dict[str, Any] = {}
+        response = httpx.Response(200, content=b"ok")
+        stub = _make_stub_client(response=response, capture=captured)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth({"Authorization": "Bearer broker-token"}),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            await http_request_handler(
+                "sess_x",
+                {
+                    "server_ref": "hue",
+                    "path": "/lights/1",
+                    "method": "GET",
+                    "headers": {"Authorization": "Bearer attacker", "X-Other": "ok"},
+                },
+            )
+        sent = captured["kwargs"]["headers"]
+        assert sent["Authorization"] == "Bearer broker-token"
+        assert sent["X-Other"] == "ok"
+
+    async def test_timeout_returns_error(self, _stub_runtime: Any) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        stub = _make_stub_client(exc=httpx.ReadTimeout("timed out"))
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        assert "error" in result
+        assert "timed out" in result["error"].lower()

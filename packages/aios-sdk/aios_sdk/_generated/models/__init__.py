@@ -53,6 +53,10 @@ from .get_health_response_get_health import GetHealthResponseGetHealth
 from .github_repository_resource import GithubRepositoryResource
 from .github_repository_resource_echo import GithubRepositoryResourceEcho
 from .github_repository_update import GithubRepositoryUpdate
+from .http_permission_policy import HttpPermissionPolicy
+from .http_permission_policy_type import HttpPermissionPolicyType
+from .http_route_spec import HttpRouteSpec
+from .http_server_spec import HttpServerSpec
 from .http_validation_error import HTTPValidationError
 from .limited_networking import LimitedNetworking
 from .list_connections_mode_type_0 import ListConnectionsModeType0
@@ -238,6 +242,10 @@ __all__ = (
     "GithubRepositoryResource",
     "GithubRepositoryResourceEcho",
     "GithubRepositoryUpdate",
+    "HttpPermissionPolicy",
+    "HttpPermissionPolicyType",
+    "HttpRouteSpec",
+    "HttpServerSpec",
     "HTTPValidationError",
     "LimitedNetworking",
     "ListConnectionsModeType0",

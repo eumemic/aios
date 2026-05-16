@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..models.agent_litellm_extra import AgentLitellmExtra
     from ..models.agent_metadata import AgentMetadata
     from ..models.agent_skill_ref import AgentSkillRef
+    from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
     from ..models.tool_spec import ToolSpec
 
@@ -40,6 +41,7 @@ class Agent:
         created_at (datetime.datetime):
         updated_at (datetime.datetime):
         skills (list[AgentSkillRef] | Unset):
+        http_servers (list[HttpServerSpec] | Unset):
         litellm_extra (AgentLitellmExtra | Unset):
         archived_at (datetime.datetime | None | Unset):
     """
@@ -58,6 +60,7 @@ class Agent:
     created_at: datetime.datetime
     updated_at: datetime.datetime
     skills: list[AgentSkillRef] | Unset = UNSET
+    http_servers: list[HttpServerSpec] | Unset = UNSET
     litellm_extra: AgentLitellmExtra | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -103,6 +106,13 @@ class Agent:
                 skills_item = skills_item_data.to_dict()
                 skills.append(skills_item)
 
+        http_servers: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.http_servers, Unset):
+            http_servers = []
+            for http_servers_item_data in self.http_servers:
+                http_servers_item = http_servers_item_data.to_dict()
+                http_servers.append(http_servers_item)
+
         litellm_extra: dict[str, Any] | Unset = UNSET
         if not isinstance(self.litellm_extra, Unset):
             litellm_extra = self.litellm_extra.to_dict()
@@ -136,6 +146,8 @@ class Agent:
         )
         if skills is not UNSET:
             field_dict["skills"] = skills
+        if http_servers is not UNSET:
+            field_dict["http_servers"] = http_servers
         if litellm_extra is not UNSET:
             field_dict["litellm_extra"] = litellm_extra
         if archived_at is not UNSET:
@@ -148,6 +160,7 @@ class Agent:
         from ..models.agent_litellm_extra import AgentLitellmExtra
         from ..models.agent_metadata import AgentMetadata
         from ..models.agent_skill_ref import AgentSkillRef
+        from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
         from ..models.tool_spec import ToolSpec
 
@@ -202,6 +215,15 @@ class Agent:
 
                 skills.append(skills_item)
 
+        _http_servers = d.pop("http_servers", UNSET)
+        http_servers: list[HttpServerSpec] | Unset = UNSET
+        if _http_servers is not UNSET:
+            http_servers = []
+            for http_servers_item_data in _http_servers:
+                http_servers_item = HttpServerSpec.from_dict(http_servers_item_data)
+
+                http_servers.append(http_servers_item)
+
         _litellm_extra = d.pop("litellm_extra", UNSET)
         litellm_extra: AgentLitellmExtra | Unset
         if isinstance(_litellm_extra, Unset):
@@ -241,6 +263,7 @@ class Agent:
             created_at=created_at,
             updated_at=updated_at,
             skills=skills,
+            http_servers=http_servers,
             litellm_extra=litellm_extra,
             archived_at=archived_at,
         )

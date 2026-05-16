@@ -147,6 +147,7 @@ class TestEntrySweepSpan:
             model="openrouter/x",
             tools=[],
             mcp_servers=[],
+            http_servers=[],
             skills=[],
             system="sys",
             litellm_extra={},

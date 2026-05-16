@@ -28,6 +28,7 @@ BuiltinToolType = Literal[
     "search_events",
     "cancel",
     "schedule_wake",
+    "http_request",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled
@@ -89,6 +90,56 @@ class McpToolConfig(BaseModel):
     name: str
     enabled: bool = True
     permission_policy: McpPermissionPolicy | None = None
+
+
+# ── HTTP server declaration ──────────────────────────────────────────────────
+
+
+class HttpPermissionPolicy(BaseModel):
+    """Wrapper matching the ``{type: "always_allow"}`` shape used for MCP."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: PermissionPolicy
+
+
+class HttpRouteSpec(BaseModel):
+    """One entry in an ``HttpServerSpec.routes`` allowlist.
+
+    ``path_pattern`` is a glob against the request path (``*`` matches one
+    segment, ``**`` matches any number of segments).  ``description`` is
+    operator-authored prose rendered into the system prompt so the agent
+    knows what the route does and how to call it.  ``permission_policy``
+    gates *invocation*: ``always_ask`` parks the call in
+    ``requires_action`` until the client confirms.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path_pattern: str = Field(min_length=1)
+    description: str | None = None
+    enabled: bool = True
+    permission_policy: HttpPermissionPolicy | None = None
+
+
+class HttpServerSpec(BaseModel):
+    """One entry in an agent's ``http_servers`` list.
+
+    Declares an authenticated HTTP endpoint the agent can reach via the
+    ``http_request`` built-in tool.  ``base_url`` is the common URL
+    prefix the agent's ``path`` argument is appended to; ``routes`` is
+    the allowlist of path patterns the broker permits.  Credentials are
+    resolved at request time from the session's bound vaults, keyed on
+    ``base_url``.  Secret never enters the sandbox — the worker authors
+    the ``Authorization`` header from the vault credential.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=64)
+    base_url: str = Field(min_length=1)
+    description: str | None = None
+    routes: list[HttpRouteSpec] = Field(default_factory=list)
 
 
 # ── Tool declaration ──────────────────────────────────────────────────────────
@@ -154,6 +205,7 @@ class AgentCreate(BaseModel):
     tools: list[ToolSpec] = Field(default_factory=list)
     skills: list[AgentSkillRef] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
+    http_servers: list[HttpServerSpec] = Field(default_factory=list)
     description: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     litellm_extra: dict[str, Any] = Field(
@@ -193,6 +245,7 @@ class AgentUpdate(BaseModel):
     tools: list[ToolSpec] | None = None
     skills: list[AgentSkillRef] | None = None
     mcp_servers: list[McpServerSpec] | None = None
+    http_servers: list[HttpServerSpec] | None = None
     description: str | None = None
     metadata: dict[str, Any] | None = None
     litellm_extra: dict[str, Any] | None = None
@@ -211,6 +264,7 @@ class Agent(BaseModel):
     tools: list[ToolSpec]
     skills: list[AgentSkillRef] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec]
+    http_servers: list[HttpServerSpec] = Field(default_factory=list)
     description: str | None
     metadata: dict[str, Any]
     litellm_extra: dict[str, Any] = Field(default_factory=dict)
@@ -231,6 +285,7 @@ class AgentVersion(BaseModel):
     tools: list[ToolSpec]
     skills: list[AgentSkillRef] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec]
+    http_servers: list[HttpServerSpec] = Field(default_factory=list)
     litellm_extra: dict[str, Any] = Field(default_factory=dict)
     window_min: int
     window_max: int

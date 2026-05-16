@@ -52,7 +52,7 @@ from aios.ids import (
     make_id,
 )
 from aios.models.accounts import Account
-from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
+from aios.models.agents import Agent, AgentVersion, HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.connections import BindingMode, Connection, ConnectionMode
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
@@ -255,6 +255,7 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
     tools_data = parse_jsonb(row["tools"])
     skills_data = parse_jsonb(row["skills"])
     mcp_data = parse_jsonb(row.get("mcp_servers", []))
+    http_data = parse_jsonb(row.get("http_servers", []))
     metadata = parse_jsonb(row["metadata"])
     litellm_extra = parse_jsonb(row["litellm_extra"])
     return Agent(
@@ -266,6 +267,7 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
         tools=[ToolSpec.model_validate(t) for t in tools_data],
         skills=[AgentSkillRef.model_validate(s) for s in skills_data],
         mcp_servers=[McpServerSpec.model_validate(s) for s in (mcp_data or [])],
+        http_servers=[HttpServerSpec.model_validate(s) for s in (http_data or [])],
         description=row["description"],
         metadata=metadata,
         litellm_extra=litellm_extra or {},
@@ -281,6 +283,7 @@ def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
     tools_data = parse_jsonb(row["tools"])
     skills_data = parse_jsonb(row["skills"])
     mcp_data = parse_jsonb(row.get("mcp_servers", []))
+    http_data = parse_jsonb(row.get("http_servers", []))
     litellm_extra = parse_jsonb(row["litellm_extra"])
     return AgentVersion(
         agent_id=row["agent_id"],
@@ -290,6 +293,7 @@ def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
         tools=[ToolSpec.model_validate(t) for t in tools_data],
         skills=[AgentSkillRef.model_validate(s) for s in skills_data],
         mcp_servers=[McpServerSpec.model_validate(s) for s in (mcp_data or [])],
+        http_servers=[HttpServerSpec.model_validate(s) for s in (http_data or [])],
         litellm_extra=litellm_extra or {},
         window_min=row["window_min"],
         window_max=row["window_max"],
@@ -307,6 +311,7 @@ async def insert_agent(
     tools: list[ToolSpec],
     skills_json: str = "[]",
     mcp_servers: list[McpServerSpec],
+    http_servers: list[HttpServerSpec],
     description: str | None,
     metadata: dict[str, Any],
     litellm_extra: dict[str, Any],
@@ -321,6 +326,7 @@ async def insert_agent(
     new_id = make_id(AGENT)
     tools_json = json.dumps([t.model_dump() for t in tools])
     mcp_json = json.dumps([s.model_dump() for s in mcp_servers])
+    http_json = json.dumps([s.model_dump() for s in http_servers])
     metadata_json = json.dumps(metadata)
     extra_json = json.dumps(litellm_extra)
     try:
@@ -328,12 +334,12 @@ async def insert_agent(
             row = await conn.fetchrow(
                 """
                 INSERT INTO agents (
-                    id, name, model, system, tools, skills, mcp_servers,
+                    id, name, model, system, tools, skills, mcp_servers, http_servers,
                     description, metadata, litellm_extra,
                     window_min, window_max, version, account_id
                 )
-                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
-                        $8, $9::jsonb, $10::jsonb, $11, $12, 1, $13)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb,
+                        $9, $10::jsonb, $11::jsonb, $12, $13, 1, $14)
                 RETURNING *
                 """,
                 new_id,
@@ -343,6 +349,7 @@ async def insert_agent(
                 tools_json,
                 skills_json,
                 mcp_json,
+                http_json,
                 description,
                 metadata_json,
                 extra_json,
@@ -355,11 +362,11 @@ async def insert_agent(
             await conn.execute(
                 """
                 INSERT INTO agent_versions (
-                    agent_id, version, model, system, tools, skills, mcp_servers,
+                    agent_id, version, model, system, tools, skills, mcp_servers, http_servers,
                     litellm_extra, window_min, window_max, account_id
                 )
-                VALUES ($1, 1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb,
-                        $7::jsonb, $8, $9, $10)
+                VALUES ($1, 1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb,
+                        $8::jsonb, $9, $10, $11)
                 """,
                 new_id,
                 model,
@@ -367,6 +374,7 @@ async def insert_agent(
                 tools_json,
                 skills_json,
                 mcp_json,
+                http_json,
                 extra_json,
                 window_min,
                 window_max,
@@ -436,6 +444,7 @@ async def update_agent(
     tools: list[ToolSpec] | None = None,
     skills_json: str | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
     litellm_extra: dict[str, Any] | None = None,
@@ -469,6 +478,7 @@ async def update_agent(
     cur_skills_json = json.dumps([s.model_dump() for s in current.skills])
     new_skills_json = skills_json if skills_json is not None else cur_skills_json
     new_mcp = mcp_servers if mcp_servers is not None else current.mcp_servers
+    new_http = http_servers if http_servers is not None else current.http_servers
     new_desc = description if description is not None else current.description
     new_meta = metadata if metadata is not None else current.metadata
     new_extra = litellm_extra if litellm_extra is not None else current.litellm_extra
@@ -494,6 +504,7 @@ async def update_agent(
         and new_tools == current.tools
         and new_skills_json == cur_skills_json
         and new_mcp == current.mcp_servers
+        and new_http == current.http_servers
         and new_desc == current.description
         and new_meta == current.metadata
         and new_extra == current.litellm_extra
@@ -505,6 +516,7 @@ async def update_agent(
     new_version = current.version + 1
     tools_json = json.dumps([t.model_dump() for t in new_tools])
     mcp_json = json.dumps([s.model_dump() for s in new_mcp])
+    http_json = json.dumps([s.model_dump() for s in new_http])
     meta_json = json.dumps(new_meta)
     extra_json = json.dumps(new_extra)
 
@@ -524,11 +536,12 @@ async def update_agent(
             UPDATE agents
                SET version = $2, name = $3, model = $4, system = $5,
                    tools = $6::jsonb, skills = $7::jsonb, mcp_servers = $8::jsonb,
-                   description = $9, metadata = $10::jsonb,
-                   litellm_extra = $11::jsonb,
-                   window_min = $12, window_max = $13,
+                   http_servers = $9::jsonb,
+                   description = $10, metadata = $11::jsonb,
+                   litellm_extra = $12::jsonb,
+                   window_min = $13, window_max = $14,
                    updated_at = now()
-             WHERE id = $1 AND account_id = $14 AND version = $15
+             WHERE id = $1 AND account_id = $15 AND version = $16
             RETURNING *
             """,
             agent_id,
@@ -539,6 +552,7 @@ async def update_agent(
             tools_json,
             new_skills_json,
             mcp_json,
+            http_json,
             new_desc,
             meta_json,
             extra_json,
@@ -566,11 +580,11 @@ async def update_agent(
         await conn.execute(
             """
             INSERT INTO agent_versions (
-                agent_id, version, model, system, tools, skills, mcp_servers,
+                agent_id, version, model, system, tools, skills, mcp_servers, http_servers,
                 litellm_extra, window_min, window_max, account_id
             )
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
-                    $8::jsonb, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb,
+                    $9::jsonb, $10, $11, $12)
             """,
             agent_id,
             new_version,
@@ -579,6 +593,7 @@ async def update_agent(
             tools_json,
             new_skills_json,
             mcp_json,
+            http_json,
             extra_json,
             new_wmin,
             new_wmax,

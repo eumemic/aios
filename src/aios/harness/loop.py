@@ -23,6 +23,7 @@ watermark and proceeds.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any, Literal
 
 from aios.db.sse_lock import has_subscriber
@@ -748,7 +749,26 @@ def _classify_tool_call(
     if not tool_registry.has(name):
         return "custom"
 
-    if resolve_permission(name, agent.tools) == "always_ask":
+    tool_def = tool_registry.get(name)
+    perm_tool = resolve_permission(name, agent.tools)
+    perm_route: str | None = None
+    if tool_def.classify_permission is not None:
+        # Arg-aware refinement: tools like ``http_request`` resolve a
+        # per-call policy from the parsed arguments + agent config
+        # (e.g. matched route's ``permission_policy`` on
+        # ``agent.http_servers``).  Malformed args fall through to
+        # dispatch so the schema validator emits a typed error the
+        # model can self-correct from.
+        function = tool_call.get("function") or {}
+        args_str = function.get("arguments") or "{}"
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = None
+        if isinstance(args, dict):
+            perm_route = tool_def.classify_permission(args, agent)
+
+    if perm_tool == "always_ask" or perm_route == "always_ask":
         return "needs_confirm"
 
     return "immediate"

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from ..models.agent_create_litellm_extra import AgentCreateLitellmExtra
     from ..models.agent_create_metadata import AgentCreateMetadata
     from ..models.agent_skill_ref import AgentSkillRef
+    from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
     from ..models.tool_spec import ToolSpec
 
@@ -29,6 +30,7 @@ class AgentCreate:
         tools (list[ToolSpec] | Unset):
         skills (list[AgentSkillRef] | Unset):
         mcp_servers (list[McpServerSpec] | Unset):
+        http_servers (list[HttpServerSpec] | Unset):
         description (None | str | Unset):
         metadata (AgentCreateMetadata | Unset):
         litellm_extra (AgentCreateLitellmExtra | Unset): Provider-specific LiteLLM kwargs merged into every model
@@ -47,6 +49,7 @@ class AgentCreate:
     tools: list[ToolSpec] | Unset = UNSET
     skills: list[AgentSkillRef] | Unset = UNSET
     mcp_servers: list[McpServerSpec] | Unset = UNSET
+    http_servers: list[HttpServerSpec] | Unset = UNSET
     description: None | str | Unset = UNSET
     metadata: AgentCreateMetadata | Unset = UNSET
     litellm_extra: AgentCreateLitellmExtra | Unset = UNSET
@@ -80,6 +83,13 @@ class AgentCreate:
             for mcp_servers_item_data in self.mcp_servers:
                 mcp_servers_item = mcp_servers_item_data.to_dict()
                 mcp_servers.append(mcp_servers_item)
+
+        http_servers: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.http_servers, Unset):
+            http_servers = []
+            for http_servers_item_data in self.http_servers:
+                http_servers_item = http_servers_item_data.to_dict()
+                http_servers.append(http_servers_item)
 
         description: None | str | Unset
         if isinstance(self.description, Unset):
@@ -115,6 +125,8 @@ class AgentCreate:
             field_dict["skills"] = skills
         if mcp_servers is not UNSET:
             field_dict["mcp_servers"] = mcp_servers
+        if http_servers is not UNSET:
+            field_dict["http_servers"] = http_servers
         if description is not UNSET:
             field_dict["description"] = description
         if metadata is not UNSET:
@@ -133,6 +145,7 @@ class AgentCreate:
         from ..models.agent_create_litellm_extra import AgentCreateLitellmExtra
         from ..models.agent_create_metadata import AgentCreateMetadata
         from ..models.agent_skill_ref import AgentSkillRef
+        from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
         from ..models.tool_spec import ToolSpec
 
@@ -170,6 +183,15 @@ class AgentCreate:
 
                 mcp_servers.append(mcp_servers_item)
 
+        _http_servers = d.pop("http_servers", UNSET)
+        http_servers: list[HttpServerSpec] | Unset = UNSET
+        if _http_servers is not UNSET:
+            http_servers = []
+            for http_servers_item_data in _http_servers:
+                http_servers_item = HttpServerSpec.from_dict(http_servers_item_data)
+
+                http_servers.append(http_servers_item)
+
         def _parse_description(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -204,6 +226,7 @@ class AgentCreate:
             tools=tools,
             skills=skills,
             mcp_servers=mcp_servers,
+            http_servers=http_servers,
             description=description,
             metadata=metadata,
             litellm_extra=litellm_extra,
