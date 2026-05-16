@@ -179,3 +179,53 @@ class TestReleaseIfMountsChanged:
         # New handle's snapshot matches current echoes → no release fired.
         destroys = [c for c in backend.calls if c[0] == "destroy"]
         assert destroys == []
+
+
+class TestLocksDictCleanup:
+    """``SandboxRegistry._locks`` must release its per-session entries on
+    teardown. Pre-fix the dict was only ever populated (by
+    ``_lock_for``) and never popped — every session that ever provisioned
+    a sandbox left a permanent ``asyncio.Lock`` entry, slow unbounded
+    growth across long-running workers handling many sessions. Companion
+    leak class to #451 (runtime per-session caches not cleared on
+    ``release``) and #475 (mcp pool evict strands owner task)."""
+
+    async def test_release_clears_lock(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        _seed(registry, "sess_X")
+        # Touch the lock so it lands in ``_locks``.
+        _ = registry._lock_for("sess_X")
+        assert "sess_X" in registry._locks
+
+        await registry.release("sess_X")
+
+        assert "sess_X" not in registry._locks, (
+            f"_locks still contains 'sess_X' after release; got "
+            f"{list(registry._locks)!r}. Slow unbounded growth across the "
+            f"worker's lifetime as sessions are released."
+        )
+
+    async def test_evict_clears_lock(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        _seed(registry, "sess_X")
+        _ = registry._lock_for("sess_X")
+        assert "sess_X" in registry._locks
+
+        registry.evict("sess_X")
+
+        assert "sess_X" not in registry._locks
+
+    async def test_release_all_clears_locks(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        _seed(registry, "sess_X")
+        _seed(registry, "sess_Y")
+        _ = registry._lock_for("sess_X")
+        _ = registry._lock_for("sess_Y")
+        assert set(registry._locks) == {"sess_X", "sess_Y"}
+
+        await registry.release_all()
+
+        assert registry._locks == {}

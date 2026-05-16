@@ -301,6 +301,7 @@ class SandboxRegistry:
 
         handle = self._handles.pop(session_id, None)
         self._last_used.pop(session_id, None)
+        self._locks.pop(session_id, None)
         proxy = self._git_proxies.pop(session_id, None)
 
         if proxy is not None:
@@ -360,6 +361,7 @@ class SandboxRegistry:
         from aios.harness import runtime
 
         self._last_used.pop(session_id, None)
+        self._locks.pop(session_id, None)
         if self._handles.pop(session_id, None) is not None:
             log.info("sandbox.evicted", session_id=session_id)
         # Drop the proxy too — a fresh sandbox will get a fresh proxy
@@ -386,6 +388,7 @@ class SandboxRegistry:
         proxies = list(self._git_proxies.values())
         self._handles.clear()
         self._last_used.clear()
+        self._locks.clear()
         self._git_proxies.clear()
 
         if proxies:
