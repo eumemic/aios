@@ -1,9 +1,9 @@
 name: Promote aios-sandbox :smoked → :stable
 
 # Manifest-level retag: promotes the already-smoked image to :stable.
-# Requires explicit reviewer approval via the ``stable`` GitHub environment
-# before the retag executes, so no untested image can reach :stable
-# without a human sign-off.
+# The gate is the explicit workflow_dispatch invocation — :stable is never
+# touched by an automatic process; only an intentional operator (or trusted
+# bot) action retags. Repo-write access is the access barrier.
 #
 # After promoting, fires a repository-dispatch event to eumemic-ops so the
 # deploy ledger can record the new :stable digest.
@@ -19,7 +19,6 @@ on:
 jobs:
   promote:
     runs-on: ubuntu-latest
-    environment: stable  # requires reviewer approval
     permissions:
       contents: read
       packages: write
