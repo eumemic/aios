@@ -36,7 +36,6 @@ from pathlib import Path
 
 from aios.logging import get_logger
 from aios.sandbox._subprocess import run_subprocess_with_timeout
-from aios.sandbox.backends.base import SandboxBackendError
 from aios.sandbox.volumes import (
     github_repo_cache_dir,
     github_repo_cache_lock_path,
@@ -312,10 +311,8 @@ def _redact_token_from_message(msg: str, token: str) -> str:
     return msg.replace(token, "<redacted>")
 
 
-# Re-export for callers that catch backend/git errors uniformly.
 __all__ = [
     "GithubCloneError",
-    "SandboxBackendError",
     "ensure_cache_clone",
     "ensure_session_working_tree",
     "remove_session_working_tree",
