@@ -143,7 +143,8 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
         header += "\n[" + " · ".join(r_parts) + "]"
     reply_to = metadata.get("reply_to")
     if isinstance(reply_to, dict):
-        quoted = (reply_to.get("text") or "").replace("\n", " ").strip()
+        text = reply_to.get("text")
+        quoted = text.replace("\n", " ").strip() if isinstance(text, str) else ""
         quote_parts: list[str] = []
         author = reply_to.get("author_uuid")
         if isinstance(author, str) and author:
