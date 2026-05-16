@@ -320,8 +320,3 @@ def _is_terminal(payload: dict[str, Any]) -> bool:
         and isinstance(payload["data"], dict)
         and payload["data"].get("status") == "terminated"
     )
-
-
-# Reference imports for static analysis: queries is reserved for future use
-# (e.g., per-session validation before opening the stream).
-_ = queries
