@@ -374,6 +374,21 @@ async def stream_litellm(
             await _notify_delta(pool, session_id, content)
 
     assembled: Any = litellm.stream_chunk_builder(chunks=chunks)
+    # ``litellm.stream_chunk_builder(chunks=[])`` returns ``None`` rather
+    # than raising, so a provider that closes the connection without
+    # emitting any chunks (Bedrock cold start, OpenRouter mid-handshake
+    # disconnect, vLLM under load) would otherwise crash at the
+    # ``assembled.get("usage")`` below with an opaque
+    # ``AttributeError: 'NoneType' object has no attribute 'get'``.
+    # Surface a typed error so operators see the actual failure mode in
+    # ``step.litellm_failed`` logs and the retry path's reason is
+    # meaningful.
+    if assembled is None:
+        raise RuntimeError(
+            f"litellm returned an empty completion (zero chunks) for model "
+            f"{model!r}; the provider closed the connection without emitting "
+            f"any data"
+        )
     usage_obj = assembled.get("usage")
     usage = _normalize_usage(
         usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else usage_obj or {}
