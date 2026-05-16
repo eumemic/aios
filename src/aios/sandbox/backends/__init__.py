@@ -13,18 +13,7 @@ caller's perspective — all per-session state lives on the
 
 from __future__ import annotations
 
-from aios.sandbox.backends.base import (
-    CommandResult,
-    Limited,
-    ManagedSandboxRef,
-    Mount,
-    NetworkPolicy,
-    SandboxBackend,
-    SandboxBackendError,
-    SandboxHandle,
-    SandboxSpec,
-    Unrestricted,
-)
+from aios.sandbox.backends.base import SandboxBackend
 
 
 def make_backend(name: str) -> SandboxBackend:
@@ -36,16 +25,4 @@ def make_backend(name: str) -> SandboxBackend:
     raise ValueError(f"unknown sandbox backend: {name!r}. Supported: 'docker'.")
 
 
-__all__ = [
-    "CommandResult",
-    "Limited",
-    "ManagedSandboxRef",
-    "Mount",
-    "NetworkPolicy",
-    "SandboxBackend",
-    "SandboxBackendError",
-    "SandboxHandle",
-    "SandboxSpec",
-    "Unrestricted",
-    "make_backend",
-]
+__all__ = ["make_backend"]
