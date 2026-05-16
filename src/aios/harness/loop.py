@@ -23,7 +23,6 @@ watermark and proceeds.
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import TYPE_CHECKING, Any, Literal
 
 from aios.db.sse_lock import has_subscriber
@@ -719,7 +718,7 @@ def _classify_tool_call(
       registered.  Routed to immediate tool-error so the model can
       self-correct rather than parking in ``requires_action``.
     """
-    from aios.harness.tool_dispatch import _parse_mcp_tool_name
+    from aios.harness.tool_dispatch import _parse_arguments, _parse_mcp_tool_name
     from aios.tools.registry import registry as tool_registry
 
     function = tool_call.get("function") or {}
@@ -759,13 +758,8 @@ def _classify_tool_call(
         # ``agent.http_servers``).  Malformed args fall through to
         # dispatch so the schema validator emits a typed error the
         # model can self-correct from.
-        function = tool_call.get("function") or {}
-        args_str = function.get("arguments") or "{}"
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = None
-        if isinstance(args, dict):
+        args = _parse_arguments(function.get("arguments"))
+        if args is not None:
             perm_route = tool_def.classify_permission(args, agent)
 
     if perm_tool == "always_ask" or perm_route == "always_ask":
