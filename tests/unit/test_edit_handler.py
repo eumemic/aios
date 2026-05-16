@@ -242,3 +242,49 @@ class TestErrorPaths:
         )
         assert "error" in result
         assert "Permission denied" in result["error"]
+
+    async def test_truncated_cat_aborts_write_back(
+        self, stub_registry: Any, stub_handle: SandboxHandle
+    ) -> None:
+        """``cat -- path`` is capped at ``bash_max_output_bytes`` (100 KiB by
+        default). For a non-memory file larger than that, the docker backend
+        sets ``CommandResult.truncated=True`` and appends the literal
+        ``"\\n\\n[output truncated]"`` marker to ``stdout``. Edit previously
+        ignored the flag, treated the truncated bytes as the full file, ran
+        ``original.replace(old, new)``, and write-back replaced the entire
+        file with the truncated content (plus the marker text) — silent
+        data loss for every model edit on any non-trivial file.
+
+        Failing pre-fix because edit accepted the truncated read and wrote
+        back; post-fix because edit now returns a typed error referencing
+        truncation, never reaching the second exec.
+        """
+        truncated_stdout = "A" * 95000 + "TARGET\n" + "rest..." + "\n\n[output truncated]"
+        truncated_result = CommandResult(
+            exit_code=0,
+            stdout=truncated_stdout,
+            stderr="",
+            timed_out=False,
+            truncated=True,
+        )
+        stub_registry.exec = _script_responses(truncated_result, _ok(""))  # type: ignore[method-assign]
+        result = await edit_handler(
+            "sess_01TEST",
+            {
+                "path": "/workspace/big.txt",
+                "old_string": "TARGET",
+                "new_string": "REPLACED",
+            },
+        )
+        assert "error" in result, (
+            f"edit must refuse to write back when the read was truncated "
+            f"(otherwise the bytes past the truncation point are silently "
+            f"lost on write); got success {result!r}."
+        )
+        assert "truncat" in result["error"].lower(), (
+            f"error must reference truncation so the model can use a "
+            f"different tool (e.g., read with explicit ranges); got "
+            f"{result['error']!r}."
+        )
+        # Critically, no write-back was attempted.
+        assert stub_registry.exec.await_count == 1  # type: ignore[attr-defined]
