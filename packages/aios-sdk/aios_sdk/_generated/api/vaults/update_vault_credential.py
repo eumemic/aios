@@ -82,7 +82,7 @@ def sync_detailed(
      Update a credential's metadata and/or rotate its auth secrets.
 
     Omitted secret fields are preserved (decrypt-merge-encrypt cycle on the
-    encrypted payload). ``mcp_server_url`` and ``auth_type`` are immutable
+    encrypted payload). ``target_url`` and ``auth_type`` are immutable
     and not accepted in the body. To rotate an OAuth refresh token, send
     only the new ``refresh_token`` (and optional ``access_token`` /
     ``expires_at``); other auth fields stay intact.
@@ -94,7 +94,7 @@ def sync_detailed(
         body (VaultCredentialUpdate): Request body for ``PUT
             /v1/vaults/{vault_id}/credentials/{id}``.
 
-            ``mcp_server_url`` and ``auth_type`` are immutable — not accepted here.
+            ``target_url`` and ``auth_type`` are immutable — not accepted here.
             Omitted secret fields are preserved (decrypt-merge-encrypt).
 
     Raises:
@@ -132,7 +132,7 @@ def sync(
      Update a credential's metadata and/or rotate its auth secrets.
 
     Omitted secret fields are preserved (decrypt-merge-encrypt cycle on the
-    encrypted payload). ``mcp_server_url`` and ``auth_type`` are immutable
+    encrypted payload). ``target_url`` and ``auth_type`` are immutable
     and not accepted in the body. To rotate an OAuth refresh token, send
     only the new ``refresh_token`` (and optional ``access_token`` /
     ``expires_at``); other auth fields stay intact.
@@ -144,7 +144,7 @@ def sync(
         body (VaultCredentialUpdate): Request body for ``PUT
             /v1/vaults/{vault_id}/credentials/{id}``.
 
-            ``mcp_server_url`` and ``auth_type`` are immutable — not accepted here.
+            ``target_url`` and ``auth_type`` are immutable — not accepted here.
             Omitted secret fields are preserved (decrypt-merge-encrypt).
 
     Raises:
@@ -177,7 +177,7 @@ async def asyncio_detailed(
      Update a credential's metadata and/or rotate its auth secrets.
 
     Omitted secret fields are preserved (decrypt-merge-encrypt cycle on the
-    encrypted payload). ``mcp_server_url`` and ``auth_type`` are immutable
+    encrypted payload). ``target_url`` and ``auth_type`` are immutable
     and not accepted in the body. To rotate an OAuth refresh token, send
     only the new ``refresh_token`` (and optional ``access_token`` /
     ``expires_at``); other auth fields stay intact.
@@ -189,7 +189,7 @@ async def asyncio_detailed(
         body (VaultCredentialUpdate): Request body for ``PUT
             /v1/vaults/{vault_id}/credentials/{id}``.
 
-            ``mcp_server_url`` and ``auth_type`` are immutable — not accepted here.
+            ``target_url`` and ``auth_type`` are immutable — not accepted here.
             Omitted secret fields are preserved (decrypt-merge-encrypt).
 
     Raises:
@@ -225,7 +225,7 @@ async def asyncio(
      Update a credential's metadata and/or rotate its auth secrets.
 
     Omitted secret fields are preserved (decrypt-merge-encrypt cycle on the
-    encrypted payload). ``mcp_server_url`` and ``auth_type`` are immutable
+    encrypted payload). ``target_url`` and ``auth_type`` are immutable
     and not accepted in the body. To rotate an OAuth refresh token, send
     only the new ``refresh_token`` (and optional ``access_token`` /
     ``expires_at``); other auth fields stay intact.
@@ -237,7 +237,7 @@ async def asyncio(
         body (VaultCredentialUpdate): Request body for ``PUT
             /v1/vaults/{vault_id}/credentials/{id}``.
 
-            ``mcp_server_url`` and ``auth_type`` are immutable — not accepted here.
+            ``target_url`` and ``auth_type`` are immutable — not accepted here.
             Omitted secret fields are preserved (decrypt-merge-encrypt).
 
     Raises:

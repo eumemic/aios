@@ -2319,7 +2319,7 @@ def _row_to_vault_credential(row: asyncpg.Record) -> VaultCredential:
         id=row["id"],
         vault_id=row["vault_id"],
         display_name=row["display_name"],
-        mcp_server_url=row["mcp_server_url"],
+        target_url=row["target_url"],
         auth_type=row["auth_type"],
         metadata=metadata,
         created_at=row["created_at"],
@@ -2334,7 +2334,7 @@ async def insert_vault_credential(
     account_id: str,
     vault_id: str,
     display_name: str | None,
-    mcp_server_url: str,
+    target_url: str,
     auth_type: str,
     blob: EncryptedBlob,
     metadata: dict[str, Any],
@@ -2345,7 +2345,7 @@ async def insert_vault_credential(
         row = await conn.fetchrow(
             """
             INSERT INTO vault_credentials (
-                id, vault_id, display_name, mcp_server_url,
+                id, vault_id, display_name, target_url,
                 auth_type, ciphertext, nonce, metadata, account_id
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
@@ -2354,7 +2354,7 @@ async def insert_vault_credential(
             new_id,
             vault_id,
             display_name,
-            mcp_server_url,
+            target_url,
             auth_type,
             blob.ciphertext,
             blob.nonce,
@@ -2363,8 +2363,8 @@ async def insert_vault_credential(
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
-            f"an active credential for {mcp_server_url!r} already exists in this vault",
-            detail={"mcp_server_url": mcp_server_url, "vault_id": vault_id},
+            f"an active credential for {target_url!r} already exists in this vault",
+            detail={"target_url": target_url, "vault_id": vault_id},
         ) from exc
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -2399,11 +2399,11 @@ async def get_vault_credential(
 async def lock_oauth_credential_for_refresh(
     conn: asyncpg.Connection[Any],
     vault_id: str,
-    mcp_server_url: str,
+    target_url: str,
     *,
     account_id: str,
 ) -> tuple[str, EncryptedBlob] | None:
-    """``SELECT FOR UPDATE`` the active credential for ``(vault_id, url)``.
+    """``SELECT FOR UPDATE`` the active credential for ``(vault_id, target_url)``.
 
     Used by the OAuth refresh path to serialize concurrent refreshes of the
     same credential. Returns ``(credential_id, EncryptedBlob)`` or ``None``
@@ -2411,10 +2411,10 @@ async def lock_oauth_credential_for_refresh(
     """
     row = await conn.fetchrow(
         "SELECT id, ciphertext, nonce FROM vault_credentials "
-        "WHERE vault_id = $1 AND mcp_server_url = $2 AND archived_at IS NULL "
+        "WHERE vault_id = $1 AND target_url = $2 AND archived_at IS NULL "
         "AND account_id = $3 FOR UPDATE",
         vault_id,
-        mcp_server_url,
+        target_url,
         account_id,
     )
     if row is None:
@@ -2650,7 +2650,7 @@ async def batch_get_session_vault_ids(
     return result
 
 
-# ─── MCP credential resolution ───────────────────────────────────────────────
+# ─── credential resolution ───────────────────────────────────────────────────
 
 
 async def resolve_vault_credential(
@@ -2658,22 +2658,22 @@ async def resolve_vault_credential(
     *,
     account_id: str,
     vault_id: str,
-    mcp_server_url: str,
+    target_url: str,
 ) -> tuple[EncryptedBlob, str] | None:
-    """Look up an MCP credential in a specific vault by URL — no
+    """Look up a credential in a specific vault by ``target_url`` — no
     ``session_vaults`` join."""
     row = await conn.fetchrow(
         """
         SELECT ciphertext, nonce, auth_type
           FROM vault_credentials
          WHERE vault_id = $1
-           AND mcp_server_url = $2
+           AND target_url = $2
            AND archived_at IS NULL
            AND account_id = $3
          LIMIT 1
         """,
         vault_id,
-        mcp_server_url,
+        target_url,
         account_id,
     )
     if row is None:
@@ -2681,17 +2681,17 @@ async def resolve_vault_credential(
     return EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]), str(row["auth_type"])
 
 
-async def resolve_mcp_credential(
+async def resolve_session_credential(
     conn: asyncpg.Connection[Any],
     session_id: str,
-    mcp_server_url: str,
+    target_url: str,
     *,
     account_id: str,
 ) -> tuple[EncryptedBlob, str, str] | None:
-    """Find the first matching MCP credential across a session's bound vaults.
+    """Find the first matching credential across a session's bound vaults.
 
     Joins ``session_vaults`` (rank-ordered) with ``vault_credentials``
-    filtered by ``mcp_server_url``. Returns
+    filtered by ``target_url``. Returns
     ``(EncryptedBlob, auth_type, vault_id)`` for the first match, or
     ``None`` if no credential exists. The ``vault_id`` is needed by the
     OAuth refresh path to scope ``SELECT … FOR UPDATE`` to a specific row.
@@ -2702,7 +2702,7 @@ async def resolve_mcp_credential(
           FROM session_vaults sv
           JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
          WHERE sv.session_id = $1
-           AND vc.mcp_server_url = $2
+           AND vc.target_url = $2
            AND vc.archived_at IS NULL
            AND sv.account_id = $3
            AND vc.account_id = $3
@@ -2710,7 +2710,7 @@ async def resolve_mcp_credential(
          LIMIT 1
         """,
         session_id,
-        mcp_server_url,
+        target_url,
         account_id,
     )
     if row is None:

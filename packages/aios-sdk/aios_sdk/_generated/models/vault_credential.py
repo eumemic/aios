@@ -26,7 +26,7 @@ class VaultCredential:
         id (str):
         vault_id (str):
         display_name (None | str):
-        mcp_server_url (str):
+        target_url (str):
         auth_type (VaultCredentialAuthType):
         metadata (VaultCredentialMetadata):
         created_at (datetime.datetime):
@@ -37,7 +37,7 @@ class VaultCredential:
     id: str
     vault_id: str
     display_name: None | str
-    mcp_server_url: str
+    target_url: str
     auth_type: VaultCredentialAuthType
     metadata: VaultCredentialMetadata
     created_at: datetime.datetime
@@ -53,7 +53,7 @@ class VaultCredential:
         display_name: None | str
         display_name = self.display_name
 
-        mcp_server_url = self.mcp_server_url
+        target_url = self.target_url
 
         auth_type = self.auth_type.value
 
@@ -78,7 +78,7 @@ class VaultCredential:
                 "id": id,
                 "vault_id": vault_id,
                 "display_name": display_name,
-                "mcp_server_url": mcp_server_url,
+                "target_url": target_url,
                 "auth_type": auth_type,
                 "metadata": metadata,
                 "created_at": created_at,
@@ -106,7 +106,7 @@ class VaultCredential:
 
         display_name = _parse_display_name(d.pop("display_name"))
 
-        mcp_server_url = d.pop("mcp_server_url")
+        target_url = d.pop("target_url")
 
         auth_type = VaultCredentialAuthType(d.pop("auth_type"))
 
@@ -137,7 +137,7 @@ class VaultCredential:
             id=id,
             vault_id=vault_id,
             display_name=display_name,
-            mcp_server_url=mcp_server_url,
+            target_url=target_url,
             auth_type=auth_type,
             metadata=metadata,
             created_at=created_at,

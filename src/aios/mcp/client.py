@@ -15,9 +15,10 @@ as regular function-calling tools.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from contextlib import AsyncExitStack
-from typing import Any
+from typing import Any, assert_never, cast
 
 import asyncpg
 import httpx
@@ -29,6 +30,7 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.logging import get_logger
 from aios.mcp.schema import make_function_tool
+from aios.models.vaults import AuthType
 from aios.services.vaults import is_expiring, refresh_credential
 
 log = get_logger("aios.mcp.client")
@@ -69,75 +71,91 @@ async def _open_session(
     return session, init_result
 
 
-def _token_from_payload(payload: dict[str, Any], auth_type: str) -> str:
-    if auth_type == "static_bearer":
-        return str(payload.get("token", ""))
-    if auth_type == "mcp_oauth":
-        return str(payload.get("access_token", ""))
-    log.warning("mcp.unknown_auth_type", auth_type=auth_type)
-    return ""
+def _auth_header_from_payload(payload: dict[str, Any], auth_type: AuthType) -> str:
+    """Render the ``Authorization`` header value for ``auth_type``.
+
+    Empty string means "no header should be sent" — caller drops the
+    header entirely. ``bearer_header`` and ``oauth2_refresh`` produce
+    ``Bearer <token>``; ``basic`` produces ``Basic <base64(user:pass)>``.
+    """
+    if auth_type == "bearer_header":
+        token = str(payload.get("token", ""))
+        return f"Bearer {token}" if token else ""
+    if auth_type == "oauth2_refresh":
+        token = str(payload.get("access_token", ""))
+        return f"Bearer {token}" if token else ""
+    if auth_type == "basic":
+        username = str(payload.get("username", ""))
+        password = str(payload.get("password", ""))
+        if not username and not password:
+            return ""
+        encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
+        return f"Basic {encoded}"
+    assert_never(auth_type)
 
 
-async def resolve_auth_for_url(
+async def resolve_auth_for_target_url(
     pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
     session_id: str,
-    mcp_server_url: str,
+    target_url: str,
     *,
     account_id: str,
 ) -> tuple[str | None, dict[str, str]]:
-    """Resolve MCP auth identity + headers for ``mcp_server_url`` via
-    the session's bound vaults.
+    """Resolve auth identity + headers for ``target_url`` via the
+    session's bound vaults.
 
     Returns ``(vault_id, headers)`` on the success path, or
     ``(None, {})`` whenever there are no auth headers to send (no
-    credential bound, or a credential whose token is empty / a refresh
-    re-read missed). ``vault_id`` is the row id of the
+    credential bound, or a credential whose secret material is empty
+    / a refresh re-read missed). ``vault_id`` is the row id of the
     ``vault_credentials`` entry — stable across OAuth token rotation
     (``refresh_credential`` updates the row in place), so callers feed
     it to the pool as a stable cache key (see #459).
 
-    For ``mcp_oauth`` credentials whose ``expires_at`` falls within the
-    refresh skew window, the access token is transparently refreshed
+    For ``oauth2_refresh`` credentials whose ``expires_at`` falls within
+    the refresh skew window, the access token is transparently refreshed
     (row-locked via ``refresh_credential`` to serialize concurrent
     refreshes of the same row) before returning.  OAuth refresh failures
     bubble up as :class:`OAuthRefreshError`; there is no silent fallback
     to the stale token.
     """
     async with pool.acquire() as conn:
-        session_result = await queries.resolve_mcp_credential(
-            conn, session_id, mcp_server_url, account_id=account_id
+        session_result = await queries.resolve_session_credential(
+            conn, session_id, target_url, account_id=account_id
         )
         if session_result is None:
             return None, {}
-        blob, auth_type, vault_id = session_result
+        blob, auth_type_str, vault_id = session_result
+        # The CHECK constraint on vault_credentials.auth_type guarantees the
+        # DB-stored string is one of the AuthType literals.
+        auth_type = cast(AuthType, auth_type_str)
         subkey = crypto_box.derive_account_subkey(account_id)
 
-        if auth_type == "mcp_oauth":
+        if auth_type == "oauth2_refresh":
             payload = json.loads(subkey.decrypt(blob))
             if is_expiring(payload):
                 await refresh_credential(
                     crypto_box,
                     conn,
                     vault_id=vault_id,
-                    mcp_server_url=mcp_server_url,
+                    target_url=target_url,
                     account_id=account_id,
                 )
                 refreshed = await queries.resolve_vault_credential(
-                    conn, vault_id=vault_id, mcp_server_url=mcp_server_url, account_id=account_id
+                    conn, vault_id=vault_id, target_url=target_url, account_id=account_id
                 )
                 if refreshed is None:
                     return None, {}
                 blob = refreshed[0]
                 payload = json.loads(subkey.decrypt(blob))
-            token = str(payload.get("access_token", ""))
         else:
             payload = json.loads(subkey.decrypt(blob))
-            token = _token_from_payload(payload, auth_type)
 
-    if not token:
+    header_value = _auth_header_from_payload(payload, auth_type)
+    if not header_value:
         return None, {}
-    return vault_id, {"Authorization": f"Bearer {token}"}
+    return vault_id, {"Authorization": header_value}
 
 
 async def discover_mcp_tools(

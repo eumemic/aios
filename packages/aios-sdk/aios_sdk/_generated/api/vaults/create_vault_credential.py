@@ -78,19 +78,19 @@ def sync_detailed(
 
      Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.
 
-    Validates required fields per ``auth_type``: ``mcp_oauth`` requires
+    Validates required fields per ``auth_type``: ``oauth2_refresh`` requires
     ``access_token`` (plus the refresh fields needed for rotation);
-    ``static_bearer`` requires ``token``. Caps at 20 active credentials per
-    vault. The ``mcp_server_url`` is immutable after creation — to retarget
-    a credential, archive the existing one and create a new credential at
-    the new URL.
+    ``bearer_header`` requires ``token``; ``basic`` requires ``username``
+    and ``password``. Caps at 20 active credentials per vault. The
+    ``target_url`` is immutable after creation — to retarget a credential,
+    archive the existing one and create a new credential at the new URL.
 
     Args:
         vault_id (str):
         authorization (None | str | Unset):
         body (VaultCredentialCreate): Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-            All secret fields are write-only. The ``mcp_server_url`` is immutable
+            All secret fields are write-only. The ``target_url`` is immutable
             after creation. The service layer validates required fields per
             ``auth_type``.
 
@@ -126,19 +126,19 @@ def sync(
 
      Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.
 
-    Validates required fields per ``auth_type``: ``mcp_oauth`` requires
+    Validates required fields per ``auth_type``: ``oauth2_refresh`` requires
     ``access_token`` (plus the refresh fields needed for rotation);
-    ``static_bearer`` requires ``token``. Caps at 20 active credentials per
-    vault. The ``mcp_server_url`` is immutable after creation — to retarget
-    a credential, archive the existing one and create a new credential at
-    the new URL.
+    ``bearer_header`` requires ``token``; ``basic`` requires ``username``
+    and ``password``. Caps at 20 active credentials per vault. The
+    ``target_url`` is immutable after creation — to retarget a credential,
+    archive the existing one and create a new credential at the new URL.
 
     Args:
         vault_id (str):
         authorization (None | str | Unset):
         body (VaultCredentialCreate): Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-            All secret fields are write-only. The ``mcp_server_url`` is immutable
+            All secret fields are write-only. The ``target_url`` is immutable
             after creation. The service layer validates required fields per
             ``auth_type``.
 
@@ -169,19 +169,19 @@ async def asyncio_detailed(
 
      Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.
 
-    Validates required fields per ``auth_type``: ``mcp_oauth`` requires
+    Validates required fields per ``auth_type``: ``oauth2_refresh`` requires
     ``access_token`` (plus the refresh fields needed for rotation);
-    ``static_bearer`` requires ``token``. Caps at 20 active credentials per
-    vault. The ``mcp_server_url`` is immutable after creation — to retarget
-    a credential, archive the existing one and create a new credential at
-    the new URL.
+    ``bearer_header`` requires ``token``; ``basic`` requires ``username``
+    and ``password``. Caps at 20 active credentials per vault. The
+    ``target_url`` is immutable after creation — to retarget a credential,
+    archive the existing one and create a new credential at the new URL.
 
     Args:
         vault_id (str):
         authorization (None | str | Unset):
         body (VaultCredentialCreate): Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-            All secret fields are write-only. The ``mcp_server_url`` is immutable
+            All secret fields are write-only. The ``target_url`` is immutable
             after creation. The service layer validates required fields per
             ``auth_type``.
 
@@ -215,19 +215,19 @@ async def asyncio(
 
      Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.
 
-    Validates required fields per ``auth_type``: ``mcp_oauth`` requires
+    Validates required fields per ``auth_type``: ``oauth2_refresh`` requires
     ``access_token`` (plus the refresh fields needed for rotation);
-    ``static_bearer`` requires ``token``. Caps at 20 active credentials per
-    vault. The ``mcp_server_url`` is immutable after creation — to retarget
-    a credential, archive the existing one and create a new credential at
-    the new URL.
+    ``bearer_header`` requires ``token``; ``basic`` requires ``username``
+    and ``password``. Caps at 20 active credentials per vault. The
+    ``target_url`` is immutable after creation — to retarget a credential,
+    archive the existing one and create a new credential at the new URL.
 
     Args:
         vault_id (str):
         authorization (None | str | Unset):
         body (VaultCredentialCreate): Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-            All secret fields are write-only. The ``mcp_server_url`` is immutable
+            All secret fields are write-only. The ``target_url`` is immutable
             after creation. The service layer validates required fields per
             ``auth_type``.
 

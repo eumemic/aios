@@ -24,12 +24,12 @@ T = TypeVar("T", bound="VaultCredentialCreate")
 class VaultCredentialCreate:
     """Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-    All secret fields are write-only. The ``mcp_server_url`` is immutable
+    All secret fields are write-only. The ``target_url`` is immutable
     after creation. The service layer validates required fields per
     ``auth_type``.
 
         Attributes:
-            mcp_server_url (str):
+            target_url (str):
             auth_type (VaultCredentialCreateAuthType):
             display_name (None | str | Unset):
             metadata (VaultCredentialCreateMetadata | Unset):
@@ -42,9 +42,11 @@ class VaultCredentialCreate:
             scope (None | str | Unset):
             resource (None | str | Unset):
             token (None | str | Unset):
+            username (None | str | Unset):
+            password (None | str | Unset):
     """
 
-    mcp_server_url: str
+    target_url: str
     auth_type: VaultCredentialCreateAuthType
     display_name: None | str | Unset = UNSET
     metadata: VaultCredentialCreateMetadata | Unset = UNSET
@@ -63,13 +65,15 @@ class VaultCredentialCreate:
     scope: None | str | Unset = UNSET
     resource: None | str | Unset = UNSET
     token: None | str | Unset = UNSET
+    username: None | str | Unset = UNSET
+    password: None | str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.token_endpoint_auth_basic import TokenEndpointAuthBasic
         from ..models.token_endpoint_auth_none import TokenEndpointAuthNone
         from ..models.token_endpoint_auth_post import TokenEndpointAuthPost
 
-        mcp_server_url = self.mcp_server_url
+        target_url = self.target_url
 
         auth_type = self.auth_type.value
 
@@ -145,11 +149,23 @@ class VaultCredentialCreate:
         else:
             token = self.token
 
+        username: None | str | Unset
+        if isinstance(self.username, Unset):
+            username = UNSET
+        else:
+            username = self.username
+
+        password: None | str | Unset
+        if isinstance(self.password, Unset):
+            password = UNSET
+        else:
+            password = self.password
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
             {
-                "mcp_server_url": mcp_server_url,
+                "target_url": target_url,
                 "auth_type": auth_type,
             }
         )
@@ -175,6 +191,10 @@ class VaultCredentialCreate:
             field_dict["resource"] = resource
         if token is not UNSET:
             field_dict["token"] = token
+        if username is not UNSET:
+            field_dict["username"] = username
+        if password is not UNSET:
+            field_dict["password"] = password
 
         return field_dict
 
@@ -188,7 +208,7 @@ class VaultCredentialCreate:
         )
 
         d = dict(src_dict)
-        mcp_server_url = d.pop("mcp_server_url")
+        target_url = d.pop("target_url")
 
         auth_type = VaultCredentialCreateAuthType(d.pop("auth_type"))
 
@@ -344,8 +364,26 @@ class VaultCredentialCreate:
 
         token = _parse_token(d.pop("token", UNSET))
 
+        def _parse_username(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        username = _parse_username(d.pop("username", UNSET))
+
+        def _parse_password(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        password = _parse_password(d.pop("password", UNSET))
+
         vault_credential_create = cls(
-            mcp_server_url=mcp_server_url,
+            target_url=target_url,
             auth_type=auth_type,
             display_name=display_name,
             metadata=metadata,
@@ -358,6 +396,8 @@ class VaultCredentialCreate:
             scope=scope,
             resource=resource,
             token=token,
+            username=username,
+            password=password,
         )
 
         return vault_credential_create

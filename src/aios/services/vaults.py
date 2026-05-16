@@ -1,14 +1,15 @@
 """Business logic for vaults and vault credentials.
 
-Vaults are named collections of encrypted credentials for MCP server
-authentication. The CryptoBox handles encryption/decryption; the service
-layer validates auth-type-specific fields and enforces limits.
+Vaults are named collections of encrypted credentials for authenticated
+outbound services (MCP servers, HTTP APIs). The CryptoBox handles
+encryption/decryption; the service layer validates auth-type-specific
+fields and enforces limits.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, assert_never
 
 import asyncpg
 import httpx
@@ -18,6 +19,7 @@ from aios.db import queries
 from aios.errors import NotFoundError, OAuthRefreshError, ValidationError
 from aios.logging import get_logger
 from aios.models.vaults import (
+    AuthType,
     TokenEndpointAuth,
     TokenEndpointAuthNone,
     Vault,
@@ -29,7 +31,7 @@ from aios.models.vaults import (
 MAX_CREDENTIALS_PER_VAULT = 20
 
 # Refresh an OAuth token if it expires within this window — gives the
-# in-flight MCP request enough headroom to complete on the new token.
+# in-flight request enough headroom to complete on the new token.
 REFRESH_SKEW_SECONDS = 30
 
 # Timeout for the OAuth token-endpoint POST. Generous because OAuth providers
@@ -53,6 +55,17 @@ _OAUTH_FIELDS = (
     "resource",
 )
 _BEARER_FIELDS = ("token",)
+_BASIC_FIELDS = ("username", "password")
+
+
+def _fields_for(auth_type: AuthType) -> tuple[str, ...]:
+    if auth_type == "oauth2_refresh":
+        return _OAUTH_FIELDS
+    if auth_type == "bearer_header":
+        return _BEARER_FIELDS
+    if auth_type == "basic":
+        return _BASIC_FIELDS
+    assert_never(auth_type)
 
 
 def _serialize_token_endpoint_auth(v: TokenEndpointAuth) -> dict[str, str]:
@@ -66,7 +79,7 @@ def is_expiring(payload: dict[str, Any], skew: int = REFRESH_SKEW_SECONDS) -> bo
     """Return True if the token's ``expires_at`` is within ``skew`` seconds of now.
 
     Missing ``expires_at`` is treated as "never expires" (False) so that
-    legacy / non-expiring tokens behave like ``static_bearer``.
+    legacy / non-expiring tokens behave like ``bearer_header``.
     """
     raw = payload.get("expires_at")
     if not raw:
@@ -86,9 +99,9 @@ async def refresh_credential(
     *,
     account_id: str,
     vault_id: str,
-    mcp_server_url: str,
+    target_url: str,
 ) -> None:
-    """Refresh the OAuth access token for ``(vault_id, mcp_server_url)``.
+    """Refresh the OAuth access token for ``(vault_id, target_url)``.
 
     Concurrency-safe: opens a transaction, locks the credential row with
     ``SELECT … FOR UPDATE``, then re-checks ``expires_at`` against the skew
@@ -101,12 +114,12 @@ async def refresh_credential(
     """
     async with conn.transaction():
         locked = await queries.lock_oauth_credential_for_refresh(
-            conn, vault_id, mcp_server_url, account_id=account_id
+            conn, vault_id, target_url, account_id=account_id
         )
         if locked is None:
             raise OAuthRefreshError(
-                f"no active credential for {mcp_server_url!r} in vault {vault_id}",
-                detail={"vault_id": vault_id, "mcp_server_url": mcp_server_url},
+                f"no active credential for {target_url!r} in vault {vault_id}",
+                detail={"vault_id": vault_id, "target_url": target_url},
             )
         credential_id, blob = locked
         subkey = crypto_box.derive_account_subkey(account_id)
@@ -280,50 +293,50 @@ def _extract_auth_payload(body: VaultCredentialCreate) -> dict[str, Any]:
     Validates required fields per auth_type. Returns the dict to be
     JSON-serialized and encrypted.
     """
-    if body.auth_type == "static_bearer":
-        if body.token is None:
+    if body.auth_type == "bearer_header" and body.token is None:
+        raise ValidationError(
+            "bearer_header credentials require 'token'",
+            detail={"auth_type": body.auth_type},
+        )
+    if body.auth_type == "basic":
+        missing = [f for f in _BASIC_FIELDS if getattr(body, f) is None]
+        if missing:
             raise ValidationError(
-                "static_bearer credentials require 'token'",
-                detail={"auth_type": body.auth_type},
+                f"basic credentials require {missing}",
+                detail={"auth_type": body.auth_type, "missing": missing},
             )
-        payload: dict[str, Any] = {}
-        for field in _BEARER_FIELDS:
-            val = getattr(body, field)
-            if val is not None:
-                payload[field] = val.get_secret_value() if hasattr(val, "get_secret_value") else val
-        return payload
-    else:  # mcp_oauth
-        if body.access_token is None:
-            raise ValidationError(
-                "mcp_oauth credentials require 'access_token'",
-                detail={"auth_type": body.auth_type},
-            )
-        payload = {}
-        for field in _OAUTH_FIELDS:
-            val = getattr(body, field)
-            if val is None:
-                continue
-            if field == "token_endpoint_auth":
-                payload[field] = _serialize_token_endpoint_auth(val)
-            elif hasattr(val, "get_secret_value"):
-                payload[field] = val.get_secret_value()
-            elif hasattr(val, "isoformat"):
-                payload[field] = val.isoformat()
-            else:
-                payload[field] = val
-        return payload
+    if body.auth_type == "oauth2_refresh" and body.access_token is None:
+        raise ValidationError(
+            "oauth2_refresh credentials require 'access_token'",
+            detail={"auth_type": body.auth_type},
+        )
+
+    payload: dict[str, Any] = {}
+    for field in _fields_for(body.auth_type):
+        val = getattr(body, field)
+        if val is None:
+            continue
+        if field == "token_endpoint_auth":
+            payload[field] = _serialize_token_endpoint_auth(val)
+        elif hasattr(val, "get_secret_value"):
+            payload[field] = val.get_secret_value()
+        elif hasattr(val, "isoformat"):
+            payload[field] = val.isoformat()
+        else:
+            payload[field] = val
+    return payload
 
 
 def _merge_auth_payload(
     existing: dict[str, Any],
     body: VaultCredentialUpdate,
-    auth_type: str,
+    auth_type: AuthType,
 ) -> dict[str, Any]:
     """Merge update fields into the existing decrypted payload.
 
     Only fields present in model_fields_set replace existing values.
     """
-    fields = _OAUTH_FIELDS if auth_type == "mcp_oauth" else _BEARER_FIELDS
+    fields = _fields_for(auth_type)
     merged = dict(existing)
     for field in fields:
         if field not in body.model_fields_set:
@@ -375,7 +388,7 @@ async def create_vault_credential(
             conn,
             vault_id=vault_id,
             display_name=body.display_name,
-            mcp_server_url=body.mcp_server_url,
+            target_url=body.target_url,
             auth_type=body.auth_type,
             blob=blob,
             metadata=body.metadata,

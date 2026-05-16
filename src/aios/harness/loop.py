@@ -796,7 +796,7 @@ async def discover_session_mcp_tools(
     string.  Servers that supplied no instructions (or ``""``) are
     omitted from the dict.
     """
-    from aios.mcp.client import discover_mcp_tools, resolve_auth_for_url
+    from aios.mcp.client import discover_mcp_tools, resolve_auth_for_target_url
 
     enabled_server_names: set[str] = set()
     for spec in agent.tools:
@@ -811,7 +811,7 @@ async def discover_session_mcp_tools(
     crypto_box = runtime.require_crypto_box()
 
     async def _discover_one(name: str, url: str) -> tuple[list[dict[str, Any]], str | None]:
-        vault_id, headers = await resolve_auth_for_url(
+        vault_id, headers = await resolve_auth_for_target_url(
             pool, crypto_box, session_id, url, account_id=account_id
         )
         return await discover_mcp_tools(url, vault_id, headers, name)

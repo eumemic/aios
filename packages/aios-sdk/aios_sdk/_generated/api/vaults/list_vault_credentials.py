@@ -90,7 +90,7 @@ def sync_detailed(
      List credentials in a vault, newest first, excluding archived.
 
     Cursor pagination via ``after``. Secret material is never returned —
-    only metadata (display name, mcp_server_url, auth_type, timestamps).
+    only metadata (display name, target_url, auth_type, timestamps).
 
     Args:
         vault_id (str):
@@ -133,7 +133,7 @@ def sync(
      List credentials in a vault, newest first, excluding archived.
 
     Cursor pagination via ``after``. Secret material is never returned —
-    only metadata (display name, mcp_server_url, auth_type, timestamps).
+    only metadata (display name, target_url, auth_type, timestamps).
 
     Args:
         vault_id (str):
@@ -171,7 +171,7 @@ async def asyncio_detailed(
      List credentials in a vault, newest first, excluding archived.
 
     Cursor pagination via ``after``. Secret material is never returned —
-    only metadata (display name, mcp_server_url, auth_type, timestamps).
+    only metadata (display name, target_url, auth_type, timestamps).
 
     Args:
         vault_id (str):
@@ -212,7 +212,7 @@ async def asyncio(
      List credentials in a vault, newest first, excluding archived.
 
     Cursor pagination via ``after``. Secret material is never returned —
-    only metadata (display name, mcp_server_url, auth_type, timestamps).
+    only metadata (display name, target_url, auth_type, timestamps).
 
     Args:
         vault_id (str):
