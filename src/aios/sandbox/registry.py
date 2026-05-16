@@ -79,10 +79,6 @@ class SandboxRegistry:
         # client and bound TCP port.
         self._evict_proxy_stop_tasks: set[asyncio.Task[None]] = set()
 
-    @property
-    def backend(self) -> SandboxBackend:
-        return self._backend
-
     def _lock_for(self, session_id: str) -> asyncio.Lock:
         lock = self._locks.get(session_id)
         if lock is None:
