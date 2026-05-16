@@ -244,8 +244,6 @@ def _network_policy_from_config(env_config: EnvironmentConfig | None) -> Network
     networking = env_config.networking if env_config else None
     if isinstance(networking, LimitedNetworking):
         return Limited(allowed_hosts=frozenset(networking.allowed_hosts))
-    # Today the only non-limited option is unrestricted; ``Disabled`` is
-    # reserved for future use (no current EnvironmentConfig produces it).
     return Unrestricted()
 
 

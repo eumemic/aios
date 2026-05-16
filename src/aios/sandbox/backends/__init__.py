@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from aios.sandbox.backends.base import (
     CommandResult,
-    Disabled,
     Limited,
     ManagedSandboxRef,
     Mount,
@@ -39,7 +38,6 @@ def make_backend(name: str) -> SandboxBackend:
 
 __all__ = [
     "CommandResult",
-    "Disabled",
     "Limited",
     "ManagedSandboxRef",
     "Mount",

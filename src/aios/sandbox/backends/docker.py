@@ -28,7 +28,6 @@ from aios.sandbox.backends.base import (
     MANAGED_LABEL_VALUE,
     SESSION_LABEL_KEY,
     CommandResult,
-    Disabled,
     Limited,
     ManagedSandboxRef,
     SandboxBackendError,
@@ -83,10 +82,7 @@ class DockerBackend:
         for key, value in spec.labels.items():
             argv.extend(["--label", f"{key}={value}"])
 
-        if isinstance(spec.network_policy, Disabled):
-            argv.extend(["--network", "none"])
-        else:
-            argv.extend(["--network", SANDBOX_NETWORK_NAME])
+        argv.extend(["--network", SANDBOX_NETWORK_NAME])
 
         # Limited policy needs NET_ADMIN so the iptables script (applied
         # later by the registry via aios.sandbox.setup) can install rules.
