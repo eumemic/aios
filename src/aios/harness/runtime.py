@@ -119,10 +119,6 @@ def require_task_registry() -> TaskRegistry:
     return _require("task_registry", task_registry)
 
 
-def require_mcp_session_pool() -> McpSessionPool:
-    return _require("mcp_session_pool", mcp_session_pool)
-
-
 def require_mcp_broker() -> McpBroker:
     return _require("mcp_broker", mcp_broker)
 
