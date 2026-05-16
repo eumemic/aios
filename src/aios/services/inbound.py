@@ -207,7 +207,6 @@ async def _append_with_dedup(
             )
             if not inserted:
                 raise _DedupRollback()
-            await queries.flip_quiescent_to_pending(conn, session_id, account_id=account_id)
     except _DedupRollback:
         return False
     return True

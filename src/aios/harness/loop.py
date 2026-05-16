@@ -928,7 +928,7 @@ async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str
     # Terminal landing pad (#353): sweep skips ``errored`` (see
     # ``CANDIDATE_ROWS_SQL`` / ``CONFIRMED_ROWS_SQL``); any in-flight
     # tool task that completes after this point sits unreaped until a
-    # user message flips status via ``flip_quiescent_to_pending``.
+    # user message lifts status back to ``pending`` (via ``append_event``).
     await sessions_service.set_session_status(
         pool, session_id, "errored", stop_reason={"type": "error"}, account_id=account_id
     )

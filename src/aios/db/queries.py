@@ -1639,12 +1639,29 @@ async def append_event(
     new_id = make_id(EVENT)
     data_json = json.dumps(data)
 
+    # role/tool_name/is_error/sender_name: indexed-column promotions for
+    # events_search (migration 0022); not on the Event model.
+    role: str | None = None
+    if kind == "message":
+        raw_role = data.get("role")
+        if isinstance(raw_role, str):
+            role = raw_role
+    # User messages lift idle/errored → pending in the seq UPDATE so the
+    # sweep stops ignoring an errored session (#39, #353).
+    is_user_message = kind == "message" and role == "user"
+
     async with conn.transaction():
         seq_row = await conn.fetchrow(
-            "UPDATE sessions SET last_event_seq = last_event_seq + 1 "
+            "UPDATE sessions "
+            "SET last_event_seq = last_event_seq + 1, "
+            "    status = CASE WHEN $3 AND status IN ('idle', 'errored') "
+            "                  THEN 'pending' ELSE status END, "
+            "    updated_at = CASE WHEN $3 AND status IN ('idle', 'errored') "
+            "                      THEN now() ELSE updated_at END "
             "WHERE id = $1 AND account_id = $2 RETURNING last_event_seq, focal_channel",
             session_id,
             account_id,
+            is_user_message,
         )
         if seq_row is None:
             raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
@@ -1658,7 +1675,7 @@ async def append_event(
         cum_tokens: int | None = None
         if kind == "message":
             prev = await _latest_cumulative_tokens(conn, session_id)
-            if data.get("role") == "user" and orig_channel is not None:
+            if is_user_message and orig_channel is not None:
                 # TODO(vision): plumb ``agent.model`` through here so
                 # :func:`render_user_event` matches build-time output for
                 # image-bearing events.  Today this call site renders without
@@ -1677,15 +1694,6 @@ async def append_event(
         channel = await _derive_event_channel(
             conn, session_id, kind, data, orig_channel, focal_at_arrival
         )
-        # Pure promotions: role and the three tool/user-derived columns are
-        # stamped from the same JSON paths the 0022 backfill uses.  Agents
-        # query these via events_search; they're absent from the Event
-        # pydantic model (query-side surface only).
-        role: str | None = None
-        if kind == "message":
-            raw_role = data.get("role")
-            if isinstance(raw_role, str):
-                role = raw_role
         tool_name = _derive_tool_name(kind, data)
         is_error = _derive_is_error(kind, data)
         sender_name = _derive_sender_name(kind, data)
@@ -3810,28 +3818,6 @@ async def list_recent_chat_ids(
 
 
 # ─── connector_inbound_acks (dedup ledger) ──────────────────────────────────
-
-
-async def flip_quiescent_to_pending(
-    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
-) -> None:
-    """Flip ``sessions.status`` to ``pending`` if currently quiescent.
-
-    Quiescent here means either ``idle`` (clean turn end) or ``errored``
-    (retry budget spent — #353).  Called after appending a user message
-    so polling orchestrators can distinguish queued-but-not-started from
-    turn-finished, AND so a fresh user message lifts an ``errored``
-    session out of the sweep's blacklist (errored is opaque to the
-    sweep; ``pending`` is not).  Other states (running / rescheduling /
-    terminated) are left alone — the worker owns the running status, and
-    changing rescheduling would lose the retry-in-progress signal.
-    """
-    await conn.execute(
-        "UPDATE sessions SET status = 'pending', updated_at = now() "
-        "WHERE id = $1 AND status IN ('idle', 'errored') AND account_id = $2",
-        session_id,
-        account_id,
-    )
 
 
 async def try_record_inbound_ack(

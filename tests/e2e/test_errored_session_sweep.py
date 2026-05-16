@@ -4,8 +4,8 @@ Asserts the two halves of the fix:
 
 - ``errored`` is opaque to ``find_sessions_needing_inference`` even when
   the session has an unreacted user message (the loop trigger #353 hit).
-- A fresh user message lifts ``errored → pending`` via
-  ``flip_quiescent_to_pending``, restoring the operator-recovery contract.
+- A fresh user message lifts ``errored → pending`` via ``append_event``
+  itself, restoring the operator-recovery contract.
 """
 
 from __future__ import annotations
