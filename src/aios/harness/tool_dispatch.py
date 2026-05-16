@@ -441,32 +441,27 @@ async def _execute_mcp_tool_async(
         if suffix is not None:
             meta[FOCAL_CHANNEL_META_KEY] = suffix
 
-        # Agent-declared HTTP MCP server.  Connector dispatch was the
-        # other branch here historically — connectors now run as peer
-        # services and route via the custom-tool / requires_action flow
-        # (see #301), so this dispatcher only handles HTTP MCP.
-        if True:
-            url = mcp_server_map.get(server_name)
-            if url is None:
-                bound_log.warning("mcp_tool.server_not_found", server_name=server_name)
-                is_error = True
-                await _append_tool_result(
-                    pool,
-                    session_id,
-                    call_id,
-                    name,
-                    account_id=account_id,
-                    error=f"MCP server {server_name!r} not found",
-                )
-                return
-
-            from aios.mcp.client import call_mcp_tool, resolve_auth_for_url
-
-            crypto_box = runtime.require_crypto_box()
-            vault_id, headers = await resolve_auth_for_url(
-                pool, crypto_box, session_id, url, account_id=account_id
+        url = mcp_server_map.get(server_name)
+        if url is None:
+            bound_log.warning("mcp_tool.server_not_found", server_name=server_name)
+            is_error = True
+            await _append_tool_result(
+                pool,
+                session_id,
+                call_id,
+                name,
+                account_id=account_id,
+                error=f"MCP server {server_name!r} not found",
             )
-            result = await call_mcp_tool(url, vault_id, headers, tool_name, arguments, meta=meta)
+            return
+
+        from aios.mcp.client import call_mcp_tool, resolve_auth_for_url
+
+        crypto_box = runtime.require_crypto_box()
+        vault_id, headers = await resolve_auth_for_url(
+            pool, crypto_box, session_id, url, account_id=account_id
+        )
+        result = await call_mcp_tool(url, vault_id, headers, tool_name, arguments, meta=meta)
 
         content_str = json.dumps(result, ensure_ascii=False)
         mcp_is_error = "error" in result
