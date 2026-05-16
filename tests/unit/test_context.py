@@ -1048,6 +1048,25 @@ class TestFocalRendering:
         assert "\n[reply_to: author_uuid=bot · timestamp_ms=1776400000000]" in content
         assert "> what I said before" in content
 
+    def test_focal_match_reply_to_text_non_string_does_not_brick_session(self) -> None:
+        """Non-string ``reply_to.text`` from a connector must not crash the
+        renderer. ``_format_channel_header`` runs on every wake while the
+        event is in the window, so a crash permanently bricks the session
+        (same failure class as #446)."""
+        md = {
+            "channel": self._CHAN_A,
+            "reply_to": {
+                "author_uuid": "bot",
+                "timestamp_ms": 1776400000000,
+                "text": {"blocks": ["unexpected shape"]},
+            },
+        }
+        events = [_evt(1, "user", content="ok", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        # Quote snippet omitted because the text isn't renderable as a string.
+        assert "[reply_to: author_uuid=bot · timestamp_ms=1776400000000]" in content
+        assert "blocks" not in content
+
     def test_focal_match_reaction_surfaced(self) -> None:
         md = {
             "channel": self._CHAN_A,
