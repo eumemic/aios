@@ -153,3 +153,82 @@ async def test_connector_cannot_shadow_sender_via_metadata(
     assert metadata.get("sender") != "<spoofed>", (
         f"connector-supplied metadata.sender must be stripped; got {metadata.get('sender')!r}."
     )
+
+
+async def test_archived_connection_drops_inbound_without_routing(
+    fake_pool: MagicMock,
+) -> None:
+    """An inbound delivered for a connection whose ``archived_at`` is set
+    must NOT be routed into any session, even when a stale
+    ``chat_sessions`` ledger row still exists from before the archive.
+
+    Background: ``queries.get_connection`` does NOT filter
+    ``archived_at IS NULL`` and ``archive_connection`` doesn't cascade-
+    delete the per-chat ``chat_sessions`` ledger rows. The three-tier
+    resolver's tier-1 ``lookup_chat_session`` short-circuits on the
+    stale ledger row and returns the pre-archive session id, so a
+    misbehaving (or merely retrying) connector container that posts
+    after archive lands its messages in a session the operator believes
+    is decommissioned. Pre-fix ``handle_inbound`` happily proceeds with
+    the archived connection's metadata; post-fix it returns
+    ``drop_reason=DETACHED`` before touching the resolver.
+
+    Reachability: high — runtime connector containers cache state, the
+    connection_discovery_stream removal NOTIFY is at-most-once, and
+    network blips cause retry of inbounds queued just before archive.
+    """
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    from aios.models.connections import Connection
+    from aios.services.inbound import InboundDrop, handle_inbound
+
+    archived = Connection(
+        id="conn_01ARCHIVED000000000000000001",
+        connector="telegram",
+        external_account_id="bot1",
+        session_id=None,
+        session_template_id=None,
+        metadata={},
+        secrets_set=False,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        attached_at=None,
+        updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        archived_at=datetime(2026, 1, 3, tzinfo=UTC),  # ← archived
+    )
+
+    async def fake_get_connection(*_args: Any, **_kwargs: Any) -> Connection:
+        return archived
+
+    resolver_called = False
+
+    async def fake_resolver(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal resolver_called
+        resolver_called = True
+        raise AssertionError("resolver should not be invoked for archived connection")
+
+    with (
+        patch(
+            "aios.services.inbound.queries.get_connection",
+            AsyncMock(side_effect=fake_get_connection),
+        ),
+        patch("aios_connectors.resolver.resolve_target_session", fake_resolver),
+    ):
+        result = await handle_inbound(
+            fake_pool,
+            account_id="acc_test_stub",
+            connection_id=archived.id,
+            event_id="evt_should_drop",
+            chat_id="chat_1",
+            sender={},
+            content="hello",
+        )
+
+    assert result.drop_reason == InboundDrop.DETACHED, (
+        f"archived connection must short-circuit with a drop reason instead of "
+        f"flowing through the resolver to a stale ``chat_sessions`` row; got "
+        f"{result!r}. Pre-fix the resolver is invoked and would land the "
+        f"message in the pre-archive per_chat session — operator believes the "
+        f"connection is decommissioned but messages keep flowing."
+    )
+    assert not resolver_called, "resolver must be skipped entirely for archived connections"
