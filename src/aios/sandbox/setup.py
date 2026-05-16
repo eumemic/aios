@@ -25,15 +25,11 @@ the registry and the orchestrator backend-agnostic.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
 
 from aios.config import get_settings
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.sandbox.backends.base import SandboxBackend, SandboxHandle
-
-if TYPE_CHECKING:
-    pass
 
 log = get_logger("aios.sandbox.setup")
 

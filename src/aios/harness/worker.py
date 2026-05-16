@@ -26,14 +26,11 @@ import contextlib
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import asyncpg
 
 import aios.tools  # noqa: F401  — side-effect: register built-in tools
-
-if TYPE_CHECKING:
-    pass
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
