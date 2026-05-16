@@ -34,7 +34,7 @@ from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.logging import get_logger
-from aios.models.agents import ToolSpec
+from aios.models.agents import PermissionPolicy, ToolSpec
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.services.wake import defer_wake
@@ -751,7 +751,7 @@ def _classify_tool_call(
 
     tool_def = tool_registry.get(name)
     perm_tool = resolve_permission(name, agent.tools)
-    perm_route: str | None = None
+    perm_route: PermissionPolicy | None = None
     if tool_def.classify_permission is not None:
         # Arg-aware refinement: tools like ``http_request`` resolve a
         # per-call policy from the parsed arguments + agent config
