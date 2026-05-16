@@ -37,7 +37,6 @@ SESSION_TEMPLATE: Final = "stpl"
 # does that on a binding id; if one is added later, generate ULIDs
 # in the migration or relax ``split_id``.
 BINDING: Final = "bnd"
-RUNTIME: Final = "rt"
 RUNTIME_TOKEN: Final = "rtk"
 MEMORY_STORE: Final = "memstore"
 MEMORY: Final = "mem"
@@ -66,7 +65,6 @@ _PREFIXES: Final = frozenset(
         GITHUB_REPOSITORY,
         FILE,
         BINDING,
-        RUNTIME,
         RUNTIME_TOKEN,
         MANAGEMENT_CALL,
         ACCOUNT,
