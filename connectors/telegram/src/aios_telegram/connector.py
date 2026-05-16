@@ -311,32 +311,44 @@ class TelegramConnector(HttpConnector):
         for att, host_path in zip(attachments, host_paths, strict=True):
             if host_path is None:
                 continue
-            candidate = SDKAttachment(
-                host_path=str(host_path),
-                filename=att.filename,
-                content_type=att.content_type,
-            )
+            # Unconditionally drop the per-attachment temp file once we've
+            # taken the runtime tuple. ``_download_one`` creates it with
+            # ``delete=False`` so PTB can write to it; without this
+            # ``finally`` every successful Telegram inbound attachment
+            # leaks one file into ``/tmp`` for the lifetime of the
+            # connector container — eventual ``/tmp`` exhaustion kills
+            # the next ``NamedTemporaryFile`` and tears the serve task
+            # down. The runtime tuple carries the in-memory ``blob``
+            # bytes; the on-disk path is single-use scratch.
             try:
-                candidate.as_params()  # size + existence
-            except AttachmentError as err:
-                log.warning(
-                    "telegram.inbound.attachment_rejected",
-                    file_id=att.file_id,
+                candidate = SDKAttachment(
+                    host_path=str(host_path),
                     filename=att.filename,
-                    error=str(err),
+                    content_type=att.content_type,
                 )
-                continue
-            try:
-                blob = host_path.read_bytes()
-            except OSError as err:
-                log.warning(
-                    "telegram.inbound.attachment_read_failed",
-                    file_id=att.file_id,
-                    filename=att.filename,
-                    error=str(err),
-                )
-                continue
-            out.append((att.filename, blob, att.content_type))
+                try:
+                    candidate.as_params()  # size + existence
+                except AttachmentError as err:
+                    log.warning(
+                        "telegram.inbound.attachment_rejected",
+                        file_id=att.file_id,
+                        filename=att.filename,
+                        error=str(err),
+                    )
+                    continue
+                try:
+                    blob = host_path.read_bytes()
+                except OSError as err:
+                    log.warning(
+                        "telegram.inbound.attachment_read_failed",
+                        file_id=att.file_id,
+                        filename=att.filename,
+                        error=str(err),
+                    )
+                    continue
+                out.append((att.filename, blob, att.content_type))
+            finally:
+                await asyncio.to_thread(host_path.unlink, missing_ok=True)
         return out or None
 
     async def _download_one(self, state: _TelegramConnectionState, att: Attachment) -> Path | None:
