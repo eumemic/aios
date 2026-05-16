@@ -155,6 +155,60 @@ class TestSnapshot:
         assert result == {}
 
 
+class TestSymlinkRejection:
+    """Bash inside the sandbox can ``ln -s <worker-side-path> /mnt/memory/<store>/leak``.
+    The host_dir read happens on the WORKER side, so ``read_bytes`` on the
+    symlinked file resolves the link against the worker's filesystem — which
+    exposes any file the worker process can read (vault key material on disk,
+    other tenants' state, /etc, etc.) to a memory store that subsequently
+    persists the bytes to the DB and renders them to the model. Reject
+    symlinks at the walk site, matching #497's policy for
+    ``walk_skill_dir`` (same confused-deputy threat class)."""
+
+    def test_snapshot_skips_symlinks_to_host_files(self, tmp_path: Path) -> None:
+        from aios.tools.bash_memory_reconcile import snapshot_memory_mounts
+
+        sensitive = tmp_path / "host_secret.txt"
+        sensitive.write_text("HOST-ONLY SECRET")
+
+        host_dir = tmp_path / STORE_A
+        host_dir.mkdir()
+        (host_dir / ".materialized").touch()
+        # Bash inside the sandbox would create this symlink; the target is
+        # resolved against the worker's filesystem at read time.
+        (host_dir / "leak.txt").symlink_to(sensitive)
+
+        runtime.set_session_memory_mounts(SESSION_ID, [_echo()])
+        with patch("aios.tools.bash_memory_reconcile.memory_store_host_dir", return_value=host_dir):
+            result = snapshot_memory_mounts(SESSION_ID)
+
+        assert (STORE_A, "/leak.txt") not in result, (
+            f"snapshot must skip symlinks; got entries for symlinked paths: "
+            f"{[k for k in result if k[1] == '/leak.txt']!r}. Pre-fix the "
+            f"file_sha would be the sha256 of the symlink target's bytes "
+            f"(HOST-ONLY SECRET) — confused-deputy exfiltration through the "
+            f"reconcile path."
+        )
+
+    def test_snapshot_skips_symlinks_to_in_tree_files(self, tmp_path: Path) -> None:
+        """Strict rejection — even an in-tree symlink is skipped. Matches the
+        #497 policy for skill files: copy the file, don't link it."""
+        from aios.tools.bash_memory_reconcile import snapshot_memory_mounts
+
+        host_dir = tmp_path / STORE_A
+        host_dir.mkdir()
+        (host_dir / ".materialized").touch()
+        (host_dir / "real.md").write_text("real content")
+        (host_dir / "alias.md").symlink_to(host_dir / "real.md")
+
+        runtime.set_session_memory_mounts(SESSION_ID, [_echo()])
+        with patch("aios.tools.bash_memory_reconcile.memory_store_host_dir", return_value=host_dir):
+            result = snapshot_memory_mounts(SESSION_ID)
+
+        assert (STORE_A, "/real.md") in result
+        assert (STORE_A, "/alias.md") not in result
+
+
 # ── TestReconcile ─────────────────────────────────────────────────────────────
 
 

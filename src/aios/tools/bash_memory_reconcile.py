@@ -61,12 +61,21 @@ def _bytes_map_to_sha_map(
 def _walk_store_files(host_dir: Path) -> list[tuple[Path, str]]:
     """Return (absolute_path, store_path) for all eligible files in host_dir.
 
-    Skips directories, the .materialized marker, and any hidden temp files
+    Skips directories, the .materialized marker, any hidden temp files
     starting with ``.tmp.`` (written by the atomic_mirror helper during
-    in-flight writes).
+    in-flight writes), and any symlinks. The symlink rejection mirrors
+    PR #497's policy for ``walk_skill_dir``: bash inside the sandbox can
+    ``ln -s <worker-side-path> /mnt/memory/<store>/leak``, and the
+    subsequent host-side ``read_bytes`` would resolve the symlink
+    against the worker's filesystem — exfiltrating any worker-readable
+    file (vault key material on disk, neighbour tenants' state, /etc,
+    OAuth refresh tokens, …) into a memory store that then persists
+    the bytes to DB and renders them to the model on every wake.
     """
     results: list[tuple[Path, str]] = []
     for fpath in host_dir.rglob("*"):
+        if fpath.is_symlink():
+            continue
         if fpath.is_dir():
             continue
         name = fpath.name
