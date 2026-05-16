@@ -111,10 +111,6 @@ def require_crypto_box() -> CryptoBox:
     return _require("crypto_box", crypto_box)
 
 
-def require_worker_id() -> str:
-    return _require("worker_id", worker_id)
-
-
 def require_sandbox_registry() -> SandboxRegistry:
     return _require("sandbox_registry", sandbox_registry)
 
