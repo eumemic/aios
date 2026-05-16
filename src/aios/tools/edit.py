@@ -160,6 +160,23 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
                 "error": read_result.stderr.strip() or f"could not read {path}",
                 "path": path,
             }
+        # ``cat -- path`` stdout is capped at ``bash_max_output_bytes`` and the
+        # backend appends a literal ``[output truncated]`` marker. Treating the
+        # truncated bytes as the full file would (a) match ``old_string`` only
+        # within the prefix the model can see and (b) write the truncated bytes
+        # plus the marker text back via the heredoc — silently dropping every
+        # byte past the cap and embedding the marker into the file. Refuse the
+        # operation so the model picks a different tool (e.g. ``read`` with
+        # explicit ranges to locate and apply the edit out-of-band).
+        if read_result.truncated:
+            return {
+                "error": (
+                    f"file at {path} exceeds the {settings.bash_max_output_bytes}-byte "
+                    f"tool-output cap; edit cannot safely operate on the truncated read. "
+                    f"Use the read tool with explicit ranges to locate and apply your edit."
+                ),
+                "path": path,
+            }
         original = read_result.stdout
         precondition_sha = None
         memory_id = ""
