@@ -1553,6 +1553,39 @@ async def find_tool_result_event(
     return _row_to_event(row) if row is not None else None
 
 
+async def find_tool_confirmed_event(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_call_id: str,
+    *,
+    account_id: str,
+) -> Event | None:
+    """Return the existing ``lifecycle/tool_confirmed`` event for
+    ``tool_call_id``, or ``None``.
+
+    Used by ``services.confirm_tool_allow`` to make the intake
+    idempotent on ``(session_id, tool_call_id)``: a retried POST returns
+    the original event instead of appending a duplicate. Mirrors the
+    same-shape sibling :func:`find_tool_result_event` (used by the deny
+    twin's idempotency).
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT * FROM events
+         WHERE session_id = $1
+           AND account_id = $2
+           AND kind = 'lifecycle'
+           AND data->>'event' = 'tool_confirmed'
+           AND data->>'tool_call_id' = $3
+         LIMIT 1
+        """,
+        session_id,
+        account_id,
+        tool_call_id,
+    )
+    return _row_to_event(row) if row is not None else None
+
+
 async def lookup_tool_name_by_call_id(
     conn: asyncpg.Connection[Any],
     session_id: str,

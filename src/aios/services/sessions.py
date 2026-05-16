@@ -15,7 +15,7 @@ import asyncpg
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.errors import PayloadTooLargeError
+from aios.errors import NotFoundError, PayloadTooLargeError
 from aios.models.events import Event, EventKind
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -263,8 +263,6 @@ async def append_tool_result(
     in the connector-facing endpoint).  The caller is responsible for
     deferring the wake afterwards.
     """
-    from aios.errors import NotFoundError
-
     async with conn.transaction():
         # Lock the session row up-front so a concurrent retry serializes
         # behind us and observes the appended event on its check. The
@@ -506,16 +504,39 @@ async def confirm_tool_allow(
 ) -> Event:
     """Record an allow confirmation for an ``always_ask`` tool call.
 
-    Appends a lifecycle event. The worker's step function will see this
-    and dispatch the tool call.
+    Appends a ``lifecycle/tool_confirmed`` event. The worker's step
+    function will see this and dispatch the tool call.
+
+    Idempotent on ``(session_id, tool_call_id)``: a retried POST
+    (network blip, 502, mid-flight client disconnect, double-click)
+    returns the original event instead of appending a duplicate. Mirrors
+    the deny twin's same-event-shape dedup (#447); ``_dispatch_confirmed_tools``
+    further set-deduplicates so the tool dispatches once even pre-fix,
+    but the lifecycle event log must not accumulate duplicate rows.
     """
-    return await append_event(
-        pool,
-        session_id,
-        "lifecycle",
-        {"event": "tool_confirmed", "tool_call_id": tool_call_id, "result": "allow"},
-        account_id=account_id,
-    )
+    async with pool.acquire() as conn, conn.transaction():
+        locked = await conn.fetchval(
+            "SELECT id FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            session_id,
+            account_id,
+        )
+        if locked is None:
+            raise NotFoundError(
+                f"session {session_id} not found",
+                detail={"session_id": session_id},
+            )
+        existing = await queries.find_tool_confirmed_event(
+            conn, session_id, tool_call_id, account_id=account_id
+        )
+        if existing is not None:
+            return existing
+        return await queries.append_event(
+            conn,
+            session_id=session_id,
+            kind="lifecycle",
+            data={"event": "tool_confirmed", "tool_call_id": tool_call_id, "result": "allow"},
+            account_id=account_id,
+        )
 
 
 async def confirm_tool_deny(
