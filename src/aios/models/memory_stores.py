@@ -14,14 +14,12 @@ instructions cap 4096 chars.
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _MEMORY_PATH_PATTERN = r"^(/[^/\x00]+)+$"
-MEMORY_PATH_RE = re.compile(_MEMORY_PATH_PATTERN)
 MAX_CONTENT_BYTES = 102400
 MAX_STORES_PER_SESSION = 8
 MAX_INSTRUCTIONS_CHARS = 4096
