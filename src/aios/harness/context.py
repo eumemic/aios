@@ -62,6 +62,32 @@ _THINKING_FIELDS: frozenset[str] = frozenset({"thinking_blocks", "reasoning_cont
 _NOTIFICATION_PREVIEW_CHARS = 80
 
 
+def _extract_reaction_emoji(reaction: dict[str, Any]) -> str | None:
+    """Extract a human-readable emoji string from reaction metadata.
+
+    Two producer shapes are in the wild:
+    - Signal: ``{"emoji": "👍", ...}`` (the single active emoji)
+    - Telegram: ``{"new_emojis": ["👍", ...], "old_emojis": [...], ...}``
+      (the post-reaction state; ``new_emojis=[]`` means the user
+      cleared their reaction)
+
+    Returns ``None`` only if neither shape is recognizable. The
+    ``"cleared"`` literal is returned for an explicit empty Telegram
+    ``new_emojis`` so the model can tell a removal apart from a
+    missing field.
+    """
+    emoji = reaction.get("emoji")
+    if isinstance(emoji, str) and emoji:
+        return emoji
+    new_emojis = reaction.get("new_emojis")
+    if isinstance(new_emojis, list):
+        emojis = [e for e in new_emojis if isinstance(e, str) and e]
+        if emojis:
+            return " ".join(emojis)
+        return "cleared"
+    return None
+
+
 def _format_channel_header(metadata: dict[str, Any]) -> str:
     """Render a one-line header describing the origin of an inbound message.
 
@@ -132,7 +158,7 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
             header += "\n" + "\n".join(mention_lines)
     reaction = metadata.get("reaction")
     if isinstance(reaction, dict):
-        emoji = reaction.get("emoji") or "?"
+        emoji = _extract_reaction_emoji(reaction) or "?"
         r_parts: list[str] = [f"reaction={emoji!r}"]
         target_author = reaction.get("target_author_uuid")
         if isinstance(target_author, str) and target_author:
@@ -175,8 +201,8 @@ def _notification_preview(content: str, metadata: dict[str, Any] | None) -> str:
     if isinstance(metadata, dict):
         reaction = metadata.get("reaction")
         if isinstance(reaction, dict):
-            emoji = reaction.get("emoji")
-            if isinstance(emoji, str) and emoji:
+            emoji = _extract_reaction_emoji(reaction)
+            if emoji:
                 return f"reacted {emoji}"
     return ""
 
