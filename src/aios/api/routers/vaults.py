@@ -129,12 +129,12 @@ async def create_credential(
 ) -> VaultCredential:
     """Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.
 
-    Validates required fields per ``auth_type``: ``mcp_oauth`` requires
+    Validates required fields per ``auth_type``: ``oauth2_refresh`` requires
     ``access_token`` (plus the refresh fields needed for rotation);
-    ``static_bearer`` requires ``token``. Caps at 20 active credentials per
-    vault. The ``mcp_server_url`` is immutable after creation — to retarget
-    a credential, archive the existing one and create a new credential at
-    the new URL.
+    ``bearer_header`` requires ``token``; ``basic`` requires ``username``
+    and ``password``. Caps at 20 active credentials per vault. The
+    ``target_url`` is immutable after creation — to retarget a credential,
+    archive the existing one and create a new credential at the new URL.
     """
     account_id, _, _ = _auth
     return await service.create_vault_credential(
@@ -153,7 +153,7 @@ async def list_credentials(
     """List credentials in a vault, newest first, excluding archived.
 
     Cursor pagination via ``after``. Secret material is never returned —
-    only metadata (display name, mcp_server_url, auth_type, timestamps).
+    only metadata (display name, target_url, auth_type, timestamps).
     """
     account_id, _, _ = _auth
     items = await service.list_vault_credentials(
@@ -191,7 +191,7 @@ async def update_credential(
     """Update a credential's metadata and/or rotate its auth secrets.
 
     Omitted secret fields are preserved (decrypt-merge-encrypt cycle on the
-    encrypted payload). ``mcp_server_url`` and ``auth_type`` are immutable
+    encrypted payload). ``target_url`` and ``auth_type`` are immutable
     and not accepted in the body. To rotate an OAuth refresh token, send
     only the new ``refresh_token`` (and optional ``access_token`` /
     ``expires_at``); other auth fields stay intact.

@@ -21,7 +21,7 @@ from aios.models.agents import McpServerSpec, ToolSpec
 @pytest.fixture(autouse=True)
 def _mock_crypto_box() -> Any:
     """Bypass the runtime crypto-box requirement — discovery doesn't
-    actually decrypt anything when resolve_auth_for_url is mocked.
+    actually decrypt anything when resolve_auth_for_target_url is mocked.
     """
     with patch("aios.harness.loop.runtime.require_crypto_box") as m:
         m.return_value = object()
@@ -74,7 +74,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__t", "url": url}], None
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -89,7 +89,7 @@ class TestDiscoverSessionMcpTools:
 
     async def test_auth_resolved_per_url(self) -> None:
         """Each URL resolves auth independently — goes through
-        resolve_auth_for_url once per server, not once per batch.
+        resolve_auth_for_target_url once per server, not once per batch.
         """
         from aios.harness.loop import discover_session_mcp_tools
 
@@ -118,7 +118,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__t", "auth": headers["Authorization"]}], None
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_url", side_effect=_fake_resolve),
+            patch("aios.mcp.client.resolve_auth_for_target_url", side_effect=_fake_resolve),
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             tools, _instructions = await discover_session_mcp_tools(
@@ -160,7 +160,7 @@ class TestDiscoverSessionMcpTools:
             return [], "## linear\n\nbe brief"
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -191,7 +191,7 @@ class TestDiscoverSessionMcpTools:
             return [], ""
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})

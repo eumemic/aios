@@ -31,8 +31,8 @@ def test_get_resource_path(mocked_cli):
 def test_create_via_body_file(mocked_cli, tmp_path):
     body = tmp_path / "cred.json"
     body.write_text(
-        '{"display_name": "my-creds", "mcp_server_url": "http://x",'
-        ' "auth_type": "static_bearer", "token": "t"}'
+        '{"display_name": "my-creds", "target_url": "http://x",'
+        ' "auth_type": "bearer_header", "token": "t"}'
     )
     mocked_cli.queue_response(
         httpx.Response(201, json=resource_response("vault_credential", id="cred_new"))
@@ -58,7 +58,7 @@ def test_create_via_body_file(mocked_cli, tmp_path):
 def test_create_via_file_alias(mocked_cli, tmp_path):
     body = tmp_path / "cred.json"
     body.write_text(
-        '{"display_name": "x", "mcp_server_url": "http://y", "auth_type": "static_bearer", "token": "t"}'
+        '{"display_name": "x", "target_url": "http://y", "auth_type": "bearer_header", "token": "t"}'
     )
     mocked_cli.queue_response(
         httpx.Response(201, json=resource_response("vault_credential", id="cred_new"))

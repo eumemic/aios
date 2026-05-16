@@ -12,14 +12,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aios.crypto.vault import CryptoBox
-from aios.mcp.client import call_mcp_tool, discover_mcp_tools, resolve_auth_for_url
+from aios.mcp.client import call_mcp_tool, discover_mcp_tools, resolve_auth_for_target_url
 from tests.unit.conftest import fake_pool_yielding_conn
 
-# ── resolve_auth_for_url ──────────────────────────────────────────────────────
+# ── resolve_auth_for_target_url ──────────────────────────────────────────────────────
 
 
-class TestResolveAuthForUrl:
-    """Auth resolves through the session's bound vaults; ``mcp_oauth``
+class TestResolveAuthForTargetUrl:
+    """Auth resolves through the session's bound vaults; ``oauth2_refresh``
     credentials are transparently refreshed when expiring.
 
     The connector redesign (#200) removed the connection-owned MCP URL
@@ -38,11 +38,11 @@ class TestResolveAuthForUrl:
         blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(payload)
         pool = fake_pool_yielding_conn(MagicMock())
         with patch(
-            "aios.mcp.client.queries.resolve_mcp_credential",
+            "aios.mcp.client.queries.resolve_session_credential",
             new_callable=AsyncMock,
         ) as s:
-            s.return_value = (blob, "static_bearer", "vlt_s1")
-            vault_id, result = await resolve_auth_for_url(
+            s.return_value = (blob, "bearer_header", "vlt_s1")
+            vault_id, result = await resolve_auth_for_target_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
         assert vault_id == "vlt_s1"
@@ -52,11 +52,11 @@ class TestResolveAuthForUrl:
     async def test_no_credential_returns_empty(self, crypto_box: CryptoBox) -> None:
         pool = fake_pool_yielding_conn(MagicMock())
         with patch(
-            "aios.mcp.client.queries.resolve_mcp_credential",
+            "aios.mcp.client.queries.resolve_session_credential",
             new_callable=AsyncMock,
         ) as s:
             s.return_value = None
-            vault_id, result = await resolve_auth_for_url(
+            vault_id, result = await resolve_auth_for_target_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
         assert vault_id is None
@@ -67,11 +67,11 @@ class TestResolveAuthForUrl:
         blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(payload)
         pool = fake_pool_yielding_conn(MagicMock())
         with patch(
-            "aios.mcp.client.queries.resolve_mcp_credential",
+            "aios.mcp.client.queries.resolve_session_credential",
             new_callable=AsyncMock,
         ) as s:
-            s.return_value = (blob, "static_bearer", "vlt_s1")
-            vault_id, result = await resolve_auth_for_url(
+            s.return_value = (blob, "bearer_header", "vlt_s1")
+            vault_id, result = await resolve_auth_for_target_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
         # Empty-token path returns (None, {}) — a transient stateless
@@ -79,25 +79,43 @@ class TestResolveAuthForUrl:
         assert vault_id is None
         assert result == {}
 
-    async def test_mcp_oauth_static_token(self, crypto_box: CryptoBox) -> None:
+    async def test_oauth2_refresh_static_token(self, crypto_box: CryptoBox) -> None:
         payload = json.dumps({"access_token": "oauth-token"})
         blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(payload)
         pool = fake_pool_yielding_conn(MagicMock())
         with patch(
-            "aios.mcp.client.queries.resolve_mcp_credential",
+            "aios.mcp.client.queries.resolve_session_credential",
             new_callable=AsyncMock,
         ) as s:
-            s.return_value = (blob, "mcp_oauth", "vlt_s1")
-            vault_id, result = await resolve_auth_for_url(
+            s.return_value = (blob, "oauth2_refresh", "vlt_s1")
+            vault_id, result = await resolve_auth_for_target_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
         assert vault_id == "vlt_s1"
         assert result == {"Authorization": "Bearer oauth-token"}
 
+    async def test_basic_auth_renders_authorization_header(self, crypto_box: CryptoBox) -> None:
+        import base64
+
+        payload = json.dumps({"username": "alice", "password": "s3cret"})
+        blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(payload)
+        pool = fake_pool_yielding_conn(MagicMock())
+        with patch(
+            "aios.mcp.client.queries.resolve_session_credential",
+            new_callable=AsyncMock,
+        ) as s:
+            s.return_value = (blob, "basic", "vlt_s1")
+            vault_id, result = await resolve_auth_for_target_url(
+                pool, crypto_box, "sess_123", "https://x.example.com", account_id="acc_test_stub"
+            )
+        expected = base64.b64encode(b"alice:s3cret").decode()
+        assert vault_id == "vlt_s1"
+        assert result == {"Authorization": f"Basic {expected}"}
+
     # ── OAuth refresh ─────────────────────────────────────────────────────
 
     async def test_oauth_refresh_triggered_when_expiring(self, crypto_box: CryptoBox) -> None:
-        """Stale mcp_oauth token triggers refresh, then the re-read
+        """Stale oauth2_refresh token triggers refresh, then the re-read
         returns the fresh token.
         """
         from datetime import UTC, datetime, timedelta
@@ -116,7 +134,7 @@ class TestResolveAuthForUrl:
         refresh_mock = AsyncMock()
         with (
             patch(
-                "aios.mcp.client.queries.resolve_mcp_credential",
+                "aios.mcp.client.queries.resolve_session_credential",
                 new_callable=AsyncMock,
             ) as s,
             patch(
@@ -125,16 +143,16 @@ class TestResolveAuthForUrl:
             ) as v,
             patch("aios.mcp.client.refresh_credential", refresh_mock),
         ):
-            s.return_value = (stale_blob, "mcp_oauth", "vlt_s1")
-            v.return_value = (fresh_blob, "mcp_oauth")
-            vault_id, result = await resolve_auth_for_url(
+            s.return_value = (stale_blob, "oauth2_refresh", "vlt_s1")
+            v.return_value = (fresh_blob, "oauth2_refresh")
+            vault_id, result = await resolve_auth_for_target_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
 
         refresh_mock.assert_awaited_once()
         kwargs = refresh_mock.await_args.kwargs
         assert kwargs["vault_id"] == "vlt_s1"
-        assert kwargs["mcp_server_url"] == "https://mcp.example.com"
+        assert kwargs["target_url"] == "https://mcp.example.com"
         assert vault_id == "vlt_s1"
         assert result == {"Authorization": "Bearer fresh"}
 
@@ -153,13 +171,13 @@ class TestResolveAuthForUrl:
 
         with (
             patch(
-                "aios.mcp.client.queries.resolve_mcp_credential",
+                "aios.mcp.client.queries.resolve_session_credential",
                 new_callable=AsyncMock,
             ) as s,
             patch("aios.mcp.client.refresh_credential", refresh_mock),
         ):
-            s.return_value = (blob, "mcp_oauth", "vlt_s1")
-            vault_id, result = await resolve_auth_for_url(
+            s.return_value = (blob, "oauth2_refresh", "vlt_s1")
+            vault_id, result = await resolve_auth_for_target_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
 
@@ -183,7 +201,7 @@ class TestResolveAuthForUrl:
 
         with (
             patch(
-                "aios.mcp.client.queries.resolve_mcp_credential",
+                "aios.mcp.client.queries.resolve_session_credential",
                 new_callable=AsyncMock,
             ) as s,
             patch(
@@ -192,8 +210,8 @@ class TestResolveAuthForUrl:
             ),
             pytest.raises(OAuthRefreshError),
         ):
-            s.return_value = (blob, "mcp_oauth", "vlt_s1")
-            await resolve_auth_for_url(
+            s.return_value = (blob, "oauth2_refresh", "vlt_s1")
+            await resolve_auth_for_target_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
 

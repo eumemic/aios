@@ -25,7 +25,7 @@ T = TypeVar("T", bound="VaultCredentialUpdate")
 class VaultCredentialUpdate:
     """Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.
 
-    ``mcp_server_url`` and ``auth_type`` are immutable — not accepted here.
+    ``target_url`` and ``auth_type`` are immutable — not accepted here.
     Omitted secret fields are preserved (decrypt-merge-encrypt).
 
         Attributes:
@@ -40,6 +40,8 @@ class VaultCredentialUpdate:
             scope (None | str | Unset):
             resource (None | str | Unset):
             token (None | str | Unset):
+            username (None | str | Unset):
+            password (None | str | Unset):
     """
 
     display_name: None | str | Unset = UNSET
@@ -59,6 +61,8 @@ class VaultCredentialUpdate:
     scope: None | str | Unset = UNSET
     resource: None | str | Unset = UNSET
     token: None | str | Unset = UNSET
+    username: None | str | Unset = UNSET
+    password: None | str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.token_endpoint_auth_basic import TokenEndpointAuthBasic
@@ -144,6 +148,18 @@ class VaultCredentialUpdate:
         else:
             token = self.token
 
+        username: None | str | Unset
+        if isinstance(self.username, Unset):
+            username = UNSET
+        else:
+            username = self.username
+
+        password: None | str | Unset
+        if isinstance(self.password, Unset):
+            password = UNSET
+        else:
+            password = self.password
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
@@ -169,6 +185,10 @@ class VaultCredentialUpdate:
             field_dict["resource"] = resource
         if token is not UNSET:
             field_dict["token"] = token
+        if username is not UNSET:
+            field_dict["username"] = username
+        if password is not UNSET:
+            field_dict["password"] = password
 
         return field_dict
 
@@ -347,6 +367,24 @@ class VaultCredentialUpdate:
 
         token = _parse_token(d.pop("token", UNSET))
 
+        def _parse_username(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        username = _parse_username(d.pop("username", UNSET))
+
+        def _parse_password(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        password = _parse_password(d.pop("password", UNSET))
+
         vault_credential_update = cls(
             display_name=display_name,
             metadata=metadata,
@@ -359,6 +397,8 @@ class VaultCredentialUpdate:
             scope=scope,
             resource=resource,
             token=token,
+            username=username,
+            password=password,
         )
 
         return vault_credential_update

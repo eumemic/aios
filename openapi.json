@@ -3796,7 +3796,7 @@
           "vaults"
         ],
         "summary": "Create Credential",
-        "description": "Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.\n\nValidates required fields per ``auth_type``: ``mcp_oauth`` requires\n``access_token`` (plus the refresh fields needed for rotation);\n``static_bearer`` requires ``token``. Caps at 20 active credentials per\nvault. The ``mcp_server_url`` is immutable after creation \u2014 to retarget\na credential, archive the existing one and create a new credential at\nthe new URL.",
+        "description": "Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.\n\nValidates required fields per ``auth_type``: ``oauth2_refresh`` requires\n``access_token`` (plus the refresh fields needed for rotation);\n``bearer_header`` requires ``token``; ``basic`` requires ``username``\nand ``password``. Caps at 20 active credentials per vault. The\n``target_url`` is immutable after creation \u2014 to retarget a credential,\narchive the existing one and create a new credential at the new URL.",
         "operationId": "create_vault_credential",
         "parameters": [
           {
@@ -3863,7 +3863,7 @@
           "vaults"
         ],
         "summary": "List Credentials",
-        "description": "List credentials in a vault, newest first, excluding archived.\n\nCursor pagination via ``after``. Secret material is never returned \u2014\nonly metadata (display name, mcp_server_url, auth_type, timestamps).",
+        "description": "List credentials in a vault, newest first, excluding archived.\n\nCursor pagination via ``after``. Secret material is never returned \u2014\nonly metadata (display name, target_url, auth_type, timestamps).",
         "operationId": "list_vault_credentials",
         "parameters": [
           {
@@ -4016,7 +4016,7 @@
           "vaults"
         ],
         "summary": "Update Credential",
-        "description": "Update a credential's metadata and/or rotate its auth secrets.\n\nOmitted secret fields are preserved (decrypt-merge-encrypt cycle on the\nencrypted payload). ``mcp_server_url`` and ``auth_type`` are immutable\nand not accepted in the body. To rotate an OAuth refresh token, send\nonly the new ``refresh_token`` (and optional ``access_token`` /\n``expires_at``); other auth fields stay intact.",
+        "description": "Update a credential's metadata and/or rotate its auth secrets.\n\nOmitted secret fields are preserved (decrypt-merge-encrypt cycle on the\nencrypted payload). ``target_url`` and ``auth_type`` are immutable\nand not accepted in the body. To rotate an OAuth refresh token, send\nonly the new ``refresh_token`` (and optional ``access_token`` /\n``expires_at``); other auth fields stay intact.",
         "operationId": "update_vault_credential",
         "parameters": [
           {
@@ -11769,15 +11769,16 @@
             ],
             "title": "Display Name"
           },
-          "mcp_server_url": {
+          "target_url": {
             "type": "string",
-            "title": "Mcp Server Url"
+            "title": "Target Url"
           },
           "auth_type": {
             "type": "string",
             "enum": [
-              "mcp_oauth",
-              "static_bearer"
+              "bearer_header",
+              "oauth2_refresh",
+              "basic"
             ],
             "title": "Auth Type"
           },
@@ -11814,7 +11815,7 @@
           "id",
           "vault_id",
           "display_name",
-          "mcp_server_url",
+          "target_url",
           "auth_type",
           "metadata",
           "created_at",
@@ -11837,16 +11838,17 @@
             ],
             "title": "Display Name"
           },
-          "mcp_server_url": {
+          "target_url": {
             "type": "string",
             "minLength": 1,
-            "title": "Mcp Server Url"
+            "title": "Target Url"
           },
           "auth_type": {
             "type": "string",
             "enum": [
-              "mcp_oauth",
-              "static_bearer"
+              "bearer_header",
+              "oauth2_refresh",
+              "basic"
             ],
             "title": "Auth Type"
           },
@@ -11978,16 +11980,42 @@
               }
             ],
             "title": "Token"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "mcp_server_url",
+          "target_url",
           "auth_type"
         ],
         "title": "VaultCredentialCreate",
-        "description": "Request body for ``POST /v1/vaults/{vault_id}/credentials``.\n\nAll secret fields are write-only. The ``mcp_server_url`` is immutable\nafter creation. The service layer validates required fields per\n``auth_type``."
+        "description": "Request body for ``POST /v1/vaults/{vault_id}/credentials``.\n\nAll secret fields are write-only. The ``target_url`` is immutable\nafter creation. The service layer validates required fields per\n``auth_type``."
       },
       "VaultCredentialUpdate": {
         "properties": {
@@ -12138,12 +12166,38 @@
               }
             ],
             "title": "Token"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "VaultCredentialUpdate",
-        "description": "Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.\n\n``mcp_server_url`` and ``auth_type`` are immutable \u2014 not accepted here.\nOmitted secret fields are preserved (decrypt-merge-encrypt)."
+        "description": "Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.\n\n``target_url`` and ``auth_type`` are immutable \u2014 not accepted here.\nOmitted secret fields are preserved (decrypt-merge-encrypt)."
       },
       "VaultUpdate": {
         "properties": {

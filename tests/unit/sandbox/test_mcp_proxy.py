@@ -89,7 +89,7 @@ def base_url(broker: McpBroker) -> str:
 @pytest.fixture(autouse=True)
 def _mock_crypto_and_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """The broker reaches into the runtime crypto box only to call
-    ``resolve_auth_for_url``. Both can be stubbed wholesale — tests
+    ``resolve_auth_for_target_url``. Both can be stubbed wholesale — tests
     don't care about the actual headers."""
     monkeypatch.setattr("aios.harness.runtime.require_crypto_box", lambda: object())
     monkeypatch.setattr("aios.harness.runtime.require_pool", lambda: object())
@@ -97,7 +97,7 @@ def _mock_crypto_and_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _stub_auth(*_args: Any, **_kwargs: Any) -> tuple[str | None, dict[str, str]]:
         return None, {}
 
-    monkeypatch.setattr("aios.sandbox.mcp_proxy.resolve_auth_for_url", _stub_auth)
+    monkeypatch.setattr("aios.sandbox.mcp_proxy.resolve_auth_for_target_url", _stub_auth)
 
 
 class TestSessionResolution:

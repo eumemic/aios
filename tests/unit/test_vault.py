@@ -13,7 +13,7 @@ import pytest
 from pydantic import SecretStr
 
 from aios.crypto.vault import KEY_BYTES, NONCE_BYTES, CryptoBox, EncryptedBlob
-from aios.errors import CryptoDecryptError, OAuthRefreshError
+from aios.errors import CryptoDecryptError, OAuthRefreshError, ValidationError
 from aios.models.vaults import (
     TokenEndpointAuthBasic,
     TokenEndpointAuthNone,
@@ -121,8 +121,8 @@ class TestTamperingAndKeyMismatch:
 
 def _oauth_create(**overrides: Any) -> VaultCredentialCreate:
     base = {
-        "mcp_server_url": "https://mcp.example.com",
-        "auth_type": "mcp_oauth",
+        "target_url": "https://mcp.example.com",
+        "auth_type": "oauth2_refresh",
         "access_token": SecretStr("at"),
         "client_id": "cid",
         "token_endpoint": "https://issuer.example/token",
@@ -132,14 +132,42 @@ def _oauth_create(**overrides: Any) -> VaultCredentialCreate:
 
 
 class TestExtractAuthPayload:
-    def test_static_bearer_only_token(self) -> None:
+    def test_bearer_header_only_token(self) -> None:
         body = VaultCredentialCreate(
-            mcp_server_url="https://x.com",
-            auth_type="static_bearer",
+            target_url="https://x.com",
+            auth_type="bearer_header",
             token=SecretStr("hello"),
         )
         payload = _extract_auth_payload(body)
         assert payload == {"token": "hello"}
+
+    def test_basic_username_and_password(self) -> None:
+        body = VaultCredentialCreate(
+            target_url="https://x.com",
+            auth_type="basic",
+            username=SecretStr("alice"),
+            password=SecretStr("s3cret"),
+        )
+        payload = _extract_auth_payload(body)
+        assert payload == {"username": "alice", "password": "s3cret"}
+
+    def test_basic_requires_username(self) -> None:
+        body = VaultCredentialCreate(
+            target_url="https://x.com",
+            auth_type="basic",
+            password=SecretStr("s3cret"),
+        )
+        with pytest.raises(ValidationError):
+            _extract_auth_payload(body)
+
+    def test_basic_requires_password(self) -> None:
+        body = VaultCredentialCreate(
+            target_url="https://x.com",
+            auth_type="basic",
+            username=SecretStr("alice"),
+        )
+        with pytest.raises(ValidationError):
+            _extract_auth_payload(body)
 
     def test_oauth_serializes_token_endpoint_auth_basic(self) -> None:
         body = _oauth_create(
@@ -211,7 +239,7 @@ class TestMergeAuthPayload:
                 client_secret=SecretStr("rotated"),
             ),
         )
-        merged = _merge_auth_payload(existing, update, "mcp_oauth")
+        merged = _merge_auth_payload(existing, update, "oauth2_refresh")
         assert merged["token_endpoint_auth"] == {
             "method": "client_secret_post",
             "client_secret": "rotated",
@@ -224,13 +252,13 @@ class TestMergeAuthPayload:
             "token_endpoint_auth": {"method": "none"},
         }
         update = VaultCredentialUpdate()  # nothing set
-        merged = _merge_auth_payload(existing, update, "mcp_oauth")
+        merged = _merge_auth_payload(existing, update, "oauth2_refresh")
         assert merged == existing
 
     def test_unsets_field_when_set_to_none(self) -> None:
         existing = {"access_token": "at", "client_id": "cid"}
         update = VaultCredentialUpdate(client_id=None)
-        merged = _merge_auth_payload(existing, update, "mcp_oauth")
+        merged = _merge_auth_payload(existing, update, "oauth2_refresh")
         assert "client_id" not in merged
         assert merged["access_token"] == "at"
 
@@ -244,8 +272,8 @@ def _existing_credential() -> VaultCredential:
         id="vc_1",
         vault_id="vlt_1",
         display_name="orig",
-        mcp_server_url="https://mcp.example.com",
-        auth_type="mcp_oauth",
+        target_url="https://mcp.example.com",
+        auth_type="oauth2_refresh",
         metadata={},
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
@@ -447,7 +475,7 @@ class TestRefreshCredential:
                 crypto_box,
                 conn,
                 vault_id="vlt_1",
-                mcp_server_url="https://mcp.example.com",
+                target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
@@ -478,7 +506,7 @@ class TestRefreshCredential:
                 crypto_box,
                 conn,
                 vault_id="vlt_1",
-                mcp_server_url="https://mcp.example.com",
+                target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
@@ -511,7 +539,7 @@ class TestRefreshCredential:
                 crypto_box,
                 conn,
                 vault_id="vlt_1",
-                mcp_server_url="https://mcp.example.com",
+                target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
@@ -542,7 +570,7 @@ class TestRefreshCredential:
                 crypto_box,
                 conn,
                 vault_id="vlt_1",
-                mcp_server_url="https://mcp.example.com",
+                target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
@@ -579,7 +607,7 @@ class TestRefreshCredential:
                 crypto_box,
                 conn,
                 vault_id="vlt_1",
-                mcp_server_url="https://mcp.example.com",
+                target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
@@ -612,7 +640,7 @@ class TestRefreshCredential:
                 crypto_box,
                 conn,
                 vault_id="vlt_1",
-                mcp_server_url="https://mcp.example.com",
+                target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
@@ -648,7 +676,7 @@ class TestRefreshCredential:
                 crypto_box,
                 conn,
                 vault_id="vlt_1",
-                mcp_server_url="https://mcp.example.com",
+                target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
@@ -682,7 +710,7 @@ class TestRefreshCredential:
                 crypto_box,
                 conn,
                 vault_id="vlt_1",
-                mcp_server_url="https://mcp.example.com",
+                target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
@@ -716,7 +744,7 @@ class TestRefreshCredential:
                 crypto_box,
                 conn,
                 vault_id="vlt_1",
-                mcp_server_url="https://mcp.example.com",
+                target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
@@ -745,7 +773,7 @@ class TestRefreshCredential:
                 crypto_box,
                 conn,
                 vault_id="vlt_1",
-                mcp_server_url="https://mcp.example.com",
+                target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
@@ -765,7 +793,7 @@ class TestRefreshCredential:
                 crypto_box,
                 conn,
                 vault_id="vlt_1",
-                mcp_server_url="https://mcp.example.com",
+                target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
@@ -793,7 +821,7 @@ class TestRefreshCredential:
                 crypto_box,
                 conn,
                 vault_id="vlt_1",
-                mcp_server_url="https://mcp.example.com",
+                target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 

@@ -41,7 +41,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from aios.logging import get_logger
-from aios.mcp.client import call_mcp_tool, discover_mcp_tools, resolve_auth_for_url
+from aios.mcp.client import call_mcp_tool, discover_mcp_tools, resolve_auth_for_target_url
 from aios.models.agents import McpServerSpec, ToolSpec
 
 log = get_logger("aios.sandbox.mcp_proxy")
@@ -278,7 +278,7 @@ class McpBroker:
         pool = runtime.require_pool()
         crypto_box = runtime.require_crypto_box()
         account_id = await sessions_service.load_session_account_id(pool, session_id)
-        vault_id, headers = await resolve_auth_for_url(
+        vault_id, headers = await resolve_auth_for_target_url(
             pool, crypto_box, session_id, server.url, account_id=account_id
         )
         tool_dicts, _instructions = await discover_mcp_tools(
@@ -311,7 +311,7 @@ class McpBroker:
         pool = runtime.require_pool()
         crypto_box = runtime.require_crypto_box()
         account_id = await sessions_service.load_session_account_id(pool, session_id)
-        vault_id, headers = await resolve_auth_for_url(
+        vault_id, headers = await resolve_auth_for_target_url(
             pool, crypto_box, session_id, server.url, account_id=account_id
         )
         tool_dicts, _ = await discover_mcp_tools(server.url, vault_id, headers, server.name)
@@ -348,7 +348,7 @@ class McpBroker:
         pool = runtime.require_pool()
         crypto_box = runtime.require_crypto_box()
         account_id = await sessions_service.load_session_account_id(pool, session_id)
-        vault_id, headers = await resolve_auth_for_url(
+        vault_id, headers = await resolve_auth_for_target_url(
             pool, crypto_box, session_id, server.url, account_id=account_id
         )
         log.info(

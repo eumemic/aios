@@ -106,30 +106,30 @@ class TestTokenEndpointAuth:
 
 
 class TestVaultCredentialCreate:
-    def test_static_bearer_valid(self) -> None:
+    def test_bearer_header_valid(self) -> None:
         c = VaultCredentialCreate(
-            mcp_server_url="https://mcp.example.com",
-            auth_type="static_bearer",
+            target_url="https://mcp.example.com",
+            auth_type="bearer_header",
             token=SecretStr("my-token"),
         )
-        assert c.auth_type == "static_bearer"
+        assert c.auth_type == "bearer_header"
         assert c.token is not None
         assert c.token.get_secret_value() == "my-token"
 
-    def test_mcp_oauth_valid(self) -> None:
+    def test_oauth2_refresh_valid(self) -> None:
         c = VaultCredentialCreate(
-            mcp_server_url="https://mcp.example.com",
-            auth_type="mcp_oauth",
+            target_url="https://mcp.example.com",
+            auth_type="oauth2_refresh",
             access_token=SecretStr("access-tok"),
             client_id="client-123",
         )
-        assert c.auth_type == "mcp_oauth"
+        assert c.auth_type == "oauth2_refresh"
         assert c.access_token is not None
 
-    def test_mcp_oauth_with_typed_token_endpoint_auth_basic(self) -> None:
+    def test_oauth2_refresh_with_typed_token_endpoint_auth_basic(self) -> None:
         c = VaultCredentialCreate(
-            mcp_server_url="https://mcp.example.com",
-            auth_type="mcp_oauth",
+            target_url="https://mcp.example.com",
+            auth_type="oauth2_refresh",
             access_token=SecretStr("access-tok"),
             client_id="client-123",
             token_endpoint="https://issuer.example/token",
@@ -141,10 +141,10 @@ class TestVaultCredentialCreate:
         assert isinstance(c.token_endpoint_auth, TokenEndpointAuthBasic)
         assert c.token_endpoint_auth.client_secret.get_secret_value() == "shh"
 
-    def test_mcp_oauth_with_typed_token_endpoint_auth_post(self) -> None:
+    def test_oauth2_refresh_with_typed_token_endpoint_auth_post(self) -> None:
         c = VaultCredentialCreate(
-            mcp_server_url="https://mcp.example.com",
-            auth_type="mcp_oauth",
+            target_url="https://mcp.example.com",
+            auth_type="oauth2_refresh",
             access_token=SecretStr("access-tok"),
             client_id="client-123",
             token_endpoint="https://issuer.example/token",
@@ -155,10 +155,10 @@ class TestVaultCredentialCreate:
         )
         assert isinstance(c.token_endpoint_auth, TokenEndpointAuthPost)
 
-    def test_mcp_oauth_with_typed_token_endpoint_auth_none(self) -> None:
+    def test_oauth2_refresh_with_typed_token_endpoint_auth_none(self) -> None:
         c = VaultCredentialCreate(
-            mcp_server_url="https://mcp.example.com",
-            auth_type="mcp_oauth",
+            target_url="https://mcp.example.com",
+            auth_type="oauth2_refresh",
             access_token=SecretStr("access-tok"),
             client_id="client-123",
             token_endpoint="https://issuer.example/token",
@@ -169,8 +169,8 @@ class TestVaultCredentialCreate:
     def test_token_endpoint_auth_accepts_dict_form(self) -> None:
         c = VaultCredentialCreate.model_validate(
             {
-                "mcp_server_url": "https://mcp.example.com",
-                "auth_type": "mcp_oauth",
+                "target_url": "https://mcp.example.com",
+                "auth_type": "oauth2_refresh",
                 "access_token": "tok",
                 "client_id": "cid",
                 "token_endpoint": "https://issuer.example/token",
@@ -185,8 +185,8 @@ class TestVaultCredentialCreate:
     def test_rejects_flat_client_secret(self) -> None:
         with pytest.raises(ValidationError):
             VaultCredentialCreate(
-                mcp_server_url="https://mcp.example.com",
-                auth_type="mcp_oauth",
+                target_url="https://mcp.example.com",
+                auth_type="oauth2_refresh",
                 access_token=SecretStr("access-tok"),
                 client_id="client-123",
                 client_secret=SecretStr("flat"),  # type: ignore[call-arg]
@@ -195,7 +195,7 @@ class TestVaultCredentialCreate:
     def test_rejects_bad_auth_type(self) -> None:
         with pytest.raises(ValidationError):
             VaultCredentialCreate(
-                mcp_server_url="https://x.com",
+                target_url="https://x.com",
                 auth_type="unknown",  # type: ignore[arg-type]
                 token=SecretStr("t"),
             )
@@ -203,16 +203,16 @@ class TestVaultCredentialCreate:
     def test_rejects_empty_url(self) -> None:
         with pytest.raises(ValidationError):
             VaultCredentialCreate(
-                mcp_server_url="",
-                auth_type="static_bearer",
+                target_url="",
+                auth_type="bearer_header",
                 token=SecretStr("t"),
             )
 
     def test_rejects_extra_fields(self) -> None:
         with pytest.raises(ValidationError):
             VaultCredentialCreate(
-                mcp_server_url="https://x.com",
-                auth_type="static_bearer",
+                target_url="https://x.com",
+                auth_type="bearer_header",
                 token=SecretStr("t"),
                 bogus="x",  # type: ignore[call-arg]
             )

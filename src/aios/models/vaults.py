@@ -1,9 +1,10 @@
 """Vault and vault credential resources.
 
-Vaults are named collections of credentials for MCP server authentication.
-Each credential is keyed by ``mcp_server_url`` and encrypted at rest via the
-CryptoBox. Secrets (tokens, client secrets) are write-only — never returned
-in API responses.
+Vaults are named collections of credentials for authenticated outbound
+services (MCP servers, HTTP APIs). Each credential is keyed by
+``target_url`` and encrypted at rest via the CryptoBox. Secrets
+(tokens, client secrets, passwords) are write-only — never returned in
+API responses.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-AuthType = Literal["mcp_oauth", "static_bearer"]
+AuthType = Literal["bearer_header", "oauth2_refresh", "basic"]
 
 
 # ── Token endpoint auth (for OAuth refresh) ─────────────────────────────────
@@ -89,7 +90,7 @@ class Vault(BaseModel):
 class VaultCredentialCreate(BaseModel):
     """Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-    All secret fields are write-only. The ``mcp_server_url`` is immutable
+    All secret fields are write-only. The ``target_url`` is immutable
     after creation. The service layer validates required fields per
     ``auth_type``.
     """
@@ -97,11 +98,11 @@ class VaultCredentialCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     display_name: str | None = Field(default=None, max_length=128)
-    mcp_server_url: str = Field(min_length=1)
+    target_url: str = Field(min_length=1)
     auth_type: AuthType
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    # mcp_oauth fields
+    # oauth2_refresh fields
     access_token: SecretStr | None = None
     expires_at: datetime | None = None
     client_id: str | None = None
@@ -111,14 +112,18 @@ class VaultCredentialCreate(BaseModel):
     scope: str | None = None
     resource: str | None = None
 
-    # static_bearer fields
+    # bearer_header fields
     token: SecretStr | None = None
+
+    # basic fields
+    username: SecretStr | None = None
+    password: SecretStr | None = None
 
 
 class VaultCredentialUpdate(BaseModel):
     """Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.
 
-    ``mcp_server_url`` and ``auth_type`` are immutable — not accepted here.
+    ``target_url`` and ``auth_type`` are immutable — not accepted here.
     Omitted secret fields are preserved (decrypt-merge-encrypt).
     """
 
@@ -127,7 +132,7 @@ class VaultCredentialUpdate(BaseModel):
     display_name: str | None = Field(default=None, max_length=128)
     metadata: dict[str, Any] | None = None
 
-    # mcp_oauth fields (all optional — omitted = preserve)
+    # oauth2_refresh fields (all optional — omitted = preserve)
     access_token: SecretStr | None = None
     expires_at: datetime | None = None
     client_id: str | None = None
@@ -137,8 +142,12 @@ class VaultCredentialUpdate(BaseModel):
     scope: str | None = None
     resource: str | None = None
 
-    # static_bearer
+    # bearer_header
     token: SecretStr | None = None
+
+    # basic
+    username: SecretStr | None = None
+    password: SecretStr | None = None
 
 
 class VaultCredential(BaseModel):
@@ -147,7 +156,7 @@ class VaultCredential(BaseModel):
     id: str
     vault_id: str
     display_name: str | None
-    mcp_server_url: str
+    target_url: str
     auth_type: AuthType
     metadata: dict[str, Any]
     created_at: datetime

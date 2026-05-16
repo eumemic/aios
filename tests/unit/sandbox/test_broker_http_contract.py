@@ -71,7 +71,7 @@ def _mock_crypto_and_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _stub_auth(*_args: Any, **_kwargs: Any) -> tuple[str | None, dict[str, str]]:
         return None, {}
 
-    monkeypatch.setattr("aios.sandbox.mcp_proxy.resolve_auth_for_url", _stub_auth)
+    monkeypatch.setattr("aios.sandbox.mcp_proxy.resolve_auth_for_target_url", _stub_auth)
 
 
 def _agent_with_one_tool() -> SimpleNamespace:

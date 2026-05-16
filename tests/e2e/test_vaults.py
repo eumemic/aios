@@ -104,7 +104,7 @@ class TestVaultCRUD:
 
 
 class TestVaultCredentialCRUD:
-    async def test_create_static_bearer(self, pool: Any, crypto_box: Any) -> None:
+    async def test_create_bearer_header(self, pool: Any, crypto_box: Any) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import vaults as svc
 
@@ -112,8 +112,8 @@ class TestVaultCredentialCRUD:
             pool, display_name="cred-test", metadata={}, account_id=account_id
         )
         body = VaultCredentialCreate(
-            mcp_server_url="https://mcp.example.com/api",
-            auth_type="static_bearer",
+            target_url="https://mcp.example.com/api",
+            auth_type="bearer_header",
             token=SecretStr("my-secret-token"),
         )
         cred = await svc.create_vault_credential(
@@ -121,8 +121,8 @@ class TestVaultCredentialCRUD:
         )
         assert cred.id.startswith("vcr_")
         assert cred.vault_id == vault.id
-        assert cred.mcp_server_url == "https://mcp.example.com/api"
-        assert cred.auth_type == "static_bearer"
+        assert cred.target_url == "https://mcp.example.com/api"
+        assert cred.auth_type == "bearer_header"
 
     async def test_secrets_not_returned(self, pool: Any, crypto_box: Any) -> None:
         """Verify that the read view never includes secret fields."""
@@ -133,8 +133,8 @@ class TestVaultCredentialCRUD:
             pool, display_name="secrets-test", metadata={}, account_id=account_id
         )
         body = VaultCredentialCreate(
-            mcp_server_url="https://mcp2.example.com",
-            auth_type="static_bearer",
+            target_url="https://mcp2.example.com",
+            auth_type="bearer_header",
             token=SecretStr("super-secret"),
         )
         cred = await svc.create_vault_credential(
@@ -147,7 +147,7 @@ class TestVaultCredentialCRUD:
         assert "access_token" not in dumped
         assert "ciphertext" not in dumped
 
-    async def test_create_mcp_oauth(self, pool: Any, crypto_box: Any) -> None:
+    async def test_create_oauth2_refresh(self, pool: Any, crypto_box: Any) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import vaults as svc
 
@@ -155,8 +155,8 @@ class TestVaultCredentialCRUD:
             pool, display_name="oauth-test", metadata={}, account_id=account_id
         )
         body = VaultCredentialCreate(
-            mcp_server_url="https://oauth.example.com",
-            auth_type="mcp_oauth",
+            target_url="https://oauth.example.com",
+            auth_type="oauth2_refresh",
             access_token=SecretStr("access-123"),
             client_id="client-abc",
             refresh_token=SecretStr("refresh-456"),
@@ -165,9 +165,9 @@ class TestVaultCredentialCRUD:
         cred = await svc.create_vault_credential(
             pool, crypto_box, vault_id=vault.id, body=body, account_id=account_id
         )
-        assert cred.auth_type == "mcp_oauth"
+        assert cred.auth_type == "oauth2_refresh"
 
-    async def test_static_bearer_requires_token(self, pool: Any, crypto_box: Any) -> None:
+    async def test_bearer_header_requires_token(self, pool: Any, crypto_box: Any) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.errors import ValidationError
         from aios.services import vaults as svc
@@ -176,8 +176,8 @@ class TestVaultCredentialCRUD:
             pool, display_name="req-test", metadata={}, account_id=account_id
         )
         body = VaultCredentialCreate(
-            mcp_server_url="https://no-token.example.com",
-            auth_type="static_bearer",
+            target_url="https://no-token.example.com",
+            auth_type="bearer_header",
         )
         with pytest.raises(ValidationError, match="require"):
             await svc.create_vault_credential(
@@ -193,8 +193,8 @@ class TestVaultCredentialCRUD:
             pool, display_name="oauth-req", metadata={}, account_id=account_id
         )
         body = VaultCredentialCreate(
-            mcp_server_url="https://no-at.example.com",
-            auth_type="mcp_oauth",
+            target_url="https://no-at.example.com",
+            auth_type="oauth2_refresh",
         )
         with pytest.raises(ValidationError, match="require"):
             await svc.create_vault_credential(
@@ -212,7 +212,7 @@ class TestVaultCredentialCRUD:
         )
         url = "https://unique-url-test.example.com"
         body = VaultCredentialCreate(
-            mcp_server_url=url, auth_type="static_bearer", token=SecretStr("t1")
+            target_url=url, auth_type="bearer_header", token=SecretStr("t1")
         )
         await svc.create_vault_credential(
             pool, crypto_box, vault_id=vault.id, body=body, account_id=account_id
@@ -223,7 +223,7 @@ class TestVaultCredentialCRUD:
             )
 
     async def test_archive_frees_url(self, pool: Any, crypto_box: Any) -> None:
-        """Archiving a credential frees its mcp_server_url for reuse."""
+        """Archiving a credential frees its target_url for reuse."""
         account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import vaults as svc
 
@@ -232,7 +232,7 @@ class TestVaultCredentialCRUD:
         )
         url = "https://archive-free-test.example.com"
         body = VaultCredentialCreate(
-            mcp_server_url=url, auth_type="static_bearer", token=SecretStr("t1")
+            target_url=url, auth_type="bearer_header", token=SecretStr("t1")
         )
         cred1 = await svc.create_vault_credential(
             pool, crypto_box, vault_id=vault.id, body=body, account_id=account_id
@@ -253,8 +253,8 @@ class TestVaultCredentialCRUD:
             pool, display_name="update-test", metadata={}, account_id=account_id
         )
         body = VaultCredentialCreate(
-            mcp_server_url="https://update-test.example.com",
-            auth_type="static_bearer",
+            target_url="https://update-test.example.com",
+            auth_type="bearer_header",
             token=SecretStr("old-token"),
             display_name="original",
         )
@@ -288,8 +288,8 @@ class TestVaultCredentialCRUD:
         )
         for i in range(20):
             body = VaultCredentialCreate(
-                mcp_server_url=f"https://limit-{i}.example.com",
-                auth_type="static_bearer",
+                target_url=f"https://limit-{i}.example.com",
+                auth_type="bearer_header",
                 token=SecretStr(f"t-{i}"),
             )
             await svc.create_vault_credential(
@@ -297,8 +297,8 @@ class TestVaultCredentialCRUD:
             )
 
         body21 = VaultCredentialCreate(
-            mcp_server_url="https://limit-overflow.example.com",
-            auth_type="static_bearer",
+            target_url="https://limit-overflow.example.com",
+            auth_type="bearer_header",
             token=SecretStr("overflow"),
         )
         with pytest.raises(ValidationError, match="maximum"):
@@ -325,8 +325,8 @@ class TestVaultCredentialCRUD:
         async def attempt(i: int) -> Any:
             account_id = "acc_test_stub"  # PR 3 scaffolding
             body = VaultCredentialCreate(
-                mcp_server_url=f"https://race-{i}.example.com",
-                auth_type="static_bearer",
+                target_url=f"https://race-{i}.example.com",
+                auth_type="bearer_header",
                 token=SecretStr(f"t-{i}"),
             )
             try:
@@ -374,8 +374,8 @@ class TestVaultCredentialCRUD:
                 crypto_box,
                 vault_id=vaults[v_idx].id,
                 body=VaultCredentialCreate(
-                    mcp_server_url=f"https://par-{v_idx}.example.com",
-                    auth_type="static_bearer",
+                    target_url=f"https://par-{v_idx}.example.com",
+                    auth_type="bearer_header",
                     token=SecretStr(f"t-{v_idx}"),
                 ),
                 account_id=account_id,
@@ -398,8 +398,8 @@ class TestArchiveAndCascade:
             pool, display_name="zero-cred", metadata={}, account_id=account_id
         )
         body = VaultCredentialCreate(
-            mcp_server_url="https://zero-cred.example.com",
-            auth_type="static_bearer",
+            target_url="https://zero-cred.example.com",
+            auth_type="bearer_header",
             token=SecretStr("doomed"),
         )
         cred = await svc.create_vault_credential(
@@ -430,8 +430,8 @@ class TestArchiveAndCascade:
                 crypto_box,
                 vault_id=vault.id,
                 body=VaultCredentialCreate(
-                    mcp_server_url=f"https://zero-vault-{i}.example.com",
-                    auth_type="static_bearer",
+                    target_url=f"https://zero-vault-{i}.example.com",
+                    auth_type="bearer_header",
                     token=SecretStr(f"t-{i}"),
                 ),
                 account_id=account_id,
@@ -463,8 +463,8 @@ class TestArchiveAndCascade:
             crypto_box,
             vault_id=vault.id,
             body=VaultCredentialCreate(
-                mcp_server_url="https://cascade.example.com",
-                auth_type="static_bearer",
+                target_url="https://cascade.example.com",
+                auth_type="bearer_header",
                 token=SecretStr("doomed"),
             ),
             account_id=account_id,
@@ -489,8 +489,8 @@ class TestQueries:
             pool, display_name="combo-test", metadata={}, account_id=account_id
         )
         body = VaultCredentialCreate(
-            mcp_server_url="https://combo.example.com",
-            auth_type="static_bearer",
+            target_url="https://combo.example.com",
+            auth_type="bearer_header",
             token=SecretStr("combo-token"),
         )
         cred = await svc.create_vault_credential(
@@ -503,7 +503,7 @@ class TestQueries:
             )
 
         assert fetched_cred.id == cred.id
-        assert fetched_cred.auth_type == "static_bearer"
+        assert fetched_cred.auth_type == "bearer_header"
         assert blob.ciphertext  # non-empty
         assert blob.nonce  # non-empty
         # Verify the blob actually decrypts to the original payload.
@@ -524,8 +524,8 @@ class TestQueries:
             pool, display_name="combo-arch", metadata={}, account_id=account_id
         )
         body = VaultCredentialCreate(
-            mcp_server_url="https://combo-arch.example.com",
-            auth_type="static_bearer",
+            target_url="https://combo-arch.example.com",
+            auth_type="bearer_header",
             token=SecretStr("doomed"),
         )
         cred = await svc.create_vault_credential(
@@ -588,8 +588,8 @@ class TestOAuthRefreshE2E:
         from datetime import UTC, datetime, timedelta
 
         return VaultCredentialCreate(
-            mcp_server_url=url,
-            auth_type="mcp_oauth",
+            target_url=url,
+            auth_type="oauth2_refresh",
             access_token=SecretStr("stale-at"),
             refresh_token=SecretStr("rt-1"),
             client_id="cid",
@@ -626,7 +626,7 @@ class TestOAuthRefreshE2E:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         import json as _json
 
-        from aios.mcp.client import resolve_auth_for_url
+        from aios.mcp.client import resolve_auth_for_target_url
         from aios.services import vaults as svc
 
         vault = await svc.create_vault(
@@ -647,7 +647,7 @@ class TestOAuthRefreshE2E:
             post_calls,
             body={"access_token": "fresh-at", "expires_in": 3600},
         ):
-            _, headers = await resolve_auth_for_url(
+            _, headers = await resolve_auth_for_target_url(
                 pool, crypto_box, session_id, url, account_id="acc_test_stub"
             )
 
@@ -679,7 +679,7 @@ class TestOAuthRefreshE2E:
         after acquiring the lock and exits without POSTing.
         """
         account_id = "acc_test_stub"  # PR 3 scaffolding
-        from aios.mcp.client import resolve_auth_for_url
+        from aios.mcp.client import resolve_auth_for_target_url
         from aios.services import vaults as svc
 
         vault = await svc.create_vault(
@@ -702,7 +702,7 @@ class TestOAuthRefreshE2E:
         ):
             results = await asyncio.gather(
                 *(
-                    resolve_auth_for_url(
+                    resolve_auth_for_target_url(
                         pool, crypto_box, session_id, url, account_id="acc_test_stub"
                     )
                     for _ in range(5)
@@ -719,7 +719,7 @@ class TestOAuthRefreshE2E:
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from aios.errors import OAuthRefreshError
-        from aios.mcp.client import resolve_auth_for_url
+        from aios.mcp.client import resolve_auth_for_target_url
         from aios.services import vaults as svc
 
         vault = await svc.create_vault(
@@ -754,7 +754,7 @@ class TestOAuthRefreshE2E:
             patch("aios.services.vaults.httpx.AsyncClient", MagicMock(return_value=client)),
             pytest.raises(OAuthRefreshError),
         ):
-            await resolve_auth_for_url(
+            await resolve_auth_for_target_url(
                 pool, crypto_box, session_id, url, account_id="acc_test_stub"
             )
 
@@ -766,12 +766,12 @@ class TestOAuthRefreshE2E:
         Companion to ``test_concurrent_resolve_only_refreshes_once``: that
         test pins the lock semantics for the *same* credential. This one
         pins the *scope* of the lock — refreshes against two different
-        ``(vault_id, mcp_server_url)`` pairs must produce two independent
+        ``(vault_id, target_url)`` pairs must produce two independent
         POSTs, not one. A future refactor that promoted the row lock to a
         global lock or a vault-level lock would make this test fail.
         """
         account_id = "acc_test_stub"  # PR 3 scaffolding
-        from aios.mcp.client import resolve_auth_for_url
+        from aios.mcp.client import resolve_auth_for_target_url
         from aios.services import vaults as svc
 
         v1 = await svc.create_vault(
@@ -805,8 +805,12 @@ class TestOAuthRefreshE2E:
             body={"access_token": "fresh-at", "expires_in": 3600},
         ):
             results = await asyncio.gather(
-                resolve_auth_for_url(pool, crypto_box, sess1, url1, account_id="acc_test_stub"),
-                resolve_auth_for_url(pool, crypto_box, sess2, url2, account_id="acc_test_stub"),
+                resolve_auth_for_target_url(
+                    pool, crypto_box, sess1, url1, account_id="acc_test_stub"
+                ),
+                resolve_auth_for_target_url(
+                    pool, crypto_box, sess2, url2, account_id="acc_test_stub"
+                ),
             )
 
         assert all(r[1] == {"Authorization": "Bearer fresh-at"} for r in results)

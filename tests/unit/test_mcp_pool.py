@@ -295,7 +295,7 @@ class TestMcpSessionPool:
         """Multi-tenant invariant the #459 re-key is built on.
 
         ``vault_id`` is account-filtered at the query layer
-        (``resolve_mcp_credential(..., account_id=...)``), so two
+        (``resolve_session_credential(..., account_id=...)``), so two
         tenants sharing an MCP URL hold independent entries and one's
         refresh reuses its OWN entry without disturbing the other.
         Pre-fix the rotation would open a third entry under a new
