@@ -221,19 +221,13 @@ class McpBroker:
         return JSONResponse({"servers": servers})
 
     async def _resolve_for_tool(
-        self, request: Request, *, require_invoke: bool
+        self, request: Request
     ) -> tuple[str, McpServerSpec, ToolSpec, str] | Response:
         """Common prelude for tool routes: resolve session, agent,
         toolset, server, and authorize the tool. Returns
         ``(session_id, server_spec, toolset, tool_name)`` on success or
         a ``Response`` to return immediately on failure.
-
-        ``require_invoke`` selects between "browsing" semantics (--help
-        and listing accept any always_allow tool) and "invoke"
-        semantics (currently the same; kept for forward-compat with the
-        always_ask path that will need a different short-circuit).
         """
-        del require_invoke  # reserved for v2 always_ask path
         resolved = await self._resolve_session(request)
         if isinstance(resolved, Response):
             return resolved
@@ -300,7 +294,7 @@ class McpBroker:
         return JSONResponse({"tools": out})
 
     async def _tool_help(self, request: Request) -> Response:
-        resolved = await self._resolve_for_tool(request, require_invoke=False)
+        resolved = await self._resolve_for_tool(request)
         if isinstance(resolved, Response):
             return resolved
         session_id, server, _toolset, tool_name = resolved
@@ -337,7 +331,7 @@ class McpBroker:
         if not isinstance(arguments, dict):
             return _err(400, 'request body must contain {"arguments": <object>}')
 
-        resolved = await self._resolve_for_tool(request, require_invoke=True)
+        resolved = await self._resolve_for_tool(request)
         if isinstance(resolved, Response):
             return resolved
         session_id, server, _toolset, tool_name = resolved
