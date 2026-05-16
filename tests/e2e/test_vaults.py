@@ -345,6 +345,131 @@ class TestVaultCredentialCRUD:
         for f in failures:
             assert "maximum" in str(f)
 
+    async def test_concurrent_update_does_not_lose_writes(self, pool: Any, crypto_box: Any) -> None:
+        """Two concurrent ``PUT /v1/vaults/:vid/credentials/:cid`` requests
+        each modifying a DIFFERENT field of the same credential must both
+        win their respective edit. Pre-fix ``update_vault_credential``
+        opens a connection without a transaction or row lock; the
+        ``decrypt → merge → re-encrypt → UPDATE`` sequence is read-modify-
+        write across an unbounded gap, so the second commit clobbers the
+        first invocation's blob field. PR #496 fixed the merge-logic
+        for ``None``-unset within ONE call; this PR fixes the cross-call
+        race that ``#496`` left uncovered.
+
+        Pre-fix: token=A1 + display_name=A2 (call A) races with
+        token=B1 + display_name=B2 (call B). One field from one call
+        is silently lost (depending on commit order). Post-fix:
+        ``SELECT … FOR UPDATE`` serializes the read-decrypt-encrypt
+        critical section so both fields land.
+        """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(
+            pool, display_name="lost-update-test", metadata={}, account_id=account_id
+        )
+        cred = await svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=vault.id,
+            body=VaultCredentialCreate(
+                target_url="https://lost-update.example.com",
+                auth_type="bearer_header",
+                token=SecretStr("initial"),
+                display_name="initial",
+            ),
+            account_id=account_id,
+        )
+
+        # Force the race window deterministically: both invocations must
+        # complete the SELECT before either reaches the UPDATE. With
+        # plain ``asyncio.gather`` the asyncpg pool would generally let
+        # the first invocation run get → update before the second's
+        # get starts, masking the bug. Patch the UPDATE query to wait
+        # until BOTH invocations have arrived — this reconstructs the
+        # exact race that webhook-retry / dual-CLI / parallel-agent
+        # production traffic creates intermittently. The release event
+        # is set from a separate coroutine so neither update releases
+        # its own wait; FIFO wake order then preserves arrival order
+        # for the underlying ``original_update`` call into Postgres.
+        from unittest.mock import patch
+
+        from aios.db import queries as queries_mod
+
+        original_update = queries_mod.update_vault_credential
+        release_updates = asyncio.Event()
+        both_arrived = asyncio.Event()
+        reached_update = 0
+
+        async def gated_update(*args: Any, **kwargs: Any) -> Any:
+            nonlocal reached_update
+            reached_update += 1
+            if reached_update == 2:
+                both_arrived.set()
+            await release_updates.wait()
+            return await original_update(*args, **kwargs)
+
+        async def release_barrier() -> None:
+            # Pre-fix: both invocations reach ``gated_update`` (no row
+            # lock from get) and ``both_arrived`` fires fast.
+            # Post-fix: the second invocation blocks on ``FOR UPDATE``
+            # before ever reaching ``gated_update`` — ``both_arrived``
+            # times out. Either way, release ``release_updates`` so
+            # the first invocation commits; the second then proceeds
+            # naturally (immediately pre-fix, after row-lock release
+            # post-fix).
+            import contextlib as _contextlib
+
+            with _contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(both_arrived.wait(), timeout=0.5)
+            release_updates.set()
+
+        async def update_token() -> Any:
+            return await svc.update_vault_credential(
+                pool,
+                crypto_box,
+                vault_id=vault.id,
+                credential_id=cred.id,
+                body=VaultCredentialUpdate(token=SecretStr("token-A")),
+                account_id=account_id,
+            )
+
+        async def update_display_name() -> Any:
+            return await svc.update_vault_credential(
+                pool,
+                crypto_box,
+                vault_id=vault.id,
+                credential_id=cred.id,
+                body=VaultCredentialUpdate(display_name="display-B"),
+                account_id=account_id,
+            )
+
+        with patch.object(queries_mod, "update_vault_credential", gated_update):
+            await asyncio.gather(update_token(), update_display_name(), release_barrier())
+
+        # Read back via the get-with-blob query and decrypt to verify the
+        # actual stored secrets — the public ``VaultCredential`` strips
+        # them. Both invocations should have committed their field.
+        async with pool.acquire() as conn:
+            from aios.db import queries
+
+            final_cred, final_blob = await queries.get_vault_credential_with_blob(
+                conn, vault.id, cred.id, account_id=account_id
+            )
+
+        subkey = crypto_box.derive_account_subkey(account_id)
+        payload = subkey.decrypt_dict(final_blob)
+
+        assert final_cred.display_name == "display-B", (
+            f"display_name update was lost — pre-fix the token-update's "
+            f"earlier read decrypted the pre-race blob, merged token-A, and "
+            f"re-encrypted, clobbering the display_name field that was about "
+            f"to land. Final display_name: {final_cred.display_name!r}"
+        )
+        assert payload.get("token") == "token-A", (
+            f"token update was lost — symmetric race; final token in blob: {payload.get('token')!r}"
+        )
+
     async def test_credential_inserts_across_vaults_do_not_block(
         self, pool: Any, crypto_box: Any
     ) -> None:
