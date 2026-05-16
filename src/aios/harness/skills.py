@@ -99,8 +99,16 @@ async def provision_skill_files(
     so files written to ``{workspace}/skills/{directory}/`` appear at
     ``/workspace/skills/{directory}/`` inside the container.
 
-    Idempotent: if the ``skills`` directory already exists, skips
-    provisioning entirely (files were written on a previous step).
+    Idempotent via per-file overwrite: ``write_text`` replaces existing
+    content with identical bytes, so repeat calls are harmless and
+    converge on the right state. The previous
+    ``if skills_dir.exists(): return`` early-out was unsafe — the model
+    can ``mkdir /workspace/skills`` via bash (bind-mounted, so it
+    creates the host dir) which would then silently skip ALL skill
+    provisioning, leaving the system prompt advertising a SKILL.md
+    path that never exists. The same early-out also hid partial-write
+    failures: a write that raised mid-loop left the dir in a
+    half-provisioned state with no retry.
     """
     if not skill_versions:
         return
@@ -108,9 +116,6 @@ async def provision_skill_files(
     raw_path = await _load_workspace_path(session_id)
     workspace = ensure_workspace_path(raw_path)
     skills_dir = workspace / "skills"
-
-    if skills_dir.exists():
-        return  # already provisioned
 
     for sv in skill_versions:
         sv_dir = skills_dir / sv.directory
