@@ -93,6 +93,21 @@ async def handle_inbound(
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, connection_id, account_id=account_id)
 
+    # Refuse to route inbounds for archived connections. ``get_connection``
+    # doesn't filter ``archived_at IS NULL`` (other callers — listing,
+    # archive itself, audit views — legitimately need archived rows), and
+    # ``archive_connection`` doesn't cascade-delete the per-chat
+    # ``chat_sessions`` ledger rows, so the resolver's tier-1
+    # ``lookup_chat_session`` would short-circuit on the stale ledger entry
+    # and land the message in the session the operator believes is
+    # decommissioned. Surface ``DETACHED`` so the router returns the same
+    # 422 it would for any other "no live routing target" case — connector
+    # containers cache state and the NOTIFY-on-removal is best-effort, so
+    # post-archive inbounds during the propagation window are routine
+    # rather than exceptional.
+    if connection.archived_at is not None:
+        return InboundResult(None, None, InboundDrop.DETACHED, False)
+
     # Session resolution: three-tier resolver in the connector subsystem
     # (chat_sessions → routing_rules → bindings.mode). Imported inside the
     # function so the core service module stays import-clean against the
