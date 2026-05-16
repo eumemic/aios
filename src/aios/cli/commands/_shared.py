@@ -35,6 +35,23 @@ def render_single(obj: Any) -> None:
     print_json(obj)
 
 
+def call_single(
+    ctx: typer.Context,
+    fn: Callable[..., Response[Any]],
+    **kwargs: Any,
+) -> None:
+    """Open an SDK client, call an endpoint returning a single resource,
+    and render the result through :func:`render_single`.
+
+    The single-resource counterpart to :func:`render_paginated`: every
+    ``get`` / ``create`` / ``update`` / ``archive`` body that ends in
+    ``render_single(obj.to_dict())`` collapses to one line.
+    """
+    with get_state(ctx).sdk_client() as client:
+        obj = unwrap(fn(client=client, **kwargs))
+    render_single(obj.to_dict())
+
+
 def render_list(
     output_format: OutputFormat,
     envelope: dict[str, Any],

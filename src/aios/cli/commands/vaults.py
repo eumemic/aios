@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 import typer
 
-from aios.cli.commands._shared import render_paginated, render_single, unwrap
+from aios.cli.commands._shared import call_single, render_paginated, unwrap
 from aios.cli.files import PayloadError, load_json_object, load_payload, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -68,9 +68,7 @@ def list_(
 @app.command("get")
 def get(ctx: typer.Context, vault_id: str) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(get_vault.sync_detailed(client=client, vault_id=vault_id))
-        render_single(obj.to_dict())
+        call_single(ctx, get_vault.sync_detailed, vault_id=vault_id)
 
     run_or_die(_run)
 
@@ -109,9 +107,7 @@ def create(
             print_error(str(exc))
             return 64
         body = VaultCreate.from_dict(payload)
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(create_vault.sync_detailed(client=client, body=body))
-        render_single(obj.to_dict())
+        call_single(ctx, create_vault.sync_detailed, body=body)
         return None
 
     run_or_die(_run)
@@ -132,9 +128,7 @@ def update(
             print_error(str(exc))
             return 64
         body = VaultUpdate.from_dict(payload)
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(update_vault.sync_detailed(client=client, vault_id=vault_id, body=body))
-        render_single(obj.to_dict())
+        call_single(ctx, update_vault.sync_detailed, vault_id=vault_id, body=body)
         return None
 
     run_or_die(_run)
@@ -143,9 +137,7 @@ def update(
 @app.command("archive")
 def archive(ctx: typer.Context, vault_id: str) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(archive_vault.sync_detailed(client=client, vault_id=vault_id))
-        render_single(obj.to_dict())
+        call_single(ctx, archive_vault.sync_detailed, vault_id=vault_id)
 
     run_or_die(_run)
 
@@ -205,13 +197,9 @@ def cred_list(
 @credentials.command("get")
 def cred_get(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                get_vault_credential.sync_detailed(
-                    client=client, vault_id=vault_id, credential_id=credential_id
-                )
-            )
-        render_single(obj.to_dict())
+        call_single(
+            ctx, get_vault_credential.sync_detailed, vault_id=vault_id, credential_id=credential_id
+        )
 
     run_or_die(_run)
 
@@ -243,11 +231,7 @@ def cred_create(
             print_error(str(exc))
             return 64
         body = VaultCredentialCreate.from_dict(payload)
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                create_vault_credential.sync_detailed(client=client, vault_id=vault_id, body=body)
-            )
-        render_single(obj.to_dict())
+        call_single(ctx, create_vault_credential.sync_detailed, vault_id=vault_id, body=body)
         return None
 
     run_or_die(_run)
@@ -269,13 +253,13 @@ def cred_update(
             print_error(str(exc))
             return 64
         body = VaultCredentialUpdate.from_dict(payload)
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                update_vault_credential.sync_detailed(
-                    client=client, vault_id=vault_id, credential_id=credential_id, body=body
-                )
-            )
-        render_single(obj.to_dict())
+        call_single(
+            ctx,
+            update_vault_credential.sync_detailed,
+            vault_id=vault_id,
+            credential_id=credential_id,
+            body=body,
+        )
         return None
 
     run_or_die(_run)
@@ -284,13 +268,12 @@ def cred_update(
 @credentials.command("archive")
 def cred_archive(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                archive_vault_credential.sync_detailed(
-                    client=client, vault_id=vault_id, credential_id=credential_id
-                )
-            )
-        render_single(obj.to_dict())
+        call_single(
+            ctx,
+            archive_vault_credential.sync_detailed,
+            vault_id=vault_id,
+            credential_id=credential_id,
+        )
 
     run_or_die(_run)
 

@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 import typer
 
-from aios.cli.commands._shared import render_paginated, render_single, unwrap
+from aios.cli.commands._shared import call_single, render_paginated, unwrap
 from aios.cli.files import PayloadError, load_payload, walk_skill_dir
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -51,9 +51,7 @@ def list_(
 @app.command("get", help="Fetch a skill.")
 def get(ctx: typer.Context, skill_id: str) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(get_skill.sync_detailed(client=client, skill_id=skill_id))
-        render_single(obj.to_dict())
+        call_single(ctx, get_skill.sync_detailed, skill_id=skill_id)
 
     run_or_die(_run)
 
@@ -80,9 +78,7 @@ def create(
         if isinstance(payload, int):
             return payload
         body = SkillCreate.from_dict(payload)
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(create_skill.sync_detailed(client=client, body=body))
-        render_single(obj.to_dict())
+        call_single(ctx, create_skill.sync_detailed, body=body)
         return None
 
     run_or_die(_run)
@@ -124,11 +120,7 @@ def versions(
 @app.command("version", help="Fetch a specific skill version.")
 def version(ctx: typer.Context, skill_id: str, version: int) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                get_skill_version.sync_detailed(client=client, skill_id=skill_id, version=version)
-            )
-        render_single(obj.to_dict())
+        call_single(ctx, get_skill_version.sync_detailed, skill_id=skill_id, version=version)
 
     run_or_die(_run)
 
@@ -157,11 +149,7 @@ def version_create(
                 print_error(str(exc))
                 return 64
         body = SkillVersionCreate.from_dict(payload)
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                create_skill_version.sync_detailed(client=client, skill_id=skill_id, body=body)
-            )
-        render_single(obj.to_dict())
+        call_single(ctx, create_skill_version.sync_detailed, skill_id=skill_id, body=body)
         return None
 
     run_or_die(_run)
