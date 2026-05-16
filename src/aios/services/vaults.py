@@ -483,10 +483,16 @@ async def update_vault_credential(
     credential_id: str,
     body: VaultCredentialUpdate,
 ) -> VaultCredential:
-    async with pool.acquire() as conn:
-        # Decrypt existing payload, merge provided fields, re-encrypt.
+    # Serialize the decrypt-merge-encrypt-update sequence against the row
+    # so two concurrent PUTs each modifying a different field (e.g. token
+    # via auth-payload, display_name via column) don't both read the same
+    # pre-race blob and have the second commit clobber the first's edit.
+    # PR #496 fixed the in-call merge (None-unset); this transaction +
+    # FOR UPDATE closes the cross-call read-modify-write race that #496
+    # left uncovered. Mirrors the pattern in ``refresh_credential`` above.
+    async with pool.acquire() as conn, conn.transaction():
         cred, existing_blob = await queries.get_vault_credential_with_blob(
-            conn, vault_id, credential_id, account_id=account_id
+            conn, vault_id, credential_id, account_id=account_id, for_update=True
         )
         subkey = crypto_box.derive_account_subkey(account_id)
         existing_payload = subkey.decrypt_dict(existing_blob)

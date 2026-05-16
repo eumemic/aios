@@ -2487,14 +2487,28 @@ async def get_vault_credential_with_blob(
     credential_id: str,
     *,
     account_id: str,
+    for_update: bool = False,
 ) -> tuple[VaultCredential, EncryptedBlob]:
     """Fetch the credential metadata and decrypted-blob inputs in one round-trip.
 
     Excludes archived credentials — the blob is meaningless once archived
     (and gets zeroed out at archive time).
+
+    Pass ``for_update=True`` to take a row-level lock for the duration
+    of the surrounding transaction. Callers that follow the
+    decrypt-merge-encrypt-update pattern (e.g.
+    :func:`aios.services.vaults.update_vault_credential`) need this to
+    serialize the cross-call read-modify-write so two concurrent PUTs
+    don't both read the same pre-race blob.
     """
+    sql = (
+        "SELECT * FROM vault_credentials "
+        "WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL AND account_id = $3"
+    )
+    if for_update:
+        sql += " FOR UPDATE"
     row = await conn.fetchrow(
-        "SELECT * FROM vault_credentials WHERE id = $1 AND vault_id = $2 AND archived_at IS NULL AND account_id = $3",
+        sql,
         credential_id,
         vault_id,
         account_id,
