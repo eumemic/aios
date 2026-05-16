@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 MAX_REPOS_PER_SESSION = 8
 
 # Mount path pattern: absolute path, segments may not be empty/contain NUL.
-# Same shape as MEMORY_PATH_RE in models/memory_stores.py.
+# Same shape as ``_MEMORY_PATH_PATTERN`` in models/memory_stores.py.
 _MOUNT_PATH_PATTERN = r"^(/[^/\x00]+)+$"
 
 
