@@ -4164,20 +4164,21 @@ async def list_memory_stores(
     account_id: str,
     include_archived: bool = False,
     limit: int = 100,
+    after: str | None = None,
 ) -> list[MemoryStore]:
-    if include_archived:
-        rows = await conn.fetch(
-            "SELECT * FROM memory_stores WHERE account_id = $1 ORDER BY id DESC LIMIT $2",
-            account_id,
-            limit,
-        )
-    else:
-        rows = await conn.fetch(
-            "SELECT * FROM memory_stores WHERE archived_at IS NULL AND account_id = $1 "
-            "ORDER BY id DESC LIMIT $2",
-            account_id,
-            limit,
-        )
+    args: list[Any] = [account_id]
+    where = ["account_id = $1"]
+    if not include_archived:
+        where.append("archived_at IS NULL")
+    if after is not None:
+        args.append(after)
+        where.append(f"id < ${len(args)}")
+    args.append(limit)
+    sql = (
+        f"SELECT * FROM memory_stores WHERE {' AND '.join(where)} "
+        f"ORDER BY id DESC LIMIT ${len(args)}"
+    )
+    rows = await conn.fetch(sql, *args)
     return [_row_to_memory_store(r) for r in rows]
 
 

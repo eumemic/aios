@@ -4284,7 +4284,7 @@
           "memory-stores"
         ],
         "summary": "List Stores",
-        "description": "List memory stores, newest first.\n\nUnlike most resources, archived stores can be included via\n``include_archived=true`` (default false). No cursor pagination \u2014 bumps\nthe default limit to 100 since stores are typically few.",
+        "description": "List memory stores, newest first.\n\nUnlike most resources, archived stores can be included via\n``include_archived=true`` (default false). Cursor pagination: pass\n``after`` from a previous response's ``next_after`` to get the next\npage. The default limit is 100 since stores are typically few.",
         "operationId": "list_memory_stores",
         "parameters": [
           {
@@ -4307,6 +4307,22 @@
               "minimum": 1,
               "default": 100,
               "title": "Limit"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After"
             }
           },
           {

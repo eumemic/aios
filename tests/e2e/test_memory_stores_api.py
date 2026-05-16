@@ -114,6 +114,44 @@ class TestStoreCrud:
         assert r.status_code == 404, r.text
 
 
+class TestStoreListPagination:
+    """The ``next_after`` cursor returned by ``GET /v1/memory-stores`` must be
+    acceptable as ``?after=`` on the next call. Pre-fix the router accepted
+    no ``after`` parameter, so FastAPI silently dropped it and the caller
+    following the documented cursor pattern saw the same page back —
+    isomorphic to the events-pagination break that #389 fixed."""
+
+    async def test_after_advances_pagination(self, http_client: httpx.AsyncClient) -> None:
+        # Create 5 stores so a limit=2 walk takes 3 pages.
+        ids: list[str] = []
+        for _ in range(5):
+            store = await _create_store(http_client)
+            ids.append(store["id"])
+
+        r1 = await http_client.get("/v1/memory-stores", params={"limit": 2})
+        assert r1.status_code == 200, r1.text
+        page1 = r1.json()
+        assert len(page1["data"]) == 2
+        assert page1["has_more"] is True
+        assert page1["next_after"] == page1["data"][-1]["id"]
+
+        # Second page, ?after=<page1.next_after> → ids MUST be disjoint from page1.
+        # Pre-fix this returned page1 again because the router signature ignored ``after``.
+        r2 = await http_client.get(
+            "/v1/memory-stores", params={"limit": 2, "after": page1["next_after"]}
+        )
+        assert r2.status_code == 200, r2.text
+        page2 = r2.json()
+        assert len(page2["data"]) == 2
+        page1_ids = {row["id"] for row in page1["data"]}
+        page2_ids = {row["id"] for row in page2["data"]}
+        assert page1_ids.isdisjoint(page2_ids), (
+            f"page 2 must advance past page 1's cursor; got overlap "
+            f"{page1_ids & page2_ids}. Pre-fix symptom: `?after=` was silently "
+            f"ignored and the same page came back."
+        )
+
+
 class TestMemoryCrud:
     async def test_create_retrieve_round_trip(self, http_client: httpx.AsyncClient) -> None:
         store = await _create_store(http_client)
