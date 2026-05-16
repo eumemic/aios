@@ -6,12 +6,12 @@ what the schema enforces.
 
 from __future__ import annotations
 
+from types import EllipsisType
 from typing import Any
 
 import asyncpg
 
 from aios.db import queries
-from aios.db.queries import _UNSET
 from aios.models.session_templates import SessionTemplate
 
 
@@ -64,7 +64,7 @@ async def update_session_template(
     account_id: str,
     name: str | None = None,
     agent_id: str | None = None,
-    agent_version: int | None = _UNSET,
+    agent_version: int | None | EllipsisType = ...,
     environment_id: str | None = None,
     vault_ids: list[str] | None = None,
     memory_store_ids: list[str] | None = None,

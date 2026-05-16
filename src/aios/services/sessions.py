@@ -9,6 +9,7 @@ and inject environment variables at container provisioning time.
 from __future__ import annotations
 
 import json
+from types import EllipsisType
 from typing import Any
 
 import asyncpg
@@ -433,8 +434,8 @@ async def update_session(
     *,
     account_id: str,
     agent_id: str | None = None,
-    agent_version: int | None = queries._UNSET,
-    title: str | None = queries._UNSET,
+    agent_version: int | None | EllipsisType = ...,
+    title: str | None | EllipsisType = ...,
     metadata: dict[str, Any] | None = None,
     vault_ids: list[str] | None = None,
     resources: list[SessionResource] | None = None,

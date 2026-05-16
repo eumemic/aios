@@ -15,7 +15,6 @@ from typing import Annotated
 from fastapi import APIRouter, Query, status
 
 from aios.api.deps import AuthDep, PoolDep
-from aios.db.queries import _UNSET
 from aios.models.common import ListResponse
 from aios.models.session_templates import (
     SessionTemplate,
@@ -96,7 +95,7 @@ async def update(
         template_id,
         name=body.name,
         agent_id=body.agent_id,
-        agent_version=(body.agent_version if "agent_version" in body.model_fields_set else _UNSET),
+        agent_version=(body.agent_version if "agent_version" in body.model_fields_set else ...),
         environment_id=body.environment_id,
         vault_ids=body.vault_ids,
         memory_store_ids=body.memory_store_ids,

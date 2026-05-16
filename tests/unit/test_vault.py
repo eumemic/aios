@@ -235,7 +235,7 @@ class TestMergeAuthPayload:
         assert merged["access_token"] == "at"
 
 
-# ── update_vault_credential: no _UNSET sentinel leaks into queries ───────────
+# ── update_vault_credential: no private sentinel leaks into queries ──────────
 
 
 def _existing_credential() -> VaultCredential:
