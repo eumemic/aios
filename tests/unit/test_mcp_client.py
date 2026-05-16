@@ -112,6 +112,25 @@ class TestResolveAuthForTargetUrl:
         assert vault_id == "vlt_s1"
         assert result == {"Authorization": f"Basic {expected}"}
 
+    async def test_custom_header_renders_named_header(self, crypto_box: CryptoBox) -> None:
+        payload = json.dumps({"header_name": "X-Browser-Use-API-Key", "header_value": "bu_secret"})
+        blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(payload)
+        pool = fake_pool_yielding_conn(MagicMock())
+        with patch(
+            "aios.mcp.client.queries.resolve_session_credential",
+            new_callable=AsyncMock,
+        ) as s:
+            s.return_value = (blob, "custom_header", "vlt_s1")
+            vault_id, result = await resolve_auth_for_target_url(
+                pool,
+                crypto_box,
+                "sess_123",
+                "https://api.browser-use.com",
+                account_id="acc_test_stub",
+            )
+        assert vault_id == "vlt_s1"
+        assert result == {"X-Browser-Use-API-Key": "bu_secret"}
+
     # ── OAuth refresh ─────────────────────────────────────────────────────
 
     async def test_oauth_refresh_triggered_when_expiring(self, crypto_box: CryptoBox) -> None:

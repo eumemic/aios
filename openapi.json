@@ -11928,7 +11928,8 @@
             "enum": [
               "bearer_header",
               "oauth2_refresh",
-              "basic"
+              "basic",
+              "custom_header"
             ],
             "title": "Auth Type"
           },
@@ -11998,7 +11999,8 @@
             "enum": [
               "bearer_header",
               "oauth2_refresh",
-              "basic"
+              "basic",
+              "custom_header"
             ],
             "title": "Auth Type"
           },
@@ -12156,6 +12158,30 @@
               }
             ],
             "title": "Password"
+          },
+          "header_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Name"
+          },
+          "header_value": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Value"
           }
         },
         "additionalProperties": false,
@@ -12342,6 +12368,30 @@
               }
             ],
             "title": "Password"
+          },
+          "header_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Name"
+          },
+          "header_value": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Value"
           }
         },
         "additionalProperties": false,

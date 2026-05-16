@@ -71,26 +71,35 @@ async def _open_session(
     return session, init_result
 
 
-def _auth_header_from_payload(payload: dict[str, Any], auth_type: AuthType) -> str:
-    """Render the ``Authorization`` header value for ``auth_type``.
+def _auth_headers_from_payload(payload: dict[str, Any], auth_type: AuthType) -> dict[str, str]:
+    """Render the auth header(s) the broker writes for ``auth_type``.
 
-    Empty string means "no header should be sent" — caller drops the
-    header entirely. ``bearer_header`` and ``oauth2_refresh`` produce
-    ``Bearer <token>``; ``basic`` produces ``Basic <base64(user:pass)>``.
+    Empty dict means "no headers to send" — caller treats the request
+    as unauthenticated.  ``bearer_header`` and ``oauth2_refresh``
+    produce ``Authorization: Bearer <token>``; ``basic`` produces
+    ``Authorization: Basic <base64(user:pass)>``; ``custom_header``
+    writes the operator-configured header name (e.g.
+    ``X-Browser-Use-API-Key``) with the credential value.
     """
     if auth_type == "bearer_header":
         token = str(payload.get("token", ""))
-        return f"Bearer {token}" if token else ""
+        return {"Authorization": f"Bearer {token}"} if token else {}
     if auth_type == "oauth2_refresh":
         token = str(payload.get("access_token", ""))
-        return f"Bearer {token}" if token else ""
+        return {"Authorization": f"Bearer {token}"} if token else {}
     if auth_type == "basic":
         username = str(payload.get("username", ""))
         password = str(payload.get("password", ""))
         if not username and not password:
-            return ""
+            return {}
         encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
-        return f"Basic {encoded}"
+        return {"Authorization": f"Basic {encoded}"}
+    if auth_type == "custom_header":
+        header_name = str(payload.get("header_name", ""))
+        header_value = str(payload.get("header_value", ""))
+        if not header_name or not header_value:
+            return {}
+        return {header_name: header_value}
     assert_never(auth_type)
 
 
@@ -149,10 +158,10 @@ async def resolve_auth_for_target_url(
         else:
             payload = json.loads(subkey.decrypt(blob))
 
-    header_value = _auth_header_from_payload(payload, auth_type)
-    if not header_value:
+    headers = _auth_headers_from_payload(payload, auth_type)
+    if not headers:
         return None, {}
-    return vault_id, {"Authorization": header_value}
+    return vault_id, headers
 
 
 async def discover_mcp_tools(

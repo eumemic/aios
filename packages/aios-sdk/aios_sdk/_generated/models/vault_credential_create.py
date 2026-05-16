@@ -44,6 +44,8 @@ class VaultCredentialCreate:
             token (None | str | Unset):
             username (None | str | Unset):
             password (None | str | Unset):
+            header_name (None | str | Unset):
+            header_value (None | str | Unset):
     """
 
     target_url: str
@@ -67,6 +69,8 @@ class VaultCredentialCreate:
     token: None | str | Unset = UNSET
     username: None | str | Unset = UNSET
     password: None | str | Unset = UNSET
+    header_name: None | str | Unset = UNSET
+    header_value: None | str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.token_endpoint_auth_basic import TokenEndpointAuthBasic
@@ -161,6 +165,18 @@ class VaultCredentialCreate:
         else:
             password = self.password
 
+        header_name: None | str | Unset
+        if isinstance(self.header_name, Unset):
+            header_name = UNSET
+        else:
+            header_name = self.header_name
+
+        header_value: None | str | Unset
+        if isinstance(self.header_value, Unset):
+            header_value = UNSET
+        else:
+            header_value = self.header_value
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -195,6 +211,10 @@ class VaultCredentialCreate:
             field_dict["username"] = username
         if password is not UNSET:
             field_dict["password"] = password
+        if header_name is not UNSET:
+            field_dict["header_name"] = header_name
+        if header_value is not UNSET:
+            field_dict["header_value"] = header_value
 
         return field_dict
 
@@ -382,6 +402,24 @@ class VaultCredentialCreate:
 
         password = _parse_password(d.pop("password", UNSET))
 
+        def _parse_header_name(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        header_name = _parse_header_name(d.pop("header_name", UNSET))
+
+        def _parse_header_value(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        header_value = _parse_header_value(d.pop("header_value", UNSET))
+
         vault_credential_create = cls(
             target_url=target_url,
             auth_type=auth_type,
@@ -398,6 +436,8 @@ class VaultCredentialCreate:
             token=token,
             username=username,
             password=password,
+            header_name=header_name,
+            header_value=header_value,
         )
 
         return vault_credential_create
