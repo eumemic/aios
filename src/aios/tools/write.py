@@ -29,6 +29,7 @@ On failure, returns ``{"error": "...", "path": path}``.
 from __future__ import annotations
 
 import base64
+import hashlib
 import shlex
 from typing import Any
 
@@ -157,6 +158,18 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
             }
         except MemoryStoreArchivedError as exc:
             return {"error": exc.message, "path": path}
+
+        # Refresh the read-sha cache so a subsequent write tool call against
+        # this same path doesn't fail its precondition with the now-stale
+        # pre-write sha. Mirrors ``edit.py``'s post-update refresh; without
+        # this the model gets a misleading "file changed since your last
+        # read" error on its OWN second write.
+        runtime.set_read_sha(
+            session_id,
+            target.store_id,
+            target.store_path,
+            hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        )
 
     content_bytes = content.encode("utf-8")
     b64 = base64.b64encode(content_bytes).decode("ascii")
