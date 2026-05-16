@@ -55,12 +55,6 @@ class Unrestricted(NetworkPolicy):
 
 
 @dataclass(frozen=True, slots=True)
-class Disabled(NetworkPolicy):
-    """No network at all. Backends may translate to ``--network none``,
-    a network namespace with no interfaces, etc."""
-
-
-@dataclass(frozen=True, slots=True)
 class Limited(NetworkPolicy):
     """Allow outbound only to ``allowed_hosts`` (resolved at apply time).
 
