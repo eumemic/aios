@@ -16,7 +16,7 @@ import asyncpg
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.errors import NotFoundError, PayloadTooLargeError
+from aios.errors import ConflictError, NotFoundError, PayloadTooLargeError
 from aios.models.events import Event, EventKind
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -277,7 +277,31 @@ async def append_tool_result(
             conn, session_id, tool_call_id, account_id=account_id
         )
         if existing is not None:
-            return existing
+            # Idempotent retry: a prior call with matching intent
+            # (same ``is_error`` outcome) — return the original event.
+            # Intent-mismatch is a CONFLICT, not a retry: e.g., a deny
+            # arriving after the tool already produced a success result
+            # (two-tab race; always_allow tool; bogus pre-confirm
+            # pre-#533). Returning the success event would lie to the
+            # operator ("you denied successfully") while the model's
+            # context still carries the success result. Raise so the
+            # operator learns the deny is too late.
+            existing_is_error = bool(existing.data.get("is_error", False))
+            if existing_is_error == is_error:
+                return existing
+            raise ConflictError(
+                f"tool_call_id {tool_call_id!r} already has a "
+                f"{'error' if existing_is_error else 'success'} "
+                f"result; cannot append a "
+                f"{'error' if is_error else 'success'} result with "
+                f"the same tool_call_id",
+                detail={
+                    "session_id": session_id,
+                    "tool_call_id": tool_call_id,
+                    "existing_is_error": existing_is_error,
+                    "requested_is_error": is_error,
+                },
+            )
 
         name = await queries.lookup_tool_name_by_call_id(
             conn, session_id, tool_call_id, account_id=account_id
