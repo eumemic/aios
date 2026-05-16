@@ -230,6 +230,63 @@ class TestHttpRequestHandler:
         assert "error" in result
         assert "does not match any enabled route" in result["error"]
 
+    async def test_path_with_query_string_rejected(self, _stub_runtime: Any) -> None:
+        """A ``path`` carrying a query string must be rejected even when the
+        path-portion matches an enabled route. The route allowlist is a
+        path-only gate; if a ``?`` segment slipped through, the operator's
+        intent (e.g. an `/lights/*` read-only allowlist) would be bypassed
+        because ``httpx`` parses the query off the constructed URL and sends
+        it upstream, where APIs routinely interpret ``?action=delete`` /
+        ``?force=true`` / ``?_method=DELETE`` as state-changing operations.
+
+        Pre-fix ``match_glob`` treats ``?action=delete`` as literal trailing
+        characters on the last segment, so ``/lights/1?action=delete`` matches
+        ``/lights/*`` and the upstream receives the query string verbatim."""
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(
+            response=httpx.Response(200, content=b""),
+            capture=captured,
+        )
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {
+                    "server_ref": "hue",
+                    "path": "/lights/1?action=delete",
+                    "method": "GET",
+                },
+            )
+        assert "error" in result, (
+            f"path with query string must be rejected at the route gate; "
+            f"got success {result!r}. Pre-fix symptom: the upstream URL "
+            f"carried ?action=delete past an allowlist intended for "
+            f"read-only operations."
+        )
+        # And the request must not have been dispatched.
+        assert "url" not in captured, (
+            f"upstream request was dispatched despite path containing a "
+            f"query string; captured={captured!r}"
+        )
+
+    async def test_path_with_fragment_rejected(self, _stub_runtime: Any) -> None:
+        """Same shape as query-string bypass for ``#fragment``. ``httpx``
+        strips the fragment over the wire but the glob-match silently accepts
+        it, leaving an inconsistency between what the route gate checks and
+        what the upstream sees. Reject for consistency with ``?``."""
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        with _patch_load_agent(agent):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1#frag", "method": "GET"},
+            )
+        assert "error" in result
+
     async def test_successful_get(self, _stub_runtime: Any) -> None:
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
         response = httpx.Response(

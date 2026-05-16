@@ -110,12 +110,14 @@ def _classify_permission(
     Returns the matched route's ``permission_policy`` so the harness can
     park the call in ``requires_action`` if the operator marked it
     ``always_ask``. Returns ``None`` for missing server / no route match
-    / bad args — the handler then runs and emits a typed error the
-    model can self-correct from.
+    / bad args / query-or-fragment-bearing path — the handler then runs
+    and emits a typed error the model can self-correct from.
     """
     server_ref = args.get("server_ref")
     path = args.get("path")
     if not isinstance(server_ref, str) or not isinstance(path, str):
+        return None
+    if "?" in path or "#" in path:
         return None
     server = _find_server(agent, server_ref)
     if server is None:
@@ -162,6 +164,22 @@ async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> di
     method = arguments["method"]
     caller_headers: dict[str, str] = arguments.get("headers") or {}
     body = arguments.get("body")
+
+    # Route allowlists are path-only gates. A ``?`` or ``#`` in ``path``
+    # would be matched as literal segment characters by ``match_glob``
+    # and then parsed by httpx as a query/fragment on the wire — letting
+    # ``/lights/1?action=delete`` slip past an `/lights/*` read-only route
+    # because the upstream sees the query string and treats it as a
+    # state-change request. Reject up front so the gate's intent is the
+    # gate's effect.
+    if "?" in path or "#" in path:
+        return {
+            "error": (
+                f"path {path!r} contains a query string or fragment, which is "
+                "not allowed — pass only the path portion. Route allowlists "
+                "do not extend across query parameters."
+            )
+        }
 
     agent, account_id = await _load_session_agent(session_id)
     server = _find_server(agent, server_ref)
