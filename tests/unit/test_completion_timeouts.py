@@ -271,3 +271,60 @@ async def test_stream_litellm_tolerates_empty_choices_chunk(
     # isn't dropped — the guard skips notify, not collection.
     assert len(captured["chunks"]) == 2
     assert captured["chunks"][-1].choices == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_stream_litellm_raises_typed_error_on_zero_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the provider closes the connection without emitting any chunks
+    (Bedrock cold start, OpenRouter mid-handshake disconnect, vLLM under
+    load), ``chunks=[]`` reaches ``litellm.stream_chunk_builder`` — which
+    returns ``None`` rather than raising. The current code then calls
+    ``assembled.get("usage")`` which crashes with a generic
+    ``AttributeError: 'NoneType' object has no attribute 'get'`` — an
+    opaque Python implementation detail in operator logs that doesn't
+    name the actual failure mode.
+
+    Per CLAUDE.md ``fail hard, no fallbacks`` plus ``model sees raw
+    errors``: surface a typed, descriptive error so operators see
+    "provider returned empty stream" rather than a NoneType crash and
+    the harness retry path logs a meaningful ``step.litellm_failed``
+    reason.
+    """
+
+    class _EmptyResponse:
+        def __aiter__(self) -> _EmptyResponse:
+            return self
+
+        async def __anext__(self) -> object:
+            raise StopAsyncIteration
+
+    async def fake_acompletion(**_kwargs: object) -> _EmptyResponse:
+        return _EmptyResponse()
+
+    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    # Intentionally do NOT patch ``stream_chunk_builder`` — we want the
+    # real-world behavior where it returns ``None`` for an empty chunk list.
+    # (Verified: ``litellm.stream_chunk_builder(chunks=[])`` returns None.)
+
+    with pytest.raises(Exception) as excinfo:
+        await completion.stream_litellm(
+            model="anthropic/claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "ping"}],
+            pool=_StubPool(),  # type: ignore[arg-type]
+            session_id="sess_test",
+        )
+
+    # Pre-fix: AttributeError("'NoneType' object has no attribute 'get'").
+    # Post-fix: a typed error whose message names "empty" so it's grep-able
+    # in operator logs.
+    msg = str(excinfo.value)
+    assert "NoneType" not in msg, (
+        f"completion must surface a typed error for empty streams, not a "
+        f"NoneType implementation detail; got {type(excinfo.value).__name__}: {msg!r}"
+    )
+    assert "empty" in msg.lower() or "no chunks" in msg.lower() or "zero" in msg.lower(), (
+        f"error message must name the failure mode (empty/no-chunks/zero); "
+        f"got {type(excinfo.value).__name__}: {msg!r}"
+    )
