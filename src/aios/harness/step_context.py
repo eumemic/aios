@@ -38,7 +38,13 @@ from aios.tools.registry import to_openai_tools
 if TYPE_CHECKING:
     import asyncpg
 
-    from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
+    from aios.models.agents import (
+        Agent,
+        AgentVersion,
+        HttpServerSpec,
+        McpServerSpec,
+        ToolSpec,
+    )
     from aios.models.events import Event
     from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.models.sessions import Session
@@ -170,8 +176,11 @@ async def compute_step_prelude(
         )
         tools.extend(mcp_tools)
         mcp_servers_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
+    http_servers_block = _build_http_servers_block(agent.http_servers)
     cli_hint = _MCP_CLI_HINT if _has_always_allow_mcp_tool(agent.tools) else ""
-    instructions_block = "\n\n".join(s for s in (cli_hint, mcp_servers_block) if s)
+    instructions_block = "\n\n".join(
+        s for s in (cli_hint, mcp_servers_block, http_servers_block) if s
+    )
 
     # Custom tools declared on connections attached to this session
     # (single_session, per_chat origin, or operator-bound chat).  Each
@@ -227,6 +236,33 @@ def _build_instructions_block(
         if not text:
             continue
         sections.append(f"## MCP server: {s.name}\n\n{text}")
+    return "\n\n".join(sections)
+
+
+def _build_http_servers_block(http_servers: list[HttpServerSpec]) -> str:
+    """Render the agent's ``http_servers`` allowlist for the system prompt.
+
+    Includes server description plus each enabled route's pattern and
+    description, so the model knows what ``http_request`` calls it can
+    make. Iteration order is ``agent.http_servers`` declaration order
+    (prefix-cache-stable across steps).
+    """
+    if not http_servers:
+        return ""
+    sections: list[str] = []
+    for s in http_servers:
+        lines = [f"## HTTP server: {s.name} ({s.base_url})"]
+        if s.description:
+            lines.append("")
+            lines.append(s.description)
+        enabled_routes = [r for r in s.routes if r.enabled]
+        if enabled_routes:
+            lines.append("")
+            lines.append("Routes:")
+            for r in enabled_routes:
+                suffix = f" — {r.description}" if r.description else ""
+                lines.append(f"- {r.path_pattern}{suffix}")
+        sections.append("\n".join(lines))
     return "\n\n".join(sections)
 
 

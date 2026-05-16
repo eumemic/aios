@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from aios.errors import AiosError
+from aios.models.agents import PermissionPolicy
 from aios.models.agents import ToolSpec as AgentToolSpec
 
 
@@ -78,6 +79,14 @@ class ToolResult:
 # :mod:`aios.harness.tool_dispatch` does that.
 ToolHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any] | ToolResult]]
 
+# Arg-aware permission classifier. Lets a tool declare a permission policy
+# that depends on the parsed arguments and the agent config — used by
+# ``http_request`` to gate on per-route policy in ``agent.http_servers``
+# rather than a single tool-level policy. ``agent`` is left untyped here
+# to avoid a circular import; consumers pass an
+# :class:`aios.models.agents.Agent` or :class:`AgentVersion`.
+ClassifyPermission = Callable[[dict[str, Any], Any], PermissionPolicy | None]
+
 
 @dataclass(slots=True, frozen=True)
 class ToolDefinition:
@@ -87,6 +96,7 @@ class ToolDefinition:
     description: str
     parameters_schema: dict[str, Any]
     handler: ToolHandler
+    classify_permission: ClassifyPermission | None = None
 
 
 @dataclass(slots=True)
@@ -102,6 +112,7 @@ class ToolRegistry:
         description: str,
         parameters_schema: dict[str, Any],
         handler: ToolHandler,
+        classify_permission: ClassifyPermission | None = None,
     ) -> None:
         """Register a tool. Raises :class:`DuplicateToolError` on name clash.
 
@@ -118,6 +129,7 @@ class ToolRegistry:
             description=description,
             parameters_schema=parameters_schema,
             handler=handler,
+            classify_permission=classify_permission,
         )
 
     def get(self, name: str) -> ToolDefinition:

@@ -56,6 +56,7 @@ _OAUTH_FIELDS = (
 )
 _BEARER_FIELDS = ("token",)
 _BASIC_FIELDS = ("username", "password")
+_CUSTOM_HEADER_FIELDS = ("header_name", "header_value")
 
 
 def _fields_for(auth_type: AuthType) -> tuple[str, ...]:
@@ -65,6 +66,8 @@ def _fields_for(auth_type: AuthType) -> tuple[str, ...]:
         return _BEARER_FIELDS
     if auth_type == "basic":
         return _BASIC_FIELDS
+    if auth_type == "custom_header":
+        return _CUSTOM_HEADER_FIELDS
     assert_never(auth_type)
 
 
@@ -303,6 +306,13 @@ def _extract_auth_payload(body: VaultCredentialCreate) -> dict[str, Any]:
         if missing:
             raise ValidationError(
                 f"basic credentials require {missing}",
+                detail={"auth_type": body.auth_type, "missing": missing},
+            )
+    if body.auth_type == "custom_header":
+        missing = [f for f in _CUSTOM_HEADER_FIELDS if getattr(body, f) is None]
+        if missing:
+            raise ValidationError(
+                f"custom_header credentials require {missing}",
                 detail={"auth_type": body.auth_type, "missing": missing},
             )
     if body.auth_type == "oauth2_refresh" and body.access_token is None:

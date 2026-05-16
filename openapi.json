@@ -7458,6 +7458,13 @@
             "type": "array",
             "title": "Mcp Servers"
           },
+          "http_servers": {
+            "items": {
+              "$ref": "#/components/schemas/HttpServerSpec"
+            },
+            "type": "array",
+            "title": "Http Servers"
+          },
           "description": {
             "anyOf": [
               {
@@ -7569,6 +7576,13 @@
             },
             "type": "array",
             "title": "Mcp Servers"
+          },
+          "http_servers": {
+            "items": {
+              "$ref": "#/components/schemas/HttpServerSpec"
+            },
+            "type": "array",
+            "title": "Http Servers"
           },
           "description": {
             "anyOf": [
@@ -7726,6 +7740,20 @@
             ],
             "title": "Mcp Servers"
           },
+          "http_servers": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/HttpServerSpec"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Servers"
+          },
           "description": {
             "anyOf": [
               {
@@ -7832,6 +7860,13 @@
             },
             "type": "array",
             "title": "Mcp Servers"
+          },
+          "http_servers": {
+            "items": {
+              "$ref": "#/components/schemas/HttpServerSpec"
+            },
+            "type": "array",
+            "title": "Http Servers"
           },
           "litellm_extra": {
             "additionalProperties": true,
@@ -8781,6 +8816,108 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "HttpPermissionPolicy": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "always_allow",
+              "always_ask"
+            ],
+            "title": "Type"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "title": "HttpPermissionPolicy",
+        "description": "Wrapper matching the ``{type: \"always_allow\"}`` shape used for MCP."
+      },
+      "HttpRouteSpec": {
+        "properties": {
+          "path_pattern": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Path Pattern"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "permission_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HttpPermissionPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path_pattern"
+        ],
+        "title": "HttpRouteSpec",
+        "description": "One entry in an ``HttpServerSpec.routes`` allowlist.\n\n``path_pattern`` is a glob against the request path (``*`` matches one\nsegment, ``**`` matches any number of segments).  ``description`` is\noperator-authored prose rendered into the system prompt so the agent\nknows what the route does and how to call it.  ``permission_policy``\ngates *invocation*: ``always_ask`` parks the call in\n``requires_action`` until the client confirms."
+      },
+      "HttpServerSpec": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "base_url": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Base Url"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "routes": {
+            "items": {
+              "$ref": "#/components/schemas/HttpRouteSpec"
+            },
+            "type": "array",
+            "title": "Routes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "base_url"
+        ],
+        "title": "HttpServerSpec",
+        "description": "One entry in an agent's ``http_servers`` list.\n\nDeclares an authenticated HTTP endpoint the agent can reach via the\n``http_request`` built-in tool.  ``base_url`` is the common URL\nprefix the agent's ``path`` argument is appended to; ``routes`` is\nthe allowlist of path patterns the broker permits.  Credentials are\nresolved at request time from the session's bound vaults, keyed on\n``base_url``.  Secret never enters the sandbox \u2014 the worker authors\nthe ``Authorization`` header from the vault credential."
       },
       "LimitedNetworking": {
         "properties": {
@@ -11473,7 +11610,8 @@
                   "web_search",
                   "search_events",
                   "cancel",
-                  "schedule_wake"
+                  "schedule_wake",
+                  "http_request"
                 ]
               },
               {
@@ -11790,7 +11928,8 @@
             "enum": [
               "bearer_header",
               "oauth2_refresh",
-              "basic"
+              "basic",
+              "custom_header"
             ],
             "title": "Auth Type"
           },
@@ -11860,7 +11999,8 @@
             "enum": [
               "bearer_header",
               "oauth2_refresh",
-              "basic"
+              "basic",
+              "custom_header"
             ],
             "title": "Auth Type"
           },
@@ -12018,6 +12158,30 @@
               }
             ],
             "title": "Password"
+          },
+          "header_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Name"
+          },
+          "header_value": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Value"
           }
         },
         "additionalProperties": false,
@@ -12204,6 +12368,30 @@
               }
             ],
             "title": "Password"
+          },
+          "header_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Name"
+          },
+          "header_value": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Value"
           }
         },
         "additionalProperties": false,

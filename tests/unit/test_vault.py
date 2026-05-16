@@ -169,6 +169,34 @@ class TestExtractAuthPayload:
         with pytest.raises(ValidationError):
             _extract_auth_payload(body)
 
+    def test_custom_header_name_and_value(self) -> None:
+        body = VaultCredentialCreate(
+            target_url="https://api.example.com",
+            auth_type="custom_header",
+            header_name="X-Api-Key",
+            header_value=SecretStr("bu_secret"),
+        )
+        payload = _extract_auth_payload(body)
+        assert payload == {"header_name": "X-Api-Key", "header_value": "bu_secret"}
+
+    def test_custom_header_requires_header_name(self) -> None:
+        body = VaultCredentialCreate(
+            target_url="https://api.example.com",
+            auth_type="custom_header",
+            header_value=SecretStr("bu_secret"),
+        )
+        with pytest.raises(ValidationError):
+            _extract_auth_payload(body)
+
+    def test_custom_header_requires_header_value(self) -> None:
+        body = VaultCredentialCreate(
+            target_url="https://api.example.com",
+            auth_type="custom_header",
+            header_name="X-Api-Key",
+        )
+        with pytest.raises(ValidationError):
+            _extract_auth_payload(body)
+
     def test_oauth_serializes_token_endpoint_auth_basic(self) -> None:
         body = _oauth_create(
             token_endpoint_auth=TokenEndpointAuthBasic(

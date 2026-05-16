@@ -14,7 +14,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-AuthType = Literal["bearer_header", "oauth2_refresh", "basic"]
+AuthType = Literal["bearer_header", "oauth2_refresh", "basic", "custom_header"]
 
 
 # ── Token endpoint auth (for OAuth refresh) ─────────────────────────────────
@@ -119,6 +119,10 @@ class VaultCredentialCreate(BaseModel):
     username: SecretStr | None = None
     password: SecretStr | None = None
 
+    # custom_header fields
+    header_name: str | None = None
+    header_value: SecretStr | None = None
+
 
 class VaultCredentialUpdate(BaseModel):
     """Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.
@@ -148,6 +152,10 @@ class VaultCredentialUpdate(BaseModel):
     # basic
     username: SecretStr | None = None
     password: SecretStr | None = None
+
+    # custom_header
+    header_name: str | None = None
+    header_value: SecretStr | None = None
 
 
 class VaultCredential(BaseModel):

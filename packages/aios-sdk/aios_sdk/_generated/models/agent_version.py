@@ -13,6 +13,7 @@ from ..types import UNSET, Unset
 if TYPE_CHECKING:
     from ..models.agent_skill_ref import AgentSkillRef
     from ..models.agent_version_litellm_extra import AgentVersionLitellmExtra
+    from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
     from ..models.tool_spec import ToolSpec
 
@@ -35,6 +36,7 @@ class AgentVersion:
         window_max (int):
         created_at (datetime.datetime):
         skills (list[AgentSkillRef] | Unset):
+        http_servers (list[HttpServerSpec] | Unset):
         litellm_extra (AgentVersionLitellmExtra | Unset):
     """
 
@@ -48,6 +50,7 @@ class AgentVersion:
     window_max: int
     created_at: datetime.datetime
     skills: list[AgentSkillRef] | Unset = UNSET
+    http_servers: list[HttpServerSpec] | Unset = UNSET
     litellm_extra: AgentVersionLitellmExtra | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -83,6 +86,13 @@ class AgentVersion:
                 skills_item = skills_item_data.to_dict()
                 skills.append(skills_item)
 
+        http_servers: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.http_servers, Unset):
+            http_servers = []
+            for http_servers_item_data in self.http_servers:
+                http_servers_item = http_servers_item_data.to_dict()
+                http_servers.append(http_servers_item)
+
         litellm_extra: dict[str, Any] | Unset = UNSET
         if not isinstance(self.litellm_extra, Unset):
             litellm_extra = self.litellm_extra.to_dict()
@@ -104,6 +114,8 @@ class AgentVersion:
         )
         if skills is not UNSET:
             field_dict["skills"] = skills
+        if http_servers is not UNSET:
+            field_dict["http_servers"] = http_servers
         if litellm_extra is not UNSET:
             field_dict["litellm_extra"] = litellm_extra
 
@@ -113,6 +125,7 @@ class AgentVersion:
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.agent_skill_ref import AgentSkillRef
         from ..models.agent_version_litellm_extra import AgentVersionLitellmExtra
+        from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
         from ..models.tool_spec import ToolSpec
 
@@ -154,6 +167,15 @@ class AgentVersion:
 
                 skills.append(skills_item)
 
+        _http_servers = d.pop("http_servers", UNSET)
+        http_servers: list[HttpServerSpec] | Unset = UNSET
+        if _http_servers is not UNSET:
+            http_servers = []
+            for http_servers_item_data in _http_servers:
+                http_servers_item = HttpServerSpec.from_dict(http_servers_item_data)
+
+                http_servers.append(http_servers_item)
+
         _litellm_extra = d.pop("litellm_extra", UNSET)
         litellm_extra: AgentVersionLitellmExtra | Unset
         if isinstance(_litellm_extra, Unset):
@@ -172,6 +194,7 @@ class AgentVersion:
             window_max=window_max,
             created_at=created_at,
             skills=skills,
+            http_servers=http_servers,
             litellm_extra=litellm_extra,
         )
 

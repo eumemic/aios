@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from ..models.agent_skill_ref import AgentSkillRef
     from ..models.agent_update_litellm_extra_type_0 import AgentUpdateLitellmExtraType0
     from ..models.agent_update_metadata_type_0 import AgentUpdateMetadataType0
+    from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
     from ..models.tool_spec import ToolSpec
 
@@ -35,6 +36,7 @@ class AgentUpdate:
             tools (list[ToolSpec] | None | Unset):
             skills (list[AgentSkillRef] | None | Unset):
             mcp_servers (list[McpServerSpec] | None | Unset):
+            http_servers (list[HttpServerSpec] | None | Unset):
             description (None | str | Unset):
             metadata (AgentUpdateMetadataType0 | None | Unset):
             litellm_extra (AgentUpdateLitellmExtraType0 | None | Unset):
@@ -49,6 +51,7 @@ class AgentUpdate:
     tools: list[ToolSpec] | None | Unset = UNSET
     skills: list[AgentSkillRef] | None | Unset = UNSET
     mcp_servers: list[McpServerSpec] | None | Unset = UNSET
+    http_servers: list[HttpServerSpec] | None | Unset = UNSET
     description: None | str | Unset = UNSET
     metadata: AgentUpdateMetadataType0 | None | Unset = UNSET
     litellm_extra: AgentUpdateLitellmExtraType0 | None | Unset = UNSET
@@ -117,6 +120,18 @@ class AgentUpdate:
         else:
             mcp_servers = self.mcp_servers
 
+        http_servers: list[dict[str, Any]] | None | Unset
+        if isinstance(self.http_servers, Unset):
+            http_servers = UNSET
+        elif isinstance(self.http_servers, list):
+            http_servers = []
+            for http_servers_type_0_item_data in self.http_servers:
+                http_servers_type_0_item = http_servers_type_0_item_data.to_dict()
+                http_servers.append(http_servers_type_0_item)
+
+        else:
+            http_servers = self.http_servers
+
         description: None | str | Unset
         if isinstance(self.description, Unset):
             description = UNSET
@@ -170,6 +185,8 @@ class AgentUpdate:
             field_dict["skills"] = skills
         if mcp_servers is not UNSET:
             field_dict["mcp_servers"] = mcp_servers
+        if http_servers is not UNSET:
+            field_dict["http_servers"] = http_servers
         if description is not UNSET:
             field_dict["description"] = description
         if metadata is not UNSET:
@@ -190,6 +207,7 @@ class AgentUpdate:
             AgentUpdateLitellmExtraType0,
         )
         from ..models.agent_update_metadata_type_0 import AgentUpdateMetadataType0
+        from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
         from ..models.tool_spec import ToolSpec
 
@@ -293,6 +311,30 @@ class AgentUpdate:
 
         mcp_servers = _parse_mcp_servers(d.pop("mcp_servers", UNSET))
 
+        def _parse_http_servers(data: object) -> list[HttpServerSpec] | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, list):
+                    raise TypeError()
+                http_servers_type_0 = []
+                _http_servers_type_0 = data
+                for http_servers_type_0_item_data in _http_servers_type_0:
+                    http_servers_type_0_item = HttpServerSpec.from_dict(
+                        http_servers_type_0_item_data
+                    )
+
+                    http_servers_type_0.append(http_servers_type_0_item)
+
+                return http_servers_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(list[HttpServerSpec] | None | Unset, data)
+
+        http_servers = _parse_http_servers(d.pop("http_servers", UNSET))
+
         def _parse_description(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -364,6 +406,7 @@ class AgentUpdate:
             tools=tools,
             skills=skills,
             mcp_servers=mcp_servers,
+            http_servers=http_servers,
             description=description,
             metadata=metadata,
             litellm_extra=litellm_extra,

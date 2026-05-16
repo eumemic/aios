@@ -7,6 +7,7 @@ class ToolSpecTypeType0(str, Enum):
     EDIT = "edit"
     GLOB = "glob"
     GREP = "grep"
+    HTTP_REQUEST = "http_request"
     READ = "read"
     SCHEDULE_WAKE = "schedule_wake"
     SEARCH_EVENTS = "search_events"

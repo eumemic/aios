@@ -12,7 +12,7 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
-from aios.models.agents import Agent, AgentVersion, McpServerSpec, ToolSpec
+from aios.models.agents import Agent, AgentVersion, HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.skills import AgentSkillRef
 from aios.services import skills as skills_service
 
@@ -27,6 +27,7 @@ async def create_agent(
     tools: list[ToolSpec],
     skills: list[AgentSkillRef] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
     description: str | None,
     metadata: dict[str, Any],
     litellm_extra: dict[str, Any] | None = None,
@@ -45,6 +46,7 @@ async def create_agent(
             tools=tools,
             skills_json=snapshot_json,
             mcp_servers=mcp_servers or [],
+            http_servers=http_servers or [],
             description=description,
             metadata=metadata,
             litellm_extra=litellm_extra or {},
@@ -90,6 +92,7 @@ async def update_agent(
     tools: list[ToolSpec] | None = None,
     skills: list[AgentSkillRef] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
     litellm_extra: dict[str, Any] | None = None,
@@ -111,6 +114,7 @@ async def update_agent(
             tools=tools,
             skills_json=skills_json_str,
             mcp_servers=mcp_servers,
+            http_servers=http_servers,
             description=description,
             metadata=metadata,
             litellm_extra=litellm_extra,
