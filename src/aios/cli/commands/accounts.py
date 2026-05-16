@@ -23,7 +23,7 @@ from typing import Annotated
 
 import typer
 
-from aios.cli.commands._shared import render_list, render_single, unwrap
+from aios.cli.commands._shared import call_single, render_list, render_single, unwrap
 from aios.cli.output import print_json, print_note
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk._generated.api.accounts import (
@@ -75,9 +75,7 @@ def me(ctx: typer.Context) -> None:
     """Print the caller's account row."""
 
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(get_my_account.sync_detailed(client=client))
-        render_single(obj.to_dict())
+        call_single(ctx, get_my_account.sync_detailed)
 
     run_or_die(_run)
 
@@ -100,9 +98,7 @@ def get(ctx: typer.Context, target_id: str) -> None:
     """Read a caller-or-direct-child account."""
 
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(get_account.sync_detailed(client=client, target_id=target_id))
-        render_single(obj.to_dict())
+        call_single(ctx, get_account.sync_detailed, target_id=target_id)
 
     run_or_die(_run)
 
@@ -142,9 +138,7 @@ def mint(
 @app.command("archive", help="Archive a direct child account.")
 def archive(ctx: typer.Context, target_id: str) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(archive_account.sync_detailed(client=client, target_id=target_id))
-        render_single(obj.to_dict())
+        call_single(ctx, archive_account.sync_detailed, target_id=target_id)
 
     run_or_die(_run)
 
@@ -172,11 +166,7 @@ def update(
             display_name=display_name if display_name is not None else UNSET,
             can_mint_children=can_mint_children if can_mint_children is not None else UNSET,
         )
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                update_account.sync_detailed(client=client, target_id=target_id, body=body)
-            )
-        render_single(obj.to_dict())
+        call_single(ctx, update_account.sync_detailed, target_id=target_id, body=body)
 
     run_or_die(_run)
 
@@ -193,9 +183,7 @@ def by_path(
     ] = "",
 ) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(resolve_account_by_path.sync_detailed(client=client, path=path))
-        render_single(obj.to_dict())
+        call_single(ctx, resolve_account_by_path.sync_detailed, path=path)
 
     run_or_die(_run)
 

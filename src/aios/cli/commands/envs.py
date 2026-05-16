@@ -7,7 +7,7 @@ from typing import Annotated
 
 import typer
 
-from aios.cli.commands._shared import render_paginated, render_single, unwrap
+from aios.cli.commands._shared import call_single, render_paginated, unwrap
 from aios.cli.files import PayloadError, load_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -49,9 +49,7 @@ def list_(
 @app.command("get")
 def get(ctx: typer.Context, env_id: str) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(get_environment.sync_detailed(client=client, env_id=env_id))
-        render_single(obj.to_dict())
+        call_single(ctx, get_environment.sync_detailed, env_id=env_id)
 
     run_or_die(_run)
 
@@ -70,9 +68,7 @@ def create(
             print_error(str(exc))
             return 64
         body = EnvironmentCreate.from_dict(payload)
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(create_environment.sync_detailed(client=client, body=body))
-        render_single(obj.to_dict())
+        call_single(ctx, create_environment.sync_detailed, body=body)
         return None
 
     run_or_die(_run)
@@ -93,9 +89,7 @@ def update(
             print_error(str(exc))
             return 64
         body = EnvironmentUpdate.from_dict(payload)
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(update_environment.sync_detailed(client=client, env_id=env_id, body=body))
-        render_single(obj.to_dict())
+        call_single(ctx, update_environment.sync_detailed, env_id=env_id, body=body)
         return None
 
     run_or_die(_run)

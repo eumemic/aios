@@ -13,7 +13,12 @@ from typing import Annotated, Any
 
 import typer
 
-from aios.cli.commands._shared import render_list, render_paginated, render_single, unwrap
+from aios.cli.commands._shared import (
+    call_single,
+    render_list,
+    render_paginated,
+    unwrap,
+)
 from aios.cli.files import PayloadError, load_json_object, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -91,9 +96,7 @@ def list_(
 @app.command("get")
 def get(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(get_connection.sync_detailed(client=client, connection_id=connection_id))
-        render_single(obj.to_dict())
+        call_single(ctx, get_connection.sync_detailed, connection_id=connection_id)
 
     run_or_die(_run)
 
@@ -172,9 +175,7 @@ def create(
             print_error(str(exc))
             return 64
         body = ConnectionCreate.from_dict(payload)
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(create_connection.sync_detailed(client=client, body=body))
-        render_single(obj.to_dict())
+        call_single(ctx, create_connection.sync_detailed, body=body)
         return None
 
     run_or_die(_run)
@@ -207,13 +208,9 @@ def set_secrets(
             print_error(str(exc))
             return 64
         body = ConnectionSetSecrets(secrets=ConnectionSetSecretsSecrets.from_dict(kvs))
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                set_connection_secrets.sync_detailed(
-                    client=client, connection_id=connection_id, body=body
-                )
-            )
-        render_single(obj.to_dict())
+        call_single(
+            ctx, set_connection_secrets.sync_detailed, connection_id=connection_id, body=body
+        )
         print_success("secrets updated on", connection_id)
         return None
 
@@ -228,13 +225,7 @@ def attach(
 ) -> None:
     def _run() -> None:
         body = ConnectionAttach(session_id=session_id)
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                attach_connection.sync_detailed(
-                    client=client, connection_id=connection_id, body=body
-                )
-            )
-        render_single(obj.to_dict())
+        call_single(ctx, attach_connection.sync_detailed, connection_id=connection_id, body=body)
 
     run_or_die(_run)
 
@@ -242,11 +233,7 @@ def attach(
 @app.command("detach", help="Drop the single_session binding, leaving the connection detached.")
 def detach(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                detach_connection.sync_detailed(client=client, connection_id=connection_id)
-            )
-        render_single(obj.to_dict())
+        call_single(ctx, detach_connection.sync_detailed, connection_id=connection_id)
 
     run_or_die(_run)
 
@@ -259,13 +246,9 @@ def configure_per_chat(
 ) -> None:
     def _run() -> None:
         body = ConnectionConfigurePerChat(session_template_id=template)
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                configure_connection_per_chat.sync_detailed(
-                    client=client, connection_id=connection_id, body=body
-                )
-            )
-        render_single(obj.to_dict())
+        call_single(
+            ctx, configure_connection_per_chat.sync_detailed, connection_id=connection_id, body=body
+        )
 
     run_or_die(_run)
 
@@ -275,11 +258,7 @@ def configure_per_chat(
 )
 def unconfigure(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                unconfigure_connection.sync_detailed(client=client, connection_id=connection_id)
-            )
-        render_single(obj.to_dict())
+        call_single(ctx, unconfigure_connection.sync_detailed, connection_id=connection_id)
 
     run_or_die(_run)
 
@@ -296,11 +275,7 @@ def bind_chat_cmd(
 ) -> None:
     def _run() -> None:
         body = BindChatRequest(chat_id=chat_id, session_id=session_id)
-        with get_state(ctx).sdk_client() as client:
-            obj = unwrap(
-                bind_chat.sync_detailed(client=client, connection_id=connection_id, body=body)
-            )
-        render_single(obj.to_dict())
+        call_single(ctx, bind_chat.sync_detailed, connection_id=connection_id, body=body)
 
     run_or_die(_run)
 

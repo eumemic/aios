@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import typer
 
-from aios.cli.commands._shared import render_paginated, render_single, unwrap
+from aios.cli.commands._shared import call_single, render_paginated, unwrap
 from aios.cli.files import PayloadError, load_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -55,9 +55,7 @@ def list_(
 @app.command("get", help="Fetch a single agent by id.")
 def get(ctx: typer.Context, agent_id: str) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            agent = unwrap(get_agent.sync_detailed(client=client, agent_id=agent_id))
-        render_single(agent.to_dict())
+        call_single(ctx, get_agent.sync_detailed, agent_id=agent_id)
 
     run_or_die(_run)
 
@@ -76,9 +74,7 @@ def create(
             print_error(str(exc))
             return 64
         body = AgentCreate.from_dict(payload)
-        with get_state(ctx).sdk_client() as client:
-            agent = unwrap(create_agent.sync_detailed(client=client, body=body))
-        render_single(agent.to_dict())
+        call_single(ctx, create_agent.sync_detailed, body=body)
         return None
 
     run_or_die(_run)
@@ -99,9 +95,7 @@ def update(
             print_error(str(exc))
             return 64
         body = AgentUpdate.from_dict(payload)
-        with get_state(ctx).sdk_client() as client:
-            agent = unwrap(update_agent.sync_detailed(client=client, agent_id=agent_id, body=body))
-        render_single(agent.to_dict())
+        call_single(ctx, update_agent.sync_detailed, agent_id=agent_id, body=body)
         return None
 
     run_or_die(_run)
@@ -143,10 +137,6 @@ def versions(
 @app.command("version", help="Fetch a specific agent version.")
 def version(ctx: typer.Context, agent_id: str, version: int) -> None:
     def _run() -> None:
-        with get_state(ctx).sdk_client() as client:
-            obj: Any = unwrap(
-                get_agent_version.sync_detailed(client=client, agent_id=agent_id, version=version)
-            )
-        render_single(obj.to_dict())
+        call_single(ctx, get_agent_version.sync_detailed, agent_id=agent_id, version=version)
 
     run_or_die(_run)
