@@ -34,10 +34,6 @@ _TOKEN_PREFIX = "aios_runtime_"
 _TOKEN_BYTES = 32  # 256 bits of entropy
 
 
-def _generate_plaintext() -> str:
-    return _TOKEN_PREFIX + secrets.token_urlsafe(_TOKEN_BYTES)
-
-
 def _hash(plaintext: str) -> str:
     return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
 
@@ -54,7 +50,7 @@ async def issue(
     Returns ``(record, plaintext)``.  Plaintext is the bearer the
     runtime container will use; never persisted.
     """
-    plaintext = _generate_plaintext()
+    plaintext = _TOKEN_PREFIX + secrets.token_urlsafe(_TOKEN_BYTES)
     async with pool.acquire() as conn:
         token = await queries.insert_runtime_token(
             conn,
