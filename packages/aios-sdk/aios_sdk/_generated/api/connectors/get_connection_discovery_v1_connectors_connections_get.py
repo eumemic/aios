@@ -70,7 +70,9 @@ def sync_detailed(
     ``connections_<connector>`` NOTIFY channel.  Each event is keyed
     ``connection`` with a JSON body shaped::
 
-        {\"event\": \"added\" | \"removed\", \"connection_id\": \"...\", \"account\": \"...\"}
+        {\"event\": \"added\" | \"removed\",
+         \"connection_id\": \"...\",
+         \"external_account_id\": \"...\"}
 
     The runtime container subscribes once per ``connector`` type and
     fans out to per-connection workers on ``added``; tears them down
@@ -113,7 +115,9 @@ def sync(
     ``connections_<connector>`` NOTIFY channel.  Each event is keyed
     ``connection`` with a JSON body shaped::
 
-        {\"event\": \"added\" | \"removed\", \"connection_id\": \"...\", \"account\": \"...\"}
+        {\"event\": \"added\" | \"removed\",
+         \"connection_id\": \"...\",
+         \"external_account_id\": \"...\"}
 
     The runtime container subscribes once per ``connector`` type and
     fans out to per-connection workers on ``added``; tears them down
@@ -151,7 +155,9 @@ async def asyncio_detailed(
     ``connections_<connector>`` NOTIFY channel.  Each event is keyed
     ``connection`` with a JSON body shaped::
 
-        {\"event\": \"added\" | \"removed\", \"connection_id\": \"...\", \"account\": \"...\"}
+        {\"event\": \"added\" | \"removed\",
+         \"connection_id\": \"...\",
+         \"external_account_id\": \"...\"}
 
     The runtime container subscribes once per ``connector`` type and
     fans out to per-connection workers on ``added``; tears them down
@@ -192,7 +198,9 @@ async def asyncio(
     ``connections_<connector>`` NOTIFY channel.  Each event is keyed
     ``connection`` with a JSON body shaped::
 
-        {\"event\": \"added\" | \"removed\", \"connection_id\": \"...\", \"account\": \"...\"}
+        {\"event\": \"added\" | \"removed\",
+         \"connection_id\": \"...\",
+         \"external_account_id\": \"...\"}
 
     The runtime container subscribes once per ``connector`` type and
     fans out to per-connection workers on ``added``; tears them down

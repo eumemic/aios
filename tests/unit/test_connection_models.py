@@ -28,18 +28,18 @@ from aios.models.session_templates import (
 
 class TestConnectionCreate:
     def test_minimal(self) -> None:
-        body = ConnectionCreate(connector="signal", account="+15550001")
+        body = ConnectionCreate(connector="signal", external_account_id="+15550001")
         assert body.connector == "signal"
-        assert body.account == "+15550001"
+        assert body.external_account_id == "+15550001"
         assert body.metadata == {}
 
     def test_rejects_slash_in_connector(self) -> None:
         with pytest.raises(ValueError, match="must not contain '/'"):
-            ConnectionCreate(connector="signal/bad", account="acct")
+            ConnectionCreate(connector="signal/bad", external_account_id="acct")
 
-    def test_rejects_slash_in_account(self) -> None:
+    def test_rejects_slash_in_external_account_id(self) -> None:
         with pytest.raises(ValueError, match="must not contain '/'"):
-            ConnectionCreate(connector="signal", account="acct/with/slash")
+            ConnectionCreate(connector="signal", external_account_id="acct/with/slash")
 
     def test_rejects_extra_fields(self) -> None:
         """``extra="forbid"`` keeps wire shape strict — the old model
@@ -50,7 +50,7 @@ class TestConnectionCreate:
             ConnectionCreate.model_validate(
                 {
                     "connector": "signal",
-                    "account": "acct",
+                    "external_account_id": "acct",
                     "mcp_url": "https://m",  # removed in #200
                 }
             )
@@ -64,10 +64,15 @@ class TestConnectionCreate:
             ConnectionCreate.model_validate(
                 {
                     "connector": "signal",
-                    "account": "+1",
+                    "external_account_id": "+1",
                     "tools": [{"type": "custom", "name": "x", "input_schema": {}}],
                 }
             )
+
+    def test_rejects_legacy_account_field(self) -> None:
+        """Pre-rename clients sending ``account`` must 422, not silently coerce."""
+        with pytest.raises(ValueError):
+            ConnectionCreate.model_validate({"connector": "signal", "account": "+15550001"})
 
 
 class TestConnectionAttach:
@@ -96,7 +101,7 @@ class TestConnectionReadView:
         c = Connection(
             id="conn_1",
             connector="signal",
-            account="+1",
+            external_account_id="+1",
             metadata={},
             created_at=self._now(),
             updated_at=self._now(),
@@ -108,7 +113,7 @@ class TestConnectionReadView:
         c = Connection(
             id="conn_1",
             connector="signal",
-            account="+1",
+            external_account_id="+1",
             session_id="sess_1",
             metadata={},
             created_at=self._now(),
@@ -122,7 +127,7 @@ class TestConnectionReadView:
         c = Connection(
             id="conn_1",
             connector="signal",
-            account="+1",
+            external_account_id="+1",
             session_template_id="stpl_1",
             metadata={},
             created_at=self._now(),

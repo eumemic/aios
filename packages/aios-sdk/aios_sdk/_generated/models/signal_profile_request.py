@@ -14,19 +14,19 @@ T = TypeVar("T", bound="SignalProfileRequest")
 class SignalProfileRequest:
     """
     Attributes:
-        account (str):
+        external_account_id (str):
         given_name (None | str | Unset):
         family_name (None | str | Unset):
         about (None | str | Unset):
     """
 
-    account: str
+    external_account_id: str
     given_name: None | str | Unset = UNSET
     family_name: None | str | Unset = UNSET
     about: None | str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
-        account = self.account
+        external_account_id = self.external_account_id
 
         given_name: None | str | Unset
         if isinstance(self.given_name, Unset):
@@ -50,7 +50,7 @@ class SignalProfileRequest:
 
         field_dict.update(
             {
-                "account": account,
+                "external_account_id": external_account_id,
             }
         )
         if given_name is not UNSET:
@@ -65,7 +65,7 @@ class SignalProfileRequest:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        account = d.pop("account")
+        external_account_id = d.pop("external_account_id")
 
         def _parse_given_name(data: object) -> None | str | Unset:
             if data is None:
@@ -95,7 +95,7 @@ class SignalProfileRequest:
         about = _parse_about(d.pop("about", UNSET))
 
         signal_profile_request = cls(
-            account=account,
+            external_account_id=external_account_id,
             given_name=given_name,
             family_name=family_name,
             about=about,

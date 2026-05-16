@@ -30,7 +30,7 @@ async def _create_with_secrets(
     account: str,
     secrets: dict[str, str] | None,
 ) -> str:
-    body: dict[str, object] = {"connector": "echo", "account": account}
+    body: dict[str, object] = {"connector": "echo", "external_account_id": account}
     if secrets is not None:
         body["secrets"] = secrets
     async with authed_client(base_url, api_key) as c:

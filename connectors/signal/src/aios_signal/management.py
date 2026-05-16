@@ -36,51 +36,56 @@ class SignalManagementMixin:
     async def register(
         self,
         *,
-        account: str,
+        external_account_id: str,
         captcha: str | None = None,
         voice: bool = False,
     ) -> dict[str, Any]:
         assert self._daemon is not None
         try:
-            await self._daemon.register(phone=account, captcha=captcha, voice=voice)
+            await self._daemon.register(
+                phone=external_account_id, captcha=captcha, voice=voice
+            )
         except RpcError as exc:
             if _is_captcha_required(exc):
                 raise ManagementHandlerError(
                     {
                         "status": "captcha_required",
                         "captcha_url": _captcha_url(exc),
-                        "account": account,
+                        "external_account_id": external_account_id,
                     }
                 ) from exc
             raise
-        return {"account": account, "status": "voice_sent" if voice else "sms_sent"}
+        return {
+            "external_account_id": external_account_id,
+            "status": "voice_sent" if voice else "sms_sent",
+        }
 
     @management_handler()
     async def verify(
         self,
         *,
-        account: str,
+        external_account_id: str,
         code: str,
         pin: str | None = None,
     ) -> dict[str, Any]:
         assert self._daemon is not None
-        result = await self._daemon.verify(phone=account, code=code, pin=pin)
-        return {"account": account, "uuid": result.get("uuid", "")}
+        result = await self._daemon.verify(phone=external_account_id, code=code, pin=pin)
+        return {"external_account_id": external_account_id, "uuid": result.get("uuid", "")}
 
     @management_handler(method="updateProfile")
     async def update_profile(
         self,
         *,
-        account: str,
+        external_account_id: str,
         given_name: str | None = None,
         family_name: str | None = None,
         about: str | None = None,
     ) -> dict[str, Any]:
         assert self._daemon is not None
         await self._daemon.update_profile(
-            phone=account,
+            phone=external_account_id,
             given_name=given_name,
             family_name=family_name,
             about=about,
         )
-        return {"account": account}
+        return {"external_account_id": external_account_id}

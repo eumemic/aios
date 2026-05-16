@@ -16,7 +16,6 @@ different one returns ``None``.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,29 +25,6 @@ import pytest
 from aios.db import queries
 
 pytestmark = pytest.mark.integration
-
-
-@pytest.fixture
-async def conn_two_accounts(
-    migrated_db_url: str, _reset_db_state: None
-) -> AsyncIterator[asyncpg.Connection[Any]]:
-    """Asyncpg conn with two seeded accounts (``acc_a``, ``acc_b``)."""
-    conn = await asyncpg.connect(migrated_db_url)
-    try:
-        # One root + two children — partial unique index
-        # ``accounts_one_active_root`` permits only a single non-archived
-        # ``parent_account_id IS NULL`` row at a time.
-        await conn.execute(
-            """
-            INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
-            VALUES ('acc_root', NULL,      TRUE,  'tenant-root'),
-                   ('acc_a',    'acc_root', FALSE, 'tenant-a'),
-                   ('acc_b',    'acc_root', FALSE, 'tenant-b')
-            """
-        )
-        yield conn
-    finally:
-        await conn.close()
 
 
 class TestGetManagementCallTenancy:

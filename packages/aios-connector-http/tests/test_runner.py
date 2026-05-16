@@ -258,9 +258,13 @@ class _FocalConnector(_ProbeConnector):
         return f"sent to {chat_id}"
 
     @tool()
-    async def needs_both(self, *, account: str, chat_id: str, text: str) -> str:
-        self.focal_calls.append({"account": account, "chat_id": chat_id, "text": text})
-        return f"{account}:{chat_id}"
+    async def needs_both(
+        self, *, external_account_id: str, chat_id: str, text: str
+    ) -> str:
+        self.focal_calls.append(
+            {"external_account_id": external_account_id, "chat_id": chat_id, "text": text}
+        )
+        return f"{external_account_id}:{chat_id}"
 
     @tool()
     async def needs_connection(self, *, connection_id: str, text: str) -> str:
@@ -289,7 +293,7 @@ class TestFocalChannelInjection:
         )
         assert c.focal_calls == [{"text": "hi", "chat_id": "chat-123"}]
 
-    async def test_injects_both_account_and_chat_id(self) -> None:
+    async def test_injects_both_external_account_id_and_chat_id(self) -> None:
         c = _FocalConnector()
         await c.dispatch_call(
             {
@@ -301,7 +305,9 @@ class TestFocalChannelInjection:
                 "focal_channel": "signal/+15551234/group-abc",
             }
         )
-        assert c.focal_calls == [{"account": "+15551234", "chat_id": "group-abc", "text": "hi"}]
+        assert c.focal_calls == [
+            {"external_account_id": "+15551234", "chat_id": "group-abc", "text": "hi"}
+        ]
 
     async def test_injects_connection_id_when_signature_accepts(self) -> None:
         c = _FocalConnector()

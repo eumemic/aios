@@ -34,7 +34,7 @@ def _new_event_id() -> str:
 async def _create_connection(http_client: httpx.AsyncClient, account: str) -> str:
     r = await http_client.post(
         "/v1/connections",
-        json={"connector": "echo", "account": account},
+        json={"connector": "echo", "external_account_id": account},
     )
     assert r.status_code == 201, r.text
     return str(r.json()["id"])

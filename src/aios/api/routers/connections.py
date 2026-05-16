@@ -39,14 +39,20 @@ router = APIRouter(prefix="/v1/connections", tags=["connections"])
 async def create(
     body: ConnectionCreate, pool: PoolDep, crypto_box: CryptoBoxDep, _auth: AuthDep
 ) -> Connection:
-    """Create a detached connection, **idempotent on ``(connector, account)``**.
+    """Create a detached connection, **idempotent on ``(connector, external_account_id)``**.
 
     Per plan decision #5, this endpoint and the supervisor's
-    auto-create-on-first-inbound path race-safely converge on a single row:
-    posting twice with the same ``(connector, account)`` returns 201 with the
-    existing row rather than 409.  The ``id`` may differ from a freshly-allocated
-    one if a concurrent writer landed first; the response always reflects the
-    canonical active row.
+    auto-create-on-first-inbound path race-safely converge on a single
+    row: posting twice with the same ``(connector, external_account_id)``
+    returns 201 with the existing row rather than 409. The ``id`` may
+    differ from a freshly-allocated one if a concurrent writer landed
+    first; the response always reflects the canonical active row.
+
+    The active-row partial-unique index is global, not tenant-scoped —
+    real-world messaging identities (Signal phone numbers, Telegram
+    bot tokens, etc.) are universally exclusive. If another tenant
+    already holds the active row for this identity, the call returns
+    409 ``conflict`` rather than silently masking the collision.
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
@@ -58,7 +64,7 @@ async def create(
     return await service.create_connection(
         pool,
         connector=body.connector,
-        account=body.account,
+        external_account_id=body.external_account_id,
         metadata=body.metadata,
         secrets=body.secrets,
         crypto_box=crypto_box,

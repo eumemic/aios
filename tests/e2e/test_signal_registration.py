@@ -36,29 +36,46 @@ class _FakeSignalConnector(HttpConnector):
 
     @management_handler()
     async def register(
-        self, *, account: str, captcha: str | None = None, voice: bool = False
+        self, *, external_account_id: str, captcha: str | None = None, voice: bool = False
     ) -> dict:
-        self.calls.append(("register", {"account": account, "captcha": captcha, "voice": voice}))
+        self.calls.append(
+            (
+                "register",
+                {
+                    "external_account_id": external_account_id,
+                    "captcha": captcha,
+                    "voice": voice,
+                },
+            )
+        )
         if self.captcha_on_register and captcha is None:
             raise ManagementHandlerError(
                 {
                     "status": "captcha_required",
                     "captcha_url": "https://signalcaptchas.org/registration/generate",
-                    "account": account,
+                    "external_account_id": external_account_id,
                 }
             )
-        return {"account": account, "status": "voice_sent" if voice else "sms_sent"}
+        return {
+            "external_account_id": external_account_id,
+            "status": "voice_sent" if voice else "sms_sent",
+        }
 
     @management_handler()
-    async def verify(self, *, account: str, code: str, pin: str | None = None) -> dict:
-        self.calls.append(("verify", {"account": account, "code": code, "pin": pin}))
-        return {"account": account, "uuid": "u-from-fake"}
+    async def verify(self, *, external_account_id: str, code: str, pin: str | None = None) -> dict:
+        self.calls.append(
+            (
+                "verify",
+                {"external_account_id": external_account_id, "code": code, "pin": pin},
+            )
+        )
+        return {"external_account_id": external_account_id, "uuid": "u-from-fake"}
 
     @management_handler(method="updateProfile")
     async def update_profile(
         self,
         *,
-        account: str,
+        external_account_id: str,
         given_name: str | None = None,
         family_name: str | None = None,
         about: str | None = None,
@@ -67,14 +84,14 @@ class _FakeSignalConnector(HttpConnector):
             (
                 "updateProfile",
                 {
-                    "account": account,
+                    "external_account_id": external_account_id,
                     "given_name": given_name,
                     "family_name": family_name,
                     "about": about,
                 },
             )
         )
-        return {"account": account}
+        return {"external_account_id": external_account_id}
 
 
 @pytest.fixture
@@ -163,13 +180,13 @@ class TestSignalRegistration:
                 # Register.
                 r = await c.post(
                     "/v1/connectors/signal/register",
-                    json={"account": "+15551234567"},
+                    json={"external_account_id": "+15551234567"},
                     timeout=10.0,
                 )
                 assert r.status_code == 200, r.text
                 body = r.json()
                 assert body == {
-                    "account": "+15551234567",
+                    "external_account_id": "+15551234567",
                     "status": "sms_sent",
                     "captcha_url": None,
                 }
@@ -177,16 +194,19 @@ class TestSignalRegistration:
                 # Verify.
                 r = await c.post(
                     "/v1/connectors/signal/verify",
-                    json={"account": "+15551234567", "code": "123456"},
+                    json={"external_account_id": "+15551234567", "code": "123456"},
                     timeout=10.0,
                 )
                 assert r.status_code == 200, r.text
-                assert r.json() == {"account": "+15551234567", "uuid": "u-from-fake"}
+                assert r.json() == {
+                    "external_account_id": "+15551234567",
+                    "uuid": "u-from-fake",
+                }
 
                 # Profile (only given_name).
                 r = await c.post(
                     "/v1/connectors/signal/profile",
-                    json={"account": "+15551234567", "given_name": "Alice"},
+                    json={"external_account_id": "+15551234567", "given_name": "Alice"},
                     timeout=10.0,
                 )
                 assert r.status_code == 204, r.text
@@ -194,11 +214,11 @@ class TestSignalRegistration:
             # The handler was hit with the right kwargs.
             assert (
                 "register",
-                {"account": "+15551234567", "captcha": None, "voice": False},
+                {"external_account_id": "+15551234567", "captcha": None, "voice": False},
             ) in connector.calls
             assert (
                 "verify",
-                {"account": "+15551234567", "code": "123456", "pin": None},
+                {"external_account_id": "+15551234567", "code": "123456", "pin": None},
             ) in connector.calls
             profile_call = next(c for c in connector.calls if c[0] == "updateProfile")
             assert profile_call[1]["given_name"] == "Alice"
@@ -232,7 +252,7 @@ class TestSignalRegistration:
             async with authed_client(live_server, api_key) as c:
                 r = await c.post(
                     "/v1/connectors/signal/register",
-                    json={"account": "+15559999999"},
+                    json={"external_account_id": "+15559999999"},
                     timeout=10.0,
                 )
                 assert r.status_code == 200, r.text
@@ -245,7 +265,7 @@ class TestSignalRegistration:
                 r = await c.post(
                     "/v1/connectors/signal/register",
                     json={
-                        "account": "+15559999999",
+                        "external_account_id": "+15559999999",
                         "captcha": "signalcaptcha://solved",
                     },
                     timeout=10.0,

@@ -1,22 +1,22 @@
 """Connection resource — the unified routing primitive.
 
-A *connection* is a registered ``(connector, account)`` pair, optionally
-attached to a routing target via the ``bindings`` table.  Three valid
-shapes derived from the active binding:
+A *connection* is a registered ``(connector, external_account_id)``
+pair, optionally attached to a routing target via the ``bindings``
+table.  Three valid shapes derived from the active binding:
 
 * **detached** — no active binding row.  Inbound messages drop with a
   counter increment.
 * **single_session** — active binding with ``mode='single_session'`` and
-  ``session_id`` populated.  Every inbound for this account appends to
+  ``session_id`` populated.  Every inbound for this identity appends to
   that one session.
 * **per_chat** — active binding with ``mode='per_chat'`` and
   ``session_template_id`` populated.  Each new chat partner spawns a
   fresh session via the template; the ``chat_id`` → ``session_id`` map
   lives in ``chat_sessions``.
 
-The active-row uniqueness on ``(connector, account)`` enforces
-"one session per account" by schema — operators can't accidentally
-double-bind a phone number to two sessions.  The
+The active-row uniqueness on ``(connector, external_account_id)``
+enforces "one session per external identity" by schema — operators
+can't accidentally double-bind a phone number to two sessions.  The
 ``bindings_connection_active_uniq`` partial-unique index gives the same
 guarantee at the binding level (at most one active binding per
 connection).
@@ -45,15 +45,16 @@ class ConnectionCreate(BaseModel):
     ``session_template_id`` is set.  Use ``POST .../attach`` or
     ``POST .../configure-per-chat`` afterward to bind a routing mode.
 
-    ``connector`` and ``account`` may not contain ``/`` — they're used
-    in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
-    and a ``/`` would create ambiguous segment boundaries.
+    ``connector`` and ``external_account_id`` may not contain ``/`` —
+    they're used in the focal-channel address scheme
+    ``{connector}/{external_account_id}/{chat_id}`` and a ``/`` would
+    create ambiguous segment boundaries.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     connector: str = Field(min_length=1, max_length=64)
-    account: str = Field(min_length=1, max_length=256)
+    external_account_id: str = Field(min_length=1, max_length=256)
     metadata: dict[str, Any] = Field(default_factory=dict)
     secrets: dict[str, str] | None = Field(
         default=None,
@@ -63,7 +64,7 @@ class ConnectionCreate(BaseModel):
         "Operator-facing reads return ``secrets_set: bool`` instead of values.",
     )
 
-    @field_validator("connector", "account")
+    @field_validator("connector", "external_account_id")
     @classmethod
     def _no_slash(cls, v: str) -> str:
         if "/" in v:
@@ -112,7 +113,7 @@ class Connection(BaseModel):
 
     id: str
     connector: str
-    account: str
+    external_account_id: str
     session_id: str | None = None
     session_template_id: str | None = None
     metadata: dict[str, Any]

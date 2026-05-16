@@ -120,7 +120,7 @@ async def handle_inbound(
         appended = await _append_with_dedup(
             pool,
             connector=connection.connector,
-            account=connection.account,
+            external_account_id=connection.external_account_id,
             event_id=event_id,
             session_id=target_session_id,
             chat_id=chat_id,
@@ -157,7 +157,7 @@ async def _append_with_dedup(
     *,
     account_id: str,
     connector: str,
-    account: str,
+    external_account_id: str,
     event_id: str,
     session_id: str,
     chat_id: str,
@@ -173,7 +173,7 @@ async def _append_with_dedup(
     txn back via :class:`_DedupRollback`.  Returns True on first-append,
     False on dedup hit.
     """
-    channel = f"{connector}/{account}/{chat_id}"
+    channel = f"{connector}/{external_account_id}/{chat_id}"
     sender_name = sender.get("display_name")
     metadata: dict[str, Any] = {}
     if connector_metadata is not None:
@@ -200,7 +200,7 @@ async def _append_with_dedup(
             inserted = await queries.try_record_inbound_ack(
                 conn,
                 connector=connector,
-                account=account,
+                external_account_id=external_account_id,
                 event_id=event_id,
                 appended_seq=event.seq,
                 account_id=account_id,

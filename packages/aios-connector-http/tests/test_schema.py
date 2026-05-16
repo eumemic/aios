@@ -177,11 +177,11 @@ class TestSkipsInjectedParams:
         assert "chat_id" not in props
         assert "chat_id" not in spec["input_schema"]["required"]
 
-    def test_account_is_excluded_from_schema(self) -> None:
+    def test_external_account_id_is_excluded_from_schema(self) -> None:
         class C(_DummyForBindings):
             @tool()
-            async def t(self, *, account: str, chat_id: str) -> str:
-                return f"{account}/{chat_id}"
+            async def t(self, *, external_account_id: str, chat_id: str) -> str:
+                return f"{external_account_id}/{chat_id}"
 
         spec = derive_tool_spec("t", C().t)
         assert spec["input_schema"]["properties"] == {}

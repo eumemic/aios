@@ -75,7 +75,7 @@ class TestConnectionToolsInPrelude:
         connection = await connections_service.create_connection(
             harness._pool,
             connector="echo",
-            account="echo-1",
+            external_account_id="echo-1",
             metadata={},
             crypto_box=crypto_box,
             account_id=account_id,
@@ -168,7 +168,7 @@ class TestConnectionToolsInPrelude:
         connection = await connections_service.create_connection(
             harness._pool,
             connector="echo",
-            account="echo-pc",
+            external_account_id="echo-pc",
             metadata={},
             crypto_box=crypto_box,
             account_id=account_id,
@@ -264,7 +264,7 @@ class TestConnectionToolDispatch:
         connection = await connections_service.create_connection(
             harness._pool,
             connector="echo",
-            account="echo-d",
+            external_account_id="echo-d",
             metadata={},
             crypto_box=crypto_box,
             account_id=account_id,

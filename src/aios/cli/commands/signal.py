@@ -50,7 +50,7 @@ def register(
 
     def _run() -> None:
         with get_state(ctx).sdk_client() as client:
-            body = SignalRegisterRequest(account=phone, captcha=captcha, voice=voice)
+            body = SignalRegisterRequest(external_account_id=phone, captcha=captcha, voice=voice)
             result = unwrap(post_connector_signal_register.sync_detailed(client=client, body=body))
         payload = result.to_dict()
         if payload.get("status") == "captcha_required":
@@ -89,7 +89,7 @@ def verify(
 
     def _run() -> None:
         with get_state(ctx).sdk_client() as client:
-            body = SignalVerifyRequest(account=phone, code=code, pin=pin)
+            body = SignalVerifyRequest(external_account_id=phone, code=code, pin=pin)
             result = unwrap(post_connector_signal_verify.sync_detailed(client=client, body=body))
         payload = result.to_dict()
         print_note(f"verified {phone} (uuid={payload.get('uuid', '?')})")
@@ -115,7 +115,7 @@ def profile(
     def _run() -> None:
         with get_state(ctx).sdk_client() as client:
             body = SignalProfileRequest(
-                account=phone,
+                external_account_id=phone,
                 given_name=given_name,
                 family_name=family_name,
                 about=about,

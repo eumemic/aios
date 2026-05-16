@@ -71,14 +71,20 @@ def sync_detailed(
 ) -> Response[Connection | HTTPValidationError]:
     """Create
 
-     Create a detached connection, **idempotent on ``(connector, account)``**.
+     Create a detached connection, **idempotent on ``(connector, external_account_id)``**.
 
     Per plan decision #5, this endpoint and the supervisor's
-    auto-create-on-first-inbound path race-safely converge on a single row:
-    posting twice with the same ``(connector, account)`` returns 201 with the
-    existing row rather than 409.  The ``id`` may differ from a freshly-allocated
-    one if a concurrent writer landed first; the response always reflects the
-    canonical active row.
+    auto-create-on-first-inbound path race-safely converge on a single
+    row: posting twice with the same ``(connector, external_account_id)``
+    returns 201 with the existing row rather than 409. The ``id`` may
+    differ from a freshly-allocated one if a concurrent writer landed
+    first; the response always reflects the canonical active row.
+
+    The active-row partial-unique index is global, not tenant-scoped —
+    real-world messaging identities (Signal phone numbers, Telegram
+    bot tokens, etc.) are universally exclusive. If another tenant
+    already holds the active row for this identity, the call returns
+    409 ``conflict`` rather than silently masking the collision.
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
@@ -94,9 +100,10 @@ def sync_detailed(
             ``session_template_id`` is set.  Use ``POST .../attach`` or
             ``POST .../configure-per-chat`` afterward to bind a routing mode.
 
-            ``connector`` and ``account`` may not contain ``/`` — they're used
-            in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
-            and a ``/`` would create ambiguous segment boundaries.
+            ``connector`` and ``external_account_id`` may not contain ``/`` —
+            they're used in the focal-channel address scheme
+            ``{connector}/{external_account_id}/{chat_id}`` and a ``/`` would
+            create ambiguous segment boundaries.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -126,14 +133,20 @@ def sync(
 ) -> Connection | HTTPValidationError | None:
     """Create
 
-     Create a detached connection, **idempotent on ``(connector, account)``**.
+     Create a detached connection, **idempotent on ``(connector, external_account_id)``**.
 
     Per plan decision #5, this endpoint and the supervisor's
-    auto-create-on-first-inbound path race-safely converge on a single row:
-    posting twice with the same ``(connector, account)`` returns 201 with the
-    existing row rather than 409.  The ``id`` may differ from a freshly-allocated
-    one if a concurrent writer landed first; the response always reflects the
-    canonical active row.
+    auto-create-on-first-inbound path race-safely converge on a single
+    row: posting twice with the same ``(connector, external_account_id)``
+    returns 201 with the existing row rather than 409. The ``id`` may
+    differ from a freshly-allocated one if a concurrent writer landed
+    first; the response always reflects the canonical active row.
+
+    The active-row partial-unique index is global, not tenant-scoped —
+    real-world messaging identities (Signal phone numbers, Telegram
+    bot tokens, etc.) are universally exclusive. If another tenant
+    already holds the active row for this identity, the call returns
+    409 ``conflict`` rather than silently masking the collision.
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
@@ -149,9 +162,10 @@ def sync(
             ``session_template_id`` is set.  Use ``POST .../attach`` or
             ``POST .../configure-per-chat`` afterward to bind a routing mode.
 
-            ``connector`` and ``account`` may not contain ``/`` — they're used
-            in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
-            and a ``/`` would create ambiguous segment boundaries.
+            ``connector`` and ``external_account_id`` may not contain ``/`` —
+            they're used in the focal-channel address scheme
+            ``{connector}/{external_account_id}/{chat_id}`` and a ``/`` would
+            create ambiguous segment boundaries.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -176,14 +190,20 @@ async def asyncio_detailed(
 ) -> Response[Connection | HTTPValidationError]:
     """Create
 
-     Create a detached connection, **idempotent on ``(connector, account)``**.
+     Create a detached connection, **idempotent on ``(connector, external_account_id)``**.
 
     Per plan decision #5, this endpoint and the supervisor's
-    auto-create-on-first-inbound path race-safely converge on a single row:
-    posting twice with the same ``(connector, account)`` returns 201 with the
-    existing row rather than 409.  The ``id`` may differ from a freshly-allocated
-    one if a concurrent writer landed first; the response always reflects the
-    canonical active row.
+    auto-create-on-first-inbound path race-safely converge on a single
+    row: posting twice with the same ``(connector, external_account_id)``
+    returns 201 with the existing row rather than 409. The ``id`` may
+    differ from a freshly-allocated one if a concurrent writer landed
+    first; the response always reflects the canonical active row.
+
+    The active-row partial-unique index is global, not tenant-scoped —
+    real-world messaging identities (Signal phone numbers, Telegram
+    bot tokens, etc.) are universally exclusive. If another tenant
+    already holds the active row for this identity, the call returns
+    409 ``conflict`` rather than silently masking the collision.
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
@@ -199,9 +219,10 @@ async def asyncio_detailed(
             ``session_template_id`` is set.  Use ``POST .../attach`` or
             ``POST .../configure-per-chat`` afterward to bind a routing mode.
 
-            ``connector`` and ``account`` may not contain ``/`` — they're used
-            in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
-            and a ``/`` would create ambiguous segment boundaries.
+            ``connector`` and ``external_account_id`` may not contain ``/`` —
+            they're used in the focal-channel address scheme
+            ``{connector}/{external_account_id}/{chat_id}`` and a ``/`` would
+            create ambiguous segment boundaries.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -229,14 +250,20 @@ async def asyncio(
 ) -> Connection | HTTPValidationError | None:
     """Create
 
-     Create a detached connection, **idempotent on ``(connector, account)``**.
+     Create a detached connection, **idempotent on ``(connector, external_account_id)``**.
 
     Per plan decision #5, this endpoint and the supervisor's
-    auto-create-on-first-inbound path race-safely converge on a single row:
-    posting twice with the same ``(connector, account)`` returns 201 with the
-    existing row rather than 409.  The ``id`` may differ from a freshly-allocated
-    one if a concurrent writer landed first; the response always reflects the
-    canonical active row.
+    auto-create-on-first-inbound path race-safely converge on a single
+    row: posting twice with the same ``(connector, external_account_id)``
+    returns 201 with the existing row rather than 409. The ``id`` may
+    differ from a freshly-allocated one if a concurrent writer landed
+    first; the response always reflects the canonical active row.
+
+    The active-row partial-unique index is global, not tenant-scoped —
+    real-world messaging identities (Signal phone numbers, Telegram
+    bot tokens, etc.) are universally exclusive. If another tenant
+    already holds the active row for this identity, the call returns
+    409 ``conflict`` rather than silently masking the collision.
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
@@ -252,9 +279,10 @@ async def asyncio(
             ``session_template_id`` is set.  Use ``POST .../attach`` or
             ``POST .../configure-per-chat`` afterward to bind a routing mode.
 
-            ``connector`` and ``account`` may not contain ``/`` — they're used
-            in the focal-channel address scheme ``{connector}/{account}/{chat_id}``
-            and a ``/`` would create ambiguous segment boundaries.
+            ``connector`` and ``external_account_id`` may not contain ``/`` —
+            they're used in the focal-channel address scheme
+            ``{connector}/{external_account_id}/{chat_id}`` and a ``/`` would
+            create ambiguous segment boundaries.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

@@ -160,7 +160,7 @@ async def _spawn_per_chat_session(
     if template.archived_at is not None:
         return ResolveResult(session_id=None, drop=ResolveDrop.ARCHIVED_TEMPLATE)
 
-    focal_channel = f"{connection.connector}/{connection.account}/{chat_id}"
+    focal_channel = f"{connection.connector}/{connection.external_account_id}/{chat_id}"
     session = await sessions_service.create_session(
         pool,
         agent_id=template.agent_id,

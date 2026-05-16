@@ -43,7 +43,7 @@ class Connection:
         Attributes:
             id (str):
             connector (str):
-            account (str):
+            external_account_id (str):
             metadata (ConnectionMetadata):
             created_at (datetime.datetime):
             updated_at (datetime.datetime):
@@ -56,7 +56,7 @@ class Connection:
 
     id: str
     connector: str
-    account: str
+    external_account_id: str
     metadata: ConnectionMetadata
     created_at: datetime.datetime
     updated_at: datetime.datetime
@@ -72,7 +72,7 @@ class Connection:
 
         connector = self.connector
 
-        account = self.account
+        external_account_id = self.external_account_id
 
         metadata = self.metadata.to_dict()
 
@@ -116,7 +116,7 @@ class Connection:
             {
                 "id": id,
                 "connector": connector,
-                "account": account,
+                "external_account_id": external_account_id,
                 "metadata": metadata,
                 "created_at": created_at,
                 "updated_at": updated_at,
@@ -144,7 +144,7 @@ class Connection:
 
         connector = d.pop("connector")
 
-        account = d.pop("account")
+        external_account_id = d.pop("external_account_id")
 
         metadata = ConnectionMetadata.from_dict(d.pop("metadata"))
 
@@ -211,7 +211,7 @@ class Connection:
         connection = cls(
             id=id,
             connector=connector,
-            account=account,
+            external_account_id=external_account_id,
             metadata=metadata,
             created_at=created_at,
             updated_at=updated_at,

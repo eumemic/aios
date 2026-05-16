@@ -5195,7 +5195,7 @@
           "connections"
         ],
         "summary": "Create",
-        "description": "Create a detached connection, **idempotent on ``(connector, account)``**.\n\nPer plan decision #5, this endpoint and the supervisor's\nauto-create-on-first-inbound path race-safely converge on a single row:\nposting twice with the same ``(connector, account)`` returns 201 with the\nexisting row rather than 409.  The ``id`` may differ from a freshly-allocated\none if a concurrent writer landed first; the response always reflects the\ncanonical active row.\n\nOptional ``secrets`` carry platform credentials (e.g. Telegram\n``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``\nand only ever read back through the runtime-scoped\n``GET /v1/connectors/runtime/secrets`` route \u2014 operator-facing\nreads return ``secrets_set: bool`` instead of values.",
+        "description": "Create a detached connection, **idempotent on ``(connector, external_account_id)``**.\n\nPer plan decision #5, this endpoint and the supervisor's\nauto-create-on-first-inbound path race-safely converge on a single\nrow: posting twice with the same ``(connector, external_account_id)``\nreturns 201 with the existing row rather than 409. The ``id`` may\ndiffer from a freshly-allocated one if a concurrent writer landed\nfirst; the response always reflects the canonical active row.\n\nThe active-row partial-unique index is global, not tenant-scoped \u2014\nreal-world messaging identities (Signal phone numbers, Telegram\nbot tokens, etc.) are universally exclusive. If another tenant\nalready holds the active row for this identity, the call returns\n409 ``conflict`` rather than silently masking the collision.\n\nOptional ``secrets`` carry platform credentials (e.g. Telegram\n``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``\nand only ever read back through the runtime-scoped\n``GET /v1/connectors/runtime/secrets`` route \u2014 operator-facing\nreads return ``secrets_set: bool`` instead of values.",
         "operationId": "create_connection",
         "parameters": [
           {
@@ -6331,7 +6331,7 @@
           "connectors"
         ],
         "summary": "Get Connection Discovery",
-        "description": "SSE stream of ``added`` / ``removed`` connection events for the\nruntime container's connector type (#328 PR 5).\n\nBackfills every active connection of the caller's ``connector``\ntype at subscribe time as ``added`` events, then tails the\n``connections_<connector>`` NOTIFY channel.  Each event is keyed\n``connection`` with a JSON body shaped::\n\n    {\"event\": \"added\" | \"removed\", \"connection_id\": \"...\", \"account\": \"...\"}\n\nThe runtime container subscribes once per ``connector`` type and\nfans out to per-connection workers on ``added``; tears them down\non ``removed``.",
+        "description": "SSE stream of ``added`` / ``removed`` connection events for the\nruntime container's connector type (#328 PR 5).\n\nBackfills every active connection of the caller's ``connector``\ntype at subscribe time as ``added`` events, then tails the\n``connections_<connector>`` NOTIFY channel.  Each event is keyed\n``connection`` with a JSON body shaped::\n\n    {\"event\": \"added\" | \"removed\",\n     \"connection_id\": \"...\",\n     \"external_account_id\": \"...\"}\n\nThe runtime container subscribes once per ``connector`` type and\nfans out to per-connection workers on ``added``; tears them down\non ``removed``.",
         "operationId": "get_connection_discovery_v1_connectors_connections_get",
         "parameters": [
           {
@@ -8032,9 +8032,9 @@
             "type": "string",
             "title": "Connector"
           },
-          "account": {
+          "external_account_id": {
             "type": "string",
-            "title": "Account"
+            "title": "External Account Id"
           },
           "session_id": {
             "anyOf": [
@@ -8107,7 +8107,7 @@
         "required": [
           "id",
           "connector",
-          "account",
+          "external_account_id",
           "metadata",
           "created_at",
           "updated_at"
@@ -8153,11 +8153,11 @@
             "minLength": 1,
             "title": "Connector"
           },
-          "account": {
+          "external_account_id": {
             "type": "string",
             "maxLength": 256,
             "minLength": 1,
-            "title": "Account"
+            "title": "External Account Id"
           },
           "metadata": {
             "additionalProperties": true,
@@ -8184,10 +8184,10 @@
         "type": "object",
         "required": [
           "connector",
-          "account"
+          "external_account_id"
         ],
         "title": "ConnectionCreate",
-        "description": "Request body for ``POST /v1/connections``.\n\nCreated in detached mode \u2014 neither ``session_id`` nor\n``session_template_id`` is set.  Use ``POST .../attach`` or\n``POST .../configure-per-chat`` afterward to bind a routing mode.\n\n``connector`` and ``account`` may not contain ``/`` \u2014 they're used\nin the focal-channel address scheme ``{connector}/{account}/{chat_id}``\nand a ``/`` would create ambiguous segment boundaries."
+        "description": "Request body for ``POST /v1/connections``.\n\nCreated in detached mode \u2014 neither ``session_id`` nor\n``session_template_id`` is set.  Use ``POST .../attach`` or\n``POST .../configure-per-chat`` afterward to bind a routing mode.\n\n``connector`` and ``external_account_id`` may not contain ``/`` \u2014\nthey're used in the focal-channel address scheme\n``{connector}/{external_account_id}/{chat_id}`` and a ``/`` would\ncreate ambiguous segment boundaries."
       },
       "ConnectionSetSecrets": {
         "properties": {
@@ -10992,9 +10992,9 @@
       },
       "SignalProfileRequest": {
         "properties": {
-          "account": {
+          "external_account_id": {
             "type": "string",
-            "title": "Account"
+            "title": "External Account Id"
           },
           "given_name": {
             "anyOf": [
@@ -11033,15 +11033,15 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "account"
+          "external_account_id"
         ],
         "title": "SignalProfileRequest"
       },
       "SignalRegisterRequest": {
         "properties": {
-          "account": {
+          "external_account_id": {
             "type": "string",
-            "title": "Account"
+            "title": "External Account Id"
           },
           "captcha": {
             "anyOf": [
@@ -11063,15 +11063,15 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "account"
+          "external_account_id"
         ],
         "title": "SignalRegisterRequest"
       },
       "SignalRegisterResponse": {
         "properties": {
-          "account": {
+          "external_account_id": {
             "type": "string",
-            "title": "Account"
+            "title": "External Account Id"
           },
           "status": {
             "type": "string",
@@ -11096,7 +11096,7 @@
         },
         "type": "object",
         "required": [
-          "account",
+          "external_account_id",
           "status"
         ],
         "title": "SignalRegisterResponse",
@@ -11104,9 +11104,9 @@
       },
       "SignalVerifyRequest": {
         "properties": {
-          "account": {
+          "external_account_id": {
             "type": "string",
-            "title": "Account"
+            "title": "External Account Id"
           },
           "code": {
             "type": "string",
@@ -11127,16 +11127,16 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "account",
+          "external_account_id",
           "code"
         ],
         "title": "SignalVerifyRequest"
       },
       "SignalVerifyResponse": {
         "properties": {
-          "account": {
+          "external_account_id": {
             "type": "string",
-            "title": "Account"
+            "title": "External Account Id"
           },
           "uuid": {
             "type": "string",
@@ -11145,7 +11145,7 @@
         },
         "type": "object",
         "required": [
-          "account",
+          "external_account_id",
           "uuid"
         ],
         "title": "SignalVerifyResponse"

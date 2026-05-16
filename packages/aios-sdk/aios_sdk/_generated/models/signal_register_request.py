@@ -14,17 +14,17 @@ T = TypeVar("T", bound="SignalRegisterRequest")
 class SignalRegisterRequest:
     """
     Attributes:
-        account (str):
+        external_account_id (str):
         captcha (None | str | Unset):
         voice (bool | Unset):  Default: False.
     """
 
-    account: str
+    external_account_id: str
     captcha: None | str | Unset = UNSET
     voice: bool | Unset = False
 
     def to_dict(self) -> dict[str, Any]:
-        account = self.account
+        external_account_id = self.external_account_id
 
         captcha: None | str | Unset
         if isinstance(self.captcha, Unset):
@@ -38,7 +38,7 @@ class SignalRegisterRequest:
 
         field_dict.update(
             {
-                "account": account,
+                "external_account_id": external_account_id,
             }
         )
         if captcha is not UNSET:
@@ -51,7 +51,7 @@ class SignalRegisterRequest:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        account = d.pop("account")
+        external_account_id = d.pop("external_account_id")
 
         def _parse_captcha(data: object) -> None | str | Unset:
             if data is None:
@@ -65,7 +65,7 @@ class SignalRegisterRequest:
         voice = d.pop("voice", UNSET)
 
         signal_register_request = cls(
-            account=account,
+            external_account_id=external_account_id,
             captcha=captcha,
             voice=voice,
         )

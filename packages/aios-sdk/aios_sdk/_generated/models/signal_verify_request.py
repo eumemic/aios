@@ -14,17 +14,17 @@ T = TypeVar("T", bound="SignalVerifyRequest")
 class SignalVerifyRequest:
     """
     Attributes:
-        account (str):
+        external_account_id (str):
         code (str):
         pin (None | str | Unset):
     """
 
-    account: str
+    external_account_id: str
     code: str
     pin: None | str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
-        account = self.account
+        external_account_id = self.external_account_id
 
         code = self.code
 
@@ -38,7 +38,7 @@ class SignalVerifyRequest:
 
         field_dict.update(
             {
-                "account": account,
+                "external_account_id": external_account_id,
                 "code": code,
             }
         )
@@ -50,7 +50,7 @@ class SignalVerifyRequest:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        account = d.pop("account")
+        external_account_id = d.pop("external_account_id")
 
         code = d.pop("code")
 
@@ -64,7 +64,7 @@ class SignalVerifyRequest:
         pin = _parse_pin(d.pop("pin", UNSET))
 
         signal_verify_request = cls(
-            account=account,
+            external_account_id=external_account_id,
             code=code,
             pin=pin,
         )

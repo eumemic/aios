@@ -66,14 +66,14 @@ class ConflictError(AiosError):
 
 
 class AccountDriftError(ConflictError):
-    """Operator tried to attach a connection for an account the connector no longer serves.
+    """Operator tried to attach a connection for an identity the connector no longer serves.
 
     Raised by :func:`aios.services.connections.attach_connection` when
     the supervisor's current account snapshot doesn't include the
-    connection's ``account``.  Without this guard the attach would
-    succeed silently and inbound for that account would drop forever
-    with the ``account_drift`` reason — operator pain that's better
-    surfaced at attach time than discovered hours later.
+    connection's ``external_account_id``.  Without this guard the
+    attach would succeed silently and inbound for that identity would
+    drop forever with the ``account_drift`` reason — operator pain
+    that's better surfaced at attach time than discovered hours later.
     """
 
     error_type = "account_drift"

@@ -48,19 +48,19 @@ def probe(daemon: MagicMock) -> _Probe:
 class TestRegister:
     @pytest.mark.asyncio
     async def test_happy_path_returns_sms_sent(self, probe: _Probe, daemon: MagicMock) -> None:
-        result = await probe.register(account="+15551234567")
-        assert result == {"account": "+15551234567", "status": "sms_sent"}
+        result = await probe.register(external_account_id="+15551234567")
+        assert result == {"external_account_id": "+15551234567", "status": "sms_sent"}
         daemon.register.assert_awaited_once_with(phone="+15551234567", captcha=None, voice=False)
 
     @pytest.mark.asyncio
     async def test_voice_routes_to_voice_sent(self, probe: _Probe, daemon: MagicMock) -> None:
-        result = await probe.register(account="+1", voice=True)
+        result = await probe.register(external_account_id="+1", voice=True)
         assert result["status"] == "voice_sent"
         daemon.register.assert_awaited_once_with(phone="+1", captcha=None, voice=True)
 
     @pytest.mark.asyncio
     async def test_passes_captcha_token_to_daemon(self, probe: _Probe, daemon: MagicMock) -> None:
-        await probe.register(account="+1", captcha="signalcaptcha://x")
+        await probe.register(external_account_id="+1", captcha="signalcaptcha://x")
         daemon.register.assert_awaited_once_with(
             phone="+1", captcha="signalcaptcha://x", voice=False
         )
@@ -71,37 +71,37 @@ class TestRegister:
     ) -> None:
         daemon.register.side_effect = RpcError("Captcha required", code=-3, data={"captcha": True})
         with pytest.raises(ManagementHandlerError) as exc_info:
-            await probe.register(account="+1")
+            await probe.register(external_account_id="+1")
         assert exc_info.value.payload == {
             "status": "captcha_required",
             "captcha_url": "https://signalcaptchas.org/registration/generate",
-            "account": "+1",
+            "external_account_id": "+1",
         }
 
     @pytest.mark.asyncio
     async def test_non_captcha_rpc_error_propagates(self, probe: _Probe, daemon: MagicMock) -> None:
         daemon.register.side_effect = RpcError("phone already registered elsewhere")
         with pytest.raises(RpcError, match="already registered"):
-            await probe.register(account="+1")
+            await probe.register(external_account_id="+1")
 
 
 class TestVerify:
     @pytest.mark.asyncio
     async def test_returns_uuid(self, probe: _Probe, daemon: MagicMock) -> None:
-        result = await probe.verify(account="+1", code="123456")
-        assert result == {"account": "+1", "uuid": "u-abc"}
+        result = await probe.verify(external_account_id="+1", code="123456")
+        assert result == {"external_account_id": "+1", "uuid": "u-abc"}
         daemon.verify.assert_awaited_once_with(phone="+1", code="123456", pin=None)
 
     @pytest.mark.asyncio
     async def test_pin_threaded_through(self, probe: _Probe, daemon: MagicMock) -> None:
-        await probe.verify(account="+1", code="000000", pin="9999")
+        await probe.verify(external_account_id="+1", code="000000", pin="9999")
         daemon.verify.assert_awaited_once_with(phone="+1", code="000000", pin="9999")
 
 
 class TestUpdateProfile:
     @pytest.mark.asyncio
     async def test_passes_only_non_none_fields(self, probe: _Probe, daemon: MagicMock) -> None:
-        await probe.update_profile(account="+1", given_name="Alice", about=None)
+        await probe.update_profile(external_account_id="+1", given_name="Alice", about=None)
         daemon.update_profile.assert_awaited_once_with(
             phone="+1", given_name="Alice", family_name=None, about=None
         )
@@ -128,7 +128,7 @@ class TestCaptchaUrl:
             "Captcha required", code=-3, data={"captcha_url": "https://x.example/123"}
         )
         with pytest.raises(ManagementHandlerError) as exc_info:
-            await probe.register(account="+1")
+            await probe.register(external_account_id="+1")
         assert exc_info.value.payload["captcha_url"] == "https://x.example/123"
 
     @pytest.mark.asyncio
@@ -137,5 +137,5 @@ class TestCaptchaUrl:
     ) -> None:
         daemon.register.side_effect = RpcError("Captcha required", code=-3)
         with pytest.raises(ManagementHandlerError) as exc_info:
-            await probe.register(account="+1")
+            await probe.register(external_account_id="+1")
         assert exc_info.value.payload["captcha_url"].startswith("https://signalcaptchas.org/")
