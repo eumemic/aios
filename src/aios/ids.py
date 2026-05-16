@@ -39,7 +39,6 @@ SESSION_TEMPLATE: Final = "stpl"
 BINDING: Final = "bnd"
 RUNTIME: Final = "rt"
 RUNTIME_TOKEN: Final = "rtk"
-ROUTING_RULE: Final = "rule"
 MEMORY_STORE: Final = "memstore"
 MEMORY: Final = "mem"
 MEMORY_VERSION: Final = "memver"
@@ -69,7 +68,6 @@ _PREFIXES: Final = frozenset(
         BINDING,
         RUNTIME,
         RUNTIME_TOKEN,
-        ROUTING_RULE,
         MANAGEMENT_CALL,
         ACCOUNT,
         ACCOUNT_KEY,
