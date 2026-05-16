@@ -133,7 +133,6 @@ async def update(
     _auth: AuthDep,
 ) -> Session:
     account_id, _, _ = _auth
-    from aios.db.queries import _UNSET
 
     # Use model_fields_set to distinguish "not provided" from "explicitly null".
     # agent_version=null means "latest" (auto-updating); omitted means "keep current".
@@ -141,8 +140,8 @@ async def update(
         pool,
         session_id,
         agent_id=body.agent_id,
-        agent_version=body.agent_version if "agent_version" in body.model_fields_set else _UNSET,
-        title=body.title if "title" in body.model_fields_set else _UNSET,
+        agent_version=body.agent_version if "agent_version" in body.model_fields_set else ...,
+        title=body.title if "title" in body.model_fields_set else ...,
         metadata=body.metadata,
         vault_ids=body.vault_ids,
         resources=body.resources,

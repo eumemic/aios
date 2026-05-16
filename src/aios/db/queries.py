@@ -1021,34 +1021,26 @@ async def list_attachment_paths_for_sessions(
     return result
 
 
-_UNSET: Any = object()
-
-
 async def update_session(
     conn: asyncpg.Connection[Any],
     session_id: str,
     *,
     account_id: str,
     agent_id: str | None = None,
-    agent_version: int | None = _UNSET,
-    title: str | None = _UNSET,
+    agent_version: int | None | EllipsisType = ...,
+    title: str | None | EllipsisType = ...,
     metadata: dict[str, Any] | None = None,
 ) -> Session:
-    """Partial update of a session. Omitted fields are preserved.
-
-    ``agent_version`` and ``title`` use a sentinel to distinguish "not
-    provided" from "explicitly set to None".
-    """
     sets: list[str] = []
     args: list[Any] = [session_id]  # $1 = session_id
 
     if agent_id is not None:
         args.append(agent_id)
         sets.append(f"agent_id = ${len(args)}")
-    if agent_version is not _UNSET:
+    if agent_version is not ...:
         args.append(agent_version)
         sets.append(f"agent_version = ${len(args)}")
-    if title is not _UNSET:
+    if title is not ...:
         args.append(title)
         sets.append(f"title = ${len(args)}")
     if metadata is not None:
@@ -3995,7 +3987,7 @@ async def update_session_template(
     account_id: str,
     name: str | None = None,
     agent_id: str | None = None,
-    agent_version: int | None = _UNSET,
+    agent_version: int | None | EllipsisType = ...,
     environment_id: str | None = None,
     vault_ids: list[str] | None = None,
     memory_store_ids: list[str] | None = None,
@@ -4009,7 +4001,7 @@ async def update_session_template(
     if agent_id is not None:
         args.append(agent_id)
         sets.append(f"agent_id = ${len(args)}")
-    if agent_version is not _UNSET:
+    if agent_version is not ...:
         args.append(agent_version)
         sets.append(f"agent_version = ${len(args)}")
     if environment_id is not None:
