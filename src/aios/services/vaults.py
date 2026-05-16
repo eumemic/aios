@@ -9,7 +9,7 @@ fields and enforces limits.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, assert_never
 
 import asyncpg
 import httpx
@@ -19,6 +19,7 @@ from aios.db import queries
 from aios.errors import NotFoundError, OAuthRefreshError, ValidationError
 from aios.logging import get_logger
 from aios.models.vaults import (
+    AuthType,
     TokenEndpointAuth,
     TokenEndpointAuthNone,
     Vault,
@@ -57,17 +58,14 @@ _BEARER_FIELDS = ("token",)
 _BASIC_FIELDS = ("username", "password")
 
 
-def _fields_for(auth_type: str) -> tuple[str, ...]:
+def _fields_for(auth_type: AuthType) -> tuple[str, ...]:
     if auth_type == "oauth2_refresh":
         return _OAUTH_FIELDS
     if auth_type == "bearer_header":
         return _BEARER_FIELDS
     if auth_type == "basic":
         return _BASIC_FIELDS
-    raise ValidationError(
-        f"unknown auth_type {auth_type!r}",
-        detail={"auth_type": auth_type},
-    )
+    assert_never(auth_type)
 
 
 def _serialize_token_endpoint_auth(v: TokenEndpointAuth) -> dict[str, str]:
@@ -332,7 +330,7 @@ def _extract_auth_payload(body: VaultCredentialCreate) -> dict[str, Any]:
 def _merge_auth_payload(
     existing: dict[str, Any],
     body: VaultCredentialUpdate,
-    auth_type: str,
+    auth_type: AuthType,
 ) -> dict[str, Any]:
     """Merge update fields into the existing decrypted payload.
 

@@ -12,9 +12,11 @@ Specifically:
 * widens the ``auth_type`` CHECK from ``('mcp_oauth', 'static_bearer')``
   to ``('bearer_header', 'oauth2_refresh', 'basic')``;
 * data-migrates existing rows (``static_bearer`` → ``bearer_header``,
-  ``mcp_oauth`` → ``oauth2_refresh``);
-* re-creates the ``vault_credentials_url_uniq`` partial unique index
-  against the renamed column.
+  ``mcp_oauth`` → ``oauth2_refresh``).
+
+Postgres references indexed columns by ``attnum`` rather than name, so
+``vault_credentials_url_uniq`` carries over the column rename without a
+rebuild — no index DDL needed.
 
 The CHECK widen also adds ``basic`` (HTTP Basic auth, used by
 ``http_servers``).
@@ -58,16 +60,8 @@ def upgrade() -> None:
 
     op.execute("ALTER TABLE vault_credentials RENAME COLUMN mcp_server_url TO target_url")
 
-    op.execute("DROP INDEX vault_credentials_url_uniq")
-    op.execute(
-        "CREATE UNIQUE INDEX vault_credentials_url_uniq "
-        "ON vault_credentials (vault_id, target_url) "
-        "WHERE archived_at IS NULL"
-    )
-
 
 def downgrade() -> None:
-    op.execute("DROP INDEX vault_credentials_url_uniq")
     op.execute("ALTER TABLE vault_credentials RENAME COLUMN target_url TO mcp_server_url")
 
     op.execute("ALTER TABLE vault_credentials DROP CONSTRAINT vault_credentials_auth_type_check")
@@ -84,10 +78,4 @@ def downgrade() -> None:
         "ALTER TABLE vault_credentials "
         "ADD CONSTRAINT vault_credentials_auth_type_check "
         "CHECK (auth_type IN ('mcp_oauth', 'static_bearer'))"
-    )
-
-    op.execute(
-        "CREATE UNIQUE INDEX vault_credentials_url_uniq "
-        "ON vault_credentials (vault_id, mcp_server_url) "
-        "WHERE archived_at IS NULL"
     )

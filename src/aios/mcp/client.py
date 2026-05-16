@@ -18,7 +18,7 @@ import asyncio
 import base64
 import json
 from contextlib import AsyncExitStack
-from typing import Any
+from typing import Any, assert_never, cast
 
 import asyncpg
 import httpx
@@ -30,6 +30,7 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.logging import get_logger
 from aios.mcp.schema import make_function_tool
+from aios.models.vaults import AuthType
 from aios.services.vaults import is_expiring, refresh_credential
 
 log = get_logger("aios.mcp.client")
@@ -70,7 +71,7 @@ async def _open_session(
     return session, init_result
 
 
-def _auth_header_from_payload(payload: dict[str, Any], auth_type: str) -> str:
+def _auth_header_from_payload(payload: dict[str, Any], auth_type: AuthType) -> str:
     """Render the ``Authorization`` header value for ``auth_type``.
 
     Empty string means "no header should be sent" — caller drops the
@@ -90,8 +91,7 @@ def _auth_header_from_payload(payload: dict[str, Any], auth_type: str) -> str:
             return ""
         encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
         return f"Basic {encoded}"
-    log.warning("vault.unknown_auth_type", auth_type=auth_type)
-    return ""
+    assert_never(auth_type)
 
 
 async def resolve_auth_for_target_url(
@@ -126,7 +126,10 @@ async def resolve_auth_for_target_url(
         )
         if session_result is None:
             return None, {}
-        blob, auth_type, vault_id = session_result
+        blob, auth_type_str, vault_id = session_result
+        # The CHECK constraint on vault_credentials.auth_type guarantees the
+        # DB-stored string is one of the AuthType literals.
+        auth_type = cast(AuthType, auth_type_str)
         subkey = crypto_box.derive_account_subkey(account_id)
 
         if auth_type == "oauth2_refresh":
