@@ -1706,12 +1706,22 @@ async def append_event(
             "                  THEN 'pending' ELSE status END, "
             "    updated_at = CASE WHEN $3 AND status IN ('idle', 'errored') "
             "                      THEN now() ELSE updated_at END "
-            "WHERE id = $1 AND account_id = $2 RETURNING last_event_seq, focal_channel",
+            "WHERE id = $1 AND account_id = $2 AND archived_at IS NULL "
+            "RETURNING last_event_seq, focal_channel",
             session_id,
             account_id,
             is_user_message,
         )
         if seq_row is None:
+            # Treat archived as "session no longer exists for write purposes."
+            # ``find_sessions_needing_inference`` (harness/sweep.py) already
+            # filters ``archived_at IS NULL``, so without this guard a
+            # POST to an archived session would return 201 + silently
+            # vanish: the row's ``last_event_seq`` increments, the event
+            # INSERTs, but the wake-sweep never picks it up. Surfacing as
+            # ``NotFoundError`` (→ 404 at the router) gives the caller an
+            # honest signal that the post is dropped. Same defect class
+            # as PR #521 (archived-connection inbound), one layer deeper.
             raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
         seq = seq_row["last_event_seq"]
         focal_at_arrival: str | None = seq_row["focal_channel"]
