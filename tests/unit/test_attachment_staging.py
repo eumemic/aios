@@ -220,3 +220,87 @@ class TestStaging:
         sess_dir = temp_workspace_root / "_attachments" / "sess-1" / "echo"
         if sess_dir.exists():
             assert list(sess_dir.iterdir()) == []
+
+    async def test_concurrent_same_event_id_keeps_winners_file_on_disk(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """Webhook retries (Telegram resend on 5xx, Signal at-least-once)
+        can deliver the same inbound twice concurrently. Both calls pass
+        ``target.exists()`` before either ``os.rename`` lands, both write
+        to the SAME ``.part`` sibling, one wins the rename, the other's
+        rename raises ``FileNotFoundError``. The loser's
+        ``except BaseException`` then unconditionally ran
+        ``target.unlink(missing_ok=True)`` — DELETING the winner's
+        freshly-renamed file. The winner's invocation returned a
+        ``staged_records`` entry pointing at the now-missing path; the
+        renderer would later fail to open it (or worse, the GC sweep
+        would race with the actual write).
+
+        To reproduce the race in a single asyncio event loop the stream
+        ``read`` is wrapped with an ``asyncio.sleep(0)`` yield so the
+        scheduler can interleave the two invocations between
+        ``target.exists()`` and ``os.rename`` — the same shape real
+        ``UploadFile`` streams produce when reading from a real socket.
+
+        Fix: don't unlink ``target`` in the loser's cleanup path —
+        nothing this invocation owns lives at ``target``.
+        """
+        import asyncio
+
+        class _SlowStream:
+            """Yield to the event loop after every chunk so two
+            concurrent ``stage_inbound_attachments`` calls actually
+            interleave between ``target.exists()`` and ``os.rename``."""
+
+            def __init__(self, payload: bytes) -> None:
+                self._payload = payload
+                self._pos = 0
+
+            async def read(self, size: int = -1) -> bytes:
+                await asyncio.sleep(0)
+                if self._pos >= len(self._payload):
+                    return b""
+                chunk = (
+                    self._payload[self._pos :]
+                    if size < 0
+                    else self._payload[self._pos : self._pos + size]
+                )
+                self._pos += len(chunk)
+                return chunk
+
+        a = InboundAttachment(
+            stream=_SlowStream(b"A" * 100), filename="img.jpg", content_type="image/jpeg"
+        )  # type: ignore[arg-type]
+        b = InboundAttachment(
+            stream=_SlowStream(b"B" * 100), filename="img.jpg", content_type="image/jpeg"
+        )  # type: ignore[arg-type]
+
+        results = await asyncio.gather(
+            stage_inbound_attachments(
+                session_id="sess-1",
+                connector_name="echo",
+                event_id="evt-1",
+                attachments=[a],
+            ),
+            stage_inbound_attachments(
+                session_id="sess-1",
+                connector_name="echo",
+                event_id="evt-1",
+                attachments=[b],
+            ),
+            return_exceptions=True,
+        )
+
+        # At least one invocation should have succeeded (the rename winner).
+        successes = [r for r in results if not isinstance(r, BaseException)]
+        assert len(successes) >= 1, f"at least one stage must succeed; got {results!r}"
+
+        target = temp_workspace_root / "_attachments" / "sess-1" / "echo" / "evt-1-img.jpg"
+        assert target.exists(), (
+            f"the rename winner's file must survive — pre-fix the loser's "
+            f"``except BaseException`` cleanup unlinked target, deleting the "
+            f"file the winner returned a ``staged_records`` reference to. "
+            f"Subsequent renderer reads (or attachment_gc orphan-sweep races) "
+            f"would then fail. Directory contents: "
+            f"{list((temp_workspace_root / '_attachments' / 'sess-1' / 'echo').iterdir()) if (temp_workspace_root / '_attachments' / 'sess-1' / 'echo').exists() else 'dir missing'}"
+        )
