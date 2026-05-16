@@ -525,6 +525,27 @@ async def confirm_tool_allow(
         )
         if existing is not None:
             return existing
+        # Validate the tool_call_id corresponds to a real assistant
+        # ``tool_calls`` entry in the session's event log. Without this,
+        # any authenticated POST to /v1/sessions/:id/tool-confirmations
+        # with decision=allow appends an arbitrary
+        # ``lifecycle/tool_confirmed`` row — poisoning the event log
+        # and (if the bogus id later collides with a real provider-
+        # generated tool_call_id) pre-confirming a tool the operator
+        # never saw. Mirrors the deny path's existing call to
+        # ``lookup_tool_name_by_call_id`` (#445) — same defense, same
+        # error surface, restores the asymmetric validation gap
+        # between allow and deny.
+        if (
+            await queries.lookup_tool_name_by_call_id(
+                conn, session_id, tool_call_id, account_id=account_id
+            )
+            is None
+        ):
+            raise NotFoundError(
+                f"tool_call_id {tool_call_id!r} not found",
+                detail={"session_id": session_id, "tool_call_id": tool_call_id},
+            )
         return await queries.append_event(
             conn,
             session_id=session_id,
