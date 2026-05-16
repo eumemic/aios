@@ -46,11 +46,7 @@ async def list_(
     """
     account_id, _, _ = _auth
     items = await service.list_skills(pool, limit=limit, after=after, account_id=account_id)
-    return ListResponse[Skill](
-        data=items,
-        has_more=len(items) == limit,
-        next_after=items[-1].id if items else None,
-    )
+    return ListResponse[Skill].paginate(items, limit, cursor=lambda x: x.id)
 
 
 @router.get("/{skill_id}", operation_id="get_skill")
@@ -114,11 +110,7 @@ async def list_versions(
     items = await service.list_skill_versions(
         pool, skill_id, limit=limit, after=after, account_id=account_id
     )
-    return ListResponse[SkillVersion](
-        data=items,
-        has_more=len(items) == limit,
-        next_after=str(items[-1].version) if items else None,
-    )
+    return ListResponse[SkillVersion].paginate(items, limit, cursor=lambda x: str(x.version))
 
 
 @router.get("/{skill_id}/versions/{version}", operation_id="get_skill_version")

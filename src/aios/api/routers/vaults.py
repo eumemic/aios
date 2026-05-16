@@ -50,11 +50,7 @@ async def list_(
     """
     account_id, _, _ = _auth
     items = await service.list_vaults(pool, limit=limit, after=after, account_id=account_id)
-    return ListResponse[Vault](
-        data=items,
-        has_more=len(items) == limit,
-        next_after=items[-1].id if items else None,
-    )
+    return ListResponse[Vault].paginate(items, limit, cursor=lambda x: x.id)
 
 
 @router.get("/{vault_id}", operation_id="get_vault")
@@ -159,11 +155,7 @@ async def list_credentials(
     items = await service.list_vault_credentials(
         pool, vault_id, limit=limit, after=after, account_id=account_id
     )
-    return ListResponse[VaultCredential](
-        data=items,
-        has_more=len(items) == limit,
-        next_after=items[-1].id if items else None,
-    )
+    return ListResponse[VaultCredential].paginate(items, limit, cursor=lambda x: x.id)
 
 
 @router.get("/{vault_id}/credentials/{credential_id}", operation_id="get_vault_credential")

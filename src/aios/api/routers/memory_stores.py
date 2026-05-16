@@ -67,11 +67,7 @@ async def list_stores(
         after=after,
         account_id=account_id,
     )
-    return ListResponse[MemoryStore](
-        data=items,
-        has_more=len(items) == limit,
-        next_after=items[-1].id if items else None,
-    )
+    return ListResponse[MemoryStore].paginate(items, limit, cursor=lambda x: x.id)
 
 
 @router.get("/{store_id}", operation_id="get_memory_store")

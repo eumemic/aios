@@ -121,11 +121,7 @@ async def list_(
         after=after,
         account_id=account_id,
     )
-    return ListResponse[Connection](
-        data=items,
-        has_more=len(items) == limit,
-        next_after=items[-1].id if items else None,
-    )
+    return ListResponse[Connection].paginate(items, limit, cursor=lambda x: x.id)
 
 
 @router.get("/{connection_id}", operation_id="get_connection")
