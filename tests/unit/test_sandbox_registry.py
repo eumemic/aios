@@ -1,14 +1,17 @@
-"""Unit tests for ``SandboxRegistry.release_if_mounts_changed`` (issue #198).
+"""Unit tests for ``SandboxRegistry`` worker-side cleanup paths.
 
-Exercises the worker-side mount-drift detector that recycles a cached
-sandbox when the session's attached memory stores have changed since
-the sandbox was provisioned. The check fires once per step at the top
-of ``loop._run_session_step_body``.
+``TestReleaseIfMountsChanged`` covers the mount-drift detector that
+recycles a cached sandbox when the session's attached memory stores
+have changed since provisioning (issue #198). ``TestEvictReclamation``
+covers the ``evict`` fast path used by ``tool_dispatch`` when a
+sandbox-side failure suggests the sandbox itself is unhealthy.
 """
 
 from __future__ import annotations
 
 import asyncio
+import gc
+from typing import Any, cast
 
 import pytest
 
@@ -229,3 +232,53 @@ class TestLocksDictCleanup:
         await registry.release_all()
 
         assert registry._locks == {}
+
+
+class TestEvictReclamation:
+    """``evict`` reclaims the per-session ``GitProxy`` through ``stop()``."""
+
+    async def test_evict_records_stop_task_in_strong_ref_set(self) -> None:
+        """evict() must strongly reference its fire-and-forget stop task
+        while it runs and discard it once the task completes."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        class _StubProxy:
+            async def stop(self) -> None: ...
+
+        registry._git_proxies["sess_X"] = cast(Any, _StubProxy())
+        registry._handles["sess_X"] = make_handle(session_id="sess_X")
+        registry._last_used["sess_X"] = 0.0
+
+        registry.evict("sess_X")
+        # set.add runs synchronously inside evict — the loop hasn't yielded
+        # yet, so the new task is still in flight.
+        assert len(registry._evict_proxy_stop_tasks) == 1
+
+        for _ in range(3):
+            await asyncio.sleep(0)
+        # add_done_callback(discard) reclaims the slot — otherwise the
+        # set grows unboundedly across the worker's lifetime.
+        assert len(registry._evict_proxy_stop_tasks) == 0
+
+    async def test_evict_proxy_actually_stops_under_gc(self) -> None:
+        """GC between evict() and the loop's first yield must not lose the
+        stop task — asyncio only weak-refs tasks, so without the strong-ref
+        set the freshly created task is eligible for collection here."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        proxy_stopped = asyncio.Event()
+
+        class _StubProxy:
+            async def stop(self) -> None:
+                proxy_stopped.set()
+
+        registry._git_proxies["sess_X"] = cast(Any, _StubProxy())
+        registry._handles["sess_X"] = make_handle(session_id="sess_X")
+        registry._last_used["sess_X"] = 0.0
+
+        registry.evict("sess_X")
+        gc.collect()
+
+        await asyncio.wait_for(proxy_stopped.wait(), timeout=1.0)

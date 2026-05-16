@@ -73,6 +73,11 @@ class SandboxRegistry:
         self._last_used: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task[None] | None = None
+        # Strong refs for evict()'s fire-and-forget proxy-stop tasks.
+        # asyncio only weak-refs tasks, so without this the task can be
+        # GC'd before stop() unwinds the proxy's uvicorn server, httpx
+        # client and bound TCP port.
+        self._evict_proxy_stop_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def backend(self) -> SandboxBackend:
@@ -357,6 +362,13 @@ class SandboxRegistry:
         Used by tool_dispatch when it detects a sandbox-side failure that
         suggests the sandbox itself is unhealthy; the next tool call will
         cold-start a fresh one.
+
+        The per-session :class:`GitProxy` is stopped in the background:
+        the caller is on a retry path and can't block on stop()'s up-to-5s
+        graceful drain. Skipping stop() entirely would strand the proxy's
+        uvicorn server, httpx client and bound TCP port — ``release_all``
+        only sees ``_git_proxies`` (which we've popped here), so without
+        the background stop the proxy leaks for the worker's lifetime.
         """
         from aios.harness import runtime
 
@@ -368,9 +380,12 @@ class SandboxRegistry:
         # from the next provision pass.
         proxy = self._git_proxies.pop(session_id, None)
         if proxy is not None:
-            # Fire-and-forget — eviction is best-effort cleanup; worker
-            # shutdown's ``release_all`` is the authoritative final stop.
-            asyncio.create_task(self._stop_proxy_silently(proxy, session_id))  # noqa: RUF006
+            task = asyncio.create_task(
+                self._stop_proxy_silently(proxy, session_id),
+                name=f"sandbox-evict-proxy-stop:{session_id}",
+            )
+            self._evict_proxy_stop_tasks.add(task)
+            task.add_done_callback(self._evict_proxy_stop_tasks.discard)
         # Same story for the MCP broker secret: drop it immediately; a
         # fresh sandbox will get a fresh secret from the next provision.
         self._release_mcp_broker_secret(session_id)
