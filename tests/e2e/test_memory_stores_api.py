@@ -152,6 +152,43 @@ class TestStoreListPagination:
         )
 
 
+class TestMemoryListLimit:
+    """``GET /v1/memory-stores/{id}/memories`` must cap response size.
+
+    Pre-fix the router had no ``limit`` parameter and the underlying SQL
+    had no ``LIMIT`` clause, so a store with thousands of memories
+    returned them all in one response — unbounded memory pressure on
+    the API process and unbounded payload size on the wire."""
+
+    async def test_default_limit_caps_response(self, http_client: httpx.AsyncClient) -> None:
+        store = await _create_store(http_client)
+        store_id = store["id"]
+        # Insert 150 memories — above the default cap (100) so the
+        # response must be truncated even without an explicit ?limit=.
+        for i in range(150):
+            await _create_memory(http_client, store_id, f"/note-{i:03d}.md", f"body {i}")
+
+        r = await http_client.get(f"/v1/memory-stores/{store_id}/memories")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert len(body["data"]) == 100, (
+            f"default limit should cap at 100; got {len(body['data'])}. Pre-fix "
+            f"symptom: no LIMIT clause returned all 150 rows in one response."
+        )
+        assert body["has_more"] is True
+
+    async def test_explicit_limit_honored(self, http_client: httpx.AsyncClient) -> None:
+        store = await _create_store(http_client)
+        store_id = store["id"]
+        for i in range(15):
+            await _create_memory(http_client, store_id, f"/x-{i:03d}.md", f"b{i}")
+        r = await http_client.get(f"/v1/memory-stores/{store_id}/memories", params={"limit": 5})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert len(body["data"]) == 5
+        assert body["has_more"] is True
+
+
 class TestMemoryCrud:
     async def test_create_retrieve_round_trip(self, http_client: httpx.AsyncClient) -> None:
         store = await _create_store(http_client)

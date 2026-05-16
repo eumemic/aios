@@ -170,6 +170,7 @@ async def list_memories(
     path_prefix: str | None = None,
     order_by: str = "created_at",
     depth: int | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> ListResponse[Memory | MemoryPrefix]:
     """List memories in a store, optionally filtered and grouped by path.
 
@@ -177,7 +178,9 @@ async def list_memories(
     groups deeper paths into ``MemoryPrefix`` entries (directory-style
     listings) — entries past the depth boundary are collapsed into a
     single prefix entry per shared directory. ``order_by`` accepts
-    ``created_at`` (default) or ``path``.
+    ``created_at`` (default) or ``path``. ``limit`` caps the raw-row
+    fetch (cursor pagination not yet supported; use ``path_prefix`` to
+    narrow scope when a store has thousands of memories).
     """
     account_id, _, _ = _auth
     items = await service.list_memories(
@@ -186,9 +189,16 @@ async def list_memories(
         path_prefix=path_prefix,
         order_by=order_by,
         depth=depth,
+        limit=limit,
         account_id=account_id,
     )
-    return ListResponse[Memory | MemoryPrefix](data=items)
+    # ``has_more`` signals the SQL cap was hit; depth aggregation may have
+    # collapsed those raw rows into fewer response entries, so compare the
+    # underlying memory count (entries that aren't MemoryPrefix) plus
+    # collapsed prefix groups against the limit.
+    raw_count = sum(1 for it in items if not isinstance(it, MemoryPrefix))
+    has_more = raw_count == limit
+    return ListResponse[Memory | MemoryPrefix](data=items, has_more=has_more)
 
 
 @router.get("/{store_id}/memories/{memory_id}", operation_id="get_memory")

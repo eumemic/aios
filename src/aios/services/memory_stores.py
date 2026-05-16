@@ -225,6 +225,7 @@ async def list_memories(
     path_prefix: str | None = None,
     order_by: str = "created_at",
     depth: int | None = None,
+    limit: int = 100,
 ) -> list[Memory | MemoryPrefix]:
     async with pool.acquire() as conn:
         return await queries.list_memories(
@@ -233,6 +234,7 @@ async def list_memories(
             path_prefix=path_prefix,
             order_by=order_by,
             depth=depth,
+            limit=limit,
             account_id=account_id,
         )
 

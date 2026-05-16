@@ -4679,7 +4679,7 @@
           "memory-stores"
         ],
         "summary": "List Memories",
-        "description": "List memories in a store, optionally filtered and grouped by path.\n\n``path_prefix`` is a literal prefix match on the memory path. ``depth``\ngroups deeper paths into ``MemoryPrefix`` entries (directory-style\nlistings) \u2014 entries past the depth boundary are collapsed into a\nsingle prefix entry per shared directory. ``order_by`` accepts\n``created_at`` (default) or ``path``.",
+        "description": "List memories in a store, optionally filtered and grouped by path.\n\n``path_prefix`` is a literal prefix match on the memory path. ``depth``\ngroups deeper paths into ``MemoryPrefix`` entries (directory-style\nlistings) \u2014 entries past the depth boundary are collapsed into a\nsingle prefix entry per shared directory. ``order_by`` accepts\n``created_at`` (default) or ``path``. ``limit`` caps the raw-row\nfetch (cursor pagination not yet supported; use ``path_prefix`` to\nnarrow scope when a store has thousands of memories).",
         "operationId": "list_memories",
         "parameters": [
           {
@@ -4731,6 +4731,18 @@
                 }
               ],
               "title": "Depth"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
             }
           },
           {
