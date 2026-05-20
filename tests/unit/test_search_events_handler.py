@@ -80,6 +80,84 @@ class TestValidateSql:
         assert err is not None
         assert "SELECT" in err
 
+    def test_rejects_direct_events_table_query(self) -> None:
+        """The agent's SQL surface is the per-session ``events_search`` view.
+
+        Allowing direct access to the ``events`` table bypasses the view's
+        ``session_id = current_setting('app.session_id', true)`` filter and
+        returns events from any session in the database (cross-tenant leak,
+        since the table holds rows for every account).
+        """
+        err = _validate_sql("SELECT data FROM events")
+        assert err is not None
+
+    def test_rejects_query_against_other_table(self) -> None:
+        """Tables other than ``events_search`` are out of scope for the agent.
+
+        A read-only SELECT against ``vault_credentials`` / ``accounts`` /
+        ``sessions`` / etc. still leaks cross-tenant rows; the view scoping
+        only works when the agent is forced to use the view.
+        """
+        for table in ("vault_credentials", "accounts", "sessions", "connections"):
+            err = _validate_sql(f"SELECT * FROM {table}")
+            assert err is not None, f"validator allowed access to {table!r}"
+
+    def test_rejects_events_table_via_cte(self) -> None:
+        """CTEs that reference ``events`` directly are the same defect class."""
+        err = _validate_sql(
+            "WITH peek AS (SELECT data FROM events WHERE session_id = 'sess_OTHER') "
+            "SELECT * FROM peek"
+        )
+        assert err is not None
+
+    def test_rejects_events_via_quoted_identifier(self) -> None:
+        """Postgres double-quoted identifiers must not bypass the check."""
+        err = _validate_sql("SELECT * FROM \"events\" WHERE session_id = 'sess_OTHER'")
+        assert err is not None
+
+    def test_rejects_pg_catalog_introspection(self) -> None:
+        """Postgres catalog tables enumerate the whole schema and must be blocked."""
+        for q in (
+            "SELECT * FROM pg_catalog.pg_tables",
+            "SELECT * FROM pg_class",
+            "SELECT * FROM information_schema.tables",
+        ):
+            err = _validate_sql(q)
+            assert err is not None, f"validator allowed {q!r}"
+
+    def test_allows_ilike_substring_with_table_name(self) -> None:
+        """ILIKE patterns containing a forbidden token must not false-positive.
+
+        ``content_text ILIKE '%events%'`` is a legitimate substring search
+        on the agent's own messages; the literal-stripping pass strips
+        the quoted string so the structural regex doesn't see it.
+        """
+        assert (
+            _validate_sql("SELECT * FROM events_search WHERE content_text ILIKE '%events%'") is None
+        )
+        assert (
+            _validate_sql("SELECT * FROM events_search WHERE content_text ILIKE '%sessions%'")
+            is None
+        )
+
+    def test_rejects_events_via_dollar_quoted_evasion(self) -> None:
+        """Dollar-quoted strings (Postgres-specific) must be stripped before the check.
+
+        Without dollar-quote stripping, a model could write
+        ``'%' || $$evil events$$ || '%'`` to confuse a naïve scanner; we want
+        to make sure the dollar-quoted body doesn't seed false positives
+        (i.e. that legitimate dollar-quoted strings containing forbidden
+        words still validate cleanly).
+        """
+        # Dollar-quoted string with forbidden word inside the literal — legit.
+        assert (
+            _validate_sql("SELECT * FROM events_search WHERE content_text ILIKE $$%events table%$$")
+            is None
+        )
+        # Dollar-quoted around a real FROM events bypass attempt — must reject.
+        err = _validate_sql("SELECT * FROM events_search UNION SELECT * FROM events")
+        assert err is not None
+
     def test_rejects_empty_string(self) -> None:
         err = _validate_sql("")
         assert err is not None

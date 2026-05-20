@@ -35,17 +35,77 @@ _FORBIDDEN_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+# Identifiers that, if referenced, mean the query is reaching outside the
+# per-session ``events_search`` view.  Stamping the events table directly
+# bypasses the view's ``session_id = current_setting('app.session_id', true)``
+# scoping; querying any other application table leaks rows that belong to
+# other sessions and other accounts (multi-tenancy).  ``pg_*`` /
+# ``information_schema`` are the schema-introspection surfaces that would
+# enumerate the rest of the catalogue.  The check runs on the *literal-stripped*
+# SQL so a substring inside an ILIKE pattern (e.g. ``'%events%'``) doesn't
+# false-positive.
+_FORBIDDEN_REFERENCES = re.compile(
+    r"\b("
+    r"events|sessions|accounts|account_keys|agents|agent_versions|environments|"
+    r"connections|connectors|vaults|vault_credentials|memory_stores|memories|"
+    r"memory_versions|session_vaults|session_resources|session_memory_stores|"
+    r"session_github_repositories|session_templates|github_repositories|"
+    r"pending_management_calls|attachments|files|skills|skill_versions|"
+    r"procrastinate_\w+|pg_\w+|information_schema|pg_catalog"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Strip SQL string literals (single-quote and dollar-quoted) and comments so
+# the identifier check above runs against the structural SQL only.  Double-
+# quoted identifiers are NOT stripped — ``"events"`` is the events table,
+# not a string — and the structural regex's ``\b`` boundaries still match
+# inside them.
+_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_SINGLE_QUOTE_RE = re.compile(r"'(?:''|[^'])*'")
+_DOLLAR_QUOTE_RE = re.compile(r"\$(\w*)\$.*?\$\1\$", re.DOTALL)
+
+
+def _strip_string_literals(sql: str) -> str:
+    """Replace SQL string literals and comments with empty placeholders.
+
+    Double-quoted identifiers are intentionally preserved — they are how
+    Postgres references tables/columns with reserved-word or mixed-case
+    names, and ``\\b`` word boundaries still match identifiers inside
+    quotes.
+    """
+    sql = _LINE_COMMENT_RE.sub("", sql)
+    sql = _BLOCK_COMMENT_RE.sub("", sql)
+    sql = _SINGLE_QUOTE_RE.sub("''", sql)
+    sql = _DOLLAR_QUOTE_RE.sub("$$$$", sql)
+    return sql
+
 
 def _validate_sql(sql: str) -> str | None:
-    """Validate SQL is a safe SELECT query. Returns an error string or None."""
+    """Validate SQL is a safe SELECT query. Returns an error string or None.
+
+    The agent's SQL surface is exclusively the per-session ``events_search``
+    view.  Direct access to any other table — including the underlying
+    ``events`` table — bypasses the view's per-session scoping and leaks
+    rows belonging to other sessions and (post multi-tenancy v1) other
+    accounts.  The structural check runs on the literal-stripped SQL so
+    substring matches inside ``ILIKE`` patterns don't false-positive.
+    """
     stripped = sql.strip()
     if not stripped.upper().startswith("SELECT"):
         return "Only SELECT queries are allowed"
     if ";" in stripped:
         return "Multiple statements (semicolons) are not allowed"
-    m = _FORBIDDEN_KEYWORDS.search(stripped)
-    if m:
-        return f"Forbidden keyword '{m.group()}' is not allowed in queries"
+    kw_match = _FORBIDDEN_KEYWORDS.search(stripped)
+    if kw_match:
+        return f"Forbidden keyword '{kw_match.group()}' is not allowed in queries"
+    structural = _strip_string_literals(stripped)
+    ref_match = _FORBIDDEN_REFERENCES.search(structural)
+    if ref_match:
+        return (
+            f"Identifier {ref_match.group()!r} is not allowed; query the events_search view instead"
+        )
     return None
 
 
