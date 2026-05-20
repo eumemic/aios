@@ -236,10 +236,7 @@ def _check_runtime_connection_scope(
     if target_connection_id not in auth_connection_ids:
         raise ForbiddenError(
             "runtime token not authorized for this connection",
-            detail={
-                "auth_connection_ids": auth_connection_ids,
-                "target_connection_id": target_connection_id,
-            },
+            detail={"target_connection_id": target_connection_id},
         )
 
 
