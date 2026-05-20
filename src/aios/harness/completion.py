@@ -149,26 +149,35 @@ def _apply_provider_cache_hints(
     * **Anthropic** — content-block ``cache_control`` markers, set by
       :func:`inject_cache_breakpoints` directly on the messages list.
       Nothing to do here.
-    * **OpenAI** — explicit ``prompt_cache_key`` kwarg, set here.
-      OpenAI's Responses / Chat Completions APIs group requests by this
-      key for cache eligibility. The natural per-session scope keeps
-      successive turns of the same session in the same bucket while
-      distinct sessions don't collide.
+    * **OpenAI** — explicit ``prompt_cache_key`` field, nested under
+      ``extra_body`` so it survives the litellm boundary. litellm 1.83.4
+      strips unknown top-level kwargs from the outbound OpenAI HTTP body;
+      ``extra_body`` is the documented pass-through that the OpenAI
+      Python SDK merges into the request JSON. OpenAI's Responses / Chat
+      Completions APIs group requests by ``prompt_cache_key`` for cache
+      eligibility. The natural per-session scope keeps successive turns
+      of the same session in the same bucket while distinct sessions
+      don't collide.
 
     Skips when ``session_id`` is unset — a caller that doesn't know the
     session (rare; only the harness's two call sites invoke these
     wrappers, and both have it) gets the safe no-op rather than a
     synthetic key that would re-bucket every call.
 
-    The caller's ``extra`` mapping (typically the agent's
-    ``litellm_extra``) is merged AFTER this helper, so an agent can
-    override ``prompt_cache_key`` with a custom scope — e.g. to share a
-    bucket across multiple sessions of the same conversation.
+    **Merge order:** this helper runs AFTER the caller's ``extra``
+    mapping (typically the agent's ``litellm_extra``) is merged into
+    ``kwargs``, so agent-provided ``extra_body`` siblings (e.g.,
+    OpenRouter ``provider.order``) are preserved alongside the cache
+    key. The inner ``setdefault`` preserves an agent-provided explicit
+    ``extra_body["prompt_cache_key"]`` override — agents may want a
+    custom scope, e.g. to share a bucket across multiple sessions of
+    the same conversation.
     """
     if session_id is None:
         return
     if _supports_openai_prompt_cache_key(model):
-        kwargs["prompt_cache_key"] = session_id
+        extra_body = kwargs.setdefault("extra_body", {})
+        extra_body.setdefault("prompt_cache_key", session_id)
 
 
 def inject_cache_breakpoints(
@@ -353,9 +362,9 @@ async def call_litellm(
         kwargs["tools"] = tools
     if api_base is not None:
         kwargs["api_base"] = api_base
-    _apply_provider_cache_hints(kwargs, model, session_id)
     if extra:
         kwargs.update(extra)
+    _apply_provider_cache_hints(kwargs, model, session_id)
 
     response = await litellm.acompletion(**kwargs)
     usage_obj = response.get("usage")
@@ -404,9 +413,9 @@ async def stream_litellm(
         kwargs["tools"] = tools
     if api_base is not None:
         kwargs["api_base"] = api_base
-    _apply_provider_cache_hints(kwargs, model, session_id)
     if extra:
         kwargs.update(extra)
+    _apply_provider_cache_hints(kwargs, model, session_id)
 
     response = await litellm.acompletion(**kwargs)
 
