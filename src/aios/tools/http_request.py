@@ -115,10 +115,13 @@ def _path_rejected_reason(path: str) -> str | None:
     raw ``path`` string, but the final URL is composed and dispatched
     via ``httpx``. Any element that ``httpx`` mutates between match
     and wire is an allowlist bypass: ``?action=delete`` slips past
-    ``/lights/*`` because httpx parses it as a query string; ``..``
-    segments slip past ``/lights/**`` because httpx normalises
-    ``/v1/lights/../admin`` to ``/v1/admin`` on the wire. Reject up
-    front so the gate's check equals the gate's effect.
+    ``/lights/*`` because httpx parses it as a query string; ``.`` /
+    ``..`` segments slip past the glob because ``*`` matches the
+    literal dot-segment, while httpx applies RFC 3986 §5.2.4
+    dot-segment removal — ``/v1/lights/../admin`` collapses to
+    ``/v1/admin`` and ``/lights/./state`` collapses to
+    ``/lights/state`` on the wire. Reject up front so the gate's
+    check equals the gate's effect.
     """
     if "?" in path or "#" in path:
         return (
@@ -126,16 +129,18 @@ def _path_rejected_reason(path: str) -> str | None:
             "not allowed — pass only the path portion. Route allowlists "
             "do not extend across query parameters."
         )
-    # ``..`` as a literal segment: ``foo/../bar`` is normalised by httpx
-    # to ``bar``, escaping any allowlist that matched ``foo/*``. The
-    # check looks for the segment, not the substring, so paths like
-    # ``foo..bar`` (legal in many APIs) are left alone.
-    if ".." in path.split("/"):
+    # ``.`` / ``..`` as literal segments: ``foo/../bar`` is normalised by
+    # httpx to ``bar``, and ``foo/./bar`` to ``foo/bar`` — escaping any
+    # allowlist that matched on the original shape. The check looks for
+    # whole segments, not substrings, so paths like ``foo..bar`` (legal
+    # in many APIs) are left alone.
+    segments = path.split("/")
+    if ".." in segments or "." in segments:
         return (
-            f"path {path!r} contains a '..' segment, which is not allowed — "
-            "the upstream URL would be normalised to a different path, "
-            "escaping the route allowlist's intent. Pass an absolute path "
-            "without traversal."
+            f"path {path!r} contains a '.' or '..' segment, which is not "
+            "allowed — the upstream URL would be normalised to a different "
+            "path, escaping the route allowlist's intent. Pass an absolute "
+            "path without dot-segments."
         )
     return None
 
@@ -148,7 +153,7 @@ def _classify_permission(
     Returns the matched route's ``permission_policy`` so the harness can
     park the call in ``requires_action`` if the operator marked it
     ``always_ask``. Returns ``None`` for missing server / no route match
-    / bad args / query-or-fragment-bearing / traversal-bearing path —
+    / bad args / query-or-fragment-bearing / dot-segment-bearing path —
     the handler then runs and emits a typed error the model can
     self-correct from.
     """
@@ -205,9 +210,9 @@ async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> di
     body = arguments.get("body")
 
     # Route allowlists are path-only gates. Reject any path element that
-    # ``httpx`` would mutate between match and wire (query/fragment, ``..``
-    # traversal) so the gate's check equals the gate's effect — see
-    # ``_path_rejected_reason``.
+    # ``httpx`` would mutate between match and wire (query/fragment,
+    # ``.`` / ``..`` dot-segments) so the gate's check equals the gate's
+    # effect — see ``_path_rejected_reason``.
     reason = _path_rejected_reason(path)
     if reason is not None:
         return {"error": reason}
