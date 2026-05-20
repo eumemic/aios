@@ -50,6 +50,25 @@ class ResolveResult(NamedTuple):
     drop: ResolveDrop | None
 
 
+async def _session_is_archived(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> bool:
+    """Return ``True`` iff ``session_id`` exists for ``account_id`` and is archived.
+
+    Shared by the tier-1 ledger and tier-3 single_session checks so both
+    surfaces refuse to route inbounds to a session ``append_event``
+    (post-#523) would reject — see the call sites for the full
+    ``DETACHED`` → 422 cascade rationale.
+    """
+    async with pool.acquire() as conn:
+        archived_at = await conn.fetchval(
+            "SELECT archived_at FROM sessions WHERE id = $1 AND account_id = $2",
+            session_id,
+            account_id,
+        )
+    return archived_at is not None
+
+
 async def resolve_target_session(
     pool: asyncpg.Pool[Any], *, account_id: str, connection: Connection, chat_id: str
 ) -> ResolveResult:
@@ -64,6 +83,18 @@ async def resolve_target_session(
             conn, connection.id, chat_id, account_id=account_id
         )
     if existing is not None:
+        # The ledger entry was stamped at spawn (tier-3) or operator-bind
+        # time (when the session was live), but the operator may have
+        # archived the bound session since.  Without this check the
+        # resolver returns the archived id with ``drop=None``,
+        # ``handle_inbound`` proceeds to ``append_event`` which (post-
+        # #523) raises NotFoundError, the inbound surfaces as
+        # ``SESSION_MISSING`` → HTTP 500, and well-behaved connectors
+        # retry-forever on 5xx (same retry-loop pathology PR #526 closed
+        # for tier-3 single_session).  ``DETACHED`` (→ 422) is the
+        # terminal signal that tells the connector to stop retrying.
+        if await _session_is_archived(pool, existing, account_id=account_id):
+            return ResolveResult(session_id=None, drop=ResolveDrop.DETACHED)
         return ResolveResult(session_id=existing, drop=None)
 
     # Tier 2: routing_rules prefix demux on the active binding.
@@ -101,13 +132,7 @@ async def resolve_target_session(
         # ledger stamp here so the next inbound goes through the same
         # check (no poisoning), and if the operator detaches+rebinds
         # to a live session the resolver picks it up immediately.
-        async with pool.acquire() as conn:
-            session_archived_at = await conn.fetchval(
-                "SELECT archived_at FROM sessions WHERE id = $1 AND account_id = $2",
-                binding.session_id,
-                account_id,
-            )
-        if session_archived_at is not None:
+        if await _session_is_archived(pool, binding.session_id, account_id=account_id):
             return ResolveResult(session_id=None, drop=ResolveDrop.DETACHED)
         # No ledger insert — operators opt into per-chat overrides explicitly.
         return ResolveResult(session_id=binding.session_id, drop=None)
