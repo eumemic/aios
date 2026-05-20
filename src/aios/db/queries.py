@@ -2302,6 +2302,21 @@ async def update_vault(
     display_name: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Vault:
+    # Refuse updates to archived vaults: the read path (``get_vault``,
+    # ``list_vaults``) filters ``archived_at IS NULL``, so a rewrite of
+    # an archived row has no observable effect — but the bare UPDATE
+    # below would still commit the new values and the RETURNING-built
+    # response would lie back to the caller as if the update took.
+    # Mirrors the symmetric raise on archived rows in
+    # ``update_agent`` / ``update_environment`` / ``update_session_template``
+    # (PR #547).
+    current = await get_vault(conn, vault_id, account_id=account_id)
+    if current.archived_at is not None:
+        raise ConflictError(
+            f"vault {vault_id} is archived",
+            detail={"id": vault_id},
+        )
+
     sets: list[str] = []
     args: list[Any] = [vault_id]
     if display_name is not None:
@@ -2311,7 +2326,7 @@ async def update_vault(
         args.append(json.dumps(metadata))
         sets.append(f"metadata = ${len(args)}::jsonb")
     if not sets:
-        return await get_vault(conn, vault_id, account_id=account_id)
+        return current
     sets.append("updated_at = now()")
     args.append(account_id)
     sql = (
