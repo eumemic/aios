@@ -6116,7 +6116,7 @@
           "runtime-tokens"
         ],
         "summary": "Issue",
-        "description": "Mint a new bearer token scoped to ``body.connector``.\n\nThe plaintext is included in the response and CANNOT be recovered\nlater \u2014 operators must save it at issue time.",
+        "description": "Mint a new bearer token scoped to ``body.connector``.\n\nThe plaintext is included in the response and CANNOT be recovered\nlater \u2014 operators must save it at issue time.\n\nOptional ``body.connection_ids`` (#350) restricts the issued token\nto that allowlist of connection IDs; omit to leave the token\nunscoped (sees every connection of ``body.connector`` type).",
         "operationId": "issue_runtime_token",
         "parameters": [
           {
@@ -6292,7 +6292,7 @@
           "connectors"
         ],
         "summary": "Put Tools Schema",
-        "description": "Publish the runtime container's tool catalog for a connector type.\n\nThe runtime container is the source of truth for what tools it\nserves \u2014 it knows their names, parameter shapes, and docstrings.\nThe SDK derives JSON Schemas from ``@tool``-decorated methods at\nstartup and calls this once, replacing whatever was on the\n``connectors.tools_schema`` row wholesale.  Operators don't\nhand-write the schema.\n\nAuthorization: the runtime bearer's ``connector`` must match the\npath's ``connector``.",
+        "description": "Publish the runtime container's tool catalog for a connector type.\n\nThe runtime container is the source of truth for what tools it\nserves \u2014 it knows their names, parameter shapes, and docstrings.\nThe SDK derives JSON Schemas from ``@tool``-decorated methods at\nstartup and calls this once, replacing whatever was on the\n``connectors.tools_schema`` row wholesale.  Operators don't\nhand-write the schema.\n\nAuthorization: the runtime bearer's ``connector`` must match the\npath's ``connector``.  ``connection_ids`` allowlist is NOT enforced\nhere \u2014 the tools schema is a connector-type-wide registration, not\na per-connection operation.",
         "operationId": "put_connector_tools_schema",
         "parameters": [
           {
@@ -6359,7 +6359,7 @@
           "connectors"
         ],
         "summary": "Get Connection Discovery",
-        "description": "SSE stream of ``added`` / ``removed`` connection events for the\nruntime container's connector type (#328 PR 5).\n\nBackfills every active connection of the caller's ``connector``\ntype at subscribe time as ``added`` events, then tails the\n``connections_<connector>`` NOTIFY channel.  Each event is keyed\n``connection`` with a JSON body shaped::\n\n    {\"event\": \"added\" | \"removed\",\n     \"connection_id\": \"...\",\n     \"external_account_id\": \"...\"}\n\nThe runtime container subscribes once per ``connector`` type and\nfans out to per-connection workers on ``added``; tears them down\non ``removed``.",
+        "description": "SSE stream of ``added`` / ``removed`` connection events for the\nruntime container's connector type (#328 PR 5).\n\nBackfills every active connection of the caller's ``connector``\ntype at subscribe time as ``added`` events, then tails the\n``connections_<connector>`` NOTIFY channel.  Each event is keyed\n``connection`` with a JSON body shaped::\n\n    {\"event\": \"added\" | \"removed\",\n     \"connection_id\": \"...\",\n     \"external_account_id\": \"...\"}\n\nThe runtime container subscribes once per ``connector`` type and\nfans out to per-connection workers on ``added``; tears them down\non ``removed``.\n\nWhen the bearer carries a ``connection_ids`` allowlist (#350), the\nbackfill and tail both filter to that set \u2014 out-of-scope IDs are\nsilently omitted (not 403'd) so the runtime container's discovery\nloop just doesn't see them.",
         "operationId": "get_connection_discovery_v1_connectors_connections_get",
         "parameters": [
           {
@@ -6410,7 +6410,7 @@
           "connectors"
         ],
         "summary": "Post Runtime Inbound",
-        "description": "Append an inbound user message to ``connection_id``'s session.\n\nThe bearer authenticates the caller as one connector *type*;\n``connection_id`` rides as a form field and must belong to that\ntype.  Idempotent on ``event_id``; drops surface as 4xx/5xx with\na body explaining the reason (operator-config issue vs server\nerror vs payload).",
+        "description": "Append an inbound user message to ``connection_id``'s session.\n\nThe bearer authenticates the caller as one connector *type*;\n``connection_id`` rides as a form field and must belong to that\ntype.  When the bearer carries a ``connection_ids`` allowlist\n(#350), the form field must also be on the list \u2014 otherwise 403.\nIdempotent on ``event_id``; drops surface as 4xx/5xx with\na body explaining the reason (operator-config issue vs server\nerror vs payload).",
         "operationId": "post_connector_runtime_inbound",
         "parameters": [
           {
@@ -6470,7 +6470,7 @@
           "connectors"
         ],
         "summary": "Post Runtime Tool Result",
-        "description": "Submit a custom tool result from a runtime container.\n\nAuthorization: the bearer's connector must match ``body.connection_id``'s\nconnector, and the session must be bound to that connection.",
+        "description": "Submit a custom tool result from a runtime container.\n\nAuthorization: the bearer's connector must match\n``body.connection_id``'s connector, the session must be bound to\nthat connection, and (when the bearer carries a ``connection_ids``\nallowlist) ``body.connection_id`` must be on the list (#350).",
         "operationId": "post_connector_runtime_tool_result",
         "parameters": [
           {
@@ -6530,7 +6530,7 @@
           "connectors"
         ],
         "summary": "Get Runtime Secrets",
-        "description": "Decrypted secrets for ``connection_id``.\n\nThe bearer's connector must match the connection's connector\ntype.  Returns ``{\"secrets\": {}}`` when none are configured \u2014\ncallers decide whether that's acceptable.",
+        "description": "Decrypted secrets for ``connection_id``.\n\nThe bearer's connector must match the connection's connector\ntype; when the bearer carries a ``connection_ids`` allowlist\n(#350), ``connection_id`` must be on the list.  Returns\n``{\"secrets\": {}}`` when none are configured \u2014 callers decide\nwhether that's acceptable.",
         "operationId": "get_connector_runtime_secrets",
         "parameters": [
           {
@@ -6589,7 +6589,7 @@
           "connectors"
         ],
         "summary": "Get Runtime Calls",
-        "description": "SSE stream of pending custom tool calls across every active\nconnection of the caller's connector type.\n\nBackfills at subscribe time, then tails ``connector_calls_<connector>``.\nEach event is keyed ``call`` with a JSON body shaped::\n\n    {\n        \"session_id\": \"...\",\n        \"tool_call_id\": \"...\",\n        \"name\": \"...\",\n        \"arguments\": \"...\",       // JSON string from the model\n        \"focal_channel\": \"...\",\n        \"connection_id\": \"...\"\n    }\n\nThe ``connection_id`` field lets the runtime container fan out to\nits per-connection workers client-side.",
+        "description": "SSE stream of pending custom tool calls across every active\nconnection of the caller's connector type.\n\nBackfills at subscribe time, then tails ``connector_calls_<connector>``.\nEach event is keyed ``call`` with a JSON body shaped::\n\n    {\n        \"session_id\": \"...\",\n        \"tool_call_id\": \"...\",\n        \"name\": \"...\",\n        \"arguments\": \"...\",       // JSON string from the model\n        \"focal_channel\": \"...\",\n        \"connection_id\": \"...\"\n    }\n\nThe ``connection_id`` field lets the runtime container fan out to\nits per-connection workers client-side.  When the bearer carries\na ``connection_ids`` allowlist (#350), backfill and tail both\nfilter to that set \u2014 out-of-scope calls are silently omitted.",
         "operationId": "get_runtime_calls_v1_connectors_runtime_calls_get",
         "parameters": [
           {
@@ -6640,7 +6640,7 @@
           "connectors"
         ],
         "summary": "Get Runtime Management Calls",
-        "description": "SSE stream of pending management calls for the caller's connector type.\n\nPer-connector-type only (no session/connection scope).  Each event is\nkeyed ``call`` with body ``{\"call_id\": \"mgmt_...\", \"method\": str, \"params\": dict}``.",
+        "description": "SSE stream of pending management calls for the caller's connector type.\n\nPer-connector-type only (no session/connection scope).  Each event is\nkeyed ``call`` with body ``{\"call_id\": \"mgmt_...\", \"method\": str, \"params\": dict}``.\n``connection_ids`` allowlist is NOT enforced here \u2014 management\ncalls are connector-type-wide, not per-connection.",
         "operationId": "get_runtime_management_calls_v1_connectors_runtime_management_calls_get",
         "parameters": [
           {
@@ -10311,6 +10311,20 @@
             ],
             "title": "Label"
           },
+          "connection_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Ids"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -10348,7 +10362,7 @@
           "created_at"
         ],
         "title": "RuntimeToken",
-        "description": "Read view of a runtime token.  Never carries plaintext."
+        "description": "Read view of a runtime token.  Never carries plaintext.\n\n``connection_ids`` is the optional allowlist scope (#350).  ``None``\nmeans the token is unscoped \u2014 it sees every connection of its\n``connector`` type.  A non-``None`` list (including ``[]``) limits\nvisibility / operations to the listed IDs only."
       },
       "RuntimeTokenIssue": {
         "properties": {
@@ -10367,6 +10381,21 @@
               }
             ],
             "title": "Label"
+          },
+          "connection_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Ids",
+            "description": "Optional allowlist of connection IDs the issued token is authorized for.  Omit (``None``) to leave the token unscoped \u2014 it sees every connection of ``connector`` type."
           }
         },
         "additionalProperties": false,
@@ -10397,6 +10426,20 @@
               }
             ],
             "title": "Label"
+          },
+          "connection_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Ids"
           },
           "plaintext": {
             "type": "string",

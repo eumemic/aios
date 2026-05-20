@@ -220,6 +220,29 @@ def _check_runtime_scope(auth_connector: str, target_connector: str) -> None:
         )
 
 
+def _check_runtime_connection_scope(
+    auth_connection_ids: list[str] | None,
+    target_connection_id: str,
+) -> None:
+    """Raise 403 if a runtime bearer with a non-``None`` allowlist reaches
+    outside its ``connection_ids`` scope (#350).
+
+    ``None`` means the token is unscoped — no check is performed.
+    A non-``None`` list (including ``[]``) restricts the bearer to
+    its listed IDs only; anything else 403s.
+    """
+    if auth_connection_ids is None:
+        return
+    if target_connection_id not in auth_connection_ids:
+        raise ForbiddenError(
+            "runtime token not authorized for this connection",
+            detail={
+                "auth_connection_ids": auth_connection_ids,
+                "target_connection_id": target_connection_id,
+            },
+        )
+
+
 @router.put(
     "/{connector}/tools_schema",
     operation_id="put_connector_tools_schema",
@@ -240,9 +263,11 @@ async def put_tools_schema(
     hand-write the schema.
 
     Authorization: the runtime bearer's ``connector`` must match the
-    path's ``connector``.
+    path's ``connector``.  ``connection_ids`` allowlist is NOT enforced
+    here — the tools schema is a connector-type-wide registration, not
+    a per-connection operation.
     """
-    _, auth_connector, account_id = auth
+    _, auth_connector, account_id, _scope = auth
     _check_runtime_scope(auth_connector, connector)
     async with pool.acquire() as conn:
         await queries.update_connector_tools_schema(
@@ -274,10 +299,21 @@ async def get_connection_discovery(
     The runtime container subscribes once per ``connector`` type and
     fans out to per-connection workers on ``added``; tears them down
     on ``removed``.
+
+    When the bearer carries a ``connection_ids`` allowlist (#350), the
+    backfill and tail both filter to that set — out-of-scope IDs are
+    silently omitted (not 403'd) so the runtime container's discovery
+    loop just doesn't see them.
     """
-    _, connector, account_id = auth
+    _, connector, account_id, auth_connection_ids = auth
     return EventSourceResponse(
-        connection_discovery_stream(db_url, pool, connector, account_id=account_id),
+        connection_discovery_stream(
+            db_url,
+            pool,
+            connector,
+            account_id=account_id,
+            connection_ids=auth_connection_ids,
+        ),
         ping=15,
     )
 
@@ -320,14 +356,17 @@ async def post_runtime_inbound(
 
     The bearer authenticates the caller as one connector *type*;
     ``connection_id`` rides as a form field and must belong to that
-    type.  Idempotent on ``event_id``; drops surface as 4xx/5xx with
+    type.  When the bearer carries a ``connection_ids`` allowlist
+    (#350), the form field must also be on the list — otherwise 403.
+    Idempotent on ``event_id``; drops surface as 4xx/5xx with
     a body explaining the reason (operator-config issue vs server
     error vs payload).
     """
-    _, auth_connector, account_id = auth
+    _, auth_connector, account_id, auth_connection_ids = auth
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, connection_id, account_id=account_id)
     _check_runtime_scope(auth_connector, connection.connector)
+    _check_runtime_connection_scope(auth_connection_ids, connection_id)
     return await _do_inbound(
         pool,
         account_id=account_id,
@@ -354,13 +393,16 @@ async def post_runtime_tool_result(
 ) -> Any:
     """Submit a custom tool result from a runtime container.
 
-    Authorization: the bearer's connector must match ``body.connection_id``'s
-    connector, and the session must be bound to that connection.
+    Authorization: the bearer's connector must match
+    ``body.connection_id``'s connector, the session must be bound to
+    that connection, and (when the bearer carries a ``connection_ids``
+    allowlist) ``body.connection_id`` must be on the list (#350).
     """
-    _, auth_connector, account_id = auth
+    _, auth_connector, account_id, auth_connection_ids = auth
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, body.connection_id, account_id=account_id)
         _check_runtime_scope(auth_connector, connection.connector)
+        _check_runtime_connection_scope(auth_connection_ids, body.connection_id)
         if not await queries.is_session_bound_to_connection(
             conn,
             connection_id=body.connection_id,
@@ -399,13 +441,16 @@ async def get_runtime_secrets(
     """Decrypted secrets for ``connection_id``.
 
     The bearer's connector must match the connection's connector
-    type.  Returns ``{"secrets": {}}`` when none are configured —
-    callers decide whether that's acceptable.
+    type; when the bearer carries a ``connection_ids`` allowlist
+    (#350), ``connection_id`` must be on the list.  Returns
+    ``{"secrets": {}}`` when none are configured — callers decide
+    whether that's acceptable.
     """
-    _, auth_connector, account_id = auth
+    _, auth_connector, account_id, auth_connection_ids = auth
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, connection_id, account_id=account_id)
     _check_runtime_scope(auth_connector, connection.connector)
+    _check_runtime_connection_scope(auth_connection_ids, connection_id)
     secrets = await connections_service.get_connection_secrets(
         pool, connection_id, crypto_box=crypto_box, account_id=account_id
     )
@@ -437,11 +482,19 @@ async def get_runtime_calls(
         }
 
     The ``connection_id`` field lets the runtime container fan out to
-    its per-connection workers client-side.
+    its per-connection workers client-side.  When the bearer carries
+    a ``connection_ids`` allowlist (#350), backfill and tail both
+    filter to that set — out-of-scope calls are silently omitted.
     """
-    _, connector, account_id = auth
+    _, connector, account_id, auth_connection_ids = auth
     return EventSourceResponse(
-        runtime_connector_calls_stream(db_url, pool, connector, account_id=account_id),
+        runtime_connector_calls_stream(
+            db_url,
+            pool,
+            connector,
+            account_id=account_id,
+            connection_ids=auth_connection_ids,
+        ),
         ping=15,
     )
 
@@ -459,8 +512,10 @@ async def get_runtime_management_calls(
 
     Per-connector-type only (no session/connection scope).  Each event is
     keyed ``call`` with body ``{"call_id": "mgmt_...", "method": str, "params": dict}``.
+    ``connection_ids`` allowlist is NOT enforced here — management
+    calls are connector-type-wide, not per-connection.
     """
-    _, connector, account_id = auth
+    _, connector, account_id, _scope = auth
     return EventSourceResponse(
         management_calls_stream(db_url, pool, connector, account_id=account_id),
         ping=15,
@@ -655,7 +710,11 @@ async def post_runtime_management_call_result(
     pool: PoolDep,
     auth: RuntimeAuthDep,
 ) -> None:
-    _, auth_connector, account_id = auth
+    _, auth_connector, account_id, _scope = auth
+    # ``connection_ids`` allowlist is NOT enforced — management calls
+    # are connector-type-wide; the result intake is the matching peer
+    # of ``get_runtime_management_calls`` which also doesn't filter.
+    #
     # Autocommit conn (no ``async with conn.transaction()``): the UPDATE
     # commits before the NOTIFY fires.  Don't wrap these in a
     # transaction — subscribers would see uncommitted state.  See

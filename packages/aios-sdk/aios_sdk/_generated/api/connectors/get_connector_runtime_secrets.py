@@ -76,8 +76,10 @@ def sync_detailed(
      Decrypted secrets for ``connection_id``.
 
     The bearer's connector must match the connection's connector
-    type.  Returns ``{\"secrets\": {}}`` when none are configured —
-    callers decide whether that's acceptable.
+    type; when the bearer carries a ``connection_ids`` allowlist
+    (#350), ``connection_id`` must be on the list.  Returns
+    ``{\"secrets\": {}}`` when none are configured — callers decide
+    whether that's acceptable.
 
     Args:
         connection_id (str):
@@ -114,8 +116,10 @@ def sync(
      Decrypted secrets for ``connection_id``.
 
     The bearer's connector must match the connection's connector
-    type.  Returns ``{\"secrets\": {}}`` when none are configured —
-    callers decide whether that's acceptable.
+    type; when the bearer carries a ``connection_ids`` allowlist
+    (#350), ``connection_id`` must be on the list.  Returns
+    ``{\"secrets\": {}}`` when none are configured — callers decide
+    whether that's acceptable.
 
     Args:
         connection_id (str):
@@ -147,8 +151,10 @@ async def asyncio_detailed(
      Decrypted secrets for ``connection_id``.
 
     The bearer's connector must match the connection's connector
-    type.  Returns ``{\"secrets\": {}}`` when none are configured —
-    callers decide whether that's acceptable.
+    type; when the bearer carries a ``connection_ids`` allowlist
+    (#350), ``connection_id`` must be on the list.  Returns
+    ``{\"secrets\": {}}`` when none are configured — callers decide
+    whether that's acceptable.
 
     Args:
         connection_id (str):
@@ -183,8 +189,10 @@ async def asyncio(
      Decrypted secrets for ``connection_id``.
 
     The bearer's connector must match the connection's connector
-    type.  Returns ``{\"secrets\": {}}`` when none are configured —
-    callers decide whether that's acceptable.
+    type; when the bearer carries a ``connection_ids`` allowlist
+    (#350), ``connection_id`` must be on the list.  Returns
+    ``{\"secrets\": {}}`` when none are configured — callers decide
+    whether that's acceptable.
 
     Args:
         connection_id (str):

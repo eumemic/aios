@@ -80,20 +80,29 @@ async def require_bearer_auth(
 async def require_runtime_auth(
     pool: Annotated[asyncpg.Pool, Depends(get_pool)],
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> tuple[str, str, str]:
-    """Resolve a bearer runtime token to ``(token_id, connector, account_id)``.
+) -> tuple[str, str, str, list[str] | None]:
+    """Resolve a bearer runtime token to
+    ``(token_id, connector, account_id, connection_ids)``.
 
     Accepts only tokens issued via ``POST /v1/runtime-tokens``. Routes
     that take ``RuntimeAuthDep`` receive the resolved tuple — the
     ``connector`` half is used to scope the runtime-facing routes
     (``/connectors/runtime/...`` family) to one connector type;
-    ``account_id`` scopes resource queries to the token's tenant.
+    ``account_id`` scopes resource queries to the token's tenant;
+    ``connection_ids`` is the optional allowlist scope (#350):
+    ``None`` means the token is unscoped, a non-``None`` list limits
+    the bearer to those connection IDs.
     """
     token = _extract_bearer_token(authorization)
     resolved = await runtime_tokens_service.resolve(pool, token)
     if resolved is None:
         raise UnauthorizedError("invalid or revoked runtime token")
-    return (resolved.token_id, resolved.connector, resolved.account_id)
+    return (
+        resolved.token_id,
+        resolved.connector,
+        resolved.account_id,
+        resolved.connection_ids,
+    )
 
 
 # Type aliases for clarity at the route definitions.
@@ -104,4 +113,4 @@ CryptoBoxDep = Annotated[CryptoBox, Depends(get_crypto_box)]
 ProcrastinateDep = Annotated[ProcrastinateApp, Depends(get_procrastinate)]
 DbUrlDep = Annotated[str, Depends(get_db_url)]
 AuthDep = Annotated[AccountAuthResult, Depends(require_bearer_auth)]
-RuntimeAuthDep = Annotated[tuple[str, str, str], Depends(require_runtime_auth)]
+RuntimeAuthDep = Annotated[tuple[str, str, str, list[str] | None], Depends(require_runtime_auth)]

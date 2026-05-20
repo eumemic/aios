@@ -84,7 +84,9 @@ def sync_detailed(
     hand-write the schema.
 
     Authorization: the runtime bearer's ``connector`` must match the
-    path's ``connector``.
+    path's ``connector``.  ``connection_ids`` allowlist is NOT enforced
+    here — the tools schema is a connector-type-wide registration, not
+    a per-connection operation.
 
     Args:
         connector (str):
@@ -131,7 +133,9 @@ def sync(
     hand-write the schema.
 
     Authorization: the runtime bearer's ``connector`` must match the
-    path's ``connector``.
+    path's ``connector``.  ``connection_ids`` allowlist is NOT enforced
+    here — the tools schema is a connector-type-wide registration, not
+    a per-connection operation.
 
     Args:
         connector (str):
@@ -173,7 +177,9 @@ async def asyncio_detailed(
     hand-write the schema.
 
     Authorization: the runtime bearer's ``connector`` must match the
-    path's ``connector``.
+    path's ``connector``.  ``connection_ids`` allowlist is NOT enforced
+    here — the tools schema is a connector-type-wide registration, not
+    a per-connection operation.
 
     Args:
         connector (str):
@@ -218,7 +224,9 @@ async def asyncio(
     hand-write the schema.
 
     Authorization: the runtime bearer's ``connector`` must match the
-    path's ``connector``.
+    path's ``connector``.  ``connection_ids`` allowlist is NOT enforced
+    here — the tools schema is a connector-type-wide registration, not
+    a per-connection operation.
 
     Args:
         connector (str):

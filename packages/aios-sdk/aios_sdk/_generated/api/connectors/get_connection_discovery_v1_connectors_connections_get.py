@@ -78,6 +78,11 @@ def sync_detailed(
     fans out to per-connection workers on ``added``; tears them down
     on ``removed``.
 
+    When the bearer carries a ``connection_ids`` allowlist (#350), the
+    backfill and tail both filter to that set — out-of-scope IDs are
+    silently omitted (not 403'd) so the runtime container's discovery
+    loop just doesn't see them.
+
     Args:
         authorization (None | str | Unset):
 
@@ -123,6 +128,11 @@ def sync(
     fans out to per-connection workers on ``added``; tears them down
     on ``removed``.
 
+    When the bearer carries a ``connection_ids`` allowlist (#350), the
+    backfill and tail both filter to that set — out-of-scope IDs are
+    silently omitted (not 403'd) so the runtime container's discovery
+    loop just doesn't see them.
+
     Args:
         authorization (None | str | Unset):
 
@@ -162,6 +172,11 @@ async def asyncio_detailed(
     The runtime container subscribes once per ``connector`` type and
     fans out to per-connection workers on ``added``; tears them down
     on ``removed``.
+
+    When the bearer carries a ``connection_ids`` allowlist (#350), the
+    backfill and tail both filter to that set — out-of-scope IDs are
+    silently omitted (not 403'd) so the runtime container's discovery
+    loop just doesn't see them.
 
     Args:
         authorization (None | str | Unset):
@@ -205,6 +220,11 @@ async def asyncio(
     The runtime container subscribes once per ``connector`` type and
     fans out to per-connection workers on ``added``; tears them down
     on ``removed``.
+
+    When the bearer carries a ``connection_ids`` allowlist (#350), the
+    backfill and tail both filter to that set — out-of-scope IDs are
+    silently omitted (not 403'd) so the runtime container's discovery
+    loop just doesn't see them.
 
     Args:
         authorization (None | str | Unset):

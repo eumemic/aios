@@ -66,6 +66,8 @@ def sync_detailed(
 
     Per-connector-type only (no session/connection scope).  Each event is
     keyed ``call`` with body ``{\"call_id\": \"mgmt_...\", \"method\": str, \"params\": dict}``.
+    ``connection_ids`` allowlist is NOT enforced here — management
+    calls are connector-type-wide, not per-connection.
 
     Args:
         authorization (None | str | Unset):
@@ -100,6 +102,8 @@ def sync(
 
     Per-connector-type only (no session/connection scope).  Each event is
     keyed ``call`` with body ``{\"call_id\": \"mgmt_...\", \"method\": str, \"params\": dict}``.
+    ``connection_ids`` allowlist is NOT enforced here — management
+    calls are connector-type-wide, not per-connection.
 
     Args:
         authorization (None | str | Unset):
@@ -129,6 +133,8 @@ async def asyncio_detailed(
 
     Per-connector-type only (no session/connection scope).  Each event is
     keyed ``call`` with body ``{\"call_id\": \"mgmt_...\", \"method\": str, \"params\": dict}``.
+    ``connection_ids`` allowlist is NOT enforced here — management
+    calls are connector-type-wide, not per-connection.
 
     Args:
         authorization (None | str | Unset):
@@ -161,6 +167,8 @@ async def asyncio(
 
     Per-connector-type only (no session/connection scope).  Each event is
     keyed ``call`` with body ``{\"call_id\": \"mgmt_...\", \"method\": str, \"params\": dict}``.
+    ``connection_ids`` allowlist is NOT enforced here — management
+    calls are connector-type-wide, not per-connection.
 
     Args:
         authorization (None | str | Unset):

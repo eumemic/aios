@@ -142,6 +142,7 @@ async def runtime_connector_calls_stream(
     connector: str,
     *,
     account_id: str,
+    connection_ids: list[str] | None = None,
 ) -> AsyncIterator[ServerSentEvent]:
     """Yield SSE events for pending custom tool calls across every active
     connection of ``connector`` type (#328 PR 5).
@@ -152,7 +153,13 @@ async def runtime_connector_calls_stream(
 
     Backfills any pending calls at subscribe time, then tails the
     ``connector_calls_<connector>`` NOTIFY channel.
+
+    When ``connection_ids`` is non-``None`` (#350), backfill and tail
+    both filter to that allowlist — out-of-scope calls are silently
+    omitted.  The tail-side check parses the NOTIFY payload directly
+    so the per-connection fetch is skipped for out-of-scope IDs.
     """
+    allowlist = set(connection_ids) if connection_ids is not None else None
     async with listen_for_connector_calls_by_type(db_url, connector) as queue:
         emitted: set[str] = set()
 
@@ -161,6 +168,8 @@ async def runtime_connector_calls_stream(
                 conn, connector, account_id=account_id
             )
         for call in backfill:
+            if allowlist is not None and call.get("connection_id") not in allowlist:
+                continue
             emitted.add(call["tool_call_id"])
             yield ServerSentEvent(data=json.dumps(call), event="call")
 
@@ -171,6 +180,9 @@ async def runtime_connector_calls_stream(
             if not connection_id:
                 log.warning("sse.runtime_calls.malformed_payload", payload=payload)
                 continue
+            # Skip the per-connection fetch for out-of-scope IDs.
+            if allowlist is not None and connection_id not in allowlist:
+                continue
             async with pool.acquire() as conn:
                 pending = await queries.list_pending_calls_for_session_and_connection(
                     conn,
@@ -180,6 +192,10 @@ async def runtime_connector_calls_stream(
                 )
             for call in pending:
                 if call["tool_call_id"] in emitted:
+                    continue
+                # Defensive post-fetch check — keeps the emit honest even
+                # if a future refactor changes the partition logic.
+                if allowlist is not None and connection_id not in allowlist:
                     continue
                 emitted.add(call["tool_call_id"])
                 call["connection_id"] = connection_id
@@ -237,6 +253,7 @@ async def connection_discovery_stream(
     connector: str,
     *,
     account_id: str,
+    connection_ids: list[str] | None = None,
 ) -> AsyncIterator[ServerSentEvent]:
     """Yield ``added`` SSE events backfilling every active connection of
     ``connector`` type, then ``added`` / ``removed`` events as connections
@@ -247,7 +264,13 @@ async def connection_discovery_stream(
     workers, and tears workers down on ``removed`` events.  The emit
     side lives in :mod:`aios.services.connections.attach_connection` /
     ``archive_connection``.
+
+    When ``connection_ids`` is non-``None`` (#350), the backfill and
+    tail both filter to that allowlist — out-of-scope IDs are silently
+    skipped in either phase so the runtime container's discovery loop
+    just doesn't see them.
     """
+    allowlist = set(connection_ids) if connection_ids is not None else None
     async with listen_for_connection_discovery(db_url, connector) as queue:
         emitted_added: set[str] = set()
 
@@ -261,6 +284,8 @@ async def connection_discovery_stream(
                     conn, connector=connector, limit=200, after=cursor, account_id=account_id
                 )
             for connection in page:
+                if allowlist is not None and connection.id not in allowlist:
+                    continue
                 emitted_added.add(connection.id)
                 yield ServerSentEvent(
                     data=json.dumps(
@@ -289,6 +314,8 @@ async def connection_discovery_stream(
             # existence-leak (sibling account_ids would otherwise surface
             # via the tail).
             if event_account_id != account_id:
+                continue
+            if allowlist is not None and connection_id not in allowlist:
                 continue
             if event == "added" and connection_id in emitted_added:
                 continue

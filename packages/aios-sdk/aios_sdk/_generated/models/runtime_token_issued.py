@@ -8,6 +8,8 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
+from ..types import UNSET, Unset
+
 T = TypeVar("T", bound="RuntimeTokenIssued")
 
 
@@ -24,6 +26,7 @@ class RuntimeTokenIssued:
             label (None | str):
             plaintext (str): The bearer token value.  Save this — it cannot be recovered.
             created_at (datetime.datetime):
+            connection_ids (list[str] | None | Unset):
     """
 
     id: str
@@ -31,6 +34,7 @@ class RuntimeTokenIssued:
     label: None | str
     plaintext: str
     created_at: datetime.datetime
+    connection_ids: list[str] | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -45,6 +49,15 @@ class RuntimeTokenIssued:
 
         created_at = self.created_at.isoformat()
 
+        connection_ids: list[str] | None | Unset
+        if isinstance(self.connection_ids, Unset):
+            connection_ids = UNSET
+        elif isinstance(self.connection_ids, list):
+            connection_ids = self.connection_ids
+
+        else:
+            connection_ids = self.connection_ids
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -56,6 +69,8 @@ class RuntimeTokenIssued:
                 "created_at": created_at,
             }
         )
+        if connection_ids is not UNSET:
+            field_dict["connection_ids"] = connection_ids
 
         return field_dict
 
@@ -77,12 +92,30 @@ class RuntimeTokenIssued:
 
         created_at = isoparse(d.pop("created_at"))
 
+        def _parse_connection_ids(data: object) -> list[str] | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, list):
+                    raise TypeError()
+                connection_ids_type_0 = cast(list[str], data)
+
+                return connection_ids_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(list[str] | None | Unset, data)
+
+        connection_ids = _parse_connection_ids(d.pop("connection_ids", UNSET))
+
         runtime_token_issued = cls(
             id=id,
             connector=connector,
             label=label,
             plaintext=plaintext,
             created_at=created_at,
+            connection_ids=connection_ids,
         )
 
         runtime_token_issued.additional_properties = d
