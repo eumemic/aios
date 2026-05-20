@@ -141,21 +141,17 @@ async def get_environment(
 async def list_environments(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Environment]:
-    if after is None:
-        rows = await conn.fetch(
-            "SELECT * FROM environments WHERE archived_at IS NULL AND account_id = $1 "
-            "ORDER BY id DESC LIMIT $2",
-            account_id,
-            limit,
-        )
-    else:
-        rows = await conn.fetch(
-            "SELECT * FROM environments WHERE archived_at IS NULL AND id < $1 "
-            "AND account_id = $2 ORDER BY id DESC LIMIT $3",
-            after,
-            account_id,
-            limit,
-        )
+    args: list[Any] = [account_id]
+    where = ["archived_at IS NULL", "account_id = $1"]
+    if after is not None:
+        args.append(after)
+        where.append(f"id < ${len(args)}")
+    args.append(limit)
+    sql = (
+        f"SELECT * FROM environments WHERE {' AND '.join(where)} "
+        f"ORDER BY id DESC LIMIT ${len(args)}"
+    )
+    rows = await conn.fetch(sql, *args)
     return [_row_to_environment(r) for r in rows]
 
 
@@ -2276,21 +2272,14 @@ async def get_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_id:
 async def list_vaults(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Vault]:
-    if after is None:
-        rows = await conn.fetch(
-            "SELECT * FROM vaults WHERE archived_at IS NULL AND account_id = $1 "
-            "ORDER BY id DESC LIMIT $2",
-            account_id,
-            limit,
-        )
-    else:
-        rows = await conn.fetch(
-            "SELECT * FROM vaults WHERE archived_at IS NULL AND id < $1 AND account_id = $2 "
-            "ORDER BY id DESC LIMIT $3",
-            after,
-            account_id,
-            limit,
-        )
+    args: list[Any] = [account_id]
+    where = ["archived_at IS NULL", "account_id = $1"]
+    if after is not None:
+        args.append(after)
+        where.append(f"id < ${len(args)}")
+    args.append(limit)
+    sql = f"SELECT * FROM vaults WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
+    rows = await conn.fetch(sql, *args)
     return [_row_to_vault(r) for r in rows]
 
 
@@ -2903,21 +2892,14 @@ async def get_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id:
 async def list_skills(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Skill]:
-    if after is None:
-        rows = await conn.fetch(
-            "SELECT * FROM skills WHERE archived_at IS NULL AND account_id = $1 "
-            "ORDER BY id DESC LIMIT $2",
-            account_id,
-            limit,
-        )
-    else:
-        rows = await conn.fetch(
-            "SELECT * FROM skills WHERE archived_at IS NULL AND id < $1 AND account_id = $2 "
-            "ORDER BY id DESC LIMIT $3",
-            after,
-            account_id,
-            limit,
-        )
+    args: list[Any] = [account_id]
+    where = ["archived_at IS NULL", "account_id = $1"]
+    if after is not None:
+        args.append(after)
+        where.append(f"id < ${len(args)}")
+    args.append(limit)
+    sql = f"SELECT * FROM skills WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
+    rows = await conn.fetch(sql, *args)
     return [_row_to_skill(r) for r in rows]
 
 
@@ -4041,23 +4023,17 @@ async def get_session_template(
 async def list_session_templates(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[SessionTemplate]:
-    if after is None:
-        rows = await conn.fetch(
-            "SELECT * FROM session_templates "
-            "WHERE archived_at IS NULL AND account_id = $2 "
-            "ORDER BY id DESC LIMIT $1",
-            limit,
-            account_id,
-        )
-    else:
-        rows = await conn.fetch(
-            "SELECT * FROM session_templates "
-            "WHERE archived_at IS NULL AND id < $1 AND account_id = $3 "
-            "ORDER BY id DESC LIMIT $2",
-            after,
-            limit,
-            account_id,
-        )
+    args: list[Any] = [account_id]
+    where = ["archived_at IS NULL", "account_id = $1"]
+    if after is not None:
+        args.append(after)
+        where.append(f"id < ${len(args)}")
+    args.append(limit)
+    sql = (
+        f"SELECT * FROM session_templates WHERE {' AND '.join(where)} "
+        f"ORDER BY id DESC LIMIT ${len(args)}"
+    )
+    rows = await conn.fetch(sql, *args)
     return [_row_to_session_template(r) for r in rows]
 
 
