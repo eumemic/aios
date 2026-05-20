@@ -47,7 +47,7 @@ from aios.harness.sweep import (
 from aios.harness.task_registry import TaskRegistry
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
-from aios.sandbox.backends import make_backend
+from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.mcp_proxy import McpBroker
 from aios.sandbox.network import ensure_sandbox_network
 from aios.sandbox.registry import SandboxRegistry
@@ -108,11 +108,10 @@ async def worker_main() -> None:
     try:
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
         crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-        sandbox_registry = SandboxRegistry(backend=make_backend(settings.sandbox_backend))
+        sandbox_registry = SandboxRegistry(backend=DockerBackend())
         task_registry = TaskRegistry()
         mcp_session_pool = McpSessionPool()
-        if settings.sandbox_backend == "docker":
-            await ensure_sandbox_network()
+        await ensure_sandbox_network()
         mcp_broker = McpBroker()
         await mcp_broker.start()
 
