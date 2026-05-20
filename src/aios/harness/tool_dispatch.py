@@ -233,10 +233,10 @@ async def _execute_tool_async(
         else:
             event_data["content"] = json.dumps(result, ensure_ascii=False)
         tc.bound_log.info("tool.completed")
-        await sessions_service.append_event(
+        await _append_tool_result_event(
             pool,
             session_id,
-            "message",
+            tc.call_id,
             event_data,
             account_id=account_id,
         )
@@ -283,6 +283,67 @@ def _validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> st
     return "\n".join(lines)
 
 
+async def _append_tool_result_event(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    tool_call_id: str,
+    event_data: dict[str, Any],
+    *,
+    account_id: str,
+) -> None:
+    """Append a ``role:"tool"`` event, dedup-guarded on ``tool_call_id``.
+
+    The worker's tool task lifecycle (success-, error-, schema-,
+    cancel-paths) all funnel through here so a tool-role event that
+    already landed via the operator path (``confirm_tool_deny`` →
+    ``services.sessions.append_tool_result``) is not silently
+    overwritten by the late worker result.
+
+    Specifically: an ``always_allow`` builtin (or any tool the harness
+    dispatches without the always_ask confirmation gate) can have its
+    operator deny commit while the task is in-flight; without dedup
+    here, the worker's late append lands a SECOND tool-role event for
+    the same ``tool_call_id`` and the context builder's
+    ``real_results[tcid] = e.data`` keying clobbers the deny — the
+    next prompt carries the tool's successful output as if no deny had
+    happened (silent failure symmetric to PR #535).
+
+    Transaction + ``SELECT ... FOR UPDATE`` mirrors
+    :func:`services.sessions.append_tool_result` so the worker-vs-API
+    race serialises through the same session-row lock as the operator
+    path; "first commit wins, second commit no-ops" applies to either
+    ordering.
+    """
+    from aios.db import queries
+
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            session_id,
+            account_id,
+        )
+        existing = await queries.find_tool_result_event(
+            conn, session_id, tool_call_id, account_id=account_id
+        )
+        if existing is not None:
+            existing_is_error = bool(existing.data.get("is_error", False))
+            log.warning(
+                "tool.result_dedup_skip",
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                existing_is_error=existing_is_error,
+                attempted_is_error=bool(event_data.get("is_error", False)),
+            )
+            return
+        await queries.append_event(
+            conn,
+            session_id=session_id,
+            kind="message",
+            data=event_data,
+            account_id=account_id,
+        )
+
+
 async def _append_tool_result(
     pool: asyncpg.Pool[Any],
     session_id: str,
@@ -292,12 +353,13 @@ async def _append_tool_result(
     account_id: str,
     error: str,
 ) -> None:
-    """Append a tool-role error event."""
+    """Append a tool-role error event (dedup-guarded — see
+    :func:`_append_tool_result_event`)."""
     content = json.dumps({"error": error}, ensure_ascii=False)
-    await sessions_service.append_event(
+    await _append_tool_result_event(
         pool,
         session_id,
-        "message",
+        call_id,
         {
             "role": "tool",
             "tool_call_id": call_id,
@@ -469,6 +531,6 @@ async def _execute_mcp_tool_async(
             tc.is_error = True
 
         tc.bound_log.info("mcp_tool.completed", is_error=mcp_is_error)
-        await sessions_service.append_event(
-            pool, session_id, "message", event_data, account_id=account_id
+        await _append_tool_result_event(
+            pool, session_id, tc.call_id, event_data, account_id=account_id
         )
