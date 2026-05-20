@@ -19,7 +19,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-_MEMORY_PATH_PATTERN = r"^(/[^/\x00]+)+$"
+from aios.models._paths import ABSOLUTE_PATH_PATTERN, check_no_traversal_segments
+
 MAX_CONTENT_BYTES = 102400
 MAX_STORES_PER_SESSION = 8
 MAX_INSTRUCTIONS_CHARS = 4096
@@ -73,21 +74,13 @@ MemoryPath = Annotated[
     Field(
         min_length=2,
         max_length=4096,
-        pattern=_MEMORY_PATH_PATTERN,
+        pattern=ABSOLUTE_PATH_PATTERN,
         description=(
             "Absolute, slash-separated path. Segments may not contain / or NUL, "
             "and `.` and `..` are not allowed as segments."
         ),
     ),
 ]
-
-
-def _check_memory_path(path: str) -> None:
-    """Reject `.` and `..` segments. Path-traversal guard at the input boundary —
-    without this, ``host_dir / path.lstrip("/")`` could escape the per-store dir."""
-    for segment in path.lstrip("/").split("/"):
-        if segment in (".", ".."):
-            raise ValueError(f"path segment {segment!r} is not allowed (would enable traversal)")
 
 
 class MemoryCreate(BaseModel):
@@ -100,7 +93,7 @@ class MemoryCreate(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> MemoryCreate:
-        _check_memory_path(self.path)
+        check_no_traversal_segments(self.path)
         if len(self.content.encode("utf-8")) > MAX_CONTENT_BYTES:
             raise ValueError(f"content exceeds {MAX_CONTENT_BYTES}-byte cap")
         return self
@@ -136,7 +129,7 @@ class MemoryUpdate(BaseModel):
         if self.content is not None and len(self.content.encode("utf-8")) > MAX_CONTENT_BYTES:
             raise ValueError(f"content exceeds {MAX_CONTENT_BYTES}-byte cap")
         if self.path is not None:
-            _check_memory_path(self.path)
+            check_no_traversal_segments(self.path)
         return self
 
 

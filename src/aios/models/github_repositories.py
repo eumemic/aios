@@ -19,21 +19,17 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
+from aios.models._paths import ABSOLUTE_PATH_PATTERN, check_no_traversal_segments
+
 # Cap mirrors memory_stores' MAX_STORES_PER_SESSION. There's no hard
 # resource constraint forcing a low cap; this is a sanity bound that
 # matches the existing aios convention for per-session mountable resources.
 MAX_REPOS_PER_SESSION = 8
 
-# Mount path pattern: absolute path, segments may not be empty/contain NUL.
-# Same shape as ``_MEMORY_PATH_PATTERN`` in models/memory_stores.py.
-_MOUNT_PATH_PATTERN = r"^(/[^/\x00]+)+$"
-
 
 def _check_mount_path(path: str) -> None:
     """Block path-traversal segments and reserved-mount overlaps."""
-    for segment in path.lstrip("/").split("/"):
-        if segment in (".", ".."):
-            raise ValueError(f"path segment {segment!r} is not allowed (would enable traversal)")
+    check_no_traversal_segments(path)
     if path == "/mnt/memory" or path.startswith("/mnt/memory/"):
         raise ValueError("mount_path may not overlap with the /mnt/memory tree (memory stores)")
     if path == "/workspace":
@@ -60,7 +56,7 @@ class GithubRepositoryResource(BaseModel):
 
     type: Literal["github_repository"]
     url: str = Field(min_length=1)
-    mount_path: str = Field(min_length=2, max_length=4096, pattern=_MOUNT_PATH_PATTERN)
+    mount_path: str = Field(min_length=2, max_length=4096, pattern=ABSOLUTE_PATH_PATTERN)
     authorization_token: SecretStr
     git_user_name: str | None = Field(default=None, max_length=256)
     git_user_email: str | None = Field(default=None, max_length=256)
