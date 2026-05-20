@@ -70,7 +70,10 @@ async def test_call_litellm_openai_path_sends_prompt_cache_key(
         session_id="sess_abc123",
     )
 
-    assert captured.get("prompt_cache_key") == "sess_abc123"
+    extra_body = captured.get("extra_body")
+    assert isinstance(extra_body, dict)
+    assert extra_body.get("prompt_cache_key") == "sess_abc123"
+    assert "prompt_cache_key" not in captured  # NOT at top level
 
 
 @pytest.mark.asyncio
@@ -113,7 +116,10 @@ async def test_stream_litellm_openai_path_sends_prompt_cache_key(
         session_id="sess_xyz789",
     )
 
-    assert captured.get("prompt_cache_key") == "sess_xyz789"
+    extra_body = captured.get("extra_body")
+    assert isinstance(extra_body, dict)
+    assert extra_body.get("prompt_cache_key") == "sess_xyz789"
+    assert "prompt_cache_key" not in captured  # NOT at top level
 
 
 @pytest.mark.asyncio
@@ -142,6 +148,10 @@ async def test_call_litellm_anthropic_path_omits_prompt_cache_key(
     )
 
     assert "prompt_cache_key" not in captured
+    extra_body = captured.get("extra_body")
+    if extra_body is not None:
+        assert isinstance(extra_body, dict)
+        assert extra_body.get("prompt_cache_key") is None
 
 
 @pytest.mark.asyncio
@@ -165,6 +175,10 @@ async def test_call_litellm_openai_path_session_id_optional(
     )
 
     assert "prompt_cache_key" not in captured
+    extra_body = captured.get("extra_body")
+    if extra_body is not None:
+        assert isinstance(extra_body, dict)
+        assert extra_body.get("prompt_cache_key") is None
 
 
 @pytest.mark.asyncio
@@ -189,7 +203,98 @@ async def test_call_litellm_extra_overrides_prompt_cache_key(
         model="openai/gpt-5.5",
         messages=[{"role": "user", "content": "hi"}],
         session_id="sess_default",
-        extra={"prompt_cache_key": "shared-bucket"},
+        extra={"extra_body": {"prompt_cache_key": "shared-bucket"}},
     )
 
-    assert captured.get("prompt_cache_key") == "shared-bucket"
+    extra_body = captured.get("extra_body")
+    assert isinstance(extra_body, dict)
+    assert extra_body.get("prompt_cache_key") == "shared-bucket"
+
+
+@pytest.mark.asyncio
+async def test_call_litellm_openai_preserves_agent_extra_body_siblings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the agent provides ``extra_body`` for unrelated reasons (e.g.
+    OpenRouter ``provider.order`` pinning), ``prompt_cache_key`` must be
+    merged alongside, not clobber and not get clobbered.
+
+    Naive ``setdefault("extra_body", {})`` BEFORE the agent's
+    ``kwargs.update(extra)`` would let the agent's ``extra_body`` wholesale
+    replace the harness's, dropping ``prompt_cache_key``. The fix is to
+    merge AFTER the agent's update.
+    """
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(**kwargs: object) -> _DictResponse:
+        captured.update(kwargs)
+        return _ok_response()
+
+    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+
+    await completion.call_litellm(
+        model="openai/gpt-5.5",
+        messages=[{"role": "user", "content": "hi"}],
+        session_id="sess_merge",
+        extra={"extra_body": {"provider": {"order": ["anthropic"]}}},
+    )
+
+    extra_body = captured.get("extra_body")
+    assert isinstance(extra_body, dict)
+    assert extra_body.get("prompt_cache_key") == "sess_merge"
+    assert extra_body.get("provider") == {"order": ["anthropic"]}
+
+
+@pytest.mark.asyncio
+async def test_call_litellm_openai_path_prompt_cache_key_reaches_http_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wire-level guard: ``prompt_cache_key`` must land in the outbound HTTP
+    JSON body, not just in kwargs passed to ``litellm.acompletion``.
+
+    The previous fix (PR #556) failed this because top-level kwargs are
+    stripped by litellm 1.83.4 before the OpenAI HTTP request is built;
+    ``extra_body`` is the pass-through that the OpenAI Python SDK merges
+    into the request JSON.
+    """
+    import json
+
+    import httpx
+    from openai import AsyncOpenAI
+
+    captured_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_body.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-5.5",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": ""},
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+        )
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    mock_client = AsyncOpenAI(
+        api_key="test-key",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    await completion.call_litellm(
+        model="openai/gpt-5.5",
+        messages=[{"role": "user", "content": "hi"}],
+        session_id="sess_wire",
+        extra={"client": mock_client},
+    )
+
+    assert captured_body.get("prompt_cache_key") == "sess_wire"
