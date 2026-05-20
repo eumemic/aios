@@ -107,6 +107,37 @@ def _match_route(server: HttpServerSpec, path: str) -> HttpRouteSpec | None:
     return None
 
 
+_DOT_SEGMENTS = frozenset({".", ".."})
+
+
+def _path_is_dispatchable(path: str) -> bool:
+    """True iff ``path`` is safe to feed through the route allowlist.
+
+    Filters paths whose textual shape lets the upstream URL diverge from
+    what ``match_glob`` checked:
+
+    * ``?`` / ``#`` — httpx parses these off as query / fragment, so the
+      upstream sees a different path than the gate validated.
+    * ``.`` / ``..`` segments — httpx applies RFC 3986 §5.2.4 dot-segment
+      removal: ``base_url/lights/..`` collapses to ``base_url/`` (reaching
+      the server root despite a ``/lights/*`` allowlist), and
+      ``base_url/lights/./state`` collapses to ``base_url/lights/state``
+      (escaping a ``/lights/*/state`` allowlist that expected a real id
+      segment between). ``*`` matches the literal ``.`` / ``..`` segment,
+      so without this filter the glob accepts what the wire then rewrites
+      past the gate.
+
+    Same posture as the ``?`` / ``#`` filters: reject before dispatch
+    so the gate's intent is the gate's effect.
+    """
+    if "?" in path or "#" in path:
+        return False
+    # Split on ``/`` to inspect each segment; ``.`` / ``..`` only trigger
+    # httpx's normalization when they're whole segments, not when they
+    # appear inside one (e.g. ``/foo..bar`` is a literal path component).
+    return not any(seg in _DOT_SEGMENTS for seg in path.split("/"))
+
+
 def _classify_permission(
     args: dict[str, Any], agent: Agent | AgentVersion
 ) -> PermissionPolicy | None:
@@ -115,14 +146,15 @@ def _classify_permission(
     Returns the matched route's ``permission_policy`` so the harness can
     park the call in ``requires_action`` if the operator marked it
     ``always_ask``. Returns ``None`` for missing server / no route match
-    / bad args / query-or-fragment-bearing path — the handler then runs
-    and emits a typed error the model can self-correct from.
+    / bad args / non-dispatchable path (see :func:`_path_is_dispatchable`)
+    — the handler then runs and emits a typed error the model can
+    self-correct from.
     """
     server_ref = args.get("server_ref")
     path = args.get("path")
     if not isinstance(server_ref, str) or not isinstance(path, str):
         return None
-    if "?" in path or "#" in path:
+    if not _path_is_dispatchable(path):
         return None
     server = _find_server(agent, server_ref)
     if server is None:
@@ -170,19 +202,19 @@ async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> di
     caller_headers: dict[str, str] = arguments.get("headers") or {}
     body = arguments.get("body")
 
-    # Route allowlists are path-only gates. A ``?`` or ``#`` in ``path``
-    # would be matched as literal segment characters by ``match_glob``
-    # and then parsed by httpx as a query/fragment on the wire — letting
-    # ``/lights/1?action=delete`` slip past an `/lights/*` read-only route
-    # because the upstream sees the query string and treats it as a
-    # state-change request. Reject up front so the gate's intent is the
-    # gate's effect.
-    if "?" in path or "#" in path:
+    # Route allowlists are path-only gates. Filter paths whose textual
+    # shape lets the upstream URL diverge from what ``match_glob`` would
+    # check — ``?`` / ``#`` (parsed off as query / fragment), and
+    # ``.`` / ``..`` path segments (RFC 3986 §5.2.4 dot-segment removal:
+    # httpx normalizes ``base_url/lights/..`` to ``base_url/`` post-glob).
+    # Reject up front so the gate's intent is the gate's effect.
+    if not _path_is_dispatchable(path):
         return {
             "error": (
-                f"path {path!r} contains a query string or fragment, which is "
-                "not allowed — pass only the path portion. Route allowlists "
-                "do not extend across query parameters."
+                f"path {path!r} contains a query string, fragment, or "
+                "'.'/'..' segment, which is not allowed — pass only a "
+                "normalized path portion. Route allowlists do not extend "
+                "across query parameters or dot-segment normalization."
             )
         }
 

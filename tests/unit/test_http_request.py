@@ -463,3 +463,135 @@ class TestHttpRequestHandler:
             )
         assert "error" in result
         assert "timed out" in result["error"].lower()
+
+    async def test_path_with_dot_dot_segment_rejected(self, _stub_runtime: Any) -> None:
+        """Path-traversal bypass of the route allowlist via ``..`` segments.
+
+        The route gate uses ``match_glob``, where ``*`` matches any single
+        path segment — including a literal ``..``. The constructed URL
+        ``base_url/lights/..`` is then normalized by httpx (per RFC 3986
+        section 5.2.4) into ``base_url/``, reaching the server root despite
+        the operator's intent to scope the agent to ``/lights/*``.
+
+        Same shape as the ``?`` and ``#`` rejection tests: a path the route
+        allowlist accepts produces, after httpx normalization, an upstream
+        request to a path the allowlist does NOT cover. Reject ``..`` at
+        the same site so the gate's intent is the gate's effect.
+
+        Pre-fix symptom: the request dispatches and the upstream sees the
+        root path, bypassing the allowlist that scoped to ``/lights/*``.
+        """
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(
+            response=httpx.Response(200, content=b""),
+            capture=captured,
+        )
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/..", "method": "GET"},
+            )
+        assert "error" in result, (
+            f"path with '..' segment must be rejected at the route gate; "
+            f"got success {result!r}. Pre-fix symptom: glob '/lights/*' "
+            f"matches 'lights/..' (the '*' eats the '..' segment), httpx "
+            f"normalizes 'base_url/lights/..' to 'base_url/', and the "
+            f"upstream receives a root-path request the allowlist never "
+            f"approved."
+        )
+        # And the request must not have been dispatched.
+        assert "url" not in captured, (
+            f"upstream request was dispatched despite path containing '..' "
+            f"traversal; captured={captured!r}"
+        )
+
+    async def test_path_with_single_dot_segment_rejected(self, _stub_runtime: Any) -> None:
+        """Same shape as ``..`` but for single-``.`` segments.
+
+        RFC 3986 §5.2.4 also strips ``.`` segments: ``base_url/lights/./state``
+        normalizes to ``base_url/lights/state``. Against a
+        ``/lights/*/state`` allowlist (operator's intent: only routes that
+        include a real id segment between ``lights`` and ``state``), the
+        agent can send ``/lights/./state``: ``*`` matches the literal ``.``
+        and the glob accepts, but the upstream then receives ``/lights/state``
+        — a path the allowlist does NOT cover.
+
+        Same root cause as ``..``; both are dot-segment normalization
+        artefacts. The fix at :func:`_path_is_dispatchable` covers both.
+        """
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*/state")])])
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(
+            response=httpx.Response(200, content=b""),
+            capture=captured,
+        )
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/./state", "method": "GET"},
+            )
+        assert "error" in result, (
+            f"path with single '.' segment must be rejected at the route "
+            f"gate; got success {result!r}. Pre-fix symptom: glob "
+            f"'/lights/*/state' matches 'lights/./state', httpx normalizes "
+            f"to 'base_url/lights/state', and the upstream receives a path "
+            f"the allowlist's *-segment scoping did not cover."
+        )
+        assert "url" not in captured, (
+            f"upstream request was dispatched despite '.' segment; captured={captured!r}"
+        )
+
+    async def test_path_with_embedded_dot_dot_rejected(self, _stub_runtime: Any) -> None:
+        """``..`` segments embedded mid-path also escape the allowlist.
+
+        With a ``/lights/**`` (multi-segment) allowlist, an agent can send
+        ``/lights/../admin/delete``: the glob matches because ``**`` accepts
+        any segments, but httpx normalizes the URL to ``base_url/admin/delete``
+        — reaching an admin endpoint the operator never granted.
+
+        Distinct from the single-segment case because ``**`` is the only
+        glob form that admits the embedded variant. Worth a separate test
+        so a fix that only handles the single-``*`` case still goes red here.
+        """
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/**")])])
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(
+            response=httpx.Response(200, content=b""),
+            capture=captured,
+        )
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {
+                    "server_ref": "hue",
+                    "path": "/lights/../admin/delete",
+                    "method": "GET",
+                },
+            )
+        assert "error" in result, (
+            f"path with embedded '..' must be rejected at the route gate; "
+            f"got success {result!r}. Pre-fix symptom: glob '/lights/**' "
+            f"matches 'lights/../admin/delete', httpx normalizes the URL "
+            f"to 'base_url/admin/delete', and the upstream receives an "
+            f"admin-path request the allowlist never approved."
+        )
+        assert "url" not in captured, (
+            f"upstream request was dispatched despite embedded '..' "
+            f"traversal; captured={captured!r}"
+        )
