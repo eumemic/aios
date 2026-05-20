@@ -112,7 +112,7 @@ async def worker_main() -> None:
         task_registry = TaskRegistry()
         mcp_session_pool = McpSessionPool()
         await ensure_sandbox_network()
-        mcp_broker = McpBroker()
+        mcp_broker = McpBroker(socket_path=settings.mcp_broker_socket_path)
         await mcp_broker.start()
 
         # Register the connector subsystem's ToolProvider impl against the

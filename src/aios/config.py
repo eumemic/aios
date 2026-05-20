@@ -152,6 +152,18 @@ class Settings(BaseSettings):
         "closed. An OAuth token refresh rotates the bearer, orphaning the "
         "old keyed entry; the idle reaper (checks every 60s) reclaims it.",
     )
+    mcp_broker_socket_path: Path | None = Field(
+        default=None,
+        description="Host path for the MCP broker's Unix-domain socket. "
+        "When set, the broker dual-listens on TCP (ephemeral port, used by "
+        "any out-of-container tooling) AND on this UDS path; sandbox "
+        "containers receive ``MCP_BROKER_URL=unix:///var/run/aios/mcp-broker.sock`` "
+        "and a bind mount of the socket file. Use this in deployments where "
+        "the worker's TCP port isn't reachable from the sandbox network — "
+        "e.g. Coolify production where TCP port publishing isn't done. When "
+        "unset (the default), sandboxes reach the broker over TCP via "
+        "``http://aios-worker:<port>``.",
+    )
 
     # ── database pool ──────────────────────────────────────────────────────
     db_pool_max_size: int = Field(
