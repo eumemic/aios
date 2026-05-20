@@ -74,6 +74,13 @@ class _ToolCall:
     is_error: bool = False
 
 
+class _ToolBail(Exception):
+    """Intentional bail from a tool body: the lifecycle treats it as a
+    clean model-visible error, not a handler crash (no type prefix on
+    the message, no ``on_exception`` callback).
+    """
+
+
 @asynccontextmanager
 async def _tool_lifecycle(
     pool: asyncpg.Pool[Any],
@@ -114,6 +121,12 @@ async def _tool_lifecycle(
         tc.is_error = True
         await _append_tool_result(
             pool, session_id, call_id, name, account_id=account_id, error="cancelled"
+        )
+    except _ToolBail as err:
+        bound_log.info(f"{log_prefix}.bail", error=str(err))
+        tc.is_error = True
+        await _append_tool_result(
+            pool, session_id, call_id, name, account_id=account_id, error=str(err)
         )
     except Exception as err:
         bound_log.exception(f"{log_prefix}.handler_failed")
@@ -179,27 +192,12 @@ async def _execute_tool_async(
     ) as tc:
         arguments = _parse_arguments(tc.raw_args)
         if arguments is None:
-            tc.bound_log.warning("tool.bad_arguments")
-            tc.is_error = True
-            await _append_tool_result(
-                pool,
-                session_id,
-                tc.call_id,
-                tc.name,
-                account_id=account_id,
-                error="arguments were not valid JSON",
-            )
-            return
+            raise _ToolBail("arguments were not valid JSON")
 
         try:
             tool = registry.get(tc.name)
         except ToolNotFoundError as err:
-            tc.bound_log.warning("tool.not_registered")
-            tc.is_error = True
-            await _append_tool_result(
-                pool, session_id, tc.call_id, tc.name, account_id=account_id, error=err.message
-            )
-            return
+            raise _ToolBail(err.message) from err
 
         # Validate arguments against the tool's parameters_schema before
         # dispatch.  Weaker models often emit tool calls with wrong
@@ -211,17 +209,7 @@ async def _execute_tool_async(
         # explicitly gives the model feedback to self-correct.
         schema_error = _validate_arguments(arguments, tool.parameters_schema)
         if schema_error is not None:
-            tc.bound_log.info("tool.schema_error", error=schema_error)
-            tc.is_error = True
-            await _append_tool_result(
-                pool,
-                session_id,
-                tc.call_id,
-                tc.name,
-                account_id=account_id,
-                error=schema_error,
-            )
-            return
+            raise _ToolBail(schema_error)
 
         # Invoke handler.  Handlers return either a plain dict (JSON-
         # encoded into the tool message's content) or a ToolResult
@@ -439,19 +427,12 @@ async def _execute_mcp_tool_async(
     ) as tc:
         arguments = _parse_arguments(tc.raw_args)
         if arguments is None:
-            tc.bound_log.warning("mcp_tool.bad_arguments")
-            tc.is_error = True
-            await _append_tool_result(
-                pool,
-                session_id,
-                tc.call_id,
-                tc.name,
-                account_id=account_id,
-                error="arguments were not valid JSON",
-            )
-            return
+            raise _ToolBail("arguments were not valid JSON")
 
-        server_name, tool_name = _parse_mcp_tool_name(tc.name)
+        try:
+            server_name, tool_name = _parse_mcp_tool_name(tc.name)
+        except ValueError as err:
+            raise _ToolBail(str(err)) from err
 
         from aios.harness.channels import (
             FOCAL_CHANNEL_META_KEY,
@@ -466,17 +447,7 @@ async def _execute_mcp_tool_async(
 
         url = mcp_server_map.get(server_name)
         if url is None:
-            tc.bound_log.warning("mcp_tool.server_not_found", server_name=server_name)
-            tc.is_error = True
-            await _append_tool_result(
-                pool,
-                session_id,
-                tc.call_id,
-                tc.name,
-                account_id=account_id,
-                error=f"MCP server {server_name!r} not found",
-            )
-            return
+            raise _ToolBail(f"MCP server {server_name!r} not found")
 
         from aios.mcp.client import call_mcp_tool, resolve_auth_for_target_url
 
