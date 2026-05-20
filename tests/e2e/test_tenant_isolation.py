@@ -219,6 +219,48 @@ class TestTwoTenantIsolation:
         cross = await http_client.get(f"/v1/session-templates/{b_id}", headers=_bearer(ka))
         assert cross.status_code == 404, cross.text
 
+    async def test_vault_credential_create_cross_tenant_404(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        """POST /v1/vaults/{B-vault}/credentials as tenant A must 404.
+
+        ``services.vaults.create_vault_credential`` row-locks the parent
+        vault with ``SELECT 1 FROM vaults WHERE id = $1 FOR UPDATE`` —
+        no ``account_id`` filter. Tenant A can target tenant B's
+        ``vault_id``, land the lock, then ``insert_vault_credential``
+        writes a row with ``(account_id=A, vault_id=B's vault)`` —
+        cross-tenant data placement. The credential is invisible to B
+        (B's reads scope by ``account_id``), but A has manufactured a
+        credential nested under a vault it doesn't own. Match the
+        established cross-tenant posture: NotFound, not silent success.
+        """
+        ka = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-vcred-a")
+        kb = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-vcred-b")
+
+        vault_b = await http_client.post(
+            "/v1/vaults", headers=_bearer(kb), json={"display_name": "b-vault"}
+        )
+        assert vault_b.status_code == 201, vault_b.text
+        b_vault_id = vault_b.json()["id"]
+
+        # Tenant A targets tenant B's vault_id; expected 404, not 201.
+        cross = await http_client.post(
+            f"/v1/vaults/{b_vault_id}/credentials",
+            headers=_bearer(ka),
+            json={
+                "display_name": "stolen",
+                "target_url": "https://example.com",
+                "auth_type": "bearer_header",
+                "token": "secret",
+            },
+        )
+        assert cross.status_code == 404, cross.text
+
+        # Confirm B's view of its own vault is uncontaminated.
+        list_b = await http_client.get(f"/v1/vaults/{b_vault_id}/credentials", headers=_bearer(kb))
+        assert list_b.status_code == 200
+        assert list_b.json()["data"] == []
+
     async def test_keys_isolated(
         self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
     ) -> None:
