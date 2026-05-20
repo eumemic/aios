@@ -30,7 +30,7 @@ def _spec(**overrides: object) -> SandboxSpec:
         "labels": {},
         "network_policy": Unrestricted(),
         "host_gateway_alias": None,
-        "image": "aios-sandbox:test",
+        "image": "ghcr.io/eumemic/aios-sandbox:test",
     }
     base.update(overrides)
     return SandboxSpec(**base)  # type: ignore[arg-type]
@@ -69,3 +69,10 @@ class TestPullAlwaysFlag:
         pull_index = argv.index("--pull")
         image_index = argv.index(spec.image)
         assert pull_index < image_index
+
+    @pytest.mark.asyncio
+    async def test_pull_always_absent_for_local_image(self) -> None:
+        """``--pull`` must NOT appear when the image is a bare local tag."""
+        spec = _spec(image="aios-sandbox:latest")
+        argv = await _capture_argv(spec)
+        assert "--pull" not in argv

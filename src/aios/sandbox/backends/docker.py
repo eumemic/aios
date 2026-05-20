@@ -118,7 +118,9 @@ class DockerBackend:
         for key, value in spec.environment.items():
             argv.extend(["--env", f"{key}={value}"])
 
-        argv.extend(["--pull", "always"])
+        # Only pull from registry for remote images; local/bare tags (dev builds) have no registry prefix
+        if _is_registry_image(spec.image):
+            argv.extend(["--pull", "always"])
         argv.append(spec.image)
 
         rc, stdout_bytes, stderr_bytes = await run_docker_cli(argv)
@@ -260,6 +262,31 @@ class DockerBackend:
                 exit_code=rc,
                 stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
             )
+
+
+def _is_registry_image(image: str) -> bool:
+    """Return True if *image* refers to a remote registry (not a bare local tag).
+
+    Docker treats bare names (e.g. ``aios-sandbox:latest``) as
+    ``docker.io/library/<name>``, so ``--pull always`` would trigger a Hub
+    lookup that fails for locally-built images.  We only add the flag when the
+    image clearly references a remote registry.
+
+    Rules (applied to the name part before any ``:tag`` suffix):
+    - Single component (no ``/``) → bare name, local.
+    - First component contains ``.`` or ``:`` → registry hostname (e.g.
+      ``ghcr.io``, ``localhost:5000``).
+    - First component is ``localhost`` → local registry, but still a daemon
+      push/pull target → treat as registry.
+    - Otherwise (e.g. ``myorg/myimage``) → Docker Hub short form, no explicit
+      hostname → local-enough that ``--pull always`` is unsafe.
+    """
+    name = image.split(":")[0]  # strip tag
+    parts = name.split("/")
+    if len(parts) == 1:
+        return False  # bare name like "ubuntu" or "aios-sandbox"
+    first = parts[0]
+    return first == "localhost" or "." in first or ":" in first
 
 
 def _format_volume(host_path: object, sandbox_path: str, read_only: bool) -> str:
