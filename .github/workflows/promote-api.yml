@@ -14,7 +14,7 @@ name: Promote aios-api → Coolify
 # If anything in that chain fails, production stays on the prior known-good
 # build.
 #
-# Spec: eumemic/eumemic-ops#19 (deploy-gate v2 step 7).
+# Spec: eumemic/eumemic-ops#19 (deploy-gate v2 step 7). Issue: eumemic/aios#564.
 # Receiver: eumemic/eumemic-ops .github/workflows/deploy-app.yml.
 #
 # Security note: this workflow does not interpolate any untrusted input
