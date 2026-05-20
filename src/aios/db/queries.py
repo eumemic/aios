@@ -1042,6 +1042,29 @@ async def update_session(
     title: str | None | EllipsisType = ...,
     metadata: dict[str, Any] | None = None,
 ) -> Session:
+    # Refuse updates to archived sessions: read paths
+    # (``list_sessions``, the worker, the resolver) all filter
+    # ``archived_at IS NULL``, so a rewrite of an archived row has no
+    # observable effect — but the bare UPDATE below would still commit
+    # the new values and the RETURNING-built response would lie back
+    # to the caller as if the update took.  Mirrors the symmetric
+    # raise on archived rows in ``update_agent`` / ``update_environment``
+    # / ``update_session_template`` (PR #547) / ``update_vault``
+    # (PR #554).
+    #
+    # Load-bearing for the resource-attachment writes inside
+    # ``service.update_session`` (vault_ids / memory / github
+    # resources): those callers run in the same transaction but their
+    # query-layer functions don't independently check ``archived_at``,
+    # so this raise is the only synchronous barrier against rewriting
+    # attachments on an archived session.
+    current = await get_session(conn, session_id, account_id=account_id)
+    if current.archived_at is not None:
+        raise ConflictError(
+            f"session {session_id} is archived",
+            detail={"id": session_id},
+        )
+
     sets: list[str] = []
     args: list[Any] = [session_id]  # $1 = session_id
 
@@ -1059,7 +1082,7 @@ async def update_session(
         sets.append(f"metadata = ${len(args)}::jsonb")
 
     if not sets:
-        return await get_session(conn, session_id, account_id=account_id)
+        return current
 
     sets.append("updated_at = now()")
     args.append(account_id)
