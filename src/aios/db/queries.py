@@ -4074,6 +4074,21 @@ async def update_session_template(
     memory_store_ids: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> SessionTemplate:
+    # Refuse updates to archived templates: the resolver's
+    # ``_spawn_per_chat_session`` already drops inbounds that target an
+    # archived template (``ResolveDrop.ARCHIVED_TEMPLATE``), so a
+    # rewrite of an archived row has no downstream effect — but the
+    # bare UPDATE below would still commit the new values and the
+    # RETURNING-built response would lie back to the caller as if the
+    # update took.  Mirrors the symmetric raise on archived rows in
+    # ``update_agent`` / ``update_environment``.
+    current = await get_session_template(conn, template_id, account_id=account_id)
+    if current.archived_at is not None:
+        raise ConflictError(
+            f"session template {template_id} is archived",
+            detail={"id": template_id},
+        )
+
     sets: list[str] = []
     args: list[Any] = [template_id]
     if name is not None:
