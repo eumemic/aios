@@ -1,15 +1,18 @@
 """Contract tests for the HTTP/JSON envelope between ``bin/mcp`` and
 :class:`aios.sandbox.mcp_proxy.McpBroker`. Pins request/response shape,
-exit codes, and secret validation. Runs over loopback — cross-container
-reachability is covered by
+exit codes, and secret validation across both transports the broker
+exposes — TCP and Unix-domain socket. Runs over loopback —
+cross-container reachability is covered by
 :mod:`tests.e2e.test_sandbox_broker_reachability`."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +33,18 @@ from aios.sandbox.mcp_proxy import McpBroker
 _MCP_BINARY = Path(__file__).resolve().parents[3] / "bin" / "mcp"
 
 
+def _broker_url(broker: McpBroker) -> str:
+    """Pick the broker's UDS URL when one is bound; otherwise TCP.
+
+    The CLI accepts both forms (``unix:///path`` and ``http://host:port``)
+    so the same envelope tests can exercise both transports without
+    branching at the test layer.
+    """
+    if broker.socket_path is not None:
+        return f"unix://{broker.socket_path}"
+    return f"http://127.0.0.1:{broker.port}"
+
+
 async def _run_cli(
     *args: str, broker: McpBroker, secret: str = "s"
 ) -> subprocess.CompletedProcess[str]:
@@ -42,7 +57,7 @@ async def _run_cli(
         subprocess.run,
         [sys.executable, str(_MCP_BINARY), *args],
         env={
-            "MCP_BROKER_URL": f"http://127.0.0.1:{broker.port}",
+            "MCP_BROKER_URL": _broker_url(broker),
             "MCP_BROKER_SECRET": secret,
             "PATH": "/usr/bin:/bin",
         },
@@ -53,14 +68,28 @@ async def _run_cli(
     )
 
 
-@pytest.fixture
-async def broker() -> AsyncIterator[McpBroker]:
-    b = McpBroker()
+@pytest.fixture(params=["tcp", "uds"])
+async def broker(request: pytest.FixtureRequest) -> AsyncIterator[McpBroker]:
+    """Boot the broker over either TCP only or TCP + UDS.
+
+    Each test method runs twice — once per transport. UDS host paths
+    must stay under macOS's ~104-char ``AF_UNIX`` limit, so we mkdtemp
+    under ``/tmp`` rather than using pytest's ``tmp_path`` (which lives
+    under ``/private/var/folders/...`` on macOS).
+    """
+    tmpdir: Path | None = None
+    socket_path: Path | None = None
+    if request.param == "uds":
+        tmpdir = Path(tempfile.mkdtemp(prefix="aios-uds-"))
+        socket_path = tmpdir / "b.sock"
+    b = McpBroker(socket_path=socket_path)
     await b.start()
     try:
         yield b
     finally:
         await b.stop()
+        if tmpdir is not None:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

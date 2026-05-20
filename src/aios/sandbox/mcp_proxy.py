@@ -31,6 +31,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -112,18 +114,31 @@ class McpBroker:
     shutdown. Sandbox provisioning calls :meth:`register_session` to
     bind a freshly minted per-session secret to a session id; release
     calls :meth:`unregister_session`.
+
+    Transports: always TCP (ephemeral port on ``0.0.0.0``). When
+    ``socket_path`` is provided, the same Starlette app is *also*
+    served over a Unix-domain socket at that host path — this is the
+    only mode that works in deployments where the worker's TCP port
+    isn't published to the sandbox network (e.g. Coolify production).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, socket_path: Path | None = None) -> None:
         self._secrets: dict[str, str] = {}
         self._server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
         self._port: int | None = None
+        self._socket_path: Path | None = socket_path
+        self._uds_server: uvicorn.Server | None = None
+        self._uds_serve_task: asyncio.Task[None] | None = None
 
     @property
     def port(self) -> int:
         assert self._port is not None, "McpBroker.start() has not completed"
         return self._port
+
+    @property
+    def socket_path(self) -> Path | None:
+        return self._socket_path
 
     def register_session(self, session_id: str, secret: str) -> None:
         self._secrets[secret] = session_id
@@ -133,11 +148,8 @@ class McpBroker:
         for s in stale:
             self._secrets.pop(s, None)
 
-    async def start(self) -> None:
-        """Bind ``0.0.0.0:0`` and begin serving. ``0.0.0.0`` covers every
-        interface the worker has — the sandbox may reach in via any of
-        them depending on deployment topology."""
-        app = Starlette(
+    def _build_app(self) -> Starlette:
+        return Starlette(
             routes=[
                 Route("/v1/{secret}/servers", self._list_servers, methods=["GET"]),
                 Route(
@@ -157,6 +169,17 @@ class McpBroker:
                 ),
             ]
         )
+
+    async def start(self) -> None:
+        """Bind ``0.0.0.0:0`` and begin serving. ``0.0.0.0`` covers every
+        interface the worker has — the sandbox may reach in via any of
+        them depending on deployment topology.
+
+        If ``socket_path`` was set on construction, also bind a Unix
+        domain socket at that path with mode ``0o666`` so the sandbox's
+        unprivileged user can connect.
+        """
+        app = self._build_app()
         config = uvicorn.Config(
             app,
             host="0.0.0.0",
@@ -168,17 +191,53 @@ class McpBroker:
         self._server = uvicorn.Server(config)
         self._serve_task = asyncio.create_task(self._server.serve(), name="mcp-broker-serve")
 
+        # Set up UDS server (if requested) on the *same* Starlette app
+        # so route handlers and the secret map are shared.
+        if self._socket_path is not None:
+            # Parent dir may not exist (e.g. ``/var/run/aios`` on a host
+            # that hasn't been pre-provisioned); a stale file from a
+            # previous crashed worker must be cleared before bind.
+            self._socket_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._socket_path.exists() or self._socket_path.is_symlink():
+                self._socket_path.unlink()
+            uds_config = uvicorn.Config(
+                app,
+                uds=str(self._socket_path),
+                log_level="error",
+                access_log=False,
+                lifespan="off",
+            )
+            self._uds_server = uvicorn.Server(uds_config)
+            self._uds_serve_task = asyncio.create_task(
+                self._uds_server.serve(), name="mcp-broker-serve-uds"
+            )
+
         try:
             loop = asyncio.get_running_loop()
             deadline = loop.time() + _BIND_TIMEOUT_S
             while loop.time() < deadline:
                 await asyncio.sleep(0.01)
-                if self._server.started and self._server.servers:
-                    sockets = self._server.servers[0].sockets
-                    if sockets:
-                        self._port = sockets[0].getsockname()[1]
-                        log.info("mcp_broker.started", port=self._port)
-                        return
+                tcp_ready = (
+                    self._server.started
+                    and bool(self._server.servers)
+                    and bool(self._server.servers[0].sockets)
+                )
+                uds_ready = self._uds_server is None or (
+                    self._uds_server.started and bool(self._uds_server.servers)
+                )
+                if tcp_ready and uds_ready:
+                    assert self._server.servers[0].sockets  # for mypy
+                    self._port = self._server.servers[0].sockets[0].getsockname()[1]
+                    if self._socket_path is not None:
+                        # Default uvicorn UDS mode (0o600) excludes the
+                        # sandbox's unprivileged user; relax to 0o666.
+                        os.chmod(self._socket_path, 0o666)
+                    log.info(
+                        "mcp_broker.started",
+                        port=self._port,
+                        socket_path=str(self._socket_path) if self._socket_path else None,
+                    )
+                    return
             raise RuntimeError(f"mcp broker failed to bind within {_BIND_TIMEOUT_S}s")
         except BaseException:
             # Bind never completed; the caller drops its reference, so
@@ -200,11 +259,27 @@ class McpBroker:
                 if self._serve_task is not None:
                     with contextlib.suppress(TimeoutError, asyncio.CancelledError):
                         await asyncio.wait_for(self._serve_task, timeout=5.0)
+            if self._uds_server is not None and self._uds_server.started:
+                self._uds_server.should_exit = True
+                if self._uds_serve_task is not None:
+                    with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                        await asyncio.wait_for(self._uds_serve_task, timeout=5.0)
         finally:
             if self._serve_task is not None and not self._serve_task.done():
                 self._serve_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._serve_task
+            if self._uds_serve_task is not None and not self._uds_serve_task.done():
+                self._uds_serve_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._uds_serve_task
+            # Uvicorn doesn't always clean the socket file (especially
+            # on cancelled-during-startup paths); a stale file across
+            # worker restarts would break the next bind, so do it
+            # here unconditionally.
+            if self._socket_path is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    self._socket_path.unlink()
         log.info("mcp_broker.stopped", port=self._port)
 
     async def _resolve_session(self, request: Request) -> str | Response:
