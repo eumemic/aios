@@ -5463,16 +5463,29 @@ async def resolve_runtime_token(
 ) -> tuple[str, str, str] | None:
     """Look up an unrevoked token by hash; touch ``last_used_at`` in one round-trip.
 
-    Returns ``(token_id, connector, account_id)`` on hit, ``None`` on miss/revoked.
-    The token hash is globally unique (one row owns the secret), so the lookup
-    does not filter by account; account_id is read off the matched row and
+    Returns ``(token_id, connector, account_id)`` on hit, ``None`` on
+    miss / revoked token / archived account.  The token hash is
+    globally unique (one row owns the secret), so the lookup does not
+    filter by account; account_id is read off the matched row and
     becomes the authenticated scope for the request.
+
+    Refuses tokens on archived accounts via the EXISTS subquery — same
+    asymmetry-closing intent as :func:`lookup_account_by_key_hash`'s
+    JOIN with ``accounts.archived_at IS NULL``. Without this, archiving
+    an account leaves its runtime containers (Telegram bot, Signal
+    bot, HTTP pollers) authenticated and operating on a decommissioned
+    tenant — symmetric to the account-key path that already refuses
+    archived-account bearers.
     """
     row = await conn.fetchrow(
         """
         UPDATE runtime_tokens
            SET last_used_at = now()
-         WHERE token_hash = $1 AND revoked_at IS NULL
+         WHERE token_hash = $1
+           AND revoked_at IS NULL
+           AND EXISTS (SELECT 1 FROM accounts
+                        WHERE accounts.id = runtime_tokens.account_id
+                          AND accounts.archived_at IS NULL)
         RETURNING id, connector, account_id
         """,
         token_hash,
