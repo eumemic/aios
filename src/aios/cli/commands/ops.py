@@ -23,6 +23,8 @@ def _run_api() -> int:
         host=settings.api_host,
         port=settings.api_port,
         log_config=None,  # we configure structlog ourselves
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )
     return 0
 
