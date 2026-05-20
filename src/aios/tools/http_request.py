@@ -107,6 +107,39 @@ def _match_route(server: HttpServerSpec, path: str) -> HttpRouteSpec | None:
     return None
 
 
+def _path_rejected_reason(path: str) -> str | None:
+    """Return the reason ``path`` must be rejected at the route gate, or
+    ``None`` when it's safe to glob-match.
+
+    The route allowlist is enforced by segment-glob matching on the
+    raw ``path`` string, but the final URL is composed and dispatched
+    via ``httpx``. Any element that ``httpx`` mutates between match
+    and wire is an allowlist bypass: ``?action=delete`` slips past
+    ``/lights/*`` because httpx parses it as a query string; ``..``
+    segments slip past ``/lights/**`` because httpx normalises
+    ``/v1/lights/../admin`` to ``/v1/admin`` on the wire. Reject up
+    front so the gate's check equals the gate's effect.
+    """
+    if "?" in path or "#" in path:
+        return (
+            f"path {path!r} contains a query string or fragment, which is "
+            "not allowed — pass only the path portion. Route allowlists "
+            "do not extend across query parameters."
+        )
+    # ``..`` as a literal segment: ``foo/../bar`` is normalised by httpx
+    # to ``bar``, escaping any allowlist that matched ``foo/*``. The
+    # check looks for the segment, not the substring, so paths like
+    # ``foo..bar`` (legal in many APIs) are left alone.
+    if ".." in path.split("/"):
+        return (
+            f"path {path!r} contains a '..' segment, which is not allowed — "
+            "the upstream URL would be normalised to a different path, "
+            "escaping the route allowlist's intent. Pass an absolute path "
+            "without traversal."
+        )
+    return None
+
+
 def _classify_permission(
     args: dict[str, Any], agent: Agent | AgentVersion
 ) -> PermissionPolicy | None:
@@ -115,14 +148,15 @@ def _classify_permission(
     Returns the matched route's ``permission_policy`` so the harness can
     park the call in ``requires_action`` if the operator marked it
     ``always_ask``. Returns ``None`` for missing server / no route match
-    / bad args / query-or-fragment-bearing path — the handler then runs
-    and emits a typed error the model can self-correct from.
+    / bad args / query-or-fragment-bearing / traversal-bearing path —
+    the handler then runs and emits a typed error the model can
+    self-correct from.
     """
     server_ref = args.get("server_ref")
     path = args.get("path")
     if not isinstance(server_ref, str) or not isinstance(path, str):
         return None
-    if "?" in path or "#" in path:
+    if _path_rejected_reason(path) is not None:
         return None
     server = _find_server(agent, server_ref)
     if server is None:
@@ -170,21 +204,13 @@ async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> di
     caller_headers: dict[str, str] = arguments.get("headers") or {}
     body = arguments.get("body")
 
-    # Route allowlists are path-only gates. A ``?`` or ``#`` in ``path``
-    # would be matched as literal segment characters by ``match_glob``
-    # and then parsed by httpx as a query/fragment on the wire — letting
-    # ``/lights/1?action=delete`` slip past an `/lights/*` read-only route
-    # because the upstream sees the query string and treats it as a
-    # state-change request. Reject up front so the gate's intent is the
-    # gate's effect.
-    if "?" in path or "#" in path:
-        return {
-            "error": (
-                f"path {path!r} contains a query string or fragment, which is "
-                "not allowed — pass only the path portion. Route allowlists "
-                "do not extend across query parameters."
-            )
-        }
+    # Route allowlists are path-only gates. Reject any path element that
+    # ``httpx`` would mutate between match and wire (query/fragment, ``..``
+    # traversal) so the gate's check equals the gate's effect — see
+    # ``_path_rejected_reason``.
+    reason = _path_rejected_reason(path)
+    if reason is not None:
+        return {"error": reason}
 
     agent, account_id = await _load_session_agent(session_id)
     server = _find_server(agent, server_ref)
