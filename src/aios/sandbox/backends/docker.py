@@ -272,7 +272,7 @@ def _is_registry_image(image: str) -> bool:
     lookup that fails for locally-built images.  We only add the flag when the
     image clearly references a remote registry.
 
-    Rules (applied to the name part before any ``:tag`` suffix):
+    Rules:
     - Single component (no ``/``) → bare name, local.
     - First component contains ``.`` or ``:`` → registry hostname (e.g.
       ``ghcr.io``, ``localhost:5000``).
@@ -280,11 +280,14 @@ def _is_registry_image(image: str) -> bool:
       push/pull target → treat as registry.
     - Otherwise (e.g. ``myorg/myimage``) → Docker Hub short form, no explicit
       hostname → local-enough that ``--pull always`` is unsafe.
+
+    Note: only the *first* path component is inspected, so a tag suffix on
+    the final component (e.g. ``localhost:5000/foo:bar``) does not confuse
+    the check.
     """
-    name = image.split(":")[0]  # strip tag
-    parts = name.split("/")
+    parts = image.split("/")
     if len(parts) == 1:
-        return False  # bare name like "ubuntu" or "aios-sandbox"
+        return False  # bare name like "ubuntu" or "aios-sandbox[:tag]"
     first = parts[0]
     return first == "localhost" or "." in first or ":" in first
 

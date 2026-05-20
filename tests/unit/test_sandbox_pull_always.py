@@ -76,3 +76,19 @@ class TestPullAlwaysFlag:
         spec = _spec(image="aios-sandbox:latest")
         argv = await _capture_argv(spec)
         assert "--pull" not in argv
+
+    @pytest.mark.asyncio
+    async def test_pull_always_absent_for_bare_name_no_tag(self) -> None:
+        """``--pull`` must NOT appear for a bare image name without any tag."""
+        spec = _spec(image="aios-sandbox")
+        argv = await _capture_argv(spec)
+        assert "--pull" not in argv
+
+    @pytest.mark.asyncio
+    async def test_pull_always_present_for_localhost_registry(self) -> None:
+        """``--pull always`` must appear for a localhost-port private registry."""
+        spec = _spec(image="localhost:5000/foo:bar")
+        argv = await _capture_argv(spec)
+        assert "--pull" in argv
+        i = argv.index("--pull")
+        assert argv[i + 1] == "always"
