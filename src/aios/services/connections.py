@@ -171,8 +171,23 @@ async def attach_connection(
     Returns the freshly-read connection with its derived
     ``session_id`` populated.  Race-safe via the partial-unique index
     on ``bindings (connection_id) WHERE archived_at IS NULL``.
+
+    Refuses binding to an archived session — the FK constraint accepts
+    archived rows (no partial ``WHERE archived_at IS NULL`` on the FK),
+    so without this check ``insert_binding`` would succeed and the
+    operator would receive a 200 with the archived ``session_id``.
+    Subsequent inbounds would DETACH at the resolver (post-#541), but
+    that's a delayed signal from a different actor; bind-time is the
+    only point where the operator can correct the action that caused
+    the misconfiguration.
     """
     async with pool.acquire() as conn:
+        session = await queries.get_session(conn, session_id, account_id=account_id)
+        if session.archived_at is not None:
+            raise ConflictError(
+                f"session {session_id} is archived; cannot attach a connection to it",
+                detail={"id": connection_id, "session_id": session_id},
+            )
         await queries.insert_binding(
             conn,
             connection_id=connection_id,
