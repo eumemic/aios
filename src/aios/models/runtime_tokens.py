@@ -23,11 +23,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class RuntimeToken(BaseModel):
-    """Read view of a runtime token.  Never carries plaintext."""
+    """Read view of a runtime token.  Never carries plaintext.
+
+    ``connection_ids`` is the optional allowlist scope (#350).  ``None``
+    means the token is unscoped — it sees every connection of its
+    ``connector`` type.  A non-``None`` list (including ``[]``) limits
+    visibility / operations to the listed IDs only.
+    """
 
     id: str
     connector: str
     label: str | None = None
+    connection_ids: list[str] | None = None
     created_at: datetime
     last_used_at: datetime | None = None
     revoked_at: datetime | None = None
@@ -40,6 +47,14 @@ class RuntimeTokenIssue(BaseModel):
 
     connector: str
     label: str | None = Field(default=None, max_length=128)
+    connection_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional allowlist of connection IDs the issued token is "
+            "authorized for.  Omit (``None``) to leave the token "
+            "unscoped — it sees every connection of ``connector`` type."
+        ),
+    )
 
 
 class RuntimeTokenIssued(BaseModel):
@@ -52,6 +67,7 @@ class RuntimeTokenIssued(BaseModel):
     id: str
     connector: str
     label: str | None
+    connection_ids: list[str] | None = None
     plaintext: str = Field(
         description="The bearer token value.  Save this — it cannot be recovered.",
     )

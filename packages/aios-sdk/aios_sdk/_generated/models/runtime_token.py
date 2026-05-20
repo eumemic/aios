@@ -17,19 +17,26 @@ T = TypeVar("T", bound="RuntimeToken")
 class RuntimeToken:
     """Read view of a runtime token.  Never carries plaintext.
 
-    Attributes:
-        id (str):
-        connector (str):
-        created_at (datetime.datetime):
-        label (None | str | Unset):
-        last_used_at (datetime.datetime | None | Unset):
-        revoked_at (datetime.datetime | None | Unset):
+    ``connection_ids`` is the optional allowlist scope (#350).  ``None``
+    means the token is unscoped — it sees every connection of its
+    ``connector`` type.  A non-``None`` list (including ``[]``) limits
+    visibility / operations to the listed IDs only.
+
+        Attributes:
+            id (str):
+            connector (str):
+            created_at (datetime.datetime):
+            label (None | str | Unset):
+            connection_ids (list[str] | None | Unset):
+            last_used_at (datetime.datetime | None | Unset):
+            revoked_at (datetime.datetime | None | Unset):
     """
 
     id: str
     connector: str
     created_at: datetime.datetime
     label: None | str | Unset = UNSET
+    connection_ids: list[str] | None | Unset = UNSET
     last_used_at: datetime.datetime | None | Unset = UNSET
     revoked_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -46,6 +53,15 @@ class RuntimeToken:
             label = UNSET
         else:
             label = self.label
+
+        connection_ids: list[str] | None | Unset
+        if isinstance(self.connection_ids, Unset):
+            connection_ids = UNSET
+        elif isinstance(self.connection_ids, list):
+            connection_ids = self.connection_ids
+
+        else:
+            connection_ids = self.connection_ids
 
         last_used_at: None | str | Unset
         if isinstance(self.last_used_at, Unset):
@@ -74,6 +90,8 @@ class RuntimeToken:
         )
         if label is not UNSET:
             field_dict["label"] = label
+        if connection_ids is not UNSET:
+            field_dict["connection_ids"] = connection_ids
         if last_used_at is not UNSET:
             field_dict["last_used_at"] = last_used_at
         if revoked_at is not UNSET:
@@ -98,6 +116,23 @@ class RuntimeToken:
             return cast(None | str | Unset, data)
 
         label = _parse_label(d.pop("label", UNSET))
+
+        def _parse_connection_ids(data: object) -> list[str] | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, list):
+                    raise TypeError()
+                connection_ids_type_0 = cast(list[str], data)
+
+                return connection_ids_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(list[str] | None | Unset, data)
+
+        connection_ids = _parse_connection_ids(d.pop("connection_ids", UNSET))
 
         def _parse_last_used_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -138,6 +173,7 @@ class RuntimeToken:
             connector=connector,
             created_at=created_at,
             label=label,
+            connection_ids=connection_ids,
             last_used_at=last_used_at,
             revoked_at=revoked_at,
         )

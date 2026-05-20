@@ -78,7 +78,9 @@ def sync_detailed(
         }
 
     The ``connection_id`` field lets the runtime container fan out to
-    its per-connection workers client-side.
+    its per-connection workers client-side.  When the bearer carries
+    a ``connection_ids`` allowlist (#350), backfill and tail both
+    filter to that set — out-of-scope calls are silently omitted.
 
     Args:
         authorization (None | str | Unset):
@@ -125,7 +127,9 @@ def sync(
         }
 
     The ``connection_id`` field lets the runtime container fan out to
-    its per-connection workers client-side.
+    its per-connection workers client-side.  When the bearer carries
+    a ``connection_ids`` allowlist (#350), backfill and tail both
+    filter to that set — out-of-scope calls are silently omitted.
 
     Args:
         authorization (None | str | Unset):
@@ -167,7 +171,9 @@ async def asyncio_detailed(
         }
 
     The ``connection_id`` field lets the runtime container fan out to
-    its per-connection workers client-side.
+    its per-connection workers client-side.  When the bearer carries
+    a ``connection_ids`` allowlist (#350), backfill and tail both
+    filter to that set — out-of-scope calls are silently omitted.
 
     Args:
         authorization (None | str | Unset):
@@ -212,7 +218,9 @@ async def asyncio(
         }
 
     The ``connection_id`` field lets the runtime container fan out to
-    its per-connection workers client-side.
+    its per-connection workers client-side.  When the bearer carries
+    a ``connection_ids`` allowlist (#350), backfill and tail both
+    filter to that set — out-of-scope calls are silently omitted.
 
     Args:
         authorization (None | str | Unset):

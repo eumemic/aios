@@ -76,6 +76,10 @@ def sync_detailed(
     The plaintext is included in the response and CANNOT be recovered
     later — operators must save it at issue time.
 
+    Optional ``body.connection_ids`` (#350) restricts the issued token
+    to that allowlist of connection IDs; omit to leave the token
+    unscoped (sees every connection of ``body.connector`` type).
+
     Args:
         authorization (None | str | Unset):
         body (RuntimeTokenIssue): Request body for ``POST /v1/runtime-tokens``.
@@ -113,6 +117,10 @@ def sync(
     The plaintext is included in the response and CANNOT be recovered
     later — operators must save it at issue time.
 
+    Optional ``body.connection_ids`` (#350) restricts the issued token
+    to that allowlist of connection IDs; omit to leave the token
+    unscoped (sees every connection of ``body.connector`` type).
+
     Args:
         authorization (None | str | Unset):
         body (RuntimeTokenIssue): Request body for ``POST /v1/runtime-tokens``.
@@ -144,6 +152,10 @@ async def asyncio_detailed(
 
     The plaintext is included in the response and CANNOT be recovered
     later — operators must save it at issue time.
+
+    Optional ``body.connection_ids`` (#350) restricts the issued token
+    to that allowlist of connection IDs; omit to leave the token
+    unscoped (sees every connection of ``body.connector`` type).
 
     Args:
         authorization (None | str | Unset):
@@ -179,6 +191,10 @@ async def asyncio(
 
     The plaintext is included in the response and CANNOT be recovered
     later — operators must save it at issue time.
+
+    Optional ``body.connection_ids`` (#350) restricts the issued token
+    to that allowlist of connection IDs; omit to leave the token
+    unscoped (sees every connection of ``body.connector`` type).
 
     Args:
         authorization (None | str | Unset):

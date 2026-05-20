@@ -30,15 +30,24 @@ async def issue(body: RuntimeTokenIssue, pool: PoolDep, _auth: AuthDep) -> Runti
 
     The plaintext is included in the response and CANNOT be recovered
     later — operators must save it at issue time.
+
+    Optional ``body.connection_ids`` (#350) restricts the issued token
+    to that allowlist of connection IDs; omit to leave the token
+    unscoped (sees every connection of ``body.connector`` type).
     """
     account_id, _, _ = _auth
     token, plaintext = await service.issue(
-        pool, connector=body.connector, label=body.label, account_id=account_id
+        pool,
+        connector=body.connector,
+        label=body.label,
+        account_id=account_id,
+        connection_ids=body.connection_ids,
     )
     return RuntimeTokenIssued(
         id=token.id,
         connector=token.connector,
         label=token.label,
+        connection_ids=token.connection_ids,
         plaintext=plaintext,
         created_at=token.created_at,
     )

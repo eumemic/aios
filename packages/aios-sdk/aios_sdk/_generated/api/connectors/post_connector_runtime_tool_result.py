@@ -71,8 +71,10 @@ def sync_detailed(
 
      Submit a custom tool result from a runtime container.
 
-    Authorization: the bearer's connector must match ``body.connection_id``'s
-    connector, and the session must be bound to that connection.
+    Authorization: the bearer's connector must match
+    ``body.connection_id``'s connector, the session must be bound to
+    that connection, and (when the bearer carries a ``connection_ids``
+    allowlist) ``body.connection_id`` must be on the list (#350).
 
     Args:
         authorization (None | str | Unset):
@@ -112,8 +114,10 @@ def sync(
 
      Submit a custom tool result from a runtime container.
 
-    Authorization: the bearer's connector must match ``body.connection_id``'s
-    connector, and the session must be bound to that connection.
+    Authorization: the bearer's connector must match
+    ``body.connection_id``'s connector, the session must be bound to
+    that connection, and (when the bearer carries a ``connection_ids``
+    allowlist) ``body.connection_id`` must be on the list (#350).
 
     Args:
         authorization (None | str | Unset):
@@ -148,8 +152,10 @@ async def asyncio_detailed(
 
      Submit a custom tool result from a runtime container.
 
-    Authorization: the bearer's connector must match ``body.connection_id``'s
-    connector, and the session must be bound to that connection.
+    Authorization: the bearer's connector must match
+    ``body.connection_id``'s connector, the session must be bound to
+    that connection, and (when the bearer carries a ``connection_ids``
+    allowlist) ``body.connection_id`` must be on the list (#350).
 
     Args:
         authorization (None | str | Unset):
@@ -187,8 +193,10 @@ async def asyncio(
 
      Submit a custom tool result from a runtime container.
 
-    Authorization: the bearer's connector must match ``body.connection_id``'s
-    connector, and the session must be bound to that connection.
+    Authorization: the bearer's connector must match
+    ``body.connection_id``'s connector, the session must be bound to
+    that connection, and (when the bearer carries a ``connection_ids``
+    allowlist) ``body.connection_id`` must be on the list (#350).
 
     Args:
         authorization (None | str | Unset):

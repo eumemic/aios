@@ -75,7 +75,9 @@ def sync_detailed(
 
     The bearer authenticates the caller as one connector *type*;
     ``connection_id`` rides as a form field and must belong to that
-    type.  Idempotent on ``event_id``; drops surface as 4xx/5xx with
+    type.  When the bearer carries a ``connection_ids`` allowlist
+    (#350), the form field must also be on the list — otherwise 403.
+    Idempotent on ``event_id``; drops surface as 4xx/5xx with
     a body explaining the reason (operator-config issue vs server
     error vs payload).
 
@@ -115,7 +117,9 @@ def sync(
 
     The bearer authenticates the caller as one connector *type*;
     ``connection_id`` rides as a form field and must belong to that
-    type.  Idempotent on ``event_id``; drops surface as 4xx/5xx with
+    type.  When the bearer carries a ``connection_ids`` allowlist
+    (#350), the form field must also be on the list — otherwise 403.
+    Idempotent on ``event_id``; drops surface as 4xx/5xx with
     a body explaining the reason (operator-config issue vs server
     error vs payload).
 
@@ -150,7 +154,9 @@ async def asyncio_detailed(
 
     The bearer authenticates the caller as one connector *type*;
     ``connection_id`` rides as a form field and must belong to that
-    type.  Idempotent on ``event_id``; drops surface as 4xx/5xx with
+    type.  When the bearer carries a ``connection_ids`` allowlist
+    (#350), the form field must also be on the list — otherwise 403.
+    Idempotent on ``event_id``; drops surface as 4xx/5xx with
     a body explaining the reason (operator-config issue vs server
     error vs payload).
 
@@ -188,7 +194,9 @@ async def asyncio(
 
     The bearer authenticates the caller as one connector *type*;
     ``connection_id`` rides as a form field and must belong to that
-    type.  Idempotent on ``event_id``; drops surface as 4xx/5xx with
+    type.  When the bearer carries a ``connection_ids`` allowlist
+    (#350), the form field must also be on the list — otherwise 403.
+    Idempotent on ``event_id``; drops surface as 4xx/5xx with
     a body explaining the reason (operator-config issue vs server
     error vs payload).
 

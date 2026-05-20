@@ -5401,6 +5401,7 @@ def _row_to_runtime_token(row: asyncpg.Record) -> RuntimeToken:
         id=row["id"],
         connector=row["connector"],
         label=row["label"],
+        connection_ids=(list(row["connection_ids"]) if row["connection_ids"] is not None else None),
         created_at=row["created_at"],
         last_used_at=row["last_used_at"],
         revoked_at=row["revoked_at"],
@@ -5414,6 +5415,7 @@ async def insert_runtime_token(
     connector: str,
     label: str | None,
     token_hash: str,
+    connection_ids: list[str] | None = None,
 ) -> RuntimeToken:
     """Insert a new (unrevoked) token scoping a runtime container to ``connector``.
 
@@ -5421,6 +5423,10 @@ async def insert_runtime_token(
     runtime token for a connector type before any connection of that
     type exists (the FK on ``runtime_tokens.connector`` would otherwise
     block first-token-on-fresh-type).
+
+    ``connection_ids`` is the optional allowlist scope (#350): ``None``
+    leaves the column NULL (unscoped); a list (including ``[]``) is
+    persisted verbatim.
     """
     await conn.execute(
         "INSERT INTO connectors (connector) VALUES ($1) ON CONFLICT DO NOTHING",
@@ -5428,8 +5434,9 @@ async def insert_runtime_token(
     )
     row = await conn.fetchrow(
         """
-        INSERT INTO runtime_tokens (id, connector, label, token_hash, account_id)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO runtime_tokens
+            (id, connector, label, token_hash, account_id, connection_ids)
+        VALUES ($1, $2, $3, $4, $5, $6::text[])
         RETURNING *
         """,
         make_id(RUNTIME_TOKEN),
@@ -5437,6 +5444,7 @@ async def insert_runtime_token(
         label,
         token_hash,
         account_id,
+        connection_ids,
     )
     assert row is not None
     return _row_to_runtime_token(row)
@@ -5490,14 +5498,19 @@ async def revoke_runtime_token(
 async def resolve_runtime_token(
     conn: asyncpg.Connection[Any],
     token_hash: str,
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, list[str] | None] | None:
     """Look up an unrevoked token by hash; touch ``last_used_at`` in one round-trip.
 
-    Returns ``(token_id, connector, account_id)`` on hit, ``None`` on
-    miss / revoked token / archived account.  The token hash is
-    globally unique (one row owns the secret), so the lookup does not
-    filter by account; account_id is read off the matched row and
-    becomes the authenticated scope for the request.
+    Returns ``(token_id, connector, account_id, connection_ids)`` on
+    hit, ``None`` on miss / revoked token / archived account.  The
+    token hash is globally unique (one row owns the secret), so the
+    lookup does not filter by account; account_id is read off the
+    matched row and becomes the authenticated scope for the request.
+
+    ``connection_ids`` is the optional allowlist scope (#350):
+    ``None`` means the token is unscoped — every connection of
+    ``connector`` type is reachable; a non-``None`` list (including
+    ``[]``) limits the bearer to those connection IDs.
 
     Refuses tokens on archived accounts via the EXISTS subquery — same
     asymmetry-closing intent as :func:`lookup_account_by_key_hash`'s
@@ -5516,13 +5529,14 @@ async def resolve_runtime_token(
            AND EXISTS (SELECT 1 FROM accounts
                         WHERE accounts.id = runtime_tokens.account_id
                           AND accounts.archived_at IS NULL)
-        RETURNING id, connector, account_id
+        RETURNING id, connector, account_id, connection_ids
         """,
         token_hash,
     )
     if row is None:
         return None
-    return (row["id"], row["connector"], row["account_id"])
+    connection_ids = list(row["connection_ids"]) if row["connection_ids"] is not None else None
+    return (row["id"], row["connector"], row["account_id"], connection_ids)
 
 
 # ─── files ───────────────────────────────────────────────────────────────────

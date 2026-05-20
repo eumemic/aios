@@ -23,11 +23,18 @@ from aios.models.runtime_tokens import RuntimeToken
 
 
 class ResolvedRuntimeToken(NamedTuple):
-    """The handful of fields auth needs after a successful token lookup."""
+    """The handful of fields auth needs after a successful token lookup.
+
+    ``connection_ids`` is the optional allowlist scope (#350): ``None``
+    means the token is unscoped (sees every connection of its
+    ``connector`` type); a non-``None`` list — including ``[]`` —
+    limits the bearer to those connection IDs.
+    """
 
     token_id: str
     connector: str
     account_id: str
+    connection_ids: list[str] | None
 
 
 _TOKEN_PREFIX = "aios_runtime_"
@@ -44,11 +51,16 @@ async def issue(
     account_id: str,
     connector: str,
     label: str | None,
+    connection_ids: list[str] | None = None,
 ) -> tuple[RuntimeToken, str]:
     """Issue a fresh runtime token scoped to ``connector``.
 
     Returns ``(record, plaintext)``.  Plaintext is the bearer the
     runtime container will use; never persisted.
+
+    ``connection_ids`` is the optional allowlist scope (#350): ``None``
+    leaves the token unscoped; a list (including ``[]``) restricts the
+    bearer to the listed connection IDs.
     """
     plaintext = _TOKEN_PREFIX + secrets.token_urlsafe(_TOKEN_BYTES)
     async with pool.acquire() as conn:
@@ -58,6 +70,7 @@ async def issue(
             label=label,
             token_hash=_hash(plaintext),
             account_id=account_id,
+            connection_ids=connection_ids,
         )
     return token, plaintext
 
@@ -90,5 +103,10 @@ async def resolve(pool: asyncpg.Pool[Any], plaintext: str) -> ResolvedRuntimeTok
         row = await queries.resolve_runtime_token(conn, _hash(plaintext))
     if row is None:
         return None
-    token_id, connector, account_id = row
-    return ResolvedRuntimeToken(token_id=token_id, connector=connector, account_id=account_id)
+    token_id, connector, account_id, connection_ids = row
+    return ResolvedRuntimeToken(
+        token_id=token_id,
+        connector=connector,
+        account_id=account_id,
+        connection_ids=connection_ids,
+    )
