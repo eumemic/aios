@@ -486,7 +486,8 @@ class SandboxRegistry:
                         to_release.append(sid)
                 for sid in to_release:
                     log.info("sandbox.idle_release", session_id=sid)
-                    await self.release(sid)
+                    async with self._lock_for(sid):
+                        await self.release(sid)
             except Exception:
                 log.exception("sandbox.reap_idle_loop_failed")
 
