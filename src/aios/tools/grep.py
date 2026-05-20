@@ -150,7 +150,15 @@ async def grep_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     parts.append("2>/dev/null")
     parts.append(f"| head -{limit}")
 
-    cmd = " ".join(parts)
+    # ``set -o pipefail`` is load-bearing: without it the pipe's exit code is
+    # ``head``'s (0 even when ``rg`` failed because ``head`` happily consumes
+    # empty stdin), and the existing ``exit_code not in (0, 1)`` branch never
+    # fires for bad-regex / bad-path / other rg failures. The model gets
+    # ``{"matches": ""}`` and reads it as "no matches" — chasing red herrings
+    # (different paths, different patterns) instead of fixing its input.
+    # ``bash -c`` is the sandbox exec shell so the option is supported.
+    # Same defect class as PR #513 (read tool), one tool over.
+    cmd = "set -o pipefail; " + " ".join(parts)
 
     result = await sandbox.exec(
         handle,

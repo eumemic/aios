@@ -97,7 +97,7 @@ class TestHappyPath:
     async def test_default_path(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello"})
         cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
-        assert cmd.startswith("rg")
+        assert "rg " in cmd
         assert "/workspace" in cmd
 
     async def test_include_flag(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
@@ -198,3 +198,34 @@ class TestErrorPath:
         result = await grep_handler("sess_01TEST", {"pattern": "[invalid"})
         assert "error" in result
         assert "invalid regex" in result["error"]
+
+    async def test_cmd_uses_pipefail_so_rg_failure_propagates(
+        self, stub_registry: Any, stub_handle: SandboxHandle
+    ) -> None:
+        """``rg <pattern> <path> 2>/dev/null | head -N`` is a pipe whose final
+        exit code is ``head``'s — which is 0 even when ``rg`` failed (bad regex
+        ``rg`` exit 2, path traversal error, missing path) because ``head``
+        happily consumes empty input and exits 0. Without ``set -o pipefail``
+        the result returned to the model is ``{"matches": ""}`` — empty,
+        looking like "no matches" rather than the actual rg error. The model
+        chases red herrings: tries different paths, different patterns, never
+        realizing rg itself rejected its input.
+
+        Stderr is also swallowed via ``2>/dev/null`` so there's nothing to
+        surface even if the exit code were correct — but the existing
+        ``result.exit_code not in (0, 1)`` branch would convert it to an
+        error dict if the exit code propagated.
+
+        Mirrors the read-tool fix in PR #513: prepend ``set -o pipefail`` so
+        any non-zero exit anywhere in the pipe is surfaced as the overall exit
+        code, which the existing error-detection branch then turns into the
+        error dict the model can act on.
+        """
+        await grep_handler("sess_01TEST", {"pattern": "hello"})
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        assert "pipefail" in cmd, (
+            f"cmd must enable ``pipefail`` so a failing ``rg`` (e.g., invalid "
+            f"regex, missing path) propagates through the ``| head -N`` to "
+            f"the overall pipe exit code; without it, rg errors silently "
+            f"return empty matches. Got: {cmd!r}"
+        )
