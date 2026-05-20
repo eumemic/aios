@@ -14,7 +14,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, status
 
-from aios.api.deps import AuthDep, PoolDep
+from aios.api.deps import AccountIdDep, PoolDep
 from aios.models.common import ListResponse
 from aios.models.session_templates import (
     SessionTemplate,
@@ -27,7 +27,9 @@ router = APIRouter(prefix="/v1/session-templates", tags=["session-templates"])
 
 
 @router.post("", operation_id="create_session_template", status_code=status.HTTP_201_CREATED)
-async def create(body: SessionTemplateCreate, pool: PoolDep, _auth: AuthDep) -> SessionTemplate:
+async def create(
+    body: SessionTemplateCreate, pool: PoolDep, account_id: AccountIdDep
+) -> SessionTemplate:
     """Create a session template — a frozen recipe for per_chat session spawn.
 
     Captures the agent + environment + vaults + memory stores that a
@@ -35,7 +37,6 @@ async def create(body: SessionTemplateCreate, pool: PoolDep, _auth: AuthDep) -> 
     partner. Pin ``agent_version`` to a specific version for deterministic
     spawning, or leave unset to track the agent's latest.
     """
-    account_id, _, _ = _auth
     return await service.create_session_template(
         pool,
         name=body.name,
@@ -52,7 +53,7 @@ async def create(body: SessionTemplateCreate, pool: PoolDep, _auth: AuthDep) -> 
 @router.get("", operation_id="list_session_templates")
 async def list_(
     pool: PoolDep,
-    _auth: AuthDep,
+    account_id: AccountIdDep,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     after: str | None = None,
 ) -> ListResponse[SessionTemplate]:
@@ -60,7 +61,6 @@ async def list_(
 
     Cursor pagination via ``after``.
     """
-    account_id, _, _ = _auth
     items = await service.list_session_templates(
         pool, limit=limit, after=after, account_id=account_id
     )
@@ -68,15 +68,14 @@ async def list_(
 
 
 @router.get("/{template_id}", operation_id="get_session_template")
-async def get(template_id: str, pool: PoolDep, _auth: AuthDep) -> SessionTemplate:
+async def get(template_id: str, pool: PoolDep, account_id: AccountIdDep) -> SessionTemplate:
     """Fetch one session template by id."""
-    account_id, _, _ = _auth
     return await service.get_session_template(pool, template_id, account_id=account_id)
 
 
 @router.put("/{template_id}", operation_id="update_session_template")
 async def update(
-    template_id: str, body: SessionTemplateUpdate, pool: PoolDep, _auth: AuthDep
+    template_id: str, body: SessionTemplateUpdate, pool: PoolDep, account_id: AccountIdDep
 ) -> SessionTemplate:
     """Update a session template's recipe fields. Omitted fields are preserved.
 
@@ -85,7 +84,6 @@ async def update(
     pass null to switch to "track latest," pass a number to pin to that
     specific version. Already-spawned sessions are unaffected.
     """
-    account_id, _, _ = _auth
     return await service.update_session_template(
         pool,
         template_id,
@@ -105,7 +103,7 @@ async def update(
     operation_id="archive_session_template",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def delete(template_id: str, pool: PoolDep, _auth: AuthDep) -> None:
+async def delete(template_id: str, pool: PoolDep, account_id: AccountIdDep) -> None:
     """Archive a session template (soft-delete via DELETE verb).
 
     Already-spawned sessions are unaffected and continue normally. Per-chat
@@ -114,5 +112,4 @@ async def delete(template_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     handler until the connection is reconfigured to point at a different
     template. There is no API surface to un-archive currently.
     """
-    account_id, _, _ = _auth
     await service.archive_session_template(pool, template_id, account_id=account_id)

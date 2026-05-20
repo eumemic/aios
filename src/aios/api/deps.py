@@ -77,6 +77,20 @@ async def require_bearer_auth(
     return (account.id, key_id, account.can_mint_children)
 
 
+async def get_account_id(
+    auth: Annotated[AccountAuthResult, Depends(require_bearer_auth)],
+) -> str:
+    """Return just the ``account_id`` from the bearer-token auth tuple.
+
+    Endpoints that don't need ``key_id`` or ``can_mint_children`` use
+    ``AccountIdDep`` to skip the tuple destructure. Endpoints that
+    audit-log the key_id or branch on can_mint (currently only the
+    ``accounts`` router) keep ``AuthDep``.
+    """
+    account_id, _, _ = auth
+    return account_id
+
+
 async def require_runtime_auth(
     pool: Annotated[asyncpg.Pool, Depends(get_pool)],
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
@@ -113,4 +127,5 @@ CryptoBoxDep = Annotated[CryptoBox, Depends(get_crypto_box)]
 ProcrastinateDep = Annotated[ProcrastinateApp, Depends(get_procrastinate)]
 DbUrlDep = Annotated[str, Depends(get_db_url)]
 AuthDep = Annotated[AccountAuthResult, Depends(require_bearer_auth)]
+AccountIdDep = Annotated[str, Depends(get_account_id)]
 RuntimeAuthDep = Annotated[tuple[str, str, str, list[str] | None], Depends(require_runtime_auth)]

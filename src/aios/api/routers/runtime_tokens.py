@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, status
 
-from aios.api.deps import AuthDep, PoolDep
+from aios.api.deps import AccountIdDep, PoolDep
 from aios.models.common import ListResponse
 from aios.models.runtime_tokens import (
     RuntimeToken,
@@ -25,7 +25,9 @@ router = APIRouter(prefix="/v1/runtime-tokens", tags=["runtime-tokens"])
 
 
 @router.post("", operation_id="issue_runtime_token", status_code=status.HTTP_201_CREATED)
-async def issue(body: RuntimeTokenIssue, pool: PoolDep, _auth: AuthDep) -> RuntimeTokenIssued:
+async def issue(
+    body: RuntimeTokenIssue, pool: PoolDep, account_id: AccountIdDep
+) -> RuntimeTokenIssued:
     """Mint a new bearer token scoped to ``body.connector``.
 
     The plaintext is included in the response and CANNOT be recovered
@@ -35,7 +37,6 @@ async def issue(body: RuntimeTokenIssue, pool: PoolDep, _auth: AuthDep) -> Runti
     to that allowlist of connection IDs; omit to leave the token
     unscoped (sees every connection of ``body.connector`` type).
     """
-    account_id, _, _ = _auth
     token, plaintext = await service.issue(
         pool,
         connector=body.connector,
@@ -57,16 +58,14 @@ async def issue(body: RuntimeTokenIssue, pool: PoolDep, _auth: AuthDep) -> Runti
 async def list_(
     connector: str,
     pool: PoolDep,
-    _auth: AuthDep,
+    account_id: AccountIdDep,
 ) -> ListResponse[RuntimeToken]:
     """All tokens (revoked included) for ``connector``, newest first."""
-    account_id, _, _ = _auth
     items = await service.list_tokens(pool, connector=connector, account_id=account_id)
     return ListResponse[RuntimeToken](data=items, has_more=False, next_after=None)
 
 
 @router.post("/{token_id}/revoke", operation_id="revoke_runtime_token")
-async def revoke(token_id: str, pool: PoolDep, _auth: AuthDep) -> RuntimeToken:
+async def revoke(token_id: str, pool: PoolDep, account_id: AccountIdDep) -> RuntimeToken:
     """Soft-delete a token.  Idempotent — re-revoking is a no-op."""
-    account_id, _, _ = _auth
     return await service.revoke(pool, token_id, account_id=account_id)

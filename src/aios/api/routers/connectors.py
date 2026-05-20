@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict
 from sse_starlette import EventSourceResponse
 
 from aios.api.deps import (
-    AuthDep,
+    AccountIdDep,
     CryptoBoxDep,
     DbUrlDep,
     PoolDep,
@@ -600,7 +600,7 @@ async def post_signal_register(
     body: SignalRegisterRequest,
     db_url: DbUrlDep,
     pool: PoolDep,
-    _auth: AuthDep,
+    account_id: AccountIdDep,
 ) -> SignalRegisterResponse:
     """Initiate signal-cli ``register`` for ``account``.
 
@@ -608,7 +608,6 @@ async def post_signal_register(
     browser, repost with ``captcha=<token>``.  On success: SMS (or voice
     call with ``voice=true``) carrying a 6-digit code for ``verify``.
     """
-    account_id, _, _ = _auth
     result = await _signal_management_call(
         db_url,
         pool,
@@ -637,7 +636,7 @@ async def post_signal_verify(
     body: SignalVerifyRequest,
     db_url: DbUrlDep,
     pool: PoolDep,
-    _auth: AuthDep,
+    account_id: AccountIdDep,
 ) -> SignalVerifyResponse:
     """Submit the SMS / voice verification code.
 
@@ -645,7 +644,6 @@ async def post_signal_verify(
     running connector picks it up on the next ``verify_phone`` call
     without restart.
     """
-    account_id, _, _ = _auth
     result = await _signal_management_call(
         db_url,
         pool,
@@ -668,11 +666,10 @@ async def post_signal_profile(
     body: SignalProfileRequest,
     db_url: DbUrlDep,
     pool: PoolDep,
-    _auth: AuthDep,
+    account_id: AccountIdDep,
 ) -> None:
     """Update ``given_name`` / ``family_name`` / ``about``.  Avatar bytes
     are not supported in v1 (no operator→container file staging surface)."""
-    account_id, _, _ = _auth
     await _signal_management_call(
         db_url,
         pool,

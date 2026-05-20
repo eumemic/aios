@@ -6,7 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, status
 
-from aios.api.deps import AuthDep, PoolDep
+from aios.api.deps import AccountIdDep, PoolDep
 from aios.models.common import ListResponse
 from aios.models.memory_stores import (
     Memory,
@@ -27,14 +27,15 @@ router = APIRouter(prefix="/v1/memory-stores", tags=["memory-stores"])
 
 
 @router.post("", operation_id="create_memory_store", status_code=status.HTTP_201_CREATED)
-async def create_store(body: MemoryStoreCreate, pool: PoolDep, _auth: AuthDep) -> MemoryStore:
+async def create_store(
+    body: MemoryStoreCreate, pool: PoolDep, account_id: AccountIdDep
+) -> MemoryStore:
     """Create a new memory store — a named collection of file-like memories.
 
     Memories created in this store are mirrored to a per-store host
     directory so that sessions referencing the store can read them through
     the sandbox filesystem.
     """
-    account_id, _, _ = _auth
     return await service.create_store(
         pool,
         name=body.name,
@@ -47,7 +48,7 @@ async def create_store(body: MemoryStoreCreate, pool: PoolDep, _auth: AuthDep) -
 @router.get("", operation_id="list_memory_stores")
 async def list_stores(
     pool: PoolDep,
-    _auth: AuthDep,
+    account_id: AccountIdDep,
     include_archived: bool = False,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     after: str | None = None,
@@ -59,7 +60,6 @@ async def list_stores(
     ``after`` from a previous response's ``next_after`` to get the next
     page. The default limit is 100 since stores are typically few.
     """
-    account_id, _, _ = _auth
     items = await service.list_stores(
         pool,
         include_archived=include_archived,
@@ -71,15 +71,14 @@ async def list_stores(
 
 
 @router.get("/{store_id}", operation_id="get_memory_store")
-async def get_store(store_id: str, pool: PoolDep, _auth: AuthDep) -> MemoryStore:
+async def get_store(store_id: str, pool: PoolDep, account_id: AccountIdDep) -> MemoryStore:
     """Fetch one memory store by id."""
-    account_id, _, _ = _auth
     return await service.get_store(pool, store_id, account_id=account_id)
 
 
 @router.post("/{store_id}", operation_id="update_memory_store")
 async def update_store(
-    store_id: str, body: MemoryStoreUpdate, pool: PoolDep, _auth: AuthDep
+    store_id: str, body: MemoryStoreUpdate, pool: PoolDep, account_id: AccountIdDep
 ) -> MemoryStore:
     """Update a memory store's ``name``, ``description``, or ``metadata``.
 
@@ -87,7 +86,6 @@ async def update_store(
     archived stores are read-only. Treat as partial update on the listed
     fields.
     """
-    account_id, _, _ = _auth
     return await service.update_store(
         pool,
         store_id,
@@ -103,7 +101,7 @@ async def update_store(
     operation_id="archive_memory_store",
     openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
 )
-async def archive_store(store_id: str, pool: PoolDep, _auth: AuthDep) -> MemoryStore:
+async def archive_store(store_id: str, pool: PoolDep, account_id: AccountIdDep) -> MemoryStore:
     """Archive a memory store: hides from default lists, makes it read-only.
 
     The store and its memories persist; sessions can still resolve memory
@@ -111,7 +109,6 @@ async def archive_store(store_id: str, pool: PoolDep, _auth: AuthDep) -> MemoryS
     un-archived (no API surface for that currently). Use
     ``delete_memory_store`` for full removal.
     """
-    account_id, _, _ = _auth
     return await service.archive_store(pool, store_id, account_id=account_id)
 
 
@@ -120,7 +117,7 @@ async def archive_store(store_id: str, pool: PoolDep, _auth: AuthDep) -> MemoryS
     operation_id="delete_memory_store",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def delete_store(store_id: str, pool: PoolDep, _auth: AuthDep) -> None:
+async def delete_store(store_id: str, pool: PoolDep, account_id: AccountIdDep) -> None:
     """Hard-delete a memory store, all its memories, and its host mirror.
 
     Cascade-deletes memories and versions in the database. After the DB
@@ -128,7 +125,6 @@ async def delete_store(store_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     (best-effort — a missing dir is fine, indicates no session ever
     provisioned for this store). Returns 204.
     """
-    account_id, _, _ = _auth
     await service.delete_store(pool, store_id, account_id=account_id)
 
 
@@ -140,14 +136,15 @@ async def delete_store(store_id: str, pool: PoolDep, _auth: AuthDep) -> None:
     operation_id="create_memory",
     status_code=status.HTTP_201_CREATED,
 )
-async def create_memory(store_id: str, body: MemoryCreate, pool: PoolDep, _auth: AuthDep) -> Memory:
+async def create_memory(
+    store_id: str, body: MemoryCreate, pool: PoolDep, account_id: AccountIdDep
+) -> Memory:
     """Create a memory at the given path within a store.
 
     The content is also mirrored to the store's host directory so that
     sandboxed sessions can read it through the filesystem. Creates an
     initial version (every memory mutation creates a version).
     """
-    account_id, _, _ = _auth
     return await service.create_memory(
         pool,
         store_id=store_id,
@@ -162,7 +159,7 @@ async def create_memory(store_id: str, body: MemoryCreate, pool: PoolDep, _auth:
 async def list_memories(
     store_id: str,
     pool: PoolDep,
-    _auth: AuthDep,
+    account_id: AccountIdDep,
     path_prefix: str | None = None,
     order_by: str = "created_at",
     depth: int | None = None,
@@ -178,7 +175,6 @@ async def list_memories(
     fetch (cursor pagination not yet supported; use ``path_prefix`` to
     narrow scope when a store has thousands of memories).
     """
-    account_id, _, _ = _auth
     items = await service.list_memories(
         pool,
         store_id,
@@ -198,9 +194,10 @@ async def list_memories(
 
 
 @router.get("/{store_id}/memories/{memory_id}", operation_id="get_memory")
-async def get_memory(store_id: str, memory_id: str, pool: PoolDep, _auth: AuthDep) -> Memory:
+async def get_memory(
+    store_id: str, memory_id: str, pool: PoolDep, account_id: AccountIdDep
+) -> Memory:
     """Fetch one memory by id, including its current content."""
-    account_id, _, _ = _auth
     return await service.get_memory(
         pool, store_id, memory_id, include_content=True, account_id=account_id
     )
@@ -212,7 +209,7 @@ async def update_memory(
     memory_id: str,
     body: MemoryUpdate,
     pool: PoolDep,
-    _auth: AuthDep,
+    account_id: AccountIdDep,
 ) -> Memory:
     """Update a memory's content and/or path. Creates a new version.
 
@@ -222,7 +219,6 @@ async def update_memory(
     mirror is updated to match: renames delete the old path and write the
     new one.
     """
-    account_id, _, _ = _auth
     return await service.update_memory(
         pool,
         store_id=store_id,
@@ -242,14 +238,15 @@ async def update_memory(
     operation_id="delete_memory",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def delete_memory(store_id: str, memory_id: str, pool: PoolDep, _auth: AuthDep) -> None:
+async def delete_memory(
+    store_id: str, memory_id: str, pool: PoolDep, account_id: AccountIdDep
+) -> None:
     """Soft-delete a memory and remove it from the host mirror.
 
     Sets ``deleted_at`` on the memory and appends a ``deleted`` tombstone
     version. The row and version history persist; live reads filter on
     ``deleted_at IS NULL`` so the memory becomes invisible. Returns 204.
     """
-    account_id, _, _ = _auth
     await service.delete_memory(
         pool,
         store_id=store_id,
@@ -266,7 +263,7 @@ async def delete_memory(store_id: str, memory_id: str, pool: PoolDep, _auth: Aut
 async def list_versions(
     store_id: str,
     pool: PoolDep,
-    _auth: AuthDep,
+    account_id: AccountIdDep,
     memory_id: str | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> ListResponse[MemoryVersion]:
@@ -276,7 +273,6 @@ async def list_versions(
     Without the filter, returns versions across all memories in the store
     (useful for audit). No cursor pagination; bumps default limit to 100.
     """
-    account_id, _, _ = _auth
     items = await service.list_versions(
         pool, store_id, memory_id=memory_id, limit=limit, account_id=account_id
     )
@@ -285,10 +281,9 @@ async def list_versions(
 
 @router.get("/{store_id}/memory-versions/{version_id}", operation_id="get_memory_version")
 async def get_version(
-    store_id: str, version_id: str, pool: PoolDep, _auth: AuthDep
+    store_id: str, version_id: str, pool: PoolDep, account_id: AccountIdDep
 ) -> MemoryVersion:
     """Fetch one historical memory version by id."""
-    account_id, _, _ = _auth
     return await service.get_version(pool, store_id, version_id, account_id=account_id)
 
 
@@ -298,7 +293,7 @@ async def get_version(
     openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
 )
 async def redact_version(
-    store_id: str, version_id: str, pool: PoolDep, _auth: AuthDep
+    store_id: str, version_id: str, pool: PoolDep, account_id: AccountIdDep
 ) -> MemoryVersion:
     """Redact the content of a historical memory version in place.
 
@@ -307,7 +302,6 @@ async def redact_version(
     previously written into a memory. Live memory content is unaffected
     (only this specific historical version is redacted).
     """
-    account_id, _, _ = _auth
     return await service.redact_version(
         pool,
         store_id=store_id,
