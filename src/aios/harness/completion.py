@@ -112,6 +112,65 @@ def _supports_anthropic_cache_control(model: str) -> bool:
     return False
 
 
+@cache
+def _supports_openai_prompt_cache_key(model: str) -> bool:
+    """True when ``model`` accepts OpenAI's ``prompt_cache_key`` field.
+
+    OpenAI's Responses / Chat Completions APIs group requests by an
+    explicit ``prompt_cache_key`` for cache eligibility. Anthropic uses
+    ``cache_control`` content-block markers instead, so the two cache
+    channels are mutually exclusive — the gate here mirrors
+    :func:`_supports_anthropic_cache_control`, returning True for the
+    openai provider (and only the openai provider) so the two paths
+    can't accidentally both fire.
+
+    Unknown model strings return False (safe no-op) — same posture as
+    the Anthropic gate.
+
+    Cached for the same reason as the Anthropic counterpart: pure
+    function of the model string, low cardinality.
+    """
+    try:
+        _, provider, _, _ = litellm.get_llm_provider(model)
+    except Exception:
+        return False
+    return bool(provider == "openai")
+
+
+def _apply_provider_cache_hints(
+    kwargs: dict[str, Any],
+    model: str,
+    session_id: str | None,
+) -> None:
+    """Inject the provider-appropriate cache hint into outbound kwargs.
+
+    Two cache channels exist, dispatched by provider:
+
+    * **Anthropic** — content-block ``cache_control`` markers, set by
+      :func:`inject_cache_breakpoints` directly on the messages list.
+      Nothing to do here.
+    * **OpenAI** — explicit ``prompt_cache_key`` kwarg, set here.
+      OpenAI's Responses / Chat Completions APIs group requests by this
+      key for cache eligibility. The natural per-session scope keeps
+      successive turns of the same session in the same bucket while
+      distinct sessions don't collide.
+
+    Skips when ``session_id`` is unset — a caller that doesn't know the
+    session (rare; only the harness's two call sites invoke these
+    wrappers, and both have it) gets the safe no-op rather than a
+    synthetic key that would re-bucket every call.
+
+    The caller's ``extra`` mapping (typically the agent's
+    ``litellm_extra``) is merged AFTER this helper, so an agent can
+    override ``prompt_cache_key`` with a custom scope — e.g. to share a
+    bucket across multiple sessions of the same conversation.
+    """
+    if session_id is None:
+        return
+    if _supports_openai_prompt_cache_key(model):
+        kwargs["prompt_cache_key"] = session_id
+
+
 def inject_cache_breakpoints(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
@@ -269,6 +328,7 @@ async def call_litellm(
     tools: list[dict[str, Any]] | None = None,
     api_base: str | None = None,
     extra: dict[str, Any] | None = None,
+    session_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, int], float | None]:
     """Call ``litellm.acompletion`` and return ``(message, usage, cost)``.
 
@@ -277,6 +337,10 @@ async def call_litellm(
     ``thinking_blocks``. The harness stores the message dict opaquely.
     Usage is normalized to our canonical field names. Cost is LiteLLM's
     per-request USD figure, or ``None`` when the provider doesn't report it.
+
+    ``session_id`` (when provided on the openai provider path) is forwarded
+    as OpenAI's ``prompt_cache_key`` so successive turns of the same
+    session share a cache bucket. See ``_apply_provider_cache_hints``.
     """
     inject_cache_breakpoints(messages, tools, model)
 
@@ -289,6 +353,7 @@ async def call_litellm(
         kwargs["tools"] = tools
     if api_base is not None:
         kwargs["api_base"] = api_base
+    _apply_provider_cache_hints(kwargs, model, session_id)
     if extra:
         kwargs.update(extra)
 
@@ -339,6 +404,7 @@ async def stream_litellm(
         kwargs["tools"] = tools
     if api_base is not None:
         kwargs["api_base"] = api_base
+    _apply_provider_cache_hints(kwargs, model, session_id)
     if extra:
         kwargs.update(extra)
 
