@@ -420,9 +420,21 @@ async def create_vault_credential(
         # Lock the parent vault row to serialize concurrent credential inserts
         # within this vault. Without it, two parallel inserts can both observe
         # ``count == MAX-1`` and overflow the cap.
+        #
+        # The ``account_id = $2`` filter is load-bearing for tenant isolation,
+        # not just the lock's correctness: ``insert_vault_credential`` trusts
+        # the caller's ``account_id`` (writes it verbatim) and the
+        # ``vault_credentials.vault_id`` FK enforces only existence, not
+        # account-matching. Without scoping the lock, tenant A can target
+        # tenant B's vault_id, land the lock, pass the (correctly scoped)
+        # quota check at count 0, and write a credential row at
+        # ``(account_id=A, vault_id=B-vault)``. Mirrors the sessions.py
+        # ``SELECT id FROM sessions … FOR UPDATE`` pattern, where the
+        # account_id is similarly load-bearing rather than redundant.
         locked = await conn.fetchrow(
-            "SELECT 1 FROM vaults WHERE id = $1 FOR UPDATE",
+            "SELECT 1 FROM vaults WHERE id = $1 AND account_id = $2 FOR UPDATE",
             vault_id,
+            account_id,
         )
         if locked is None:
             raise NotFoundError(
