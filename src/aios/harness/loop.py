@@ -431,6 +431,7 @@ async def _run_session_step_body(
                 messages=messages,
                 tools=tools if tools else None,
                 extra=agent.litellm_extra or None,
+                session_id=session_id,
             )
     except Exception:
         log.exception("step.litellm_failed", session_id=session_id)
