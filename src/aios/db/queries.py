@@ -1163,8 +1163,13 @@ async def clone_session(
 
     The clone inherits ``agent_id``, ``environment_id``, ``agent_version``,
     ``title``, ``metadata``, ``env``, vault bindings, ``last_event_seq``,
-    ``status``, ``stop_reason``, and ``focal_channel`` so its next forward
-    step sees a context byte-identical to the parent's at clone time.
+    ``status``, ``stop_reason``, ``focal_channel``, and ``focal_locked``
+    so its next forward step sees a context byte-identical to the
+    parent's at clone time.  ``focal_locked`` MUST follow ``focal_channel``
+    on the clone path: a per_chat parent (``focal_locked=True``) cloned
+    without its lock would inherit the bound channel but bypass the
+    ``is_session_focal_locked`` gate on ``switch_channel``, letting the
+    clone escape per_chat isolation.
 
     Cumulative ``input_tokens`` / ``output_tokens`` start at 0 — those were
     paid on the parent and shouldn't be double-counted.
@@ -1212,11 +1217,11 @@ async def clone_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 status, stop_reason, workspace_volume_path, env, last_event_seq,
-                focal_channel, account_id
+                focal_channel, focal_locked, account_id
             )
             SELECT $1, agent_id, environment_id, agent_version, title, metadata,
                    status, stop_reason, $2, env, last_event_seq, focal_channel,
-                   account_id
+                   focal_locked, account_id
               FROM sessions WHERE id = $3
             RETURNING *
             """,
