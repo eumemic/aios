@@ -147,6 +147,37 @@ class TestSearchEvents:
         assert "error" in result
         assert "SELECT" in result["error"]
 
+    async def test_rejects_cross_session_via_events_table(self, harness: Harness) -> None:
+        """Reaching the raw ``events`` table bypasses per-session scoping.
+
+        The ``events_search`` view filters by ``current_setting('app.session_id')``;
+        the underlying ``events`` table does not.  A naive scanner would only
+        forbid writes — but a SELECT against ``events`` happily returns rows
+        from any session in the database (and post multi-tenancy, any account).
+        Verify that the validator blocks the bypass before the query reaches
+        Postgres, so the cross-tenant leak surface is closed at the tool boundary.
+        """
+        session_id_a = await self._setup_session(harness)
+
+        harness.script_model([assistant("Kubernetes is great!")])
+        session_b = await harness.start("Tell me about Kubernetes", tools=["search_events"])
+        await harness.run_until_idle(session_b.id)
+
+        # Session A tries to read session B's events via the raw table.
+        result = await search_events_handler(
+            session_id_a,
+            {
+                "query": (
+                    f"SELECT data FROM events WHERE session_id = '{session_b.id}' "
+                    f"AND data->>'role' = 'user'"
+                ),
+            },
+        )
+        assert "error" in result, (
+            f"validator must reject direct events-table access; got: {result!r}"
+        )
+        assert "events_search" in result["error"]
+
     async def test_read_only_enforcement(self, harness: Harness) -> None:
         """The READ ONLY transaction used by _execute_query blocks writes.
 

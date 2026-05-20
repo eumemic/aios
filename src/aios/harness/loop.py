@@ -537,11 +537,10 @@ async def _run_session_step_body(
         # Unknown-MCP tools route through the regular MCP dispatcher,
         # bypassing the permission gate.  ``_execute_mcp_tool_async``
         # already detects unknown servers and appends a tool_error
-        # event (``mcp_tool.server_not_found``); the prior code path
-        # parked the session in ``requires_action`` and dispatched
-        # only after a confirmation, which never came.  Routing them
-        # to immediate dispatch lets the model see the error in the
-        # next step and self-correct.
+        # event for them; the prior code path parked the session in
+        # ``requires_action`` and dispatched only after a confirmation,
+        # which never came.  Routing them to immediate dispatch lets
+        # the model see the error in the next step and self-correct.
         immediate_mcp = mcp_immediate + unknown_mcp
         if immediate_mcp:
             launch_mcp_tool_calls(
@@ -688,8 +687,8 @@ def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, str]) -> bo
     Used by :func:`_classify_tool_call` to short-circuit hallucinated
     tool names before the permission gate, so the model gets a tool
     error in one turn instead of parking in ``requires_action`` forever
-    waiting on a confirmation that would dispatch into
-    ``mcp_tool.server_not_found`` anyway.
+    waiting on a confirmation that would surface as an unknown-server
+    tool error anyway.
     """
     return server_name in mcp_server_map
 

@@ -74,6 +74,13 @@ class _ToolCall:
     is_error: bool = False
 
 
+class _ToolBail(Exception):
+    """Intentional bail from a tool body: the lifecycle treats it as a
+    clean model-visible error, not a handler crash (no type prefix on
+    the message, no ``on_exception`` callback).
+    """
+
+
 @asynccontextmanager
 async def _tool_lifecycle(
     pool: asyncpg.Pool[Any],
@@ -114,6 +121,12 @@ async def _tool_lifecycle(
         tc.is_error = True
         await _append_tool_result(
             pool, session_id, call_id, name, account_id=account_id, error="cancelled"
+        )
+    except _ToolBail as err:
+        bound_log.info(f"{log_prefix}.bail", error=str(err))
+        tc.is_error = True
+        await _append_tool_result(
+            pool, session_id, call_id, name, account_id=account_id, error=str(err)
         )
     except Exception as err:
         bound_log.exception(f"{log_prefix}.handler_failed")
@@ -179,27 +192,12 @@ async def _execute_tool_async(
     ) as tc:
         arguments = _parse_arguments(tc.raw_args)
         if arguments is None:
-            tc.bound_log.warning("tool.bad_arguments")
-            tc.is_error = True
-            await _append_tool_result(
-                pool,
-                session_id,
-                tc.call_id,
-                tc.name,
-                account_id=account_id,
-                error="arguments were not valid JSON",
-            )
-            return
+            raise _ToolBail("arguments were not valid JSON")
 
         try:
             tool = registry.get(tc.name)
         except ToolNotFoundError as err:
-            tc.bound_log.warning("tool.not_registered")
-            tc.is_error = True
-            await _append_tool_result(
-                pool, session_id, tc.call_id, tc.name, account_id=account_id, error=err.message
-            )
-            return
+            raise _ToolBail(err.message) from err
 
         # Validate arguments against the tool's parameters_schema before
         # dispatch.  Weaker models often emit tool calls with wrong
@@ -211,17 +209,7 @@ async def _execute_tool_async(
         # explicitly gives the model feedback to self-correct.
         schema_error = _validate_arguments(arguments, tool.parameters_schema)
         if schema_error is not None:
-            tc.bound_log.info("tool.schema_error", error=schema_error)
-            tc.is_error = True
-            await _append_tool_result(
-                pool,
-                session_id,
-                tc.call_id,
-                tc.name,
-                account_id=account_id,
-                error=schema_error,
-            )
-            return
+            raise _ToolBail(schema_error)
 
         # Invoke handler.  Handlers return either a plain dict (JSON-
         # encoded into the tool message's content) or a ToolResult
@@ -245,10 +233,10 @@ async def _execute_tool_async(
         else:
             event_data["content"] = json.dumps(result, ensure_ascii=False)
         tc.bound_log.info("tool.completed")
-        await sessions_service.append_event(
+        await _append_tool_result_event(
             pool,
             session_id,
-            "message",
+            tc.call_id,
             event_data,
             account_id=account_id,
         )
@@ -295,6 +283,67 @@ def _validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> st
     return "\n".join(lines)
 
 
+async def _append_tool_result_event(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    tool_call_id: str,
+    event_data: dict[str, Any],
+    *,
+    account_id: str,
+) -> None:
+    """Append a ``role:"tool"`` event, dedup-guarded on ``tool_call_id``.
+
+    The worker's tool task lifecycle (success-, error-, schema-,
+    cancel-paths) all funnel through here so a tool-role event that
+    already landed via the operator path (``confirm_tool_deny`` →
+    ``services.sessions.append_tool_result``) is not silently
+    overwritten by the late worker result.
+
+    Specifically: an ``always_allow`` builtin (or any tool the harness
+    dispatches without the always_ask confirmation gate) can have its
+    operator deny commit while the task is in-flight; without dedup
+    here, the worker's late append lands a SECOND tool-role event for
+    the same ``tool_call_id`` and the context builder's
+    ``real_results[tcid] = e.data`` keying clobbers the deny — the
+    next prompt carries the tool's successful output as if no deny had
+    happened (silent failure symmetric to PR #535).
+
+    Transaction + ``SELECT ... FOR UPDATE`` mirrors
+    :func:`services.sessions.append_tool_result` so the worker-vs-API
+    race serialises through the same session-row lock as the operator
+    path; "first commit wins, second commit no-ops" applies to either
+    ordering.
+    """
+    from aios.db import queries
+
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            session_id,
+            account_id,
+        )
+        existing = await queries.find_tool_result_event(
+            conn, session_id, tool_call_id, account_id=account_id
+        )
+        if existing is not None:
+            existing_is_error = bool(existing.data.get("is_error", False))
+            log.warning(
+                "tool.result_dedup_skip",
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                existing_is_error=existing_is_error,
+                attempted_is_error=bool(event_data.get("is_error", False)),
+            )
+            return
+        await queries.append_event(
+            conn,
+            session_id=session_id,
+            kind="message",
+            data=event_data,
+            account_id=account_id,
+        )
+
+
 async def _append_tool_result(
     pool: asyncpg.Pool[Any],
     session_id: str,
@@ -304,12 +353,13 @@ async def _append_tool_result(
     account_id: str,
     error: str,
 ) -> None:
-    """Append a tool-role error event."""
+    """Append a tool-role error event (dedup-guarded — see
+    :func:`_append_tool_result_event`)."""
     content = json.dumps({"error": error}, ensure_ascii=False)
-    await sessions_service.append_event(
+    await _append_tool_result_event(
         pool,
         session_id,
-        "message",
+        call_id,
         {
             "role": "tool",
             "tool_call_id": call_id,
@@ -439,19 +489,12 @@ async def _execute_mcp_tool_async(
     ) as tc:
         arguments = _parse_arguments(tc.raw_args)
         if arguments is None:
-            tc.bound_log.warning("mcp_tool.bad_arguments")
-            tc.is_error = True
-            await _append_tool_result(
-                pool,
-                session_id,
-                tc.call_id,
-                tc.name,
-                account_id=account_id,
-                error="arguments were not valid JSON",
-            )
-            return
+            raise _ToolBail("arguments were not valid JSON")
 
-        server_name, tool_name = _parse_mcp_tool_name(tc.name)
+        try:
+            server_name, tool_name = _parse_mcp_tool_name(tc.name)
+        except ValueError as err:
+            raise _ToolBail(str(err)) from err
 
         from aios.harness.channels import (
             FOCAL_CHANNEL_META_KEY,
@@ -466,17 +509,7 @@ async def _execute_mcp_tool_async(
 
         url = mcp_server_map.get(server_name)
         if url is None:
-            tc.bound_log.warning("mcp_tool.server_not_found", server_name=server_name)
-            tc.is_error = True
-            await _append_tool_result(
-                pool,
-                session_id,
-                tc.call_id,
-                tc.name,
-                account_id=account_id,
-                error=f"MCP server {server_name!r} not found",
-            )
-            return
+            raise _ToolBail(f"MCP server {server_name!r} not found")
 
         from aios.mcp.client import call_mcp_tool, resolve_auth_for_target_url
 
@@ -498,6 +531,6 @@ async def _execute_mcp_tool_async(
             tc.is_error = True
 
         tc.bound_log.info("mcp_tool.completed", is_error=mcp_is_error)
-        await sessions_service.append_event(
-            pool, session_id, "message", event_data, account_id=account_id
+        await _append_tool_result_event(
+            pool, session_id, tc.call_id, event_data, account_id=account_id
         )

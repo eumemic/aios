@@ -532,6 +532,15 @@ async def confirm_tool_allow(
     the deny twin's same-event-shape dedup (#447); ``_dispatch_confirmed_tools``
     further set-deduplicates so the tool dispatches once even pre-fix,
     but the lifecycle event log must not accumulate duplicate rows.
+
+    Rejects with :class:`ConflictError` when the tool call already has
+    a tool-role result event — a prior deny or a racing dispatch
+    pinned the model's view; appending a lifecycle ``allow`` here would
+    be a phantom no-op surfaced as 201 (operator UI shows "allow
+    accepted" while the model has moved on with the prior result).
+    Symmetric twin to #535 (``confirm_tool_deny`` rejected when tool
+    already succeeded); same defect class — confirm endpoints must not
+    silently accept impossible inputs.
     """
     async with pool.acquire() as conn, conn.transaction():
         locked = await conn.fetchval(
@@ -569,6 +578,30 @@ async def confirm_tool_allow(
             raise NotFoundError(
                 f"tool_call_id {tool_call_id!r} not found",
                 detail={"session_id": session_id, "tool_call_id": tool_call_id},
+            )
+        # Reject when the tool call has already resolved (deny error
+        # or successful dispatch).  Pinning the model's view is
+        # one-way; an allow appended after the result has no dispatch
+        # effect (``CONFIRMED_ROWS_SQL`` filters out sessions whose
+        # confirmed-and-not-resolved set is empty), yet returning the
+        # lifecycle event would lie to the operator ("allow
+        # accepted").  Surface as ``ConflictError`` (→ 409) so the
+        # operator learns "too late" — same shape as #535's
+        # deny-after-success.
+        prior_result = await queries.find_tool_result_event(
+            conn, session_id, tool_call_id, account_id=account_id
+        )
+        if prior_result is not None:
+            prior_is_error = bool(prior_result.data.get("is_error", False))
+            raise ConflictError(
+                f"tool_call_id {tool_call_id!r} already has a "
+                f"{'error' if prior_is_error else 'success'} "
+                f"result; cannot allow a tool call that has already resolved",
+                detail={
+                    "session_id": session_id,
+                    "tool_call_id": tool_call_id,
+                    "existing_is_error": prior_is_error,
+                },
             )
         return await queries.append_event(
             conn,

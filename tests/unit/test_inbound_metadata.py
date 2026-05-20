@@ -112,11 +112,13 @@ async def test_connector_cannot_plant_attachments_via_metadata(
 async def test_connector_cannot_shadow_sender_via_metadata(
     fake_pool: MagicMock,
 ) -> None:
-    """Same pattern for ``sender``: trusted code sets it from the request's
-    ``sender.display_name``, but only conditionally (when that's a str).
-    A connector-supplied metadata.sender wins when the request sender is
-    blank — letting the connector forge a different user identity in
-    log/render output."""
+    """Same pattern for the rendered sender identity: trusted code sets
+    ``metadata["sender_name"]`` from ``sender.display_name`` (the key
+    the harness renderer + ``events_search.sender_name`` derivation
+    consume), and a connector-supplied ``metadata["sender_name"]`` must
+    be stripped — otherwise the connector can forge a different user
+    identity in log/render output by passing it through the bytes-only
+    inbound POST while leaving ``sender.display_name`` blank."""
     captured: dict[str, Any] = {}
 
     async def fake_append_event(*_args: Any, **kwargs: Any) -> Any:
@@ -145,13 +147,103 @@ async def test_connector_cannot_shadow_sender_via_metadata(
             sender={},  # no display_name → trusted code path doesn't override
             content="hi",
             attachments=[],
-            connector_metadata={"sender": "<spoofed>"},
+            connector_metadata={"sender_name": "<spoofed>"},
             platform_timestamp=None,
         )
 
     metadata = captured["data"]["metadata"]
-    assert metadata.get("sender") != "<spoofed>", (
-        f"connector-supplied metadata.sender must be stripped; got {metadata.get('sender')!r}."
+    assert metadata.get("sender_name") != "<spoofed>", (
+        f"connector-supplied metadata.sender_name must be stripped; got "
+        f"{metadata.get('sender_name')!r}."
+    )
+
+
+async def test_inbound_sender_display_name_reaches_renderer(
+    fake_pool: MagicMock,
+) -> None:
+    """The trusted ``sender.display_name`` must land in the metadata key
+    that the harness renderer + ``events_search.sender_name`` derivation
+    actually consume — ``metadata["sender_name"]``.
+
+    Pre-fix the trusted code writes ``metadata["sender"] = display_name``
+    (the key in ``_RESERVED_METADATA_KEYS``) but every reader looks at
+    ``metadata["sender_name"]``:
+      - ``harness/context._format_channel_header`` (focal full-content)
+      - ``harness/context._format_notification_marker`` (non-focal)
+      - ``db/queries._derive_sender_name`` (search_events sender_name
+        column)
+    As a result an inbound from a connector that doesn't redundantly
+    stamp ``metadata["sender_name"]`` itself (the documented contract is
+    that ``sender.display_name`` carries the canonical identity — see
+    the echo-http reference connector) renders without sender attribution
+    and the search_events column is NULL.
+
+    Most-deployed connectors (telegram, signal) paper over this by also
+    writing ``metadata["sender_name"]`` directly from their own state,
+    so the symptom only surfaces on minimal/new connectors and on the
+    ``events_search.sender_name`` column even for telegram/signal when
+    the connector value differs from ``sender.display_name`` (the
+    promoted column reflects the wrong source of truth).
+    """
+    from aios.db.queries import _derive_sender_name
+    from aios.harness.context import render_user_event
+
+    captured: dict[str, Any] = {}
+
+    async def fake_append_event(*_args: Any, **kwargs: Any) -> Any:
+        captured["data"] = kwargs["data"]
+        ev = MagicMock()
+        ev.id = "evt_stub"
+        return ev
+
+    with (
+        patch(
+            "aios.services.inbound.queries.append_event", AsyncMock(side_effect=fake_append_event)
+        ),
+        patch(
+            "aios.services.inbound.queries.try_record_inbound_ack",
+            AsyncMock(return_value=True),
+        ),
+    ):
+        await _append_with_dedup(
+            fake_pool,
+            account_id="acc_test_stub",
+            connector="echo",
+            external_account_id="bot1",
+            event_id="evt_inbound_render",
+            session_id="sess_X",
+            chat_id="chat_1",
+            sender={"display_name": "Alice"},
+            content="hello",
+            attachments=[],
+            connector_metadata=None,  # minimal connector: only sender payload
+            platform_timestamp=None,
+        )
+
+    data = captured["data"]
+    metadata = data["metadata"]
+    channel = metadata["channel"]
+
+    # 1. Renderer's full-content header must include the sender clause.
+    rendered = render_user_event(
+        data,
+        orig_channel=channel,
+        focal_channel_at_arrival=channel,
+    )
+    assert "from=Alice" in rendered["content"], (
+        f"focal-render must include from=Alice; got content={rendered['content']!r}. "
+        f"Pre-fix the trusted ``sender.display_name`` is stored at "
+        f"metadata['sender'] which no reader consumes; "
+        f"metadata={metadata!r}."
+    )
+
+    # 2. Derived ``sender_name`` column must be populated so search_events
+    #    WHERE sender_name = 'Alice' returns the inbound row.
+    derived = _derive_sender_name("message", data)
+    assert derived == "Alice", (
+        f"events_search.sender_name derivation must yield 'Alice'; got "
+        f"{derived!r}. Pre-fix _derive_sender_name reads metadata['sender_name'] "
+        f"which the trusted code never writes; metadata={metadata!r}."
     )
 
 

@@ -34,7 +34,13 @@ from aios.services.wake import defer_wake
 # crafted payload can't plant fields the renderer / logging trusts —
 # most acutely ``attachments``, which the harness's vision renderer
 # resolves through ``resolve_to_host_path`` and reads from disk.
-_RESERVED_METADATA_KEYS = frozenset({"channel", "sender", "attachments", "platform_timestamp"})
+#
+# ``sender_name`` is the key the renderer + ``events_search.sender_name``
+# derivation actually consume; reserving the historical ``sender`` key
+# instead left the security boundary off the consumed slot — a connector
+# could forge an arbitrary ``sender_name`` and the renderer would surface
+# it as the trusted ``from=`` clause.
+_RESERVED_METADATA_KEYS = frozenset({"channel", "sender_name", "attachments", "platform_timestamp"})
 
 
 class _DedupRollback(Exception):
@@ -215,7 +221,10 @@ async def _append_with_dedup(
         )
     metadata["channel"] = channel
     if isinstance(sender_name, str):
-        metadata["sender"] = sender_name
+        # See ``_RESERVED_METADATA_KEYS`` for why this writes under
+        # ``sender_name`` (the key the renderer + events_search column
+        # consume) rather than the pre-fix ``sender`` (a dead key).
+        metadata["sender_name"] = sender_name
     if isinstance(attachments, list) and attachments:
         metadata["attachments"] = attachments
     if platform_timestamp is not None:

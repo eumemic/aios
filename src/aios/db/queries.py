@@ -2302,6 +2302,21 @@ async def update_vault(
     display_name: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Vault:
+    # Refuse updates to archived vaults: the read path (``get_vault``,
+    # ``list_vaults``) filters ``archived_at IS NULL``, so a rewrite of
+    # an archived row has no observable effect — but the bare UPDATE
+    # below would still commit the new values and the RETURNING-built
+    # response would lie back to the caller as if the update took.
+    # Mirrors the symmetric raise on archived rows in
+    # ``update_agent`` / ``update_environment`` / ``update_session_template``
+    # (PR #547).
+    current = await get_vault(conn, vault_id, account_id=account_id)
+    if current.archived_at is not None:
+        raise ConflictError(
+            f"vault {vault_id} is archived",
+            detail={"id": vault_id},
+        )
+
     sets: list[str] = []
     args: list[Any] = [vault_id]
     if display_name is not None:
@@ -2311,7 +2326,7 @@ async def update_vault(
         args.append(json.dumps(metadata))
         sets.append(f"metadata = ${len(args)}::jsonb")
     if not sets:
-        return await get_vault(conn, vault_id, account_id=account_id)
+        return current
     sets.append("updated_at = now()")
     args.append(account_id)
     sql = (
@@ -4059,6 +4074,21 @@ async def update_session_template(
     memory_store_ids: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> SessionTemplate:
+    # Refuse updates to archived templates: the resolver's
+    # ``_spawn_per_chat_session`` already drops inbounds that target an
+    # archived template (``ResolveDrop.ARCHIVED_TEMPLATE``), so a
+    # rewrite of an archived row has no downstream effect — but the
+    # bare UPDATE below would still commit the new values and the
+    # RETURNING-built response would lie back to the caller as if the
+    # update took.  Mirrors the symmetric raise on archived rows in
+    # ``update_agent`` / ``update_environment``.
+    current = await get_session_template(conn, template_id, account_id=account_id)
+    if current.archived_at is not None:
+        raise ConflictError(
+            f"session template {template_id} is archived",
+            detail={"id": template_id},
+        )
+
     sets: list[str] = []
     args: list[Any] = [template_id]
     if name is not None:
@@ -5463,16 +5493,29 @@ async def resolve_runtime_token(
 ) -> tuple[str, str, str] | None:
     """Look up an unrevoked token by hash; touch ``last_used_at`` in one round-trip.
 
-    Returns ``(token_id, connector, account_id)`` on hit, ``None`` on miss/revoked.
-    The token hash is globally unique (one row owns the secret), so the lookup
-    does not filter by account; account_id is read off the matched row and
+    Returns ``(token_id, connector, account_id)`` on hit, ``None`` on
+    miss / revoked token / archived account.  The token hash is
+    globally unique (one row owns the secret), so the lookup does not
+    filter by account; account_id is read off the matched row and
     becomes the authenticated scope for the request.
+
+    Refuses tokens on archived accounts via the EXISTS subquery — same
+    asymmetry-closing intent as :func:`lookup_account_by_key_hash`'s
+    JOIN with ``accounts.archived_at IS NULL``. Without this, archiving
+    an account leaves its runtime containers (Telegram bot, Signal
+    bot, HTTP pollers) authenticated and operating on a decommissioned
+    tenant — symmetric to the account-key path that already refuses
+    archived-account bearers.
     """
     row = await conn.fetchrow(
         """
         UPDATE runtime_tokens
            SET last_used_at = now()
-         WHERE token_hash = $1 AND revoked_at IS NULL
+         WHERE token_hash = $1
+           AND revoked_at IS NULL
+           AND EXISTS (SELECT 1 FROM accounts
+                        WHERE accounts.id = runtime_tokens.account_id
+                          AND accounts.archived_at IS NULL)
         RETURNING id, connector, account_id
         """,
         token_hash,
