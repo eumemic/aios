@@ -118,6 +118,7 @@ class DockerBackend:
         for key, value in spec.environment.items():
             argv.extend(["--env", f"{key}={value}"])
 
+        argv.extend(["--pull", "always"])
         argv.append(spec.image)
 
         rc, stdout_bytes, stderr_bytes = await run_docker_cli(argv)
