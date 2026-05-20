@@ -28,7 +28,7 @@ from aios_echo_http import EchoConnector
 
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, last_assistant_content, tool_call
-from tests.helpers.connections import authed_client, issue_runtime_token, wait_for_health
+from tests.helpers.connections import create_connection, issue_runtime_token, wait_for_health
 
 
 @pytest.fixture
@@ -87,15 +87,6 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
             with contextlib.suppress(asyncio.CancelledError):
                 await serve_task
             await pool.close()
-
-
-async def _create_connection(api_key: str, base_url: str, account: str) -> str:
-    async with authed_client(base_url, api_key) as c:
-        r = await c.post(
-            "/v1/connections", json={"connector": "echo", "external_account_id": account}
-        )
-        r.raise_for_status()
-        return str(r.json()["id"])
 
 
 async def _publish_echo_tools_schema(harness: Harness) -> None:
@@ -190,7 +181,7 @@ class TestSdkAgainstLiveServer:
         )
 
         api_key = aios_env["AIOS_API_KEY"]
-        connection_id = await _create_connection(api_key, live_server, f"acct-sse-{id(self)}")
+        connection_id = await create_connection(api_key, live_server, f"acct-sse-{id(self)}")
         await connections_service.attach_connection(
             harness._pool, connection_id, session_id=session.id, account_id=account_id
         )
@@ -283,7 +274,7 @@ class TestEchoHttpConnectorEndToEnd:
         )
 
         api_key = aios_env["AIOS_API_KEY"]
-        connection_id = await _create_connection(api_key, live_server, f"acct-{id(self)}")
+        connection_id = await create_connection(api_key, live_server, f"acct-{id(self)}")
         await connections_service.attach_connection(
             harness._pool, connection_id, session_id=session.id, account_id=account_id
         )
@@ -389,7 +380,7 @@ class TestEchoHttpConnectorEndToEnd:
         )
 
         api_key = aios_env["AIOS_API_KEY"]
-        connection_id = await _create_connection(api_key, live_server, f"acct-i-{id(self)}")
+        connection_id = await create_connection(api_key, live_server, f"acct-i-{id(self)}")
         await connections_service.attach_connection(
             harness._pool, connection_id, session_id=session.id, account_id=account_id
         )

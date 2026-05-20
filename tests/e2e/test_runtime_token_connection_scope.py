@@ -19,26 +19,12 @@ import socket
 from collections.abc import AsyncIterator
 from unittest import mock
 
-import httpx
 import pytest
 import uvicorn
 
 from aios_sdk import Client, stream_connection_discovery
 from tests.conftest import needs_docker
-from tests.helpers.connections import authed_client, bearer
-
-
-async def _wait_for_health(url: str, *, deadline_s: float = 5.0) -> None:
-    deadline = asyncio.get_running_loop().time() + deadline_s
-    async with httpx.AsyncClient() as client:
-        while True:
-            with contextlib.suppress(httpx.HTTPError):
-                r = await client.get(f"{url}/v1/health", timeout=0.5)
-                if r.status_code < 500:
-                    return
-            if asyncio.get_running_loop().time() >= deadline:
-                raise TimeoutError(f"server at {url} not ready in {deadline_s}s")
-            await asyncio.sleep(0.05)
+from tests.helpers.connections import authed_client, bearer, create_connection, wait_for_health
 
 
 @pytest.fixture
@@ -82,7 +68,7 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
         serve_task = asyncio.create_task(_serve())
         try:
             url = f"http://127.0.0.1:{port}"
-            await _wait_for_health(url)
+            await wait_for_health(url)
             yield url
         finally:
             await server.shutdown()
@@ -90,15 +76,6 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
             with contextlib.suppress(asyncio.CancelledError):
                 await serve_task
             await pool.close()
-
-
-async def _create_connection(api_key: str, base_url: str, account: str) -> str:
-    async with authed_client(base_url, api_key) as c:
-        r = await c.post(
-            "/v1/connections", json={"connector": "echo", "external_account_id": account}
-        )
-        r.raise_for_status()
-        return str(r.json()["id"])
 
 
 async def _issue_runtime_token(
@@ -168,9 +145,9 @@ class TestRuntimeTokenConnectionScope:
         """Three echo connections A/B/C; scope to [A, B]; backfill must
         emit A and B (in any order) and must NOT emit C."""
         api_key = aios_env["AIOS_API_KEY"]
-        a = await _create_connection(api_key, live_server, "acct-scope-a")
-        b = await _create_connection(api_key, live_server, "acct-scope-b")
-        c = await _create_connection(api_key, live_server, "acct-scope-c")
+        a = await create_connection(api_key, live_server, "acct-scope-a")
+        b = await create_connection(api_key, live_server, "acct-scope-b")
+        c = await create_connection(api_key, live_server, "acct-scope-c")
 
         token = await _issue_runtime_token(api_key, live_server, "echo", connection_ids=[a, b])
 
@@ -188,9 +165,9 @@ class TestRuntimeTokenConnectionScope:
         behaviour: every active connection of the bearer's type is
         emitted in backfill."""
         api_key = aios_env["AIOS_API_KEY"]
-        a = await _create_connection(api_key, live_server, "acct-unscoped-a")
-        b = await _create_connection(api_key, live_server, "acct-unscoped-b")
-        c = await _create_connection(api_key, live_server, "acct-unscoped-c")
+        a = await create_connection(api_key, live_server, "acct-unscoped-a")
+        b = await create_connection(api_key, live_server, "acct-unscoped-b")
+        c = await create_connection(api_key, live_server, "acct-unscoped-c")
 
         token = await _issue_runtime_token(api_key, live_server, "echo")
 

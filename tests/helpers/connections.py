@@ -58,6 +58,20 @@ async def issue_runtime_token(api_key: str, base_url: str, connector: str) -> st
         return str(r.json()["plaintext"])
 
 
+async def create_connection(api_key: str, base_url: str, account: str) -> str:
+    """Create a detached ``echo`` connection scoped to ``account`` (the external_account_id).
+
+    Used by e2e tests that need a fresh connection_id without going
+    through the auto-create-on-first-inbound supervisor path.
+    """
+    async with authed_client(base_url, api_key) as c:
+        r = await c.post(
+            "/v1/connections", json={"connector": "echo", "external_account_id": account}
+        )
+        r.raise_for_status()
+        return str(r.json()["id"])
+
+
 @contextlib.asynccontextmanager
 async def asgi_client(pool: Any) -> AsyncIterator[httpx.AsyncClient]:
     """In-process ``httpx.AsyncClient`` wired to a fresh FastAPI app.
