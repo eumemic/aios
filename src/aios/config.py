@@ -155,7 +155,7 @@ class Settings(BaseSettings):
 
     # ── database pool ──────────────────────────────────────────────────────
     db_pool_max_size: int = Field(
-        default=16,
+        default=8,
         ge=1,
         description="Maximum asyncpg pool size. Should comfortably exceed "
         "worker_concurrency * ~3 connections per turn.",

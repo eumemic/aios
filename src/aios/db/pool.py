@@ -11,6 +11,11 @@ from typing import Any
 
 import asyncpg
 
+from aios.logging import get_logger
+
+_KNOWN_POOL_COUNT = 2  # API pool + worker pool (production call sites)
+log = get_logger("aios.db.pool")
+
 
 def normalize_dsn(db_url: str) -> str:
     """Strip SQLAlchemy/alembic driver prefixes; asyncpg wants bare ``postgresql://``."""
@@ -20,11 +25,22 @@ def normalize_dsn(db_url: str) -> str:
     return db_url
 
 
-async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 16) -> asyncpg.Pool[Any]:
+async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 8) -> asyncpg.Pool[Any]:
     """Create a new asyncpg pool against ``db_url``."""
     pool = await asyncpg.create_pool(
         dsn=normalize_dsn(db_url), min_size=min_size, max_size=max_size
     )
     if pool is None:
         raise RuntimeError(f"asyncpg.create_pool returned None for {db_url}")
+    async with pool.acquire() as conn:
+        pg_max_connections = int(await conn.fetchval("SHOW max_connections"))
+    total_pool_capacity = max_size * _KNOWN_POOL_COUNT
+    if total_pool_capacity >= pg_max_connections:
+        log.warning(
+            "db.pool.unsafe_max_size",
+            max_size=max_size,
+            known_pool_count=_KNOWN_POOL_COUNT,
+            total_pool_capacity=total_pool_capacity,
+            pg_max_connections=pg_max_connections,
+        )
     return pool
