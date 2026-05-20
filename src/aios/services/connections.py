@@ -316,7 +316,19 @@ async def bind_chat_to_session(
         # Validate both FKs at the service boundary — without this,
         # asyncpg surfaces FK violations as 500s instead of clean 4xxs.
         await queries.get_connection(conn, connection_id, account_id=account_id)
-        await queries.get_session(conn, session_id, account_id=account_id)
+        session = await queries.get_session(conn, session_id, account_id=account_id)
+        # Refuse archived sessions at bind time — the FK accepts archived
+        # rows so without this check the ledger stamp succeeds, the
+        # operator receives a 201 ``BoundChat`` with the archived id, and
+        # subsequent inbounds DETACH at the resolver's tier-1 check
+        # (post-#541). Bind-time is the only point where the operator
+        # learns of the misconfiguration at the action that caused it
+        # (mirrors the sibling ``attach_connection`` fix in #549).
+        if session.archived_at is not None:
+            raise ConflictError(
+                f"session {session_id} is archived; cannot bind a chat to it",
+                detail={"connection_id": connection_id, "session_id": session_id},
+            )
         await queries.insert_chat_session(
             conn,
             connection_id=connection_id,
