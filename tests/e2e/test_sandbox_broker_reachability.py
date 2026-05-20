@@ -17,7 +17,6 @@ from pathlib import Path
 
 import pytest
 
-from aios.sandbox.backends import make_backend
 from aios.sandbox.backends.base import (
     INSTANCE_LABEL_KEY,
     MANAGED_LABEL_KEY,
@@ -27,6 +26,7 @@ from aios.sandbox.backends.base import (
     SandboxSpec,
     Unrestricted,
 )
+from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.network import (
     SANDBOX_NETWORK_NAME,
     WORKER_NETWORK_ALIAS,
@@ -111,7 +111,7 @@ def workspace(tmp_path: Path) -> Path:
 async def test_sandbox_resolves_worker_alias_via_docker_dns(
     broker_sidecar: None, workspace: Path
 ) -> None:
-    backend = make_backend("docker")
+    backend = DockerBackend()
     instance_id = f"test_{uuid.uuid4().hex[:8]}"
     session_id = f"sess_{uuid.uuid4().hex[:8]}"
     spec = SandboxSpec(

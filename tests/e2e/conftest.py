@@ -172,7 +172,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     from aios.db.pool import create_pool
     from aios.harness import runtime
     from aios.harness.task_registry import TaskRegistry
-    from aios.sandbox.backends import make_backend
+    from aios.sandbox.backends.docker import DockerBackend
     from aios.sandbox.mcp_proxy import McpBroker
     from aios.sandbox.network import ensure_sandbox_network
     from aios.sandbox.registry import SandboxRegistry
@@ -183,13 +183,12 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     pool = await create_pool(settings.db_url, min_size=1, max_size=4)
     crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
     task_reg = TaskRegistry()
-    sandbox_reg = SandboxRegistry(backend=make_backend(settings.sandbox_backend))
+    sandbox_reg = SandboxRegistry(backend=DockerBackend())
     # Mirror worker startup: create+attach the sandbox network before
     # bringing the broker up. Otherwise the very first sandbox a test
     # provisions hits ``docker run --network aios-sandbox`` against a
     # network that doesn't exist on this host yet.
-    if settings.sandbox_backend == "docker":
-        await ensure_sandbox_network()
+    await ensure_sandbox_network()
     mcp_broker = McpBroker()
     await mcp_broker.start()
 
