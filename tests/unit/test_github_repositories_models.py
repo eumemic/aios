@@ -49,7 +49,7 @@ class TestGithubRepositoryResourceCreate:
             )  # type: ignore[call-arg]
 
     def test_token_must_be_non_empty(self) -> None:
-        with pytest.raises(ValidationError, match="non-empty"):
+        with pytest.raises(ValidationError, match="authorization_token"):
             GithubRepositoryResource(
                 type="github_repository",
                 url="https://github.com/octocat/Hello-World",
@@ -133,7 +133,7 @@ class TestGithubRepositoryUpdate:
             GithubRepositoryUpdate()  # type: ignore[call-arg]
 
     def test_token_must_be_non_empty(self) -> None:
-        with pytest.raises(ValidationError, match="non-empty"):
+        with pytest.raises(ValidationError, match="authorization_token"):
             GithubRepositoryUpdate(authorization_token=SecretStr(""))
 
     def test_immutable_fields_rejected(self) -> None:
