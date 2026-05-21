@@ -17,8 +17,21 @@ SSE responses can be very long-lived (hours). Borrowing from the pool would
 either starve other consumers or, worse, leak ``LISTEN`` state across pool
 borrowers. asyncpg's pool resets borrowed connections, but a still-LISTENing
 connection has subtle semantics that are easier to avoid by simply opening
-a fresh connection per SSE client. The connection is closed cleanly in the
-context manager's ``finally`` block, which implicitly issues ``UNLISTEN``.
+a fresh connection per SSE client.
+
+## Why ``terminate()`` instead of ``await conn.close()``
+
+The context manager's ``finally`` block must close the connection even when
+the caller is being cancelled — which is exactly what happens on SSE client
+disconnect, where sse-starlette cancels the response task group. Under
+anyio's scope-cancellation, every ``await`` inside the cancelled scope
+re-raises ``CancelledError`` immediately, so ``await conn.close()`` can't
+run to completion: asyncpg's close protocol stops before transport.abort()
+fires and the Postgres backend lingers until TCP keepalive reaps it
+(~2h). ``conn.terminate()`` is synchronous — it calls ``transport.abort()``
+directly, closing the socket without awaiting. Non-graceful but appropriate
+for SSE-style disconnects where the client is already gone, and equally
+correct on normal exit and exception unwinds (issue #606).
 
 ## Why the callback must be synchronous
 
@@ -54,7 +67,6 @@ anyone tries.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -106,14 +118,9 @@ async def listen_for_connector_result(
                 log.warning("listen.connector_result_queue_full", call_id=call_id)
 
         await conn.add_listener(channel, _callback)
-        try:
-            yield queue
-        finally:
-            with contextlib.suppress(Exception):
-                await conn.remove_listener(channel, _callback)
+        yield queue
     finally:
-        with contextlib.suppress(Exception):
-            await conn.close()
+        conn.terminate()
 
 
 @asynccontextmanager
@@ -176,14 +183,9 @@ async def listen_for_events(
         # worker can detect that an SSE subscriber exists (issue #81).
         # pg_locks releases automatically on connection close — no cleanup.
         await acquire_subscriber_lock(conn, session_id)
-        try:
-            yield queue
-        finally:
-            with contextlib.suppress(Exception):
-                await conn.remove_listener(channel, _callback)
+        yield queue
     finally:
-        with contextlib.suppress(Exception):
-            await conn.close()
+        conn.terminate()
 
 
 @asynccontextmanager
@@ -226,14 +228,9 @@ async def listen_for_connector_calls_by_type(
                     pass
 
         await conn.add_listener(channel, _callback)
-        try:
-            yield queue
-        finally:
-            with contextlib.suppress(Exception):
-                await conn.remove_listener(channel, _callback)
+        yield queue
     finally:
-        with contextlib.suppress(Exception):
-            await conn.close()
+        conn.terminate()
 
 
 @asynccontextmanager
@@ -270,14 +267,9 @@ async def listen_for_management_calls(
                     pass
 
         await conn.add_listener(channel, _callback)
-        try:
-            yield queue
-        finally:
-            with contextlib.suppress(Exception):
-                await conn.remove_listener(channel, _callback)
+        yield queue
     finally:
-        with contextlib.suppress(Exception):
-            await conn.close()
+        conn.terminate()
 
 
 @asynccontextmanager
@@ -319,14 +311,9 @@ async def listen_for_connection_discovery(
                     pass
 
         await conn.add_listener(channel, _callback)
-        try:
-            yield queue
-        finally:
-            with contextlib.suppress(Exception):
-                await conn.remove_listener(channel, _callback)
+        yield queue
     finally:
-        with contextlib.suppress(Exception):
-            await conn.close()
+        conn.terminate()
 
 
 SESSION_INTERRUPT_CHANNEL = "aios_session_interrupt"
@@ -353,11 +340,6 @@ async def listen_for_session_interrupts(
                 log.warning("listen.session_interrupt_queue_full")
 
         await conn.add_listener(SESSION_INTERRUPT_CHANNEL, _callback)
-        try:
-            yield queue
-        finally:
-            with contextlib.suppress(Exception):
-                await conn.remove_listener(SESSION_INTERRUPT_CHANNEL, _callback)
+        yield queue
     finally:
-        with contextlib.suppress(Exception):
-            await conn.close()
+        conn.terminate()
