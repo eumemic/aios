@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 import typer
 
 from aios.cli.client import AiosApiError, AiosClient
+from aios.cli.files import PayloadError
 from aios.cli.output import OutputFormat, print_error
 
 if TYPE_CHECKING:
@@ -80,6 +81,9 @@ def run_or_die(fn: Callable[[], int | None]) -> None:
             print_error(f"detail: {exc.detail}")
         exit_code = 2 if exc.status_code == 401 else 1
         raise typer.Exit(exit_code) from exc
+    except PayloadError as exc:
+        print_error(str(exc))
+        raise typer.Exit(64) from exc
     except BrokenPipeError:
         _silence_stdout()
         raise typer.Exit(0) from None

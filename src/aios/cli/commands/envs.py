@@ -8,8 +8,8 @@ from typing import Annotated
 import typer
 
 from aios.cli.commands._shared import call_single, render_paginated, unwrap
-from aios.cli.files import PayloadError, load_payload
-from aios.cli.output import print_error, print_success
+from aios.cli.files import load_payload
+from aios.cli.output import print_success
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk._generated.api.environments import (
     archive_environment,
@@ -62,11 +62,7 @@ def create(
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
-        try:
-            payload = load_payload(file, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+        payload = load_payload(file, stdin, data)
         body = EnvironmentCreate.from_dict(payload)
         call_single(ctx, create_environment.sync_detailed, body=body)
         return None
@@ -83,11 +79,7 @@ def update(
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
-        try:
-            payload = load_payload(file, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+        payload = load_payload(file, stdin, data)
         body = EnvironmentUpdate.from_dict(payload)
         call_single(ctx, update_environment.sync_detailed, env_id=env_id, body=body)
         return None

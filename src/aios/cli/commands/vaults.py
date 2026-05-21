@@ -8,7 +8,7 @@ from typing import Annotated, Any
 import typer
 
 from aios.cli.commands._shared import call_single, render_paginated, unwrap
-from aios.cli.files import PayloadError, load_json_object, load_payload, resolve_payload
+from aios.cli.files import load_json_object, load_payload, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk._generated.api.vaults import (
@@ -96,16 +96,8 @@ def create(
                 return 64
             ergonomic = {"display_name": display_name}
             if metadata_json is not None:
-                try:
-                    ergonomic["metadata"] = load_json_object(metadata_json, "--metadata-json")
-                except PayloadError as exc:
-                    print_error(str(exc))
-                    return 64
-        try:
-            payload = resolve_payload(ergonomic, file, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+                ergonomic["metadata"] = load_json_object(metadata_json, "--metadata-json")
+        payload = resolve_payload(ergonomic, file, stdin, data)
         body = VaultCreate.from_dict(payload)
         call_single(ctx, create_vault.sync_detailed, body=body)
         return None
@@ -122,11 +114,7 @@ def update(
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
-        try:
-            payload = load_payload(file, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+        payload = load_payload(file, stdin, data)
         body = VaultUpdate.from_dict(payload)
         call_single(ctx, update_vault.sync_detailed, vault_id=vault_id, body=body)
         return None
@@ -225,11 +213,7 @@ def cred_create(
 ) -> None:
     def _run() -> int | None:
         source = body_file or file
-        try:
-            payload = load_payload(source, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+        payload = load_payload(source, stdin, data)
         body = VaultCredentialCreate.from_dict(payload)
         call_single(ctx, create_vault_credential.sync_detailed, vault_id=vault_id, body=body)
         return None
@@ -247,11 +231,7 @@ def cred_update(
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
-        try:
-            payload = load_payload(file, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+        payload = load_payload(file, stdin, data)
         body = VaultCredentialUpdate.from_dict(payload)
         call_single(
             ctx,
