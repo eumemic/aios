@@ -272,24 +272,20 @@ async def call_mcp_tool(
                     session.call_tool(tool_name, arguments, meta=meta),
                     timeout=_TOOL_CALL_TIMEOUT_S,
                 )
-            except TimeoutError:
-                # Don't retry on timeout: the wait_for fires while we
-                # wait for the response, but the request may already
-                # have reached the server and been processed. A retry
-                # would duplicate the side effect — e.g. ``signal_send``
-                # / ``telegram_send`` delivering the same message twice.
-                # Evict so the next caller doesn't reuse the same
-                # session; surface the error so the model can decide
-                # whether to retry.
+            except Exception:
+                # Don't retry any call_tool failure: by the time the
+                # exception surfaces here, the request may already
+                # have reached the server and been processed —
+                # whether it was a timeout firing mid-response-read,
+                # a broken pipe, a TCP reset, or an HTTP/2 GOAWAY.
+                # A retry would duplicate the side effect — e.g.
+                # ``signal_send`` / ``telegram_send`` delivering the
+                # same message twice.  Evict so the next caller
+                # doesn't reuse the same session; surface the error
+                # so the model can decide whether to retry through
+                # the session log.
                 _pool.evict(url, vault_id)
                 raise
-            except Exception:
-                _pool.evict(url, vault_id)
-                session, _ = await _pool.get_or_connect(url, vault_id, headers)
-                result = await asyncio.wait_for(
-                    session.call_tool(tool_name, arguments, meta=meta),
-                    timeout=_TOOL_CALL_TIMEOUT_S,
-                )
         else:
             async with AsyncExitStack() as stack:
                 session, _ = await _open_session(url, headers, stack)
