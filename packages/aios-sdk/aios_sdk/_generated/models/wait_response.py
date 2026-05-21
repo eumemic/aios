@@ -7,8 +7,10 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
 from ..models.wait_response_session_status import WaitResponseSessionStatus
+from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.awaiting_tool_call import AwaitingToolCall
     from ..models.event import Event
     from ..models.wait_response_session_stop_reason_type_0 import (
         WaitResponseSessionStopReasonType0,
@@ -27,12 +29,14 @@ class WaitResponse:
         session_status (WaitResponseSessionStatus):
         session_stop_reason (None | WaitResponseSessionStopReasonType0):
         next_after (int):
+        session_awaiting (list[AwaitingToolCall] | Unset):
     """
 
     events: list[Event]
     session_status: WaitResponseSessionStatus
     session_stop_reason: None | WaitResponseSessionStopReasonType0
     next_after: int
+    session_awaiting: list[AwaitingToolCall] | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -55,6 +59,13 @@ class WaitResponse:
 
         next_after = self.next_after
 
+        session_awaiting: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.session_awaiting, Unset):
+            session_awaiting = []
+            for session_awaiting_item_data in self.session_awaiting:
+                session_awaiting_item = session_awaiting_item_data.to_dict()
+                session_awaiting.append(session_awaiting_item)
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -65,11 +76,14 @@ class WaitResponse:
                 "next_after": next_after,
             }
         )
+        if session_awaiting is not UNSET:
+            field_dict["session_awaiting"] = session_awaiting
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.awaiting_tool_call import AwaitingToolCall
         from ..models.event import Event
         from ..models.wait_response_session_stop_reason_type_0 import (
             WaitResponseSessionStopReasonType0,
@@ -106,11 +120,23 @@ class WaitResponse:
 
         next_after = d.pop("next_after")
 
+        _session_awaiting = d.pop("session_awaiting", UNSET)
+        session_awaiting: list[AwaitingToolCall] | Unset = UNSET
+        if _session_awaiting is not UNSET:
+            session_awaiting = []
+            for session_awaiting_item_data in _session_awaiting:
+                session_awaiting_item = AwaitingToolCall.from_dict(
+                    session_awaiting_item_data
+                )
+
+                session_awaiting.append(session_awaiting_item)
+
         wait_response = cls(
             events=events,
             session_status=session_status,
             session_stop_reason=session_stop_reason,
             next_after=next_after,
+            session_awaiting=session_awaiting,
         )
 
         wait_response.additional_properties = d

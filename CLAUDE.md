@@ -86,15 +86,18 @@ Both share Postgres: same database, same `LISTEN/NOTIFY`, same procrastinate job
 - **Blind-spot injection**: tool results that arrived during inference are injected as user messages at the tail.
 - **`reacting_to` watermark**: each assistant message records the max seq of events it saw, so `find_sessions_needing_inference` knows what's "new."
 
-### Custom tools (client-executed)
+### Externally-executed tools (custom + always_ask)
 
-When the model calls a custom tool (type="custom"), the harness does NOT execute it. Instead:
-1. Session idles with `stop_reason: {"type": "requires_action", "event_ids": [...]}`
-2. Client executes the tool externally
-3. Client POSTs result to `POST /sessions/:id/tool-results`
-4. Result appended → wake deferred → next step fires
+Tool calls the harness doesn't execute itself — `type="custom"` (client-executed) and `always_ask`-gated built-ins/MCP awaiting operator approval — sit unresolved in the event log alongside any async in-flight built-in. The session does NOT park. End of step flips `status="idle"` with `stop_reason={"type":"end_turn"}` regardless of what the model emitted; pending tool calls are observable via the derived `Session.awaiting` view.
 
-Built-in and custom tools can be called in the same response. The inference gate's batch logic waits for ALL tool_call_ids to have results.
+The same wake mechanism drives all three cases:
+- **In-flight async built-in**: task's `_tool_lifecycle.finally` appends the result and triggers a sweep.
+- **Custom tool**: client POSTs to `/sessions/:id/tool-results` (operator) or `/connectors/runtime/tool-results` (connector runtime) — both call `defer_wake` after appending.
+- **always_ask awaiting confirm**: operator POSTs to `/sessions/:id/tool-confirmations`; allow appends a lifecycle event that the next step's `_dispatch_confirmed_tools` consumes.
+
+A user message arriving during any of these wakes the session via the same `find_sessions_needing_inference` short-circuit (sweep.py — `if any(evt.role == "user")`). The model sees pending tool calls via the `_PENDING_BACKGROUND` / `_PENDING_EXTERNAL` synthesized placeholders in `build_messages` and can interleave responses freely.
+
+Built-in and externally-executed tools can be called in the same response. The inference gate waits for all tool_call_ids before re-firing under the no-user-stimulus path; a user message lifts that wait.
 
 ### Two pools in one process
 

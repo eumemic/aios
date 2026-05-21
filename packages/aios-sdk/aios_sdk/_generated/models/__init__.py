@@ -18,6 +18,8 @@ from .agent_update_litellm_extra_type_0 import AgentUpdateLitellmExtraType0
 from .agent_update_metadata_type_0 import AgentUpdateMetadataType0
 from .agent_version import AgentVersion
 from .agent_version_litellm_extra import AgentVersionLitellmExtra
+from .awaiting_tool_call import AwaitingToolCall
+from .awaiting_tool_call_kind import AwaitingToolCallKind
 from .bind_chat_request import BindChatRequest
 from .body_post_connector_runtime_inbound import BodyPostConnectorRuntimeInbound
 from .body_upload_session_file import BodyUploadSessionFile
@@ -207,6 +209,8 @@ __all__ = (
     "AgentUpdateMetadataType0",
     "AgentVersion",
     "AgentVersionLitellmExtra",
+    "AwaitingToolCall",
+    "AwaitingToolCallKind",
     "BindChatRequest",
     "BodyPostConnectorRuntimeInbound",
     "BodyUploadSessionFile",

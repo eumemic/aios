@@ -151,7 +151,8 @@ def _classify_permission(
     """Per-route permission lookup for the dispatch gate.
 
     Returns the matched route's ``permission_policy`` so the harness can
-    park the call in ``requires_action`` if the operator marked it
+    leave the call unresolved (pending confirmation via
+    ``POST /sessions/:id/tool-confirmations``) if the operator marked it
     ``always_ask``. Returns ``None`` for missing server / no route match
     / bad args / query-or-fragment-bearing / dot-segment-bearing path —
     the handler then runs and emits a typed error the model can

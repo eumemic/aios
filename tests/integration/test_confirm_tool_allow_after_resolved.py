@@ -7,7 +7,8 @@ Pre-fix the allow path checks only for an existing
 NOT check whether a tool-role result already exists for the same
 ``tool_call_id``.  So:
 
-  1. Tool fires (always_ask).  Session parks in ``requires_action``.
+  1. Tool fires (always_ask).  Call sits unresolved on
+     ``Session.awaiting``.
   2. Operator denies in tab A → ``confirm_tool_deny`` →
      ``append_tool_result(is_error=True)``.  A tool-role error event
      lands on the log; no ``lifecycle/tool_confirmed`` event exists.

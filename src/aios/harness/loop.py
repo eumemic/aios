@@ -354,6 +354,7 @@ async def _run_session_step_body(
             channels=channels,
             prelude=prelude,
             events=events,
+            in_flight_tool_call_ids=frozenset(task_registry.in_flight_tool_call_ids(session_id)),
         )
     except Exception:
         await sessions_service.append_event(
@@ -397,9 +398,6 @@ async def _run_session_step_body(
     # when AIOS_DUMP_CONTEXT is set — useful for debugging prompt construction
     # (header inlining, system-prompt augmentation, tool list shape).
     await _dump_context_if_enabled(session_id, agent.model, messages, tools)
-
-    # Mark session as running.
-    await sessions_service.set_session_status(pool, session_id, "running", account_id=account_id)
 
     # Emit span start so consumers can measure inference latency.
     start_event = await sessions_service.append_event(
@@ -499,11 +497,13 @@ async def _run_session_step_body(
         pool, session_id, "message", assistant_msg, account_id=account_id
     )
 
-    # Check for tool calls — partition into four buckets:
-    #   immediate       — built-in with always_allow (execute now)
-    #   mcp_immediate   — MCP with always_allow (execute now via MCP client)
-    #   needs_confirm   — built-in or MCP with always_ask (hold for confirmation)
-    #   custom          — not in registry and not MCP (hold for client execution)
+    # Partition the model's tool calls into dispatch buckets. Immediate
+    # builtin/MCP tools launch as asyncio tasks now; ``needs_confirm``
+    # (always_ask awaiting allow) and ``custom`` (client-executed) tool
+    # calls sit unresolved in the log until an external POST lands their
+    # result. The session is NOT parked: a new user message or any other
+    # stimulus can wake the session and the model sees pending tool calls
+    # via the synthesized placeholder in ``build_messages``.
     tool_calls: list[dict[str, Any]] = assistant_msg.get("tool_calls") or []
 
     if tool_calls:
@@ -538,10 +538,8 @@ async def _run_session_step_body(
         # Unknown-MCP tools route through the regular MCP dispatcher,
         # bypassing the permission gate.  ``_execute_mcp_tool_async``
         # already detects unknown servers and appends a tool_error
-        # event for them; the prior code path parked the session in
-        # ``requires_action`` and dispatched only after a confirmation,
-        # which never came.  Routing them to immediate dispatch lets
-        # the model see the error in the next step and self-correct.
+        # event for them.  Routing them to immediate dispatch lets the
+        # model see the error in the next step and self-correct.
         immediate_mcp = mcp_immediate + unknown_mcp
         if immediate_mcp:
             launch_mcp_tool_calls(
@@ -561,49 +559,24 @@ async def _run_session_step_body(
             )
 
         if needs_confirm or custom:
-            confirm_ids = [tc.get("id") for tc in needs_confirm if tc.get("id")]
-            custom_ids = [tc.get("id") for tc in custom if tc.get("id")]
-            all_pending_ids = confirm_ids + custom_ids
-
-            stop_reason: dict[str, Any] = {
-                "type": "requires_action",
-                "event_ids": all_pending_ids,
-            }
-            if confirm_ids:
-                stop_reason["confirmations"] = confirm_ids
-            if custom_ids:
-                stop_reason["custom_tools"] = custom_ids
-
-            await sessions_service.set_session_status(
-                pool,
-                session_id,
-                "idle",
-                stop_reason=stop_reason,
-                account_id=account_id,
-            )
-            await _append_lifecycle(
-                pool,
-                session_id,
-                "turn_ended",
-                "idle",
-                "requires_action",
-                account_id=account_id,
-            )
             log.info(
-                "step.tools_pending",
+                "step.external_tools_pending",
                 session_id=session_id,
-                confirmations=confirm_ids,
-                custom_tools=custom_ids,
+                confirmations=[tc.get("id") for tc in needs_confirm if tc.get("id")],
+                custom_tools=[tc.get("id") for tc in custom if tc.get("id")],
             )
-    else:
-        # No tool calls — the model's turn is done.
-        await sessions_service.set_session_status(
-            pool, session_id, "idle", stop_reason={"type": "end_turn"}, account_id=account_id
-        )
-        await _append_lifecycle(
-            pool, session_id, "turn_ended", "idle", "end_turn", account_id=account_id
-        )
-        log.info("step.turn_ended", session_id=session_id, cause=cause)
+
+    # Always flip to idle with ``end_turn`` at the end of a step body.
+    # "End of turn" here means the model's step concluded; pending tool
+    # calls (custom or unconfirmed always_ask) are observable via
+    # ``Session.awaiting``, derived from the event log on each read.
+    await sessions_service.set_session_status(
+        pool, session_id, "idle", stop_reason={"type": "end_turn"}, account_id=account_id
+    )
+    await _append_lifecycle(
+        pool, session_id, "turn_ended", "idle", "end_turn", account_id=account_id
+    )
+    log.info("step.turn_ended", session_id=session_id, cause=cause)
     return None
 
 
@@ -687,9 +660,9 @@ def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, str]) -> bo
 
     Used by :func:`_classify_tool_call` to short-circuit hallucinated
     tool names before the permission gate, so the model gets a tool
-    error in one turn instead of parking in ``requires_action`` forever
-    waiting on a confirmation that would surface as an unknown-server
-    tool error anyway.
+    error in one turn instead of leaving the call sitting unresolved
+    forever waiting on a confirmation that would surface as an
+    unknown-server tool error anyway.
     """
     return server_name in mcp_server_map
 
@@ -716,7 +689,7 @@ def _classify_tool_call(
       the call until the client posts a tool-result).
     * ``"unknown_mcp"`` — MCP-namespaced tool whose server is not
       registered.  Routed to immediate tool-error so the model can
-      self-correct rather than parking in ``requires_action``.
+      self-correct rather than leaving the call unresolved.
     """
     from aios.harness.tool_dispatch import _parse_arguments, _parse_mcp_tool_name
     from aios.tools.registry import registry as tool_registry

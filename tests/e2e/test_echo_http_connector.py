@@ -138,6 +138,9 @@ class TestSdkAgainstLiveServer:
         token = await issue_runtime_token(api_key, live_server, "echo")
 
         # Pre-seed a pending call so backfill has something to deliver.
+        # The connector backfill scans the event log directly: an assistant
+        # event with a tool_call that has no paired tool_result and whose
+        # name is in connector.tools_schema is sufficient.
         await sess_svc.append_event(
             harness._pool,
             session.id,
@@ -152,17 +155,6 @@ class TestSdkAgainstLiveServer:
                         "function": {"name": "ping", "arguments": "{}"},
                     }
                 ],
-            },
-            account_id=account_id,
-        )
-        await sess_svc.set_session_status(
-            harness._pool,
-            session.id,
-            "idle",
-            stop_reason={
-                "type": "requires_action",
-                "event_ids": ["call_sse_bf"],
-                "custom_tools": ["call_sse_bf"],
             },
             account_id=account_id,
         )
@@ -248,8 +240,8 @@ class TestEchoHttpConnectorEndToEnd:
 
         connector_task = asyncio.create_task(connector.run())
         try:
-            # Step 1: model calls echo → session parks in requires_action,
-            # which fires connector_calls NOTIFY → connector receives via SSE
+            # Step 1: model calls echo → assistant message lands → append_event
+            # fires connector_calls NOTIFY → connector receives via SSE
             # → connector posts tool_result.
             await harness.run_step(session.id)
 

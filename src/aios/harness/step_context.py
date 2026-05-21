@@ -183,10 +183,11 @@ async def compute_step_prelude(
 
     # Custom tools declared on connections attached to this session
     # (single_session, per_chat origin, or operator-bound chat).  Each
-    # entry is dispatched via the requires_action / tool-results flow —
-    # the connector executes externally and POSTs the result back (#301).
-    # Resolved via the ``ToolProvider`` Protocol (#328) so the harness
-    # doesn't import connector-subsystem code directly.
+    # entry sits unresolved in the event log until the connector
+    # executes it externally and POSTs the result back via
+    # ``/tool-results`` (#301).  Resolved via the ``ToolProvider``
+    # Protocol (#328) so the harness doesn't import connector-subsystem
+    # code directly.
     from aios.harness import runtime as harness_runtime
     from aios.models.agents import ToolSpec
 
@@ -268,11 +269,17 @@ async def compose_step_context(
     channels: list[str],
     prelude: StepPrelude,
     events: list[Event],
+    in_flight_tool_call_ids: frozenset[str] = frozenset(),
 ) -> StepContext:
     """Compose the chat-completions payload for a step.
 
     Takes a prelude built by :func:`compute_step_prelude` and the
     windowed events slate; glues them into the final message list.
+
+    ``in_flight_tool_call_ids`` selects the pending placeholder variant
+    for each unresolved tool_call. Background-executing tasks get the
+    "still executing in the background" wording; everything else
+    (custom, awaiting-confirm) gets the "external action" wording.
     """
     from aios.harness.channels import build_channels_tail_block
 
@@ -281,6 +288,7 @@ async def compose_step_context(
         system_prompt=prelude.system_prompt,
         model=agent.model,
         session_id=session.id,
+        in_flight_tool_call_ids=in_flight_tool_call_ids,
     )
 
     # Tail block lives *after* build_messages so its per-step mutations

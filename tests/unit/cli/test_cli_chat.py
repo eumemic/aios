@@ -85,7 +85,7 @@ def test_resolve_session_join_returns_last_event_seq(
     client.request.return_value = {
         "id": "sess_X",
         "agent_id": "agt_A",
-        "status": "running",
+        "status": "idle",
         "last_event_seq": 1234,
     }
 

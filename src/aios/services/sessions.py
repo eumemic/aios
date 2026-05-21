@@ -18,9 +18,11 @@ import asyncpg
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.errors import ConflictError, NotFoundError, PayloadTooLargeError
+from aios.models.agents import ToolSpec
 from aios.models.events import Event, EventKind
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
+    AwaitingToolCall,
     Session,
     SessionResource,
     SessionResourceEcho,
@@ -28,6 +30,7 @@ from aios.models.sessions import (
     split_resources_by_type,
 )
 from aios.sandbox.volumes import validate_workspace_path
+from aios.services import agents as agents_service
 from aios.services import github_repositories as github_repo_service
 from aios.services import memory_stores as memory_service
 
@@ -133,12 +136,138 @@ async def create_session(
         return session
 
 
+def _classify_awaiting(
+    name: str,
+    tool_call_id: str,
+    has_allow_lifecycle: bool,
+    agent_tools: list[ToolSpec],
+) -> AwaitingToolCall | None:
+    """Classify an unresolved tool_call into an ``AwaitingToolCall``, or
+    ``None`` if it does not represent a session blocked on external action.
+
+    Returns ``None`` for:
+    * builtin/mcp tools with ``always_allow`` permission — these are
+      executed by the worker; an unresolved one is either in-flight or
+      a ghost the sweep will repair.
+    * builtin/mcp tools with ``always_ask`` permission that already
+      have a ``tool_confirmed allow`` lifecycle event — these are just
+      awaiting the next step's dispatch, not external action.
+    """
+    # Late import to avoid a registration-time cycle: aios.tools.__init__
+    # imports schedule_wake, which imports services.wake, which imports
+    # services.sessions.  A top-level import here would close the loop.
+    from aios.tools.registry import registry as tool_registry
+
+    if name.startswith("mcp__"):
+        perm = _resolve_mcp_permission(name, agent_tools)
+        if perm == "always_ask" and not has_allow_lifecycle:
+            return AwaitingToolCall(
+                tool_call_id=tool_call_id, name=name, kind="mcp", needs_confirm=True
+            )
+        return None
+    if tool_registry.has(name):
+        perm = _resolve_builtin_permission(name, agent_tools)
+        if perm == "always_ask" and not has_allow_lifecycle:
+            return AwaitingToolCall(
+                tool_call_id=tool_call_id, name=name, kind="builtin", needs_confirm=True
+            )
+        return None
+    # Unknown name: classified as custom by the harness too. Always
+    # awaiting client execution; ``needs_confirm`` is meaningless for
+    # custom tools (they don't go through the confirmation gate).
+    return AwaitingToolCall(
+        tool_call_id=tool_call_id, name=name, kind="custom", needs_confirm=False
+    )
+
+
+def _resolve_builtin_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
+    for spec in agent_tools:
+        if spec.type == name:
+            return spec.permission
+    return None
+
+
+def _resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
+    """Look up the permission policy for an MCP tool name.
+
+    Mirrors :func:`aios.harness.loop.resolve_mcp_permission` so the
+    awaiting view classifies tools the same way the dispatcher does.
+    """
+    server_name = name.split("__", 2)[1] if "__" in name else ""
+    for spec in agent_tools:
+        if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
+            cfg = spec.default_config
+            if cfg and cfg.permission_policy:
+                return cfg.permission_policy.type
+            return spec.permission
+    return None
+
+
+async def _agent_tools_for_session(
+    pool: asyncpg.Pool[Any], session: Session, *, account_id: str
+) -> list[ToolSpec]:
+    """Load the ToolSpec list the harness sees for ``session`` at step time."""
+    if session.agent_version is not None:
+        version = await agents_service.get_agent_version(
+            pool, session.agent_id, session.agent_version, account_id=account_id
+        )
+        return version.tools
+    agent = await agents_service.get_agent(pool, session.agent_id, account_id=account_id)
+    return agent.tools
+
+
+async def compute_awaiting(
+    pool: asyncpg.Pool[Any], sessions: list[Session], *, account_id: str
+) -> dict[str, list[AwaitingToolCall]]:
+    """Compute the ``awaiting`` view for a batch of sessions.
+
+    One SQL round-trip for unresolved tool_calls across the batch, then
+    one agent load per distinct (agent_id, agent_version) pair, then
+    in-memory classification.
+    """
+    if not sessions:
+        return {}
+    async with pool.acquire() as conn:
+        unresolved_by_sid = await queries.list_unresolved_tool_calls_batch(
+            conn, [s.id for s in sessions], account_id=account_id
+        )
+    if not unresolved_by_sid:
+        return {}
+    sessions_with_pending = [s for s in sessions if s.id in unresolved_by_sid]
+    agent_tools_cache: dict[tuple[str, int | None], list[ToolSpec]] = {}
+    out: dict[str, list[AwaitingToolCall]] = {}
+    for session in sessions_with_pending:
+        key = (session.agent_id, session.agent_version)
+        if key not in agent_tools_cache:
+            agent_tools_cache[key] = await _agent_tools_for_session(
+                pool, session, account_id=account_id
+            )
+        tools = agent_tools_cache[key]
+        entries: list[AwaitingToolCall] = []
+        for tc in unresolved_by_sid[session.id]:
+            classified = _classify_awaiting(
+                tc["name"], tc["tool_call_id"], tc["has_allow_lifecycle"], tools
+            )
+            if classified is not None:
+                entries.append(classified)
+        if entries:
+            out[session.id] = entries
+    return out
+
+
 async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> Session:
     async with pool.acquire() as conn:
         session = await queries.get_session(conn, session_id, account_id=account_id)
         vault_ids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
         echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
-        return session.model_copy(update={"vault_ids": vault_ids, "resources": echoes})
+    awaiting_by_sid = await compute_awaiting(pool, [session], account_id=account_id)
+    return session.model_copy(
+        update={
+            "vault_ids": vault_ids,
+            "resources": echoes,
+            "awaiting": awaiting_by_sid.get(session_id, []),
+        }
+    )
 
 
 async def get_session_event_stats(
@@ -167,23 +296,25 @@ async def list_sessions(
         sessions = await queries.list_sessions(
             conn, agent_id=agent_id, status=status, limit=limit, after=after, account_id=account_id
         )
-        if sessions:
-            vault_map = await queries.batch_get_session_vault_ids(
-                conn, [s.id for s in sessions], account_id=account_id
-            )
-            enriched: list[Session] = []
-            for s in sessions:
-                echoes = await _list_all_echoes(conn, s.id, account_id=account_id)
-                enriched.append(
-                    s.model_copy(
-                        update={
-                            "vault_ids": vault_map.get(s.id, []),
-                            "resources": echoes,
-                        }
-                    )
-                )
-            sessions = enriched
-        return sessions
+        if not sessions:
+            return sessions
+        vault_map = await queries.batch_get_session_vault_ids(
+            conn, [s.id for s in sessions], account_id=account_id
+        )
+        echoes_by_sid: dict[str, list[SessionResourceEcho]] = {}
+        for s in sessions:
+            echoes_by_sid[s.id] = await _list_all_echoes(conn, s.id, account_id=account_id)
+    awaiting_by_sid = await compute_awaiting(pool, sessions, account_id=account_id)
+    return [
+        s.model_copy(
+            update={
+                "vault_ids": vault_map.get(s.id, []),
+                "resources": echoes_by_sid.get(s.id, []),
+                "awaiting": awaiting_by_sid.get(s.id, []),
+            }
+        )
+        for s in sessions
+    ]
 
 
 async def append_user_message(

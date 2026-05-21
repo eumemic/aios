@@ -101,27 +101,6 @@ class TestPendingStatus:
         r = await http_client.get(f"/v1/sessions/{idle_session_id}")
         assert r.json()["status"] == "pending"
 
-    async def test_running_status_not_clobbered_by_concurrent_message(
-        self, http_client: httpx.AsyncClient, pool: Any, idle_session_id: str
-    ) -> None:
-        """If the session is already ``running``, a new user message must not
-        rewrite the status — the in-flight worker owns it."""
-        account_id = "acc_test_stub"  # PR 3 scaffolding
-        from aios.services import sessions as sessions_svc
-
-        await sessions_svc.set_session_status(
-            pool, idle_session_id, "running", account_id=account_id
-        )
-
-        r = await http_client.post(
-            f"/v1/sessions/{idle_session_id}/messages",
-            json={"content": "arrived mid-turn"},
-        )
-        assert r.status_code == 201, r.text
-
-        r = await http_client.get(f"/v1/sessions/{idle_session_id}")
-        assert r.json()["status"] == "running"
-
     async def test_rescheduling_status_not_clobbered(
         self, http_client: httpx.AsyncClient, pool: Any, idle_session_id: str
     ) -> None:

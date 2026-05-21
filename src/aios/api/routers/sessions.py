@@ -639,5 +639,6 @@ async def wait_for_events(
         events=events,
         session_status=session.status,
         session_stop_reason=session.stop_reason,
+        session_awaiting=session.awaiting,
         next_after=events[-1].seq if events else after,
     )
