@@ -19,6 +19,7 @@ import re
 from pathlib import Path
 
 from aios.config import get_settings
+from aios.errors import ForbiddenError
 
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^\w.\-]")
 _MAX_FILENAME_LEN = 200
@@ -78,6 +79,50 @@ def ensure_workspace_path(raw_path: str) -> Path:
     path = Path(raw_path).resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def validate_workspace_path(raw_path: str, account_id: str) -> None:
+    """Refuse ``raw_path`` if it resolves outside the account's
+    workspace subdirectory.
+
+    Without this check an authenticated client could POST
+    ``/v1/sessions`` with e.g. ``workspace_path="/etc"`` and the
+    sandbox would bind-mount the host's ``/etc`` read-write at
+    ``/workspace`` — arbitrary host filesystem read/write via any
+    bash / write / edit tool call.  A path under another account's
+    subdir (``workspace_root/{other_account_id}/...``) would defeat
+    the per-account-subdir isolation ``insert_session`` enforces by
+    default.
+
+    ``Path.resolve()`` collapses ``..`` traversal and dereferences
+    symlinks on the supplied path before the ``is_relative_to``
+    check, so create-time inputs that already point outside the jail
+    are rejected — including ``/etc``, ``..``-traversal back up to
+    ``workspace_root/{other_account_id}``, and symlinks under the
+    account's subdir that point outward at validate time.
+
+    Limitations: this is the create-time + bind-mount-time check on
+    the workspace_path argument.  Symlinks WRITTEN inside the
+    mounted ``/workspace`` after the bind-mount is live still resolve
+    on the host filesystem at access time (Docker bind-mount semantic),
+    so a tool ``ln -s /etc /workspace/sneaky`` followed by
+    ``cat /workspace/sneaky/passwd`` still reads host ``/etc/passwd``.
+    Fencing that surface requires kernel-level mount options
+    (``nosymfollow``) or container-level MAC; out of scope for this
+    fix.
+
+    Raises ``ForbiddenError`` (403, not 422): semantically this is an
+    attempted privilege escalation per the project's "fail hard" stance,
+    and surfacing it under the auth-tier error family makes it visible
+    in audit logs as such.
+    """
+    path = Path(raw_path).resolve()
+    account_root = (get_settings().workspace_root / account_id).resolve()
+    if not path.is_relative_to(account_root):
+        raise ForbiddenError(
+            "workspace_path must resolve to within the account's workspace subdirectory",
+            detail={"workspace_path": raw_path},
+        )
 
 
 _MEMORY_STORES_ROOT = "_memory_stores"
