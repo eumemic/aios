@@ -104,6 +104,18 @@ async def _run_git(
     return rc, stdout, stderr
 
 
+def _raise_redacted_git_error(stderr: bytes, *, message: str, token: str) -> None:
+    """Raise :class:`GithubCloneError` with ``stderr`` decoded and
+    token-redacted appended to ``message``.
+
+    Used by every raise site whose preceding ``_run_git`` operation
+    carried the auth-embedded URL (clone, fetch, remote set-url) and
+    whose stderr could therefore leak the token if echoed verbatim.
+    """
+    redacted = _redact_token_from_message(stderr.decode("utf-8", errors="replace"), token)
+    raise GithubCloneError(f"{message}: {redacted}")
+
+
 async def ensure_cache_clone(repo_url: str, token: str) -> Path:
     """Ensure ``<cache_root>/<url_hash>`` is a populated bare clone.
 
@@ -152,9 +164,8 @@ async def ensure_cache_clone(repo_url: str, token: str) -> Path:
                 # Drop any partial dir so the next attempt re-clones from scratch.
                 if cache_dir.exists():
                     shutil.rmtree(cache_dir, ignore_errors=True)
-                raise GithubCloneError(
-                    f"git clone --bare failed for {repo_url!r}: "
-                    f"{_redact_token_from_message(stderr.decode('utf-8', errors='replace'), token)}"
+                _raise_redacted_git_error(
+                    stderr, message=f"git clone --bare failed for {repo_url!r}", token=token
                 )
             # Disable gc on the bare cache so it can't reap objects that
             # per-session working trees alternate against.
@@ -250,9 +261,10 @@ async def ensure_session_working_tree(
     if rc != 0:
         if work_dir.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
-        raise GithubCloneError(
-            f"git clone --reference failed for session {session_id} repo {resource_id}: "
-            f"{_redact_token_from_message(stderr.decode('utf-8', errors='replace'), token)}"
+        _raise_redacted_git_error(
+            stderr,
+            message=f"git clone --reference failed for session {session_id} repo {resource_id}",
+            token=token,
         )
 
     # Replace the auth-embedded origin URL with the proxy URL. The bind
@@ -267,9 +279,10 @@ async def ensure_session_working_tree(
     if rc != 0:
         if work_dir.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
-        raise GithubCloneError(
-            f"failed to scrub origin URL for session {session_id} repo {resource_id}: "
-            f"{_redact_token_from_message(stderr.decode('utf-8', errors='replace'), token)}"
+        _raise_redacted_git_error(
+            stderr,
+            message=f"failed to scrub origin URL for session {session_id} repo {resource_id}",
+            token=token,
         )
 
     for key, value in (("user.name", git_user_name), ("user.email", git_user_email)):
