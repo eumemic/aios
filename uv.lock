@@ -14,6 +14,7 @@ members = [
     "aios-sdk",
     "aios-signal",
     "aios-telegram",
+    "aios-whatsapp",
 ]
 
 [[package]]
@@ -139,6 +140,7 @@ dev = [
     { name = "aios-echo-http" },
     { name = "aios-signal" },
     { name = "aios-telegram" },
+    { name = "aios-whatsapp" },
     { name = "httpx" },
     { name = "mypy" },
     { name = "openapi-python-client" },
@@ -181,6 +183,7 @@ dev = [
     { name = "aios-echo-http", editable = "connectors/echo-http" },
     { name = "aios-signal", editable = "connectors/signal" },
     { name = "aios-telegram", editable = "connectors/telegram" },
+    { name = "aios-whatsapp", editable = "connectors/whatsapp" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "openapi-python-client", specifier = ">=0.21" },
@@ -351,6 +354,43 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "python-telegram-bot", specifier = ">=22.6,<23" },
+    { name = "structlog", specifier = ">=24.4" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.13" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "pytest-mock", specifier = ">=3.14" },
+    { name = "ruff", specifier = ">=0.8" },
+]
+
+[[package]]
+name = "aios-whatsapp"
+version = "0.1.0"
+source = { editable = "connectors/whatsapp" }
+dependencies = [
+    { name = "aios-connector-http" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "structlog" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-mock" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aios-connector-http", editable = "packages/aios-connector-http" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "structlog", specifier = ">=24.4" },
 ]
 
