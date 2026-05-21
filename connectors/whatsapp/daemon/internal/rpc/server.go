@@ -29,14 +29,22 @@ type Handler interface {
 	Dispatch(ctx context.Context, method string, params json.RawMessage) (any, *Error)
 }
 
-// Error is the JSON-RPC 2.0 error object.  Code follows the spec where
-// useful (e.g. -32601 = method not found); the daemon is free to use
-// custom positive codes for application errors.
+// Error is the JSON-RPC 2.0 error object.  Code follows the spec for
+// the pre-defined ranges; application errors use Server-error range
+// (-32000 to -32099).
 type Error struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
 }
+
+// Standard JSON-RPC 2.0 error codes plus the server-error range we use
+// for application errors.  Referenced by handler implementations.
+const (
+	ErrCodeMethodNotFound = -32601
+	ErrCodeInvalidParams  = -32602
+	ErrCodeServerError    = -32000
+)
 
 // Server accepts TCP connections and serves JSON-RPC.  Use Broadcast
 // to push daemon-initiated notifications to all subscribed connections.
@@ -46,6 +54,12 @@ type Server struct {
 
 	subsMu sync.Mutex
 	subs   []*subscriber
+
+	// ready is closed once Run has bound the listener, so callers (and
+	// tests in particular) can wait deterministically rather than
+	// polling the port for connectability.
+	readyOnce sync.Once
+	ready     chan struct{}
 }
 
 // subscriber is one connection that has called "subscribe".  The
@@ -70,7 +84,14 @@ func (s *subscriber) writeLine(line []byte) error {
 
 // NewServer builds an unstarted Server.  Call Run() to bind + accept.
 func NewServer(addr string, h Handler) *Server {
-	return &Server{addr: addr, handler: h}
+	return &Server{addr: addr, handler: h, ready: make(chan struct{})}
+}
+
+// Ready returns a channel that's closed once Run has bound the listener.
+// Useful for tests that want to wait deterministically instead of
+// polling the port for connectability.
+func (s *Server) Ready() <-chan struct{} {
+	return s.ready
 }
 
 // shutdownPollInterval is how often a serve loop checks ctx.Err() while
@@ -86,6 +107,7 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen %q: %w", s.addr, err)
 	}
+	s.readyOnce.Do(func() { close(s.ready) })
 	log.Printf("rpc.listening addr=%s", ln.Addr().String())
 
 	go func() {
@@ -179,6 +201,11 @@ type errorResponse struct {
 	Error   *Error          `json:"error"`
 }
 
+// subscribeAck is the immutable shape returned to a subscribe request;
+// hoisted to package scope so each handshake reuses the same map
+// instead of allocating per call.
+var subscribeAck = map[string]string{"status": "subscribed"}
+
 func (s *Server) serve(ctx context.Context, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 	remote := conn.RemoteAddr().String()
@@ -229,7 +256,7 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 			out, err = json.Marshal(successResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
-				Result:  map[string]string{"status": "subscribed"},
+				Result:  subscribeAck,
 			})
 		} else {
 			result, rpcErr := s.handler.Dispatch(ctx, req.Method, req.Params)

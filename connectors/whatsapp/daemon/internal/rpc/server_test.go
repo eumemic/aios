@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"net"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -21,18 +20,20 @@ func (h *stubHandler) Dispatch(_ context.Context, method string, params json.Raw
 	return h.dispatch(method, params)
 }
 
-// runServer brings up a Server on a chosen ephemeral port and returns
-// the bound address.  The caller cancels ctx to shut it down.
-func runServer(t *testing.T, h Handler) (string, context.CancelFunc) {
+// runServer brings up a Server on an OS-assigned ephemeral port and
+// returns it.  The caller waits on srv.Ready() before connecting.
+// Cleanup is registered with t.Cleanup so the server is cancelled and
+// drained at the end of the test.
+func runServer(t *testing.T, h Handler) (srv *Server, addr string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	addr := ln.Addr().String()
+	addr = ln.Addr().String()
 	_ = ln.Close()
 
-	srv := NewServer(addr, h)
+	srv = NewServer(addr, h)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -40,32 +41,19 @@ func runServer(t *testing.T, h Handler) (string, context.CancelFunc) {
 		close(done)
 	}()
 
-	// Wait for the server to bind by probing the port.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		c, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err == nil {
-			_ = c.Close()
-			break
-		}
-		if time.Now().After(deadline) {
-			cancel()
-			t.Fatalf("server never bound %s: %v", addr, err)
-		}
-		time.Sleep(20 * time.Millisecond)
+	select {
+	case <-srv.Ready():
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatalf("server never bound %s", addr)
 	}
 
 	t.Cleanup(func() {
 		cancel()
 		<-done
 	})
-
-	// Expose the server for Broadcast tests via a side channel.
-	servers[addr] = srv
-	return addr, cancel
+	return srv, addr
 }
-
-var servers = map[string]*Server{}
 
 // rpcRequest writes a single JSON-RPC request and reads one response line.
 func rpcRequest(t *testing.T, conn net.Conn, method string, id int) map[string]any {
@@ -88,9 +76,9 @@ func rpcRequest(t *testing.T, conn net.Conn, method string, id int) map[string]a
 }
 
 func TestServerSubscribeReturnsAck(t *testing.T) {
-	addr, _ := runServer(t, &stubHandler{
+	_, addr := runServer(t, &stubHandler{
 		dispatch: func(string, json.RawMessage) (any, *Error) {
-			return nil, &Error{Code: -32601, Message: "method not found"}
+			return nil, &Error{Code: ErrCodeMethodNotFound, Message: "method not found"}
 		},
 	})
 
@@ -114,27 +102,22 @@ func TestServerSubscribeReturnsAck(t *testing.T) {
 }
 
 func TestServerBroadcastReachesSubscribers(t *testing.T) {
-	addr, _ := runServer(t, &stubHandler{
+	srv, addr := runServer(t, &stubHandler{
 		dispatch: func(string, json.RawMessage) (any, *Error) {
-			return nil, &Error{Code: -32601, Message: "method not found"}
+			return nil, &Error{Code: ErrCodeMethodNotFound, Message: "method not found"}
 		},
 	})
 
-	// Open a subscriber connection and subscribe.
 	subConn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial subscriber: %v", err)
 	}
 	defer subConn.Close()
+	// Subscribe handshake is synchronous: rpcRequest returns only after
+	// the server has added the connection to its subscribers list and
+	// written the ack.  No sleep needed before broadcasting.
 	_ = rpcRequest(t, subConn, "subscribe", 1)
-
-	// Broadcast a notification from the server side.
-	srv := servers[addr]
-	go func() {
-		// Small delay so the subscriber is parked on Read before we broadcast.
-		time.Sleep(50 * time.Millisecond)
-		srv.Broadcast("ping", map[string]string{"hello": "world"})
-	}()
+	srv.Broadcast("ping", map[string]string{"hello": "world"})
 
 	subConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	subReader := bufio.NewReader(subConn)
@@ -153,20 +136,18 @@ func TestServerBroadcastReachesSubscribers(t *testing.T) {
 	if !ok || params["hello"] != "world" {
 		t.Fatalf("notification params = %v, want {hello: world}", notif["params"])
 	}
-	// Notifications must not carry an id.
 	if _, hasID := notif["id"]; hasID {
 		t.Fatalf("notification contains id: %v", notif)
 	}
 }
 
 func TestServerBroadcastSkipsNonSubscribers(t *testing.T) {
-	addr, _ := runServer(t, &stubHandler{
+	srv, addr := runServer(t, &stubHandler{
 		dispatch: func(method string, _ json.RawMessage) (any, *Error) {
 			return map[string]string{"echo": method}, nil
 		},
 	})
 
-	// Connection that calls a non-subscribe method.
 	clientConn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial client: %v", err)
@@ -178,8 +159,6 @@ func TestServerBroadcastSkipsNonSubscribers(t *testing.T) {
 		t.Fatalf("ping returned error: %v", resp["error"])
 	}
 
-	// Broadcast — this connection did NOT subscribe so should not see it.
-	srv := servers[addr]
 	srv.Broadcast("event", map[string]string{"k": "v"})
 
 	clientConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
@@ -190,15 +169,12 @@ func TestServerBroadcastSkipsNonSubscribers(t *testing.T) {
 }
 
 func TestServerCleansUpSubscriberOnDisconnect(t *testing.T) {
-	addr, _ := runServer(t, &stubHandler{
+	srv, addr := runServer(t, &stubHandler{
 		dispatch: func(string, json.RawMessage) (any, *Error) {
-			return nil, &Error{Code: -32601, Message: "method not found"}
+			return nil, &Error{Code: ErrCodeMethodNotFound, Message: "method not found"}
 		},
 	})
 
-	srv := servers[addr]
-
-	// Connect + subscribe N parallel connections then close them all.
 	const n = 5
 	conns := make([]net.Conn, 0, n)
 	for i := 0; i < n; i++ {
@@ -210,12 +186,9 @@ func TestServerCleansUpSubscriberOnDisconnect(t *testing.T) {
 		conns = append(conns, c)
 	}
 
-	srv.subsMu.Lock()
-	if got := len(srv.subs); got != n {
-		srv.subsMu.Unlock()
+	if got := subscriberCount(srv); got != n {
 		t.Fatalf("subscribers after subscribe = %d, want %d", got, n)
 	}
-	srv.subsMu.Unlock()
 
 	var wg sync.WaitGroup
 	for _, c := range conns {
@@ -227,23 +200,20 @@ func TestServerCleansUpSubscriberOnDisconnect(t *testing.T) {
 	}
 	wg.Wait()
 
-	// The serve loop notices the closed read deadline + EOF and unwinds —
-	// give it a moment to remove itself.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		srv.subsMu.Lock()
-		got := len(srv.subs)
-		srv.subsMu.Unlock()
-		if got == 0 {
+		if subscriberCount(srv) == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("subscribers after close = %d, want 0", got)
+			t.Fatalf("subscribers after close = %d, want 0", subscriberCount(srv))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 }
 
-// Suppress unused import warning when the test file is otherwise
-// compiled but skipped via build tags.
-var _ = strconv.Itoa
+func subscriberCount(srv *Server) int {
+	srv.subsMu.Lock()
+	defer srv.subsMu.Unlock()
+	return len(srv.subs)
+}
