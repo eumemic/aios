@@ -119,6 +119,7 @@ def mock_step_dependencies() -> Any:
         agent_id="agt_x",
         agent_version=None,
         focal_channel=None,
+        stop_hook=None,
     )
     agent = SimpleNamespace(
         model="openrouter/x",
