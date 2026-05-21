@@ -1198,16 +1198,26 @@ async def clone_session(
         workspace_path = str(get_settings().workspace_root / account_id / new_id)
 
     async with conn.transaction():
-        status = await conn.fetchval(
-            "SELECT status FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+        row = await conn.fetchrow(
+            "SELECT status, archived_at FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
             parent_session_id,
             account_id,
         )
-        if status is None:
+        if row is None:
             raise NotFoundError(
                 f"session {parent_session_id} not found",
                 detail={"id": parent_session_id},
             )
+        # Refuse archived parents: cloning would resurrect the parent's
+        # event log into a live new session, defeating the archive
+        # intent.  Same family as PR #573 / #547 / #554 / #587 —
+        # archive must hold across every mutation/copy surface.
+        if row["archived_at"] is not None:
+            raise ConflictError(
+                f"session {parent_session_id} is archived",
+                detail={"id": parent_session_id},
+            )
+        status = row["status"]
         if status not in _CLONEABLE_STATUSES:
             raise ConflictError(
                 f"can only clone sessions in {_CLONEABLE_STATUSES} state; "
