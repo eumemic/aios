@@ -87,56 +87,19 @@ class Vault(BaseModel):
 # ── Vault Credential ────────────────────────────────────────────────────────
 
 
-class VaultCredentialCreate(BaseModel):
-    """Request body for ``POST /v1/vaults/{vault_id}/credentials``.
+class _VaultCredentialSecrets(BaseModel):
+    """Shared secret-bearing fields for ``VaultCredentialCreate`` /
+    ``VaultCredentialUpdate``.
 
-    All secret fields are write-only. The ``target_url`` is immutable
-    after creation. The service layer validates required fields per
+    All fields are optional on both bodies: omitted on Create means
+    "not configured", omitted on Update means "preserve existing".
+    The service layer validates which fields are required per
     ``auth_type``.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    display_name: str | None = Field(default=None, max_length=128)
-    target_url: str = Field(min_length=1)
-    auth_type: AuthType
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
     # oauth2_refresh fields
-    access_token: SecretStr | None = None
-    expires_at: datetime | None = None
-    client_id: str | None = None
-    refresh_token: SecretStr | None = None
-    token_endpoint: str | None = None
-    token_endpoint_auth: TokenEndpointAuth | None = None
-    scope: str | None = None
-    resource: str | None = None
-
-    # bearer_header fields
-    token: SecretStr | None = None
-
-    # basic fields
-    username: SecretStr | None = None
-    password: SecretStr | None = None
-
-    # custom_header fields
-    header_name: str | None = None
-    header_value: SecretStr | None = None
-
-
-class VaultCredentialUpdate(BaseModel):
-    """Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.
-
-    ``target_url`` and ``auth_type`` are immutable — not accepted here.
-    Omitted secret fields are preserved (decrypt-merge-encrypt).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    display_name: str | None = Field(default=None, max_length=128)
-    metadata: dict[str, Any] | None = None
-
-    # oauth2_refresh fields (all optional — omitted = preserve)
     access_token: SecretStr | None = None
     expires_at: datetime | None = None
     client_id: str | None = None
@@ -156,6 +119,31 @@ class VaultCredentialUpdate(BaseModel):
     # custom_header
     header_name: str | None = None
     header_value: SecretStr | None = None
+
+
+class VaultCredentialCreate(_VaultCredentialSecrets):
+    """Request body for ``POST /v1/vaults/{vault_id}/credentials``.
+
+    All secret fields are write-only. The ``target_url`` is immutable
+    after creation. The service layer validates required fields per
+    ``auth_type``.
+    """
+
+    display_name: str | None = Field(default=None, max_length=128)
+    target_url: str = Field(min_length=1)
+    auth_type: AuthType
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VaultCredentialUpdate(_VaultCredentialSecrets):
+    """Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.
+
+    ``target_url`` and ``auth_type`` are immutable — not accepted here.
+    Omitted secret fields are preserved (decrypt-merge-encrypt).
+    """
+
+    display_name: str | None = Field(default=None, max_length=128)
+    metadata: dict[str, Any] | None = None
 
 
 class VaultCredential(BaseModel):
