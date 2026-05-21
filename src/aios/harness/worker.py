@@ -164,11 +164,10 @@ async def worker_main() -> None:
                 repaired_ghosts=sweep.repaired_ghosts,
             )
 
-        # Reap orphaned sandbox containers. At startup the task_registry
-        # is empty by construction — no step or tool task has run yet —
-        # so every managed container surviving from a prior worker run is
-        # a corpse. Sessions that will resume on this worker spawn fresh
-        # containers on their first step.
+        # Reap every managed container from a prior worker run — at
+        # startup the task_registry is empty, so all surviving containers
+        # are corpses. Resuming sessions spawn fresh containers on their
+        # next step.
         reaped = await sandbox_registry.reap_orphans([])
         if reaped:
             log.info("worker.reaped_orphan_containers", count=reaped)

@@ -497,13 +497,11 @@ async def _run_session_step_body(
         pool, session_id, "message", assistant_msg, account_id=account_id
     )
 
-    # Partition the model's tool calls into dispatch buckets. Immediate
-    # builtin/MCP tools launch as asyncio tasks now; ``needs_confirm``
-    # (always_ask awaiting allow) and ``custom`` (client-executed) tool
-    # calls sit unresolved in the log until an external POST lands their
-    # result. The session is NOT parked: a new user message or any other
-    # stimulus can wake the session and the model sees pending tool calls
-    # via the synthesized placeholder in ``build_messages``.
+    # Partition tool calls into dispatch buckets. Immediate builtin/MCP
+    # launch now; ``needs_confirm`` and ``custom`` sit unresolved in the
+    # log until an external POST lands the result — the session ends its
+    # turn anyway and any stimulus can wake it (``Session.awaiting``
+    # surfaces what's still pending).
     tool_calls: list[dict[str, Any]] = assistant_msg.get("tool_calls") or []
 
     if tool_calls:
@@ -566,10 +564,8 @@ async def _run_session_step_body(
                 custom_tools=[tc.get("id") for tc in custom if tc.get("id")],
             )
 
-    # Always flip to idle with ``end_turn`` at the end of a step body.
-    # "End of turn" here means the model's step concluded; pending tool
-    # calls (custom or unconfirmed always_ask) are observable via
-    # ``Session.awaiting``, derived from the event log on each read.
+    # End-of-turn is unconditional; pending tool calls live on
+    # ``Session.awaiting`` (derived from the event log per read).
     await sessions_service.set_session_status(
         pool, session_id, "idle", stop_reason={"type": "end_turn"}, account_id=account_id
     )

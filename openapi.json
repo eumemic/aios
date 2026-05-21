@@ -10805,7 +10805,7 @@
           "updated_at"
         ],
         "title": "Session",
-        "description": "Read view of a session. Internal-only columns are not exposed.\n\n``stop_reason`` records why the most recent step ended. Possible\n``type`` values: ``\"end_turn\"``, ``\"interrupt\"``, ``\"rescheduling\"``,\n``\"error\"``. To find tool calls the session is blocked on, read\n``awaiting`` (derived per read from the event log + task_registry)."
+        "description": "Read view of a session. Internal-only columns are not exposed.\n\n``stop_reason`` records why the most recent step ended. Possible\n``type`` values: ``\"end_turn\"``, ``\"interrupt\"``, ``\"rescheduling\"``,\n``\"error\"``. ``awaiting`` lists tool calls the session is blocked\non (derived per read from the event log + agent tool specs)."
       },
       "SessionCloneRequest": {
         "properties": {

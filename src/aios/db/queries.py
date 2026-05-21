@@ -1088,12 +1088,10 @@ async def delete_session(
 ) -> None:
     """Delete a session and its events.
 
-    Operator-initiated. No safety check on in-flight work: with parking
-    removed there's no longer a session-row signal for "tools running"
-    (the task_registry is the live source of truth, but it only sees
-    one worker process). If a delete races a tool task, the task's
-    ``_tool_lifecycle.finally`` will fail loudly on the missing session
-    — that's an acceptable signal per fail-hard.
+    Operator-initiated, no in-flight-work check: the task_registry is the
+    only live source of truth and only sees one worker. If a delete races
+    a tool task, ``_tool_lifecycle.finally`` fails loudly on the missing
+    session — acceptable per fail-hard.
     """
     async with conn.transaction():
         row = await conn.fetchrow(
@@ -1848,15 +1846,11 @@ async def append_event(
     # treats the channel as a string literal and preserves it byte-for-byte.
     await conn.execute("SELECT pg_notify($1, $2)", f"events_{session_id}", new_id)
 
-    # Connector fan-out: an assistant message with tool_calls is the
-    # event that may produce work for connector runtimes (custom-tool
-    # calls). Fire ``connector_calls_<type>`` per bound connection so
-    # the runtime SSE can pull the call's args via the backfill query.
-    # NOTIFY fires whether or not the tool_calls include a custom name
-    # — the consumer's backfill filters by ``connector.tools_schema``,
-    # so over-fanout is harmless. Keeping the trigger here (instead of
-    # inside a custom-detector branch) avoids loading agent.tools on
-    # the append hot path.
+    # Connector fan-out: every assistant-with-tool_calls fires
+    # ``connector_calls_<type>`` per bound connection. The consumer's
+    # backfill filters by ``connector.tools_schema``, so over-fanout
+    # (when none of the tool_calls are custom) is harmless and avoids
+    # loading agent.tools on the append hot path.
     if (
         kind == "message"
         and role == "assistant"
@@ -1950,18 +1944,28 @@ async def list_pending_calls_for_connector(
             (row["connection_id"], row["focal_channel"])
         )
 
-    calls_by_session = await _unresolved_connector_calls_for_sessions(
-        conn,
-        session_ids=list(by_session.keys()),
-        account_id=account_id,
-        tool_names=tool_names,
+    raw_by_sid = await _latest_unresolved_tool_calls(
+        conn, list(by_session.keys()), account_id=account_id
     )
-
+    name_set = set(tool_names)
     out: list[dict[str, Any]] = []
-    for sid, calls in calls_by_session.items():
+    for sid, calls in raw_by_sid.items():
         for conn_id, focal in by_session[sid]:
-            for call in calls:
-                out.append({**call, "connection_id": conn_id, "focal_channel": focal})
+            for tc in calls:
+                fn = tc.get("function") or {}
+                name = fn.get("name")
+                if name not in name_set:
+                    continue
+                out.append(
+                    {
+                        "session_id": sid,
+                        "tool_call_id": tc["id"],
+                        "name": name,
+                        "arguments": fn.get("arguments", "{}"),
+                        "connection_id": conn_id,
+                        "focal_channel": focal,
+                    }
+                )
     return out
 
 
@@ -1997,35 +2001,43 @@ async def list_pending_calls_for_session_and_connection(
     if not tool_names:
         return []
 
-    calls_by_session = await _unresolved_connector_calls_for_sessions(
-        conn,
-        session_ids=[session_id],
-        account_id=account_id,
-        tool_names=tool_names,
-    )
+    raw_by_sid = await _latest_unresolved_tool_calls(conn, [session_id], account_id=account_id)
+    name_set = set(tool_names)
     focal = conn_row["focal_channel"]
-    return [
-        {**call, "connection_id": connection_id, "focal_channel": focal}
-        for call in calls_by_session.get(session_id, [])
-    ]
+    out: list[dict[str, Any]] = []
+    for tc in raw_by_sid.get(session_id, []):
+        fn = tc.get("function") or {}
+        name = fn.get("name")
+        if name not in name_set:
+            continue
+        out.append(
+            {
+                "session_id": session_id,
+                "tool_call_id": tc["id"],
+                "name": name,
+                "arguments": fn.get("arguments", "{}"),
+                "connection_id": connection_id,
+                "focal_channel": focal,
+            }
+        )
+    return out
 
 
-async def _unresolved_connector_calls_for_sessions(
+async def _latest_unresolved_tool_calls(
     conn: asyncpg.Connection[Any],
-    *,
     session_ids: list[str],
+    *,
     account_id: str,
-    tool_names: list[str],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Return ``{session_id: [{tool_call_id, name, arguments}]}`` for the
-    latest assistant's unresolved tool_calls whose ``function.name`` is in
-    ``tool_names``.
+    """Return ``{session_id: [tool_call_dict]}`` for the latest assistant's
+    tool_calls (per session) that have no paired tool_result event.
 
-    Pending-ness is purely an event-log property: an assistant tool_call
-    with no paired tool-role event. The session row's ``status`` and
-    ``stop_reason`` are irrelevant — the harness no longer parks sessions
-    for custom tools (#TBD).
+    Pending-ness is purely an event-log property — the session row's
+    ``status`` and ``stop_reason`` are irrelevant. Tool_call dicts are
+    returned as-is from the assistant's ``data->'tool_calls'`` array.
     """
+    if not session_ids:
+        return {}
     asst_rows = await conn.fetch(
         """
         SELECT DISTINCT ON (session_id) session_id, data
@@ -2044,29 +2056,19 @@ async def _unresolved_connector_calls_for_sessions(
     )
     if not asst_rows:
         return {}
-    completed = await _tool_result_ids_by_session(conn, session_ids, account_id=account_id)
-    name_set = set(tool_names)
+    results_by_sid = await _tool_result_ids_by_session(conn, session_ids, account_id=account_id)
     out: dict[str, list[dict[str, Any]]] = {}
     for row in asst_rows:
-        sid = row["session_id"]
+        sid: str = row["session_id"]
         data = parse_jsonb(row["data"])
-        results = completed.get(sid, set())
-        for tc in data.get("tool_calls") or []:
-            tc_id = tc.get("id")
-            if not tc_id or tc_id in results:
-                continue
-            fn = tc.get("function") or {}
-            name = fn.get("name")
-            if name not in name_set:
-                continue
-            out.setdefault(sid, []).append(
-                {
-                    "session_id": sid,
-                    "tool_call_id": tc_id,
-                    "name": name,
-                    "arguments": fn.get("arguments", "{}"),
-                }
-            )
+        completed: set[str] = results_by_sid.get(sid, set())
+        unresolved = [
+            tc
+            for tc in (data.get("tool_calls") or [])
+            if tc.get("id") and tc["id"] not in completed
+        ]
+        if unresolved:
+            out[sid] = unresolved
     return out
 
 
@@ -2106,32 +2108,14 @@ async def list_unresolved_tool_calls_batch(
     """For each session, return the latest assistant's tool_calls that
     have no paired tool_result, annotated with allow-lifecycle presence.
 
-    Used by :func:`services.sessions._enrich_awaiting` to build the
+    Used by :func:`services.sessions.compute_awaiting` to build the
     ``Session.awaiting`` derived view. Returned dicts have keys
     ``tool_call_id``, ``name``, ``has_allow_lifecycle`` — the caller
     classifies kind/needs_confirm using ``agent.tools``.
     """
-    if not session_ids:
+    raw = await _latest_unresolved_tool_calls(conn, session_ids, account_id=account_id)
+    if not raw:
         return {}
-    asst_rows = await conn.fetch(
-        """
-        SELECT DISTINCT ON (session_id) session_id, data
-          FROM events
-         WHERE session_id = ANY($1::text[])
-           AND account_id = $2
-           AND kind = 'message'
-           AND role = 'assistant'
-           AND jsonb_array_length(
-                 COALESCE(NULLIF(data->'tool_calls','null'::jsonb), '[]'::jsonb)
-               ) > 0
-         ORDER BY session_id, seq DESC
-        """,
-        session_ids,
-        account_id,
-    )
-    if not asst_rows:
-        return {}
-    results_by_sid = await _tool_result_ids_by_session(conn, session_ids, account_id=account_id)
     allow_rows = await conn.fetch(
         """
         SELECT session_id, data->>'tool_call_id' AS tool_call_id
@@ -2152,29 +2136,19 @@ async def list_unresolved_tool_calls_batch(
             allows_by_sid.setdefault(r["session_id"], set()).add(tcid)
 
     out: dict[str, list[dict[str, Any]]] = {}
-    for row in asst_rows:
-        sid = row["session_id"]
-        data = parse_jsonb(row["data"])
-        completed = results_by_sid.get(sid, set())
+    for sid, calls in raw.items():
         allows = allows_by_sid.get(sid, set())
-        unresolved: list[dict[str, Any]] = []
-        for tc in data.get("tool_calls") or []:
-            tc_id = tc.get("id")
-            if not tc_id or tc_id in completed:
-                continue
-            fn = tc.get("function") or {}
-            name = fn.get("name")
-            if not name:
-                continue
-            unresolved.append(
-                {
-                    "tool_call_id": tc_id,
-                    "name": name,
-                    "has_allow_lifecycle": tc_id in allows,
-                }
-            )
-        if unresolved:
-            out[sid] = unresolved
+        entries = [
+            {
+                "tool_call_id": tc["id"],
+                "name": name,
+                "has_allow_lifecycle": tc["id"] in allows,
+            }
+            for tc in calls
+            if (name := (tc.get("function") or {}).get("name"))
+        ]
+        if entries:
+            out[sid] = entries
     return out
 
 

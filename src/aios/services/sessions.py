@@ -143,57 +143,36 @@ def _classify_awaiting(
     agent_tools: list[ToolSpec],
 ) -> AwaitingToolCall | None:
     """Classify an unresolved tool_call into an ``AwaitingToolCall``, or
-    ``None`` if it does not represent a session blocked on external action.
-
-    Returns ``None`` for:
-    * builtin/mcp tools with ``always_allow`` permission — these are
-      executed by the worker; an unresolved one is either in-flight or
-      a ghost the sweep will repair.
-    * builtin/mcp tools with ``always_ask`` permission that already
-      have a ``tool_confirmed allow`` lifecycle event — these are just
-      awaiting the next step's dispatch, not external action.
+    ``None`` if the session is not blocked on external action for it
+    (``always_allow`` builtin/mcp, or ``always_ask`` already confirmed).
     """
-    # Late import to avoid a registration-time cycle: aios.tools.__init__
-    # imports schedule_wake, which imports services.wake, which imports
-    # services.sessions.  A top-level import here would close the loop.
+    # Late import: aios.tools → services.wake → services.sessions cycle.
     from aios.tools.registry import registry as tool_registry
 
     if name.startswith("mcp__"):
-        perm = _resolve_mcp_permission(name, agent_tools)
-        if perm == "always_ask" and not has_allow_lifecycle:
+        if _mcp_permission(name, agent_tools) == "always_ask" and not has_allow_lifecycle:
             return AwaitingToolCall(
                 tool_call_id=tool_call_id, name=name, kind="mcp", needs_confirm=True
             )
         return None
     if tool_registry.has(name):
-        perm = _resolve_builtin_permission(name, agent_tools)
-        if perm == "always_ask" and not has_allow_lifecycle:
+        builtin_perm = next((s.permission for s in agent_tools if s.type == name), None)
+        if builtin_perm == "always_ask" and not has_allow_lifecycle:
             return AwaitingToolCall(
                 tool_call_id=tool_call_id, name=name, kind="builtin", needs_confirm=True
             )
         return None
-    # Unknown name: classified as custom by the harness too. Always
-    # awaiting client execution; ``needs_confirm`` is meaningless for
-    # custom tools (they don't go through the confirmation gate).
+    # Unknown name: client-executed custom tool. ``needs_confirm`` is
+    # meaningless for custom tools — they don't go through the gate.
     return AwaitingToolCall(
         tool_call_id=tool_call_id, name=name, kind="custom", needs_confirm=False
     )
 
 
-def _resolve_builtin_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
-    for spec in agent_tools:
-        if spec.type == name:
-            return spec.permission
-    return None
-
-
-def _resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
-    """Look up the permission policy for an MCP tool name.
-
-    Mirrors :func:`aios.harness.loop.resolve_mcp_permission` so the
-    awaiting view classifies tools the same way the dispatcher does.
-    """
-    server_name = name.split("__", 2)[1] if "__" in name else ""
+def _mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
+    """Look up the permission policy for an ``mcp__`` tool name. Mirrors
+    :func:`aios.harness.loop.resolve_mcp_permission`."""
+    server_name = name.split("__", 2)[1]
     for spec in agent_tools:
         if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
             cfg = spec.default_config
@@ -233,20 +212,19 @@ async def compute_awaiting(
         )
     if not unresolved_by_sid:
         return {}
-    sessions_with_pending = [s for s in sessions if s.id in unresolved_by_sid]
-    agent_tools_cache: dict[tuple[str, int | None], list[ToolSpec]] = {}
+    tools_cache: dict[tuple[str, int | None], list[ToolSpec]] = {}
     out: dict[str, list[AwaitingToolCall]] = {}
-    for session in sessions_with_pending:
+    for session in sessions:
+        unresolved = unresolved_by_sid.get(session.id)
+        if not unresolved:
+            continue
         key = (session.agent_id, session.agent_version)
-        if key not in agent_tools_cache:
-            agent_tools_cache[key] = await _agent_tools_for_session(
-                pool, session, account_id=account_id
-            )
-        tools = agent_tools_cache[key]
+        if key not in tools_cache:
+            tools_cache[key] = await _agent_tools_for_session(pool, session, account_id=account_id)
         entries: list[AwaitingToolCall] = []
-        for tc in unresolved_by_sid[session.id]:
+        for tc in unresolved:
             classified = _classify_awaiting(
-                tc["name"], tc["tool_call_id"], tc["has_allow_lifecycle"], tools
+                tc["name"], tc["tool_call_id"], tc["has_allow_lifecycle"], tools_cache[key]
             )
             if classified is not None:
                 entries.append(classified)

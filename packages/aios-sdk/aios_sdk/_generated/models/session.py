@@ -29,8 +29,8 @@ class Session:
 
     ``stop_reason`` records why the most recent step ended. Possible
     ``type`` values: ``"end_turn"``, ``"interrupt"``, ``"rescheduling"``,
-    ``"error"``. To find tool calls the session is blocked on, read
-    ``awaiting`` (derived per read from the event log + task_registry).
+    ``"error"``. ``awaiting`` lists tool calls the session is blocked
+    on (derived per read from the event log + agent tool specs).
 
         Attributes:
             id (str):
