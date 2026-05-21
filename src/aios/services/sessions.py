@@ -436,7 +436,8 @@ async def clone_session(
             conn, parent_session_id, workspace_path=workspace_path, account_id=account_id
         )
         vault_ids = await queries.get_session_vault_ids(conn, session.id, account_id=account_id)
-        return session.model_copy(update={"vault_ids": vault_ids})
+        echoes = await _list_all_echoes(conn, session.id, account_id=account_id)
+        return session.model_copy(update={"vault_ids": vault_ids, "resources": echoes})
 
 
 async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> None:

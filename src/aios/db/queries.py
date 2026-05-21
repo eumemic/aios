@@ -1162,14 +1162,17 @@ async def clone_session(
     """Clone a session into a new one with the same prefix of events.
 
     The clone inherits ``agent_id``, ``environment_id``, ``agent_version``,
-    ``title``, ``metadata``, ``env``, vault bindings, ``last_event_seq``,
+    ``title``, ``metadata``, ``env``, vault bindings, memory-store
+    attachments, github-repository attachments, ``last_event_seq``,
     ``status``, ``stop_reason``, ``focal_channel``, and ``focal_locked``
     so its next forward step sees a context byte-identical to the
     parent's at clone time.  ``focal_locked`` MUST follow ``focal_channel``
     on the clone path: a per_chat parent (``focal_locked=True``) cloned
     without its lock would inherit the bound channel but bypass the
     ``is_session_focal_locked`` gate on ``switch_channel``, letting the
-    clone escape per_chat isolation.
+    clone escape per_chat isolation.  github-repository ``id`` is a
+    global PK so each clone's row is minted fresh; everything else
+    on the attachment rows propagates verbatim.
 
     Cumulative ``input_tokens`` / ``output_tokens`` start at 0 — those were
     paid on the parent and shouldn't be double-counted.
@@ -1236,6 +1239,54 @@ async def clone_session(
             "SELECT $1, vault_id, rank, account_id FROM session_vaults WHERE session_id = $2",
             new_id,
             parent_session_id,
+        )
+
+        # Resource attachments.  ``session_memory_stores`` has a
+        # composite PK so a direct INSERT/SELECT works.
+        # ``session_github_repositories.id`` is a global PK, so each
+        # row needs a fresh ULID minted via the same ordinal-join
+        # pattern the events copy below uses.  Direct INSERT/SELECT
+        # bypasses the archival check the normal attach path enforces
+        # — by design: a clone snapshots the parent's attachment
+        # state at clone time, including references to stores
+        # archived after the parent attached them.
+        await conn.execute(
+            """
+            INSERT INTO session_memory_stores (
+                session_id, memory_store_id, rank, access, instructions,
+                name_at_attach, description_at_attach, account_id
+            )
+            SELECT $1, memory_store_id, rank, access, instructions,
+                   name_at_attach, description_at_attach, account_id
+              FROM session_memory_stores WHERE session_id = $2
+            """,
+            new_id,
+            parent_session_id,
+        )
+        gh_count: int = await conn.fetchval(
+            "SELECT COUNT(*) FROM session_github_repositories WHERE session_id = $1",
+            parent_session_id,
+        )
+        new_gh_ids = [make_id(GITHUB_REPOSITORY) for _ in range(gh_count)]
+        await conn.execute(
+            """
+            INSERT INTO session_github_repositories (
+                id, session_id, rank, repo_url, mount_path,
+                ciphertext, nonce, created_at, updated_at,
+                git_user_name, git_user_email, account_id
+            )
+            SELECT i.id, $2, s.rank, s.repo_url, s.mount_path,
+                   s.ciphertext, s.nonce, s.created_at, s.updated_at,
+                   s.git_user_name, s.git_user_email, s.account_id
+              FROM (
+                SELECT *, row_number() OVER (ORDER BY rank) AS rn
+                  FROM session_github_repositories WHERE session_id = $1
+              ) s
+              JOIN unnest($3::text[]) WITH ORDINALITY AS i(id, rn) USING (rn)
+            """,
+            parent_session_id,
+            new_id,
+            new_gh_ids,
         )
 
         # Events are gapless 1..last_event_seq per session, so we pre-generate
