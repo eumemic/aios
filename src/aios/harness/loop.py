@@ -1062,14 +1062,22 @@ async def _dispatch_confirmed_tools(
     write a second ``tool_result`` event (violates CLAUDE.md
     invariant #4).
     """
-    # Find the latest assistant message with tool_calls.
+    # Collect tool_calls from EVERY assistant message, not just the
+    # latest.  An always_ask tool_call in turn A1 can outlive A1 if
+    # the model emits a later assistant A2 (e.g., reacting to an
+    # impatient user message that lifts the session out of
+    # ``requires_action``).  Stopping at A2 would silently drop A1's
+    # operator-confirmed dispatch — ghost-repair then papers over
+    # with the misleading ``"No result was received"`` synthetic
+    # error, even though the operator did allow the tool; the
+    # dispatch was lost.  Filtering by ``completed`` / ``in_flight``
+    # below correctly excludes anything already handled.
     asst_tool_calls: list[dict[str, Any]] = []
-    for e in reversed(message_events):
+    for e in message_events:
         if e.kind == "message" and e.data.get("role") == "assistant":
             tcs = e.data.get("tool_calls")
             if tcs:
-                asst_tool_calls = tcs
-                break
+                asst_tool_calls.extend(tcs)
 
     if not asst_tool_calls:
         return []

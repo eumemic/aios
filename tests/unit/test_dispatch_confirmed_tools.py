@@ -81,6 +81,57 @@ class TestDispatchConfirmedTools:
         assert [tc["id"] for tc in pending] == ["tc1"]
         assert mock_read.call_args.kwargs["newest_first"] is True
 
+    async def test_dispatches_confirmed_from_older_assistant(self) -> None:
+        """Confirmed tool calls from older assistant turns must still be
+        dispatched, even when a later assistant turn carries different
+        tool_calls.
+
+        Reachable scenario: the model emits assistant message A1 with an
+        ``always_ask`` tool_call X.  Operator hasn't confirmed yet.  The
+        user — impatient — sends another message.  ``append_event`` lifts
+        idle to pending; the step fires; the model sees X as a synthetic
+        pending result and emits assistant message A2 with a NEW tool_call
+        Z (e.g., a search to gather context for the reply, or a new
+        ``always_allow`` action).  Z runs, lands its tool_result.  THEN
+        the operator finally confirms X.
+
+        Pre-fix ``_dispatch_confirmed_tools`` walked reversed events and
+        broke at the first assistant with non-empty tool_calls — A2's
+        ``[Z]``.  The dispatch filter checked ``confirmed={X}`` against
+        ``[Z]`` and returned ``[]``.  X is silently dropped; ghost-repair
+        eventually papers over with ``"No result was received"`` — a
+        misleading synthetic error, because the operator DID allow X;
+        only the dispatch was lost."""
+        msg_events = [
+            _assistant_with_tool_calls(["tc_X"]),  # older A1 with the confirmed tool
+            SimpleNamespace(
+                kind="message",
+                data={"role": "user", "content": "are you still there?"},
+            ),
+            _assistant_with_tool_calls(["tc_Z"]),  # newer A2 with a DIFFERENT tool_call
+            SimpleNamespace(
+                kind="message",
+                data={"role": "tool", "tool_call_id": "tc_Z", "content": "z done"},
+            ),
+        ]
+        pool = MagicMock()
+        with patch(
+            "aios.harness.loop.sessions_service.read_events",
+            AsyncMock(return_value=[_confirmed("tc_X")]),
+        ):
+            pending = await _dispatch_confirmed_tools(
+                pool,
+                "sess_x",
+                msg_events,
+                account_id="acc_test_stub",
+                task_registry=TaskRegistry(),
+            )
+        assert [tc["id"] for tc in pending] == ["tc_X"], (
+            "operator-confirmed tool_call from an older assistant turn was "
+            "dropped because _dispatch_confirmed_tools broke at the first "
+            "assistant-with-tool_calls it found, ignoring earlier turns"
+        )
+
     async def test_skips_tool_call_with_in_flight_task(self) -> None:
         """An in-flight task in ``task_registry`` blocks re-dispatch — without
         this guard, a wake firing step N+1 before the task appended its
