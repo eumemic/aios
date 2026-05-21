@@ -7,12 +7,23 @@ import socket
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 # HttpConnector reads AIOS_URL / AIOS_RUNTIME_TOKEN at __init__ time.
 os.environ.setdefault("AIOS_URL", "http://test")
 os.environ.setdefault("AIOS_RUNTIME_TOKEN", "aios_runtime_test")
+
+from aios_whatsapp.config import Settings
+from aios_whatsapp.connector import WhatsappConnector, _WhatsappConnectionState
+from aios_whatsapp.daemon import WhatsappDaemon
+
+CONNECTION_ID = "conn_test"
+PHONE = "+15551112222"
+BOT_JID = "15551112222@s.whatsapp.net"
+PEER_JID = "15553334444@s.whatsapp.net"
+GROUP_JID = "111222333@g.us"
 
 
 def _unused_port() -> int:
@@ -31,6 +42,25 @@ def _unused_port() -> int:
 @pytest.fixture
 def unused_port() -> int:
     return _unused_port()
+
+
+@pytest.fixture
+def connector(tmp_path: Path) -> WhatsappConnector:
+    """WhatsappConnector with a stubbed daemon and one registered connection.
+
+    Tool-method tests invoke ``connector.whatsapp_send(...)`` directly
+    (bypassing the SDK's focal-channel injection); the daemon's
+    ``rpc.call`` is a mock that captures args and returns whatever the
+    test sets on it.
+    """
+    cfg = Settings(data_dir=tmp_path / "data")
+    c = WhatsappConnector(cfg)
+    fake_daemon = MagicMock(spec=WhatsappDaemon)
+    fake_daemon.rpc = MagicMock()
+    fake_daemon.rpc.call = AsyncMock(return_value=None)
+    c.state[CONNECTION_ID] = _WhatsappConnectionState(phone=PHONE, daemon=fake_daemon)
+    c.emit_inbound = AsyncMock(return_value={"appended_event_id": "ev_1"})  # type: ignore[method-assign]
+    return c
 
 
 @pytest.fixture

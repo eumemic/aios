@@ -1,7 +1,8 @@
 """Stand-in for ``whatsapp-daemon`` used in unit tests.
 
 Speaks the same wire protocol (line-delimited JSON-RPC 2.0 over TCP) as
-the production Go daemon.  Implements: ``version``, ``crash``, ``notify``.
+the production Go daemon.  Implements: ``version``, ``subscribe``,
+``crash``, ``notify``.
 """
 
 from __future__ import annotations
@@ -31,6 +32,12 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": {"name": "whatsapp-daemon-fake", "version": "test"},
+                }
+            elif method == "subscribe":
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {"status": "subscribed"},
                 }
             elif method == "crash":
                 writer.close()

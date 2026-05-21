@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"aios.dev/connectors/whatsapp/daemon/internal/handler"
 	"aios.dev/connectors/whatsapp/daemon/internal/rpc"
@@ -46,6 +47,12 @@ func main() {
 
 	reg := handler.NewRegistry()
 	handler.RegisterLifecycle(reg, daemonName, Version)
+	// PR-N (whatsmeow integration) replaces this stub with a closure
+	// over whatsmeow.Client.SendMessage; until then the daemon answers
+	// sendMessage with a deterministic fake so the Python connector's
+	// end-to-end wiring can be exercised without an actual WhatsApp
+	// pairing.
+	handler.RegisterSend(reg, stubSend)
 
 	srv := rpc.NewServer(*listen, reg)
 	if err := srv.Run(ctx); err != nil {
@@ -53,4 +60,9 @@ func main() {
 		os.Exit(1)
 	}
 	log.Println("daemon.exit.ok")
+}
+
+func stubSend(_ context.Context, jid, text string) (string, int64, error) {
+	log.Printf("daemon.send.stub jid=%s text_len=%d", jid, len(text))
+	return "STUB-" + jid, time.Now().UnixMilli(), nil
 }
