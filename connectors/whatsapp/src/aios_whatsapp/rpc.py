@@ -98,13 +98,33 @@ class RpcListener:
         self._writer: asyncio.StreamWriter | None = None
 
     async def connect(self) -> None:
-        """Open the persistent TCP connection. Call once before iterating."""
+        """Open the persistent TCP connection and subscribe to notifications.
+
+        The daemon fan-outs notifications only to connections that have
+        called ``subscribe`` — RpcClient's fresh-per-call sockets never
+        do, so they can't receive a stray notification mid-response.
+        """
         try:
             self._reader, self._writer = await asyncio.open_connection(self._host, self._port)
         except OSError as e:
             raise ListenerClosedError(
                 f"failed to connect listener to {self._host}:{self._port}: {e}"
             ) from e
+        sub = {"jsonrpc": "2.0", "method": "subscribe", "id": 1}
+        self._writer.write(json.dumps(sub).encode("utf-8") + b"\n")
+        try:
+            await self._writer.drain()
+            line = await self._reader.readline()
+        except OSError as e:
+            raise ListenerClosedError(f"subscribe handshake failed: {e}") from e
+        if not line:
+            raise ListenerClosedError("daemon closed listener before subscribe ack")
+        try:
+            ack = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ListenerClosedError(f"subscribe ack was not JSON: {line!r}") from e
+        if "error" in ack:
+            raise ListenerClosedError(f"daemon rejected subscribe: {ack['error']}")
 
     async def notifications(self) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """Yield ``(method, params)`` pairs for each notification frame.

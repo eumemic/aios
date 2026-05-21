@@ -1,6 +1,12 @@
 // Package rpc implements a minimal JSON-RPC 2.0 server speaking
-// line-delimited JSON over TCP. One frame = one line. Requests carry
+// line-delimited JSON over TCP.  One frame = one line.  Requests carry
 // an "id"; notifications (server → client) omit it.
+//
+// Subscription model: only connections that have called the
+// special-cased "subscribe" RPC receive daemon-initiated notifications
+// via Server.Broadcast.  Fresh client connections (the Python
+// RpcClient pattern) never subscribe, so they cannot read a stray
+// notification in place of their RPC response.
 package rpc
 
 import (
@@ -23,38 +29,57 @@ type Handler interface {
 	Dispatch(ctx context.Context, method string, params json.RawMessage) (any, *Error)
 }
 
-// Error is the JSON-RPC 2.0 error object. Code follows the spec's
-// conventions where useful (e.g. -32601 = method not found) but the
-// daemon is free to use custom positive codes for application errors.
+// Error is the JSON-RPC 2.0 error object.  Code follows the spec where
+// useful (e.g. -32601 = method not found); the daemon is free to use
+// custom positive codes for application errors.
 type Error struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
 }
 
-// Server accepts TCP connections, parses one JSON-RPC frame per line,
-// dispatches via the supplied Handler, and writes one response per
-// request. Notifications (frames without an "id") from the client are
-// ignored — the Python side does not send them.
+// Server accepts TCP connections and serves JSON-RPC.  Use Broadcast
+// to push daemon-initiated notifications to all subscribed connections.
 type Server struct {
 	addr    string
 	handler Handler
+
+	subsMu sync.Mutex
+	subs   []*subscriber
 }
 
-// NewServer builds an unstarted Server. Call Run() to bind + accept.
+// subscriber is one connection that has called "subscribe".  The
+// per-connection mutex serialises Broadcast vs response writes so two
+// goroutines never interleave bytes on the same socket.
+type subscriber struct {
+	writer *bufio.Writer
+	mu     sync.Mutex
+}
+
+func (s *subscriber) writeLine(line []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.writer.Write(line); err != nil {
+		return err
+	}
+	if err := s.writer.WriteByte('\n'); err != nil {
+		return err
+	}
+	return s.writer.Flush()
+}
+
+// NewServer builds an unstarted Server.  Call Run() to bind + accept.
 func NewServer(addr string, h Handler) *Server {
 	return &Server{addr: addr, handler: h}
 }
 
 // shutdownPollInterval is how often a serve loop checks ctx.Err() while
-// blocked on an idle read. Small enough that SIGTERM-to-Go-daemon (with
-// no traffic in flight) returns promptly; large enough not to burn CPU.
+// blocked on an idle read.  Small enough that SIGTERM-to-Go-daemon
+// returns promptly; large enough not to burn CPU.
 const shutdownPollInterval = 500 * time.Millisecond
 
 // Run binds the configured address and accepts connections until ctx
-// is cancelled. Cancellation triggers a graceful shutdown: the
-// listener closes, in-flight serve loops observe ctx.Err() between
-// reads via a read deadline, and Run returns nil.
+// is cancelled.
 func (s *Server) Run(ctx context.Context) error {
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", s.addr)
@@ -86,9 +111,52 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
-// request is the canonical JSON-RPC 2.0 request frame we accept.
-// Unknown fields are tolerated; missing "id" means notification (we
-// ignore client-initiated notifications).
+// Broadcast sends a JSON-RPC notification frame to every subscribed
+// connection.  Best-effort: a write failure on one connection is
+// logged but does not block others, and the failing connection will
+// be removed from the subscriber list when its serve loop returns.
+func (s *Server) Broadcast(method string, params any) {
+	frame, err := json.Marshal(struct {
+		JSONRPC string `json:"jsonrpc"`
+		Method  string `json:"method"`
+		Params  any    `json:"params,omitempty"`
+	}{JSONRPC: "2.0", Method: method, Params: params})
+	if err != nil {
+		log.Printf("rpc.broadcast.marshal_failed method=%s err=%v", method, err)
+		return
+	}
+
+	s.subsMu.Lock()
+	targets := make([]*subscriber, len(s.subs))
+	copy(targets, s.subs)
+	s.subsMu.Unlock()
+
+	for _, sub := range targets {
+		if werr := sub.writeLine(frame); werr != nil {
+			log.Printf("rpc.broadcast.write_error method=%s err=%v", method, werr)
+		}
+	}
+}
+
+func (s *Server) addSubscriber(sub *subscriber) {
+	s.subsMu.Lock()
+	defer s.subsMu.Unlock()
+	s.subs = append(s.subs, sub)
+}
+
+func (s *Server) removeSubscriber(sub *subscriber) {
+	s.subsMu.Lock()
+	defer s.subsMu.Unlock()
+	for i, x := range s.subs {
+		if x == sub {
+			s.subs = append(s.subs[:i], s.subs[i+1:]...)
+			return
+		}
+	}
+}
+
+// request is the canonical JSON-RPC 2.0 request frame.  Missing "id"
+// means notification; we ignore client-initiated notifications.
 type request struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -96,11 +164,9 @@ type request struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
-// successResponse and errorResponse are split structs so that a nil
-// result (e.g. an ack-only method that returns (nil, nil)) marshals to
-// the spec-compliant `"result": null` rather than being omitted via
-// omitempty — JSON-RPC 2.0 requires the result member to be present
-// on success.
+// successResponse and errorResponse are split structs so a nil result
+// from an ack-only method marshals to spec-compliant `"result": null`
+// rather than being omitted via omitempty.
 type successResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
@@ -117,22 +183,24 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 	remote := conn.RemoteAddr().String()
 
+	sub := &subscriber{writer: bufio.NewWriter(conn)}
+	subscribed := false
+	defer func() {
+		if subscribed {
+			s.removeSubscriber(sub)
+		}
+	}()
+
 	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		// Reset the read deadline so an idle connection cannot pin the
-		// goroutine past ctx cancellation.  bufio.Reader returns from its
-		// buffer without hitting the syscall when data is queued, so an
-		// active client sees no behavior change.
 		_ = conn.SetReadDeadline(time.Now().Add(shutdownPollInterval))
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
-				// No data yet; loop to re-check ctx.Err().
 				continue
 			}
 			if !errors.Is(err, io.EOF) {
@@ -143,37 +211,39 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 
 		var req request
 		if err := json.Unmarshal(line, &req); err != nil {
-			// Malformed frame: close the connection. Don't try to
-			// recover — line framing is broken at this point.
 			log.Printf("rpc.frame.bad_json remote=%s err=%v", remote, err)
 			return
 		}
 
 		if len(req.ID) == 0 {
-			// Notification from the client side: ignore. The Python
-			// side talks request/response only; notifications flow
-			// the other direction.
+			// Client-initiated notification: ignore.
 			continue
 		}
 
-		result, rpcErr := s.handler.Dispatch(ctx, req.Method, req.Params)
 		var out []byte
-		if rpcErr != nil {
-			out, err = json.Marshal(errorResponse{JSONRPC: "2.0", ID: req.ID, Error: rpcErr})
+		if req.Method == "subscribe" {
+			if !subscribed {
+				s.addSubscriber(sub)
+				subscribed = true
+			}
+			out, err = json.Marshal(successResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result:  map[string]string{"status": "subscribed"},
+			})
 		} else {
-			out, err = json.Marshal(successResponse{JSONRPC: "2.0", ID: req.ID, Result: result})
+			result, rpcErr := s.handler.Dispatch(ctx, req.Method, req.Params)
+			if rpcErr != nil {
+				out, err = json.Marshal(errorResponse{JSONRPC: "2.0", ID: req.ID, Error: rpcErr})
+			} else {
+				out, err = json.Marshal(successResponse{JSONRPC: "2.0", ID: req.ID, Result: result})
+			}
 		}
 		if err != nil {
 			log.Printf("rpc.response.marshal_failed method=%s err=%v", req.Method, err)
 			return
 		}
-		if _, err := writer.Write(out); err != nil {
-			return
-		}
-		if err := writer.WriteByte('\n'); err != nil {
-			return
-		}
-		if err := writer.Flush(); err != nil {
+		if werr := sub.writeLine(out); werr != nil {
 			return
 		}
 	}
