@@ -2696,7 +2696,7 @@
           "sessions"
         ],
         "summary": "List Events",
-        "description": "List events for a session, paginated by sequence number.\n\nPass the response's ``next_after`` field as ``?after=`` on the next call\nto walk forward through the stream. (The query param was previously\nnamed ``after_seq``, which didn't match the ``next_after`` response\nfield \u2014 clients following the natural roundtrip pattern sent\n``?after=`` and got it silently ignored, causing pagination to loop on\nthe first page. See issue #389.)",
+        "description": "List events for a session, paginated by sequence number.\n\nPass the response's ``next_after`` field as ``?after=`` on the next call\nto walk forward through the stream. (The query param was previously\nnamed ``after_seq``, which didn't match the ``next_after`` response\nfield \u2014 clients following the natural roundtrip pattern sent\n``?after=`` and got it silently ignored, causing pagination to loop on\nthe first page. See issue #389.)\n\n``?after_seq=N`` is accepted as an alias for ``?after=N`` for\nbackwards compatibility with older clients (issue #596).",
         "operationId": "list_session_events",
         "parameters": [
           {
@@ -2716,6 +2716,22 @@
               "type": "integer",
               "default": 0,
               "title": "After"
+            }
+          },
+          {
+            "name": "after_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After Seq"
             }
           },
           {
@@ -2786,6 +2802,74 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ListResponse_Event_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{session_id}/events/{event_id}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Get Event",
+        "description": "Fetch a single event by its id.\n\nReturns 404 when the event does not exist or belongs to a different session.",
+        "operationId": "get_session_event",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
                 }
               }
             }
@@ -10782,6 +10866,23 @@
             "title": "Focal Locked",
             "default": false
           },
+          "last_event_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Event At"
+          },
+          "total_events": {
+            "type": "integer",
+            "title": "Total Events",
+            "default": 0
+          },
           "stop_hook": {
             "anyOf": [
               {
@@ -11886,6 +11987,7 @@
                   "search_events",
                   "cancel",
                   "schedule_wake",
+                  "wake_session",
                   "http_request"
                 ]
               },

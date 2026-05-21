@@ -47,6 +47,8 @@ class Session:
         archived_at (datetime.datetime | None | Unset):
         focal_channel (None | str | Unset):
         focal_locked (bool | Unset):  Default: False.
+        last_event_at (datetime.datetime | None | Unset):
+        total_events (int | Unset):  Default: 0.
         stop_hook (AlwaysContinueStopHook | None | SelfCheckStopHook | TaskCallStopHook | Unset):
     """
 
@@ -69,6 +71,8 @@ class Session:
     archived_at: datetime.datetime | None | Unset = UNSET
     focal_channel: None | str | Unset = UNSET
     focal_locked: bool | Unset = False
+    last_event_at: datetime.datetime | None | Unset = UNSET
+    total_events: int | Unset = 0
     stop_hook: (
         AlwaysContinueStopHook | None | SelfCheckStopHook | TaskCallStopHook | Unset
     ) = UNSET
@@ -145,6 +149,16 @@ class Session:
 
         focal_locked = self.focal_locked
 
+        last_event_at: None | str | Unset
+        if isinstance(self.last_event_at, Unset):
+            last_event_at = UNSET
+        elif isinstance(self.last_event_at, datetime.datetime):
+            last_event_at = self.last_event_at.isoformat()
+        else:
+            last_event_at = self.last_event_at
+
+        total_events = self.total_events
+
         stop_hook: dict[str, Any] | None | Unset
         if isinstance(self.stop_hook, Unset):
             stop_hook = UNSET
@@ -186,6 +200,10 @@ class Session:
             field_dict["focal_channel"] = focal_channel
         if focal_locked is not UNSET:
             field_dict["focal_locked"] = focal_locked
+        if last_event_at is not UNSET:
+            field_dict["last_event_at"] = last_event_at
+        if total_events is not UNSET:
+            field_dict["total_events"] = total_events
         if stop_hook is not UNSET:
             field_dict["stop_hook"] = stop_hook
 
@@ -316,6 +334,25 @@ class Session:
 
         focal_locked = d.pop("focal_locked", UNSET)
 
+        def _parse_last_event_at(data: object) -> datetime.datetime | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                last_event_at_type_0 = isoparse(data)
+
+                return last_event_at_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(datetime.datetime | None | Unset, data)
+
+        last_event_at = _parse_last_event_at(d.pop("last_event_at", UNSET))
+
+        total_events = d.pop("total_events", UNSET)
+
         def _parse_stop_hook(
             data: object,
         ) -> (
@@ -378,6 +415,8 @@ class Session:
             archived_at=archived_at,
             focal_channel=focal_channel,
             focal_locked=focal_locked,
+            last_event_at=last_event_at,
+            total_events=total_events,
             stop_hook=stop_hook,
         )
 
