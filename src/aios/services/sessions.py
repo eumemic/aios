@@ -9,6 +9,7 @@ and inject environment variables at container provisioning time.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from types import EllipsisType
 from typing import Any
 
@@ -137,17 +138,14 @@ async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: s
         session = await queries.get_session(conn, session_id, account_id=account_id)
         vault_ids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
         echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
-        total_events, last_event_at = await queries.get_session_event_stats(
-            conn, session_id, account_id=account_id
-        )
-        return session.model_copy(
-            update={
-                "vault_ids": vault_ids,
-                "resources": echoes,
-                "total_events": total_events,
-                "last_event_at": last_event_at,
-            }
-        )
+        return session.model_copy(update={"vault_ids": vault_ids, "resources": echoes})
+
+
+async def get_session_event_stats(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> tuple[int, datetime | None]:
+    async with pool.acquire() as conn:
+        return await queries.get_session_event_stats(conn, session_id, account_id=account_id)
 
 
 async def get_session_model(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> str:

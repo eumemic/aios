@@ -39,7 +39,9 @@ async def list_(
 
     Cursor pagination via ``after``.
     """
-    items = await service.list_environments(pool, limit=limit, after=after, account_id=account_id)
+    items = await service.list_environments(
+        pool, limit=limit + 1, after=after, account_id=account_id
+    )
     return ListResponse[Environment].paginate(items, limit, cursor=lambda x: x.id)
 
 
