@@ -233,6 +233,27 @@ async def append_event(
         )
 
 
+async def _lock_session_or_raise(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> None:
+    """``SELECT FOR UPDATE`` the session row; raise NotFoundError on miss.
+
+    Called inside an outer ``async with conn.transaction()`` block to
+    serialize concurrent retries on the same session. The presence check
+    is a free side effect — the primary purpose is the row lock.
+    """
+    locked = await conn.fetchval(
+        "SELECT id FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+        session_id,
+        account_id,
+    )
+    if locked is None:
+        raise NotFoundError(
+            f"session {session_id} not found",
+            detail={"session_id": session_id},
+        )
+
+
 async def append_tool_result(
     conn: asyncpg.Connection[Any],
     *,
@@ -262,20 +283,7 @@ async def append_tool_result(
     deferring the wake afterwards.
     """
     async with conn.transaction():
-        # Lock the session row up-front so a concurrent retry serializes
-        # behind us and observes the appended event on its check. The
-        # ``WHERE … RETURNING`` shape gives us the row-presence check
-        # as a free side effect — the primary purpose is the lock.
-        locked = await conn.fetchval(
-            "SELECT id FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
-            session_id,
-            account_id,
-        )
-        if locked is None:
-            raise NotFoundError(
-                f"session {session_id} not found",
-                detail={"session_id": session_id},
-            )
+        await _lock_session_or_raise(conn, session_id, account_id=account_id)
         existing = await queries.find_tool_result_event(
             conn, session_id, tool_call_id, account_id=account_id
         )
@@ -549,16 +557,7 @@ async def confirm_tool_allow(
     silently accept impossible inputs.
     """
     async with pool.acquire() as conn, conn.transaction():
-        locked = await conn.fetchval(
-            "SELECT id FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
-            session_id,
-            account_id,
-        )
-        if locked is None:
-            raise NotFoundError(
-                f"session {session_id} not found",
-                detail={"session_id": session_id},
-            )
+        await _lock_session_or_raise(conn, session_id, account_id=account_id)
         existing = await queries.find_tool_confirmed_event(
             conn, session_id, tool_call_id, account_id=account_id
         )
