@@ -269,11 +269,18 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     lifetime.
     """
     from aios.harness import runtime
-    from aios.sandbox.volumes import ensure_workspace_path
+    from aios.sandbox.volumes import ensure_workspace_path, validate_workspace_path
 
     settings = get_settings()
     account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     raw_path, session_env = await _load_session_provisioning(session_id, account_id=account_id)
+    # Re-validate at the bind-mount boundary: ``validate_workspace_path``
+    # also runs at session-create time, but a symlink swap on any
+    # directory component of ``raw_path`` between then and now would
+    # let ``ensure_workspace_path``'s ``Path.resolve()`` dereference
+    # to an out-of-jail target.  Re-running the check immediately
+    # before the bind-mount closes that TOCTOU window.
+    validate_workspace_path(raw_path, account_id)
     workspace_path = ensure_workspace_path(raw_path)
     env_config = await _load_environment_config(session_id, account_id=account_id)
     memory_echoes = await _materialize_memory_mounts(session_id, account_id=account_id)

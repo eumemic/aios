@@ -26,6 +26,7 @@ from aios.models.sessions import (
     SessionStatus,
     split_resources_by_type,
 )
+from aios.sandbox.volumes import validate_workspace_path
 from aios.services import github_repositories as github_repo_service
 from aios.services import memory_stores as memory_service
 
@@ -94,6 +95,8 @@ async def create_session(
     ``github_repository`` entries (their auth tokens are encrypted on
     insert). Memory-store-only attachments don't need it.
     """
+    if workspace_path is not None:
+        validate_workspace_path(workspace_path, account_id)
     async with pool.acquire() as conn, conn.transaction():
         session = await queries.insert_session(
             conn,
@@ -431,6 +434,8 @@ async def clone_session(
     workspace_path: str | None = None,
 ) -> Session:
     """Clone a session — see :func:`queries.clone_session`."""
+    if workspace_path is not None:
+        validate_workspace_path(workspace_path, account_id)
     async with pool.acquire() as conn:
         session = await queries.clone_session(
             conn, parent_session_id, workspace_path=workspace_path, account_id=account_id
