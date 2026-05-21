@@ -2159,6 +2159,33 @@ async def read_events(
     return [_row_to_event(r) for r in rows]
 
 
+async def get_event(
+    conn: asyncpg.Connection[Any], session_id: str, event_id: str, *, account_id: str
+) -> Event:
+    row = await conn.fetchrow(
+        "SELECT * FROM events WHERE id = $1 AND session_id = $2 AND account_id = $3",
+        event_id,
+        session_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(f"event {event_id} not found", detail={"id": event_id})
+    return _row_to_event(row)
+
+
+async def get_session_event_stats(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> tuple[int, datetime | None]:
+    row = await conn.fetchrow(
+        "SELECT COUNT(*) AS total, MAX(created_at) AS last_at FROM events "
+        "WHERE session_id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    assert row is not None  # COUNT(*) always returns a row
+    return int(row["total"]), row["last_at"]
+
+
 async def read_message_events(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> list[Event]:

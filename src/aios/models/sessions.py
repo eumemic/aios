@@ -195,6 +195,8 @@ class Session(BaseModel):
     archived_at: datetime | None = None
     focal_channel: str | None = None
     focal_locked: bool = False
+    last_event_at: datetime | None = None
+    total_events: int = 0
 
 
 class SessionCloneRequest(BaseModel):

@@ -428,6 +428,8 @@ async def list_events(
     pool: PoolDep,
     account_id: AccountIdDep,
     after: int = 0,
+    # after_seq is the legacy name; prefer after. Both are accepted.
+    after_seq: Annotated[int | None, Query(alias="after_seq")] = None,
     kind: EventKind | None = None,
     # Higher cap than the standard 200: operators paginate through full
     # session event logs via ``aios sessions events`` (one page per
@@ -444,23 +446,50 @@ async def list_events(
     field — clients following the natural roundtrip pattern sent
     ``?after=`` and got it silently ignored, causing pagination to loop on
     the first page. See issue #389.)
+
+    ``?after_seq=N`` is accepted as an alias for ``?after=N`` for
+    backwards compatibility with older clients (issue #596).
     """
+    # Resolve after_seq alias: explicit after_seq overrides after.
+    effective_after = after_seq if after_seq is not None else after
     # Scope check: 404 cross-tenant probes before reading events. The
     # ``read_events`` query also filters by account_id, so this is
     # belt-and-suspenders against a future query that forgets the
     # filter — but ``get_session`` is what gives the caller a clean
     # 404 rather than an empty list for a cross-tenant session id.
     await service.get_session(pool, session_id, account_id=account_id)
-    items = await service.read_events(
+    # Fetch one extra row so we can tell whether more exist without a
+    # separate COUNT query — accurate has_more with no off-by-one.
+    rows = await service.read_events(
         pool,
         session_id,
-        after_seq=after,
+        after_seq=effective_after,
         kind=kind,
-        limit=limit,
+        limit=limit + 1,
         error_only=error_only,
         account_id=account_id,
     )
-    return ListResponse[Event].paginate(items, limit, cursor=lambda x: str(x.seq))
+    has_more = len(rows) > limit
+    items = rows[:limit]
+    return ListResponse[Event](
+        data=items,
+        has_more=has_more,
+        next_after=str(items[-1].seq) if items else None,
+    )
+
+
+@router.get("/{session_id}/events/{event_id}", operation_id="get_session_event")
+async def get_event(
+    session_id: str,
+    event_id: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> Event:
+    """Fetch a single event by its id.
+
+    Returns 404 when the event does not exist or belongs to a different session.
+    """
+    return await service.get_event(pool, session_id, event_id, account_id=account_id)
 
 
 @router.get("/{session_id}/context", operation_id="get_session_context")
