@@ -9,9 +9,12 @@ The file groups three sections:
    ``/runtime/management-call-results``.  The bearer scopes the caller
    to one ``connector`` type; ``connection_id`` rides as a form/query
    field for the routes that operate on a specific connection.
-2. **Operator-facing signal management** (``AuthDep``, operator API key):
-   ``/signal/register``, ``/signal/verify``, ``/signal/profile``.  These
-   block-await the connector's resolution via the
+2. **Operator-facing per-connector management** (``AuthDep``, operator
+   API key):
+   * Signal: ``/signal/register``, ``/signal/verify``, ``/signal/profile``.
+   * WhatsApp: ``/whatsapp/start-pairing``, ``/whatsapp/confirm-pairing``,
+     ``/whatsapp/unpair``.
+   These block-await the connector's resolution via the
    ``connector_result_<call_id>`` LISTEN channel.
 
 Section banners (``# ───`) below mark the boundary.
@@ -733,6 +736,150 @@ async def post_signal_profile(
         pool,
         account_id=account_id,
         method="updateProfile",
+        params=body.model_dump(exclude_none=True),
+        timeout_s=30.0,
+    )
+
+
+# ─── operator-facing whatsapp management routes ───────────────────────
+
+
+class WhatsappStartPairingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_account_id: str
+
+
+class WhatsappStartPairingResponse(BaseModel):
+    external_account_id: str
+    code: str
+
+
+class WhatsappConfirmPairingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_account_id: str
+
+
+class WhatsappConfirmPairingResponse(BaseModel):
+    """``status`` is the terminal pairing outcome; ``jid`` / ``push_name``
+    are populated on success, ``reason`` on error / timeout."""
+
+    external_account_id: str
+    status: Literal["success", "timeout", "error"]
+    jid: str | None = None
+    push_name: str | None = None
+    reason: str | None = None
+
+
+class WhatsappUnpairRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_account_id: str
+
+
+async def _whatsapp_management_call(
+    db_url: str,
+    pool: PoolDep,
+    *,
+    account_id: str,
+    method: str,
+    params: dict[str, Any],
+    timeout_s: float,
+) -> Any:
+    result, is_error = await management_calls.submit_call(
+        db_url,
+        pool,
+        connector="whatsapp",
+        method=method,
+        params=params,
+        timeout_s=timeout_s,
+        account_id=account_id,
+    )
+    if is_error:
+        raise ConnectorCallFailedError(
+            f"whatsapp connector failed {method!r}",
+            detail={"method": method, "connector_error": result},
+        )
+    return result
+
+
+@router.post(
+    "/whatsapp/start-pairing",
+    operation_id="post_connector_whatsapp_start_pairing",
+)
+async def post_whatsapp_start_pairing(
+    body: WhatsappStartPairingRequest,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> WhatsappStartPairingResponse:
+    """Initiate QR pairing.  Returns the first QR code; the operator
+    scans within whatsmeow's QR window (~20 s before rotation, ~100 s
+    total).  The follow-up ``/confirm-pairing`` blocks until the
+    pairing terminates."""
+    result = await _whatsapp_management_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="startPairing",
+        params=body.model_dump(exclude_none=True),
+        timeout_s=30.0,
+    )
+    return WhatsappStartPairingResponse(
+        external_account_id=body.external_account_id,
+        code=str(result.get("code", "")),
+    )
+
+
+@router.post(
+    "/whatsapp/confirm-pairing",
+    operation_id="post_connector_whatsapp_confirm_pairing",
+)
+async def post_whatsapp_confirm_pairing(
+    body: WhatsappConfirmPairingRequest,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> WhatsappConfirmPairingResponse:
+    """Block until pairing terminates.  Long-poll: up to ~180 s server-side
+    so a slow scan doesn't trip the HTTP timeout before the daemon
+    itself reports timeout."""
+    result = await _whatsapp_management_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="confirmPairing",
+        params=body.model_dump(exclude_none=True),
+        timeout_s=240.0,
+    )
+    return WhatsappConfirmPairingResponse(
+        external_account_id=body.external_account_id,
+        status=result.get("status", "error"),
+        jid=result.get("jid"),
+        push_name=result.get("push_name"),
+        reason=result.get("reason"),
+    )
+
+
+@router.post(
+    "/whatsapp/unpair",
+    operation_id="post_connector_whatsapp_unpair",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def post_whatsapp_unpair(
+    body: WhatsappUnpairRequest,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> None:
+    """Log out the WhatsApp device on the server; clears the local
+    sqlstore so the next ``/start-pairing`` provisions a fresh device."""
+    await _whatsapp_management_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="unpair",
         params=body.model_dump(exclude_none=True),
         timeout_s=30.0,
     )

@@ -67,6 +67,7 @@ func main() {
 	defer client.Close()
 
 	handler.RegisterSend(reg, client.SendMessage)
+	handler.RegisterPairing(reg, &clientPairAdapter{client: client})
 
 	// Connect runs in parallel with srv.Run so the listener binds (and
 	// `version` RPC starts answering) while the WhatsApp handshake is
@@ -82,4 +83,34 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("daemon.exit.ok")
+}
+
+// clientPairAdapter bridges wameow.Client to handler.Pairer.  The
+// translation step is a wameow.PairingOutcome → handler.PairingOutcome
+// memcopy; the wameow package can't import handler (would be a
+// dependency cycle once handler grows wameow-typed methods) so the
+// adapter sits in main.
+type clientPairAdapter struct {
+	client *wameow.Client
+}
+
+func (a *clientPairAdapter) StartPairing(ctx context.Context) (string, error) {
+	return a.client.StartPairing(ctx)
+}
+
+func (a *clientPairAdapter) ConfirmPairing(ctx context.Context) (handler.PairingOutcome, error) {
+	outcome, err := a.client.ConfirmPairing(ctx)
+	if err != nil {
+		return handler.PairingOutcome{}, err
+	}
+	return handler.PairingOutcome{
+		Status:   outcome.Status,
+		JID:      outcome.JID,
+		PushName: outcome.PushName,
+		Reason:   outcome.Reason,
+	}, nil
+}
+
+func (a *clientPairAdapter) Unpair(ctx context.Context) error {
+	return a.client.Unpair(ctx)
 }

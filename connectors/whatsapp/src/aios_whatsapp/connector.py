@@ -16,6 +16,7 @@ from aios_connector_http import HttpConnector, iso_from_ms, tool
 
 from .config import Settings
 from .daemon import WhatsappDaemon
+from .management import WhatsappManagementMixin
 from .parse import parse_message
 
 log = structlog.get_logger(__name__)
@@ -27,7 +28,7 @@ class _WhatsappConnectionState:
     daemon: WhatsappDaemon
 
 
-class WhatsappConnector(HttpConnector):
+class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
     connector = "whatsapp"
     state: dict[str, _WhatsappConnectionState]
 
