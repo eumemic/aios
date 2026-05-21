@@ -185,40 +185,16 @@ class TestReleaseIfMountsChanged:
 
 
 class TestLocksDictCleanup:
-    """``SandboxRegistry._locks`` must release its per-session entries on
-    teardown. Pre-fix the dict was only ever populated (by
-    ``_lock_for``) and never popped — every session that ever provisioned
-    a sandbox left a permanent ``asyncio.Lock`` entry, slow unbounded
-    growth across long-running workers handling many sessions. Companion
-    leak class to #451 (runtime per-session caches not cleared on
-    ``release``) and #475 (mcp pool evict strands owner task)."""
-
-    async def test_release_clears_lock(self) -> None:
-        backend = FakeBackend()
-        registry = SandboxRegistry(backend=backend)
-        _seed(registry, "sess_X")
-        # Touch the lock so it lands in ``_locks``.
-        _ = registry._lock_for("sess_X")
-        assert "sess_X" in registry._locks
-
-        await registry.release("sess_X")
-
-        assert "sess_X" not in registry._locks, (
-            f"_locks still contains 'sess_X' after release; got "
-            f"{list(registry._locks)!r}. Slow unbounded growth across the "
-            f"worker's lifetime as sessions are released."
-        )
-
-    async def test_evict_clears_lock(self) -> None:
-        backend = FakeBackend()
-        registry = SandboxRegistry(backend=backend)
-        _seed(registry, "sess_X")
-        _ = registry._lock_for("sess_X")
-        assert "sess_X" in registry._locks
-
-        registry.evict("sess_X")
-
-        assert "sess_X" not in registry._locks
+    """``SandboxRegistry._locks`` is reclaimed at registry teardown
+    (``release_all``) only.  Both ``release()`` and ``evict()``
+    deliberately keep the per-session entry so a concurrent
+    ``get_or_provision`` (or one already in-flight) serializes via
+    the same lock instance — popping while another task is mid-
+    provision would let it run unprotected against the cleanup's
+    broker-secret unregistration, wedging the new sandbox.  One
+    ``asyncio.Lock`` per ever-touched session_id is a bounded leak
+    that the worker's eventual restart clears; the race is
+    unacceptable."""
 
     async def test_release_all_clears_locks(self) -> None:
         backend = FakeBackend()
@@ -232,6 +208,73 @@ class TestLocksDictCleanup:
         await registry.release_all()
 
         assert registry._locks == {}
+
+    async def test_evict_does_not_pop_lock_entry(self) -> None:
+        """``evict()`` must also keep ``_locks[sid]`` so an in-flight
+        ``get_or_provision`` that already acquired the lock isn't left
+        holding an instance that's no longer findable — a third caller
+        arriving via ``_lock_for(sid)`` would then create a new lock
+        and race with the in-flight provision."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        _seed(registry, "sess_X")
+        original_lock = registry._lock_for("sess_X")
+
+        registry.evict("sess_X")
+
+        assert registry._lock_for("sess_X") is original_lock
+
+    async def test_release_does_not_pop_lock_entry_mid_release(self) -> None:
+        """``release()`` must NOT pop ``_locks[sid]`` mid-release.
+
+        ``release_if_mounts_changed`` and the idle reaper both wrap
+        ``release()`` in ``async with self._lock_for(sid)`` so that a
+        concurrent ``get_or_provision`` serializes behind them.  If
+        ``release()`` pops ``_locks[sid]`` while its awaits (proxy
+        stop, ``backend.destroy``) are still in flight, the lock the
+        caller holds is no longer findable in the dict — a concurrent
+        ``get_or_provision`` would call ``_lock_for()``, see no entry,
+        and create a NEW lock.  Both tasks then run unprotected, and
+        ``release()``'s subsequent ``_release_mcp_broker_secret`` call
+        unregisters the new provision's broker secret, wedging the
+        new sandbox with no MCP authentication until the next eviction
+        cycle.
+        """
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        _seed(registry, "sess_X")
+
+        destroy_started = asyncio.Event()
+        destroy_unblock = asyncio.Event()
+
+        async def blocking_destroy(handle: SandboxHandle) -> None:
+            destroy_started.set()
+            await destroy_unblock.wait()
+
+        backend.destroy = blocking_destroy  # type: ignore[method-assign]
+
+        original_lock = registry._lock_for("sess_X")
+
+        async def release_task() -> None:
+            async with registry._lock_for("sess_X"):
+                await registry.release("sess_X")
+
+        task = asyncio.create_task(release_task())
+        try:
+            await destroy_started.wait()
+
+            # While release() is in progress, ``_lock_for`` MUST return
+            # the same lock instance the caller is holding.  Otherwise a
+            # concurrent provision creates a new lock and races.
+            lock_during_release = registry._lock_for("sess_X")
+            assert lock_during_release is original_lock, (
+                "release() popped _locks[sid] mid-release; a concurrent "
+                "get_or_provision would create a new lock and race with "
+                "the still-running release."
+            )
+        finally:
+            destroy_unblock.set()
+            await task
 
 
 class TestEvictReclamation:

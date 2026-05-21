@@ -302,7 +302,20 @@ class SandboxRegistry:
 
         handle = self._handles.pop(session_id, None)
         self._last_used.pop(session_id, None)
-        self._locks.pop(session_id, None)
+        # NOTE: do NOT pop self._locks[session_id] here.  The two
+        # release()-callers (``release_if_mounts_changed`` and the
+        # idle reaper) wrap this call in ``async with
+        # self._lock_for(session_id)``; popping the entry mid-release
+        # would leave the caller holding a lock that's no longer
+        # findable in the dict, so a concurrent ``get_or_provision``
+        # would call ``_lock_for()``, see no entry, create a new
+        # lock, and race with the in-progress release.  The race
+        # leaks: ``_release_mcp_broker_secret`` below would
+        # unregister the new provision's broker secret, wedging the
+        # new sandbox.  The accumulation of one ``asyncio.Lock`` per
+        # ever-touched session is a bounded leak that the worker's
+        # eventual restart clears; the race is unacceptable.
+        # ``release_all()`` clears the whole dict at teardown.
         proxy = self._git_proxies.pop(session_id, None)
 
         if proxy is not None:
@@ -369,7 +382,15 @@ class SandboxRegistry:
         from aios.harness import runtime
 
         self._last_used.pop(session_id, None)
-        self._locks.pop(session_id, None)
+        # NOTE: do NOT pop self._locks[session_id] here either — same
+        # reason as ``release()``.  A concurrent ``get_or_provision``
+        # that is already inside ``async with self._lock_for(sid)``
+        # (awaiting ``_provision``) would have its lock disappear
+        # from the dict; a subsequent third task arriving via
+        # ``_lock_for(sid)`` would see no entry, create a new lock,
+        # and race with the in-flight provision.  ``_release_mcp_broker_secret``
+        # below would then unregister that in-flight provision's
+        # broker secret, wedging the new sandbox.
         if self._handles.pop(session_id, None) is not None:
             log.info("sandbox.evicted", session_id=session_id)
         # Drop the proxy too — a fresh sandbox will get a fresh proxy
