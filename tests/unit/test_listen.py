@@ -50,10 +50,16 @@ def _mk_listener(name: str) -> AbstractAsyncContextManager[Any]:
     ],
 )
 async def test_add_listener_failure_closes_conn(name: str) -> None:
-    """conn.close() must run if add_listener raises during setup."""
+    """conn.terminate() must run if add_listener raises during setup.
+
+    Switched from ``conn.close()`` (async, graceful) to ``conn.terminate()``
+    (sync, non-graceful) in #606: under sse-starlette's anyio scope-cancellation,
+    every subsequent ``await`` re-raises ``CancelledError``, so an async close
+    never reaches Postgres and the backend lingers.  ``terminate()`` is
+    synchronous and always closes the socket.
+    """
     conn = MagicMock()
     conn.add_listener = AsyncMock(side_effect=RuntimeError("simulated network blip"))
-    conn.close = AsyncMock()
 
     with (
         patch("aios.db.listen.asyncpg.connect", AsyncMock(return_value=conn)),
@@ -62,15 +68,14 @@ async def test_add_listener_failure_closes_conn(name: str) -> None:
         async with _mk_listener(name):
             pytest.fail("context manager should not yield when setup raises")
 
-    conn.close.assert_awaited_once()
+    conn.terminate.assert_called_once()
 
 
 async def test_listen_for_events_acquire_subscriber_lock_failure_closes_conn() -> None:
-    """conn.close() must run if acquire_subscriber_lock raises after add_listener."""
+    """conn.terminate() must run if acquire_subscriber_lock raises after add_listener."""
     conn = MagicMock()
     conn.add_listener = AsyncMock()
     conn.remove_listener = AsyncMock()
-    conn.close = AsyncMock()
 
     with (
         patch("aios.db.listen.asyncpg.connect", AsyncMock(return_value=conn)),
@@ -83,4 +88,4 @@ async def test_listen_for_events_acquire_subscriber_lock_failure_closes_conn() -
         async with listen.listen_for_events("postgresql://stub/aios", "sess_X"):
             pytest.fail("context manager should not yield when setup raises")
 
-    conn.close.assert_awaited_once()
+    conn.terminate.assert_called_once()
