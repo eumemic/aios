@@ -44,9 +44,8 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import ConflictError
 from aios.models.agents import ToolSpec
-from aios.services import agents as agents_service
-from aios.services import environments as environments_service
 from aios.services import sessions as sessions_service
+from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
 
@@ -67,32 +66,14 @@ async def _seed_session_with_tool_call(
             account_id,
             f"allow-after-resolved-test-{suffix}",
         )
-    agent = await agents_service.create_agent(
+    _agent, _env, session = await seed_agent_env_session(
         pool,
         account_id=account_id,
-        name=f"allow-after-resolved-agent-{suffix}",
-        model="openrouter/test",
-        system="",
+        prefix=f"allow-after-resolved-{suffix}",
         tools=[ToolSpec(type="bash")],
-        description=None,
-        metadata={},
-        window_min=50_000,
-        window_max=150_000,
-    )
-    env = await environments_service.create_environment(
-        pool, account_id=account_id, name=f"allow-after-resolved-env-{suffix}"
     )
     tool_call_id = f"tc_resolved_{suffix}"
     async with pool.acquire() as conn:
-        session = await queries.insert_session(
-            conn,
-            account_id=account_id,
-            agent_id=agent.id,
-            environment_id=env.id,
-            agent_version=agent.version,
-            title=None,
-            metadata={},
-        )
         await queries.append_event(
             conn,
             account_id=account_id,

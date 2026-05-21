@@ -44,10 +44,9 @@ from aios.harness import runtime
 from aios.harness.task_registry import TaskRegistry
 from aios.harness.tool_dispatch import _execute_tool_async
 from aios.models.agents import ToolSpec
-from aios.services import agents as agents_service
-from aios.services import environments as environments_service
 from aios.services import sessions as sessions_service
 from aios.tools.registry import registry
+from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
 
@@ -111,35 +110,17 @@ async def session_with_pending_tool_call(
                 VALUES ('acc_worker_race', NULL, TRUE, 'worker-deny-race-test')
                 """
             )
-        agent = await agents_service.create_agent(
+        # ``bash`` is a placeholder — the test invokes
+        # ``_execute_tool_async`` directly with a tool_call whose
+        # function.name targets the test-only registered tool, so
+        # the agent's declared tools list is not consulted.
+        _agent, _env, session = await seed_agent_env_session(
             pool,
             account_id="acc_worker_race",
-            name="worker-deny-race-test",
-            model="openrouter/test",
-            system="",
-            # ``bash`` is a placeholder — the test invokes
-            # ``_execute_tool_async`` directly with a tool_call whose
-            # function.name targets the test-only registered tool, so
-            # the agent's declared tools list is not consulted.
+            prefix="worker-deny-race",
             tools=[ToolSpec(type="bash")],
-            description=None,
-            metadata={},
-            window_min=50_000,
-            window_max=150_000,
-        )
-        env = await environments_service.create_environment(
-            pool, account_id="acc_worker_race", name="worker-deny-race-env"
         )
         async with pool.acquire() as conn:
-            session = await queries.insert_session(
-                conn,
-                account_id="acc_worker_race",
-                agent_id=agent.id,
-                environment_id=env.id,
-                agent_version=agent.version,
-                title=None,
-                metadata={},
-            )
             # Assistant message with one tool_call; no tool-role result
             # event yet (the tool is in-flight in the simulated race).
             await queries.append_event(

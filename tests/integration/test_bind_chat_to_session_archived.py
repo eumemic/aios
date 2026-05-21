@@ -27,9 +27,8 @@ import pytest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import ConflictError
-from aios.services import agents as agents_service
 from aios.services import connections as connections_service
-from aios.services import environments as environments_service
+from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
 
@@ -49,31 +48,10 @@ async def archived_session_and_connection(
                 VALUES ('acc_bind_arch', NULL, TRUE, 'bind-archived-test')
                 """
             )
-        agent = await agents_service.create_agent(
-            pool,
-            account_id="acc_bind_arch",
-            name="bind-arch-test",
-            model="openrouter/test",
-            system="",
-            tools=[],
-            description=None,
-            metadata={},
-            window_min=50_000,
-            window_max=150_000,
-        )
-        env = await environments_service.create_environment(
-            pool, account_id="acc_bind_arch", name="bind-arch-env"
+        _agent, _env, session = await seed_agent_env_session(
+            pool, account_id="acc_bind_arch", prefix="bind-arch"
         )
         async with pool.acquire() as conn:
-            session = await queries.insert_session(
-                conn,
-                account_id="acc_bind_arch",
-                agent_id=agent.id,
-                environment_id=env.id,
-                agent_version=agent.version,
-                title=None,
-                metadata={},
-            )
             connection = await queries.insert_connection(
                 conn,
                 connector="echo",

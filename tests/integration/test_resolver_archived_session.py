@@ -38,9 +38,8 @@ import pytest
 
 from aios.db import queries
 from aios.db.pool import create_pool
-from aios.services import agents as agents_service
 from aios.services import connections as connections_service
-from aios.services import environments as environments_service
+from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
 
@@ -60,31 +59,10 @@ async def archived_session_bound_to_connection(
                 VALUES ('acc_resolver_arch', NULL, TRUE, 'resolver-archived-test')
                 """
             )
-        agent = await agents_service.create_agent(
-            pool,
-            account_id="acc_resolver_arch",
-            name="resolver-arch-test",
-            model="openrouter/test",
-            system="",
-            tools=[],
-            description=None,
-            metadata={},
-            window_min=50_000,
-            window_max=150_000,
-        )
-        env = await environments_service.create_environment(
-            pool, account_id="acc_resolver_arch", name="resolver-arch-env"
+        _agent, _env, session = await seed_agent_env_session(
+            pool, account_id="acc_resolver_arch", prefix="resolver-arch"
         )
         async with pool.acquire() as conn:
-            session = await queries.insert_session(
-                conn,
-                account_id="acc_resolver_arch",
-                agent_id=agent.id,
-                environment_id=env.id,
-                agent_version=agent.version,
-                title=None,
-                metadata={},
-            )
             # Insert a connection directly via the DB (the public
             # ``create_connection`` API requires a richer fixture set).
             connection = await queries.insert_connection(
@@ -157,31 +135,10 @@ async def chat_sessions_ledger_with_archived_session(
                 VALUES ('acc_ledger_arch', NULL, TRUE, 'ledger-archived-test')
                 """
             )
-        agent = await agents_service.create_agent(
-            pool,
-            account_id="acc_ledger_arch",
-            name="ledger-arch-test",
-            model="openrouter/test",
-            system="",
-            tools=[],
-            description=None,
-            metadata={},
-            window_min=50_000,
-            window_max=150_000,
-        )
-        env = await environments_service.create_environment(
-            pool, account_id="acc_ledger_arch", name="ledger-arch-env"
+        _agent, _env, session = await seed_agent_env_session(
+            pool, account_id="acc_ledger_arch", prefix="ledger-arch"
         )
         async with pool.acquire() as conn:
-            session = await queries.insert_session(
-                conn,
-                account_id="acc_ledger_arch",
-                agent_id=agent.id,
-                environment_id=env.id,
-                agent_version=agent.version,
-                title=None,
-                metadata={},
-            )
             connection = await queries.insert_connection(
                 conn,
                 connector="echo",
