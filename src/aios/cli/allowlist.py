@@ -103,6 +103,10 @@ NEEDS_CLI_TRACKED: dict[str, str] = {
     # Single-event lookup landed via #598 (events API gaps fix).
     # Tracked: aios#TBD — extend `aios sessions events` with `get <event-id>`.
     "get_session_event": "needs CLI; tracked in aios#TBD (sessions events get)",
+    # ── Stop hooks (followup) ────────────────────────────────────────
+    # Landed via #603 (Stop hooks v1).
+    # Tracked: aios#TBD — `aios sessions stop-hook set/clear`.
+    "set_session_stop_hook": "needs CLI; tracked in aios#TBD (sessions stop-hook)",
 }
 
 

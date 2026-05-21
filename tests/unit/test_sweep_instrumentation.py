@@ -141,7 +141,11 @@ class TestEntrySweepSpan:
         from aios.harness.loop import run_session_step
 
         session = SimpleNamespace(
-            id="sess_x", agent_id="agt_x", agent_version=None, focal_channel=None
+            id="sess_x",
+            agent_id="agt_x",
+            agent_version=None,
+            focal_channel=None,
+            stop_hook=None,
         )
         agent = SimpleNamespace(
             model="openrouter/x",

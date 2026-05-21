@@ -158,10 +158,12 @@ async def compute_step_prelude(
     )
     from aios.harness.loop import (
         _switch_channel_tool_spec,
+        _task_complete_tool_spec,
         discover_session_mcp_tools,
     )
     from aios.harness.memory_stores import augment_with_memory_stores
     from aios.harness.skills import augment_system_prompt
+    from aios.harness.stop_hooks import augment_with_stop_hook, should_inject_task_complete
     from aios.services import skills as skills_service
 
     tools = to_openai_tools(agent.tools)
@@ -169,6 +171,10 @@ async def compute_step_prelude(
     # focal attention; inject it whenever the session has bound channels.
     if channels:
         tools.append(_switch_channel_tool_spec())
+    # task_complete is the only terminator for ``task_call`` Stop hooks —
+    # injected here so the agent doesn't have to declare it explicitly.
+    if should_inject_task_complete(session.stop_hook):
+        tools.append(_task_complete_tool_spec())
 
     mcp_servers_block = ""
     if agent.mcp_servers:
@@ -206,6 +212,7 @@ async def compute_step_prelude(
     system_prompt = augment_with_focal_paradigm(system_prompt, channels)
     system_prompt = join_blocks(system_prompt, instructions_block)
     system_prompt = augment_with_memory_stores(system_prompt, memory_store_echoes)
+    system_prompt = augment_with_stop_hook(system_prompt, session.stop_hook)
 
     return StepPrelude(
         system_prompt=system_prompt,

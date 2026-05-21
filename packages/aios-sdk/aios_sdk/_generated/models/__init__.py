@@ -18,6 +18,7 @@ from .agent_update_litellm_extra_type_0 import AgentUpdateLitellmExtraType0
 from .agent_update_metadata_type_0 import AgentUpdateMetadataType0
 from .agent_version import AgentVersion
 from .agent_version_litellm_extra import AgentVersionLitellmExtra
+from .always_continue_stop_hook import AlwaysContinueStopHook
 from .bind_chat_request import BindChatRequest
 from .body_post_connector_runtime_inbound import BodyPostConnectorRuntimeInbound
 from .body_upload_session_file import BodyUploadSessionFile
@@ -119,6 +120,7 @@ from .runtime_tool_result_request import RuntimeToolResultRequest
 from .runtime_tool_result_request_content_type_1_item import (
     RuntimeToolResultRequestContentType1Item,
 )
+from .self_check_stop_hook import SelfCheckStopHook
 from .session import Session
 from .session_clone_request import SessionCloneRequest
 from .session_create import SessionCreate
@@ -152,6 +154,8 @@ from .skill_version import SkillVersion
 from .skill_version_create import SkillVersionCreate
 from .skill_version_create_files import SkillVersionCreateFiles
 from .skill_version_files import SkillVersionFiles
+from .stop_hook_request import StopHookRequest
+from .task_call_stop_hook import TaskCallStopHook
 from .token_endpoint_auth_basic import TokenEndpointAuthBasic
 from .token_endpoint_auth_none import TokenEndpointAuthNone
 from .token_endpoint_auth_post import TokenEndpointAuthPost
@@ -207,6 +211,7 @@ __all__ = (
     "AgentUpdateMetadataType0",
     "AgentVersion",
     "AgentVersionLitellmExtra",
+    "AlwaysContinueStopHook",
     "BindChatRequest",
     "BodyPostConnectorRuntimeInbound",
     "BodyUploadSessionFile",
@@ -302,6 +307,7 @@ __all__ = (
     "RuntimeTokenIssued",
     "RuntimeToolResultRequest",
     "RuntimeToolResultRequestContentType1Item",
+    "SelfCheckStopHook",
     "Session",
     "SessionCloneRequest",
     "SessionCreate",
@@ -335,6 +341,8 @@ __all__ = (
     "SkillVersionCreate",
     "SkillVersionCreateFiles",
     "SkillVersionFiles",
+    "StopHookRequest",
+    "TaskCallStopHook",
     "TokenEndpointAuthBasic",
     "TokenEndpointAuthNone",
     "TokenEndpointAuthPost",

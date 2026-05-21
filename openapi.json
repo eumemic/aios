@@ -1942,6 +1942,75 @@
         }
       }
     },
+    "/v1/sessions/{session_id}/stop-hook": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Set Stop Hook",
+        "description": "Set or clear the session's pluggable stop hook.\n\nPass ``{\"hook\": null}`` (or omit ``hook``) to clear and return the\nsession to its conversational default.  The harness's next\nconversational stop-point picks up the new hook.",
+        "operationId": "set_session_stop_hook",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StopHookRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/sessions/{session_id}/resources": {
       "get": {
         "tags": [
@@ -7986,6 +8055,31 @@
         "title": "AgentVersion",
         "description": "Read view of a specific agent version from the version history."
       },
+      "AlwaysContinueStopHook": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "always_continue",
+            "title": "Type",
+            "default": "always_continue"
+          },
+          "continuation_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Continuation Message"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AlwaysContinueStopHook",
+        "description": "Stop hook: never honor conversational end-of-turn.\n\nFor maintenance-mode lieutenants whose charter is to watch\nindefinitely.  The session can still be paused by external signals\n(supervisor message, interrupt, budget exhaustion)."
+      },
       "BindChatRequest": {
         "properties": {
           "chat_id": {
@@ -10595,6 +10689,45 @@
         "title": "RuntimeToolResultRequest",
         "description": "Body for ``POST /v1/connectors/runtime/tool-results``.\n\nCarries ``connection_id`` explicitly \u2014 the bearer scopes the\ncaller to a connector *type*, not to one connection, so the body\nhas to name the target connection."
       },
+      "SelfCheckStopHook": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "self_check",
+            "title": "Type",
+            "default": "self_check"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Prompt"
+          },
+          "stop_on": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Stop On"
+          },
+          "continuation_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Continuation Message"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "prompt",
+          "stop_on"
+        ],
+        "title": "SelfCheckStopHook",
+        "description": "Stop hook: allow stop only when the agent's final message starts with ``stop_on``.\n\nThe ``prompt`` is appended to the augmented system prompt so the model\nis aware of the termination criterion throughout the session.  At\neach conversational end-of-turn the harness compares the assistant\nmessage's first non-whitespace word (case-insensitive) to ``stop_on``;\na match allows the idle transition, a mismatch wakes the session\nwith ``continuation_message``."
+      },
       "Session": {
         "properties": {
           "id": {
@@ -10749,6 +10882,35 @@
             "type": "integer",
             "title": "Total Events",
             "default": 0
+          },
+          "stop_hook": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SelfCheckStopHook"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TaskCallStopHook"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AlwaysContinueStopHook"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "type",
+                  "mapping": {
+                    "always_continue": "#/components/schemas/AlwaysContinueStopHook",
+                    "self_check": "#/components/schemas/SelfCheckStopHook",
+                    "task_call": "#/components/schemas/TaskCallStopHook"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Hook"
           }
         },
         "type": "object",
@@ -11600,6 +11762,74 @@
         ],
         "title": "SkillVersionCreate",
         "description": "Request body for ``POST /v1/skills/{skill_id}/versions``.\n\nSame file format as :class:`SkillCreate`. The directory, name, and\ndescription are re-extracted from the new SKILL.md."
+      },
+      "StopHookRequest": {
+        "properties": {
+          "hook": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SelfCheckStopHook"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TaskCallStopHook"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AlwaysContinueStopHook"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "type",
+                  "mapping": {
+                    "always_continue": "#/components/schemas/AlwaysContinueStopHook",
+                    "self_check": "#/components/schemas/SelfCheckStopHook",
+                    "task_call": "#/components/schemas/TaskCallStopHook"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hook"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "StopHookRequest",
+        "description": "Request body for ``POST /v1/sessions/{id}/stop-hook``.\n\n``hook=None`` clears the hook (returns the session to conversational\ndefault)."
+      },
+      "TaskCallStopHook": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "task_call",
+            "title": "Type",
+            "default": "task_call"
+          },
+          "tool_name": {
+            "type": "string",
+            "const": "task_complete",
+            "title": "Tool Name",
+            "default": "task_complete"
+          },
+          "continuation_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Continuation Message"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "TaskCallStopHook",
+        "description": "Stop hook: allow stop only when the agent calls the ``task_complete`` tool.\n\nThe harness injects ``task_complete`` into the tool list and the\nsystem prompt for sessions with this hook.  Conversational\nend-of-turn (final text without tool calls) is treated as\ncontinuation; the agent must explicitly call ``task_complete()``.\n\n``tool_name`` is fixed to ``task_complete`` in v1; the field exists\nso a future v2 can parameterize the terminator without a schema\nbreak."
       },
       "TokenEndpointAuthBasic": {
         "properties": {

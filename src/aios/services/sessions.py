@@ -25,6 +25,7 @@ from aios.models.sessions import (
     SessionResource,
     SessionResourceEcho,
     SessionStatus,
+    StopHookSpec,
     split_resources_by_type,
 )
 from aios.sandbox.volumes import validate_workspace_path
@@ -471,6 +472,30 @@ async def clone_session(
 async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> None:
     async with pool.acquire() as conn:
         await queries.delete_session(conn, session_id, account_id=account_id)
+
+
+async def set_session_stop_hook(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    stop_hook: StopHookSpec | None,
+) -> Session:
+    """Set (or clear when ``None``) the session's pluggable stop hook.
+
+    The harness's next step picks up the new hook on its no-tools branch
+    (see :func:`aios.harness.loop._maybe_apply_stop_hook_continuation`)
+    and, for ``task_call`` hooks, on the ``task_complete`` supersession
+    path before tool dispatch.  The vault / resource enrichment matches
+    :func:`get_session` so the returned read view is identical in shape.
+    """
+    async with pool.acquire() as conn:
+        session = await queries.update_session_stop_hook(
+            conn, session_id, account_id=account_id, stop_hook=stop_hook
+        )
+        vault_ids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
+        echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
+        return session.model_copy(update={"vault_ids": vault_ids, "resources": echoes})
 
 
 async def update_session(

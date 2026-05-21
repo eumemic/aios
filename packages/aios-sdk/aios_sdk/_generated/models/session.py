@@ -12,11 +12,14 @@ from ..models.session_status import SessionStatus
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.always_continue_stop_hook import AlwaysContinueStopHook
     from ..models.github_repository_resource_echo import GithubRepositoryResourceEcho
     from ..models.memory_store_resource_echo import MemoryStoreResourceEcho
+    from ..models.self_check_stop_hook import SelfCheckStopHook
     from ..models.session_metadata import SessionMetadata
     from ..models.session_stop_reason_type_0 import SessionStopReasonType0
     from ..models.session_usage import SessionUsage
+    from ..models.task_call_stop_hook import TaskCallStopHook
 
 
 T = TypeVar("T", bound="Session")
@@ -46,6 +49,7 @@ class Session:
         focal_locked (bool | Unset):  Default: False.
         last_event_at (datetime.datetime | None | Unset):
         total_events (int | Unset):  Default: 0.
+        stop_hook (AlwaysContinueStopHook | None | SelfCheckStopHook | TaskCallStopHook | Unset):
     """
 
     id: str
@@ -69,11 +73,17 @@ class Session:
     focal_locked: bool | Unset = False
     last_event_at: datetime.datetime | None | Unset = UNSET
     total_events: int | Unset = 0
+    stop_hook: (
+        AlwaysContinueStopHook | None | SelfCheckStopHook | TaskCallStopHook | Unset
+    ) = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.always_continue_stop_hook import AlwaysContinueStopHook
         from ..models.memory_store_resource_echo import MemoryStoreResourceEcho
+        from ..models.self_check_stop_hook import SelfCheckStopHook
         from ..models.session_stop_reason_type_0 import SessionStopReasonType0
+        from ..models.task_call_stop_hook import TaskCallStopHook
 
         id = self.id
 
@@ -149,6 +159,18 @@ class Session:
 
         total_events = self.total_events
 
+        stop_hook: dict[str, Any] | None | Unset
+        if isinstance(self.stop_hook, Unset):
+            stop_hook = UNSET
+        elif isinstance(self.stop_hook, SelfCheckStopHook):
+            stop_hook = self.stop_hook.to_dict()
+        elif isinstance(self.stop_hook, TaskCallStopHook):
+            stop_hook = self.stop_hook.to_dict()
+        elif isinstance(self.stop_hook, AlwaysContinueStopHook):
+            stop_hook = self.stop_hook.to_dict()
+        else:
+            stop_hook = self.stop_hook
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -182,18 +204,23 @@ class Session:
             field_dict["last_event_at"] = last_event_at
         if total_events is not UNSET:
             field_dict["total_events"] = total_events
+        if stop_hook is not UNSET:
+            field_dict["stop_hook"] = stop_hook
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.always_continue_stop_hook import AlwaysContinueStopHook
         from ..models.github_repository_resource_echo import (
             GithubRepositoryResourceEcho,
         )
         from ..models.memory_store_resource_echo import MemoryStoreResourceEcho
+        from ..models.self_check_stop_hook import SelfCheckStopHook
         from ..models.session_metadata import SessionMetadata
         from ..models.session_stop_reason_type_0 import SessionStopReasonType0
         from ..models.session_usage import SessionUsage
+        from ..models.task_call_stop_hook import TaskCallStopHook
 
         d = dict(src_dict)
         id = d.pop("id")
@@ -326,6 +353,50 @@ class Session:
 
         total_events = d.pop("total_events", UNSET)
 
+        def _parse_stop_hook(
+            data: object,
+        ) -> (
+            AlwaysContinueStopHook | None | SelfCheckStopHook | TaskCallStopHook | Unset
+        ):
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                stop_hook_type_0_type_0 = SelfCheckStopHook.from_dict(data)
+
+                return stop_hook_type_0_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                stop_hook_type_0_type_1 = TaskCallStopHook.from_dict(data)
+
+                return stop_hook_type_0_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                stop_hook_type_0_type_2 = AlwaysContinueStopHook.from_dict(data)
+
+                return stop_hook_type_0_type_2
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(
+                AlwaysContinueStopHook
+                | None
+                | SelfCheckStopHook
+                | TaskCallStopHook
+                | Unset,
+                data,
+            )
+
+        stop_hook = _parse_stop_hook(d.pop("stop_hook", UNSET))
+
         session = cls(
             id=id,
             agent_id=agent_id,
@@ -346,6 +417,7 @@ class Session:
             focal_locked=focal_locked,
             last_event_at=last_event_at,
             total_events=total_events,
+            stop_hook=stop_hook,
         )
 
         session.additional_properties = d

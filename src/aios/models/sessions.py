@@ -70,6 +70,88 @@ SessionStatus = Literal["pending", "running", "idle", "rescheduling", "errored",
 
 MAX_USER_MESSAGE_CHARS = 1_000_000
 
+# Default continuation messages, used when a hook denies stop without
+# supplying its own ``continuation_message``.  Kept module-level so tests
+# and operators can assert on the exact wire shape.
+DEFAULT_CONTINUATION_MESSAGE = (
+    "[Session is in continuous mode; the conversational end-of-turn does "
+    "not apply here. Continue working on your task.]"
+)
+DEFAULT_SELF_CHECK_CONTINUATION_MESSAGE = (
+    "[Stop condition not yet met; continue working on your task.]"
+)
+
+
+class SelfCheckStopHook(BaseModel):
+    """Stop hook: allow stop only when the agent's final message starts with ``stop_on``.
+
+    The ``prompt`` is appended to the augmented system prompt so the model
+    is aware of the termination criterion throughout the session.  At
+    each conversational end-of-turn the harness compares the assistant
+    message's first non-whitespace word (case-insensitive) to ``stop_on``;
+    a match allows the idle transition, a mismatch wakes the session
+    with ``continuation_message``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["self_check"] = "self_check"
+    prompt: str = Field(min_length=1)
+    stop_on: str = Field(min_length=1)
+    continuation_message: str | None = None
+
+
+class TaskCallStopHook(BaseModel):
+    """Stop hook: allow stop only when the agent calls the ``task_complete`` tool.
+
+    The harness injects ``task_complete`` into the tool list and the
+    system prompt for sessions with this hook.  Conversational
+    end-of-turn (final text without tool calls) is treated as
+    continuation; the agent must explicitly call ``task_complete()``.
+
+    ``tool_name`` is fixed to ``task_complete`` in v1; the field exists
+    so a future v2 can parameterize the terminator without a schema
+    break.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["task_call"] = "task_call"
+    tool_name: Literal["task_complete"] = "task_complete"
+    continuation_message: str | None = None
+
+
+class AlwaysContinueStopHook(BaseModel):
+    """Stop hook: never honor conversational end-of-turn.
+
+    For maintenance-mode lieutenants whose charter is to watch
+    indefinitely.  The session can still be paused by external signals
+    (supervisor message, interrupt, budget exhaustion).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["always_continue"] = "always_continue"
+    continuation_message: str | None = None
+
+
+StopHookSpec = Annotated[
+    SelfCheckStopHook | TaskCallStopHook | AlwaysContinueStopHook,
+    Field(discriminator="type"),
+]
+
+
+class StopHookRequest(BaseModel):
+    """Request body for ``POST /v1/sessions/{id}/stop-hook``.
+
+    ``hook=None`` clears the hook (returns the session to conversational
+    default).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    hook: StopHookSpec | None = None
+
 
 class SessionUsage(BaseModel):
     """Cumulative token usage across all model calls in a session."""
@@ -197,6 +279,7 @@ class Session(BaseModel):
     focal_locked: bool = False
     last_event_at: datetime | None = None
     total_events: int = 0
+    stop_hook: StopHookSpec | None = None
 
 
 class SessionCloneRequest(BaseModel):
