@@ -10,6 +10,7 @@ instructions the caller attached.
 from __future__ import annotations
 
 from aios.errors import MemoryPreconditionFailedError
+from aios.harness._text import join_blocks
 from aios.models.memory_stores import MAX_CONTENT_BYTES, MemoryStoreResourceEcho
 
 # When #332 lands (bash writes durably persisted to the memory version log),
@@ -104,9 +105,4 @@ def build_memory_stores_block(echoes: list[MemoryStoreResourceEcho]) -> str:
 
 def augment_with_memory_stores(base_system: str, echoes: list[MemoryStoreResourceEcho]) -> str:
     """Append the memory-stores block to ``base_system`` if any are attached."""
-    block = build_memory_stores_block(echoes)
-    if not block:
-        return base_system
-    if base_system:
-        return base_system + "\n\n" + block
-    return block
+    return join_blocks(base_system, build_memory_stores_block(echoes))

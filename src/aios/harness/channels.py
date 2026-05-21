@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from aios.harness._text import join_blocks
 from aios.models.events import Event
 
 MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
@@ -135,12 +136,7 @@ def build_focal_paradigm_block(channels: list[str]) -> str:
 
 
 def augment_with_focal_paradigm(base_system: str, channels: list[str]) -> str:
-    block = build_focal_paradigm_block(channels)
-    if not block:
-        return base_system
-    if base_system:
-        return base_system + "\n\n" + block
-    return block
+    return join_blocks(base_system, build_focal_paradigm_block(channels))
 
 
 def max_tail_block_local(channels: list[str]) -> int:

@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from aios.harness._text import join_blocks
 from aios.harness.context import (
     build_messages,
     separate_adjacent_user_messages,
@@ -178,9 +179,7 @@ async def compute_step_prelude(
         mcp_servers_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
     http_servers_block = _build_http_servers_block(agent.http_servers)
     cli_hint = _MCP_CLI_HINT if _has_always_allow_mcp_tool(agent.tools) else ""
-    instructions_block = "\n\n".join(
-        s for s in (cli_hint, mcp_servers_block, http_servers_block) if s
-    )
+    instructions_block = join_blocks(cli_hint, mcp_servers_block, http_servers_block)
 
     # Custom tools declared on connections attached to this session
     # (single_session, per_chat origin, or operator-bound chat).  Each
@@ -205,11 +204,7 @@ async def compute_step_prelude(
     )
     system_prompt = augment_system_prompt(agent.system, skill_versions)
     system_prompt = augment_with_focal_paradigm(system_prompt, channels)
-    if instructions_block:
-        if system_prompt:
-            system_prompt = system_prompt + "\n\n" + instructions_block
-        else:
-            system_prompt = instructions_block
+    system_prompt = join_blocks(system_prompt, instructions_block)
     system_prompt = augment_with_memory_stores(system_prompt, memory_store_echoes)
 
     return StepPrelude(
