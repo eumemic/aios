@@ -181,6 +181,10 @@ async def attach_connection(
     only point where the operator can correct the action that caused
     the misconfiguration.
     """
+    # pool.acquire() yields an autocommit connection; the INSERT commits
+    # before the NOTIFY fires.  Do NOT wrap these in
+    # ``async with conn.transaction()`` — see db/listen.py for why
+    # NOTIFY-after-commit is load-bearing for subscribers.
     async with pool.acquire() as conn:
         session = await queries.get_session(conn, session_id, account_id=account_id)
         if session.archived_at is not None:
@@ -196,10 +200,6 @@ async def attach_connection(
             account_id=account_id,
         )
         connection = await queries.get_connection(conn, connection_id, account_id=account_id)
-    # Second acquire so the NOTIFY fires OUTSIDE the insert's implicit
-    # transaction — subscribers must never see a payload for an
-    # uncommitted row.
-    async with pool.acquire() as conn:
         await queries.notify_connection_change(
             conn,
             connector=connection.connector,
@@ -413,6 +413,9 @@ async def archive_connection(
     live single_session, or from stranding the template a per_chat
     binding spawns from.
     """
+    # pool.acquire() yields an autocommit connection; the archive UPDATE
+    # commits before the NOTIFY fires.  See ``attach_connection`` and
+    # ``services/management_calls.py`` for the same pattern + rationale.
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, connection_id, account_id=account_id)
         if connection.archived_at is not None:
@@ -425,7 +428,6 @@ async def archive_connection(
                 detail={"id": connection_id, "mode": binding.mode},
             )
         archived = await queries.archive_connection(conn, connection_id, account_id=account_id)
-    async with pool.acquire() as conn:
         await queries.notify_connection_change(
             conn,
             connector=archived.connector,
