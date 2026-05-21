@@ -49,6 +49,7 @@ from aios.errors import (
 )
 from aios.models.connections import ConnectorSecrets
 from aios.services import connections as connections_service
+from aios.services import connectors as connectors_service
 from aios.services import inbound as inbound_service
 from aios.services import management_calls
 from aios.services import sessions as sessions_service
@@ -266,10 +267,14 @@ async def put_tools_schema(
     """
     _, auth_connector, account_id, _scope = auth
     _check_runtime_scope(auth_connector, connector)
-    async with pool.acquire() as conn:
-        await queries.update_connector_tools_schema(
-            conn, connector, tools_schema=body.tools, account_id=account_id
-        )
+    # Authorization: connectors are root-owned (the connector type IS
+    # the configuration).  Child tenants only add connections; they
+    # must not be able to publish a tools_schema that propagates into
+    # every other tenant's session prelude.  The check lives in the
+    # service layer so the route stays a thin shim.
+    await connectors_service.update_tools_schema(
+        pool, connector=connector, account_id=account_id, tools_schema=body.tools
+    )
 
 
 @router.get(
