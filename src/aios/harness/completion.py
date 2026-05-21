@@ -345,6 +345,54 @@ def _normalize_usage(raw: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _build_litellm_kwargs(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    api_base: str | None,
+    extra: dict[str, Any] | None,
+    session_id: str | None,
+    stream: bool,
+) -> dict[str, Any]:
+    """Assemble shared kwargs; stream adds ``stream=True`` + ``stream_timeout``."""
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "timeout": _REQUEST_TIMEOUT_S,
+    }
+    if stream:
+        kwargs["stream"] = True
+        kwargs["stream_timeout"] = _STREAM_INTER_CHUNK_TIMEOUT_S
+    if tools:
+        kwargs["tools"] = tools
+    if api_base is not None:
+        kwargs["api_base"] = api_base
+    if extra:
+        kwargs.update(extra)
+    _apply_provider_cache_hints(kwargs, model, session_id)
+    return kwargs
+
+
+def _unpack_litellm_response(
+    obj: Any, *, source: str
+) -> tuple[dict[str, Any], dict[str, int], float | None]:
+    """Extract ``(message, usage, cost)``; ``source`` labels the TypeError on bad message shape."""
+    usage_obj = obj.get("usage")
+    usage = _normalize_usage(
+        usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else usage_obj or {}
+    )
+    cost = _extract_cost(obj)
+    message = obj["choices"][0]["message"]
+    # litellm returns a Message object that supports model_dump()
+    if hasattr(message, "model_dump"):
+        result: dict[str, Any] = message.model_dump()
+        return _normalize_message(result), usage, cost
+    if isinstance(message, dict):
+        return _normalize_message(message), usage, cost
+    raise TypeError(f"unexpected message type from {source}: {type(message).__name__}")
+
+
 async def call_litellm(
     *,
     model: str,
@@ -367,34 +415,17 @@ async def call_litellm(
     session share a cache bucket. See ``_apply_provider_cache_hints``.
     """
     inject_cache_breakpoints(messages, tools, model)
-
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "timeout": _REQUEST_TIMEOUT_S,
-    }
-    if tools:
-        kwargs["tools"] = tools
-    if api_base is not None:
-        kwargs["api_base"] = api_base
-    if extra:
-        kwargs.update(extra)
-    _apply_provider_cache_hints(kwargs, model, session_id)
-
-    response = await litellm.acompletion(**kwargs)
-    usage_obj = response.get("usage")
-    usage = _normalize_usage(
-        usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else usage_obj or {}
+    kwargs = _build_litellm_kwargs(
+        model=model,
+        messages=messages,
+        tools=tools,
+        api_base=api_base,
+        extra=extra,
+        session_id=session_id,
+        stream=False,
     )
-    cost = _extract_cost(response)
-    message = response["choices"][0]["message"]
-    # litellm returns a Message object that supports model_dump()
-    if hasattr(message, "model_dump"):
-        result: dict[str, Any] = message.model_dump()
-        return _normalize_message(result), usage, cost
-    if isinstance(message, dict):
-        return _normalize_message(message), usage, cost
-    raise TypeError(f"unexpected message type from litellm.acompletion: {type(message).__name__}")
+    response = await litellm.acompletion(**kwargs)
+    return _unpack_litellm_response(response, source="litellm.acompletion")
 
 
 async def stream_litellm(
@@ -416,22 +447,15 @@ async def stream_litellm(
     storage as a normal event.
     """
     inject_cache_breakpoints(messages, tools, model)
-
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-        "timeout": _REQUEST_TIMEOUT_S,
-        "stream_timeout": _STREAM_INTER_CHUNK_TIMEOUT_S,
-    }
-    if tools:
-        kwargs["tools"] = tools
-    if api_base is not None:
-        kwargs["api_base"] = api_base
-    if extra:
-        kwargs.update(extra)
-    _apply_provider_cache_hints(kwargs, model, session_id)
-
+    kwargs = _build_litellm_kwargs(
+        model=model,
+        messages=messages,
+        tools=tools,
+        api_base=api_base,
+        extra=extra,
+        session_id=session_id,
+        stream=True,
+    )
     response = await litellm.acompletion(**kwargs)
 
     # Per-chunk inactivity guard. The ``stream_timeout`` kwarg above is
@@ -479,18 +503,7 @@ async def stream_litellm(
             f"{model!r}; the provider closed the connection without emitting "
             f"any data"
         )
-    usage_obj = assembled.get("usage")
-    usage = _normalize_usage(
-        usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else usage_obj or {}
-    )
-    cost = _extract_cost(assembled)
-    message = assembled["choices"][0]["message"]
-    if hasattr(message, "model_dump"):
-        result: dict[str, Any] = message.model_dump()
-        return _normalize_message(result), usage, cost
-    if isinstance(message, dict):
-        return _normalize_message(message), usage, cost
-    raise TypeError(f"unexpected message type from stream_chunk_builder: {type(message).__name__}")
+    return _unpack_litellm_response(assembled, source="stream_chunk_builder")
 
 
 async def _notify_delta(
