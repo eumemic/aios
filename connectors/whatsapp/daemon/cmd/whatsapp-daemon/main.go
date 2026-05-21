@@ -9,14 +9,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"aios.dev/connectors/whatsapp/daemon/internal/handler"
 	"aios.dev/connectors/whatsapp/daemon/internal/rpc"
+	"aios.dev/connectors/whatsapp/daemon/internal/wameow"
 )
 
 // Version is stamped at build time via -ldflags="-X main.Version=...".
@@ -29,6 +29,7 @@ const daemonName = "whatsapp-daemon"
 func main() {
 	listen := flag.String("listen", "127.0.0.1:7584", "TCP address to listen on (host:port)")
 	storeDir := flag.String("store-dir", "", "directory holding whatsmeow's sqlstore + media cache (required)")
+	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -37,8 +38,16 @@ func main() {
 		return
 	}
 
+	level, err := parseLogLevel(*logLevel)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(logger)
+
 	if *storeDir == "" {
-		log.Println("daemon.config.invalid reason=-store-dir is required")
+		logger.Error("daemon.config.invalid", "reason", "-store-dir is required")
 		os.Exit(2)
 	}
 
@@ -47,21 +56,44 @@ func main() {
 
 	reg := handler.NewRegistry()
 	handler.RegisterLifecycle(reg, daemonName, Version)
-	// stubSend is replaced with a whatsmeow-backed closure once the
-	// real WhatsApp client integration lands; until then the daemon
-	// answers sendMessage with deterministic fake data so the wire
-	// boundary can be exercised without an actual pairing.
-	handler.RegisterSend(reg, stubSend)
 
 	srv := rpc.NewServer(*listen, reg)
-	if err := srv.Run(ctx); err != nil {
-		log.Printf("daemon.exit.error err=%v", err)
+
+	client, err := wameow.NewClient(ctx, *storeDir, srv, logger.With("component", "wameow"))
+	if err != nil {
+		logger.Error("wameow.init_failed", "err", err)
 		os.Exit(1)
 	}
-	log.Println("daemon.exit.ok")
+	defer client.Close()
+
+	handler.RegisterSend(reg, client.SendMessage)
+
+	// Connect is best-effort: an unpaired device logs and returns nil
+	// so the daemon stays alive serving RPC (pairing flow lands in a
+	// later PR).  A real connect error is logged but not fatal —
+	// whatsmeow auto-reconnects.
+	if err := client.Connect(ctx); err != nil {
+		logger.Warn("wameow.connect_failed", "err", err)
+	}
+
+	if err := srv.Run(ctx); err != nil {
+		logger.Error("daemon.exit.error", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("daemon.exit.ok")
 }
 
-func stubSend(_ context.Context, jid, text string) (string, int64, error) {
-	log.Printf("daemon.send.stub jid=%s text_len=%d", jid, len(text))
-	return "STUB-" + jid, time.Now().UnixMilli(), nil
+func parseLogLevel(s string) (slog.Level, error) {
+	switch s {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("invalid -log-level=%q (want debug|info|warn|error)", s)
+	}
 }

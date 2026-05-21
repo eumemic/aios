@@ -16,7 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -108,7 +108,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("listen %q: %w", s.addr, err)
 	}
 	s.readyOnce.Do(func() { close(s.ready) })
-	log.Printf("rpc.listening addr=%s", ln.Addr().String())
+	slog.Info("rpc.listening", "addr", ln.Addr().String())
 
 	go func() {
 		<-ctx.Done()
@@ -144,7 +144,7 @@ func (s *Server) Broadcast(method string, params any) {
 		Params  any    `json:"params,omitempty"`
 	}{JSONRPC: "2.0", Method: method, Params: params})
 	if err != nil {
-		log.Printf("rpc.broadcast.marshal_failed method=%s err=%v", method, err)
+		slog.Error("rpc.broadcast.marshal_failed", "method", method, "err", err)
 		return
 	}
 
@@ -155,7 +155,7 @@ func (s *Server) Broadcast(method string, params any) {
 
 	for _, sub := range targets {
 		if werr := sub.writeLine(frame); werr != nil {
-			log.Printf("rpc.broadcast.write_error method=%s err=%v", method, werr)
+			slog.Warn("rpc.broadcast.write_error", "method", method, "err", werr)
 		}
 	}
 }
@@ -231,14 +231,14 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 				continue
 			}
 			if !errors.Is(err, io.EOF) {
-				log.Printf("rpc.conn.read_error remote=%s err=%v", remote, err)
+				slog.Warn("rpc.conn.read_error", "remote", remote, "err", err)
 			}
 			return
 		}
 
 		var req request
 		if err := json.Unmarshal(line, &req); err != nil {
-			log.Printf("rpc.frame.bad_json remote=%s err=%v", remote, err)
+			slog.Warn("rpc.frame.bad_json", "remote", remote, "err", err)
 			return
 		}
 
@@ -267,7 +267,7 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 			}
 		}
 		if err != nil {
-			log.Printf("rpc.response.marshal_failed method=%s err=%v", req.Method, err)
+			slog.Error("rpc.response.marshal_failed", "method", req.Method, "err", err)
 			return
 		}
 		if werr := sub.writeLine(out); werr != nil {
