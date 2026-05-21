@@ -309,6 +309,27 @@ class McpBroker:
             )
         return await agents_service.get_agent(pool, session.agent_id, account_id=account_id)
 
+    async def _load_auth_for(
+        self, session_id: str, server_url: str
+    ) -> tuple[str | None, dict[str, str]]:
+        """Resolve ``(vault_id, headers)`` for an MCP call out to ``server_url``.
+
+        Used by all three tool routes (``_list_tools`` / ``_tool_help`` /
+        ``_invoke``) to look up the session's vault binding for the server
+        and decrypt the auth headers. Deferred-imports
+        :mod:`aios.harness.runtime` and :mod:`aios.services.sessions` to
+        avoid an import cycle at module load.
+        """
+        from aios.harness import runtime
+        from aios.services import sessions as sessions_service
+
+        pool = runtime.require_pool()
+        crypto_box = runtime.require_crypto_box()
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        return await resolve_auth_for_target_url(
+            pool, crypto_box, session_id, server_url, account_id=account_id
+        )
+
     async def _list_servers(self, request: Request) -> Response:
         resolved = await self._resolve_session(request)
         if isinstance(resolved, Response):
@@ -372,15 +393,7 @@ class McpBroker:
         if server is None:
             return _err(404, f"server '{server_name}' has no URL configured")
 
-        from aios.harness import runtime
-        from aios.services import sessions as sessions_service
-
-        pool = runtime.require_pool()
-        crypto_box = runtime.require_crypto_box()
-        account_id = await sessions_service.load_session_account_id(pool, session_id)
-        vault_id, headers = await resolve_auth_for_target_url(
-            pool, crypto_box, session_id, server.url, account_id=account_id
-        )
+        vault_id, headers = await self._load_auth_for(session_id, server.url)
         try:
             tool_dicts, _instructions = await discover_mcp_tools(
                 server.url, vault_id, headers, server_name
@@ -414,15 +427,7 @@ class McpBroker:
             return resolved
         session_id, server, _toolset, tool_name = resolved
 
-        from aios.harness import runtime
-        from aios.services import sessions as sessions_service
-
-        pool = runtime.require_pool()
-        crypto_box = runtime.require_crypto_box()
-        account_id = await sessions_service.load_session_account_id(pool, session_id)
-        vault_id, headers = await resolve_auth_for_target_url(
-            pool, crypto_box, session_id, server.url, account_id=account_id
-        )
+        vault_id, headers = await self._load_auth_for(session_id, server.url)
         try:
             tool_dicts, _ = await discover_mcp_tools(server.url, vault_id, headers, server.name)
         except Exception as exc:
@@ -460,15 +465,7 @@ class McpBroker:
             return resolved
         session_id, server, _toolset, tool_name = resolved
 
-        from aios.harness import runtime
-        from aios.services import sessions as sessions_service
-
-        pool = runtime.require_pool()
-        crypto_box = runtime.require_crypto_box()
-        account_id = await sessions_service.load_session_account_id(pool, session_id)
-        vault_id, headers = await resolve_auth_for_target_url(
-            pool, crypto_box, session_id, server.url, account_id=account_id
-        )
+        vault_id, headers = await self._load_auth_for(session_id, server.url)
         log.info(
             "mcp_broker.invoke",
             session_id=session_id,
