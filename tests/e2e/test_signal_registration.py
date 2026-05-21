@@ -7,16 +7,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import socket
 from collections.abc import AsyncIterator
 from unittest import mock
 
 import pytest
-import uvicorn
 
 from aios_connector_http import HttpConnector, ManagementHandlerError, management_handler
 from tests.conftest import needs_docker
-from tests.helpers.connections import authed_client, issue_runtime_token, wait_for_health
+from tests.e2e.conftest import live_aios_server
+from tests.helpers.connections import authed_client, issue_runtime_token
 
 
 class _FakeSignalConnector(HttpConnector):
@@ -97,53 +96,8 @@ class _FakeSignalConnector(HttpConnector):
 @pytest.fixture
 async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
     """Same uvicorn-in-process fixture pattern the other e2e tests use."""
-    from aios.api.app import create_app
-    from aios.config import get_settings
-    from aios.crypto.vault import CryptoBox
-    from aios.db.pool import create_pool
-
-    settings = get_settings()
-    pool = await create_pool(settings.db_url, min_size=1, max_size=8)
-    app = create_app()
-    app.state.pool = pool
-    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    app.state.db_url = settings.db_url
-    app.state.procrastinate = mock.MagicMock()
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="off")
-    server = uvicorn.Server(config)
-    server.config.load()
-    server.lifespan = server.config.lifespan_class(server.config)
-
-    async def _serve() -> None:
-        sock.setblocking(False)
-        await server.serve(sockets=[sock])
-
-    with (
-        mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock),
-        mock.patch("aios.api.routers.connectors.defer_wake", new_callable=mock.AsyncMock),
-        mock.patch("aios.services.inbound.defer_wake", new_callable=mock.AsyncMock),
-    ):
-        serve_task = asyncio.create_task(_serve())
-        try:
-            url = f"http://127.0.0.1:{port}"
-            await wait_for_health(url)
-            yield url
-        finally:
-            # uvicorn's ``should_exit`` is poll-based (500 ms tick); with an
-            # open SSE stream the poll routinely loses the race and the test
-            # eats the full 5 s wait_for timeout.  ``shutdown()`` triggers
-            # the graceful drain synchronously instead, then cancel the
-            # serve task to free the asyncio bookkeeping.
-            await server.shutdown()
-            serve_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await serve_task
-            await pool.close()
+    async with live_aios_server(pool_max_size=8) as url:
+        yield url
 
 
 async def _run_connector(connector: _FakeSignalConnector) -> None:
