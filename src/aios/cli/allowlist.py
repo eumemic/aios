@@ -99,6 +99,10 @@ NEEDS_CLI_TRACKED: dict[str, str] = {
     # ── Account usage (followup) ─────────────────────────────────────
     # Tracked: aios#TBD — add `aios accounts usage <ID>`.
     "get_account_usage": "needs CLI; tracked in aios#TBD (accounts usage)",
+    # ── Session events (followup) ────────────────────────────────────
+    # Single-event lookup landed via #598 (events API gaps fix).
+    # Tracked: aios#TBD — extend `aios sessions events` with `get <event-id>`.
+    "get_session_event": "needs CLI; tracked in aios#TBD (sessions events get)",
 }
 
 
