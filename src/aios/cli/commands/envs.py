@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from aios.cli.commands._shared import call_single, render_paginated, unwrap
+from aios.cli.coverage import covers
 from aios.cli.files import load_payload
 from aios.cli.output import print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -27,6 +28,7 @@ _COLS = ("id", "name", "archived_at", "updated_at")
 
 
 @app.command("list")
+@covers("list_environments")
 def list_(
     ctx: typer.Context,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
@@ -47,6 +49,7 @@ def list_(
 
 
 @app.command("get")
+@covers("get_environment")
 def get(ctx: typer.Context, env_id: str) -> None:
     def _run() -> None:
         call_single(ctx, get_environment.sync_detailed, env_id=env_id)
@@ -55,6 +58,7 @@ def get(ctx: typer.Context, env_id: str) -> None:
 
 
 @app.command("create", help="Create an environment (EnvironmentCreate shape).")
+@covers("create_environment")
 def create(
     ctx: typer.Context,
     file: Annotated[Path | None, typer.Option("--file")] = None,
@@ -71,6 +75,7 @@ def create(
 
 
 @app.command("update", help="Update an environment (EnvironmentUpdate shape).")
+@covers("update_environment")
 def update(
     ctx: typer.Context,
     env_id: str,
@@ -88,6 +93,7 @@ def update(
 
 
 @app.command("archive", help="Archive an environment (soft-delete, retained for audit).")
+@covers("archive_environment")
 def archive(ctx: typer.Context, env_id: str) -> None:
     def _run() -> None:
         with get_state(ctx).sdk_client() as client:

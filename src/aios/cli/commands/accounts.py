@@ -24,6 +24,7 @@ from typing import Annotated
 import typer
 
 from aios.cli.commands._shared import call_single, render_list, render_single, unwrap
+from aios.cli.coverage import covers
 from aios.cli.output import print_json, print_note
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk._generated.api.accounts import (
@@ -71,6 +72,7 @@ def _envelope[T](items: list[T]) -> dict[str, object]:
 
 
 @app.command("me")
+@covers("get_my_account")
 def me(ctx: typer.Context) -> None:
     """Print the caller's account row."""
 
@@ -81,6 +83,7 @@ def me(ctx: typer.Context) -> None:
 
 
 @app.command("list")
+@covers("list_my_children")
 def list_(ctx: typer.Context) -> None:
     """List direct, non-archived child accounts under the caller."""
 
@@ -94,6 +97,7 @@ def list_(ctx: typer.Context) -> None:
 
 
 @app.command("get")
+@covers("get_account")
 def get(ctx: typer.Context, target_id: str) -> None:
     """Read a caller-or-direct-child account."""
 
@@ -104,6 +108,7 @@ def get(ctx: typer.Context, target_id: str) -> None:
 
 
 @app.command("mint", help="Mint a direct child account and its first API key.")
+@covers("mint_child_account")
 def mint(
     ctx: typer.Context,
     display_name: Annotated[
@@ -136,6 +141,7 @@ def mint(
 
 
 @app.command("archive", help="Archive a direct child account.")
+@covers("archive_account")
 def archive(ctx: typer.Context, target_id: str) -> None:
     def _run() -> None:
         call_single(ctx, archive_account.sync_detailed, target_id=target_id)
@@ -144,6 +150,7 @@ def archive(ctx: typer.Context, target_id: str) -> None:
 
 
 @app.command("update", help="Partial-update a caller-or-direct-child account.")
+@covers("update_account")
 def update(
     ctx: typer.Context,
     target_id: str,
@@ -175,6 +182,7 @@ def update(
     "by-path",
     help="Resolve a slash-separated display-name path under the caller's account.",
 )
+@covers("resolve_account_by_path")
 def by_path(
     ctx: typer.Context,
     path: Annotated[
@@ -192,6 +200,7 @@ def by_path(
     "purge",
     help="Hard-delete an already-archived direct child (compliance / GDPR path).",
 )
+@covers("purge_account")
 def purge(ctx: typer.Context, target_id: str) -> None:
     """Two-step ceremony: ``archive`` first, then ``purge``. Refuses when
     the target isn't archived, has non-archived children, has any
@@ -213,6 +222,7 @@ keys_app = typer.Typer(
 
 
 @keys_app.command("list")
+@covers("list_account_keys")
 def keys_list(ctx: typer.Context, target_id: str) -> None:
     """List key summaries for ``target_id`` (caller or direct child)."""
 
@@ -226,6 +236,7 @@ def keys_list(ctx: typer.Context, target_id: str) -> None:
 
 
 @keys_app.command("mint", help="Mint an additional API key on ``target_id``.")
+@covers("mint_account_key")
 def keys_mint(
     ctx: typer.Context,
     target_id: str,
@@ -248,6 +259,7 @@ def keys_mint(
 
 
 @keys_app.command("revoke")
+@covers("revoke_account_key")
 def keys_revoke(ctx: typer.Context, target_id: str, key_id: str) -> None:
     """Revoke a key. Idempotent — re-revoking is a no-op."""
 

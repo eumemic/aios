@@ -8,6 +8,7 @@ from typing import Annotated, Any
 import typer
 
 from aios.cli.commands._shared import call_single, render_paginated, unwrap
+from aios.cli.coverage import covers
 from aios.cli.files import load_payload, walk_skill_dir
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -29,6 +30,7 @@ _COLS = ("id", "display_title", "latest_version", "updated_at")
 
 
 @app.command("list", help="List skills.")
+@covers("list_skills")
 def list_(
     ctx: typer.Context,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
@@ -49,6 +51,7 @@ def list_(
 
 
 @app.command("get", help="Fetch a skill.")
+@covers("get_skill")
 def get(ctx: typer.Context, skill_id: str) -> None:
     def _run() -> None:
         call_single(ctx, get_skill.sync_detailed, skill_id=skill_id)
@@ -57,6 +60,7 @@ def get(ctx: typer.Context, skill_id: str) -> None:
 
 
 @app.command("create", help="Create a skill from a SKILL.md-rooted directory or a JSON payload.")
+@covers("create_skill")
 def create(
     ctx: typer.Context,
     dir_: Annotated[
@@ -85,6 +89,7 @@ def create(
 
 
 @app.command("archive", help="Archive a skill (soft-delete, retained for audit).")
+@covers("archive_skill")
 def archive(ctx: typer.Context, skill_id: str) -> None:
     def _run() -> None:
         with get_state(ctx).sdk_client() as client:
@@ -95,6 +100,7 @@ def archive(ctx: typer.Context, skill_id: str) -> None:
 
 
 @app.command("versions", help="List a skill's version history.")
+@covers("list_skill_versions")
 def versions(
     ctx: typer.Context,
     skill_id: str,
@@ -118,6 +124,7 @@ def versions(
 
 
 @app.command("version", help="Fetch a specific skill version.")
+@covers("get_skill_version")
 def version(ctx: typer.Context, skill_id: str, version: int) -> None:
     def _run() -> None:
         call_single(ctx, get_skill_version.sync_detailed, skill_id=skill_id, version=version)
@@ -126,6 +133,7 @@ def version(ctx: typer.Context, skill_id: str, version: int) -> None:
 
 
 @app.command("version-create", help="Create a new version of an existing skill.")
+@covers("create_skill_version")
 def version_create(
     ctx: typer.Context,
     skill_id: str,

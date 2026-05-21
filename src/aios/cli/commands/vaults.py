@@ -8,6 +8,7 @@ from typing import Annotated, Any
 import typer
 
 from aios.cli.commands._shared import call_single, render_paginated, unwrap
+from aios.cli.coverage import covers
 from aios.cli.files import load_json_object, load_payload, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -46,6 +47,7 @@ _CRED_COLS = ("id", "display_name", "auth_type", "target_url", "updated_at")
 
 
 @app.command("list", help="List vaults.")
+@covers("list_vaults")
 def list_(
     ctx: typer.Context,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
@@ -66,6 +68,7 @@ def list_(
 
 
 @app.command("get")
+@covers("get_vault")
 def get(ctx: typer.Context, vault_id: str) -> None:
     def _run() -> None:
         call_single(ctx, get_vault.sync_detailed, vault_id=vault_id)
@@ -74,6 +77,7 @@ def get(ctx: typer.Context, vault_id: str) -> None:
 
 
 @app.command("create", help="Create a vault.")
+@covers("create_vault")
 def create(
     ctx: typer.Context,
     display_name: Annotated[
@@ -106,6 +110,7 @@ def create(
 
 
 @app.command("update", help="Update a vault (VaultUpdate shape).")
+@covers("update_vault")
 def update(
     ctx: typer.Context,
     vault_id: str,
@@ -123,6 +128,7 @@ def update(
 
 
 @app.command("archive")
+@covers("archive_vault")
 def archive(ctx: typer.Context, vault_id: str) -> None:
     def _run() -> None:
         call_single(ctx, archive_vault.sync_detailed, vault_id=vault_id)
@@ -134,6 +140,7 @@ def archive(ctx: typer.Context, vault_id: str) -> None:
     "delete",
     help="Hard-delete a vault (irreversible; prefer `archive` instead).",
 )
+@covers("delete_vault")
 def delete(
     ctx: typer.Context,
     vault_id: str,
@@ -161,6 +168,7 @@ def delete(
 
 
 @credentials.command("list")
+@covers("list_vault_credentials")
 def cred_list(
     ctx: typer.Context,
     vault_id: str,
@@ -183,6 +191,7 @@ def cred_list(
 
 
 @credentials.command("get")
+@covers("get_vault_credential")
 def cred_get(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
     def _run() -> None:
         call_single(
@@ -193,6 +202,7 @@ def cred_get(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
 
 
 @credentials.command("create", help="Create a credential in a vault.")
+@covers("create_vault_credential")
 def cred_create(
     ctx: typer.Context,
     vault_id: str,
@@ -222,6 +232,7 @@ def cred_create(
 
 
 @credentials.command("update")
+@covers("update_vault_credential")
 def cred_update(
     ctx: typer.Context,
     vault_id: str,
@@ -246,6 +257,7 @@ def cred_update(
 
 
 @credentials.command("archive")
+@covers("archive_vault_credential")
 def cred_archive(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
     def _run() -> None:
         call_single(
@@ -262,6 +274,7 @@ def cred_archive(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
     "delete",
     help="Hard-delete a credential (irreversible; prefer `archive` instead).",
 )
+@covers("delete_vault_credential")
 def cred_delete(
     ctx: typer.Context,
     vault_id: str,

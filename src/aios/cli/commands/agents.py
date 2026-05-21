@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from aios.cli.commands._shared import call_single, render_paginated, unwrap
+from aios.cli.coverage import covers
 from aios.cli.files import load_payload
 from aios.cli.output import print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -30,6 +31,7 @@ _MAXW = {"name": 32, "model": 40}
 
 
 @app.command("list", help="List agents.")
+@covers("list_agents")
 def list_(
     ctx: typer.Context,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
@@ -53,6 +55,7 @@ def list_(
 
 
 @app.command("get", help="Fetch a single agent by id.")
+@covers("get_agent")
 def get(ctx: typer.Context, agent_id: str) -> None:
     def _run() -> None:
         call_single(ctx, get_agent.sync_detailed, agent_id=agent_id)
@@ -61,6 +64,7 @@ def get(ctx: typer.Context, agent_id: str) -> None:
 
 
 @app.command("create", help="Create an agent from a JSON payload (AgentCreate shape).")
+@covers("create_agent")
 def create(
     ctx: typer.Context,
     file: Annotated[Path | None, typer.Option("--file", help="Read JSON body from a file.")] = None,
@@ -77,6 +81,7 @@ def create(
 
 
 @app.command("update", help="Update an agent (AgentUpdate shape; include 'version').")
+@covers("update_agent")
 def update(
     ctx: typer.Context,
     agent_id: str,
@@ -94,6 +99,7 @@ def update(
 
 
 @app.command("archive", help="Archive an agent (soft-delete, retained for audit).")
+@covers("archive_agent")
 def archive(ctx: typer.Context, agent_id: str) -> None:
     def _run() -> None:
         with get_state(ctx).sdk_client() as client:
@@ -104,6 +110,7 @@ def archive(ctx: typer.Context, agent_id: str) -> None:
 
 
 @app.command("versions", help="List an agent's version history.")
+@covers("list_agent_versions")
 def versions(
     ctx: typer.Context,
     agent_id: str,
@@ -127,6 +134,7 @@ def versions(
 
 
 @app.command("version", help="Fetch a specific agent version.")
+@covers("get_agent_version")
 def version(ctx: typer.Context, agent_id: str, version: int) -> None:
     def _run() -> None:
         call_single(ctx, get_agent_version.sync_detailed, agent_id=agent_id, version=version)

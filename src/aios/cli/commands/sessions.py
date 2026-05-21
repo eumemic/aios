@@ -17,6 +17,7 @@ from aios.cli.commands._shared import (
     render_single,
     with_client,
 )
+from aios.cli.coverage import covers
 from aios.cli.files import load_json_object, load_payload
 from aios.cli.output import cyan, dim, print_error, print_json, print_success
 from aios.cli.profile import compute_profile, profile_to_dict, render_profile
@@ -31,6 +32,7 @@ _SESSION_MAXW = {"title": 32}
 
 
 @app.command("list", help="List sessions.")
+@covers("list_sessions")
 def list_(
     ctx: typer.Context,
     agent_id: Annotated[str | None, typer.Option("--agent-id")] = None,
@@ -60,6 +62,7 @@ def list_(
 
 
 @app.command("get", help="Fetch a session by id.")
+@covers("get_session")
 def get(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:
         client = just_client(ctx)
@@ -71,6 +74,7 @@ def get(ctx: typer.Context, session_id: str) -> None:
 
 
 @app.command("create", help="Create a session (SessionCreate shape).")
+@covers("create_session")
 def create(
     ctx: typer.Context,
     agent_id: Annotated[str | None, typer.Option("--agent", help="Agent id to bind.")] = None,
@@ -108,6 +112,7 @@ def create(
 
 
 @app.command("update", help="Update a session (SessionUpdate shape).")
+@covers("update_session")
 def update(
     ctx: typer.Context,
     session_id: str,
@@ -127,6 +132,7 @@ def update(
 
 
 @app.command("archive", help="Archive a session (status=terminated, soft).")
+@covers("archive_session")
 def archive(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:
         client = just_client(ctx)
@@ -141,6 +147,7 @@ def archive(ctx: typer.Context, session_id: str) -> None:
     "clone",
     help="Clone a session — copy its event log into a new session id.",
 )
+@covers("clone_session")
 def clone(
     ctx: typer.Context,
     session_id: str,
@@ -187,6 +194,7 @@ def clone(
     "delete",
     help="Hard-delete a session (irreversible; prefer `archive` instead).",
 )
+@covers("delete_session")
 def delete(
     ctx: typer.Context,
     session_id: str,
@@ -212,6 +220,7 @@ def delete(
 
 
 @app.command("send", help="Append a user message and wake the session.")
+@covers("send_message")
 def send(
     ctx: typer.Context,
     session_id: str,
@@ -234,6 +243,7 @@ def send(
 
 
 @app.command("interrupt", help="Interrupt any in-flight turn for a session.")
+@covers("interrupt_session")
 def interrupt(
     ctx: typer.Context,
     session_id: str,
@@ -252,6 +262,7 @@ def interrupt(
 
 
 @app.command("events", help="List a session's events (backfill).")
+@covers("list_session_events")
 def events(
     ctx: typer.Context,
     session_id: str,
@@ -319,6 +330,7 @@ def profile(
 
 
 @app.command("stream", help="Tail a session as Server-Sent Events.")
+@covers("stream_events_v1_sessions__session_id__stream_get")
 def stream(
     ctx: typer.Context,
     session_id: str,
@@ -457,6 +469,7 @@ def _compact(value: Any, limit: int) -> str:
 
 
 @app.command("tool-result", help="Submit a custom-tool result for a pending tool call.")
+@covers("submit_tool_result")
 def tool_result(
     ctx: typer.Context,
     session_id: str,
@@ -477,6 +490,7 @@ def tool_result(
 
 
 @app.command("tool-confirm", help="Confirm or deny an always_ask built-in tool call.")
+@covers("submit_tool_confirmation")
 def tool_confirm(
     ctx: typer.Context,
     session_id: str,
