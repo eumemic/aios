@@ -467,26 +467,26 @@ class TestCallMcpToolWithPool:
 
         session.initialize.assert_awaited_once()
 
-    async def test_evicts_and_retries_on_call_tool_failure(
-        self, restore_runtime_pool: None
-    ) -> None:
-        """First ``call_tool`` raises → pool evicts, second succeeds."""
+    async def test_does_not_retry_on_call_tool_failure(self, restore_runtime_pool: None) -> None:
+        """A non-timeout transport failure (broken pipe, TCP reset,
+        HTTP/2 GOAWAY) may have landed after the server already
+        processed the request — retrying would duplicate the side
+        effect, just like the timeout case.  The wrapper evicts and
+        surfaces the error; the model decides whether to retry."""
         from aios.mcp.client import call_mcp_tool
 
-        s_a, s_b = _make_mock_session(), _make_mock_session()
+        s_a = _make_mock_session()
         s_a.call_tool = AsyncMock(side_effect=RuntimeError("broken"))
-        s_b.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False))
 
         runtime.mcp_session_pool = McpSessionPool()
         with (
             patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
-            patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
+            patch("aios.mcp.pool.ClientSession", _session_ctx(s_a)),
         ):
             result = await call_mcp_tool("https://m.example/", "v", {}, "do_thing", {})
 
-        assert result == {"content": ""}
-        assert s_a.initialize.await_count == 1
-        assert s_b.initialize.await_count == 1
+        assert result.get("code") == "transport_error"
+        assert s_a.call_tool.await_count == 1
 
     async def test_does_not_retry_call_tool_on_timeout(
         self, restore_runtime_pool: None, monkeypatch: pytest.MonkeyPatch
