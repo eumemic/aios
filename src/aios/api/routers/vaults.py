@@ -47,7 +47,7 @@ async def list_(
     Cursor pagination: pass ``after`` from a previous response's
     ``next_after`` to get the next page.
     """
-    items = await service.list_vaults(pool, limit=limit, after=after, account_id=account_id)
+    items = await service.list_vaults(pool, limit=limit + 1, after=after, account_id=account_id)
     return ListResponse[Vault].paginate(items, limit, cursor=lambda x: x.id)
 
 
@@ -147,7 +147,7 @@ async def list_credentials(
     only metadata (display name, target_url, auth_type, timestamps).
     """
     items = await service.list_vault_credentials(
-        pool, vault_id, limit=limit, after=after, account_id=account_id
+        pool, vault_id, limit=limit + 1, after=after, account_id=account_id
     )
     return ListResponse[VaultCredential].paginate(items, limit, cursor=lambda x: x.id)
 

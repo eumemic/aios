@@ -43,7 +43,7 @@ async def list_(
 
     Cursor pagination via ``after``.
     """
-    items = await service.list_skills(pool, limit=limit, after=after, account_id=account_id)
+    items = await service.list_skills(pool, limit=limit + 1, after=after, account_id=account_id)
     return ListResponse[Skill].paginate(items, limit, cursor=lambda x: x.id)
 
 
@@ -102,7 +102,7 @@ async def list_versions(
     complete file-bundle snapshot at the time it was created.
     """
     items = await service.list_skill_versions(
-        pool, skill_id, limit=limit, after=after, account_id=account_id
+        pool, skill_id, limit=limit + 1, after=after, account_id=account_id
     )
     return ListResponse[SkillVersion].paginate(items, limit, cursor=lambda x: str(x.version))
 

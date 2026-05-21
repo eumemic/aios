@@ -63,7 +63,7 @@ async def list_stores(
     items = await service.list_stores(
         pool,
         include_archived=include_archived,
-        limit=limit,
+        limit=limit + 1,
         after=after,
         account_id=account_id,
     )

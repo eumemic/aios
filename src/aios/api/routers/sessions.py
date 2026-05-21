@@ -105,7 +105,7 @@ async def list_(
         pool,
         agent_id=agent_id,
         status=status_filter,
-        limit=limit,
+        limit=limit + 1,
         after=after,
         account_id=account_id,
     )
@@ -114,7 +114,11 @@ async def list_(
 
 @router.get("/{session_id}", operation_id="get_session")
 async def get(session_id: str, pool: PoolDep, account_id: AccountIdDep) -> Session:
-    return await service.get_session(pool, session_id, account_id=account_id)
+    session = await service.get_session(pool, session_id, account_id=account_id)
+    total_events, last_event_at = await service.get_session_event_stats(
+        pool, session_id, account_id=account_id
+    )
+    return session.model_copy(update={"total_events": total_events, "last_event_at": last_event_at})
 
 
 @router.put("/{session_id}", operation_id="update_session")
@@ -429,7 +433,7 @@ async def list_events(
     account_id: AccountIdDep,
     after: int = 0,
     # after_seq is the legacy name; prefer after. Both are accepted.
-    after_seq: Annotated[int | None, Query(alias="after_seq")] = None,
+    after_seq: int | None = None,
     kind: EventKind | None = None,
     # Higher cap than the standard 200: operators paginate through full
     # session event logs via ``aios sessions events`` (one page per
@@ -469,13 +473,7 @@ async def list_events(
         error_only=error_only,
         account_id=account_id,
     )
-    has_more = len(rows) > limit
-    items = rows[:limit]
-    return ListResponse[Event](
-        data=items,
-        has_more=has_more,
-        next_after=str(items[-1].seq) if items else None,
-    )
+    return ListResponse[Event].paginate(rows, limit, cursor=lambda x: str(x.seq))
 
 
 @router.get("/{session_id}/events/{event_id}", operation_id="get_session_event")

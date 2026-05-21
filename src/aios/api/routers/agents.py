@@ -54,7 +54,7 @@ async def list_(
     exactly.
     """
     items = await service.list_agents(
-        pool, limit=limit, after=after, name=name, account_id=account_id
+        pool, limit=limit + 1, after=after, name=name, account_id=account_id
     )
     return ListResponse[Agent].paginate(items, limit, cursor=lambda x: x.id)
 
@@ -122,7 +122,7 @@ async def list_versions(
     complete snapshot of the agent's config at the time it was created.
     """
     items = await service.list_agent_versions(
-        pool, agent_id, limit=limit, after=after, account_id=account_id
+        pool, agent_id, limit=limit + 1, after=after, account_id=account_id
     )
     return ListResponse[AgentVersion].paginate(items, limit, cursor=lambda x: str(x.version))
 
