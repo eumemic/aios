@@ -112,6 +112,10 @@ def _supports_anthropic_cache_control(model: str) -> bool:
     return False
 
 
+_OPENAI_NATIVE_PROVIDERS = frozenset({"openai", "azure"})
+_OPENAI_PROXY_PROVIDERS = frozenset({"openrouter"})
+
+
 @cache
 def _supports_openai_prompt_cache_key(model: str) -> bool:
     """True when ``model`` accepts OpenAI's ``prompt_cache_key`` field.
@@ -120,9 +124,15 @@ def _supports_openai_prompt_cache_key(model: str) -> bool:
     explicit ``prompt_cache_key`` for cache eligibility. Anthropic uses
     ``cache_control`` content-block markers instead, so the two cache
     channels are mutually exclusive — the gate here mirrors
-    :func:`_supports_anthropic_cache_control`, returning True for the
-    openai provider (and only the openai provider) so the two paths
-    can't accidentally both fire.
+    :func:`_supports_anthropic_cache_control`, scoped to the OpenAI
+    side: native OpenAI (direct ``openai`` plus Azure OpenAI, which is
+    the same Responses / Chat Completions API on Microsoft infra and
+    [documents the field](https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/prompt-caching)
+    natively) plus OpenAI-backed routes through OpenRouter (which
+    forwards unknown ``extra_body`` params to the backing provider).
+    Non-OpenAI models on OpenRouter stay gated out — the field is
+    silently dropped by OpenRouter for non-OpenAI backends and could
+    trip parameter validation on some adapter versions.
 
     Unknown model strings return False (safe no-op) — same posture as
     the Anthropic gate.
@@ -131,10 +141,15 @@ def _supports_openai_prompt_cache_key(model: str) -> bool:
     function of the model string, low cardinality.
     """
     try:
-        _, provider, _, _ = litellm.get_llm_provider(model)
+        model_name, provider, _, _ = litellm.get_llm_provider(model)
     except Exception:
         return False
-    return bool(provider == "openai")
+    if provider in _OPENAI_NATIVE_PROVIDERS:
+        return True
+    if provider in _OPENAI_PROXY_PROVIDERS:
+        lower = (model_name or model).lower()
+        return lower.startswith("openai/")
+    return False
 
 
 def _apply_provider_cache_hints(

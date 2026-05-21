@@ -123,6 +123,103 @@ async def test_stream_litellm_openai_path_sends_prompt_cache_key(
 
 
 @pytest.mark.asyncio
+async def test_call_litellm_openrouter_openai_route_sends_prompt_cache_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter routes that target an OpenAI backend
+    (``openrouter/openai/...``) must carry ``prompt_cache_key``.
+
+    OpenRouter forwards unknown params via ``extra_body`` to the
+    backing provider; for an OpenAI backend the cache key threads
+    through and OpenAI groups requests by it.  Pre-fix the provider
+    gate accepted only literal ``provider == "openai"``, so OpenRouter
+    routes dropped the key silently — reproducing the low-cache-hit
+    symptom PR #559 / #556 set out to fix, just for OpenRouter
+    users.
+    """
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(**kwargs: object) -> _DictResponse:
+        captured.update(kwargs)
+        return _ok_response()
+
+    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+
+    await completion.call_litellm(
+        model="openrouter/openai/gpt-4o",
+        messages=[{"role": "user", "content": "hi"}],
+        session_id="sess_openrouter",
+    )
+
+    extra_body = captured.get("extra_body")
+    assert isinstance(extra_body, dict)
+    assert extra_body.get("prompt_cache_key") == "sess_openrouter"
+
+
+@pytest.mark.asyncio
+async def test_call_litellm_azure_path_sends_prompt_cache_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Azure OpenAI is the same Responses / Chat Completions API on
+    Microsoft infra and natively supports ``prompt_cache_key``.
+
+    Pre-fix the provider gate accepted only literal ``provider ==
+    "openai"``, so Azure-deployed aios users dropped the key silently
+    — same low-cache-hit symptom as the direct-OpenAI and
+    OpenRouter-OpenAI cases."""
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(**kwargs: object) -> _DictResponse:
+        captured.update(kwargs)
+        return _ok_response()
+
+    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+
+    await completion.call_litellm(
+        model="azure/gpt-4o",
+        messages=[{"role": "user", "content": "hi"}],
+        session_id="sess_azure",
+    )
+
+    extra_body = captured.get("extra_body")
+    assert isinstance(extra_body, dict)
+    assert extra_body.get("prompt_cache_key") == "sess_azure"
+
+
+@pytest.mark.asyncio
+async def test_call_litellm_openrouter_non_openai_route_omits_prompt_cache_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter routes that target a non-OpenAI backend must NOT
+    carry ``prompt_cache_key``.
+
+    Adding the field to an Anthropic / Llama / Mistral / Gemini
+    backend either gets silently discarded or trips parameter
+    validation, depending on the provider's adapter version.  The
+    gate stays scoped to the openai-backend subset of OpenRouter
+    routes."""
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(**kwargs: object) -> _DictResponse:
+        captured.update(kwargs)
+        return _ok_response()
+
+    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+
+    await completion.call_litellm(
+        model="openrouter/anthropic/claude-3-5-sonnet",
+        messages=[{"role": "user", "content": "hi"}],
+        session_id="sess_openrouter_claude",
+    )
+
+    assert "prompt_cache_key" not in captured
+    extra_body = captured.get("extra_body")
+    if extra_body is not None:
+        assert isinstance(extra_body, dict)
+        assert extra_body.get("prompt_cache_key") is None
+
+
+@pytest.mark.asyncio
 async def test_call_litellm_anthropic_path_omits_prompt_cache_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
