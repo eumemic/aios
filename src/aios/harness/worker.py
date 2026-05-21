@@ -33,7 +33,6 @@ import asyncpg
 import aios.tools  # noqa: F401  — side-effect: register built-in tools
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
-from aios.db import queries
 from aios.db.listen import listen_for_session_interrupts
 from aios.db.pool import create_pool, normalize_dsn
 from aios.harness import runtime
@@ -165,10 +164,8 @@ async def worker_main() -> None:
                 repaired_ghosts=sweep.repaired_ghosts,
             )
 
-        # Reap orphaned sandbox containers.
-        async with pool.acquire() as conn:
-            active_session_ids = await queries.list_running_session_ids(conn)
-        reaped = await sandbox_registry.reap_orphans(active_session_ids)
+        # Reap orphaned sandbox containers from prior worker runs.
+        reaped = await sandbox_registry.reap_orphans()
         if reaped:
             log.info("worker.reaped_orphan_containers", count=reaped)
 

@@ -34,8 +34,10 @@ class ToolSpec:
 
     ``permission`` controls execution policy for built-in tools:
     ``None`` or ``"always_allow"`` executes immediately (current default);
-    ``"always_ask"`` idles the session with ``requires_action`` until the
-    client confirms or denies.
+    ``"always_ask"`` leaves the call unresolved in the event log until
+    the client confirms or denies via
+    ``POST /sessions/:id/tool-confirmations``. Pending calls surface on
+    ``Session.awaiting`` so clients can list what they need to act on.
 
         Attributes:
             type_ (ToolSpecTypeType0 | ToolSpecTypeType1):

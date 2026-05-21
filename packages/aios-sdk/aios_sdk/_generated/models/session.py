@@ -12,6 +12,7 @@ from ..models.session_status import SessionStatus
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.awaiting_tool_call import AwaitingToolCall
     from ..models.github_repository_resource_echo import GithubRepositoryResourceEcho
     from ..models.memory_store_resource_echo import MemoryStoreResourceEcho
     from ..models.session_metadata import SessionMetadata
@@ -26,26 +27,32 @@ T = TypeVar("T", bound="Session")
 class Session:
     """Read view of a session. Internal-only columns are not exposed.
 
-    Attributes:
-        id (str):
-        agent_id (str):
-        environment_id (str):
-        agent_version (int | None):
-        title (None | str):
-        metadata (SessionMetadata):
-        status (SessionStatus):
-        stop_reason (None | SessionStopReasonType0):
-        last_event_seq (int):
-        created_at (datetime.datetime):
-        updated_at (datetime.datetime):
-        vault_ids (list[str] | Unset):
-        usage (SessionUsage | Unset): Cumulative token usage across all model calls in a session.
-        resources (list[GithubRepositoryResourceEcho | MemoryStoreResourceEcho] | Unset):
-        archived_at (datetime.datetime | None | Unset):
-        focal_channel (None | str | Unset):
-        focal_locked (bool | Unset):  Default: False.
-        last_event_at (datetime.datetime | None | Unset):
-        total_events (int | Unset):  Default: 0.
+    ``stop_reason`` records why the most recent step ended. Possible
+    ``type`` values: ``"end_turn"``, ``"interrupt"``, ``"rescheduling"``,
+    ``"error"``. ``awaiting`` lists tool calls the session is blocked
+    on (derived per read from the event log + agent tool specs).
+
+        Attributes:
+            id (str):
+            agent_id (str):
+            environment_id (str):
+            agent_version (int | None):
+            title (None | str):
+            metadata (SessionMetadata):
+            status (SessionStatus):
+            stop_reason (None | SessionStopReasonType0):
+            last_event_seq (int):
+            created_at (datetime.datetime):
+            updated_at (datetime.datetime):
+            awaiting (list[AwaitingToolCall] | Unset):
+            vault_ids (list[str] | Unset):
+            usage (SessionUsage | Unset): Cumulative token usage across all model calls in a session.
+            resources (list[GithubRepositoryResourceEcho | MemoryStoreResourceEcho] | Unset):
+            archived_at (datetime.datetime | None | Unset):
+            focal_channel (None | str | Unset):
+            focal_locked (bool | Unset):  Default: False.
+            last_event_at (datetime.datetime | None | Unset):
+            total_events (int | Unset):  Default: 0.
     """
 
     id: str
@@ -59,6 +66,7 @@ class Session:
     last_event_seq: int
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    awaiting: list[AwaitingToolCall] | Unset = UNSET
     vault_ids: list[str] | Unset = UNSET
     usage: SessionUsage | Unset = UNSET
     resources: list[GithubRepositoryResourceEcho | MemoryStoreResourceEcho] | Unset = (
@@ -102,6 +110,13 @@ class Session:
         created_at = self.created_at.isoformat()
 
         updated_at = self.updated_at.isoformat()
+
+        awaiting: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.awaiting, Unset):
+            awaiting = []
+            for awaiting_item_data in self.awaiting:
+                awaiting_item = awaiting_item_data.to_dict()
+                awaiting.append(awaiting_item)
 
         vault_ids: list[str] | Unset = UNSET
         if not isinstance(self.vault_ids, Unset):
@@ -166,6 +181,8 @@ class Session:
                 "updated_at": updated_at,
             }
         )
+        if awaiting is not UNSET:
+            field_dict["awaiting"] = awaiting
         if vault_ids is not UNSET:
             field_dict["vault_ids"] = vault_ids
         if usage is not UNSET:
@@ -187,6 +204,7 @@ class Session:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.awaiting_tool_call import AwaitingToolCall
         from ..models.github_repository_resource_echo import (
             GithubRepositoryResourceEcho,
         )
@@ -240,6 +258,15 @@ class Session:
         created_at = isoparse(d.pop("created_at"))
 
         updated_at = isoparse(d.pop("updated_at"))
+
+        _awaiting = d.pop("awaiting", UNSET)
+        awaiting: list[AwaitingToolCall] | Unset = UNSET
+        if _awaiting is not UNSET:
+            awaiting = []
+            for awaiting_item_data in _awaiting:
+                awaiting_item = AwaitingToolCall.from_dict(awaiting_item_data)
+
+                awaiting.append(awaiting_item)
 
         vault_ids = cast(list[str], d.pop("vault_ids", UNSET))
 
@@ -338,6 +365,7 @@ class Session:
             last_event_seq=last_event_seq,
             created_at=created_at,
             updated_at=updated_at,
+            awaiting=awaiting,
             vault_ids=vault_ids,
             usage=usage,
             resources=resources,

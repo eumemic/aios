@@ -1064,8 +1064,8 @@ class TestSessionVersionBinding:
 
 @needs_docker
 class TestCustomTools:
-    async def test_custom_tool_idles_with_requires_action(self, harness: Harness) -> None:
-        """When the model calls a custom tool, the session idles with requires_action."""
+    async def test_custom_tool_idles_with_awaiting(self, harness: Harness) -> None:
+        """When the model calls a custom tool, the call appears in ``session.awaiting``."""
         account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.models.agents import ToolSpec
         from aios.services import agents as agents_service
@@ -1126,12 +1126,12 @@ class TestCustomTools:
         # Run one step — model calls custom tool
         await harness.run_step(session.id)
 
-        # Session should be idle with requires_action
+        # Session ends turn cleanly; custom tool is observable via awaiting
         s = await harness.session(session.id)
         assert s.status == "idle"
-        assert s.stop_reason is not None
-        assert s.stop_reason["type"] == "requires_action"
-        assert "call_w1" in s.stop_reason["event_ids"]
+        assert s.stop_reason == {"type": "end_turn"}
+        assert {a.tool_call_id for a in s.awaiting} == {"call_w1"}
+        assert s.awaiting[0].kind == "custom"
 
     async def test_custom_tool_result_resumes_session(self, harness: Harness) -> None:
         """Submitting a custom tool result via the API resumes the session."""
@@ -1286,11 +1286,11 @@ class TestCustomTools:
         await harness.run_step(session.id)
         await harness.wait_for_tools(session.id)
 
-        # Session should be idle with requires_action for the custom tool
+        # Custom tool is awaiting external execution; built-in already completed
         s = await harness.session(session.id)
         assert s.status == "idle"
-        assert s.stop_reason is not None
-        assert s.stop_reason["type"] == "requires_action"
+        assert s.stop_reason == {"type": "end_turn"}
+        assert {a.tool_call_id for a in s.awaiting} == {"call_lookup"}
 
         # The built-in tool (echo) should have already completed
         events = await harness.events(session.id)
@@ -1340,8 +1340,8 @@ class TestPermissionPolicies:
         old = registry.get(name)
         registry._tools[name] = replace(old, handler=handler)
 
-    async def test_always_ask_idles_with_requires_action(self, harness: Harness) -> None:
-        """Model calls an always_ask tool → session idles with requires_action."""
+    async def test_always_ask_idles_with_awaiting_confirm(self, harness: Harness) -> None:
+        """Model calls an always_ask tool → call appears in ``session.awaiting`` with builtin kind."""
         from aios.models.agents import ToolSpec
 
         async def fake_glob(
@@ -1366,10 +1366,9 @@ class TestPermissionPolicies:
 
         s = await harness.session(session.id)
         assert s.status == "idle"
-        assert s.stop_reason is not None
-        assert s.stop_reason["type"] == "requires_action"
-        assert "call_ask1" in s.stop_reason["event_ids"]
-        assert "call_ask1" in s.stop_reason.get("confirmations", [])
+        assert s.stop_reason == {"type": "end_turn"}
+        assert {a.tool_call_id for a in s.awaiting} == {"call_ask1"}
+        assert s.awaiting[0].kind == "builtin"
 
     async def test_always_ask_allow_executes_tool(self, harness: Harness) -> None:
         """Confirm allow → tool executes → model sees result → responds."""
@@ -1395,11 +1394,11 @@ class TestPermissionPolicies:
             tool_specs=[ToolSpec(type="glob", permission="always_ask")],
         )
 
-        # Step 1: model calls always_ask tool → session idles
+        # Step 1: model calls always_ask tool → call appears in awaiting
         await harness.run_step(session.id)
         s = await harness.session(session.id)
-        assert s.stop_reason is not None
-        assert s.stop_reason["type"] == "requires_action"
+        assert s.stop_reason == {"type": "end_turn"}
+        assert {a.tool_call_id for a in s.awaiting} == {"call_allow1"}
 
         # Confirm allow
         await harness.confirm_tool(session.id, "call_allow1", "allow")
@@ -1507,13 +1506,12 @@ class TestPermissionPolicies:
         await harness.run_step(session.id)
         await harness.wait_for_tools(session.id)
 
-        # glob should have executed; session idles for grep
+        # glob should have executed; grep is awaiting confirmation
         s = await harness.session(session.id)
         assert s.status == "idle"
-        assert s.stop_reason is not None
-        assert s.stop_reason["type"] == "requires_action"
-        assert "call_slow" in s.stop_reason["event_ids"]
-        assert "call_slow" in s.stop_reason.get("confirmations", [])
+        assert s.stop_reason == {"type": "end_turn"}
+        assert {a.tool_call_id for a in s.awaiting} == {"call_slow"}
+        assert s.awaiting[0].kind == "builtin"
 
         # glob result should already be in the log
         events = await harness.events(session.id)

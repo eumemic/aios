@@ -498,29 +498,24 @@ async def get_context(
 ) -> ContextResponse:
     """Return the chat-completions payload the worker would send next.
 
-    Dry-run preview for debugging prompt construction.  Reuses the exact
-    composer the worker's step function uses (:func:`compose_step_context`)
-    so the endpoint's output is byte-identical to what the next model
-    call would see — no divergence.  Side effects (skill provisioning,
-    session-status bumps, event appends) are omitted; the endpoint is
-    read-only.
+    Dry-run preview for debugging prompt construction. Reuses the exact
+    composer the worker's step function uses (:func:`compose_step_context`).
+    Side effects (skill provisioning, session-status bumps, event
+    appends) are omitted; the endpoint is read-only.
+
+    One known divergence from the worker's output: unresolved tool_calls
+    that the worker is currently executing render as ``_PENDING_EXTERNAL``
+    here (the API process has no view into the worker's task_registry).
+    The worker would render them as ``_PENDING_BACKGROUND``. Custom and
+    awaiting-confirm calls render identically on both sides.
     """
     from aios.harness.step_context import compose_step_context, compute_step_prelude
     from aios.harness.tokens import approx_tokens
-    from aios.models.agents import Agent, AgentVersion
     from aios.services import agents as agents_service
     from aios.services.channels import list_session_channels
 
-    session = await service.get_session(pool, session_id, account_id=account_id)
-
-    agent: Agent | AgentVersion
-    if session.agent_version is not None:
-        agent = await agents_service.get_agent_version(
-            pool, session.agent_id, session.agent_version, account_id=account_id
-        )
-    else:
-        agent = await agents_service.get_agent(pool, session.agent_id, account_id=account_id)
-
+    session = await service.get_session_basic(pool, session_id, account_id=account_id)
+    agent = await agents_service.load_for_session(pool, session, account_id=account_id)
     channels = await list_session_channels(pool, session_id, account_id=account_id)
 
     from aios.db import queries as _queries
@@ -557,6 +552,10 @@ async def get_context(
         account_id=account_id,
     )
 
+    # The API process has no task_registry — it lives only in the worker
+    # — so we can't tell which unresolved tool_calls are mid-execution
+    # versus awaiting external action. All unresolved calls render as
+    # ``_PENDING_EXTERNAL`` for this preview; see docstring.
     step_ctx = await compose_step_context(
         session=session,
         agent=agent,
@@ -608,7 +607,7 @@ async def wait_for_events(
     resume from where you left off. (The query param was previously named
     ``after_seq``; see issue #389.)
     """
-    await service.get_session(pool, session_id, account_id=account_id)
+    await service.get_session_basic(pool, session_id, account_id=account_id)
 
     async with listen_for_events(db_url, session_id) as queue:
         events = await service.read_events(pool, session_id, after_seq=after, account_id=account_id)
@@ -639,5 +638,6 @@ async def wait_for_events(
         events=events,
         session_status=session.status,
         session_stop_reason=session.stop_reason,
+        session_awaiting=session.awaiting,
         next_after=events[-1].seq if events else after,
     )

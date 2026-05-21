@@ -906,27 +906,6 @@ async def set_session_status(
     if row is None:
         return
 
-    # Connector-calls fan-out (#328 PR 5): when a session parks in
-    # ``requires_action`` with pending custom_tools, NOTIFY the per-type
-    # channel for each bound connection's connector type — the runtime
-    # SSE subscribes once per connector type and fans out to its N
-    # connections client-side.  Firing here (after stop_reason is
-    # committed) avoids the race where the SSE consumer's query checks
-    # for ``requires_action`` but stop_reason hasn't been written yet.
-    if (
-        isinstance(stop_reason, dict)
-        and stop_reason.get("type") == "requires_action"
-        and stop_reason.get("custom_tools")
-    ):
-        for cid, connector in await _list_bound_connection_ids(
-            conn, session_id, account_id=account_id
-        ):
-            await conn.execute(
-                "SELECT pg_notify($1, $2)",
-                f"connector_calls_{connector}",
-                f"{session_id}|{cid}",
-            )
-
 
 async def increment_session_usage(
     conn: asyncpg.Connection[Any],
@@ -953,25 +932,6 @@ async def increment_session_usage(
         cache_creation_input_tokens,
         account_id,
     )
-
-
-async def list_running_session_ids(conn: asyncpg.Connection[Any]) -> list[str]:
-    """Return ids of sessions with ``status = 'running'``.
-
-    Used by the sandbox orphan reaper at worker startup: any Docker
-    container labelled ``aios.managed=true`` whose ``aios.session_id``
-    is NOT in this list is a corpse from a dead worker and gets
-    force-removed.
-    """
-    rows = await conn.fetch(
-        """
-        SELECT id
-          FROM sessions
-         WHERE status = 'running'
-           AND archived_at IS NULL
-        """
-    )
-    return [str(r["id"]) for r in rows]
 
 
 async def get_session_model(
@@ -1128,18 +1088,13 @@ async def delete_session(
 ) -> None:
     async with conn.transaction():
         row = await conn.fetchrow(
-            "SELECT status FROM sessions WHERE id = $1 AND account_id = $2",
+            "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2",
             session_id,
             account_id,
         )
         if row is None:
             raise NotFoundError(
                 f"session {session_id} not found",
-                detail={"id": session_id},
-            )
-        if row["status"] == "running":
-            raise ConflictError(
-                f"session {session_id} is running and cannot be deleted",
                 detail={"id": session_id},
             )
         await conn.execute(
@@ -1883,6 +1838,26 @@ async def append_event(
     # preserving case, so the two would never match. pg_notify(text, text)
     # treats the channel as a string literal and preserves it byte-for-byte.
     await conn.execute("SELECT pg_notify($1, $2)", f"events_{session_id}", new_id)
+
+    # Connector fan-out: every assistant-with-tool_calls fires
+    # ``connector_calls_<type>`` per bound connection. The consumer's
+    # backfill filters by ``connector.tools_schema``, so over-fanout
+    # (when none of the tool_calls are custom) is harmless and avoids
+    # loading agent.tools on the append hot path.
+    if (
+        kind == "message"
+        and role == "assistant"
+        and isinstance(data, dict)
+        and data.get("tool_calls")
+    ):
+        for cid, connector in await _list_bound_connection_ids(
+            conn, session_id, account_id=account_id
+        ):
+            await conn.execute(
+                "SELECT pg_notify($1, $2)",
+                f"connector_calls_{connector}",
+                f"{session_id}|{cid}",
+            )
     return _row_to_event(row)
 
 
@@ -1894,10 +1869,12 @@ async def list_pending_calls_for_connector(
 ) -> list[dict[str, Any]]:
     """Pending custom tool calls across every active connection of ``connector`` type.
 
-    Used by the runtime SSE (#328 PR 5) at subscribe-time backfill.
-    A "pending" call is one referenced in some session's
-    ``stop_reason.custom_tools`` array — i.e. the model called a
-    custom tool and the session is parked in ``requires_action``.
+    Used by the runtime SSE at subscribe-time backfill.  A "pending"
+    call is a tool_call on the latest assistant message of a bound
+    session whose ``function.name`` is in ``connector.tools_schema``
+    and has no paired tool_result event yet.  No dependency on
+    ``stop_reason`` — the source of truth is the event log.
+
     Each emitted record carries ``connection_id`` so the runtime can
     fan out to the right per-connection worker.
 
@@ -1921,26 +1898,21 @@ async def list_pending_calls_for_connector(
     if cat_row is None:
         return []
     tools_data = parse_jsonb(cat_row["tools"])
-    tool_names = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
-    if not tool_names:
+    name_set = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
+    if not name_set:
         return []
 
-    # The lineage predicate joins ``s.id`` not a parameter, so we inline
-    # rather than calling ``_session_bound_to_connection_predicate``
-    # (which expects a $N param index for the session).
-    # Tenant isolation: both ``connections.account_id`` and
-    # ``sessions.account_id`` must match the bearer's account, otherwise
-    # a runtime token for tenant A could see pending tool calls (with
-    # arguments) from tenants B, C, D under the same connector type.
-    rows = await conn.fetch(
+    # Find bound sessions of this connector type. Tenant isolation: both
+    # ``connections.account_id`` and ``sessions.account_id`` must match the
+    # bearer's account, otherwise a runtime token for tenant A could see
+    # tool-call arguments from tenants B, C, D under the same connector type.
+    bound_rows = await conn.fetch(
         """
-        SELECT c.id AS connection_id,
-               s.id AS session_id, s.stop_reason, s.focal_channel
+        SELECT DISTINCT c.id AS connection_id,
+               s.id AS session_id, s.focal_channel
           FROM connections c
           JOIN sessions s
             ON s.archived_at IS NULL
-           AND s.status = 'idle'
-           AND s.stop_reason->>'type' = 'requires_action'
            AND s.account_id = $2
            AND (EXISTS (SELECT 1 FROM bindings b
                          WHERE b.connection_id = c.id
@@ -1956,19 +1928,36 @@ async def list_pending_calls_for_connector(
         connector,
         account_id,
     )
+    if not bound_rows:
+        return []
 
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        calls = await _pending_calls_for_session(
-            conn,
-            session_id=row["session_id"],
-            stop_reason=parse_jsonb(row["stop_reason"]),
-            focal_channel=row["focal_channel"],
-            tool_names=tool_names,
+    by_session: dict[str, list[tuple[str, str | None]]] = {}
+    for row in bound_rows:
+        by_session.setdefault(row["session_id"], []).append(
+            (row["connection_id"], row["focal_channel"])
         )
-        for call in calls:
-            call["connection_id"] = row["connection_id"]
-            out.append(call)
+
+    raw_by_sid = await _latest_unresolved_tool_calls(
+        conn, list(by_session.keys()), account_id=account_id
+    )
+    out: list[dict[str, Any]] = []
+    for sid, calls in raw_by_sid.items():
+        for conn_id, focal in by_session[sid]:
+            for tc in calls:
+                fn = tc.get("function") or {}
+                name = fn.get("name")
+                if name not in name_set:
+                    continue
+                out.append(
+                    {
+                        "session_id": sid,
+                        "tool_call_id": tc["id"],
+                        "name": name,
+                        "arguments": fn.get("arguments", "{}"),
+                        "connection_id": conn_id,
+                        "focal_channel": focal,
+                    }
+                )
     return out
 
 
@@ -1979,104 +1968,183 @@ async def list_pending_calls_for_session_and_connection(
     session_id: str,
     connection_id: str,
 ) -> list[dict[str, Any]]:
-    """Same shape as :func:`list_pending_calls_for_connection` but scoped
+    """Same shape as :func:`list_pending_calls_for_connector` but scoped
     to one session.  Used by the SSE NOTIFY tail to fetch calls only for
     the session that just emitted, instead of re-scanning all bound
     sessions.
     """
     conn_row = await conn.fetchrow(
-        """
-        SELECT cat.tools_schema AS tools
+        f"""
+        SELECT cat.tools_schema AS tools, s.focal_channel
           FROM connections c
           JOIN connectors cat ON cat.connector = c.connector
+          JOIN sessions s
+            ON s.id = $3 AND s.archived_at IS NULL AND s.account_id = $2
          WHERE c.id = $1 AND c.archived_at IS NULL AND c.account_id = $2
+           AND {
+            _session_bound_to_connection_predicate(
+                connection_alias="c", session_param_index=3, account_id_param_index=2
+            )
+        }
         """,
         connection_id,
         account_id,
+        session_id,
     )
     if conn_row is None:
         return []
     tools_data = parse_jsonb(conn_row["tools"])
-    tool_names = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
-    if not tool_names:
+    name_set = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
+    if not name_set:
         return []
 
-    sess_row = await conn.fetchrow(
-        "SELECT stop_reason, status, focal_channel FROM sessions "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
-        session_id,
+    raw_by_sid = await _latest_unresolved_tool_calls(conn, [session_id], account_id=account_id)
+    focal = conn_row["focal_channel"]
+    out: list[dict[str, Any]] = []
+    for tc in raw_by_sid.get(session_id, []):
+        fn = tc.get("function") or {}
+        name = fn.get("name")
+        if name not in name_set:
+            continue
+        out.append(
+            {
+                "session_id": session_id,
+                "tool_call_id": tc["id"],
+                "name": name,
+                "arguments": fn.get("arguments", "{}"),
+                "connection_id": connection_id,
+                "focal_channel": focal,
+            }
+        )
+    return out
+
+
+async def _latest_unresolved_tool_calls(
+    conn: asyncpg.Connection[Any],
+    session_ids: list[str],
+    *,
+    account_id: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return ``{session_id: [tool_call_dict]}`` for the latest assistant's
+    tool_calls (per session) that have no paired tool_result event.
+
+    Pending-ness is purely an event-log property — the session row's
+    ``status`` and ``stop_reason`` are irrelevant. Tool_call dicts are
+    returned as-is from the assistant's ``data->'tool_calls'`` array.
+    """
+    if not session_ids:
+        return {}
+    asst_rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (session_id) session_id, data
+          FROM events
+         WHERE session_id = ANY($1::text[])
+           AND account_id = $2
+           AND kind = 'message'
+           AND role = 'assistant'
+           AND jsonb_array_length(
+                 COALESCE(NULLIF(data->'tool_calls','null'::jsonb), '[]'::jsonb)
+               ) > 0
+         ORDER BY session_id, seq DESC
+        """,
+        session_ids,
         account_id,
     )
-    if sess_row is None:
-        return []
-    if sess_row["status"] != "idle":
-        return []
-    stop_reason = parse_jsonb(sess_row["stop_reason"])
-    if not isinstance(stop_reason, dict) or stop_reason.get("type") != "requires_action":
-        return []
+    if not asst_rows:
+        return {}
+    results_by_sid = await _tool_result_ids_by_session(conn, session_ids, account_id=account_id)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in asst_rows:
+        sid: str = row["session_id"]
+        data = parse_jsonb(row["data"])
+        completed: set[str] = results_by_sid.get(sid, set())
+        unresolved = [
+            tc
+            for tc in (data.get("tool_calls") or [])
+            if tc.get("id") and tc["id"] not in completed
+        ]
+        if unresolved:
+            out[sid] = unresolved
+    return out
 
-    return await _pending_calls_for_session(
-        conn,
-        session_id=session_id,
-        stop_reason=stop_reason,
-        focal_channel=sess_row["focal_channel"],
-        tool_names=tool_names,
-    )
 
-
-async def _pending_calls_for_session(
+async def _tool_result_ids_by_session(
     conn: asyncpg.Connection[Any],
+    session_ids: list[str],
     *,
-    session_id: str,
-    stop_reason: Any,
-    focal_channel: str | None,
-    tool_names: set[str],
-) -> list[dict[str, Any]]:
-    """Fetch the pending tool_call rows for one ``requires_action`` session."""
-    if not isinstance(stop_reason, dict):
-        return []
-    pending_ids = stop_reason.get("custom_tools") or []
-    if not pending_ids:
-        return []
-
-    # The pending call_ids are referenced in the most recent assistant
-    # event; walk that event's data->'tool_calls' array.  We could scan
-    # all assistant events but the loop only parks on the latest, so the
-    # latest assistant message owns every id in stop_reason.
+    account_id: str,
+) -> dict[str, set[str]]:
+    """Map ``session_id → {tool_call_id}`` for every tool-role event."""
     rows = await conn.fetch(
         """
-        SELECT data
+        SELECT session_id, data->>'tool_call_id' AS tool_call_id
           FROM events
-         WHERE session_id = $1
+         WHERE session_id = ANY($1::text[])
+           AND account_id = $2
            AND kind = 'message'
-           AND data->>'role' = 'assistant'
-         ORDER BY seq DESC
-         LIMIT 5
+           AND role = 'tool'
         """,
-        session_id,
+        session_ids,
+        account_id,
     )
+    out: dict[str, set[str]] = {}
+    for r in rows:
+        tcid = r["tool_call_id"]
+        if tcid:
+            out.setdefault(r["session_id"], set()).add(tcid)
+    return out
 
-    pending_set = set(pending_ids)
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        data = parse_jsonb(row["data"])
-        for tc in data.get("tool_calls") or []:
-            tc_id = tc.get("id")
-            if tc_id not in pending_set:
-                continue
-            fn = tc.get("function") or {}
-            name = fn.get("name")
-            if name not in tool_names:
-                continue
-            out.append(
-                {
-                    "session_id": session_id,
-                    "tool_call_id": tc_id,
-                    "name": name,
-                    "arguments": fn.get("arguments", "{}"),
-                    "focal_channel": focal_channel,
-                }
-            )
+
+async def list_unresolved_tool_calls_batch(
+    conn: asyncpg.Connection[Any],
+    session_ids: list[str],
+    *,
+    account_id: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """For each session, return the latest assistant's tool_calls that
+    have no paired tool_result, annotated with allow-lifecycle presence.
+
+    Used by :func:`services.sessions.compute_awaiting` to build the
+    ``Session.awaiting`` derived view. Returned dicts have keys
+    ``tool_call_id``, ``name``, ``has_allow_lifecycle`` — the caller
+    classifies kind/needs_confirm using ``agent.tools``.
+    """
+    raw = await _latest_unresolved_tool_calls(conn, session_ids, account_id=account_id)
+    if not raw:
+        return {}
+    allow_rows = await conn.fetch(
+        """
+        SELECT session_id, data->>'tool_call_id' AS tool_call_id
+          FROM events
+         WHERE session_id = ANY($1::text[])
+           AND account_id = $2
+           AND kind = 'lifecycle'
+           AND data->>'event' = 'tool_confirmed'
+           AND data->>'result' = 'allow'
+        """,
+        session_ids,
+        account_id,
+    )
+    allows_by_sid: dict[str, set[str]] = {}
+    for r in allow_rows:
+        tcid = r["tool_call_id"]
+        if tcid:
+            allows_by_sid.setdefault(r["session_id"], set()).add(tcid)
+
+    out: dict[str, list[dict[str, Any]]] = {}
+    for sid, calls in raw.items():
+        allows = allows_by_sid.get(sid, set())
+        entries = [
+            {
+                "tool_call_id": tc["id"],
+                "name": name,
+                "has_allow_lifecycle": tc["id"] in allows,
+            }
+            for tc in calls
+            if (name := (tc.get("function") or {}).get("name"))
+        ]
+        if entries:
+            out[sid] = entries
     return out
 
 
@@ -2085,10 +2153,10 @@ async def _list_bound_connection_ids(
 ) -> list[tuple[str, str]]:
     """``(connection_id, connector)`` pairs for active connections bound to ``session_id``.
 
-    Used by :func:`set_session_status` to fan an assistant-tool-calls
-    event out on the per-type ``connector_calls_<connector>`` NOTIFY
-    channel (#328 PR 5).  Tools-less connections receive notifications
-    and harmlessly no-op them on the consumer side.
+    Called from :func:`append_event` when an assistant message with
+    tool_calls lands, to fan a per-connection notification on the
+    ``connector_calls_<connector>`` channel.  Tools-less connections
+    receive notifications and harmlessly no-op them on the consumer side.
     """
     rows = await conn.fetch(
         f"""

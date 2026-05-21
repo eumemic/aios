@@ -4,14 +4,15 @@ Connections can carry a ``tools`` jsonb column (migration 0029).  When a
 session has connections attached — single_session, per_chat origin, or
 operator-bound chat — the connection's ``type="custom"`` tools are
 merged into the model's tool list at step time.  The model calls them,
-the session parks in ``requires_action``, an external client (a
-connector container) executes the tool and POSTs the result back.
+the tool_call sits unresolved in the event log (visible on
+``Session.awaiting``), an external client (a connector container)
+executes the tool and POSTs the result back.
 
 This file pins the contract end-to-end with the real harness:
 
 * Tools are sourced via ``services.connections.list_tools_for_session``.
 * Step prelude includes them alongside agent + MCP + connector-subprocess tools.
-* The standard custom-tool flow (requires_action → tool-results → resume)
+* The custom-tool flow (model calls → awaiting → tool-results → resume)
   works regardless of whether the tool came from an agent or a connection.
 * Multimodal tool-result content (``list[dict]``) flows through ``POST
   /v1/sessions/:id/tool-results`` intact.
@@ -227,7 +228,7 @@ class TestConnectionToolsInPrelude:
 
 @needs_docker
 class TestConnectionToolDispatch:
-    """Full requires_action round-trip with a connection-sourced tool."""
+    """Full ``awaiting``→ tool-result → resume round-trip with a connection-sourced tool."""
 
     async def test_model_calls_connection_tool_then_resumes_after_result(
         self, harness: Harness, crypto_box: CryptoBox
@@ -303,13 +304,13 @@ class TestConnectionToolDispatch:
             harness._pool, session.id, "say hi", account_id=account_id
         )
 
-        # Step 1: model calls chat_send → session parks in requires_action.
+        # Step 1: model calls chat_send → call appears in session.awaiting.
         await harness.run_step(session.id)
         s = await harness.session(session.id)
         assert s.status == "idle"
-        assert s.stop_reason is not None
-        assert s.stop_reason["type"] == "requires_action"
-        assert "cs_1" in (s.stop_reason.get("custom_tools") or [])
+        assert s.stop_reason == {"type": "end_turn"}
+        assert {a.tool_call_id for a in s.awaiting} == {"cs_1"}
+        assert s.awaiting[0].kind == "custom"
 
         # External client (the connector container, in production) POSTs the result.
         await sess_svc.append_event(

@@ -302,12 +302,8 @@ class McpBroker:
 
         pool = runtime.require_pool()
         account_id = await sessions_service.load_session_account_id(pool, session_id)
-        session = await sessions_service.get_session(pool, session_id, account_id=account_id)
-        if session.agent_version is not None:
-            return await agents_service.get_agent_version(
-                pool, session.agent_id, session.agent_version, account_id=account_id
-            )
-        return await agents_service.get_agent(pool, session.agent_id, account_id=account_id)
+        session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
+        return await agents_service.load_for_session(pool, session, account_id=account_id)
 
     async def _load_auth_for(
         self, session_id: str, server_url: str

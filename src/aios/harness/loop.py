@@ -33,7 +33,12 @@ from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.logging import get_logger
-from aios.models.agents import PermissionPolicy, ToolSpec
+from aios.models.agents import (
+    PermissionPolicy,
+    is_mcp_tool_name,
+    resolve_mcp_permission,
+    resolve_permission,
+)
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.services.wake import defer_wake
@@ -247,24 +252,12 @@ async def _run_session_step_body(
         log.debug("step.early_out", session_id=session_id, cause=cause)
         return None
 
-    session = await sessions_service.get_session(pool, session_id, account_id=account_id)
+    session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
 
-    from aios.models.agents import Agent, AgentVersion
     from aios.services.channels import list_session_channels
 
-    agent_task: asyncio.Task[Agent | AgentVersion]
-    if session.agent_version is not None:
-        agent_task = asyncio.create_task(
-            agents_service.get_agent_version(
-                pool, session.agent_id, session.agent_version, account_id=account_id
-            )
-        )
-    else:
-        agent_task = asyncio.create_task(
-            agents_service.get_agent(pool, session.agent_id, account_id=account_id)
-        )
     agent, channels, memory_echoes = await asyncio.gather(
-        agent_task,
+        agents_service.load_for_session(pool, session, account_id=account_id),
         list_session_channels(pool, session_id, account_id=account_id),
         refresh_session_mount_state(pool, session_id, account_id=account_id),
     )
@@ -313,8 +306,8 @@ async def _run_session_step_body(
         task_registry=task_registry,
     )
     if pending:
-        pending_builtin = [tc for tc in pending if not _is_mcp_tool(_tc_name(tc))]
-        pending_mcp = [tc for tc in pending if _is_mcp_tool(_tc_name(tc))]
+        pending_builtin = [tc for tc in pending if not is_mcp_tool_name(_tc_name(tc))]
+        pending_mcp = [tc for tc in pending if is_mcp_tool_name(_tc_name(tc))]
         if pending_builtin:
             launch_tool_calls(pool, session_id, pending_builtin, account_id=account_id)
         if pending_mcp:
@@ -354,6 +347,7 @@ async def _run_session_step_body(
             channels=channels,
             prelude=prelude,
             events=events,
+            in_flight_tool_call_ids=frozenset(task_registry.in_flight_tool_call_ids(session_id)),
         )
     except Exception:
         await sessions_service.append_event(
@@ -397,9 +391,6 @@ async def _run_session_step_body(
     # when AIOS_DUMP_CONTEXT is set — useful for debugging prompt construction
     # (header inlining, system-prompt augmentation, tool list shape).
     await _dump_context_if_enabled(session_id, agent.model, messages, tools)
-
-    # Mark session as running.
-    await sessions_service.set_session_status(pool, session_id, "running", account_id=account_id)
 
     # Emit span start so consumers can measure inference latency.
     start_event = await sessions_service.append_event(
@@ -499,11 +490,11 @@ async def _run_session_step_body(
         pool, session_id, "message", assistant_msg, account_id=account_id
     )
 
-    # Check for tool calls — partition into four buckets:
-    #   immediate       — built-in with always_allow (execute now)
-    #   mcp_immediate   — MCP with always_allow (execute now via MCP client)
-    #   needs_confirm   — built-in or MCP with always_ask (hold for confirmation)
-    #   custom          — not in registry and not MCP (hold for client execution)
+    # Partition tool calls into dispatch buckets. Immediate builtin/MCP
+    # launch now; ``needs_confirm`` and ``custom`` sit unresolved in the
+    # log until an external POST lands the result — the session ends its
+    # turn anyway and any stimulus can wake it (``Session.awaiting``
+    # surfaces what's still pending).
     tool_calls: list[dict[str, Any]] = assistant_msg.get("tool_calls") or []
 
     if tool_calls:
@@ -538,10 +529,8 @@ async def _run_session_step_body(
         # Unknown-MCP tools route through the regular MCP dispatcher,
         # bypassing the permission gate.  ``_execute_mcp_tool_async``
         # already detects unknown servers and appends a tool_error
-        # event for them; the prior code path parked the session in
-        # ``requires_action`` and dispatched only after a confirmation,
-        # which never came.  Routing them to immediate dispatch lets
-        # the model see the error in the next step and self-correct.
+        # event for them.  Routing them to immediate dispatch lets the
+        # model see the error in the next step and self-correct.
         immediate_mcp = mcp_immediate + unknown_mcp
         if immediate_mcp:
             launch_mcp_tool_calls(
@@ -561,49 +550,22 @@ async def _run_session_step_body(
             )
 
         if needs_confirm or custom:
-            confirm_ids = [tc.get("id") for tc in needs_confirm if tc.get("id")]
-            custom_ids = [tc.get("id") for tc in custom if tc.get("id")]
-            all_pending_ids = confirm_ids + custom_ids
-
-            stop_reason: dict[str, Any] = {
-                "type": "requires_action",
-                "event_ids": all_pending_ids,
-            }
-            if confirm_ids:
-                stop_reason["confirmations"] = confirm_ids
-            if custom_ids:
-                stop_reason["custom_tools"] = custom_ids
-
-            await sessions_service.set_session_status(
-                pool,
-                session_id,
-                "idle",
-                stop_reason=stop_reason,
-                account_id=account_id,
-            )
-            await _append_lifecycle(
-                pool,
-                session_id,
-                "turn_ended",
-                "idle",
-                "requires_action",
-                account_id=account_id,
-            )
             log.info(
-                "step.tools_pending",
+                "step.external_tools_pending",
                 session_id=session_id,
-                confirmations=confirm_ids,
-                custom_tools=custom_ids,
+                confirmations=[tc.get("id") for tc in needs_confirm if tc.get("id")],
+                custom_tools=[tc.get("id") for tc in custom if tc.get("id")],
             )
-    else:
-        # No tool calls — the model's turn is done.
-        await sessions_service.set_session_status(
-            pool, session_id, "idle", stop_reason={"type": "end_turn"}, account_id=account_id
-        )
-        await _append_lifecycle(
-            pool, session_id, "turn_ended", "idle", "end_turn", account_id=account_id
-        )
-        log.info("step.turn_ended", session_id=session_id, cause=cause)
+
+    # End-of-turn is unconditional; pending tool calls live on
+    # ``Session.awaiting`` (derived from the event log per read).
+    await sessions_service.set_session_status(
+        pool, session_id, "idle", stop_reason={"type": "end_turn"}, account_id=account_id
+    )
+    await _append_lifecycle(
+        pool, session_id, "turn_ended", "idle", "end_turn", account_id=account_id
+    )
+    log.info("step.turn_ended", session_id=session_id, cause=cause)
     return None
 
 
@@ -673,11 +635,6 @@ def _tc_name(tc: dict[str, Any]) -> str:
     return name
 
 
-def _is_mcp_tool(name: str) -> bool:
-    """Return True if the tool name is an MCP-namespaced tool."""
-    return name.startswith("mcp__")
-
-
 def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, str]) -> bool:
     """Return True if ``server_name`` resolves to a registered MCP server.
 
@@ -687,9 +644,9 @@ def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, str]) -> bo
 
     Used by :func:`_classify_tool_call` to short-circuit hallucinated
     tool names before the permission gate, so the model gets a tool
-    error in one turn instead of parking in ``requires_action`` forever
-    waiting on a confirmation that would surface as an unknown-server
-    tool error anyway.
+    error in one turn instead of leaving the call sitting unresolved
+    forever waiting on a confirmation that would surface as an
+    unknown-server tool error anyway.
     """
     return server_name in mcp_server_map
 
@@ -716,7 +673,7 @@ def _classify_tool_call(
       the call until the client posts a tool-result).
     * ``"unknown_mcp"`` — MCP-namespaced tool whose server is not
       registered.  Routed to immediate tool-error so the model can
-      self-correct rather than parking in ``requires_action``.
+      self-correct rather than leaving the call unresolved.
     """
     from aios.harness.tool_dispatch import _parse_arguments, _parse_mcp_tool_name
     from aios.tools.registry import registry as tool_registry
@@ -724,7 +681,7 @@ def _classify_tool_call(
     function = tool_call.get("function") or {}
     name: str = function.get("name") or ""
 
-    if _is_mcp_tool(name):
+    if is_mcp_tool_name(name):
         try:
             server_name, _ = _parse_mcp_tool_name(name)
         except ValueError:
@@ -766,33 +723,6 @@ def _classify_tool_call(
         return "needs_confirm"
 
     return "immediate"
-
-
-def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
-    """Look up the permission policy for a built-in or custom tool by name."""
-    for spec in agent_tools:
-        tool_name = spec.name if spec.type == "custom" else spec.type
-        if tool_name == name:
-            return spec.permission
-    return None
-
-
-def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
-    """Look up the permission policy for an MCP tool.
-
-    Finds the ``mcp_toolset`` entry whose ``mcp_server_name`` matches
-    the server portion of the namespaced tool name, then returns the
-    ``default_config.permission_policy.type`` or ``None`` (which callers
-    treat as ``always_ask``).
-    """
-    server_name = name.split("__", 2)[1]
-    for spec in agent_tools:
-        if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
-            cfg = spec.default_config
-            if cfg and cfg.permission_policy:
-                return cfg.permission_policy.type
-            return spec.permission
-    return None
 
 
 async def discover_session_mcp_tools(

@@ -507,13 +507,24 @@ def _strip_to_spec(
 # ─── build_messages ──────────────────────────────────────────────────────────
 
 
-_PENDING_CONTENT = json.dumps(
+_PENDING_BACKGROUND = json.dumps(
     {
         "status": "pending",
         "message": (
             "This tool is still executing in the background. "
             "Its result will arrive when ready. "
             "Do not re-request this tool."
+        ),
+    }
+)
+_PENDING_EXTERNAL = json.dumps(
+    {
+        "status": "pending",
+        "message": (
+            "This tool is awaiting external action (client execution or "
+            "operator approval). Its result will arrive when that action "
+            "completes. Continue handling other work; do not re-request "
+            "this tool."
         ),
     }
 )
@@ -533,6 +544,7 @@ def build_messages(
     system_prompt: str | None,
     model: str | None = None,
     session_id: str | None = None,
+    in_flight_tool_call_ids: frozenset[str] = frozenset(),
 ) -> ContextResult:
     """Assemble a chat-completions message list from pre-windowed events.
 
@@ -614,9 +626,12 @@ def build_messages(
                     messages.append(real_results[tcid])
                     max_stimulus_seq = max(max_stimulus_seq, rseq)
                 else:
-                    messages.append(
-                        {"role": "tool", "tool_call_id": tcid, "content": _PENDING_CONTENT}
+                    placeholder = (
+                        _PENDING_BACKGROUND
+                        if tcid in in_flight_tool_call_ids
+                        else _PENDING_EXTERNAL
                     )
+                    messages.append({"role": "tool", "tool_call_id": tcid, "content": placeholder})
                     if tcid in real_results:
                         # Safe: last assistant has horizon=INF so rseq<=INF
                         # always takes the REAL branch above; only non-last

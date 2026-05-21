@@ -166,18 +166,6 @@ class TestCloneBasic:
 
 
 class TestCloneRefusal:
-    async def test_refuses_running_parent(
-        self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
-    ) -> None:
-        account_id = "acc_test_stub"  # PR 3 scaffolding
-        from aios.services import sessions as sessions_svc
-
-        await sessions_svc.set_session_status(
-            pool, parent_session_id, "running", account_id=account_id
-        )
-        r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
-        assert r.status_code == 409, r.text
-
     async def test_refuses_pending_parent(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:

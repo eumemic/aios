@@ -1,6 +1,5 @@
 """Integration test: ``set_session_status`` must not rewrite an
-archived session's row, and must skip the connector-calls fan-out
-when the row is gone."""
+archived session's row."""
 
 from __future__ import annotations
 
@@ -18,11 +17,11 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-async def archived_running_session(
+async def archived_marked_session(
     migrated_db_url: str, _reset_db_state: None
 ) -> AsyncIterator[tuple[asyncpg.Pool[Any], str, str]]:
     """Yield ``(pool, account_id, session_id)`` for a session pinned
-    to ``running`` then archived — gives the post-call read a
+    to ``rescheduling`` then archived — gives the post-call read a
     distinctive expected ``status`` value."""
     pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
     try:
@@ -38,20 +37,20 @@ async def archived_running_session(
         )
         async with pool.acquire() as conn:
             await queries.set_session_status(
-                conn, session.id, "running", None, account_id="acc_sss_arch"
+                conn, session.id, "rescheduling", None, account_id="acc_sss_arch"
             )
             archived = await queries.archive_session(conn, session.id, account_id="acc_sss_arch")
         assert archived.archived_at is not None
-        assert archived.status == "running"
+        assert archived.status == "rescheduling"
         yield pool, "acc_sss_arch", session.id
     finally:
         await pool.close()
 
 
 async def test_set_session_status_refuses_archived_silently(
-    archived_running_session: tuple[asyncpg.Pool[Any], str, str],
+    archived_marked_session: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:
-    pool, account_id, session_id = archived_running_session
+    pool, account_id, session_id = archived_marked_session
 
     async with pool.acquire() as conn:
         await queries.set_session_status(
@@ -64,20 +63,19 @@ async def test_set_session_status_refuses_archived_silently(
             session_id,
         )
     assert row is not None
-    assert row["status"] == "running", (
-        f"archived row was rewritten: status is {row['status']!r}, expected 'running'."
+    assert row["status"] == "rescheduling", (
+        f"archived row was rewritten: status is {row['status']!r}, expected 'rescheduling'."
     )
     assert row["stop_reason"] is None
     assert row["archived_at"] is not None
 
 
-async def test_set_session_status_skips_notify_on_archived(
-    archived_running_session: tuple[asyncpg.Pool[Any], str, str],
+async def test_set_session_status_no_rewrite_on_archived(
+    archived_marked_session: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:
-    """The ``requires_action`` fan-out must short-circuit on the no-row
-    UPDATE — otherwise ``_list_bound_connection_ids`` runs and (with
-    bindings) emits ``pg_notify`` for an archived session."""
-    pool, account_id, session_id = archived_running_session
+    """The no-row UPDATE on an archived session must not bump
+    ``updated_at`` (and therefore must not have written anything)."""
+    pool, account_id, session_id = archived_marked_session
 
     async with pool.acquire() as conn:
         pre_updated_at = await conn.fetchval(
@@ -87,7 +85,7 @@ async def test_set_session_status_skips_notify_on_archived(
             conn,
             session_id,
             "idle",
-            {"type": "requires_action", "custom_tools": [{"name": "x"}]},
+            {"type": "end_turn"},
             account_id=account_id,
         )
         post_updated_at = await conn.fetchval(

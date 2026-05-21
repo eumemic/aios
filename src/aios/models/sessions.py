@@ -66,7 +66,7 @@ def _validate_session_resources(resources: list[SessionResource]) -> None:
     _validate_github_resources(github)
 
 
-SessionStatus = Literal["pending", "running", "idle", "rescheduling", "errored", "terminated"]
+SessionStatus = Literal["pending", "idle", "rescheduling", "errored", "terminated"]
 
 MAX_USER_MESSAGE_CHARS = 1_000_000
 
@@ -78,6 +78,27 @@ class SessionUsage(BaseModel):
     output_tokens: int = 0
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
+
+
+class AwaitingToolCall(BaseModel):
+    """One pending tool call the harness will not dispatch itself.
+
+    Derived view on session reads. Each entry is a tool_call in the
+    latest assistant message with no paired tool_result and no
+    in-process executor:
+
+    * ``kind == "custom"`` — client-executed; awaits POST to
+      ``/sessions/:id/tool-results`` (operator-facing) or
+      ``/connectors/runtime/tool-results`` (runtime-container-facing).
+    * ``kind == "builtin" | "mcp"`` — ``always_ask``-gated and not yet
+      confirmed; awaits POST to ``/sessions/:id/tool-confirmations``.
+      Confirmed-but-not-yet-dispatched and ``always_allow`` calls don't
+      appear here — they're harness-internal.
+    """
+
+    tool_call_id: str
+    name: str
+    kind: Literal["builtin", "mcp", "custom"]
 
 
 class SessionCreate(BaseModel):
@@ -176,7 +197,13 @@ class SessionUpdate(BaseModel):
 
 
 class Session(BaseModel):
-    """Read view of a session. Internal-only columns are not exposed."""
+    """Read view of a session. Internal-only columns are not exposed.
+
+    ``stop_reason`` records why the most recent step ended. Possible
+    ``type`` values: ``"end_turn"``, ``"interrupt"``, ``"rescheduling"``,
+    ``"error"``. ``awaiting`` lists tool calls the session is blocked
+    on (derived per read from the event log + agent tool specs).
+    """
 
     id: str
     agent_id: str
@@ -186,6 +213,7 @@ class Session(BaseModel):
     metadata: dict[str, Any]
     status: SessionStatus
     stop_reason: dict[str, Any] | None
+    awaiting: list[AwaitingToolCall] = Field(default_factory=list)
     vault_ids: list[str] = Field(default_factory=list)
     last_event_seq: int
     usage: SessionUsage = Field(default_factory=SessionUsage)
@@ -269,6 +297,7 @@ class WaitResponse(BaseModel):
     events: list[Event]
     session_status: SessionStatus
     session_stop_reason: dict[str, Any] | None
+    session_awaiting: list[AwaitingToolCall] = Field(default_factory=list)
     next_after: int
 
 

@@ -324,7 +324,9 @@ def _is_turn_end(obj: dict[str, Any]) -> bool:
     data = obj.get("data") or {}
     event_name = data.get("event")
     status = data.get("status")
-    # turn_ended fires for both "end_turn" and "requires_action" cases.
+    # turn_ended fires after every step body, regardless of whether
+    # the model emitted custom/always_ask tool calls that the harness
+    # left for external execution.
     if event_name == "turn_ended":
         return True
     # Interrupt also returns us to the prompt.

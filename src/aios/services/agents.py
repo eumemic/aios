@@ -131,6 +131,21 @@ async def get_agent_version(
         return await queries.get_agent_version(conn, agent_id, version, account_id=account_id)
 
 
+async def load_for_session(
+    pool: asyncpg.Pool[Any], session: Any, *, account_id: str
+) -> Agent | AgentVersion:
+    """Load the Agent / AgentVersion the harness sees for ``session`` at step time.
+
+    ``session.agent_version is None`` means "latest" — fetches the
+    current ``Agent``; an integer pins to a specific ``AgentVersion``.
+    """
+    if session.agent_version is not None:
+        return await get_agent_version(
+            pool, session.agent_id, session.agent_version, account_id=account_id
+        )
+    return await get_agent(pool, session.agent_id, account_id=account_id)
+
+
 async def list_agent_versions(
     pool: asyncpg.Pool[Any],
     agent_id: str,
