@@ -262,6 +262,9 @@ async def find_and_repair_ghosts(
         if _was_dispatched(name, tcid, confirmed, agent_tools):
             ghosts.append((sid, tcid, name))
 
+    # Per-ghost isolation; see ``wake_sessions_needing_inference`` below
+    # for the rationale.
+    repaired: list[tuple[str, str]] = []
     for sid, tcid, name in ghosts:
         content = json.dumps(
             {"error": "No result was received for this tool call."},
@@ -270,28 +273,37 @@ async def find_and_repair_ghosts(
         # Load each ghost's session account_id individually so the
         # cross-session sweeper (session_id=None) doesn't stamp empty
         # account_id onto repair events for real tenants.
-        sid_account_id = await sessions_service.load_session_account_id(pool, sid)
-        # Route through ``append_tool_result`` (services/sessions.py) rather
-        # than a bare ``append_event``: the FOR UPDATE session lock +
-        # ``find_tool_result_event`` check inside that function serialise
-        # concurrent repairs. The bare-append path had a TOCTOU window
-        # between the result-rows read above and the write here that
-        # admitted two duplicate synthetic results for the same
-        # ``tool_call_id`` under concurrent sweep invocation (periodic
-        # all-sessions sweep racing the per-tool tail sweep), violating
-        # invariant #4 (tool-always-appends-EXACTLY-one result).
-        async with pool.acquire() as conn:
-            await sessions_service.append_tool_result(
-                conn,
-                account_id=sid_account_id,
+        # Route through ``append_tool_result`` (services/sessions.py)
+        # rather than a bare ``append_event``: its session-row lock +
+        # ``find_tool_result_event`` dedup serialise concurrent
+        # repairs.  Bare-append had a TOCTOU window between the
+        # result-rows read above and the write here that admitted two
+        # duplicate synthetic results for the same ``tool_call_id``
+        # under concurrent sweep invocation, violating invariant #4
+        # (tool-always-appends-EXACTLY-one result).
+        try:
+            sid_account_id = await sessions_service.load_session_account_id(pool, sid)
+            async with pool.acquire() as conn:
+                await sessions_service.append_tool_result(
+                    conn,
+                    account_id=sid_account_id,
+                    session_id=sid,
+                    tool_call_id=tcid,
+                    content=content,
+                    is_error=True,
+                )
+        except Exception:
+            log.exception(
+                "sweep.ghost_repair_failed",
                 session_id=sid,
                 tool_call_id=tcid,
-                content=content,
-                is_error=True,
+                tool_name=name,
             )
+            continue
+        repaired.append((sid, tcid))
         log.info("sweep.ghost_repaired", session_id=sid, tool_call_id=tcid, tool_name=name)
 
-    return [(sid, tcid) for sid, tcid, _ in ghosts]
+    return repaired
 
 
 def _was_dispatched(
@@ -517,10 +529,18 @@ async def wake_sessions_needing_inference(
     """
     repaired = await find_and_repair_ghosts(pool, task_registry, session_id=session_id)
     woken = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
-    # Load each woken session's account_id individually: the cross-session
-    # sweeper (session_id=None) doesn't have one in scope, and using "" would
-    # leak an empty account onto the wake_deferred event for a real tenant.
+    # Per-session try/except: a transient failure on one session must
+    # not strand the rest of the cross-session batch.  account_id is
+    # loaded individually because the cross-session sweeper has none
+    # in scope, and "" would leak an empty account_id onto the
+    # ``wake_deferred`` event for a real tenant.
+    woken_count = 0
     for sid in woken:
-        sid_account_id = await sessions_service.load_session_account_id(pool, sid)
-        await defer_wake(pool, sid, cause="sweep", account_id=sid_account_id)
-    return SweepResult(repaired_ghosts=len(repaired), woken_sessions=len(woken))
+        try:
+            sid_account_id = await sessions_service.load_session_account_id(pool, sid)
+            await defer_wake(pool, sid, cause="sweep", account_id=sid_account_id)
+        except Exception:
+            log.exception("sweep.defer_wake_failed", session_id=sid)
+            continue
+        woken_count += 1
+    return SweepResult(repaired_ghosts=len(repaired), woken_sessions=woken_count)
