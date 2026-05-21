@@ -19,9 +19,9 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.errors import ConflictError, NotFoundError, PayloadTooLargeError
 from aios.models.agents import (
-    ToolSpec,
+    Agent,
+    AgentVersion,
     is_mcp_tool_name,
-    resolve_mcp_permission,
     resolve_permission,
 )
 from aios.models.events import Event, EventKind
@@ -142,31 +142,43 @@ async def create_session(
 
 
 def _classify_awaiting(
-    name: str,
-    tool_call_id: str,
-    has_allow_lifecycle: bool,
-    agent_tools: list[ToolSpec],
+    tc: dict[str, Any],
+    agent: Agent | AgentVersion,
 ) -> AwaitingToolCall | None:
     """Classify an unresolved tool_call into an ``AwaitingToolCall``, or
     ``None`` if the session is not blocked on external action for it
     (``always_allow`` builtin/mcp, or ``always_ask`` already confirmed).
 
     Mirrors :func:`aios.harness.loop._classify_tool_call`'s dispatch
-    rules so the view stays consistent with what the harness will do.
+    rules — including arg-aware refinement via
+    ``ToolDefinition.classify_permission`` — so the view stays
+    consistent with what the harness will do.
     """
-    # Late import: aios.tools → services.wake → services.sessions cycle.
-    from aios.config import get_settings
+    # Late import: aios.tools package init pulls in services.wake which
+    # imports this module.
+    from aios.harness.tool_dispatch import _parse_arguments
     from aios.tools.registry import registry as tool_registry
 
+    name = tc["name"]
+    tool_call_id = tc["tool_call_id"]
+    has_allow_lifecycle = tc["has_allow_lifecycle"]
+
     if is_mcp_tool_name(name):
-        perm = resolve_mcp_permission(name, agent_tools)
-        if perm is None:
-            perm = get_settings().default_mcp_permission_policy
-        if perm == "always_ask" and not has_allow_lifecycle:
+        if (
+            agents_service.effective_mcp_permission(name, agent.tools) == "always_ask"
+            and not has_allow_lifecycle
+        ):
             return AwaitingToolCall(tool_call_id=tool_call_id, name=name, kind="mcp")
         return None
     if tool_registry.has(name):
-        if resolve_permission(name, agent_tools) == "always_ask" and not has_allow_lifecycle:
+        perm_tool = resolve_permission(name, agent.tools)
+        perm_route: str | None = None
+        tool_def = tool_registry.get(name)
+        if tool_def.classify_permission is not None:
+            args = _parse_arguments(tc.get("arguments"))
+            if args is not None:
+                perm_route = tool_def.classify_permission(args, agent)
+        if (perm_tool == "always_ask" or perm_route == "always_ask") and not has_allow_lifecycle:
             return AwaitingToolCall(tool_call_id=tool_call_id, name=name, kind="builtin")
         return None
     # Unknown name: client-executed custom tool.
@@ -190,21 +202,21 @@ async def compute_awaiting(
         )
     if not unresolved_by_sid:
         return {}
-    tools_cache: dict[tuple[str, int | None], list[ToolSpec]] = {}
+    agent_cache: dict[tuple[str, int | None], Agent | AgentVersion] = {}
     out: dict[str, list[AwaitingToolCall]] = {}
     for session in sessions:
         unresolved = unresolved_by_sid.get(session.id)
         if not unresolved:
             continue
         key = (session.agent_id, session.agent_version)
-        if key not in tools_cache:
-            loaded = await agents_service.load_for_session(pool, session, account_id=account_id)
-            tools_cache[key] = loaded.tools
+        if key not in agent_cache:
+            agent_cache[key] = await agents_service.load_for_session(
+                pool, session, account_id=account_id
+            )
+        agent = agent_cache[key]
         entries: list[AwaitingToolCall] = []
         for tc in unresolved:
-            classified = _classify_awaiting(
-                tc["name"], tc["tool_call_id"], tc["has_allow_lifecycle"], tools_cache[key]
-            )
+            classified = _classify_awaiting(tc, agent)
             if classified is not None:
                 entries.append(classified)
         if entries:
