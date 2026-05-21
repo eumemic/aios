@@ -1,7 +1,6 @@
 package wameow
 
 import (
-	"io"
 	"log/slog"
 	"testing"
 	"time"
@@ -51,7 +50,9 @@ func TestExtractTextFromExtendedTextMessage(t *testing.T) {
 }
 
 func TestExtractTextReturnsEmptyForUnsupportedShape(t *testing.T) {
-	// A bare image-only message (no text, no caption) — empty string is the contract.
+	// Attachment-without-caption: empty text is the contract; the
+	// downstream layer drops attachment-only messages until PR adds
+	// attachment plumbing.
 	msg := &waE2E.Message{ImageMessage: &waE2E.ImageMessage{}}
 	if got := extractText(msg); got != "" {
 		t.Errorf("extractText image-only = %q, want empty", got)
@@ -95,6 +96,9 @@ func TestTranslateMessageDM(t *testing.T) {
 	if got["text"] != "hello bot" {
 		t.Errorf("text = %v, want 'hello bot'", got["text"])
 	}
+	if _, hasChatName := got["chat_name"]; hasChatName {
+		t.Errorf("chat_name should be omitted until pairing carries roster info; got %v", got["chat_name"])
+	}
 }
 
 func TestTranslateMessageGroupSelfEcho(t *testing.T) {
@@ -129,10 +133,7 @@ func TestTranslateMessageGroupSelfEcho(t *testing.T) {
 	}
 }
 
-func TestTranslateMessageDropsNilEnvelope(t *testing.T) {
-	if got := translateMessage(nil); got != nil {
-		t.Errorf("translateMessage(nil) = %v, want nil", got)
-	}
+func TestTranslateMessageDropsEmptyEnvelope(t *testing.T) {
 	if got := translateMessage(&events.Message{}); got != nil {
 		t.Errorf("translateMessage(empty) = %v, want nil", got)
 	}
@@ -156,7 +157,6 @@ func TestHandleEventDispatch(t *testing.T) {
 	notify := &captureNotifier{}
 	c := &Client{notify: notify, log: discardLogger()}
 
-	// *events.Message → message broadcast
 	sender := types.NewJID("15553334444", types.DefaultUserServer)
 	c.handleEvent(&events.Message{
 		Info: types.MessageInfo{
@@ -167,10 +167,9 @@ func TestHandleEventDispatch(t *testing.T) {
 		Message: &waE2E.Message{Conversation: proto.String("hi")},
 	})
 
-	// *events.Connected → connectionState broadcast
 	c.handleEvent(&events.Connected{})
 
-	// Empty Message envelope → dropped at translate boundary, no broadcast
+	// Empty Message envelope → dropped at translate boundary, no broadcast.
 	c.handleEvent(&events.Message{})
 
 	if len(notify.calls) != 2 {
@@ -182,11 +181,40 @@ func TestHandleEventDispatch(t *testing.T) {
 	if notify.calls[1].Method != "connectionState" {
 		t.Errorf("call 1 method = %q, want 'connectionState'", notify.calls[1].Method)
 	}
-	if state, ok := notify.calls[1].Params.(connectionState); !ok || state.State != "connected" {
-		t.Errorf("connectionState params = %#v, want {State:connected}", notify.calls[1].Params)
+	params, ok := notify.calls[1].Params.(map[string]any)
+	if !ok || params["state"] != "connected" {
+		t.Errorf("connectionState params = %#v, want {state:connected}", notify.calls[1].Params)
+	}
+}
+
+func TestHandleEventLoggedOutOmitsReasonWhenStreamError(t *testing.T) {
+	notify := &captureNotifier{}
+	c := &Client{notify: notify, log: discardLogger()}
+
+	// OnConnect == false (stream:error path): Reason is the zero value
+	// and must not be surfaced to the wire as misleading data.
+	c.handleEvent(&events.LoggedOut{OnConnect: false})
+
+	if len(notify.calls) != 1 {
+		t.Fatalf("got %d broadcasts, want 1", len(notify.calls))
+	}
+	if notify.calls[0].Method != "loggedOut" {
+		t.Errorf("method = %q, want 'loggedOut'", notify.calls[0].Method)
+	}
+	params, ok := notify.calls[0].Params.(map[string]any)
+	if !ok {
+		t.Fatalf("params not a map: %T", notify.calls[0].Params)
+	}
+	if params["on_connect"] != false {
+		t.Errorf("on_connect = %v, want false", params["on_connect"])
+	}
+	if _, hasReason := params["reason"]; hasReason {
+		t.Errorf("reason should be omitted when OnConnect=false; got %v", params["reason"])
 	}
 }
 
 func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	// slog.DiscardHandler short-circuits in Enabled() so the Sprintf
+	// gate in slogWaLogger never fires either.
+	return slog.New(slog.DiscardHandler)
 }

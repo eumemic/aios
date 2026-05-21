@@ -14,7 +14,6 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
@@ -29,14 +28,12 @@ import (
 type Client struct {
 	wa     *whatsmeow.Client
 	store  *sqlstore.Container
-	device *store.Device
 	notify Notifier
 	log    *slog.Logger
 }
 
 // NewClient opens the sqlstore at <storeDir>/store.db, picks the first
-// device (creating one if none exists — that path's the entrypoint for
-// pairing in a later PR), and wires the event handler to Notifier.
+// device (or creates one), and wires the event handler to Notifier.
 // Does NOT initiate a WhatsApp connection — call Connect() for that.
 func NewClient(
 	ctx context.Context,
@@ -56,33 +53,21 @@ func NewClient(
 		return nil, fmt.Errorf("get first device: %w", err)
 	}
 	wa := whatsmeow.NewClient(device, newWaLogger(log, "client"))
-	c := &Client{
-		wa:     wa,
-		store:  container,
-		device: device,
-		notify: notify,
-		log:    log,
-	}
+	c := &Client{wa: wa, store: container, notify: notify, log: log}
 	wa.AddEventHandler(c.handleEvent)
 	return c, nil
 }
 
-// HasPairedDevice reports whether the sqlstore already holds a paired
-// device identity.  When false, Connect is a no-op until the pairing
-// flow (later PR) provisions one.
-func (c *Client) HasPairedDevice() bool {
+func (c *Client) hasPairedDevice() bool {
 	return c.wa.Store.ID != nil
 }
 
-// Connect attaches to WhatsApp if a paired device exists.  Until the
-// pairing flow lands, an unpaired call logs and returns nil so the
-// daemon stays alive serving RPC.
+// Connect attaches to WhatsApp if the device is paired.  Unpaired is
+// a no-op so the daemon keeps serving RPC until the pairing flow
+// provisions a device.
 func (c *Client) Connect(ctx context.Context) error {
-	if !c.HasPairedDevice() {
-		c.log.Warn(
-			"wameow.no_paired_device",
-			"note", "daemon will not connect until pairing flow runs",
-		)
+	if !c.hasPairedDevice() {
+		c.log.Warn("wameow.no_paired_device")
 		return nil
 	}
 	if err := c.wa.Connect(); err != nil {
@@ -91,13 +76,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-// SendMessage implements the daemon's handler.SendMessageFn shape:
-// parse the JID string, build a Conversation-flavored message, send,
-// return the platform's canonical message id + server-acknowledged
-// timestamp.
+// SendMessage matches handler.SendMessageFn.
 func (c *Client) SendMessage(ctx context.Context, jidStr, text string) (string, int64, error) {
 	if !c.wa.IsConnected() {
-		return "", 0, errors.New("not connected to WhatsApp")
+		return "", 0, errors.New("whatsmeow: not connected")
 	}
 	jid, err := types.ParseJID(jidStr)
 	if err != nil {
@@ -111,12 +93,9 @@ func (c *Client) SendMessage(ctx context.Context, jidStr, text string) (string, 
 	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
 }
 
-// Close disconnects from WhatsApp and closes the sqlstore.  Safe to
-// call from defer at process exit.
+// Close disconnects from WhatsApp and closes the sqlstore.
 func (c *Client) Close() {
-	if c.wa.IsConnected() {
-		c.wa.Disconnect()
-	}
+	c.wa.Disconnect()
 	if err := c.store.Close(); err != nil {
 		c.log.Warn("wameow.store_close_error", "err", err)
 	}

@@ -38,9 +38,9 @@ func main() {
 		return
 	}
 
-	level, err := parseLogLevel(*logLevel)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(*logLevel)); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid -log-level=%q: %v\n", *logLevel, err)
 		os.Exit(2)
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
@@ -68,32 +68,18 @@ func main() {
 
 	handler.RegisterSend(reg, client.SendMessage)
 
-	// Connect is best-effort: an unpaired device logs and returns nil
-	// so the daemon stays alive serving RPC (pairing flow lands in a
-	// later PR).  A real connect error is logged but not fatal —
-	// whatsmeow auto-reconnects.
-	if err := client.Connect(ctx); err != nil {
-		logger.Warn("wameow.connect_failed", "err", err)
-	}
+	// Connect runs in parallel with srv.Run so the listener binds (and
+	// `version` RPC starts answering) while the WhatsApp handshake is
+	// still in flight.
+	go func() {
+		if err := client.Connect(ctx); err != nil {
+			logger.Warn("wameow.connect_failed", "err", err)
+		}
+	}()
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("daemon.exit.error", "err", err)
 		os.Exit(1)
 	}
 	logger.Info("daemon.exit.ok")
-}
-
-func parseLogLevel(s string) (slog.Level, error) {
-	switch s {
-	case "debug":
-		return slog.LevelDebug, nil
-	case "info":
-		return slog.LevelInfo, nil
-	case "warn":
-		return slog.LevelWarn, nil
-	case "error":
-		return slog.LevelError, nil
-	default:
-		return 0, fmt.Errorf("invalid -log-level=%q (want debug|info|warn|error)", s)
-	}
 }
