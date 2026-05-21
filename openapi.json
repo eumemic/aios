@@ -12022,6 +12022,180 @@
       },
       "VaultCredentialCreate": {
         "properties": {
+          "access_token": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access Token"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Id"
+          },
+          "refresh_token": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Token"
+          },
+          "token_endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Endpoint"
+          },
+          "token_endpoint_auth": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/TokenEndpointAuthNone"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TokenEndpointAuthBasic"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TokenEndpointAuthPost"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "method",
+                  "mapping": {
+                    "client_secret_basic": "#/components/schemas/TokenEndpointAuthBasic",
+                    "client_secret_post": "#/components/schemas/TokenEndpointAuthPost",
+                    "none": "#/components/schemas/TokenEndpointAuthNone"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Endpoint Auth"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          },
+          "resource": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
+          },
+          "header_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Name"
+          },
+          "header_value": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Value"
+          },
           "display_name": {
             "anyOf": [
               {
@@ -12053,7 +12227,19 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Metadata"
-          },
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target_url",
+          "auth_type"
+        ],
+        "title": "VaultCredentialCreate",
+        "description": "Request body for ``POST /v1/vaults/{vault_id}/credentials``.\n\nAll secret fields are write-only. The ``target_url`` is immutable\nafter creation. The service layer validates required fields per\n``auth_type``."
+      },
+      "VaultCredentialUpdate": {
+        "properties": {
           "access_token": {
             "anyOf": [
               {
@@ -12227,19 +12413,7 @@
               }
             ],
             "title": "Header Value"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "target_url",
-          "auth_type"
-        ],
-        "title": "VaultCredentialCreate",
-        "description": "Request body for ``POST /v1/vaults/{vault_id}/credentials``.\n\nAll secret fields are write-only. The ``target_url`` is immutable\nafter creation. The service layer validates required fields per\n``auth_type``."
-      },
-      "VaultCredentialUpdate": {
-        "properties": {
+          },
           "display_name": {
             "anyOf": [
               {
@@ -12263,180 +12437,6 @@
               }
             ],
             "title": "Metadata"
-          },
-          "access_token": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "password",
-                "writeOnly": true
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Access Token"
-          },
-          "expires_at": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expires At"
-          },
-          "client_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Client Id"
-          },
-          "refresh_token": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "password",
-                "writeOnly": true
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Refresh Token"
-          },
-          "token_endpoint": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Token Endpoint"
-          },
-          "token_endpoint_auth": {
-            "anyOf": [
-              {
-                "oneOf": [
-                  {
-                    "$ref": "#/components/schemas/TokenEndpointAuthNone"
-                  },
-                  {
-                    "$ref": "#/components/schemas/TokenEndpointAuthBasic"
-                  },
-                  {
-                    "$ref": "#/components/schemas/TokenEndpointAuthPost"
-                  }
-                ],
-                "discriminator": {
-                  "propertyName": "method",
-                  "mapping": {
-                    "client_secret_basic": "#/components/schemas/TokenEndpointAuthBasic",
-                    "client_secret_post": "#/components/schemas/TokenEndpointAuthPost",
-                    "none": "#/components/schemas/TokenEndpointAuthNone"
-                  }
-                }
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Token Endpoint Auth"
-          },
-          "scope": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Scope"
-          },
-          "resource": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Resource"
-          },
-          "token": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "password",
-                "writeOnly": true
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Token"
-          },
-          "username": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "password",
-                "writeOnly": true
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Username"
-          },
-          "password": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "password",
-                "writeOnly": true
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Password"
-          },
-          "header_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Header Name"
-          },
-          "header_value": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "password",
-                "writeOnly": true
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Header Value"
           }
         },
         "additionalProperties": false,

@@ -31,8 +31,6 @@ class VaultCredentialCreate:
         Attributes:
             target_url (str):
             auth_type (VaultCredentialCreateAuthType):
-            display_name (None | str | Unset):
-            metadata (VaultCredentialCreateMetadata | Unset):
             access_token (None | str | Unset):
             expires_at (datetime.datetime | None | Unset):
             client_id (None | str | Unset):
@@ -46,12 +44,12 @@ class VaultCredentialCreate:
             password (None | str | Unset):
             header_name (None | str | Unset):
             header_value (None | str | Unset):
+            display_name (None | str | Unset):
+            metadata (VaultCredentialCreateMetadata | Unset):
     """
 
     target_url: str
     auth_type: VaultCredentialCreateAuthType
-    display_name: None | str | Unset = UNSET
-    metadata: VaultCredentialCreateMetadata | Unset = UNSET
     access_token: None | str | Unset = UNSET
     expires_at: datetime.datetime | None | Unset = UNSET
     client_id: None | str | Unset = UNSET
@@ -71,6 +69,8 @@ class VaultCredentialCreate:
     password: None | str | Unset = UNSET
     header_name: None | str | Unset = UNSET
     header_value: None | str | Unset = UNSET
+    display_name: None | str | Unset = UNSET
+    metadata: VaultCredentialCreateMetadata | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.token_endpoint_auth_basic import TokenEndpointAuthBasic
@@ -80,16 +80,6 @@ class VaultCredentialCreate:
         target_url = self.target_url
 
         auth_type = self.auth_type.value
-
-        display_name: None | str | Unset
-        if isinstance(self.display_name, Unset):
-            display_name = UNSET
-        else:
-            display_name = self.display_name
-
-        metadata: dict[str, Any] | Unset = UNSET
-        if not isinstance(self.metadata, Unset):
-            metadata = self.metadata.to_dict()
 
         access_token: None | str | Unset
         if isinstance(self.access_token, Unset):
@@ -177,6 +167,16 @@ class VaultCredentialCreate:
         else:
             header_value = self.header_value
 
+        display_name: None | str | Unset
+        if isinstance(self.display_name, Unset):
+            display_name = UNSET
+        else:
+            display_name = self.display_name
+
+        metadata: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.metadata, Unset):
+            metadata = self.metadata.to_dict()
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -185,10 +185,6 @@ class VaultCredentialCreate:
                 "auth_type": auth_type,
             }
         )
-        if display_name is not UNSET:
-            field_dict["display_name"] = display_name
-        if metadata is not UNSET:
-            field_dict["metadata"] = metadata
         if access_token is not UNSET:
             field_dict["access_token"] = access_token
         if expires_at is not UNSET:
@@ -215,6 +211,10 @@ class VaultCredentialCreate:
             field_dict["header_name"] = header_name
         if header_value is not UNSET:
             field_dict["header_value"] = header_value
+        if display_name is not UNSET:
+            field_dict["display_name"] = display_name
+        if metadata is not UNSET:
+            field_dict["metadata"] = metadata
 
         return field_dict
 
@@ -231,22 +231,6 @@ class VaultCredentialCreate:
         target_url = d.pop("target_url")
 
         auth_type = VaultCredentialCreateAuthType(d.pop("auth_type"))
-
-        def _parse_display_name(data: object) -> None | str | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            return cast(None | str | Unset, data)
-
-        display_name = _parse_display_name(d.pop("display_name", UNSET))
-
-        _metadata = d.pop("metadata", UNSET)
-        metadata: VaultCredentialCreateMetadata | Unset
-        if isinstance(_metadata, Unset):
-            metadata = UNSET
-        else:
-            metadata = VaultCredentialCreateMetadata.from_dict(_metadata)
 
         def _parse_access_token(data: object) -> None | str | Unset:
             if data is None:
@@ -420,11 +404,25 @@ class VaultCredentialCreate:
 
         header_value = _parse_header_value(d.pop("header_value", UNSET))
 
+        def _parse_display_name(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        display_name = _parse_display_name(d.pop("display_name", UNSET))
+
+        _metadata = d.pop("metadata", UNSET)
+        metadata: VaultCredentialCreateMetadata | Unset
+        if isinstance(_metadata, Unset):
+            metadata = UNSET
+        else:
+            metadata = VaultCredentialCreateMetadata.from_dict(_metadata)
+
         vault_credential_create = cls(
             target_url=target_url,
             auth_type=auth_type,
-            display_name=display_name,
-            metadata=metadata,
             access_token=access_token,
             expires_at=expires_at,
             client_id=client_id,
@@ -438,6 +436,8 @@ class VaultCredentialCreate:
             password=password,
             header_name=header_name,
             header_value=header_value,
+            display_name=display_name,
+            metadata=metadata,
         )
 
         return vault_credential_create

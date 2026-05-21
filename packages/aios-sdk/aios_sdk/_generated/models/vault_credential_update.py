@@ -29,8 +29,6 @@ class VaultCredentialUpdate:
     Omitted secret fields are preserved (decrypt-merge-encrypt).
 
         Attributes:
-            display_name (None | str | Unset):
-            metadata (None | Unset | VaultCredentialUpdateMetadataType0):
             access_token (None | str | Unset):
             expires_at (datetime.datetime | None | Unset):
             client_id (None | str | Unset):
@@ -44,10 +42,10 @@ class VaultCredentialUpdate:
             password (None | str | Unset):
             header_name (None | str | Unset):
             header_value (None | str | Unset):
+            display_name (None | str | Unset):
+            metadata (None | Unset | VaultCredentialUpdateMetadataType0):
     """
 
-    display_name: None | str | Unset = UNSET
-    metadata: None | Unset | VaultCredentialUpdateMetadataType0 = UNSET
     access_token: None | str | Unset = UNSET
     expires_at: datetime.datetime | None | Unset = UNSET
     client_id: None | str | Unset = UNSET
@@ -67,6 +65,8 @@ class VaultCredentialUpdate:
     password: None | str | Unset = UNSET
     header_name: None | str | Unset = UNSET
     header_value: None | str | Unset = UNSET
+    display_name: None | str | Unset = UNSET
+    metadata: None | Unset | VaultCredentialUpdateMetadataType0 = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.token_endpoint_auth_basic import TokenEndpointAuthBasic
@@ -75,20 +75,6 @@ class VaultCredentialUpdate:
         from ..models.vault_credential_update_metadata_type_0 import (
             VaultCredentialUpdateMetadataType0,
         )
-
-        display_name: None | str | Unset
-        if isinstance(self.display_name, Unset):
-            display_name = UNSET
-        else:
-            display_name = self.display_name
-
-        metadata: dict[str, Any] | None | Unset
-        if isinstance(self.metadata, Unset):
-            metadata = UNSET
-        elif isinstance(self.metadata, VaultCredentialUpdateMetadataType0):
-            metadata = self.metadata.to_dict()
-        else:
-            metadata = self.metadata
 
         access_token: None | str | Unset
         if isinstance(self.access_token, Unset):
@@ -176,13 +162,23 @@ class VaultCredentialUpdate:
         else:
             header_value = self.header_value
 
+        display_name: None | str | Unset
+        if isinstance(self.display_name, Unset):
+            display_name = UNSET
+        else:
+            display_name = self.display_name
+
+        metadata: dict[str, Any] | None | Unset
+        if isinstance(self.metadata, Unset):
+            metadata = UNSET
+        elif isinstance(self.metadata, VaultCredentialUpdateMetadataType0):
+            metadata = self.metadata.to_dict()
+        else:
+            metadata = self.metadata
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
-        if display_name is not UNSET:
-            field_dict["display_name"] = display_name
-        if metadata is not UNSET:
-            field_dict["metadata"] = metadata
         if access_token is not UNSET:
             field_dict["access_token"] = access_token
         if expires_at is not UNSET:
@@ -209,6 +205,10 @@ class VaultCredentialUpdate:
             field_dict["header_name"] = header_name
         if header_value is not UNSET:
             field_dict["header_value"] = header_value
+        if display_name is not UNSET:
+            field_dict["display_name"] = display_name
+        if metadata is not UNSET:
+            field_dict["metadata"] = metadata
 
         return field_dict
 
@@ -222,34 +222,6 @@ class VaultCredentialUpdate:
         )
 
         d = dict(src_dict)
-
-        def _parse_display_name(data: object) -> None | str | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            return cast(None | str | Unset, data)
-
-        display_name = _parse_display_name(d.pop("display_name", UNSET))
-
-        def _parse_metadata(
-            data: object,
-        ) -> None | Unset | VaultCredentialUpdateMetadataType0:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            try:
-                if not isinstance(data, dict):
-                    raise TypeError()
-                metadata_type_0 = VaultCredentialUpdateMetadataType0.from_dict(data)
-
-                return metadata_type_0
-            except (TypeError, ValueError, AttributeError, KeyError):
-                pass
-            return cast(None | Unset | VaultCredentialUpdateMetadataType0, data)
-
-        metadata = _parse_metadata(d.pop("metadata", UNSET))
 
         def _parse_access_token(data: object) -> None | str | Unset:
             if data is None:
@@ -423,9 +395,35 @@ class VaultCredentialUpdate:
 
         header_value = _parse_header_value(d.pop("header_value", UNSET))
 
+        def _parse_display_name(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        display_name = _parse_display_name(d.pop("display_name", UNSET))
+
+        def _parse_metadata(
+            data: object,
+        ) -> None | Unset | VaultCredentialUpdateMetadataType0:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                metadata_type_0 = VaultCredentialUpdateMetadataType0.from_dict(data)
+
+                return metadata_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | VaultCredentialUpdateMetadataType0, data)
+
+        metadata = _parse_metadata(d.pop("metadata", UNSET))
+
         vault_credential_update = cls(
-            display_name=display_name,
-            metadata=metadata,
             access_token=access_token,
             expires_at=expires_at,
             client_id=client_id,
@@ -439,6 +437,8 @@ class VaultCredentialUpdate:
             password=password,
             header_name=header_name,
             header_value=header_value,
+            display_name=display_name,
+            metadata=metadata,
         )
 
         return vault_credential_update
