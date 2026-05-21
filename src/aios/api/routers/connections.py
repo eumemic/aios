@@ -114,7 +114,7 @@ async def list_(
         connector=connector,
         session_id=session_id,
         mode=mode,
-        limit=limit,
+        limit=limit + 1,
         after=after,
         account_id=account_id,
     )

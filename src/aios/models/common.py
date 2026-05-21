@@ -23,11 +23,18 @@ class ListResponse[T](BaseModel):
         *,
         cursor: Callable[[T], str],
     ) -> ListResponse[T]:
-        """Wrap a windowed query result in the pagination envelope."""
+        """Wrap a windowed query result in the pagination envelope.
+
+        Callers must fetch ``limit + 1`` rows and pass them here.  The extra
+        row is used to detect whether more pages exist without a separate COUNT
+        query; it is stripped before the response is built.
+        """
+        has_more = len(items) > limit
+        data = items[:limit]
         return cls(
-            data=items,
-            has_more=len(items) == limit,
-            next_after=cursor(items[-1]) if items else None,
+            data=data,
+            has_more=has_more,
+            next_after=cursor(data[-1]) if data else None,
         )
 
 

@@ -62,7 +62,7 @@ async def list_(
     Cursor pagination via ``after``.
     """
     items = await service.list_session_templates(
-        pool, limit=limit, after=after, account_id=account_id
+        pool, limit=limit + 1, after=after, account_id=account_id
     )
     return ListResponse[SessionTemplate].paginate(items, limit, cursor=lambda x: x.id)
 
