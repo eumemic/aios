@@ -50,14 +50,7 @@ def _mk_listener(name: str) -> AbstractAsyncContextManager[Any]:
     ],
 )
 async def test_add_listener_failure_closes_conn(name: str) -> None:
-    """conn.terminate() must run if add_listener raises during setup.
-
-    Switched from ``conn.close()`` (async, graceful) to ``conn.terminate()``
-    (sync, non-graceful) in #606: under sse-starlette's anyio scope-cancellation,
-    every subsequent ``await`` re-raises ``CancelledError``, so an async close
-    never reaches Postgres and the backend lingers.  ``terminate()`` is
-    synchronous and always closes the socket.
-    """
+    """conn.terminate() must run if add_listener raises during setup."""
     conn = MagicMock()
     conn.add_listener = AsyncMock(side_effect=RuntimeError("simulated network blip"))
 
@@ -71,7 +64,7 @@ async def test_add_listener_failure_closes_conn(name: str) -> None:
     conn.terminate.assert_called_once()
 
 
-async def test_listen_for_events_acquire_subscriber_lock_failure_closes_conn() -> None:
+async def test_listen_for_events_acquire_subscriber_lock_failure_terminates_conn() -> None:
     """conn.terminate() must run if acquire_subscriber_lock raises after add_listener."""
     conn = MagicMock()
     conn.add_listener = AsyncMock()
