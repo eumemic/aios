@@ -23,24 +23,17 @@ watermark and proceeds.
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import TYPE_CHECKING, Any, Literal
 
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
 from aios.harness.completion import call_litellm, stream_litellm
 from aios.harness.step_context import compose_step_context, compute_step_prelude
-from aios.harness.stop_hooks import (
-    continuation_message,
-    evaluate_self_check,
-    extract_assistant_text,
-)
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.logging import get_logger
 from aios.models.agents import PermissionPolicy, ToolSpec
-from aios.models.sessions import SelfCheckStopHook, StopHookSpec, TaskCallStopHook
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.services.wake import defer_wake
@@ -513,24 +506,6 @@ async def _run_session_step_body(
     #   custom          — not in registry and not MCP (hold for client execution)
     tool_calls: list[dict[str, Any]] = assistant_msg.get("tool_calls") or []
 
-    # ``task_complete`` supersession: when a ``task_call`` Stop hook is set
-    # and the model emits ``task_complete`` alongside other tool calls in
-    # the same response, synth-result ``task_complete`` inline and mark the
-    # session idle — siblings are NOT dispatched (issue #374, decision #2).
-    # Siblings remain unfulfilled in the event log; the context builder's
-    # pending-result synthesis covers them if the session is resumed.
-    if tool_calls and session.stop_hook is not None:
-        superseded = await _maybe_apply_task_complete_supersession(
-            pool,
-            session_id,
-            session.stop_hook,
-            tool_calls,
-            cause=cause,
-            account_id=account_id,
-        )
-        if superseded:
-            return None
-
     if tool_calls:
         immediate: list[dict[str, Any]] = []
         mcp_immediate: list[dict[str, Any]] = []
@@ -621,21 +596,7 @@ async def _run_session_step_body(
                 custom_tools=custom_ids,
             )
     else:
-        # No tool calls — consult the Stop hook (if any) before going idle.
-        # A hook can deny the stop and continue the session by appending a
-        # user-role continuation message and deferring another wake.
-        if session.stop_hook is not None:
-            continued = await _maybe_apply_stop_hook_continuation(
-                pool,
-                session_id,
-                session.stop_hook,
-                assistant_msg,
-                cause=cause,
-                account_id=account_id,
-            )
-            if continued:
-                return None
-        # No hook (or hook allowed stop) — the model's turn is done.
+        # No tool calls — the model's turn is done.
         await sessions_service.set_session_status(
             pool, session_id, "idle", stop_reason={"type": "end_turn"}, account_id=account_id
         )
@@ -646,137 +607,6 @@ async def _run_session_step_body(
     return None
 
 
-async def _maybe_apply_task_complete_supersession(
-    pool: asyncpg.Pool[Any],
-    session_id: str,
-    hook: StopHookSpec,
-    tool_calls: list[dict[str, Any]],
-    *,
-    cause: str,
-    account_id: str,
-) -> bool:
-    """Intercept ``task_complete`` tool calls under a ``task_call`` Stop hook.
-
-    Returns ``True`` iff supersession fired and the caller must return.
-    Synth-results ``task_complete`` inline, marks the session idle with
-    ``stop_reason={"type": "task_complete"}``, and skips dispatch of any
-    sibling tool calls in the same response.
-
-    Siblings remain unfulfilled in the event log on purpose: the context
-    builder's pending-result synthesis (see ``harness/context.py``)
-    emits placeholder results so the chat-completions payload is valid
-    if the session is later resumed.
-    """
-    from aios.harness.tool_dispatch import _append_tool_result_event
-    from aios.tools.task_complete import task_complete_handler
-
-    if not isinstance(hook, TaskCallStopHook):
-        return False
-
-    tc = next((c for c in tool_calls if _tc_name(c) == "task_complete"), None)
-    if tc is None:
-        return False
-
-    call_id = tc.get("id") or ""
-    args_str = (tc.get("function") or {}).get("arguments") or "{}"
-    try:
-        args = json.loads(args_str) if isinstance(args_str, str) else {}
-    except json.JSONDecodeError:
-        args = {}
-
-    result = await task_complete_handler(session_id, args)
-
-    await _append_tool_result_event(
-        pool,
-        session_id,
-        call_id,
-        {
-            "role": "tool",
-            "tool_call_id": call_id,
-            "name": "task_complete",
-            "content": json.dumps(result, ensure_ascii=False),
-        },
-        account_id=account_id,
-    )
-
-    stop_reason: dict[str, Any] = {"type": "task_complete"}
-    summary = result.get("summary")
-    if isinstance(summary, str) and summary:
-        stop_reason["summary"] = summary
-
-    await sessions_service.set_session_status(
-        pool, session_id, "idle", stop_reason=stop_reason, account_id=account_id
-    )
-    await _append_lifecycle(
-        pool, session_id, "turn_ended", "idle", "task_complete", account_id=account_id
-    )
-    log.info(
-        "step.task_complete_supersession",
-        session_id=session_id,
-        cause=cause,
-        sibling_count=len(tool_calls) - 1,
-    )
-    return True
-
-
-async def _maybe_apply_stop_hook_continuation(
-    pool: asyncpg.Pool[Any],
-    session_id: str,
-    hook: StopHookSpec,
-    assistant_msg: dict[str, Any],
-    *,
-    cause: str,
-    account_id: str,
-) -> bool:
-    """Consult the Stop hook on the no-tools branch.
-
-    Returns ``True`` iff the hook denied the stop and the session was
-    continued (continuation user message appended, ``turn_continued``
-    lifecycle emitted, wake deferred). Returns ``False`` when the hook
-    allowed the stop and the caller should proceed with the normal
-    idle transition.
-
-    Hook semantics:
-    - ``self_check`` — stop iff the assistant message's first word
-      (case-insensitive) matches ``stop_on``.
-    - ``task_call`` — NEVER stop on a no-tools final message; the only
-      terminator is ``task_complete`` (handled by supersession above).
-    - ``always_continue`` — NEVER stop.
-
-    Status stays ``running`` across continuation; the deferred wake is
-    the only thing that triggers the next step.
-    """
-    if isinstance(hook, SelfCheckStopHook):
-        text = extract_assistant_text(assistant_msg)
-        if evaluate_self_check(hook, text):
-            return False
-
-    msg = continuation_message(hook)
-    await sessions_service.append_event(
-        pool,
-        session_id,
-        "message",
-        {"role": "user", "content": msg},
-        account_id=account_id,
-    )
-    await _append_lifecycle(
-        pool,
-        session_id,
-        "turn_continued",
-        "running",
-        "stop_hook_denied",
-        account_id=account_id,
-    )
-    await defer_wake(pool, session_id, cause="stop_hook_continue", account_id=account_id)
-    log.info(
-        "step.stop_hook_continued",
-        session_id=session_id,
-        cause=cause,
-        hook_type=hook.type,
-    )
-    return True
-
-
 def _switch_channel_tool_spec() -> dict[str, Any]:
     """Build the chat-completions tool entry for the ``switch_channel`` built-in.
 
@@ -785,22 +615,9 @@ def _switch_channel_tool_spec() -> dict[str, Any]:
     to list it in their ``tools`` declaration — it's focal-machinery
     scope, not agent scope.
     """
-    return _builtin_tool_spec("switch_channel")
-
-
-def _task_complete_tool_spec() -> dict[str, Any]:
-    """Build the chat-completions tool entry for the ``task_complete`` built-in.
-
-    Injected by ``compute_step_prelude`` whenever the session has a
-    ``task_call`` stop hook — see :mod:`aios.harness.stop_hooks`.
-    """
-    return _builtin_tool_spec("task_complete")
-
-
-def _builtin_tool_spec(name: str) -> dict[str, Any]:
     from aios.tools.registry import registry as tool_registry
 
-    tool = tool_registry.get(name)
+    tool = tool_registry.get("switch_channel")
     return {
         "type": "function",
         "function": {

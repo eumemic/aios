@@ -46,7 +46,6 @@ from aios.models.sessions import (
     SessionStatus,
     SessionUpdate,
     SessionUserMessage,
-    StopHookRequest,
     ToolConfirmationRequest,
     ToolResultRequest,
     WaitResponse,
@@ -144,27 +143,6 @@ async def update(
         resources=body.resources,
         crypto_box=crypto_box,
         account_id=account_id,
-    )
-
-
-@router.post("/{session_id}/stop-hook", operation_id="set_session_stop_hook")
-async def set_stop_hook(
-    session_id: str,
-    body: StopHookRequest,
-    pool: PoolDep,
-    account_id: AccountIdDep,
-) -> Session:
-    """Set or clear the session's pluggable stop hook.
-
-    Pass ``{"hook": null}`` (or omit ``hook``) to clear and return the
-    session to its conversational default.  The harness's next
-    conversational stop-point picks up the new hook.
-    """
-    return await service.set_session_stop_hook(
-        pool,
-        session_id,
-        account_id=account_id,
-        stop_hook=body.hook,
     )
 
 

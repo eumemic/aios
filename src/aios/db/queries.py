@@ -69,7 +69,7 @@ from aios.models.memory_stores import (
 )
 from aios.models.runtime_tokens import RuntimeToken
 from aios.models.session_templates import SessionTemplate
-from aios.models.sessions import Session, SessionStatus, SessionUsage, StopHookSpec
+from aios.models.sessions import Session, SessionStatus, SessionUsage
 from aios.models.skills import AgentSkillRef, Skill, SkillVersion
 from aios.models.vaults import AuthType, Vault, VaultCredential
 
@@ -655,17 +655,10 @@ async def list_agent_versions(
 
 
 def _row_to_session(row: asyncpg.Record) -> Session:
-    from pydantic import TypeAdapter
-
     raw_metadata = row["metadata"]
     metadata = parse_jsonb(raw_metadata)
     raw_stop = row["stop_reason"]
     stop_reason = parse_jsonb(raw_stop)
-    raw_hook = row["stop_hook"]
-    parsed_hook = parse_jsonb(raw_hook)
-    stop_hook: StopHookSpec | None = (
-        TypeAdapter(StopHookSpec).validate_python(parsed_hook) if parsed_hook is not None else None
-    )
     return Session(
         id=row["id"],
         agent_id=row["agent_id"],
@@ -687,7 +680,6 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         archived_at=row["archived_at"],
         focal_channel=row["focal_channel"],
         focal_locked=row["focal_locked"],
-        stop_hook=stop_hook,
     )
 
 
@@ -704,7 +696,6 @@ async def insert_session(
     env: dict[str, str] | None = None,
     focal_channel: str | None = None,
     focal_locked: bool = False,
-    stop_hook: StopHookSpec | None = None,
 ) -> Session:
     """Insert a fresh session row.
 
@@ -735,12 +726,9 @@ async def insert_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 status, workspace_volume_path, env,
-                focal_channel, focal_locked, account_id, stop_hook
+                focal_channel, focal_locked, account_id
             )
-            VALUES (
-                $1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb,
-                $9, $10, $11, $12::jsonb
-            )
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10, $11)
             RETURNING *
             """,
             new_id,
@@ -754,7 +742,6 @@ async def insert_session(
             focal_channel,
             focal_locked,
             account_id,
-            json.dumps(stop_hook.model_dump(mode="json")) if stop_hook is not None else None,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -1119,38 +1106,6 @@ async def update_session(
     return _row_to_session(row)
 
 
-async def update_session_stop_hook(
-    conn: asyncpg.Connection[Any],
-    session_id: str,
-    *,
-    account_id: str,
-    stop_hook: StopHookSpec | None,
-) -> Session:
-    """Write a session's ``stop_hook`` (or clear it when ``None``).
-
-    Refuses archived sessions for the same reason :func:`update_session`
-    does: read paths filter ``archived_at IS NULL``, so an UPDATE would
-    silently no-op from the caller's perspective.
-    """
-    current = await get_session(conn, session_id, account_id=account_id)
-    if current.archived_at is not None:
-        raise ConflictError(
-            f"session {session_id} is archived",
-            detail={"id": session_id},
-        )
-    serialised = json.dumps(stop_hook.model_dump(mode="json")) if stop_hook is not None else None
-    row = await conn.fetchrow(
-        "UPDATE sessions SET stop_hook = $1::jsonb, updated_at = now() "
-        "WHERE id = $2 AND account_id = $3 AND archived_at IS NULL RETURNING *",
-        serialised,
-        session_id,
-        account_id,
-    )
-    if row is None:
-        raise ConflictError(f"session {session_id} is archived", detail={"id": session_id})
-    return _row_to_session(row)
-
-
 async def archive_session(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> Session:
@@ -1285,11 +1240,11 @@ async def clone_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 status, stop_reason, workspace_volume_path, env, last_event_seq,
-                focal_channel, focal_locked, account_id, stop_hook
+                focal_channel, focal_locked, account_id
             )
             SELECT $1, agent_id, environment_id, agent_version, title, metadata,
                    status, stop_reason, $2, env, last_event_seq, focal_channel,
-                   focal_locked, account_id, stop_hook
+                   focal_locked, account_id
               FROM sessions WHERE id = $3
             RETURNING *
             """,
