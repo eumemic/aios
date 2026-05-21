@@ -8659,6 +8659,7 @@
           },
           "authorization_token": {
             "type": "string",
+            "minLength": 1,
             "format": "password",
             "title": "Authorization Token",
             "writeOnly": true
@@ -8767,6 +8768,7 @@
         "properties": {
           "authorization_token": {
             "type": "string",
+            "minLength": 1,
             "format": "password",
             "title": "Authorization Token",
             "writeOnly": true

@@ -57,15 +57,13 @@ class GithubRepositoryResource(BaseModel):
     type: Literal["github_repository"]
     url: str = Field(min_length=1)
     mount_path: str = Field(min_length=2, max_length=4096, pattern=ABSOLUTE_PATH_PATTERN)
-    authorization_token: SecretStr
+    authorization_token: SecretStr = Field(min_length=1)
     git_user_name: str | None = Field(default=None, max_length=256)
     git_user_email: str | None = Field(default=None, max_length=256)
 
     @model_validator(mode="after")
     def _check(self) -> GithubRepositoryResource:
         _check_mount_path(self.mount_path)
-        if not self.authorization_token.get_secret_value():
-            raise ValueError("authorization_token must be non-empty")
         return self
 
 
@@ -100,15 +98,9 @@ class GithubRepositoryUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    authorization_token: SecretStr
+    authorization_token: SecretStr = Field(min_length=1)
     git_user_name: str | None = Field(default=None, max_length=256)
     git_user_email: str | None = Field(default=None, max_length=256)
-
-    @model_validator(mode="after")
-    def _check(self) -> GithubRepositoryUpdate:
-        if not self.authorization_token.get_secret_value():
-            raise ValueError("authorization_token must be non-empty")
-        return self
 
 
 def validate_resources(resources: list[GithubRepositoryResource]) -> None:
