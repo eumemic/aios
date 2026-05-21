@@ -31,8 +31,7 @@ import pytest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import NotFoundError
-from aios.services import agents as agents_service
-from aios.services import environments as environments_service
+from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
 
@@ -52,31 +51,10 @@ async def archived_session(
                 VALUES ('acc_archived', NULL, TRUE, 'archived-session-test')
                 """
             )
-        agent = await agents_service.create_agent(
-            pool,
-            account_id="acc_archived",
-            name="archived-test",
-            model="openrouter/test",
-            system="",
-            tools=[],
-            description=None,
-            metadata={},
-            window_min=50_000,
-            window_max=150_000,
-        )
-        env = await environments_service.create_environment(
-            pool, account_id="acc_archived", name="archived-test-env"
+        _agent, _env, session = await seed_agent_env_session(
+            pool, account_id="acc_archived", prefix="archived-test"
         )
         async with pool.acquire() as conn:
-            session = await queries.insert_session(
-                conn,
-                account_id="acc_archived",
-                agent_id=agent.id,
-                environment_id=env.id,
-                agent_version=agent.version,
-                title=None,
-                metadata={},
-            )
             await queries.archive_session(conn, session.id, account_id="acc_archived")
         yield pool, "acc_archived", session.id
     finally:

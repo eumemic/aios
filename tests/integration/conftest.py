@@ -12,6 +12,58 @@ from typing import Any
 import asyncpg
 import pytest
 
+from aios.db import queries
+from aios.models.agents import Agent, ToolSpec
+from aios.models.environments import Environment
+from aios.models.sessions import Session
+from aios.services import agents as agents_service
+from aios.services import environments as environments_service
+
+
+async def seed_agent_env_session(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    prefix: str,
+    tools: list[ToolSpec] | None = None,
+) -> tuple[Agent, Environment, Session]:
+    """Seed a default ``(agent, env, session)`` trio scoped to ``account_id``.
+
+    Used by integration tests that need a session-shaped scaffold but
+    don't care about the specifics of the agent / environment / session
+    rows. The agent name is ``{prefix}-agent``; the env name is
+    ``{prefix}-env``. Other agent settings (``model="openrouter/test"``,
+    ``window_min=50_000``, ``window_max=150_000``, empty system /
+    description / metadata) match the long-standing conventions across
+    the existing integration tests.
+    """
+    agent = await agents_service.create_agent(
+        pool,
+        account_id=account_id,
+        name=f"{prefix}-agent",
+        model="openrouter/test",
+        system="",
+        tools=tools or [],
+        description=None,
+        metadata={},
+        window_min=50_000,
+        window_max=150_000,
+    )
+    env = await environments_service.create_environment(
+        pool, account_id=account_id, name=f"{prefix}-env"
+    )
+    async with pool.acquire() as conn:
+        session = await queries.insert_session(
+            conn,
+            account_id=account_id,
+            agent_id=agent.id,
+            environment_id=env.id,
+            agent_version=agent.version,
+            title=None,
+            metadata={},
+        )
+    return agent, env, session
+
 
 @pytest.fixture
 async def conn_two_accounts(
