@@ -242,24 +242,31 @@ async def append_event(
         )
 
 
-async def _lock_session_or_raise(
+async def _lock_active_session_or_raise(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> None:
-    """``SELECT FOR UPDATE`` the session row; raise NotFoundError on miss.
+    """Enforce the active-session precondition: ``SELECT FOR UPDATE``
+    the session row, raise NotFoundError on miss / wrong account,
+    ConflictError when status is ``errored`` (a user message is
+    required to resume).
 
-    Called inside an outer ``async with conn.transaction()`` block to
-    serialize concurrent retries on the same session. The presence check
-    is a free side effect — the primary purpose is the row lock.
+    Must be called inside an outer ``conn.transaction()`` block — the
+    row lock is what serialises concurrent retries on the same session.
     """
-    locked = await conn.fetchval(
-        "SELECT id FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+    row = await conn.fetchrow(
+        "SELECT status FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
         session_id,
         account_id,
     )
-    if locked is None:
+    if row is None:
         raise NotFoundError(
             f"session {session_id} not found",
             detail={"session_id": session_id},
+        )
+    if row["status"] == "errored":
+        raise ConflictError(
+            f"session {session_id} is errored; post a user message to resume",
+            detail={"session_id": session_id, "status": "errored"},
         )
 
 
@@ -292,7 +299,7 @@ async def append_tool_result(
     deferring the wake afterwards.
     """
     async with conn.transaction():
-        await _lock_session_or_raise(conn, session_id, account_id=account_id)
+        await _lock_active_session_or_raise(conn, session_id, account_id=account_id)
         existing = await queries.find_tool_result_event(
             conn, session_id, tool_call_id, account_id=account_id
         )
@@ -597,7 +604,7 @@ async def confirm_tool_allow(
     silently accept impossible inputs.
     """
     async with pool.acquire() as conn, conn.transaction():
-        await _lock_session_or_raise(conn, session_id, account_id=account_id)
+        await _lock_active_session_or_raise(conn, session_id, account_id=account_id)
         existing = await queries.find_tool_confirmed_event(
             conn, session_id, tool_call_id, account_id=account_id
         )
