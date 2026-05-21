@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from aios.db import queries
 from aios.harness import runtime
+from aios.harness._text import join_blocks
 from aios.logging import get_logger
 from aios.models.skills import SkillVersion
 from aios.sandbox.volumes import ensure_workspace_path
@@ -78,12 +79,7 @@ def augment_system_prompt(
     No-op if ``skill_versions`` is empty — returns ``base_system``
     unchanged.
     """
-    skills_block = build_skills_system_block(skill_versions)
-    if not skills_block:
-        return base_system
-    if base_system:
-        return base_system + "\n\n" + skills_block
-    return skills_block
+    return join_blocks(base_system, build_skills_system_block(skill_versions))
 
 
 # ── filesystem provisioning ────────────────────────────────────────────────
