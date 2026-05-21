@@ -2034,6 +2034,11 @@ async def _latest_unresolved_tool_calls(
     """
     if not session_ids:
         return {}
+    # ``data ? 'tool_calls'`` is the partial-index predicate on
+    # ``events_assistant_tool_calls_idx``; the ``jsonb_array_length > 0``
+    # post-filter narrows to non-empty arrays (the index admits
+    # ``null`` / ``[]`` too).  Without the ``?`` conjunct the planner
+    # falls back to the wider ``events_session_seq_idx``.
     asst_rows = await conn.fetch(
         """
         SELECT DISTINCT ON (session_id) session_id, data
@@ -2042,6 +2047,7 @@ async def _latest_unresolved_tool_calls(
            AND account_id = $2
            AND kind = 'message'
            AND role = 'assistant'
+           AND data ? 'tool_calls'
            AND jsonb_array_length(
                  COALESCE(NULLIF(data->'tool_calls','null'::jsonb), '[]'::jsonb)
                ) > 0
@@ -2106,8 +2112,10 @@ async def list_unresolved_tool_calls_batch(
 
     Used by :func:`services.sessions.compute_awaiting` to build the
     ``Session.awaiting`` derived view. Returned dicts have keys
-    ``tool_call_id``, ``name``, ``has_allow_lifecycle`` — the caller
-    classifies kind/needs_confirm using ``agent.tools``.
+    ``tool_call_id``, ``name``, ``arguments``, ``has_allow_lifecycle``
+    — the caller classifies kind / needs_confirm using ``agent`` (and
+    the tool's ``classify_permission`` for arg-aware routes like
+    ``http_request``).
     """
     raw = await _latest_unresolved_tool_calls(conn, session_ids, account_id=account_id)
     if not raw:
@@ -2134,15 +2142,20 @@ async def list_unresolved_tool_calls_batch(
     out: dict[str, list[dict[str, Any]]] = {}
     for sid, calls in raw.items():
         allows = allows_by_sid.get(sid, set())
-        entries = [
-            {
-                "tool_call_id": tc["id"],
-                "name": name,
-                "has_allow_lifecycle": tc["id"] in allows,
-            }
-            for tc in calls
-            if (name := (tc.get("function") or {}).get("name"))
-        ]
+        entries: list[dict[str, Any]] = []
+        for tc in calls:
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if not name:
+                continue
+            entries.append(
+                {
+                    "tool_call_id": tc["id"],
+                    "name": name,
+                    "arguments": fn.get("arguments", "{}"),
+                    "has_allow_lifecycle": tc["id"] in allows,
+                }
+            )
         if entries:
             out[sid] = entries
     return out

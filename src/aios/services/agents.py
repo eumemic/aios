@@ -12,7 +12,15 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
-from aios.models.agents import Agent, AgentVersion, HttpServerSpec, McpServerSpec, ToolSpec
+from aios.models.agents import (
+    Agent,
+    AgentVersion,
+    HttpServerSpec,
+    McpServerSpec,
+    PermissionPolicy,
+    ToolSpec,
+    resolve_mcp_permission,
+)
 from aios.models.skills import AgentSkillRef
 from aios.services import skills as skills_service
 
@@ -144,6 +152,23 @@ async def load_for_session(
             pool, session.agent_id, session.agent_version, account_id=account_id
         )
     return await get_agent(pool, session.agent_id, account_id=account_id)
+
+
+def effective_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> PermissionPolicy:
+    """Resolved MCP permission with operator-default fallback applied.
+
+    Wraps :func:`aios.models.agents.resolve_mcp_permission` (which
+    returns ``None`` when no ``mcp_toolset`` entry matches the server)
+    and substitutes ``AIOS_DEFAULT_MCP_PERMISSION_POLICY`` (or
+    ``always_ask`` if no operator default is set) so callers see the
+    effective policy the dispatcher actually applies — never ``None``.
+    """
+    perm = resolve_mcp_permission(name, agent_tools)
+    if perm is not None:
+        return perm
+    from aios.config import get_settings
+
+    return get_settings().default_mcp_permission_policy or "always_ask"
 
 
 async def list_agent_versions(
