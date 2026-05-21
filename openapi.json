@@ -6941,6 +6941,179 @@
         }
       }
     },
+    "/v1/connectors/whatsapp/start-pairing": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Whatsapp Start Pairing",
+        "description": "Initiate QR pairing.  Returns the first QR code; the operator\nscans within whatsmeow's QR window (~20 s before rotation, ~100 s\ntotal).  The follow-up ``/confirm-pairing`` blocks until the\npairing terminates.",
+        "operationId": "post_connector_whatsapp_start_pairing",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhatsappStartPairingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhatsappStartPairingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/whatsapp/confirm-pairing": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Whatsapp Confirm Pairing",
+        "description": "Block until pairing terminates.  Long-poll: up to ~180 s server-side\nso a slow scan doesn't trip the HTTP timeout before the daemon\nitself reports timeout.",
+        "operationId": "post_connector_whatsapp_confirm_pairing",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhatsappConfirmPairingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhatsappConfirmPairingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/whatsapp/unpair": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Whatsapp Unpair",
+        "description": "Log out the WhatsApp device on the server; clears the local\nsqlstore so the next ``/start-pairing`` provisions a fresh device.",
+        "operationId": "post_connector_whatsapp_unpair",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhatsappUnpairRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/runtime/management-call-results": {
       "post": {
         "tags": [
@@ -12714,6 +12887,123 @@
         ],
         "title": "WaitResponse",
         "description": "Response for ``GET /v1/sessions/{id}/wait``."
+      },
+      "WhatsappConfirmPairingRequest": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "external_account_id"
+        ],
+        "title": "WhatsappConfirmPairingRequest"
+      },
+      "WhatsappConfirmPairingResponse": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "success",
+              "timeout",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "jid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Jid"
+          },
+          "push_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Push Name"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "external_account_id",
+          "status"
+        ],
+        "title": "WhatsappConfirmPairingResponse",
+        "description": "``status`` is the terminal pairing outcome; ``jid`` / ``push_name``\nare populated on success, ``reason`` on error / timeout."
+      },
+      "WhatsappStartPairingRequest": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "external_account_id"
+        ],
+        "title": "WhatsappStartPairingRequest"
+      },
+      "WhatsappStartPairingResponse": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          }
+        },
+        "type": "object",
+        "required": [
+          "external_account_id",
+          "code"
+        ],
+        "title": "WhatsappStartPairingResponse"
+      },
+      "WhatsappUnpairRequest": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "external_account_id"
+        ],
+        "title": "WhatsappUnpairRequest"
       }
     }
   }

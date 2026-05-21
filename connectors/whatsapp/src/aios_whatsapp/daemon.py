@@ -13,12 +13,18 @@ import asyncio
 import contextlib
 import signal
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 import structlog
 
 from .errors import DaemonCrashError
 from .rpc import RpcClient, RpcListener
+
+# Pairing waits for the operator to scan the QR; whatsmeow's QR channel
+# cycles refresh codes for ~100 s before timing out.  Give the daemon's
+# RPC up to 3 minutes so a slow scan doesn't blow the client-side
+# timeout before the daemon itself reports timeout.
+_CONFIRM_PAIRING_TIMEOUT_S = 180.0
 
 log = structlog.get_logger(__name__)
 
@@ -111,6 +117,29 @@ class WhatsappDaemon:
                 name="whatsapp-daemon-stderr",
             )
         )
+
+    async def start_pairing(self) -> dict[str, Any]:
+        """Begin QR pairing.  Returns ``{"code": "..."}`` for the first QR."""
+        result = await self.rpc.call("startPairing")
+        return result if isinstance(result, dict) else {}
+
+    async def confirm_pairing(self) -> dict[str, Any]:
+        """Block until the in-flight pairing terminates.
+
+        Returns ``{"status": "success" | "timeout" | "error", "jid"?, "push_name"?, "reason"?}``.
+
+        Uses a dedicated long-timeout RpcClient because the daemon
+        intentionally blocks for the duration of the QR window
+        (~100 s); ``self.rpc``'s default 30 s would tear the wait
+        socket down before the daemon could report timeout itself.
+        """
+        long_rpc = RpcClient(self.host, self.port, timeout=_CONFIRM_PAIRING_TIMEOUT_S)
+        result = await long_rpc.call("confirmPairing")
+        return result if isinstance(result, dict) else {}
+
+    async def unpair(self) -> None:
+        """Log out the WhatsApp device."""
+        await self.rpc.call("unpair")
 
     async def _wait_for_tcp(self) -> None:
         """Poll ``version`` until the daemon answers, exits, or attempts exhaust."""

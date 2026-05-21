@@ -30,6 +30,7 @@ type Client struct {
 	store  *sqlstore.Container
 	notify Notifier
 	log    *slog.Logger
+	pair   pairing
 }
 
 // NewClient opens the sqlstore at <storeDir>/store.db, picks the first
