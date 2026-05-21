@@ -8,6 +8,7 @@ from typing import Annotated, Any
 import typer
 
 from aios.cli.commands._shared import call_single, render_paginated, unwrap
+from aios.cli.coverage import covers
 from aios.cli.files import load_json_object, load_payload, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -32,6 +33,7 @@ _MAXW = {"name": 30, "agent_id": 24, "environment_id": 24}
 
 
 @app.command("list")
+@covers("list_session_templates")
 def list_(
     ctx: typer.Context,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
@@ -53,6 +55,7 @@ def list_(
 
 
 @app.command("get")
+@covers("get_session_template")
 def get(ctx: typer.Context, template_id: str) -> None:
     def _run() -> None:
         call_single(ctx, get_session_template.sync_detailed, template_id=template_id)
@@ -61,6 +64,7 @@ def get(ctx: typer.Context, template_id: str) -> None:
 
 
 @app.command("create", help="Create a session template.")
+@covers("create_session_template")
 def create(
     ctx: typer.Context,
     name: Annotated[str | None, typer.Option("--name")] = None,
@@ -108,6 +112,7 @@ def create(
 
 
 @app.command("update", help="Update a session template (SessionTemplateUpdate shape).")
+@covers("update_session_template")
 def update(
     ctx: typer.Context,
     template_id: str,
@@ -125,6 +130,7 @@ def update(
 
 
 @app.command("archive", help="Archive a session template (soft-delete, retained for audit).")
+@covers("archive_session_template")
 def archive(ctx: typer.Context, template_id: str) -> None:
     def _run() -> None:
         with get_state(ctx).sdk_client() as client:

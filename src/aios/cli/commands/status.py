@@ -8,6 +8,7 @@ import sys
 import httpx
 import typer
 
+from aios.cli.coverage import covers
 from aios.cli.output import cyan, green, print_json, red, yellow
 from aios.cli.runtime import CliState, get_state, run_or_die
 from aios_sdk import Client
@@ -20,6 +21,7 @@ def register(app: typer.Typer) -> None:
         "status",
         help="Print the configured API URL, reachability, and auth status.",
     )
+    @covers("get_health")
     def status(ctx: typer.Context) -> None:
         state = get_state(ctx)
 

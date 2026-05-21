@@ -19,6 +19,7 @@ from aios.cli.commands._shared import (
     render_paginated,
     unwrap,
 )
+from aios.cli.coverage import covers
 from aios.cli.files import PayloadError, load_json_object, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
@@ -64,6 +65,7 @@ _MAXW = {
 
 
 @app.command("list")
+@covers("list_connections")
 def list_(
     ctx: typer.Context,
     connector: Annotated[str | None, typer.Option("--connector")] = None,
@@ -94,6 +96,7 @@ def list_(
 
 
 @app.command("get")
+@covers("get_connection")
 def get(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
         call_single(ctx, get_connection.sync_detailed, connection_id=connection_id)
@@ -119,6 +122,7 @@ def _parse_secret_kvs(values: list[str]) -> dict[str, str]:
 
 
 @app.command("create", help="Create a connection in detached mode.")
+@covers("create_connection")
 def create(
     ctx: typer.Context,
     connector: Annotated[
@@ -173,6 +177,7 @@ def create(
     "set-secrets",
     help="Replace the connection's encrypted secrets dict (wholesale).",
 )
+@covers("set_connection_secrets")
 def set_secrets(
     ctx: typer.Context,
     connection_id: str,
@@ -202,6 +207,7 @@ def set_secrets(
 
 
 @app.command("attach", help="Bind a detached connection to a session (single_session mode).")
+@covers("attach_connection")
 def attach(
     ctx: typer.Context,
     connection_id: str,
@@ -215,6 +221,7 @@ def attach(
 
 
 @app.command("detach", help="Drop the single_session binding, leaving the connection detached.")
+@covers("detach_connection")
 def detach(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
         call_single(ctx, detach_connection.sync_detailed, connection_id=connection_id)
@@ -223,6 +230,7 @@ def detach(ctx: typer.Context, connection_id: str) -> None:
 
 
 @app.command("configure-per-chat", help="Switch the connection into per_chat mode.")
+@covers("configure_connection_per_chat")
 def configure_per_chat(
     ctx: typer.Context,
     connection_id: str,
@@ -240,6 +248,7 @@ def configure_per_chat(
 @app.command(
     "unconfigure", help="Drop the per_chat configuration, leaving the connection detached."
 )
+@covers("unconfigure_connection")
 def unconfigure(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
         call_single(ctx, unconfigure_connection.sync_detailed, connection_id=connection_id)
@@ -251,6 +260,7 @@ def unconfigure(ctx: typer.Context, connection_id: str) -> None:
     "bind-chat",
     help="Pre-bind a chat_id on a connection's account to an existing session.",
 )
+@covers("bind_chat")
 def bind_chat_cmd(
     ctx: typer.Context,
     connection_id: str,
@@ -268,6 +278,7 @@ def bind_chat_cmd(
     "unbind-chat",
     help="Drop a chat → session binding, returning the chat to the connection's mode default.",
 )
+@covers("unbind_chat")
 def unbind_chat_cmd(
     ctx: typer.Context,
     connection_id: str,
@@ -289,6 +300,7 @@ def unbind_chat_cmd(
     "bound-chats",
     help="List all chat → session bindings (operator-curated + supervisor-spawned).",
 )
+@covers("list_bound_chats")
 def bound_chats(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
         state = get_state(ctx)
@@ -310,6 +322,7 @@ def bound_chats(ctx: typer.Context, connection_id: str) -> None:
     "recent-chats",
     help="List distinct chat_ids on this connection's account that have produced inbound.",
 )
+@covers("list_recent_chats")
 def recent_chats(
     ctx: typer.Context,
     connection_id: str,
@@ -334,6 +347,7 @@ def recent_chats(
 
 
 @app.command("archive", help="Archive a detached connection (soft-delete, retained for audit).")
+@covers("archive_connection")
 def archive(ctx: typer.Context, connection_id: str) -> None:
     def _run() -> None:
         with get_state(ctx).sdk_client() as client:

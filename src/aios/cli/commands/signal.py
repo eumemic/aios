@@ -7,6 +7,7 @@ from typing import Annotated
 import typer
 
 from aios.cli.commands._shared import render_single, unwrap
+from aios.cli.coverage import covers
 from aios.cli.output import print_error, print_note
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk._generated.api.connectors import (
@@ -22,6 +23,7 @@ app = typer.Typer(name="signal", help="Signal-cli management operations.", no_ar
 
 
 @app.command("register")
+@covers("post_connector_signal_register")
 def register(
     ctx: typer.Context,
     phone: Annotated[str, typer.Argument(help="E.164 phone, e.g. +15551234567.")],
@@ -71,6 +73,7 @@ def register(
 
 
 @app.command("verify")
+@covers("post_connector_signal_verify")
 def verify(
     ctx: typer.Context,
     phone: Annotated[str, typer.Argument(help="E.164 phone, e.g. +15551234567.")],
@@ -99,6 +102,7 @@ def verify(
 
 
 @app.command("profile")
+@covers("post_connector_signal_profile")
 def profile(
     ctx: typer.Context,
     phone: Annotated[str, typer.Argument(help="E.164 phone, e.g. +15551234567.")],
