@@ -68,6 +68,7 @@ GHOST_ASST_SQL = """
       FROM events e
       JOIN sessions s ON s.id = e.session_id
      WHERE s.archived_at IS NULL
+       AND s.status <> 'errored'
        AND e.kind = 'message'
        AND e.role = 'assistant'
        AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
