@@ -4356,6 +4356,19 @@ async def update_memory_store(
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> MemoryStore:
+    # Refuse updates to archived stores: the read path filters
+    # ``archived_at IS NULL``, so a rewrite of an archived row has
+    # no observable effect — but the bare UPDATE below would still
+    # commit the new values and the RETURNING-built response would
+    # lie back to the caller as if the update took.  Same shape as
+    # ``update_agent`` / ``update_environment`` / ``update_session``
+    # (PR #573) / ``update_session_template`` (PR #547) /
+    # ``update_vault`` (PR #554).  Defense-in-depth for callers
+    # that bypass the service layer (services/memory_stores.py
+    # already pre-checks via the equivalent ``allow_archived=False``
+    # shape).
+    current = await get_memory_store(conn, store_id, allow_archived=False, account_id=account_id)
+
     sets: list[str] = []
     args: list[Any] = [store_id]
     if name is not None:
@@ -4368,7 +4381,7 @@ async def update_memory_store(
         args.append(json.dumps(metadata))
         sets.append(f"metadata = ${len(args)}::jsonb")
     if not sets:
-        return await get_memory_store(conn, store_id, account_id=account_id)
+        return current
     sets.append("updated_at = now()")
     args.append(account_id)
     sql = (
