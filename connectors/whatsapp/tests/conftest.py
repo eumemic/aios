@@ -7,6 +7,7 @@ import socket
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,9 +22,42 @@ from aios_whatsapp.daemon import WhatsappDaemon
 
 CONNECTION_ID = "conn_test"
 PHONE = "+15551112222"
-BOT_JID = "15551112222@s.whatsapp.net"
 PEER_JID = "15553334444@s.whatsapp.net"
 GROUP_JID = "111222333@g.us"
+
+
+def dm_payload(**overrides: Any) -> dict[str, Any]:
+    """Daemon ``message`` notification params for a 1:1 chat from PEER_JID."""
+    payload: dict[str, Any] = {
+        "id": "3EB0BB36C97D4F8C29A4",
+        "timestamp_ms": 1700000000000,
+        "from_jid": PEER_JID,
+        "from_push_name": "Alice",
+        "chat_jid": PEER_JID,
+        "chat_type": "dm",
+        "chat_name": None,
+        "is_self": False,
+        "text": "hello bot",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def group_payload(**overrides: Any) -> dict[str, Any]:
+    """Daemon ``message`` notification params for a group message from PEER_JID."""
+    payload: dict[str, Any] = {
+        "id": "3EB0AAA",
+        "timestamp_ms": 1700000001000,
+        "from_jid": PEER_JID,
+        "from_push_name": "Alice",
+        "chat_jid": GROUP_JID,
+        "chat_type": "group",
+        "chat_name": "Test Group",
+        "is_self": False,
+        "text": "group hello",
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _unused_port() -> int:

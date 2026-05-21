@@ -41,7 +41,7 @@ func (r *Registry) Register(name string, fn MethodFunc) {
 func (r *Registry) Dispatch(ctx context.Context, method string, params json.RawMessage) (any, *rpc.Error) {
 	fn, ok := r.methods[method]
 	if !ok {
-		return nil, &rpc.Error{Code: -32601, Message: "method not found: " + method}
+		return nil, &rpc.Error{Code: rpc.ErrCodeMethodNotFound, Message: "method not found: " + method}
 	}
 	return fn(ctx, params)
 }

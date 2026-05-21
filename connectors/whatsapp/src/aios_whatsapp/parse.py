@@ -1,16 +1,15 @@
 """Parse daemon ``message`` notifications into :class:`InboundMessage`.
 
-PR 2 scope is text only: media, quoted replies, mentions, reactions,
-edits, broadcasts and newsletters are dropped (later PRs reintroduce
-them as they're implemented end-to-end).
+Drops self-echoes, attachment-only / sticker-only messages, broadcasts,
+newsletters, and envelopes with required fields missing or malformed.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
-from .addressing import ChatType
+ChatType = Literal["dm", "group", "broadcast", "newsletter"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -31,17 +30,15 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
     Returns ``None`` to silently drop the envelope.  Drop rules:
 
     * ``is_self=True`` — echoes of our own sends.
-    * Empty ``text`` — attachment-only / sticker-only messages (PR 5).
-    * ``chat_type`` not in ``{"dm", "group"}`` — broadcasts and
-      newsletters are out of scope for v1.
+    * Empty / non-string ``text``.
+    * ``chat_type`` not in ``{"dm", "group"}``.
     * Required fields (``id``, ``chat_jid``, ``from_jid``, ``timestamp_ms``)
-      missing or malformed — daemon contract violation, logged upstream
-      via the listener's ``rpc.listener.bad_params`` path.
+      missing or wrong type.
     """
     if params.get("is_self"):
         return None
 
-    text = params.get("text") or ""
+    text = params.get("text")
     if not isinstance(text, str) or not text:
         return None
 
@@ -61,17 +58,15 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
     ):
         return None
 
-    chat_name = params.get("chat_name") if isinstance(params.get("chat_name"), str) else None
-    sender_name = (
-        params.get("from_push_name") if isinstance(params.get("from_push_name"), str) else None
-    )
+    raw_chat_name = params.get("chat_name")
+    raw_push_name = params.get("from_push_name")
 
     return InboundMessage(
         chat_type=chat_type,
         chat_jid=chat_jid,
-        chat_name=chat_name,
+        chat_name=raw_chat_name if isinstance(raw_chat_name, str) else None,
         sender_jid=sender_jid,
-        sender_name=sender_name,
+        sender_name=raw_push_name if isinstance(raw_push_name, str) else None,
         message_id=message_id,
         timestamp_ms=timestamp_ms,
         text=text,

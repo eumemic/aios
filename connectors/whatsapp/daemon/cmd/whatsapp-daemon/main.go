@@ -47,11 +47,10 @@ func main() {
 
 	reg := handler.NewRegistry()
 	handler.RegisterLifecycle(reg, daemonName, Version)
-	// PR-N (whatsmeow integration) replaces this stub with a closure
-	// over whatsmeow.Client.SendMessage; until then the daemon answers
-	// sendMessage with a deterministic fake so the Python connector's
-	// end-to-end wiring can be exercised without an actual WhatsApp
-	// pairing.
+	// stubSend is replaced with a whatsmeow-backed closure once the
+	// real WhatsApp client integration lands; until then the daemon
+	// answers sendMessage with deterministic fake data so the wire
+	// boundary can be exercised without an actual pairing.
 	handler.RegisterSend(reg, stubSend)
 
 	srv := rpc.NewServer(*listen, reg)

@@ -42,17 +42,6 @@ async def test_whatsapp_send_group_passes_group_jid(connector: WhatsappConnector
     )
 
 
-async def test_whatsapp_send_rejects_invalid_chat_id(connector: WhatsappConnector) -> None:
-    with pytest.raises(ValueError, match="invalid WhatsApp chat_id"):
-        await connector.whatsapp_send(
-            text="hi",
-            connection_id=CONNECTION_ID,
-            chat_id="not-a-jid",
-        )
-    # The daemon must not be touched on a validation failure.
-    connector.state[CONNECTION_ID].daemon.rpc.call.assert_not_awaited()  # type: ignore[attr-defined]
-
-
 async def test_whatsapp_send_raises_on_non_dict_result(connector: WhatsappConnector) -> None:
     connector.state[CONNECTION_ID].daemon.rpc.call.return_value = "not-a-dict"  # type: ignore[attr-defined]
     with pytest.raises(RuntimeError, match="sendMessage returned non-dict"):

@@ -9,13 +9,11 @@ from __future__ import annotations
 
 import socket
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from aios_connector_http import HttpConnector, tool
+from aios_connector_http import HttpConnector, iso_from_ms, tool
 
-from .addressing import is_valid_chat_id
 from .config import Settings
 from .daemon import WhatsappDaemon
 from .parse import parse_message
@@ -77,21 +75,21 @@ class WhatsappConnector(HttpConnector):
         msg = parse_message(params)
         if msg is None:
             return
+        metadata: dict[str, Any] = {
+            "chat_type": msg.chat_type,
+            "sender_jid": msg.sender_jid,
+            "message_id": msg.message_id,
+        }
+        if msg.chat_name is not None:
+            metadata["chat_name"] = msg.chat_name
         await self.emit_inbound(
             connection_id=connection_id,
             event_id=f"whatsapp-{msg.sender_jid}-{msg.message_id}",
             chat_id=msg.chat_jid,
             sender={"jid": msg.sender_jid, "display_name": msg.sender_name},
             content=msg.text,
-            metadata={
-                "chat_type": msg.chat_type,
-                "chat_jid": msg.chat_jid,
-                "chat_name": msg.chat_name,
-                "sender_jid": msg.sender_jid,
-                "message_id": msg.message_id,
-                "timestamp_ms": msg.timestamp_ms,
-            },
-            timestamp=_iso(msg.timestamp_ms),
+            metadata=metadata,
+            timestamp=iso_from_ms(msg.timestamp_ms),
         )
 
     # ── tools ──────────────────────────────────────────────────────────
@@ -113,8 +111,6 @@ class WhatsappConnector(HttpConnector):
             ``{"message_id": "...", "timestamp_ms": ...}`` from the
             daemon's whatsmeow SendMessage round-trip.
         """
-        if not is_valid_chat_id(chat_id):
-            raise ValueError(f"invalid WhatsApp chat_id: {chat_id!r}")
         state = self.state[connection_id]
         result = await state.daemon.rpc.call(
             "sendMessage",
@@ -126,17 +122,15 @@ class WhatsappConnector(HttpConnector):
 
 
 def _pick_free_port(host: str) -> int:
-    """Bind to an OS-assigned loopback port and release it.
+    """Bind to an OS-assigned loopback port and immediately release it.
 
-    Small race window between release and the daemon's bind; the daemon
-    raises on EADDRINUSE so the operator gets a loud failure rather
-    than a silently-broken connection.
+    Tiny race window between the release and the daemon's subsequent
+    bind; if a third party grabs the port in between, the daemon's
+    spawn fails with EADDRINUSE and ``_wait_for_tcp`` surfaces that as
+    :class:`DaemonCrashError` — the loud failure the operator wants
+    rather than a silently-broken connection.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind((host, 0))
         port: int = s.getsockname()[1]
     return port
-
-
-def _iso(timestamp_ms: int) -> str:
-    return datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat()

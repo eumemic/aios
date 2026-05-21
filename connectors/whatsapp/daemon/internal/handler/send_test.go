@@ -43,8 +43,8 @@ func TestSendMessageRejectsMissingJID(t *testing.T) {
 	if rpcErr == nil {
 		t.Fatalf("expected rpc error for missing jid")
 	}
-	if rpcErr.Code != -32602 {
-		t.Fatalf("expected -32602, got %d", rpcErr.Code)
+	if rpcErr.Code != rpc.ErrCodeInvalidParams {
+		t.Fatalf("expected ErrCodeInvalidParams, got %d", rpcErr.Code)
 	}
 }
 
@@ -58,6 +58,9 @@ func TestSendMessagePropagatesSendError(t *testing.T) {
 	if rpcErr == nil {
 		t.Fatalf("expected rpc error from send failure")
 	}
+	if rpcErr.Code != rpc.ErrCodeServerError {
+		t.Fatalf("expected ErrCodeServerError, got %d", rpcErr.Code)
+	}
 	if rpcErr.Message != "network down" {
 		t.Fatalf("rpc error message = %q", rpcErr.Message)
 	}
@@ -69,10 +72,7 @@ func TestSendMessageRejectsMalformedParams(t *testing.T) {
 		return "", 0, nil
 	})
 	_, rpcErr := reg.Dispatch(context.Background(), "sendMessage", json.RawMessage(`not json`))
-	if rpcErr == nil || rpcErr.Code != -32602 {
-		t.Fatalf("expected -32602 for malformed json, got %+v", rpcErr)
+	if rpcErr == nil || rpcErr.Code != rpc.ErrCodeInvalidParams {
+		t.Fatalf("expected ErrCodeInvalidParams for malformed json, got %+v", rpcErr)
 	}
 }
-
-// Suppress unused symbol when toolchains pre-1.20 don't recognize rpc.Error.
-var _ = rpc.Error{}
