@@ -1,11 +1,11 @@
-"""High-fidelity repro for the conn-leak observed in production (#606).
+"""High-fidelity leak repro driving the full SSE stack to TCP disconnect.
 
 Spins up real uvicorn + real httpx; opens N SSE streams; abruptly drops
 each TCP connection (simulating client crash / network blip); polls
 ``pg_stat_activity`` to confirm the api-side Postgres backends are
 reaped.
 
-The production leak only manifests under the full SSE stack: sse-starlette
+The production leak only manifests under the full stack: sse-starlette
 runs the response generator inside an anyio task group, and on
 ``http.disconnect`` it cancels the group's scope.  Under anyio's
 scope-cancellation, every subsequent ``await`` in the cancelled scope
@@ -14,12 +14,10 @@ the listener's finally never completes, asyncpg never sends ``Terminate``
 or aborts the transport, and the Postgres backend lingers until TCP
 keepalive reaps it (~2h on most distros).
 
-Cleanup via synchronous ``conn.terminate()`` (transport.abort() directly,
-no await) closes the socket regardless of the cancellation state.  This
-test guards against any future regression that re-introduces an async
-cleanup step in the listener helpers' finally blocks.
-
-Issue #606.
+Cleanup via synchronous ``conn.terminate()`` (``transport.abort()``
+directly, no await) closes the socket regardless of cancellation state.
+This test guards against any future regression that re-introduces an
+async cleanup step in the listener helpers' finally blocks.
 """
 
 from __future__ import annotations
@@ -34,7 +32,8 @@ import httpx
 import pytest
 
 from tests.conftest import needs_docker
-from tests.e2e.conftest import live_aios_server
+from tests.e2e.conftest import live_aios_server, wait_for_predicate
+from tests.helpers.db import count_active_backends
 from tests.integration.conftest import seed_agent_env_session
 
 
@@ -53,20 +52,8 @@ async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
         yield url
 
 
-async def _backend_count(db_url: str) -> int:
-    conn = await asyncpg.connect(db_url)
-    try:
-        result = await conn.fetchval(
-            "SELECT count(*) FROM pg_stat_activity "
-            "WHERE datname = current_database() AND pid <> pg_backend_pid()"
-        )
-        return int(result)
-    finally:
-        await conn.close()
-
-
 async def _backend_states(db_url: str) -> list[dict[str, Any]]:
-    """Snapshot all client backends with state + last query (debugging aid)."""
+    """Snapshot all client backends with state + last query (failure-only diagnostic)."""
     conn = await asyncpg.connect(db_url)
     try:
         rows = await conn.fetch(
@@ -83,26 +70,7 @@ async def _backend_states(db_url: str) -> list[dict[str, Any]]:
         await conn.close()
 
 
-async def _wait_for_backend_count(
-    db_url: str,
-    *,
-    le_to: int,
-    timeout_s: float = 8.0,
-) -> int:
-    """Poll until ``_backend_count() <= le_to`` or deadline; return last count."""
-    deadline = asyncio.get_running_loop().time() + timeout_s
-    cur = -1
-    while True:
-        cur = await _backend_count(db_url)
-        if cur <= le_to:
-            return cur
-        if asyncio.get_running_loop().time() > deadline:
-            return cur
-        await asyncio.sleep(0.1)
-
-
 async def _seed_session(db_url: str) -> str:
-    """Insert a session row directly via asyncpg pool; return its id."""
     pool = await asyncpg.create_pool(db_url, min_size=1, max_size=2)
     try:
         _agent, _env, session = await seed_agent_env_session(
@@ -128,7 +96,7 @@ class TestSseDisconnectLeak:
         # Baseline AFTER session is seeded so the seed-helper pool's
         # lifecycle is out of the way.
         await asyncio.sleep(0.2)
-        baseline = await _backend_count(migrated_db_url)
+        baseline = await count_active_backends(migrated_db_url)
 
         n_streams = 5
         clients: list[httpx.AsyncClient] = []
@@ -158,7 +126,7 @@ class TestSseDisconnectLeak:
             # backends.
             deadline = asyncio.get_running_loop().time() + 5.0
             while True:
-                peak = await _backend_count(migrated_db_url)
+                peak = await count_active_backends(migrated_db_url)
                 if peak >= baseline + n_streams:
                     break
                 if asyncio.get_running_loop().time() > deadline:
@@ -201,7 +169,13 @@ class TestSseDisconnectLeak:
         # the LISTENER reduction (peak - n_streams) rather than absolute
         # baseline so the test is robust to pool growth during peak.
         target = peak - n_streams
-        cur = await _wait_for_backend_count(migrated_db_url, le_to=target, timeout_s=8.0)
+
+        async def _reaped_to_target() -> bool:
+            return await count_active_backends(migrated_db_url) <= target
+
+        with contextlib.suppress(AssertionError):
+            await wait_for_predicate(_reaped_to_target, max_wait_s=8.0, interval_s=0.1)
+        cur = await count_active_backends(migrated_db_url)
         if cur > target:
             states = await _backend_states(migrated_db_url)
             print("\n=== LEAKED BACKENDS ===")

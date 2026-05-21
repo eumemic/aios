@@ -31,7 +31,7 @@ fires and the Postgres backend lingers until TCP keepalive reaps it
 (~2h). ``conn.terminate()`` is synchronous — it calls ``transport.abort()``
 directly, closing the socket without awaiting. Non-graceful but appropriate
 for SSE-style disconnects where the client is already gone, and equally
-correct on normal exit and exception unwinds (issue #606).
+correct on normal exit and exception unwinds.
 
 ## Why the callback must be synchronous
 
@@ -132,8 +132,6 @@ async def listen_for_events(
 ) -> AsyncIterator[asyncio.Queue[str]]:
     """Open a dedicated asyncpg connection, LISTEN events_<session_id>,
     yield an asyncio.Queue that receives event ids as they arrive.
-
-    On exit, the connection is closed (UNLISTEN is implicit at close).
 
     The queue is bounded. On overflow, the oldest payload is dropped to make
     room for the new one and a warning is logged. SSE clients can recover
