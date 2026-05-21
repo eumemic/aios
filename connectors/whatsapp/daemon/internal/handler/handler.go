@@ -1,8 +1,6 @@
-// Package handler is the daemon's method registry. Each RPC method is
-// registered by name; Dispatch routes incoming requests to the
-// matching MethodFunc. Subsequent PRs add pairing, send, presence,
-// group, etc. files alongside lifecycle.go; each file calls
-// RegisterXxx(reg, deps...) from main.go to wire its methods in.
+// Package handler is the daemon's RPC method registry. Each method is
+// registered by name; Dispatch routes incoming requests to the matching
+// MethodFunc.
 package handler
 
 import (
@@ -30,9 +28,8 @@ func NewRegistry() *Registry {
 	return &Registry{methods: make(map[string]MethodFunc)}
 }
 
-// Register binds name to fn. Caller is responsible for not stepping
-// on an existing name — the only way a duplicate would happen is a
-// programmer error, so we panic to surface it during dev/CI.
+// Register binds name to fn. Panics on duplicate registration — that's
+// a programmer error caught at process startup before the listener binds.
 func (r *Registry) Register(name string, fn MethodFunc) {
 	if _, exists := r.methods[name]; exists {
 		panic("handler: duplicate registration for " + name)

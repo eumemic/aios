@@ -1,21 +1,8 @@
-"""JSON-RPC transport for the WhatsApp daemon.
+"""JSON-RPC 2.0 over line-delimited TCP for the WhatsApp daemon.
 
-Two distinct transports share the same TCP endpoint:
-
-- :class:`RpcClient` — **fresh** TCP connection per request. Open, write a
-  single JSON-RPC line, read one response line, close. No pooling, no id
-  correlation dict — each call owns its socket.
-- :class:`RpcListener` — **persistent** TCP connection used exclusively for
-  the daemon's notification stream (``message``, ``reaction``, ``edit``,
-  ``receipt``, ``presence``, ``connectionState``, ``pairCode``,
-  ``loggedOut``).  Yields ``(method, params)`` tuples as ``AsyncIterator``;
-  disconnection is fatal and surfaces as :class:`ListenerClosedError`.
-
-Generalised from :mod:`aios_signal.rpc`: Signal's listener hard-codes
-``method == "receive"`` because signal-cli has exactly one notification
-shape.  The WhatsApp daemon multiplexes several methods on the same
-stream, so the listener yields the method name alongside the params and
-the connector dispatches on it.
+:class:`RpcClient` opens a fresh connection per call.
+:class:`RpcListener` holds one persistent connection for the daemon's
+notification stream and yields ``(method, params)`` tuples.
 """
 
 from __future__ import annotations
@@ -97,15 +84,12 @@ class RpcClient:
             return message.get("result")
         finally:
             writer.close()
-            try:
+            with contextlib.suppress(OSError):
                 await writer.wait_closed()
-            except OSError:
-                # Socket already torn down; not our problem.
-                log.debug("rpc.writer_close_error", host=self._host, port=self._port)
 
 
 class RpcListener:
-    """Persistent-connection listener for the WhatsApp daemon's notification stream."""
+    """Persistent-connection listener for the daemon's notification stream."""
 
     def __init__(self, host: str, port: int) -> None:
         self._host = host
@@ -125,13 +109,9 @@ class RpcListener:
     async def notifications(self) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """Yield ``(method, params)`` pairs for each notification frame.
 
-        Frames are JSON-RPC requests without an ``id`` (i.e. notifications,
-        per JSON-RPC 2.0).  RPC responses (frames with an ``id``) and
-        notifications with a non-dict ``params`` are silently dropped —
-        :class:`RpcClient` owns its own socket and never reuses the
-        listener's stream.
-
-        Raises :class:`ListenerClosedError` when the connection drops.
+        RPC responses (frames carrying ``id``) and frames with non-string
+        ``method`` / non-dict ``params`` are dropped.  Raises
+        :class:`ListenerClosedError` when the connection drops.
         """
         if self._reader is None:
             raise ListenerClosedError("listener not connected")
@@ -149,7 +129,6 @@ class RpcListener:
                 continue
             method = message.get("method")
             if not isinstance(method, str) or not method:
-                # RPC response or malformed frame — ignore.
                 continue
             params = message.get("params")
             if not isinstance(params, dict):

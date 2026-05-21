@@ -12,9 +12,8 @@ class WhatsappConnectorError(Exception):
 class RpcError(WhatsappConnectorError):
     """JSON-RPC error from the WhatsApp daemon.
 
-    ``code`` / ``data`` carry the structured fields when present —
-    pairing-expired puts diagnostic data in ``data`` and would be lost
-    on a string flatten.
+    ``code`` / ``data`` preserve the JSON-RPC structured-error fields
+    so callers can discriminate on shape rather than string-flattening.
     """
 
     def __init__(self, message: str, *, code: int | None = None, data: Any = None) -> None:

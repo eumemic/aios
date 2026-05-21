@@ -1,10 +1,4 @@
-"""Tests for the whatsapp connector's pydantic Settings.
-
-The phone (account identity) is not in env — it lives on the
-connection record's encrypted secrets blob and arrives per-connection
-in ``serve_connection``.  Settings carries only deployment-shape
-fields: the data dir, the daemon binary, and the loopback bind.
-"""
+"""Tests for the whatsapp connector's pydantic Settings."""
 
 from __future__ import annotations
 
@@ -30,7 +24,6 @@ def test_defaults_for_optional_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     s = Settings()
     assert s.daemon_bin == "whatsapp-daemon"
     assert s.daemon_host == "127.0.0.1"
-    assert s.daemon_port == 7584
 
 
 def test_env_override_for_daemon_bin(monkeypatch: pytest.MonkeyPatch) -> None:

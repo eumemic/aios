@@ -1,12 +1,6 @@
 // Package rpc implements a minimal JSON-RPC 2.0 server speaking
 // line-delimited JSON over TCP. One frame = one line. Requests carry
 // an "id"; notifications (server → client) omit it.
-//
-// Mirrors the wire shape Python's aios_whatsapp.rpc.RpcClient /
-// RpcListener expect, which in turn mirrors what signal-cli's daemon
-// produces. Keeping the wire shape identical to Signal means
-// aios_whatsapp.rpc is a near-verbatim copy of aios_signal.rpc and
-// the test patterns transfer.
 package rpc
 
 import (
@@ -19,6 +13,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 )
 
 // Handler dispatches a parsed JSON-RPC request to a registered method.
@@ -44,12 +39,6 @@ type Error struct {
 type Server struct {
 	addr    string
 	handler Handler
-
-	// Set by Run() once the listener binds, so callers can ask for the
-	// resolved address (useful for tests that pass :0 for an
-	// OS-assigned port).
-	mu      sync.Mutex
-	boundAt net.Addr
 }
 
 // NewServer builds an unstarted Server. Call Run() to bind + accept.
@@ -57,27 +46,21 @@ func NewServer(addr string, h Handler) *Server {
 	return &Server{addr: addr, handler: h}
 }
 
-// Addr returns the resolved listen address once Run() has bound. Nil
-// before the bind completes.
-func (s *Server) Addr() net.Addr {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.boundAt
-}
+// shutdownPollInterval is how often a serve loop checks ctx.Err() while
+// blocked on an idle read. Small enough that SIGTERM-to-Go-daemon (with
+// no traffic in flight) returns promptly; large enough not to burn CPU.
+const shutdownPollInterval = 500 * time.Millisecond
 
 // Run binds the configured address and accepts connections until ctx
 // is cancelled. Cancellation triggers a graceful shutdown: the
-// listener closes, in-flight connections drain (their reads will
-// observe EOF on the next iteration), and Run returns nil.
+// listener closes, in-flight serve loops observe ctx.Err() between
+// reads via a read deadline, and Run returns nil.
 func (s *Server) Run(ctx context.Context) error {
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("listen %q: %w", s.addr, err)
 	}
-	s.mu.Lock()
-	s.boundAt = ln.Addr()
-	s.mu.Unlock()
 	log.Printf("rpc.listening addr=%s", ln.Addr().String())
 
 	go func() {
@@ -113,13 +96,21 @@ type request struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
-// response mirrors the response shape. Exactly one of Result / Error
-// is populated; the other is omitted via omitempty.
-type response struct {
+// successResponse and errorResponse are split structs so that a nil
+// result (e.g. an ack-only method that returns (nil, nil)) marshals to
+// the spec-compliant `"result": null` rather than being omitted via
+// omitempty — JSON-RPC 2.0 requires the result member to be present
+// on success.
+type successResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
-	Result  any             `json:"result,omitempty"`
-	Error   *Error          `json:"error,omitempty"`
+	Result  any             `json:"result"`
+}
+
+type errorResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Error   *Error          `json:"error"`
 }
 
 func (s *Server) serve(ctx context.Context, conn net.Conn) {
@@ -132,8 +123,18 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 		if ctx.Err() != nil {
 			return
 		}
+		// Reset the read deadline so an idle connection cannot pin the
+		// goroutine past ctx cancellation.  bufio.Reader returns from its
+		// buffer without hitting the syscall when data is queued, so an
+		// active client sees no behavior change.
+		_ = conn.SetReadDeadline(time.Now().Add(shutdownPollInterval))
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				// No data yet; loop to re-check ctx.Err().
+				continue
+			}
 			if !errors.Is(err, io.EOF) {
 				log.Printf("rpc.conn.read_error remote=%s err=%v", remote, err)
 			}
@@ -156,14 +157,12 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 		}
 
 		result, rpcErr := s.handler.Dispatch(ctx, req.Method, req.Params)
-		resp := response{JSONRPC: "2.0", ID: req.ID}
+		var out []byte
 		if rpcErr != nil {
-			resp.Error = rpcErr
+			out, err = json.Marshal(errorResponse{JSONRPC: "2.0", ID: req.ID, Error: rpcErr})
 		} else {
-			resp.Result = result
+			out, err = json.Marshal(successResponse{JSONRPC: "2.0", ID: req.ID, Result: result})
 		}
-
-		out, err := json.Marshal(resp)
 		if err != nil {
 			log.Printf("rpc.response.marshal_failed method=%s err=%v", req.Method, err)
 			return

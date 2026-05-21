@@ -1,15 +1,8 @@
-// Command whatsapp-daemon is the Go-side half of the aios WhatsApp
-// connector. It speaks line-delimited JSON-RPC 2.0 over a loopback TCP
-// port to the Python aios_whatsapp connector, which spawns it as a
-// subprocess and tears it down on shutdown.
-//
-// This binary is the long-running counterpart to signal-cli for the
-// Signal connector — same shape, different protocol. It owns the
-// whatsmeow WhatsApp client + sqlstore; the Python side owns aios
+// Command whatsapp-daemon speaks line-delimited JSON-RPC 2.0 over a
+// loopback TCP port to the Python aios_whatsapp connector, which
+// spawns it as a subprocess and tears it down on shutdown.  It owns
+// the whatsmeow WhatsApp client + sqlstore; the Python side owns aios
 // integration (session routing, attachment marshalling, tool dispatch).
-//
-// PR-1 scope: lifecycle + the `version` RPC only. Subsequent PRs add
-// pairing, send/receive, media, reactions, edits, groups.
 package main
 
 import (
@@ -35,7 +28,6 @@ const daemonName = "whatsapp-daemon"
 func main() {
 	listen := flag.String("listen", "127.0.0.1:7584", "TCP address to listen on (host:port)")
 	storeDir := flag.String("store-dir", "", "directory holding whatsmeow's sqlstore + media cache (required)")
-	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error (reserved; PR-1 logs everything)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -43,11 +35,6 @@ func main() {
 		fmt.Printf("%s %s\n", daemonName, Version)
 		return
 	}
-
-	// -log-level is reserved for future per-level filtering once the
-	// daemon grows enough event types to warrant it. Accepted now so
-	// the Python side's spawn args are stable across PR boundaries.
-	_ = *logLevel
 
 	if *storeDir == "" {
 		log.Println("daemon.config.invalid reason=-store-dir is required")

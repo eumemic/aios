@@ -143,23 +143,13 @@ async def test_rpc_listener_ignores_responses_and_malformed_frames() -> None:
         await listener.aclose()
 
 
-async def _unused_port() -> int:
-    server = await asyncio.start_server(lambda r, w: None, host="127.0.0.1", port=0)
-    port: int = server.sockets[0].getsockname()[1]
-    server.close()
-    await server.wait_closed()
-    return port
-
-
-async def test_rpc_client_fails_cleanly_when_server_closed() -> None:
-    port = await _unused_port()
-    client = RpcClient("127.0.0.1", port, timeout=2.0)
+async def test_rpc_client_fails_cleanly_when_server_closed(unused_port: int) -> None:
+    client = RpcClient("127.0.0.1", unused_port, timeout=2.0)
     with pytest.raises(RpcError):
         await client.call("ping")
 
 
-async def test_rpc_listener_connect_failure() -> None:
-    port = await _unused_port()
-    listener = RpcListener("127.0.0.1", port)
+async def test_rpc_listener_connect_failure(unused_port: int) -> None:
+    listener = RpcListener("127.0.0.1", unused_port)
     with pytest.raises(ListenerClosedError):
         await listener.connect()

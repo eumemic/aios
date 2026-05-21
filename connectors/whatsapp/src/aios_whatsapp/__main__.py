@@ -1,11 +1,4 @@
-"""``python -m aios_whatsapp`` entry point.
-
-Reads ``AIOS_URL`` and ``AIOS_RUNTIME_TOKEN`` from env (the SDK does
-this automatically inside ``HttpConnector.__init__``).  Deployment-shape
-fields like ``AIOS_WHATSAPP_DATA_DIR`` feed pydantic-settings; the
-phone (the account identity) lives on each connection's encrypted
-secrets and is fetched per-connection in ``serve_connection``.
-"""
+"""``python -m aios_whatsapp`` entry point."""
 
 from __future__ import annotations
 

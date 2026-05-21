@@ -2,16 +2,9 @@
 
 Spawns the Go daemon, drains its stdio, waits for TCP readiness via
 ``version``, and exposes :class:`RpcClient` + :class:`RpcListener` for
-the per-connection :class:`aios_whatsapp.connector.WhatsappConnector`
-serve loop.
-
-Crash-is-fatal: an unexpected subprocess exit sets
-:class:`DaemonCrashError` on :meth:`crashed`.  The connector's listener
-drain (spawned under the runner's TaskGroup) observes this indirectly
-via :meth:`RpcListener.notifications` failing once the subprocess dies,
-and the resulting exception propagates through the TaskGroup — tearing
-the connection's ``serve_connection`` task down (but leaving sibling
-connections running, via :meth:`HttpConnector._isolated_serve_connection`).
+the connector's serve loop.  Crash mid-startup raises
+:class:`DaemonCrashError`; crash mid-session is observed via the
+listener stream raising :class:`ListenerClosedError`.
 """
 
 from __future__ import annotations
@@ -37,14 +30,7 @@ SHUTDOWN_GRACE_S = 5.0
 
 
 class WhatsappDaemon:
-    """Manages one whatsapp-daemon subprocess serving a single phone.
-
-    Per-connection scope (unlike Signal's shared multi-account daemon):
-    whatsmeow's ``Client`` is per-device, so we spawn one daemon per
-    phone and let crash isolation fall out from the runner's
-    :meth:`HttpConnector._isolated_serve_connection` per-connection
-    task scope.
-    """
+    """Manages one whatsapp-daemon subprocess serving one paired phone."""
 
     def __init__(
         self,
@@ -53,18 +39,14 @@ class WhatsappDaemon:
         host: str,
         port: int,
         store_dir: Path,
-        log_level: str = "info",
     ) -> None:
         self.daemon_bin = daemon_bin
         self.host = host
         self.port = port
         self.store_dir = store_dir
-        self.log_level = log_level
 
         self._proc: asyncio.subprocess.Process | None = None
         self._drain_tasks: list[asyncio.Task[None]] = []
-        self._watch_task: asyncio.Task[None] | None = None
-        self._crash_future: asyncio.Future[None] | None = None
 
         self.rpc = RpcClient(host, port)
         self.listener = RpcListener(host, port)
@@ -79,12 +61,6 @@ class WhatsappDaemon:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        if self._watch_task is not None:
-            self._watch_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._watch_task
-            self._watch_task = None
-
         await self.listener.aclose()
 
         if self._proc is not None and self._proc.returncode is None:
@@ -112,8 +88,6 @@ class WhatsappDaemon:
             f"{self.host}:{self.port}",
             "-store-dir",
             str(self.store_dir),
-            "-log-level",
-            self.log_level,
         ]
         log.info(
             "whatsapp.daemon.spawn",
@@ -127,42 +101,25 @@ class WhatsappDaemon:
         assert self._proc.stderr is not None
         self._drain_tasks.append(
             asyncio.create_task(
-                _drain(self._proc.stdout, "whatsapp.daemon.stdout"),
+                _drain(self._proc.stdout, "stdout"),
                 name="whatsapp-daemon-stdout",
             )
         )
         self._drain_tasks.append(
             asyncio.create_task(
-                _drain(self._proc.stderr, "whatsapp.daemon.stderr"),
+                _drain(self._proc.stderr, "stderr"),
                 name="whatsapp-daemon-stderr",
             )
         )
-        self._crash_future = asyncio.get_running_loop().create_future()
-        self._watch_task = asyncio.create_task(self._watch_exit(), name="whatsapp-daemon-watch")
-
-    async def _watch_exit(self) -> None:
-        assert self._proc is not None
-        assert self._crash_future is not None
-        rc = await self._proc.wait()
-        if not self._crash_future.done():
-            self._crash_future.set_exception(
-                DaemonCrashError(f"whatsapp-daemon exited with code {rc}")
-            )
-
-    def crashed(self) -> asyncio.Future[None]:
-        assert self._crash_future is not None, "daemon not started"
-        return self._crash_future
 
     async def _wait_for_tcp(self) -> None:
-        """Poll ``version`` until the daemon answers or attempts exhaust.
-
-        Side-effect-free probe; works whether the daemon is mid-pairing
-        or fully connected to WhatsApp.  ``READY_POLL_ATTEMPTS *
-        READY_POLL_INTERVAL_S`` (30 s default) gives generous headroom
-        for Go's startup + sqlstore initialization.
-        """
+        """Poll ``version`` until the daemon answers, exits, or attempts exhaust."""
         last_error: Exception | None = None
         for _ in range(READY_POLL_ATTEMPTS):
+            if self._proc is not None and self._proc.returncode is not None:
+                raise DaemonCrashError(
+                    f"whatsapp-daemon exited with code {self._proc.returncode} during startup"
+                )
             try:
                 probe = RpcClient(self.host, self.port, timeout=READY_POLL_TIMEOUT_S)
                 await probe.call("version")
@@ -176,28 +133,12 @@ class WhatsappDaemon:
             f"whatsapp-daemon never became ready on {self.host}:{self.port}: {last_error!r}"
         )
 
-    async def version(self) -> dict[str, str]:
-        """Return ``{name, version}`` from the daemon.
-
-        Cheap, side-effect-free.  Used both at startup (via
-        :meth:`_wait_for_tcp`) and by tests that want to round-trip
-        the RPC layer without touching whatsmeow.
-        """
-        result = await self.rpc.call("version")
-        return result if isinstance(result, dict) else {}
-
 
 async def _spawn_subprocess(args: list[str]) -> asyncio.subprocess.Process:
-    """Spawn whatsapp-daemon detached into its own session + process group.
-
-    ``start_new_session=True`` (POSIX ``setsid()``) makes the child a
-    session and process group leader so foreground-terminal SIGINTs
-    don't reach the daemon — the connector's own SIGINT handler runs
-    ``__aexit__``, which sends a clean SIGTERM.  Same rationale as
-    :func:`aios_signal.daemon._spawn_subprocess`.
-    """
-    spawn = asyncio.create_subprocess_exec
-    return await spawn(
+    # Detach into own session so terminal SIGINT doesn't cascade — the
+    # connector's own SIGTERM handler runs __aexit__, which sends a
+    # clean SIGTERM here.
+    return await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -205,14 +146,21 @@ async def _spawn_subprocess(args: list[str]) -> asyncio.subprocess.Process:
     )
 
 
-async def _drain(reader: asyncio.StreamReader, log_event: str) -> None:
+async def _drain(reader: asyncio.StreamReader, stream_name: str) -> None:
+    # Background stdio forwarder.  Broad-except keeps a stream read
+    # failure (broken pipe after daemon dies) from silently dropping
+    # the task with an unobserved exception that asyncio would lose.
     try:
         while True:
             line = await reader.readline()
             if not line:
                 return
-            log.info(log_event, line=line.rstrip(b"\n").decode("utf-8", errors="replace"))
+            log.info(
+                "whatsapp.daemon.stream",
+                stream=stream_name,
+                line=line.rstrip(b"\n").decode("utf-8", errors="replace"),
+            )
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        log.warning(f"{log_event}.read_error", error=str(e))
+        log.warning("whatsapp.daemon.stream.read_error", stream=stream_name, error=str(e))
