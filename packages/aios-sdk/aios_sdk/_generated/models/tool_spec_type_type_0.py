@@ -11,6 +11,7 @@ class ToolSpecTypeType0(str, Enum):
     READ = "read"
     SCHEDULE_WAKE = "schedule_wake"
     SEARCH_EVENTS = "search_events"
+    WAKE_SESSION = "wake_session"
     WEB_FETCH = "web_fetch"
     WEB_SEARCH = "web_search"
     WRITE = "write"

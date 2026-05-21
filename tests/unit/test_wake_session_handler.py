@@ -1,0 +1,293 @@
+"""Unit tests for the ``wake_session`` tool handler.
+
+These tests stub the worker-process pool and DB so they don't need a
+live Postgres. They cover the argument-validation surface, the
+same-account permission check, the wake-depth cap, and the per-pair
+rate-limit cap. Full-stack DB behavior is covered separately by the
+integration tests.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import ANY, AsyncMock, MagicMock
+
+import pytest
+
+from aios.tools.wake_session import (
+    WAKE_SESSION_MAX_DEPTH,
+    WAKE_SESSION_MAX_PER_HOUR,
+    WakeSessionArgumentError,
+    WakeSessionDepthExceededError,
+    WakeSessionPermissionError,
+    WakeSessionRateLimitedError,
+    WakeSessionTargetUnavailableError,
+    wake_session_handler,
+)
+
+
+def _make_pool(*, target_row: dict[str, Any] | None, depth: int, recent_wakes: int) -> MagicMock:
+    """Build a mock pool whose ``pool.acquire()`` yields a single shared
+    conn whose ``fetchrow``/``fetchval`` walk through the handler's call
+    sequence in order:
+
+      1. fetchrow → target session row (SELECT account_id, status, archived_at)
+      2. fetchrow → wake_depth read on source (COALESCE … FROM events ...)
+      3. fetchval → recent-wake count (SELECT count(*) FROM events ...)
+      4. append_event is patched separately via ``queries.append_event``.
+
+    Each ``pool.acquire()`` invocation re-enters the same conn, so the
+    side_effect queue is shared across the three acquire blocks in the
+    handler.
+    """
+    pool = MagicMock()
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=[target_row, {"depth": depth}])
+    conn.fetchval = AsyncMock(side_effect=[recent_wakes])
+    conn.execute = AsyncMock()
+
+    class _PoolAcquireCM:
+        async def __aenter__(self) -> MagicMock:
+            return conn
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    pool.acquire = lambda: _PoolAcquireCM()
+    return pool
+
+
+@pytest.fixture(autouse=True)
+def _mock_runtime_pool(monkeypatch: Any) -> None:
+    """Most tests construct their own pool — patch the runtime to use it."""
+
+    def _fake_require_pool() -> MagicMock:
+        return _DEFAULT_POOL_HOLDER["pool"]
+
+    monkeypatch.setattr("aios.tools.wake_session.runtime.require_pool", _fake_require_pool)
+
+
+_DEFAULT_POOL_HOLDER: dict[str, Any] = {"pool": None}
+
+
+@pytest.fixture
+def install_pool() -> Any:
+    """Install a pool that ``runtime.require_pool()`` will return."""
+
+    def _install(pool: MagicMock) -> None:
+        _DEFAULT_POOL_HOLDER["pool"] = pool
+
+    yield _install
+    _DEFAULT_POOL_HOLDER["pool"] = None
+
+
+class TestWakeSessionHandlerArguments:
+    async def test_missing_target_rejects(self) -> None:
+        with pytest.raises(WakeSessionArgumentError, match="target_session_id"):
+            await wake_session_handler("sess_01SOURCE", {"prompt": "hi"})
+
+    async def test_missing_prompt_rejects(self) -> None:
+        with pytest.raises(WakeSessionArgumentError, match="prompt"):
+            await wake_session_handler("sess_01SOURCE", {"target_session_id": "sess_01TARGET"})
+
+    async def test_empty_target_rejects(self) -> None:
+        with pytest.raises(WakeSessionArgumentError, match="target_session_id"):
+            await wake_session_handler("sess_01SOURCE", {"target_session_id": "", "prompt": "hi"})
+
+    async def test_self_wake_rejects(self) -> None:
+        with pytest.raises(WakeSessionArgumentError, match="schedule_wake"):
+            await wake_session_handler(
+                "sess_01SAME", {"target_session_id": "sess_01SAME", "prompt": "hi"}
+            )
+
+
+class TestWakeSessionHandlerPermission:
+    async def test_unknown_target_rejects(self, monkeypatch: Any, install_pool: Any) -> None:
+        install_pool(_make_pool(target_row=None, depth=0, recent_wakes=0))
+        monkeypatch.setattr("aios.db.queries.append_event", AsyncMock())
+        monkeypatch.setattr("aios.tools.wake_session.defer_wake", AsyncMock())
+        with pytest.raises(WakeSessionArgumentError, match="not found"):
+            await wake_session_handler(
+                "sess_01SOURCE",
+                {"target_session_id": "sess_01MISSING", "prompt": "hi"},
+            )
+
+    async def test_cross_account_rejects_without_disclosure(
+        self, monkeypatch: Any, install_pool: Any
+    ) -> None:
+        install_pool(
+            _make_pool(
+                target_row={
+                    "account_id": "acc_other",
+                    "status": "running",
+                    "archived_at": None,
+                },
+                depth=0,
+                recent_wakes=0,
+            )
+        )
+        monkeypatch.setattr("aios.db.queries.append_event", AsyncMock())
+        monkeypatch.setattr("aios.tools.wake_session.defer_wake", AsyncMock())
+        with pytest.raises(WakeSessionPermissionError, match="not found") as exc_info:
+            await wake_session_handler(
+                "sess_01SOURCE",
+                {"target_session_id": "sess_01TARGET", "prompt": "hi"},
+            )
+        # Don't leak account_id-presence: detail mirrors the unknown-target shape.
+        assert "account_id" not in (exc_info.value.detail or {})
+
+    async def test_archived_target_rejects(self, monkeypatch: Any, install_pool: Any) -> None:
+        install_pool(
+            _make_pool(
+                target_row={
+                    "account_id": "acc_test_stub",
+                    "status": "idle",
+                    "archived_at": "2026-01-01T00:00:00",
+                },
+                depth=0,
+                recent_wakes=0,
+            )
+        )
+        monkeypatch.setattr("aios.db.queries.append_event", AsyncMock())
+        monkeypatch.setattr("aios.tools.wake_session.defer_wake", AsyncMock())
+        with pytest.raises(WakeSessionTargetUnavailableError, match="archived"):
+            await wake_session_handler(
+                "sess_01SOURCE",
+                {"target_session_id": "sess_01TARGET", "prompt": "hi"},
+            )
+
+    async def test_terminated_target_rejects(self, monkeypatch: Any, install_pool: Any) -> None:
+        install_pool(
+            _make_pool(
+                target_row={
+                    "account_id": "acc_test_stub",
+                    "status": "terminated",
+                    "archived_at": None,
+                },
+                depth=0,
+                recent_wakes=0,
+            )
+        )
+        monkeypatch.setattr("aios.db.queries.append_event", AsyncMock())
+        monkeypatch.setattr("aios.tools.wake_session.defer_wake", AsyncMock())
+        with pytest.raises(WakeSessionTargetUnavailableError, match="terminated"):
+            await wake_session_handler(
+                "sess_01SOURCE",
+                {"target_session_id": "sess_01TARGET", "prompt": "hi"},
+            )
+
+    async def test_errored_target_allowed(self, monkeypatch: Any, install_pool: Any) -> None:
+        """Errored isn't a terminal state — a wake re-promotes it to pending."""
+        install_pool(
+            _make_pool(
+                target_row={
+                    "account_id": "acc_test_stub",
+                    "status": "errored",
+                    "archived_at": None,
+                },
+                depth=0,
+                recent_wakes=0,
+            )
+        )
+        mock_append = AsyncMock()
+        mock_defer = AsyncMock()
+        monkeypatch.setattr("aios.db.queries.append_event", mock_append)
+        monkeypatch.setattr("aios.tools.wake_session.defer_wake", mock_defer)
+
+        result = await wake_session_handler(
+            "sess_01SOURCE",
+            {"target_session_id": "sess_01TARGET", "prompt": "wake up"},
+        )
+        assert result["woken"] is True
+        mock_append.assert_awaited_once()
+        mock_defer.assert_awaited_once()
+
+
+class TestWakeSessionHandlerLimits:
+    async def test_depth_at_cap_rejects(self, monkeypatch: Any, install_pool: Any) -> None:
+        install_pool(
+            _make_pool(
+                target_row={
+                    "account_id": "acc_test_stub",
+                    "status": "idle",
+                    "archived_at": None,
+                },
+                depth=WAKE_SESSION_MAX_DEPTH,
+                recent_wakes=0,
+            )
+        )
+        monkeypatch.setattr("aios.db.queries.append_event", AsyncMock())
+        monkeypatch.setattr("aios.tools.wake_session.defer_wake", AsyncMock())
+        with pytest.raises(WakeSessionDepthExceededError, match="wake-depth"):
+            await wake_session_handler(
+                "sess_01SOURCE",
+                {"target_session_id": "sess_01TARGET", "prompt": "hi"},
+            )
+
+    async def test_rate_limit_at_cap_rejects(self, monkeypatch: Any, install_pool: Any) -> None:
+        install_pool(
+            _make_pool(
+                target_row={
+                    "account_id": "acc_test_stub",
+                    "status": "idle",
+                    "archived_at": None,
+                },
+                depth=0,
+                recent_wakes=WAKE_SESSION_MAX_PER_HOUR,
+            )
+        )
+        monkeypatch.setattr("aios.db.queries.append_event", AsyncMock())
+        monkeypatch.setattr("aios.tools.wake_session.defer_wake", AsyncMock())
+        with pytest.raises(WakeSessionRateLimitedError, match="rate limit"):
+            await wake_session_handler(
+                "sess_01SOURCE",
+                {"target_session_id": "sess_01TARGET", "prompt": "hi"},
+            )
+
+    async def test_happy_path_appends_and_defers(self, monkeypatch: Any, install_pool: Any) -> None:
+        install_pool(
+            _make_pool(
+                target_row={
+                    "account_id": "acc_test_stub",
+                    "status": "idle",
+                    "archived_at": None,
+                },
+                depth=2,
+                recent_wakes=0,
+            )
+        )
+        mock_append = AsyncMock()
+        mock_defer = AsyncMock()
+        monkeypatch.setattr("aios.db.queries.append_event", mock_append)
+        monkeypatch.setattr("aios.tools.wake_session.defer_wake", mock_defer)
+
+        result = await wake_session_handler(
+            "sess_01SOURCE",
+            {"target_session_id": "sess_01TARGET", "prompt": "escalation summary"},
+        )
+
+        # New depth carries over source +1.
+        assert result == {
+            "woken": True,
+            "target_session_id": "sess_01TARGET",
+            "wake_depth": 3,
+        }
+        # The append landed on the TARGET session under its account_id with
+        # wake_source_session_id + wake_depth metadata.
+        mock_append.assert_awaited_once()
+        kwargs = mock_append.call_args.kwargs
+        assert kwargs["session_id"] == "sess_01TARGET"
+        assert kwargs["account_id"] == "acc_test_stub"
+        assert kwargs["kind"] == "message"
+        assert kwargs["data"]["role"] == "user"
+        assert kwargs["data"]["content"] == "escalation summary"
+        assert kwargs["data"]["metadata"]["wake_source_session_id"] == "sess_01SOURCE"
+        assert kwargs["data"]["metadata"]["wake_depth"] == 3
+
+        mock_defer.assert_awaited_once_with(
+            ANY,
+            "sess_01TARGET",
+            cause="agent_wake",
+            account_id="acc_test_stub",
+        )

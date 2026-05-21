@@ -28,6 +28,7 @@ BuiltinToolType = Literal[
     "search_events",
     "cancel",
     "schedule_wake",
+    "wake_session",
     "http_request",
 ]
 
