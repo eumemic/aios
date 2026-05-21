@@ -204,3 +204,4 @@ class TestModelValidation:
 
         with pytest.raises(ValidationError):
             SelfCheckStopHook(prompt="?", stop_on="")
+
