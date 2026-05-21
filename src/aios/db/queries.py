@@ -1254,7 +1254,8 @@ async def clone_session(
 
     async with conn.transaction():
         row = await conn.fetchrow(
-            "SELECT status, archived_at FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            "SELECT status, stop_reason, archived_at FROM sessions "
+            "WHERE id = $1 AND account_id = $2 FOR UPDATE",
             parent_session_id,
             account_id,
         )
@@ -1265,8 +1266,7 @@ async def clone_session(
             )
         # Refuse archived parents: cloning would resurrect the parent's
         # event log into a live new session, defeating the archive
-        # intent.  Same family as PR #573 / #547 / #554 / #587 —
-        # archive must hold across every mutation/copy surface.
+        # intent.  Archive must hold across every mutation/copy surface.
         if row["archived_at"] is not None:
             raise ConflictError(
                 f"session {parent_session_id} is archived",
@@ -1278,6 +1278,16 @@ async def clone_session(
                 f"can only clone sessions in {_CLONEABLE_STATUSES} state; "
                 f"parent {parent_session_id} is in {status!r}",
                 detail={"id": parent_session_id, "status": status},
+            )
+        # Refuse parents parked in ``requires_action``: the clone
+        # inherits ``stop_reason`` verbatim, but the operator action
+        # (custom-tool result, always_ask confirmation) lands on the
+        # parent's URL only — the clone would sit idle forever.
+        stop_reason = parse_jsonb(row["stop_reason"])
+        if isinstance(stop_reason, dict) and stop_reason.get("type") == "requires_action":
+            raise ConflictError(
+                f"cannot clone session {parent_session_id}: parent is in requires_action",
+                detail={"id": parent_session_id, "stop_reason": stop_reason},
             )
 
         new_row = await conn.fetchrow(
