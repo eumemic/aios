@@ -902,14 +902,19 @@ async def set_session_status(
     account_id: str,
 ) -> None:
     stop_json = json.dumps(stop_reason) if stop_reason is not None else None
-    await conn.execute(
+    # ``archived_at IS NULL`` guards the archive race: every caller is
+    # worker-internal and silent no-op is the right contract — surfacing
+    # would just cascade into an ``errored`` flip on the same archived row.
+    row = await conn.fetchrow(
         "UPDATE sessions SET status = $1, stop_reason = $2::jsonb, updated_at = now() "
-        "WHERE id = $3 AND account_id = $4",
+        "WHERE id = $3 AND account_id = $4 AND archived_at IS NULL RETURNING 1",
         status,
         stop_json,
         session_id,
         account_id,
     )
+    if row is None:
+        return
 
     # Connector-calls fan-out (#328 PR 5): when a session parks in
     # ``requires_action`` with pending custom_tools, NOTIFY the per-type
