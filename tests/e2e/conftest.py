@@ -15,15 +15,89 @@ Docker containers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
+import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from unittest import mock
 
 import pytest
+import uvicorn
 
 from tests.e2e.harness import Harness
-from tests.helpers.connections import authed_client
+from tests.helpers.connections import authed_client, wait_for_health
+
+_DEFAULT_DEFER_WAKE_PATCHES: tuple[str, ...] = (
+    "aios.api.routers.sessions.defer_wake",
+    "aios.api.routers.connectors.defer_wake",
+    "aios.services.inbound.defer_wake",
+)
+
+
+@contextlib.asynccontextmanager
+async def live_aios_server(
+    *,
+    defer_wake_patches: tuple[str, ...] = _DEFAULT_DEFER_WAKE_PATCHES,
+    pool_max_size: int = 4,
+) -> AsyncIterator[str]:
+    """Run uvicorn on a free port serving the aios app; yield base URL.
+
+    Used by e2e tests that need a real HTTP socket (SSE streaming,
+    chunked transfer, real-uvicorn behaviour) rather than the
+    ``ASGITransport`` shortcut. ``defer_wake_patches`` is mocked for
+    the context's lifetime — the tests drive session advancement
+    directly via the harness, so the production ``defer_wake`` would
+    queue jobs the test never executes. The default covers the three
+    production sites; SSE-only tests that never hit the connectors
+    router can pass a narrower tuple to keep the mock surface tight.
+
+    Uvicorn's ``should_exit`` is poll-based (500 ms tick); with an
+    open SSE stream the poll routinely loses the race and the test
+    eats the full ``wait_for`` timeout. ``server.shutdown()`` triggers
+    the graceful drain synchronously instead, then cancelling the
+    serve task frees the asyncio bookkeeping.
+    """
+    from aios.api.app import create_app
+    from aios.config import get_settings
+    from aios.crypto.vault import CryptoBox
+    from aios.db.pool import create_pool
+
+    settings = get_settings()
+    pool = await create_pool(settings.db_url, min_size=1, max_size=pool_max_size)
+    app = create_app()
+    app.state.pool = pool
+    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
+    app.state.db_url = settings.db_url
+    app.state.procrastinate = mock.MagicMock()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="off")
+    server = uvicorn.Server(config)
+    server.config.load()
+    server.lifespan = server.config.lifespan_class(server.config)
+
+    async def _serve() -> None:
+        sock.setblocking(False)
+        await server.serve(sockets=[sock])
+
+    with contextlib.ExitStack() as patches:
+        for target in defer_wake_patches:
+            patches.enter_context(mock.patch(target, new_callable=mock.AsyncMock))
+        serve_task = asyncio.create_task(_serve())
+        try:
+            url = f"http://127.0.0.1:{port}"
+            await wait_for_health(url)
+            yield url
+        finally:
+            await server.shutdown()
+            serve_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await serve_task
+            await pool.close()
 
 
 async def wait_for_predicate(

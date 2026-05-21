@@ -19,67 +19,30 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import socket
 from collections.abc import AsyncIterator
-from unittest import mock
 
 import pytest
-import uvicorn
 
 from aios_sdk import Client, stream_connection_discovery
 from tests.conftest import needs_docker
-from tests.helpers.connections import authed_client, create_connection, wait_for_health
+from tests.e2e.conftest import live_aios_server
+from tests.helpers.connections import authed_client, create_connection
 
 
 @pytest.fixture
 async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:
-    """Same shape as ``test_echo_http_connector.live_server`` —
-    extracted-but-not-shared because per-file pytest fixtures keep the
-    setup local to the assertions that depend on them.
+    """Real-uvicorn aios so SSE chunked-transfer streaming works end-to-end.
+
+    SSE-only paths: skip the ``routers.connectors.defer_wake`` patch
+    that the connector-driven e2e tests need.
     """
-    from aios.api.app import create_app
-    from aios.config import get_settings
-    from aios.crypto.vault import CryptoBox
-    from aios.db.pool import create_pool
-
-    settings = get_settings()
-    pool = await create_pool(settings.db_url, min_size=1, max_size=4)
-    app = create_app()
-    app.state.pool = pool
-    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    app.state.db_url = settings.db_url
-    app.state.procrastinate = mock.MagicMock()
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="off")
-    server = uvicorn.Server(config)
-    server.config.load()
-    server.lifespan = server.config.lifespan_class(server.config)
-
-    async def _serve() -> None:
-        sock.setblocking(False)
-        await server.serve(sockets=[sock])
-
-    with (
-        mock.patch("aios.api.routers.sessions.defer_wake", new_callable=mock.AsyncMock),
-        mock.patch("aios.services.inbound.defer_wake", new_callable=mock.AsyncMock),
-    ):
-        serve_task = asyncio.create_task(_serve())
-        try:
-            url = f"http://127.0.0.1:{port}"
-            await wait_for_health(url)
-            yield url
-        finally:
-            # See test_signal_registration.py for why ``should_exit`` alone
-            # loses the race against open SSE streams.
-            await server.shutdown()
-            serve_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await serve_task
-            await pool.close()
+    async with live_aios_server(
+        defer_wake_patches=(
+            "aios.api.routers.sessions.defer_wake",
+            "aios.services.inbound.defer_wake",
+        ),
+    ) as url:
+        yield url
 
 
 async def _issue_runtime_token(api_key: str, base_url: str, connector: str) -> str:
