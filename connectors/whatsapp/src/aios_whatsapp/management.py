@@ -17,6 +17,22 @@ if TYPE_CHECKING:
     from .connector import _WhatsappConnectionState
 
 
+def normalize_phone(phone: str) -> str:
+    """Strip whitespace + common separators and ensure a leading ``+``.
+
+    Used at the two boundaries where operator-provided phones meet
+    internal state: ``serve_connection`` normalizes ``secrets["phone"]``
+    on store, and :meth:`WhatsappManagementMixin._state_for_phone`
+    normalizes ``external_account_id`` on lookup.  Both sides
+    canonical-form the input so trivial formatting differences
+    (``+15551112222`` vs ``15551112222`` vs ``+1 555 111-2222``) match.
+    """
+    s = phone.strip().replace("-", "").replace(" ", "")
+    if s and not s.startswith("+"):
+        s = "+" + s
+    return s
+
+
 class WhatsappManagementMixin:
     # Narrowed by WhatsappConnector to dict[str, _WhatsappConnectionState];
     # declared here so the mixin's helpers type-check on its own.
@@ -30,10 +46,24 @@ class WhatsappManagementMixin:
         before rotation; ~100 s total).  Subsequent QR refreshes are
         drained by the daemon but not surfaced — single-scan pairing
         is the v1 scope.
+
+        Raises :class:`ManagementHandlerError` with a structured
+        payload if the daemon returns an empty code (contract bug);
+        the AIOS server route surfaces this as a 502 rather than 200
+        OK with a blank QR.
         """
         state = self._state_for_phone(external_account_id)
         result = await state.daemon.start_pairing()
-        return {"external_account_id": external_account_id, "code": result.get("code", "")}
+        code = result.get("code")
+        if not code:
+            raise ManagementHandlerError(
+                {
+                    "status": "error",
+                    "external_account_id": external_account_id,
+                    "reason": "daemon returned empty pairing code",
+                }
+            )
+        return {"external_account_id": external_account_id, "code": code}
 
     @management_handler()
     async def confirmPairing(self, *, external_account_id: str) -> dict[str, Any]:
@@ -46,10 +76,16 @@ class WhatsappManagementMixin:
         outcome = await state.daemon.confirm_pairing()
         response: dict[str, Any] = {
             "external_account_id": external_account_id,
-            "status": outcome.get("status", ""),
+            # `or "error"` covers both missing key and the empty-string
+            # the daemon could emit if outcome was wiped mid-race; the
+            # route then maps an unrecognized status to an "error"
+            # response with the raw value in reason.
+            "status": outcome.get("status") or "error",
         }
         for key in ("jid", "push_name", "reason"):
-            if value := outcome.get(key):
+            # Use `is not None` so future fields with a falsy-but-
+            # meaningful value (0, False) aren't silently dropped.
+            if (value := outcome.get(key)) is not None:
                 response[key] = value
         return response
 
@@ -61,8 +97,9 @@ class WhatsappManagementMixin:
         return {"external_account_id": external_account_id, "status": "ok"}
 
     def _state_for_phone(self, phone: str) -> _WhatsappConnectionState:
+        target = normalize_phone(phone)
         for state in self.state.values():
-            if state.phone == phone:
+            if state.phone == target:
                 return state
         raise ManagementHandlerError(
             {
