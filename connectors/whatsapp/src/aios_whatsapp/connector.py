@@ -16,7 +16,7 @@ from aios_connector_http import HttpConnector, iso_from_ms, tool
 
 from .config import Settings
 from .daemon import WhatsappDaemon
-from .management import WhatsappManagementMixin
+from .management import WhatsappManagementMixin, normalize_phone
 from .parse import parse_message
 
 log = structlog.get_logger(__name__)
@@ -37,11 +37,15 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
         self._cfg = cfg
 
     async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
-        phone = secrets.get("phone")
-        if not phone:
+        phone_raw = secrets.get("phone")
+        if not phone_raw:
             raise RuntimeError(
                 f"whatsapp connection {connection_id!r} requires a 'phone' entry in its secrets"
             )
+        # Normalize at this boundary so _state_for_phone's lookup
+        # works regardless of how the operator formatted the phone
+        # at connection-create time vs management-call time.
+        phone = normalize_phone(phone_raw)
 
         store_dir = self._cfg.data_dir / phone
         port = _pick_free_port(self._cfg.daemon_host)

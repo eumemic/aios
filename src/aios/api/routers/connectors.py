@@ -797,6 +797,15 @@ async def _whatsapp_management_call(
         account_id=account_id,
     )
     if is_error:
+        # The connector emits a structured ``no_active_connection``
+        # payload when the operator's external_account_id doesn't
+        # match any running connection.  Surface as 404 so operator
+        # tooling can discriminate "wrong target" from "daemon crashed".
+        if isinstance(result, dict) and result.get("status") == "no_active_connection":
+            raise NotFoundError(
+                f"no active whatsapp connection for {result.get('external_account_id')!r}",
+                detail={"external_account_id": result.get("external_account_id")},
+            )
         raise ConnectorCallFailedError(
             f"whatsapp connector failed {method!r}",
             detail={"method": method, "connector_error": result},
@@ -826,9 +835,18 @@ async def post_whatsapp_start_pairing(
         params=body.model_dump(exclude_none=True),
         timeout_s=30.0,
     )
+    code = result.get("code") if isinstance(result, dict) else None
+    if not code:
+        # Fail loud rather than 200 OK with an empty QR — operators
+        # printing the response would otherwise show a blank code with
+        # no diagnostic.
+        raise ConnectorCallFailedError(
+            "whatsapp connector startPairing returned no code",
+            detail={"method": "startPairing", "connector_result": result},
+        )
     return WhatsappStartPairingResponse(
         external_account_id=body.external_account_id,
-        code=str(result.get("code", "")),
+        code=str(code),
     )
 
 
@@ -853,9 +871,22 @@ async def post_whatsapp_confirm_pairing(
         params=body.model_dump(exclude_none=True),
         timeout_s=240.0,
     )
+    raw_status = result.get("status") if isinstance(result, dict) else None
+    if raw_status not in ("success", "timeout", "error"):
+        # Unknown / empty daemon status: surface as "error" with the
+        # raw value as reason so the Pydantic Literal doesn't 500.
+        return WhatsappConfirmPairingResponse(
+            external_account_id=body.external_account_id,
+            status="error",
+            reason=(
+                f"unrecognized daemon status: {raw_status!r}"
+                if raw_status
+                else "daemon returned empty status"
+            ),
+        )
     return WhatsappConfirmPairingResponse(
         external_account_id=body.external_account_id,
-        status=result.get("status", "error"),
+        status=raw_status,
         jid=result.get("jid"),
         push_name=result.get("push_name"),
         reason=result.get("reason"),
