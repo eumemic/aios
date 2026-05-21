@@ -318,13 +318,16 @@ def _was_dispatched(
     ghost. A tool that was never dispatched (custom, or unconfirmed
     ``always_ask``) is legitimately waiting for the client.
 
-    Uses the same permission resolution as the step function
-    (``resolve_permission`` / ``resolve_mcp_permission`` from loop.py).
+    Uses the same permission resolution as the step function.
     """
-    from aios.harness.loop import resolve_mcp_permission, resolve_permission
+    from aios.models.agents import (
+        is_mcp_tool_name,
+        resolve_mcp_permission,
+        resolve_permission,
+    )
     from aios.tools.registry import registry
 
-    if name.startswith("mcp__"):
+    if is_mcp_tool_name(name):
         perm = resolve_mcp_permission(name, agent_tools)
         if perm == "always_allow":
             return True

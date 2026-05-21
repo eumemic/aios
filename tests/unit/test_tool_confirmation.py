@@ -5,8 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from aios.harness.loop import resolve_permission
-from aios.models.agents import ToolSpec
+from aios.models.agents import ToolSpec, resolve_permission
 from aios.models.events import Event
 from aios.services.sessions import _find_tool_call
 

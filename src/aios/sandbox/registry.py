@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from aios.logging import get_logger
@@ -449,8 +448,15 @@ class SandboxRegistry:
                     error=str(result),
                 )
 
-    async def reap_orphans(self, active_session_ids: Iterable[str]) -> int:
-        """At startup, remove sandboxes not matching an active session."""
+    async def reap_orphans(self) -> int:
+        """At startup, remove every sandbox we manage.
+
+        Called once per worker boot, before any step or tool task runs;
+        the worker's ``task_registry`` is empty by construction, so every
+        managed container is a corpse from a prior run. Sessions that
+        resume on this worker will spawn fresh containers on their next
+        step.
+        """
         from aios.config import get_settings
 
         instance_id = get_settings().instance_id
@@ -462,11 +468,8 @@ class SandboxRegistry:
         if not managed:
             return 0
 
-        active = set(active_session_ids)
         removed = 0
         for ref in managed:
-            if ref.session_id and ref.session_id in active:
-                continue
             log.info(
                 "sandbox.reap_orphan",
                 container_id=ref.sandbox_id[:12],

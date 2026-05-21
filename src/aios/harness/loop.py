@@ -33,7 +33,12 @@ from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.logging import get_logger
-from aios.models.agents import PermissionPolicy, ToolSpec
+from aios.models.agents import (
+    PermissionPolicy,
+    is_mcp_tool_name,
+    resolve_mcp_permission,
+    resolve_permission,
+)
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.services.wake import defer_wake
@@ -247,24 +252,12 @@ async def _run_session_step_body(
         log.debug("step.early_out", session_id=session_id, cause=cause)
         return None
 
-    session = await sessions_service.get_session(pool, session_id, account_id=account_id)
+    session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
 
-    from aios.models.agents import Agent, AgentVersion
     from aios.services.channels import list_session_channels
 
-    agent_task: asyncio.Task[Agent | AgentVersion]
-    if session.agent_version is not None:
-        agent_task = asyncio.create_task(
-            agents_service.get_agent_version(
-                pool, session.agent_id, session.agent_version, account_id=account_id
-            )
-        )
-    else:
-        agent_task = asyncio.create_task(
-            agents_service.get_agent(pool, session.agent_id, account_id=account_id)
-        )
     agent, channels, memory_echoes = await asyncio.gather(
-        agent_task,
+        agents_service.load_for_session(pool, session, account_id=account_id),
         list_session_channels(pool, session_id, account_id=account_id),
         refresh_session_mount_state(pool, session_id, account_id=account_id),
     )
@@ -313,8 +306,8 @@ async def _run_session_step_body(
         task_registry=task_registry,
     )
     if pending:
-        pending_builtin = [tc for tc in pending if not _is_mcp_tool(_tc_name(tc))]
-        pending_mcp = [tc for tc in pending if _is_mcp_tool(_tc_name(tc))]
+        pending_builtin = [tc for tc in pending if not is_mcp_tool_name(_tc_name(tc))]
+        pending_mcp = [tc for tc in pending if is_mcp_tool_name(_tc_name(tc))]
         if pending_builtin:
             launch_tool_calls(pool, session_id, pending_builtin, account_id=account_id)
         if pending_mcp:
@@ -642,11 +635,6 @@ def _tc_name(tc: dict[str, Any]) -> str:
     return name
 
 
-def _is_mcp_tool(name: str) -> bool:
-    """Return True if the tool name is an MCP-namespaced tool."""
-    return name.startswith("mcp__")
-
-
 def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, str]) -> bool:
     """Return True if ``server_name`` resolves to a registered MCP server.
 
@@ -693,7 +681,7 @@ def _classify_tool_call(
     function = tool_call.get("function") or {}
     name: str = function.get("name") or ""
 
-    if _is_mcp_tool(name):
+    if is_mcp_tool_name(name):
         try:
             server_name, _ = _parse_mcp_tool_name(name)
         except ValueError:
@@ -735,33 +723,6 @@ def _classify_tool_call(
         return "needs_confirm"
 
     return "immediate"
-
-
-def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
-    """Look up the permission policy for a built-in or custom tool by name."""
-    for spec in agent_tools:
-        tool_name = spec.name if spec.type == "custom" else spec.type
-        if tool_name == name:
-            return spec.permission
-    return None
-
-
-def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
-    """Look up the permission policy for an MCP tool.
-
-    Finds the ``mcp_toolset`` entry whose ``mcp_server_name`` matches
-    the server portion of the namespaced tool name, then returns the
-    ``default_config.permission_policy.type`` or ``None`` (which callers
-    treat as ``always_ask``).
-    """
-    server_name = name.split("__", 2)[1]
-    for spec in agent_tools:
-        if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
-            cfg = spec.default_config
-            if cfg and cfg.permission_policy:
-                return cfg.permission_policy.type
-            return spec.permission
-    return None
 
 
 async def discover_session_mcp_tools(

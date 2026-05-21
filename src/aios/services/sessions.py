@@ -18,7 +18,12 @@ import asyncpg
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.errors import ConflictError, NotFoundError, PayloadTooLargeError
-from aios.models.agents import ToolSpec
+from aios.models.agents import (
+    ToolSpec,
+    is_mcp_tool_name,
+    resolve_mcp_permission,
+    resolve_permission,
+)
 from aios.models.events import Event, EventKind
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -145,54 +150,27 @@ def _classify_awaiting(
     """Classify an unresolved tool_call into an ``AwaitingToolCall``, or
     ``None`` if the session is not blocked on external action for it
     (``always_allow`` builtin/mcp, or ``always_ask`` already confirmed).
+
+    Mirrors :func:`aios.harness.loop._classify_tool_call`'s dispatch
+    rules so the view stays consistent with what the harness will do.
     """
     # Late import: aios.tools → services.wake → services.sessions cycle.
+    from aios.config import get_settings
     from aios.tools.registry import registry as tool_registry
 
-    if name.startswith("mcp__"):
-        if _mcp_permission(name, agent_tools) == "always_ask" and not has_allow_lifecycle:
-            return AwaitingToolCall(
-                tool_call_id=tool_call_id, name=name, kind="mcp", needs_confirm=True
-            )
+    if is_mcp_tool_name(name):
+        perm = resolve_mcp_permission(name, agent_tools)
+        if perm is None:
+            perm = get_settings().default_mcp_permission_policy
+        if perm == "always_ask" and not has_allow_lifecycle:
+            return AwaitingToolCall(tool_call_id=tool_call_id, name=name, kind="mcp")
         return None
     if tool_registry.has(name):
-        builtin_perm = next((s.permission for s in agent_tools if s.type == name), None)
-        if builtin_perm == "always_ask" and not has_allow_lifecycle:
-            return AwaitingToolCall(
-                tool_call_id=tool_call_id, name=name, kind="builtin", needs_confirm=True
-            )
+        if resolve_permission(name, agent_tools) == "always_ask" and not has_allow_lifecycle:
+            return AwaitingToolCall(tool_call_id=tool_call_id, name=name, kind="builtin")
         return None
-    # Unknown name: client-executed custom tool. ``needs_confirm`` is
-    # meaningless for custom tools — they don't go through the gate.
-    return AwaitingToolCall(
-        tool_call_id=tool_call_id, name=name, kind="custom", needs_confirm=False
-    )
-
-
-def _mcp_permission(name: str, agent_tools: list[ToolSpec]) -> str | None:
-    """Look up the permission policy for an ``mcp__`` tool name. Mirrors
-    :func:`aios.harness.loop.resolve_mcp_permission`."""
-    server_name = name.split("__", 2)[1]
-    for spec in agent_tools:
-        if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
-            cfg = spec.default_config
-            if cfg and cfg.permission_policy:
-                return cfg.permission_policy.type
-            return spec.permission
-    return None
-
-
-async def _agent_tools_for_session(
-    pool: asyncpg.Pool[Any], session: Session, *, account_id: str
-) -> list[ToolSpec]:
-    """Load the ToolSpec list the harness sees for ``session`` at step time."""
-    if session.agent_version is not None:
-        version = await agents_service.get_agent_version(
-            pool, session.agent_id, session.agent_version, account_id=account_id
-        )
-        return version.tools
-    agent = await agents_service.get_agent(pool, session.agent_id, account_id=account_id)
-    return agent.tools
+    # Unknown name: client-executed custom tool.
+    return AwaitingToolCall(tool_call_id=tool_call_id, name=name, kind="custom")
 
 
 async def compute_awaiting(
@@ -220,7 +198,8 @@ async def compute_awaiting(
             continue
         key = (session.agent_id, session.agent_version)
         if key not in tools_cache:
-            tools_cache[key] = await _agent_tools_for_session(pool, session, account_id=account_id)
+            loaded = await agents_service.load_for_session(pool, session, account_id=account_id)
+            tools_cache[key] = loaded.tools
         entries: list[AwaitingToolCall] = []
         for tc in unresolved:
             classified = _classify_awaiting(
@@ -246,6 +225,19 @@ async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: s
             "awaiting": awaiting_by_sid.get(session_id, []),
         }
     )
+
+
+async def get_session_basic(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> Session:
+    """Bare session read with no enrichment (no vaults / resources / awaiting).
+
+    Use this when the caller reads only core columns — the worker step
+    path (``agent_id``, ``agent_version``, ``focal_channel``) and the
+    long-poll wait endpoint's existence check.
+    """
+    async with pool.acquire() as conn:
+        return await queries.get_session(conn, session_id, account_id=account_id)
 
 
 async def get_session_event_stats(

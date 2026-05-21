@@ -83,21 +83,22 @@ class SessionUsage(BaseModel):
 class AwaitingToolCall(BaseModel):
     """One pending tool call the harness will not dispatch itself.
 
-    Derived view on session reads: each entry is a tool_call in the
-    latest assistant message that has no paired tool_result event and
-    no in-process executor. Two flavors share this state:
+    Derived view on session reads. Each entry is a tool_call in the
+    latest assistant message with no paired tool_result and no
+    in-process executor:
 
-    * ``kind == "custom"`` — client-executed; awaits a POST to
+    * ``kind == "custom"`` — client-executed; awaits POST to
       ``/sessions/:id/tool-results`` (operator-facing) or
       ``/connectors/runtime/tool-results`` (runtime-container-facing).
-    * ``kind == "builtin" | "mcp"`` with ``needs_confirm=True`` —
-      ``always_ask``-gated; awaits a POST to ``/sessions/:id/tool-confirmations``.
+    * ``kind == "builtin" | "mcp"`` — ``always_ask``-gated and not yet
+      confirmed; awaits POST to ``/sessions/:id/tool-confirmations``.
+      Confirmed-but-not-yet-dispatched and ``always_allow`` calls don't
+      appear here — they're harness-internal.
     """
 
     tool_call_id: str
     name: str
     kind: Literal["builtin", "mcp", "custom"]
-    needs_confirm: bool
 
 
 class SessionCreate(BaseModel):

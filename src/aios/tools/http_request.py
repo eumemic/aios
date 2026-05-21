@@ -176,13 +176,8 @@ def _classify_permission(
 async def _load_session_agent(session_id: str) -> tuple[Agent | AgentVersion, str]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    session = await sessions_service.get_session(pool, session_id, account_id=account_id)
-    if session.agent_version is not None:
-        agent: Agent | AgentVersion = await agents_service.get_agent_version(
-            pool, session.agent_id, session.agent_version, account_id=account_id
-        )
-    else:
-        agent = await agents_service.get_agent(pool, session.agent_id, account_id=account_id)
+    session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
+    agent = await agents_service.load_for_session(pool, session, account_id=account_id)
     return agent, account_id
 
 

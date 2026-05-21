@@ -1086,13 +1086,6 @@ async def archive_session(
 async def delete_session(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> None:
-    """Delete a session and its events.
-
-    Operator-initiated, no in-flight-work check: the task_registry is the
-    only live source of truth and only sees one worker. If a delete races
-    a tool task, ``_tool_lifecycle.finally`` fails loudly on the missing
-    session — acceptable per fail-hard.
-    """
     async with conn.transaction():
         row = await conn.fetchrow(
             "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2",
@@ -1905,8 +1898,8 @@ async def list_pending_calls_for_connector(
     if cat_row is None:
         return []
     tools_data = parse_jsonb(cat_row["tools"])
-    tool_names = [t["name"] for t in tools_data if isinstance(t, dict) and "name" in t]
-    if not tool_names:
+    name_set = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
+    if not name_set:
         return []
 
     # Find bound sessions of this connector type. Tenant isolation: both
@@ -1947,7 +1940,6 @@ async def list_pending_calls_for_connector(
     raw_by_sid = await _latest_unresolved_tool_calls(
         conn, list(by_session.keys()), account_id=account_id
     )
-    name_set = set(tool_names)
     out: list[dict[str, Any]] = []
     for sid, calls in raw_by_sid.items():
         for conn_id, focal in by_session[sid]:
@@ -1982,13 +1974,18 @@ async def list_pending_calls_for_session_and_connection(
     sessions.
     """
     conn_row = await conn.fetchrow(
-        """
+        f"""
         SELECT cat.tools_schema AS tools, s.focal_channel
           FROM connections c
           JOIN connectors cat ON cat.connector = c.connector
           JOIN sessions s
             ON s.id = $3 AND s.archived_at IS NULL AND s.account_id = $2
          WHERE c.id = $1 AND c.archived_at IS NULL AND c.account_id = $2
+           AND {
+            _session_bound_to_connection_predicate(
+                connection_alias="c", session_param_index=3, account_id_param_index=2
+            )
+        }
         """,
         connection_id,
         account_id,
@@ -1997,12 +1994,11 @@ async def list_pending_calls_for_session_and_connection(
     if conn_row is None:
         return []
     tools_data = parse_jsonb(conn_row["tools"])
-    tool_names = [t["name"] for t in tools_data if isinstance(t, dict) and "name" in t]
-    if not tool_names:
+    name_set = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
+    if not name_set:
         return []
 
     raw_by_sid = await _latest_unresolved_tool_calls(conn, [session_id], account_id=account_id)
-    name_set = set(tool_names)
     focal = conn_row["focal_channel"]
     out: list[dict[str, Any]] = []
     for tc in raw_by_sid.get(session_id, []):

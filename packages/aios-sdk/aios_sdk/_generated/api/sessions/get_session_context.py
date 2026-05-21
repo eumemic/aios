@@ -71,12 +71,16 @@ def sync_detailed(
 
      Return the chat-completions payload the worker would send next.
 
-    Dry-run preview for debugging prompt construction.  Reuses the exact
-    composer the worker's step function uses (:func:`compose_step_context`)
-    so the endpoint's output is byte-identical to what the next model
-    call would see — no divergence.  Side effects (skill provisioning,
-    session-status bumps, event appends) are omitted; the endpoint is
-    read-only.
+    Dry-run preview for debugging prompt construction. Reuses the exact
+    composer the worker's step function uses (:func:`compose_step_context`).
+    Side effects (skill provisioning, session-status bumps, event
+    appends) are omitted; the endpoint is read-only.
+
+    One known divergence from the worker's output: unresolved tool_calls
+    that the worker is currently executing render as ``_PENDING_EXTERNAL``
+    here (the API process has no view into the worker's task_registry).
+    The worker would render them as ``_PENDING_BACKGROUND``. Custom and
+    awaiting-confirm calls render identically on both sides.
 
     Args:
         session_id (str):
@@ -112,12 +116,16 @@ def sync(
 
      Return the chat-completions payload the worker would send next.
 
-    Dry-run preview for debugging prompt construction.  Reuses the exact
-    composer the worker's step function uses (:func:`compose_step_context`)
-    so the endpoint's output is byte-identical to what the next model
-    call would see — no divergence.  Side effects (skill provisioning,
-    session-status bumps, event appends) are omitted; the endpoint is
-    read-only.
+    Dry-run preview for debugging prompt construction. Reuses the exact
+    composer the worker's step function uses (:func:`compose_step_context`).
+    Side effects (skill provisioning, session-status bumps, event
+    appends) are omitted; the endpoint is read-only.
+
+    One known divergence from the worker's output: unresolved tool_calls
+    that the worker is currently executing render as ``_PENDING_EXTERNAL``
+    here (the API process has no view into the worker's task_registry).
+    The worker would render them as ``_PENDING_BACKGROUND``. Custom and
+    awaiting-confirm calls render identically on both sides.
 
     Args:
         session_id (str):
@@ -148,12 +156,16 @@ async def asyncio_detailed(
 
      Return the chat-completions payload the worker would send next.
 
-    Dry-run preview for debugging prompt construction.  Reuses the exact
-    composer the worker's step function uses (:func:`compose_step_context`)
-    so the endpoint's output is byte-identical to what the next model
-    call would see — no divergence.  Side effects (skill provisioning,
-    session-status bumps, event appends) are omitted; the endpoint is
-    read-only.
+    Dry-run preview for debugging prompt construction. Reuses the exact
+    composer the worker's step function uses (:func:`compose_step_context`).
+    Side effects (skill provisioning, session-status bumps, event
+    appends) are omitted; the endpoint is read-only.
+
+    One known divergence from the worker's output: unresolved tool_calls
+    that the worker is currently executing render as ``_PENDING_EXTERNAL``
+    here (the API process has no view into the worker's task_registry).
+    The worker would render them as ``_PENDING_BACKGROUND``. Custom and
+    awaiting-confirm calls render identically on both sides.
 
     Args:
         session_id (str):
@@ -187,12 +199,16 @@ async def asyncio(
 
      Return the chat-completions payload the worker would send next.
 
-    Dry-run preview for debugging prompt construction.  Reuses the exact
-    composer the worker's step function uses (:func:`compose_step_context`)
-    so the endpoint's output is byte-identical to what the next model
-    call would see — no divergence.  Side effects (skill provisioning,
-    session-status bumps, event appends) are omitted; the endpoint is
-    read-only.
+    Dry-run preview for debugging prompt construction. Reuses the exact
+    composer the worker's step function uses (:func:`compose_step_context`).
+    Side effects (skill provisioning, session-status bumps, event
+    appends) are omitted; the endpoint is read-only.
+
+    One known divergence from the worker's output: unresolved tool_calls
+    that the worker is currently executing render as ``_PENDING_EXTERNAL``
+    here (the API process has no view into the worker's task_registry).
+    The worker would render them as ``_PENDING_BACKGROUND``. Custom and
+    awaiting-confirm calls render identically on both sides.
 
     Args:
         session_id (str):

@@ -215,7 +215,7 @@ class TestStepStartEndSpans:
                 AsyncMock(return_value={"sess_x"}),
             ),
             patch(
-                "aios.harness.loop.sessions_service.get_session",
+                "aios.harness.loop.sessions_service.get_session_basic",
                 AsyncMock(return_value=session),
             ),
             patch(
@@ -312,7 +312,7 @@ class TestStepStartEndSpans:
                 AsyncMock(return_value={"sess_x"}),
             ),
             patch(
-                "aios.harness.loop.sessions_service.get_session",
+                "aios.harness.loop.sessions_service.get_session_basic",
                 AsyncMock(return_value=session),
             ),
             patch(
@@ -409,7 +409,7 @@ class TestStepStartEndSpans:
                 AsyncMock(return_value={"sess_x"}),
             ),
             patch(
-                "aios.harness.loop.sessions_service.get_session",
+                "aios.harness.loop.sessions_service.get_session_basic",
                 AsyncMock(return_value=session),
             ),
             patch(

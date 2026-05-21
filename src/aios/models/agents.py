@@ -294,3 +294,38 @@ class AgentVersion(BaseModel):
     window_min: int
     window_max: int
     created_at: datetime
+
+
+# ── Tool-name + permission helpers ───────────────────────────────────────────
+
+
+def is_mcp_tool_name(name: str) -> bool:
+    """True if ``name`` is the namespaced form ``mcp__<server>__<tool>``."""
+    return name.startswith("mcp__")
+
+
+def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> PermissionPolicy | None:
+    """Look up the permission policy for a built-in or custom tool by name."""
+    for spec in agent_tools:
+        tool_name = spec.name if spec.type == "custom" else spec.type
+        if tool_name == name:
+            return spec.permission
+    return None
+
+
+def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> PermissionPolicy | None:
+    """Look up the permission policy for an MCP tool by namespaced name.
+
+    Returns the matched ``mcp_toolset`` entry's
+    ``default_config.permission_policy.type`` (or its bare ``permission``
+    if no policy is set), or ``None`` if no entry matches. ``None``
+    callers fall back to ``AIOS_DEFAULT_MCP_PERMISSION_POLICY``.
+    """
+    server_name = name.split("__", 2)[1]
+    for spec in agent_tools:
+        if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
+            cfg = spec.default_config
+            if cfg and cfg.permission_policy:
+                return cfg.permission_policy.type
+            return spec.permission
+    return None

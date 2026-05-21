@@ -1132,7 +1132,6 @@ class TestCustomTools:
         assert s.stop_reason == {"type": "end_turn"}
         assert {a.tool_call_id for a in s.awaiting} == {"call_w1"}
         assert s.awaiting[0].kind == "custom"
-        assert s.awaiting[0].needs_confirm is False
 
     async def test_custom_tool_result_resumes_session(self, harness: Harness) -> None:
         """Submitting a custom tool result via the API resumes the session."""
@@ -1342,7 +1341,7 @@ class TestPermissionPolicies:
         registry._tools[name] = replace(old, handler=handler)
 
     async def test_always_ask_idles_with_awaiting_confirm(self, harness: Harness) -> None:
-        """Model calls an always_ask tool → call appears in ``session.awaiting`` with ``needs_confirm``."""
+        """Model calls an always_ask tool → call appears in ``session.awaiting`` with builtin kind."""
         from aios.models.agents import ToolSpec
 
         async def fake_glob(
@@ -1370,7 +1369,6 @@ class TestPermissionPolicies:
         assert s.stop_reason == {"type": "end_turn"}
         assert {a.tool_call_id for a in s.awaiting} == {"call_ask1"}
         assert s.awaiting[0].kind == "builtin"
-        assert s.awaiting[0].needs_confirm is True
 
     async def test_always_ask_allow_executes_tool(self, harness: Harness) -> None:
         """Confirm allow → tool executes → model sees result → responds."""
@@ -1513,7 +1511,7 @@ class TestPermissionPolicies:
         assert s.status == "idle"
         assert s.stop_reason == {"type": "end_turn"}
         assert {a.tool_call_id for a in s.awaiting} == {"call_slow"}
-        assert s.awaiting[0].needs_confirm is True
+        assert s.awaiting[0].kind == "builtin"
 
         # glob result should already be in the log
         events = await harness.events(session.id)

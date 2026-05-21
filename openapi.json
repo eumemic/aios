@@ -2823,7 +2823,7 @@
           "sessions"
         ],
         "summary": "Get Context",
-        "description": "Return the chat-completions payload the worker would send next.\n\nDry-run preview for debugging prompt construction.  Reuses the exact\ncomposer the worker's step function uses (:func:`compose_step_context`)\nso the endpoint's output is byte-identical to what the next model\ncall would see \u2014 no divergence.  Side effects (skill provisioning,\nsession-status bumps, event appends) are omitted; the endpoint is\nread-only.",
+        "description": "Return the chat-completions payload the worker would send next.\n\nDry-run preview for debugging prompt construction. Reuses the exact\ncomposer the worker's step function uses (:func:`compose_step_context`).\nSide effects (skill provisioning, session-status bumps, event\nappends) are omitted; the endpoint is read-only.\n\nOne known divergence from the worker's output: unresolved tool_calls\nthat the worker is currently executing render as ``_PENDING_EXTERNAL``\nhere (the API process has no view into the worker's task_registry).\nThe worker would render them as ``_PENDING_BACKGROUND``. Custom and\nawaiting-confirm calls render identically on both sides.",
         "operationId": "get_session_context",
         "parameters": [
           {
@@ -8003,21 +8003,16 @@
               "custom"
             ],
             "title": "Kind"
-          },
-          "needs_confirm": {
-            "type": "boolean",
-            "title": "Needs Confirm"
           }
         },
         "type": "object",
         "required": [
           "tool_call_id",
           "name",
-          "kind",
-          "needs_confirm"
+          "kind"
         ],
         "title": "AwaitingToolCall",
-        "description": "One pending tool call the harness will not dispatch itself.\n\nDerived view on session reads: each entry is a tool_call in the\nlatest assistant message that has no paired tool_result event and\nno in-process executor. Two flavors share this state:\n\n* ``kind == \"custom\"`` \u2014 client-executed; awaits a POST to\n  ``/sessions/:id/tool-results`` (operator-facing) or\n  ``/connectors/runtime/tool-results`` (runtime-container-facing).\n* ``kind == \"builtin\" | \"mcp\"`` with ``needs_confirm=True`` \u2014\n  ``always_ask``-gated; awaits a POST to ``/sessions/:id/tool-confirmations``."
+        "description": "One pending tool call the harness will not dispatch itself.\n\nDerived view on session reads. Each entry is a tool_call in the\nlatest assistant message with no paired tool_result and no\nin-process executor:\n\n* ``kind == \"custom\"`` \u2014 client-executed; awaits POST to\n  ``/sessions/:id/tool-results`` (operator-facing) or\n  ``/connectors/runtime/tool-results`` (runtime-container-facing).\n* ``kind == \"builtin\" | \"mcp\"`` \u2014 ``always_ask``-gated and not yet\n  confirmed; awaits POST to ``/sessions/:id/tool-confirmations``.\n  Confirmed-but-not-yet-dispatched and ``always_allow`` calls don't\n  appear here \u2014 they're harness-internal."
       },
       "BindChatRequest": {
         "properties": {
