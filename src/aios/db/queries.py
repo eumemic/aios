@@ -177,8 +177,8 @@ async def update_environment(
     config: EnvironmentConfig | None = None,
 ) -> Environment:
     """Update an environment. Omitted fields are preserved."""
-    # Upfront read so "not found" vs "archived" produce distinct errors;
-    # folding archived into the UPDATE WHERE collapses them.
+    # Upfront read distinguishes 404 vs 409; the ``archived_at IS NULL``
+    # clause on the UPDATE closes the read->UPDATE race.
     current = await get_environment(conn, env_id, account_id=account_id)
     if current.archived_at is not None:
         raise ConflictError(f"environment {env_id} is archived", detail={"id": env_id})
@@ -198,7 +198,7 @@ async def update_environment(
     args.append(account_id)
     sql = (
         f"UPDATE environments SET {', '.join(sets)} "
-        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+        f"WHERE id = $1 AND account_id = ${len(args)} AND archived_at IS NULL RETURNING *"
     )
     try:
         row = await conn.fetchrow(sql, *args)
@@ -207,7 +207,8 @@ async def update_environment(
             f"an environment named {name!r} already exists",
             detail={"name": name},
         ) from exc
-    assert row is not None
+    if row is None:
+        raise ConflictError(f"environment {env_id} is archived", detail={"id": env_id})
     return _row_to_environment(row)
 
 
@@ -538,6 +539,7 @@ async def update_agent(
                    window_min = $13, window_max = $14,
                    updated_at = now()
              WHERE id = $1 AND account_id = $15 AND version = $16
+               AND archived_at IS NULL
             RETURNING *
             """,
             agent_id,
@@ -558,13 +560,14 @@ async def update_agent(
             expected_version,
         )
         if row is None:
-            # Either the caller's ``expected_version`` was already stale
-            # when ``get_agent`` ran (sequential stale write) or a
-            # concurrent writer bumped the version between then and the
-            # UPDATE (race). Re-read for an accurate ``current`` —
-            # READ COMMITTED means this statement-level snapshot sees
-            # the concurrent writer's committed bump.
+            # No row matched the (id, account_id, version, NOT archived)
+            # tuple.  Re-read to distinguish the three possible causes:
+            # racing archive, stale ``expected_version``, or concurrent
+            # version bump.  READ COMMITTED means this statement-level
+            # snapshot sees the concurrent writer's committed state.
             fresh = await get_agent(conn, agent_id, account_id=account_id)
+            if fresh.archived_at is not None:
+                raise ConflictError(f"agent {agent_id} is archived", detail={"id": agent_id})
             raise ConflictError(
                 f"version mismatch: expected {expected_version}, current is {fresh.version}",
                 detail={
@@ -1106,11 +1109,13 @@ async def update_session(
     args.append(account_id)
     sql = (
         f"UPDATE sessions SET {', '.join(sets)} "
-        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+        f"WHERE id = $1 AND account_id = ${len(args)} AND archived_at IS NULL RETURNING *"
     )
     row = await conn.fetchrow(sql, *args)
     if row is None:
-        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+        # The upfront read already raised on missing rows, so a no-row
+        # UPDATE here means an archive committed between read and UPDATE.
+        raise ConflictError(f"session {session_id} is archived", detail={"id": session_id})
     return _row_to_session(row)
 
 
@@ -1136,13 +1141,13 @@ async def update_session_stop_hook(
     serialised = json.dumps(stop_hook.model_dump(mode="json")) if stop_hook is not None else None
     row = await conn.fetchrow(
         "UPDATE sessions SET stop_hook = $1::jsonb, updated_at = now() "
-        "WHERE id = $2 AND account_id = $3 RETURNING *",
+        "WHERE id = $2 AND account_id = $3 AND archived_at IS NULL RETURNING *",
         serialised,
         session_id,
         account_id,
     )
     if row is None:
-        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+        raise ConflictError(f"session {session_id} is archived", detail={"id": session_id})
     return _row_to_session(row)
 
 
@@ -2486,11 +2491,11 @@ async def update_vault(
     args.append(account_id)
     sql = (
         f"UPDATE vaults SET {', '.join(sets)} "
-        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+        f"WHERE id = $1 AND account_id = ${len(args)} AND archived_at IS NULL RETURNING *"
     )
     row = await conn.fetchrow(sql, *args)
     if row is None:
-        raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
+        raise ConflictError(f"vault {vault_id} is archived", detail={"id": vault_id})
     return _row_to_vault(row)
 
 
@@ -4260,7 +4265,7 @@ async def update_session_template(
     args.append(account_id)
     sql = (
         f"UPDATE session_templates SET {', '.join(sets)} "
-        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+        f"WHERE id = $1 AND account_id = ${len(args)} AND archived_at IS NULL RETURNING *"
     )
     try:
         row = await conn.fetchrow(sql, *args)
@@ -4275,8 +4280,8 @@ async def update_session_template(
             detail={"agent_id": agent_id, "environment_id": environment_id},
         ) from exc
     if row is None:
-        raise NotFoundError(
-            f"session template {template_id} not found",
+        raise ConflictError(
+            f"session template {template_id} is archived",
             detail={"id": template_id},
         )
     return _row_to_session_template(row)
@@ -4473,11 +4478,11 @@ async def update_memory_store(
     args.append(account_id)
     sql = (
         f"UPDATE memory_stores SET {', '.join(sets)} "
-        f"WHERE id = $1 AND account_id = ${len(args)} RETURNING *"
+        f"WHERE id = $1 AND account_id = ${len(args)} AND archived_at IS NULL RETURNING *"
     )
     row = await conn.fetchrow(sql, *args)
     if row is None:
-        raise NotFoundError(f"memory store {store_id} not found", detail={"id": store_id})
+        raise ConflictError(f"memory store {store_id} is archived", detail={"id": store_id})
     return _row_to_memory_store(row)
 
 
