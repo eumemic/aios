@@ -320,16 +320,12 @@ def _was_dispatched(
 
     Uses the same permission resolution as the step function.
     """
-    from aios.models.agents import (
-        is_mcp_tool_name,
-        resolve_mcp_permission,
-        resolve_permission,
-    )
+    from aios.models.agents import is_mcp_tool_name, resolve_permission
+    from aios.services.agents import effective_mcp_permission
     from aios.tools.registry import registry
 
     if is_mcp_tool_name(name):
-        perm = resolve_mcp_permission(name, agent_tools)
-        if perm == "always_allow":
+        if effective_mcp_permission(name, agent_tools) == "always_allow":
             return True
         return tool_call_id in confirmed_ids
 

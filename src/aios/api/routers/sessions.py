@@ -459,9 +459,9 @@ async def list_events(
     # Scope check: 404 cross-tenant probes before reading events. The
     # ``read_events`` query also filters by account_id, so this is
     # belt-and-suspenders against a future query that forgets the
-    # filter — but ``get_session`` is what gives the caller a clean
-    # 404 rather than an empty list for a cross-tenant session id.
-    await service.get_session(pool, session_id, account_id=account_id)
+    # filter — but the lookup is what gives the caller a clean 404
+    # rather than an empty list for a cross-tenant session id.
+    await service.get_session_basic(pool, session_id, account_id=account_id)
     # Fetch one extra row so we can tell whether more exist without a
     # separate COUNT query — accurate has_more with no off-by-one.
     rows = await service.read_events(
@@ -580,7 +580,7 @@ async def stream_events(
     after_seq: int = 0,
 ) -> EventSourceResponse:
     """Stream session events as Server-Sent Events."""
-    await service.get_session(pool, session_id, account_id=account_id)
+    await service.get_session_basic(pool, session_id, account_id=account_id)
     return EventSourceResponse(
         sse_event_stream(db_url, pool, session_id, after_seq=after_seq),
         ping=15,
