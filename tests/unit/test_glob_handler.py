@@ -130,3 +130,29 @@ class TestErrorPath:
         result = await glob_handler("sess_01TEST", {"pattern": "*.py"})
         assert "error" in result
         assert "some error" in result["error"]
+
+    async def test_cmd_uses_pipefail_so_rg_failure_propagates(
+        self, stub_registry: Any, stub_handle: SandboxHandle
+    ) -> None:
+        """Same shape as the grep pipefail fix (PR #546): ``rg --files
+        --glob <pattern> <path> 2>/dev/null | head -500`` is a pipe
+        whose final exit code is ``head``'s — which is 0 even when
+        ``rg`` failed (invalid glob pattern, missing path), because
+        ``head`` happily consumes empty input and exits 0.  Without
+        ``set -o pipefail`` the result returned to the model is
+        ``{"matches": []}`` — looking like "no matches" rather than
+        the actual rg error.  The model chases red herrings: tries
+        different patterns, different paths, never realizing rg
+        itself rejected its input.
+
+        PR #546's commit body named this as the next-up sibling
+        ("Sibling bug exists in tools/glob.py").
+        """
+        await glob_handler("sess_01TEST", {"pattern": "*.py"})
+        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        assert "pipefail" in cmd, (
+            f"cmd must enable ``pipefail`` so a failing ``rg`` (e.g., "
+            f"invalid glob pattern, missing path) propagates through the "
+            f"``| head -N`` to the overall pipe exit code; without it, "
+            f"rg errors silently return empty matches. Got: {cmd!r}"
+        )
