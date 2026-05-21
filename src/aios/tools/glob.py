@@ -67,7 +67,16 @@ async def glob_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     sandbox = runtime.require_sandbox_registry()
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
-    cmd = f"rg --files --glob {shlex.quote(pattern)} {shlex.quote(path)} 2>/dev/null | head -500"
+    # ``set -o pipefail`` so a failing ``rg`` (invalid glob pattern,
+    # missing path) propagates through the ``| head -500`` to the
+    # overall pipe exit code; without it ``head`` happily consumes
+    # empty input and exits 0, masking the error as "no matches".
+    # Same shape as the grep pipefail fix in PR #546.
+    cmd = (
+        "set -o pipefail; "
+        f"rg --files --glob {shlex.quote(pattern)} {shlex.quote(path)} 2>/dev/null "
+        "| head -500"
+    )
 
     result = await sandbox.exec(
         handle,
