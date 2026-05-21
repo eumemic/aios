@@ -16,6 +16,7 @@ def _get_kwargs(
     session_id: str,
     *,
     after: int | Unset = 0,
+    after_seq: int | None | Unset = UNSET,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
     error_only: bool | Unset = False,
@@ -28,6 +29,13 @@ def _get_kwargs(
     params: dict[str, Any] = {}
 
     params["after"] = after
+
+    json_after_seq: int | None | Unset
+    if isinstance(after_seq, Unset):
+        json_after_seq = UNSET
+    else:
+        json_after_seq = after_seq
+    params["after_seq"] = json_after_seq
 
     json_kind: None | str | Unset
     if isinstance(kind, Unset):
@@ -91,6 +99,7 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     after: int | Unset = 0,
+    after_seq: int | None | Unset = UNSET,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
     error_only: bool | Unset = False,
@@ -107,9 +116,13 @@ def sync_detailed(
     ``?after=`` and got it silently ignored, causing pagination to loop on
     the first page. See issue #389.)
 
+    ``?after_seq=N`` is accepted as an alias for ``?after=N`` for
+    backwards compatibility with older clients (issue #596).
+
     Args:
         session_id (str):
         after (int | Unset):  Default: 0.
+        after_seq (int | None | Unset):
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
         error_only (bool | Unset):  Default: False.
@@ -126,6 +139,7 @@ def sync_detailed(
     kwargs = _get_kwargs(
         session_id=session_id,
         after=after,
+        after_seq=after_seq,
         kind=kind,
         limit=limit,
         error_only=error_only,
@@ -144,6 +158,7 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     after: int | Unset = 0,
+    after_seq: int | None | Unset = UNSET,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
     error_only: bool | Unset = False,
@@ -160,9 +175,13 @@ def sync(
     ``?after=`` and got it silently ignored, causing pagination to loop on
     the first page. See issue #389.)
 
+    ``?after_seq=N`` is accepted as an alias for ``?after=N`` for
+    backwards compatibility with older clients (issue #596).
+
     Args:
         session_id (str):
         after (int | Unset):  Default: 0.
+        after_seq (int | None | Unset):
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
         error_only (bool | Unset):  Default: False.
@@ -180,6 +199,7 @@ def sync(
         session_id=session_id,
         client=client,
         after=after,
+        after_seq=after_seq,
         kind=kind,
         limit=limit,
         error_only=error_only,
@@ -192,6 +212,7 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     after: int | Unset = 0,
+    after_seq: int | None | Unset = UNSET,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
     error_only: bool | Unset = False,
@@ -208,9 +229,13 @@ async def asyncio_detailed(
     ``?after=`` and got it silently ignored, causing pagination to loop on
     the first page. See issue #389.)
 
+    ``?after_seq=N`` is accepted as an alias for ``?after=N`` for
+    backwards compatibility with older clients (issue #596).
+
     Args:
         session_id (str):
         after (int | Unset):  Default: 0.
+        after_seq (int | None | Unset):
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
         error_only (bool | Unset):  Default: False.
@@ -227,6 +252,7 @@ async def asyncio_detailed(
     kwargs = _get_kwargs(
         session_id=session_id,
         after=after,
+        after_seq=after_seq,
         kind=kind,
         limit=limit,
         error_only=error_only,
@@ -243,6 +269,7 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     after: int | Unset = 0,
+    after_seq: int | None | Unset = UNSET,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
     error_only: bool | Unset = False,
@@ -259,9 +286,13 @@ async def asyncio(
     ``?after=`` and got it silently ignored, causing pagination to loop on
     the first page. See issue #389.)
 
+    ``?after_seq=N`` is accepted as an alias for ``?after=N`` for
+    backwards compatibility with older clients (issue #596).
+
     Args:
         session_id (str):
         after (int | Unset):  Default: 0.
+        after_seq (int | None | Unset):
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
         error_only (bool | Unset):  Default: False.
@@ -280,6 +311,7 @@ async def asyncio(
             session_id=session_id,
             client=client,
             after=after,
+            after_seq=after_seq,
             kind=kind,
             limit=limit,
             error_only=error_only,
