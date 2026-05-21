@@ -17,7 +17,7 @@ from aios.cli.commands._shared import (
     render_single,
     with_client,
 )
-from aios.cli.files import PayloadError, load_json_object, load_payload
+from aios.cli.files import load_json_object, load_payload
 from aios.cli.output import cyan, dim, print_error, print_json, print_success
 from aios.cli.profile import compute_profile, profile_to_dict, render_profile
 from aios.cli.runtime import get_state, run_or_die
@@ -85,11 +85,7 @@ def create(
 ) -> None:
     def _run() -> int | None:
         if any([file, stdin, data]):
-            try:
-                payload = load_payload(file, stdin, data)
-            except PayloadError as exc:
-                print_error(str(exc))
-                return 64
+            payload = load_payload(file, stdin, data)
         else:
             if agent_id is None or environment_id is None:
                 print_error(
@@ -120,11 +116,7 @@ def update(
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
-        try:
-            payload = load_payload(file, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+        payload = load_payload(file, stdin, data)
         client = just_client(ctx)
         with client:
             obj = client.request("PUT", f"/v1/sessions/{session_id}", json_body=payload)
@@ -231,11 +223,7 @@ def send(
     def _run() -> int | None:
         body: dict[str, Any] = {"content": message}
         if metadata is not None:
-            try:
-                body["metadata"] = load_json_object(metadata, "--metadata")
-            except PayloadError as exc:
-                print_error(str(exc))
-                return 64
+            body["metadata"] = load_json_object(metadata, "--metadata")
         client = just_client(ctx)
         with client:
             event = client.request("POST", f"/v1/sessions/{session_id}/messages", json_body=body)

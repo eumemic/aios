@@ -8,7 +8,7 @@ from typing import Annotated, Any
 import typer
 
 from aios.cli.commands._shared import call_single, render_paginated, unwrap
-from aios.cli.files import PayloadError, load_json_object, load_payload, resolve_payload
+from aios.cli.files import load_json_object, load_payload, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk._generated.api.session_templates import (
@@ -98,16 +98,8 @@ def create(
             if agent_version is not None:
                 ergonomic["agent_version"] = agent_version
             if metadata_json is not None:
-                try:
-                    ergonomic["metadata"] = load_json_object(metadata_json, "--metadata-json")
-                except PayloadError as exc:
-                    print_error(str(exc))
-                    return 64
-        try:
-            payload = resolve_payload(ergonomic, file, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+                ergonomic["metadata"] = load_json_object(metadata_json, "--metadata-json")
+        payload = resolve_payload(ergonomic, file, stdin, data)
         body = SessionTemplateCreate.from_dict(payload)
         call_single(ctx, create_session_template.sync_detailed, body=body)
         return None
@@ -124,11 +116,7 @@ def update(
     data: Annotated[str | None, typer.Option("--data")] = None,
 ) -> None:
     def _run() -> int | None:
-        try:
-            payload = load_payload(file, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+        payload = load_payload(file, stdin, data)
         body = SessionTemplateUpdate.from_dict(payload)
         call_single(ctx, update_session_template.sync_detailed, template_id=template_id, body=body)
         return None

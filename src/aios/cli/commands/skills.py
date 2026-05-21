@@ -8,7 +8,7 @@ from typing import Annotated, Any
 import typer
 
 from aios.cli.commands._shared import call_single, render_paginated, unwrap
-from aios.cli.files import PayloadError, load_payload, walk_skill_dir
+from aios.cli.files import load_payload, walk_skill_dir
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk._generated.api.skills import (
@@ -136,18 +136,10 @@ def version_create(
 ) -> None:
     def _run() -> int | None:
         if dir_ is not None:
-            try:
-                files = walk_skill_dir(dir_)
-            except PayloadError as exc:
-                print_error(str(exc))
-                return 64
+            files = walk_skill_dir(dir_)
             payload: dict[str, Any] = {"files": files}
         else:
-            try:
-                payload = load_payload(file, stdin, data)
-            except PayloadError as exc:
-                print_error(str(exc))
-                return 64
+            payload = load_payload(file, stdin, data)
         body = SkillVersionCreate.from_dict(payload)
         call_single(ctx, create_skill_version.sync_detailed, skill_id=skill_id, body=body)
         return None
@@ -168,14 +160,6 @@ def _build_skill_payload(
         if title is None:
             print_error("--title is required when creating a skill from --dir")
             return 64
-        try:
-            files = walk_skill_dir(dir_)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+        files = walk_skill_dir(dir_)
         return {"display_title": title, "files": files}
-    try:
-        return load_payload(file, stdin, data)
-    except PayloadError as exc:
-        print_error(str(exc))
-        return 64
+    return load_payload(file, stdin, data)

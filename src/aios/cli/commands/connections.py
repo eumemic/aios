@@ -158,22 +158,10 @@ def create(
                 return 64
             ergonomic = {"connector": connector, "external_account_id": external_account_id}
             if metadata_json is not None:
-                try:
-                    ergonomic["metadata"] = load_json_object(metadata_json, "--metadata-json")
-                except PayloadError as exc:
-                    print_error(str(exc))
-                    return 64
+                ergonomic["metadata"] = load_json_object(metadata_json, "--metadata-json")
             if secret:
-                try:
-                    ergonomic["secrets"] = _parse_secret_kvs(secret)
-                except PayloadError as exc:
-                    print_error(str(exc))
-                    return 64
-        try:
-            payload = resolve_payload(ergonomic, file, stdin, data)
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+                ergonomic["secrets"] = _parse_secret_kvs(secret)
+        payload = resolve_payload(ergonomic, file, stdin, data)
         body = ConnectionCreate.from_dict(payload)
         call_single(ctx, create_connection.sync_detailed, body=body)
         return None
@@ -202,11 +190,7 @@ def set_secrets(
     ] = None,
 ) -> None:
     def _run() -> int | None:
-        try:
-            kvs = _parse_secret_kvs(secret or [])
-        except PayloadError as exc:
-            print_error(str(exc))
-            return 64
+        kvs = _parse_secret_kvs(secret or [])
         body = ConnectionSetSecrets(secrets=ConnectionSetSecretsSecrets.from_dict(kvs))
         call_single(
             ctx, set_connection_secrets.sync_detailed, connection_id=connection_id, body=body
