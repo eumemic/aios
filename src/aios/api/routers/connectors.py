@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal
 
-import asyncpg
 from fastapi import APIRouter, File, Form, UploadFile, status
 from pydantic import BaseModel, ConfigDict
 from sse_starlette import EventSourceResponse
@@ -35,6 +34,7 @@ from aios.api.deps import (
     RuntimeAuthDep,
 )
 from aios.api.sse import (
+    SSE_PREFLIGHT_EXCEPTIONS,
     connection_discovery_stream,
     management_calls_stream,
     runtime_connector_calls_stream,
@@ -67,16 +67,6 @@ from aios.services.wake import defer_wake
 router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
 
 log = get_logger("aios.api.routers.connectors")
-
-
-# SSE preflight: the four runtime-facing streams (#376) call
-# ``open_listen_for_*`` BEFORE constructing ``EventSourceResponse`` so
-# that a failed ``asyncpg.connect`` / ``add_listener`` surfaces as a
-# clean 503 with an aios error envelope.  Only ``asyncpg.PostgresError``
-# and ``OSError`` (the realistic transient failures during testcontainer
-# Postgres warmup or socket churn) trigger the 503 path; anything else
-# bubbles as an unhandled 500.
-_SSE_PREFLIGHT_EXCEPTIONS = (asyncpg.PostgresError, OSError)
 
 
 # ─── connector-facing endpoints (#301) ──────────────────────────────────────
@@ -330,7 +320,7 @@ async def get_connection_discovery(
     _, connector, account_id, auth_connection_ids = auth
     try:
         subscription = await open_listen_for_connection_discovery(db_url, connector)
-    except _SSE_PREFLIGHT_EXCEPTIONS as exc:
+    except SSE_PREFLIGHT_EXCEPTIONS as exc:
         log.warning(
             "sse.connection_discovery.preflight_failed",
             connector=connector,
@@ -524,7 +514,7 @@ async def get_runtime_calls(
     _, connector, account_id, auth_connection_ids = auth
     try:
         subscription = await open_listen_for_connector_calls_by_type(db_url, connector)
-    except _SSE_PREFLIGHT_EXCEPTIONS as exc:
+    except SSE_PREFLIGHT_EXCEPTIONS as exc:
         log.warning(
             "sse.runtime_calls.preflight_failed",
             connector=connector,
@@ -566,7 +556,7 @@ async def get_runtime_management_calls(
     _, connector, account_id, _scope = auth
     try:
         subscription = await open_listen_for_management_calls(db_url, connector)
-    except _SSE_PREFLIGHT_EXCEPTIONS as exc:
+    except SSE_PREFLIGHT_EXCEPTIONS as exc:
         log.warning(
             "sse.management_calls.preflight_failed",
             connector=connector,

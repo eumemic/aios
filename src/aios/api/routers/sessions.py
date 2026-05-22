@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated
 
-import asyncpg
 from fastapi import APIRouter, File, Query, UploadFile, status
 from sse_starlette import EventSourceResponse
 
@@ -25,7 +24,7 @@ from aios.api.deps import (
     PoolDep,
     ProcrastinateDep,
 )
-from aios.api.sse import sse_event_stream
+from aios.api.sse import SSE_PREFLIGHT_EXCEPTIONS, sse_event_stream
 from aios.db import queries
 from aios.db.listen import (
     SESSION_INTERRUPT_CHANNEL,
@@ -598,7 +597,7 @@ async def stream_events(
     await service.get_session_basic(pool, session_id, account_id=account_id)
     try:
         subscription = await open_listen_for_events(db_url, session_id)
-    except (asyncpg.PostgresError, OSError) as exc:
+    except SSE_PREFLIGHT_EXCEPTIONS as exc:
         log.warning(
             "sse.session_events.preflight_failed",
             session_id=session_id,

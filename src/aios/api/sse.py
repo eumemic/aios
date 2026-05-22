@@ -43,6 +43,11 @@ if TYPE_CHECKING:
 
 log = get_logger("aios.api.sse")
 
+# Realistic transient failures during testcontainer Postgres warmup or
+# socket churn — these surface as a clean 503 from the SSE route handlers
+# (issue #376). Anything else bubbles as an unhandled 500.
+SSE_PREFLIGHT_EXCEPTIONS = (asyncpg.PostgresError, OSError)
+
 
 def _event_to_sse(event_dict: dict[str, Any]) -> ServerSentEvent:
     """Build a ServerSentEvent from an event dict.
