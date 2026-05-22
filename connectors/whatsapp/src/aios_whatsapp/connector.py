@@ -73,6 +73,28 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
         async for method, params in daemon.listener.notifications():
             if method == "message":
                 await self._handle_inbound_message(connection_id, params)
+            elif method == "loggedOut":
+                # Peer-side (or server-side) device-link revocation:
+                # the bot's account credentials are no longer valid.
+                # Subsequent whatsapp_send calls will fail at the
+                # daemon's IsConnected() check.  Surface this loudly
+                # so operators see the state change rather than
+                # debugging cryptic ``not connected`` errors.
+                log.warning(
+                    "whatsapp.connection.logged_out",
+                    connection_id=connection_id,
+                    on_connect=params.get("on_connect"),
+                    reason=params.get("reason"),
+                )
+            elif method == "connectionState":
+                # Diagnostic: ``connected`` / ``disconnected`` from
+                # whatsmeow's stream lifecycle.  Routine reconnect
+                # blips wouldn't surface anywhere otherwise.
+                log.info(
+                    "whatsapp.connection.state",
+                    connection_id=connection_id,
+                    state=params.get("state"),
+                )
             else:
                 log.warning(
                     "whatsapp.notification.unhandled",
@@ -272,10 +294,19 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
             envelope (a separate, distinct id from the original).
         """
         state = self.state[connection_id]
-        result = await state.daemon.rpc.call(
-            "editMessage",
-            {"message_id": message_id, "text": markdown_to_whatsapp(text)},
-        )
+        # Mention encoding runs BEFORE markdown so the @<E.164>
+        # pattern is detected against the model's original text.
+        # Without this, an edit that adds or rewrites an @-mention
+        # silently strips the ContextInfo.MentionedJID list and
+        # the peer sees the @ as plain text with no notification.
+        text_with_mentions, mentioned_jids = encode_mentions(text)
+        params: dict[str, Any] = {
+            "message_id": message_id,
+            "text": markdown_to_whatsapp(text_with_mentions),
+        }
+        if mentioned_jids:
+            params["mentioned_jids"] = mentioned_jids
+        result = await state.daemon.rpc.call("editMessage", params)
         if not isinstance(result, dict):
             raise RuntimeError(f"editMessage returned non-dict: {result!r}")
         return result
@@ -394,17 +425,28 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
 
 
 def _phone_to_jid(phone: str) -> str:
-    """Normalize an operator-supplied phone (+E.164 or bare digits) to
-    a WhatsApp JID (``<digits>@s.whatsapp.net``).
+    """Normalize an operator-supplied phone to a WhatsApp JID.
 
-    Strips ``+``, spaces, and dashes; if the cleaned value is already
-    a full ``...@...`` JID it's returned verbatim so the model can
-    pass JIDs through if it has them.
+    Accepts either a +E.164-shaped phone (with optional spaces,
+    dashes, parens, dots, leading +) or a pre-formed JID — the
+    latter passes through verbatim so the model can hand JIDs from
+    ``whatsapp_list_groups`` output straight to
+    ``whatsapp_create_group``.
+
+    All non-digit characters are stripped from phone-shaped input
+    so common formatter variants (``+1 (555) 123-4567``,
+    ``+1.555.123.4567``) all resolve to the same JID instead of
+    each producing its own daemon-side ParseJID error.  An input
+    with NO digits after stripping raises ValueError so the
+    failure surfaces at the Python boundary with the offending
+    value, not as an opaque daemon-side ``invalid participant jid``.
     """
     if "@" in phone:
         return phone
-    cleaned = phone.lstrip("+").replace(" ", "").replace("-", "")
-    return f"{cleaned}@s.whatsapp.net"
+    digits = "".join(c for c in phone if c.isdigit())
+    if not digits:
+        raise ValueError(f"phone {phone!r} contains no digits; cannot construct a WhatsApp JID")
+    return f"{digits}@s.whatsapp.net"
 
 
 def _phone_from_jid(jid: str) -> str:

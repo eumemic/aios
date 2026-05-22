@@ -52,6 +52,46 @@ async def test_whatsapp_create_group_converts_phones_to_jids(
     ]
 
 
+async def test_whatsapp_create_group_strips_parens_and_dots(
+    connector: WhatsappConnector,
+) -> None:
+    # Pre-fix: _phone_to_jid only stripped +/space/dash, so a
+    # ``(555) 123-4567`` style phone leaked parens into the JID
+    # local part and the daemon's ParseJID rejected with an opaque
+    # error.  Post-fix: all non-digit characters are stripped so
+    # common formatter variants all resolve to the same JID.
+    connector.state[CONNECTION_ID].daemon.rpc.call.return_value = {  # type: ignore[attr-defined]
+        "jid": "g@g.us",
+        "name": "x",
+        "participants": [],
+    }
+    await connector.whatsapp_create_group(
+        name="x",
+        participants=["+1 (555) 123-4567", "+1.555.999.0000"],
+        connection_id=CONNECTION_ID,
+    )
+    sent = connector.state[CONNECTION_ID].daemon.rpc.call.await_args.args[1]  # type: ignore[attr-defined]
+    assert sent["participants"] == [
+        "15551234567@s.whatsapp.net",
+        "15559990000@s.whatsapp.net",
+    ]
+
+
+async def test_whatsapp_create_group_rejects_digit_free_phone(
+    connector: WhatsappConnector,
+) -> None:
+    # Defensive: a participant string with no digits at all (e.g.
+    # the model passed a display name) should fail at the Python
+    # boundary with a clear ValueError rather than producing a
+    # malformed JID the daemon rejects opaquely.
+    with pytest.raises(ValueError, match="no digits"):
+        await connector.whatsapp_create_group(
+            name="x",
+            participants=["Alice"],
+            connection_id=CONNECTION_ID,
+        )
+
+
 async def test_whatsapp_create_group_passes_jid_through_unchanged(
     connector: WhatsappConnector,
 ) -> None:

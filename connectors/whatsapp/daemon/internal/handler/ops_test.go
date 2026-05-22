@@ -14,7 +14,7 @@ import (
 // its args so the test can assert what the registry forwarded.
 type stubOps struct {
 	react  func(ctx context.Context, msgID, emoji string) (string, int64, error)
-	edit   func(ctx context.Context, msgID, text string) (string, int64, error)
+	edit   func(ctx context.Context, msgID, text string, mentionedJIDs []string) (string, int64, error)
 	revoke func(ctx context.Context, msgID string) (string, int64, error)
 	// notFoundErr / notOwnErr are what IsNotFoundErr / IsNotOwnMessageErr
 	// match against — set in tests that want to verify the
@@ -26,8 +26,8 @@ type stubOps struct {
 func (s *stubOps) React(ctx context.Context, msgID, emoji string) (string, int64, error) {
 	return s.react(ctx, msgID, emoji)
 }
-func (s *stubOps) Edit(ctx context.Context, msgID, text string) (string, int64, error) {
-	return s.edit(ctx, msgID, text)
+func (s *stubOps) Edit(ctx context.Context, msgID, text string, mentionedJIDs []string) (string, int64, error) {
+	return s.edit(ctx, msgID, text, mentionedJIDs)
 }
 func (s *stubOps) Revoke(ctx context.Context, msgID string) (string, int64, error) {
 	return s.revoke(ctx, msgID)
@@ -85,17 +85,23 @@ func TestSendReactionRejectsMissingMessageID(t *testing.T) {
 
 func TestEditMessageDispatches(t *testing.T) {
 	var seenID, seenText string
+	var seenMentions []string
 	reg := NewRegistry()
 	RegisterMessageOps(reg, &stubOps{
-		edit: func(_ context.Context, id, text string) (string, int64, error) {
+		edit: func(_ context.Context, id, text string, mentions []string) (string, int64, error) {
 			seenID = id
 			seenText = text
+			seenMentions = mentions
 			return "EDIT-1", 1700000000001, nil
 		},
 	})
-	_, rpcErr := reg.Dispatch(context.Background(), "editMessage", json.RawMessage(`{"message_id":"M1","text":"corrected"}`))
+	params := json.RawMessage(`{"message_id":"M1","text":"corrected","mentioned_jids":["15551234567@s.whatsapp.net"]}`)
+	_, rpcErr := reg.Dispatch(context.Background(), "editMessage", params)
 	if rpcErr != nil {
 		t.Fatalf("unexpected rpc error: %+v", rpcErr)
+	}
+	if len(seenMentions) != 1 || seenMentions[0] != "15551234567@s.whatsapp.net" {
+		t.Errorf("seenMentions = %v, want [15551234567@s.whatsapp.net]", seenMentions)
 	}
 	if seenID != "M1" || seenText != "corrected" {
 		t.Errorf("edit args = (%q, %q)", seenID, seenText)
@@ -128,7 +134,7 @@ func TestMessageOpNotOwnMessageMapsToInvalidParams(t *testing.T) {
 	sentinel := errors.New("sentinel-not-own")
 	reg := NewRegistry()
 	RegisterMessageOps(reg, &stubOps{
-		edit: func(context.Context, string, string) (string, int64, error) {
+		edit: func(context.Context, string, string, []string) (string, int64, error) {
 			return "", 0, sentinel
 		},
 		notOwnErr: sentinel,

@@ -139,6 +139,31 @@ func TestRecordInboundEnqueuesUnreadForPeer(t *testing.T) {
 	}
 }
 
+func TestRecordInboundSkipsUnreadForReactionOnly(t *testing.T) {
+	// Pre-fix: reaction-only inbounds entered the unread queue,
+	// causing the next outbound to MarkRead a reaction id which
+	// whatsmeow rejects with a noisy mark_read_failed warning.
+	// Post-fix: reaction envelopes are tracked in msgstore but not
+	// in the unread queue.
+	c := &Client{
+		log:         discardLogger(),
+		msgs:        newTestMessageStore(t),
+		lifetimeCtx: context.Background(),
+	}
+	peer := types.NewJID("15553334444", types.DefaultUserServer)
+	c.recordInbound(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: peer, Sender: peer, IsFromMe: false},
+			ID:            "REACTION-1",
+		},
+		Message: &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{}},
+	})
+
+	if got := c.drainUnread(peer.String()); got != nil {
+		t.Errorf("reaction-only inbound enqueued unread: %v", got)
+	}
+}
+
 func TestRecordInboundSkipsUnreadForOwnEchoes(t *testing.T) {
 	// Our own outbound messages echo back through *events.Message
 	// with is_self=true.  Those aren't "unread" by us; the unread

@@ -67,10 +67,14 @@ func (c *Client) SendMessage(
 	var firstTS int64
 	delivered := make([]string, 0, len(attachments)+1)
 	captionForFirstAttachment := text
+	firstAttachmentMentions := mentionedJIDs
 	if text != "" && classify(attachments[0].Mimetype) == attachKindAudio {
 		// Audio carries no caption surface.  Send the text as its
-		// own Conversation message FIRST so it isn't silently
-		// dropped, then send the audio caption-less.
+		// own Conversation message FIRST (taking the mentions with
+		// it so they render as a pill), then send the audio
+		// caption-less AND mention-less — without the mention-clear
+		// here, the audio's ContextInfo would carry MentionedJID
+		// too and the peer would get a duplicate @-notification.
 		textMsg := buildTextMessage(text, mentionedJIDs)
 		id, ts, sendErr := c.sendOne(ctx, wa, jid, textMsg)
 		if sendErr != nil {
@@ -79,6 +83,7 @@ func (c *Client) SendMessage(
 		delivered = append(delivered, id)
 		firstTS = ts
 		captionForFirstAttachment = ""
+		firstAttachmentMentions = nil
 	}
 
 	for i, att := range attachments {
@@ -86,7 +91,7 @@ func (c *Client) SendMessage(
 		var captionMentions []string
 		if i == 0 {
 			caption = captionForFirstAttachment
-			captionMentions = mentionedJIDs
+			captionMentions = firstAttachmentMentions
 		}
 		msg, buildErr := c.buildAttachmentMessage(ctx, wa, att, caption, captionMentions)
 		if buildErr != nil {

@@ -26,13 +26,15 @@ COPY connectors/whatsapp/daemon/ ./
 # Static, CGo-disabled build — modernc.org/sqlite is pure-Go, so no
 # libc dependency on the runtime side.  Multi-arch via buildx (the
 # trailing $TARGETARCH is set by docker buildx; defaults to amd64
-# under a plain ``docker build``).
+# under a plain ``docker build``).  No post-build ``-version`` smoke:
+# under buildx with TARGETARCH != BUILDARCH the just-built binary
+# isn't executable on the build host, and ``go build``'s exit code
+# already proves the build succeeded.
 ARG TARGETARCH=amd64
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-s -w -X main.Version=docker" \
     -o /out/whatsapp-daemon \
-    ./cmd/whatsapp-daemon \
- && /out/whatsapp-daemon -version
+    ./cmd/whatsapp-daemon
 
 # ─── Python runtime stage ────────────────────────────────────────────────
 FROM python:3.13-slim-bookworm AS base

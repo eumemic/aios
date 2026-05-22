@@ -78,18 +78,35 @@ def build_instructions(
 def _render_group_roster(bot_jid: str, groups: list[GroupRosterEntry]) -> str:
     if not groups:
         return ""
+    bot_key = _jid_identity_key(bot_jid)
     lines: list[str] = ["\n## Your WhatsApp groups\n"]
     for g in groups:
         name = g.name or "(unnamed)"
         lines.append(f"\n- `{g.jid}` — {name}")
         for jid in g.member_jids:
-            tag = "(YOU)" if jid == bot_jid else ""
+            tag = "(YOU)" if _jid_identity_key(jid) == bot_key else ""
             line = f"    - `{jid}`"
             if tag:
                 line += f" {tag}"
             lines.append(line)
     lines.append("")
     return "\n".join(lines) + "\n"
+
+
+def _jid_identity_key(jid: str) -> str:
+    """Normalize a WhatsApp JID to its identity-bearing local part.
+
+    Strips the device suffix (``<phone>:<n>@s.whatsapp.net`` →
+    ``<phone>``) and the host so a literal string compare across
+    JID variants (with/without device suffix, ``@s.whatsapp.net``
+    vs ``@lid``) doesn't silently lose the (YOU) self-tag.  LID
+    JIDs use a different identifier space than phone JIDs and
+    can't be equated; callers passing a phone-shape bot_jid into
+    a LID-mode group still won't match, but the within-host
+    variants now collapse correctly.
+    """
+    local = jid.split("@", 1)[0]
+    return local.split(":", 1)[0]
 
 
 WHATSAPP_SERVER_INSTRUCTIONS = """\

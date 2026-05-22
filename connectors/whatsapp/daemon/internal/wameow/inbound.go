@@ -206,14 +206,35 @@ func (c *Client) recordInbound(e *events.Message) {
 	}
 	// Track unread peer messages so the next outbound to this chat
 	// implicitly marks them read.  is_self echoes of our own sends
-	// are not "unread" by us — skip.
-	if !e.Info.IsFromMe {
+	// are not "unread" by us — skip.  Reaction envelopes are
+	// acknowledgements, not unread messages: MarkRead'ing a
+	// reaction id is the wrong semantic (whatsmeow surfaces the
+	// rejection as a noisy mark_read_failed warning), so skip
+	// those too.
+	if !e.Info.IsFromMe && !isReactionOnly(e.Message) {
 		c.markInboundUnread(
 			e.Info.Chat.String(),
 			string(e.Info.ID),
 			e.Info.Sender.String(),
 		)
 	}
+}
+
+// isReactionOnly reports whether the message is exclusively a
+// peer-sent reaction (ReactionMessage set, no user-facing text or
+// media).  Reactions ride through recordInbound for msgstore
+// tracking but must NOT enter the read-receipt queue.
+func isReactionOnly(m *waE2E.Message) bool {
+	if m == nil || m.ReactionMessage == nil {
+		return false
+	}
+	return m.Conversation == nil &&
+		m.ExtendedTextMessage == nil &&
+		m.ImageMessage == nil &&
+		m.VideoMessage == nil &&
+		m.AudioMessage == nil &&
+		m.DocumentMessage == nil &&
+		m.StickerMessage == nil
 }
 
 // isUserVisibleChat reports whether the chat type can carry messages

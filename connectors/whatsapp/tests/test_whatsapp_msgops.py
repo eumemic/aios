@@ -64,6 +64,43 @@ async def test_whatsapp_edit_message_dispatches_editMessage(connector: WhatsappC
     assert result == {"message_id": "EDIT-1", "timestamp_ms": 1700000400000}
 
 
+async def test_whatsapp_edit_message_encodes_mentions(
+    connector: WhatsappConnector,
+) -> None:
+    # Pre-fix: edit silently stripped any @<E.164> mentions because
+    # the edit path didn't run encode_mentions and the daemon's
+    # editMessage RPC had no mentioned_jids param.  Post-fix: the
+    # edit carries mentions through to whatsmeow's BuildEdit, which
+    # builds an ExtendedTextMessage with ContextInfo.MentionedJID.
+    connector.state[CONNECTION_ID].daemon.rpc.call.return_value = {  # type: ignore[attr-defined]
+        "message_id": "EDIT-2",
+        "timestamp_ms": 1700000401000,
+    }
+    await connector.whatsapp_edit_message(
+        message_id=MSG_ID,
+        text="hey @+15551234567 corrected",
+        connection_id=CONNECTION_ID,
+    )
+    sent = connector.state[CONNECTION_ID].daemon.rpc.call.await_args.args[1]  # type: ignore[attr-defined]
+    assert sent["mentioned_jids"] == ["15551234567@s.whatsapp.net"]
+
+
+async def test_whatsapp_edit_message_omits_mentions_when_none(
+    connector: WhatsappConnector,
+) -> None:
+    connector.state[CONNECTION_ID].daemon.rpc.call.return_value = {  # type: ignore[attr-defined]
+        "message_id": "EDIT-3",
+        "timestamp_ms": 1700000402000,
+    }
+    await connector.whatsapp_edit_message(
+        message_id=MSG_ID,
+        text="no tags here",
+        connection_id=CONNECTION_ID,
+    )
+    sent = connector.state[CONNECTION_ID].daemon.rpc.call.await_args.args[1]  # type: ignore[attr-defined]
+    assert "mentioned_jids" not in sent
+
+
 async def test_whatsapp_delete_message_dispatches_deleteMessage(
     connector: WhatsappConnector,
 ) -> None:

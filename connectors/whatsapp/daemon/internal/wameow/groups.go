@@ -20,12 +20,19 @@ type GroupSummary struct {
 }
 
 // GroupParticipantInfo carries the model-relevant fields of a
-// whatsmeow participant: who they are and whether they're an admin.
+// whatsmeow participant: who they are, whether they're an admin,
+// and (on CreateGroup) whether the server failed to add them.
 // Other details (LID vs phone JIDs, anonymous display names) stay
 // inside whatsmeow's types.
+//
+// ``AddError`` is non-zero only on CreateGroup responses for
+// participants the server rejected (blocked-by-user, unreachable,
+// etc.).  Without surfacing this, a partial-success CreateGroup
+// looks indistinguishable from a full-success to the model.
 type GroupParticipantInfo struct {
-	JID     string `json:"jid"`
-	IsAdmin bool   `json:"is_admin"`
+	JID      string `json:"jid"`
+	IsAdmin  bool   `json:"is_admin"`
+	AddError int    `json:"add_error,omitempty"`
 }
 
 // ListGroups returns every group the bot is currently a member of.
@@ -100,8 +107,9 @@ func summarizeGroup(g *types.GroupInfo) GroupSummary {
 	parts := make([]GroupParticipantInfo, 0, len(g.Participants))
 	for _, p := range g.Participants {
 		parts = append(parts, GroupParticipantInfo{
-			JID:     p.JID.String(),
-			IsAdmin: p.IsAdmin || p.IsSuperAdmin,
+			JID:      p.JID.String(),
+			IsAdmin:  p.IsAdmin || p.IsSuperAdmin,
+			AddError: p.Error,
 		})
 	}
 	return GroupSummary{

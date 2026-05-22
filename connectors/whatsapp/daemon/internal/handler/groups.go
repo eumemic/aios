@@ -26,8 +26,9 @@ type GroupSummary struct {
 }
 
 type GroupParticipantInfo struct {
-	JID     string `json:"jid"`
-	IsAdmin bool   `json:"is_admin"`
+	JID      string `json:"jid"`
+	IsAdmin  bool   `json:"is_admin"`
+	AddError int    `json:"add_error,omitempty"`
 }
 
 type createGroupArgs struct {

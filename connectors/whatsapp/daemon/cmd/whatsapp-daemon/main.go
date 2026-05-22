@@ -170,7 +170,11 @@ func (a *clientGroupsAdapter) RenameGroup(ctx context.Context, groupJID, name st
 func wameowGroupToHandler(g wameow.GroupSummary) handler.GroupSummary {
 	parts := make([]handler.GroupParticipantInfo, len(g.Participants))
 	for i, p := range g.Participants {
-		parts[i] = handler.GroupParticipantInfo{JID: p.JID, IsAdmin: p.IsAdmin}
+		parts[i] = handler.GroupParticipantInfo{
+			JID:      p.JID,
+			IsAdmin:  p.IsAdmin,
+			AddError: p.AddError,
+		}
 	}
 	return handler.GroupSummary{
 		JID:          g.JID,

@@ -65,6 +65,23 @@ def test_build_instructions_omits_group_section_when_no_groups() -> None:
     assert "## Your WhatsApp groups" not in result
 
 
+def test_build_instructions_matches_bot_with_device_suffix_jid() -> None:
+    # Pre-fix: (YOU) tag used literal string equality, so a roster
+    # entry showing the bot's JID with a device-suffix variant
+    # silently dropped the self-tag.  Post-fix: comparison is on the
+    # identity-bearing local part (strip device suffix + host).
+    bot = "15555550000@s.whatsapp.net"
+    groups = [
+        GroupRosterEntry(
+            jid="g1@g.us",
+            name="Engineering",
+            member_jids=["15555550000:7@s.whatsapp.net", "15551234567@s.whatsapp.net"],
+        ),
+    ]
+    result = build_instructions(bot_jid=bot, phone="+15555550000", groups=groups)
+    assert "(YOU)" in result
+
+
 def test_static_body_mentions_only_existing_tools() -> None:
     # Defensive: the static body must reference only the WhatsApp
     # tools this connector actually publishes, so the model isn't

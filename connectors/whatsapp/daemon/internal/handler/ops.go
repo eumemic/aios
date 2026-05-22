@@ -14,7 +14,7 @@ import (
 // requires.
 type MessageOps interface {
 	React(ctx context.Context, msgID, emoji string) (string, int64, error)
-	Edit(ctx context.Context, msgID, newText string) (string, int64, error)
+	Edit(ctx context.Context, msgID, newText string, mentionedJIDs []string) (string, int64, error)
 	Revoke(ctx context.Context, msgID string) (string, int64, error)
 	IsNotFoundErr(err error) bool
 	IsNotOwnMessageErr(err error) bool
@@ -26,8 +26,9 @@ type reactArgs struct {
 }
 
 type editArgs struct {
-	MessageID string `json:"message_id"`
-	Text      string `json:"text"`
+	MessageID     string   `json:"message_id"`
+	Text          string   `json:"text"`
+	MentionedJIDs []string `json:"mentioned_jids,omitempty"`
 }
 
 type revokeArgs struct {
@@ -66,7 +67,7 @@ func RegisterMessageOps(reg *Registry, ops MessageOps) {
 		if args.MessageID == "" {
 			return nil, &rpc.Error{Code: rpc.ErrCodeInvalidParams, Message: "editMessage: message_id required"}
 		}
-		msgID, ts, err := ops.Edit(ctx, args.MessageID, args.Text)
+		msgID, ts, err := ops.Edit(ctx, args.MessageID, args.Text, args.MentionedJIDs)
 		if err != nil {
 			return nil, mapOpError(err, ops)
 		}

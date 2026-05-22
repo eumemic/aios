@@ -29,8 +29,14 @@ import re
 
 _FENCE_RE = re.compile(r"```(.*?)```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+?)`")
-_BOLD_STAR_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
-_BOLD_UNDER_RE = re.compile(r"__(.+?)__", re.DOTALL)
+# Bold pattern: only the asterisk form (``**bold**``).  CommonMark
+# also accepts ``__bold__`` but supporting that here would mis-render
+# Python dunders like ``__init__`` as bold ``*init*`` — the outer
+# boundary check can't tell ``__init__`` apart from a legitimate
+# bold ``__phrase__``, since both have non-word chars on the outside
+# and word chars inside.  Models reliably write ``**`` for bold; the
+# ``__`` form is the rare-enough case we choose to surrender.
+_BOLD_STAR_RE = re.compile(r"(?<![\w*])\*\*(?!\s)(.+?)(?<!\s)\*\*(?![\w*])", re.DOTALL)
 # Italic patterns reject snake_case / surrounded-by-word_chars contexts
 # so ``print_hello`` doesn't render as ``print<i>hello</i>``.
 _ITALIC_STAR_RE = re.compile(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])")
@@ -64,15 +70,20 @@ def markdown_to_whatsapp(text: str) -> str:
     # Phase 2: bold first, with the WhatsApp ``*x*`` output stashed so
     # the italic regex can't re-match it as italic.
     text = _BOLD_STAR_RE.sub(lambda m: stash(f"*{m.group(1)}*"), text)
-    text = _BOLD_UNDER_RE.sub(lambda m: stash(f"*{m.group(1)}*"), text)
 
     # Phase 3: italic (now safe from bold collision) and strike.
     text = _ITALIC_STAR_RE.sub(r"_\1_", text)
     text = _ITALIC_UNDER_RE.sub(r"_\1_", text)
     text = _STRIKE_RE.sub(r"~\1~", text)
 
-    # Phase 4: restore stashed slots.
+    # Phase 4: restore stashed slots.  Bounds-check the index so an
+    # adversarial input literally containing the sentinel pattern
+    # (e.g. terminal-session paste with binary content) restores to
+    # the literal match instead of raising IndexError.
     def restore(m: re.Match[str]) -> str:
-        return placeholders[int(m.group(1))]
+        idx = int(m.group(1))
+        if 0 <= idx < len(placeholders):
+            return placeholders[idx]
+        return m.group(0)
 
     return re.sub(rf"{_SLOT_OPEN}(\d+){_SLOT_CLOSE}", restore, text)

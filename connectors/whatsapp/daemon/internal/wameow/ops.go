@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
@@ -66,6 +65,10 @@ func (c *Client) React(ctx context.Context, msgID, emoji string) (string, int64,
 		return "", 0, err
 	}
 	c.recordOutbound(ctx, wa, string(resp.ID), chat)
+	// Reactions are bot-initiated outbound activity to the chat;
+	// the prior peer messages should be marked read just like a
+	// text reply via sendOne would do.
+	c.flushReadReceipts(ctx, wa, chat)
 	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
 }
 
@@ -73,7 +76,13 @@ func (c *Client) React(ctx context.Context, msgID, emoji string) (string, int64,
 // allows editing your own outbound messages and only within ~15
 // minutes of the original send; whatsmeow surfaces the server's
 // rejection if either window is exceeded.
-func (c *Client) Edit(ctx context.Context, msgID, newText string) (string, int64, error) {
+//
+// ``mentionedJIDs`` rides on the new content's ContextInfo so an edit
+// that introduces or rewrites an @-mention renders as a pill on the
+// peer's WhatsApp UI — without this, edits silently strip the
+// MentionedJID list even when the model embeds ``@<E.164>`` in the
+// new text.
+func (c *Client) Edit(ctx context.Context, msgID, newText string, mentionedJIDs []string) (string, int64, error) {
 	if newText == "" {
 		// An empty edit blanks the peer's view of the message — that
 		// almost certainly isn't the model's intent; reject explicitly
@@ -96,13 +105,14 @@ func (c *Client) Edit(ctx context.Context, msgID, newText string) (string, int64
 	if err != nil {
 		return "", 0, fmt.Errorf("invalid chat jid %q: %w", chatJIDStr, err)
 	}
-	newContent := &waE2E.Message{Conversation: proto.String(newText)}
+	newContent := buildTextMessage(newText, mentionedJIDs)
 	edit := wa.BuildEdit(chat, types.MessageID(msgID), newContent)
 	resp, err := wa.SendMessage(ctx, chat, edit)
 	if err != nil {
 		return "", 0, err
 	}
 	c.recordOutbound(ctx, wa, string(resp.ID), chat)
+	c.flushReadReceipts(ctx, wa, chat)
 	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
 }
 
@@ -136,5 +146,6 @@ func (c *Client) Revoke(ctx context.Context, msgID string) (string, int64, error
 		return "", 0, err
 	}
 	c.recordOutbound(ctx, wa, string(resp.ID), chat)
+	c.flushReadReceipts(ctx, wa, chat)
 	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
 }
