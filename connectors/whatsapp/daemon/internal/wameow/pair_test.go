@@ -7,6 +7,10 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/store/sqlstore"
+
+	_ "modernc.org/sqlite"
 )
 
 // newPairing builds a *Client with an in-progress attempt for tests
@@ -179,6 +183,56 @@ func TestResetPairStateClearsCachedSuccess(t *testing.T) {
 	_, err := c.ConfirmPairing(context.Background())
 	if err == nil {
 		t.Error("expected ConfirmPairing to error after reset")
+	}
+}
+
+func TestReplaceWhatsmeowClientRecoversFromDeletedDevice(t *testing.T) {
+	// After a successful Logout, whatsmeow marks the Device as
+	// permanently Deleted and every subsequent op on the same Client
+	// returns ErrDeviceDeleted.  replaceWhatsmeowClient must build a
+	// fresh Client around a new Device in the same container so the
+	// daemon can serve a re-pair in the same process.
+	ctx := context.Background()
+	container, err := sqlstore.New(
+		ctx,
+		"sqlite",
+		"file::memory:?_pragma=foreign_keys(1)",
+		newWaLogger(discardLogger(), "test"),
+	)
+	if err != nil {
+		t.Fatalf("sqlstore.New: %v", err)
+	}
+	defer func() { _ = container.Close() }()
+
+	device := container.NewDevice()
+	wa := whatsmeow.NewClient(device, newWaLogger(discardLogger(), "test"))
+
+	c := &Client{store: container, log: discardLogger()}
+	c.wa.Store(wa)
+
+	// Simulate the post-Logout state.  whatsmeow's Logout calls
+	// device.Delete which sets Deleted=true on the in-memory Device
+	// and swaps every session-specific store for a NoopStore that
+	// errors with ErrDeviceDeleted on subsequent ops.  Setting the
+	// flag directly here exercises the same surface without needing
+	// a JID-bearing device (sqlstore.DeleteDevice rejects unbound
+	// devices).
+	device.Deleted = true
+	if err := device.Save(ctx); !errors.Is(err, store.ErrDeviceDeleted) {
+		t.Fatalf("expected ErrDeviceDeleted from deleted device Save, got %v", err)
+	}
+
+	c.replaceWhatsmeowClient()
+
+	freshWa := c.wa.Load()
+	if freshWa == wa {
+		t.Error("replaceWhatsmeowClient did not swap c.wa")
+	}
+	if freshWa.Store.Deleted {
+		t.Error("the replaced Client's Device should not be Deleted")
+	}
+	if c.hasPairedDevice() {
+		t.Error("hasPairedDevice should be false after replace (fresh device has nil ID)")
 	}
 }
 
