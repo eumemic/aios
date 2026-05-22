@@ -70,6 +70,31 @@ async def _list_all_echoes(
     return out
 
 
+async def _batch_list_all_echoes(
+    conn: asyncpg.Connection[Any],
+    session_ids: list[str],
+    *,
+    account_id: str,
+) -> dict[str, list[SessionResourceEcho]]:
+    """Batched form of :func:`_list_all_echoes` — one query per echo family
+    across all sessions instead of two per session."""
+    if not session_ids:
+        return {}
+    memory_map = await queries.batch_list_session_memory_store_echoes(
+        conn, session_ids, account_id=account_id
+    )
+    github_map = await queries.batch_list_session_github_repo_echoes(
+        conn, session_ids, account_id=account_id
+    )
+    result: dict[str, list[SessionResourceEcho]] = {}
+    for sid in session_ids:
+        merged: list[SessionResourceEcho] = []
+        merged.extend(memory_map.get(sid, []))
+        merged.extend(github_map.get(sid, []))
+        result[sid] = merged
+    return result
+
+
 async def create_session(
     pool: asyncpg.Pool[Any],
     *,
@@ -280,18 +305,15 @@ async def list_sessions(
         )
         if not sessions:
             return sessions
-        vault_map = await queries.batch_get_session_vault_ids(
-            conn, [s.id for s in sessions], account_id=account_id
-        )
-        echoes_by_sid: dict[str, list[SessionResourceEcho]] = {}
-        for s in sessions:
-            echoes_by_sid[s.id] = await _list_all_echoes(conn, s.id, account_id=account_id)
+        sid_list = [s.id for s in sessions]
+        vault_map = await queries.batch_get_session_vault_ids(conn, sid_list, account_id=account_id)
+        echoes_map = await _batch_list_all_echoes(conn, sid_list, account_id=account_id)
     awaiting_by_sid = await compute_awaiting(pool, sessions, account_id=account_id)
     return [
         s.model_copy(
             update={
                 "vault_ids": vault_map.get(s.id, []),
-                "resources": echoes_by_sid.get(s.id, []),
+                "resources": echoes_map.get(s.id, []),
                 "awaiting": awaiting_by_sid.get(s.id, []),
             }
         )

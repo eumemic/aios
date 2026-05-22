@@ -568,3 +568,68 @@ class TestSessionResourcesUpdate:
         assert r.status_code == 200, r.text
         ids = [e["memory_store_id"] for e in r.json()["resources"]]
         assert ids == [prior["id"]]
+
+
+class TestSessionListResourcesBatched:
+    """``GET /v1/sessions`` enriches each row with its ``resources`` field via a
+    single batched query per echo family — regression guard for issue #617."""
+
+    async def test_list_returns_resources_for_each_session(
+        self, http_client: httpx.AsyncClient, pool: Any
+    ) -> None:
+        from aios.models.memory_stores import MemoryStoreResource
+        from aios.services import agents as agents_svc
+        from aios.services import environments as env_svc
+        from aios.services import sessions as sess_svc
+
+        account_id = "acc_test_stub"
+        store_a = await _create_store(http_client, name=f"list-a-{_uniq()}")
+        store_b = await _create_store(http_client, name=f"list-b-{_uniq()}")
+        store_c = await _create_store(http_client, name=f"list-c-{_uniq()}")
+
+        env = await env_svc.create_environment(
+            pool, name=f"list-resources-{_uniq()}", account_id=account_id
+        )
+        agent = await agents_svc.create_agent(
+            pool,
+            name=f"list-resources-agent-{_uniq()}",
+            model="fake/test",
+            system="",
+            tools=[],
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+            account_id=account_id,
+        )
+
+        async def _mk(initial: list[str]) -> str:
+            s = await sess_svc.create_session(
+                pool,
+                agent_id=agent.id,
+                environment_id=env.id,
+                title="list-resources",
+                metadata={},
+                resources=[
+                    MemoryStoreResource(type="memory_store", memory_store_id=sid) for sid in initial
+                ],
+                account_id=account_id,
+            )
+            return s.id
+
+        two_id = await _mk([store_a["id"], store_b["id"]])
+        zero_id = await _mk([])
+        one_id = await _mk([store_c["id"]])
+
+        r = await http_client.get(f"/v1/sessions?agent_id={agent.id}&limit=50")
+        assert r.status_code == 200, r.text
+        by_id = {s["id"]: s for s in r.json()["data"]}
+        assert {two_id, zero_id, one_id} <= by_id.keys()
+
+        ids_two = [e["memory_store_id"] for e in by_id[two_id]["resources"]]
+        assert ids_two == [store_a["id"], store_b["id"]]
+
+        assert by_id[zero_id]["resources"] == []
+
+        ids_one = [e["memory_store_id"] for e in by_id[one_id]["resources"]]
+        assert ids_one == [store_c["id"]]
