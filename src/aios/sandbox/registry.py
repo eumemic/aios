@@ -488,6 +488,34 @@ class SandboxRegistry:
 
     # ── idle-TTL reaper ──────────────────────────────────────────────────
 
+    async def _reap_idle_once(self, idle_timeout: float) -> None:
+        """One reap pass: release every session idle past ``idle_timeout``.
+
+        Extracted from :meth:`_reap_idle_loop` for deterministic testing.
+        Driven once per tick by the loop; never called directly in
+        production.
+        """
+        now = time.monotonic()
+        to_release: list[str] = []
+        for sid, last in list(self._last_used.items()):
+            if now - last > idle_timeout:
+                to_release.append(sid)
+        for sid in to_release:
+            async with self._lock_for(sid):
+                # Re-check under the lock: a concurrent get_or_provision
+                # warm hit could have freshened _last_used[sid] between
+                # the scan above and now. The warm path takes no lock
+                # (it's the fast path — "zero-observable-cost"), so this
+                # re-check is the only place we serialize against it.
+                # #566 added the lock, which closes the cold-path race;
+                # the missing piece was that the reaper trusted its
+                # stale to_release snapshot. ``evict`` can also pop
+                # _last_used out from under us, so absence means skip.
+                current = self._last_used.get(sid)
+                if current is not None and time.monotonic() - current > idle_timeout:
+                    log.info("sandbox.idle_release", session_id=sid)
+                    await self.release(sid)
+
     async def _reap_idle_loop(self, idle_timeout: float, interval: float = 60.0) -> None:
         """Background loop: release sandboxes idle > idle_timeout seconds.
 
@@ -503,15 +531,7 @@ class SandboxRegistry:
         while True:
             try:
                 await asyncio.sleep(interval)
-                now = time.monotonic()
-                to_release: list[str] = []
-                for sid, last in list(self._last_used.items()):
-                    if now - last > idle_timeout:
-                        to_release.append(sid)
-                for sid in to_release:
-                    log.info("sandbox.idle_release", session_id=sid)
-                    async with self._lock_for(sid):
-                        await self.release(sid)
+                await self._reap_idle_once(idle_timeout)
             except Exception:
                 log.exception("sandbox.reap_idle_loop_failed")
 
