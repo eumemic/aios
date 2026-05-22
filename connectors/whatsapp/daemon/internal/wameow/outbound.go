@@ -48,13 +48,14 @@ func (c *Client) SendMessage(
 	ctx context.Context,
 	jidStr, text string,
 	attachments []Attachment,
+	mentionedJIDs []string,
 ) ([]string, int64, error) {
 	wa, jid, err := c.prepareSend(jidStr)
 	if err != nil {
 		return nil, 0, err
 	}
 	if len(attachments) == 0 {
-		msg := &waE2E.Message{Conversation: proto.String(text)}
+		msg := buildTextMessage(text, mentionedJIDs)
 		id, ts, sendErr := c.sendOne(ctx, wa, jid, msg)
 		if sendErr != nil {
 			return nil, 0, sendErr
@@ -69,7 +70,7 @@ func (c *Client) SendMessage(
 		// Audio carries no caption surface.  Send the text as its
 		// own Conversation message FIRST so it isn't silently
 		// dropped, then send the audio caption-less.
-		textMsg := &waE2E.Message{Conversation: proto.String(text)}
+		textMsg := buildTextMessage(text, mentionedJIDs)
 		id, ts, sendErr := c.sendOne(ctx, wa, jid, textMsg)
 		if sendErr != nil {
 			return nil, 0, fmt.Errorf("send accompanying text for audio: %w", sendErr)
@@ -81,10 +82,12 @@ func (c *Client) SendMessage(
 
 	for i, att := range attachments {
 		caption := ""
+		var captionMentions []string
 		if i == 0 {
 			caption = captionForFirstAttachment
+			captionMentions = mentionedJIDs
 		}
-		msg, buildErr := c.buildAttachmentMessage(ctx, wa, att, caption)
+		msg, buildErr := c.buildAttachmentMessage(ctx, wa, att, caption, captionMentions)
 		if buildErr != nil {
 			return delivered, firstTS, &PartialSendError{
 				Cause: buildErr, DeliveredIDs: append([]string{}, delivered...),
@@ -159,11 +162,30 @@ func (c *Client) sendOne(ctx context.Context, wa *whatsmeow.Client, jid types.JI
 	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
 }
 
+// buildTextMessage shapes a text-only outbound message, attaching a
+// ContextInfo.MentionedJID list when the model has @-tagged anyone.
+// WhatsApp clients render the mentions as pills if the JIDs resolve
+// to chat participants; non-participants fall through as plain text.
+func buildTextMessage(text string, mentionedJIDs []string) *waE2E.Message {
+	if len(mentionedJIDs) == 0 {
+		return &waE2E.Message{Conversation: proto.String(text)}
+	}
+	return &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: proto.String(text),
+			ContextInfo: &waE2E.ContextInfo{
+				MentionedJID: mentionedJIDs,
+			},
+		},
+	}
+}
+
 func (c *Client) buildAttachmentMessage(
 	ctx context.Context,
 	wa *whatsmeow.Client,
 	att Attachment,
 	caption string,
+	captionMentions []string,
 ) (*waE2E.Message, error) {
 	data, err := os.ReadFile(att.Path)
 	if err != nil {
@@ -176,6 +198,7 @@ func (c *Client) buildAttachmentMessage(
 	}
 	size := uint64(len(data))
 	mime := att.Mimetype
+	ctxInfo := maybeMentionContextInfo(captionMentions)
 
 	switch kind {
 	case attachKindImage:
@@ -189,6 +212,7 @@ func (c *Client) buildAttachmentMessage(
 				FileLength:    proto.Uint64(size),
 				MediaKey:      uploaded.MediaKey,
 				Caption:       maybeString(caption),
+				ContextInfo:   ctxInfo,
 			},
 		}, nil
 	case attachKindVideo:
@@ -202,6 +226,7 @@ func (c *Client) buildAttachmentMessage(
 				FileLength:    proto.Uint64(size),
 				MediaKey:      uploaded.MediaKey,
 				Caption:       maybeString(caption),
+				ContextInfo:   ctxInfo,
 			},
 		}, nil
 	case attachKindAudio:
@@ -214,6 +239,7 @@ func (c *Client) buildAttachmentMessage(
 				FileSHA256:    uploaded.FileSHA256,
 				FileLength:    proto.Uint64(size),
 				MediaKey:      uploaded.MediaKey,
+				ContextInfo:   ctxInfo,
 			},
 		}, nil
 	default:
@@ -230,9 +256,21 @@ func (c *Client) buildAttachmentMessage(
 				MediaKey:      uploaded.MediaKey,
 				FileName:      proto.String(att.Filename),
 				Caption:       maybeString(caption),
+				ContextInfo:   ctxInfo,
 			},
 		}, nil
 	}
+}
+
+// maybeMentionContextInfo builds a ContextInfo populated only with
+// MentionedJID, or nil when no mentions need to ride on this
+// submessage.  Returning nil keeps unrelated ContextInfo fields off
+// the wire.
+func maybeMentionContextInfo(mentionedJIDs []string) *waE2E.ContextInfo {
+	if len(mentionedJIDs) == 0 {
+		return nil
+	}
+	return &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
 }
 
 type attachKind int

@@ -179,6 +179,36 @@ async def test_handle_inbound_revoke_stamps_metadata(connector: WhatsappConnecto
     assert kwargs["metadata"]["revoke_target_message_id"] == "3EB0ORIGINAL"
 
 
+async def test_handle_inbound_mentions_surface_as_phone_in_uuid_field(
+    connector: WhatsappConnector,
+) -> None:
+    # Inbound mentioned_jids surface as metadata.mentions list with
+    # ``uuid`` holding the +E.164 form (what the model would write
+    # in outbound text) and ``jid`` for completeness.
+    p = dm_payload(text="hey @+15551234567")
+    p["mentioned_jids"] = ["15551234567@s.whatsapp.net"]
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["metadata"]["mentions"] == [
+        {"uuid": "+15551234567", "jid": "15551234567@s.whatsapp.net"},
+    ]
+
+
+async def test_handle_inbound_lid_mention_falls_back_to_raw_jid(
+    connector: WhatsappConnector,
+) -> None:
+    # LID JIDs (linked-device identity) and group JIDs aren't phone-
+    # like; the connector falls back to the raw JID rather than
+    # losing the mention entirely.
+    p = dm_payload(text="hey")
+    p["mentioned_jids"] = ["98765@lid"]
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["metadata"]["mentions"] == [{"uuid": "98765@lid", "jid": "98765@lid"}]
+
+
 async def test_handle_inbound_all_attachments_unreadable_stamps_metadata(
     connector: WhatsappConnector, tmp_path: Path
 ) -> None:

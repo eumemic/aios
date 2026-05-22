@@ -223,3 +223,19 @@ def test_parse_message_keeps_whitespace_text_when_other_signal_present() -> None
     msg = parse_message(p)
     assert msg is not None
     assert msg.text == "   "  # surfaces as-received; the drop is conditional only
+
+
+def test_parse_message_carries_mentioned_jids() -> None:
+    p = dm_payload(text="hey @+15551234567")
+    p["mentioned_jids"] = ["15551234567@s.whatsapp.net"]
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.mentioned_jids == ("15551234567@s.whatsapp.net",)
+
+
+def test_parse_message_handles_malformed_mention_list() -> None:
+    p = dm_payload(text="hey")
+    p["mentioned_jids"] = ["valid@s.whatsapp.net", "", 12345, None]
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.mentioned_jids == ("valid@s.whatsapp.net",)

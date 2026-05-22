@@ -46,7 +46,7 @@ func translateMessage(e *events.Message) map[string]any {
 	if e.Message == nil {
 		return nil
 	}
-	return map[string]any{
+	params := map[string]any{
 		"id":             string(e.Info.ID),
 		"timestamp_ms":   e.Info.Timestamp.UnixMilli(),
 		"from_jid":       e.Info.Sender.String(),
@@ -56,6 +56,33 @@ func translateMessage(e *events.Message) map[string]any {
 		"is_self":        e.Info.IsFromMe,
 		"text":           extractText(e.Message),
 	}
+	if mentioned := extractMentions(e.Message); len(mentioned) > 0 {
+		params["mentioned_jids"] = mentioned
+	}
+	return params
+}
+
+// extractMentions returns the list of JIDs the peer's message
+// addresses by @-tag.  Pulled from whatever submessage carries a
+// ContextInfo (text, image caption, video caption, etc.).
+func extractMentions(m *waE2E.Message) []string {
+	var ctx *waE2E.ContextInfo
+	switch {
+	case m.ExtendedTextMessage != nil:
+		ctx = m.ExtendedTextMessage.GetContextInfo()
+	case m.ImageMessage != nil:
+		ctx = m.ImageMessage.GetContextInfo()
+	case m.VideoMessage != nil:
+		ctx = m.VideoMessage.GetContextInfo()
+	case m.DocumentMessage != nil:
+		ctx = m.DocumentMessage.GetContextInfo()
+	case m.AudioMessage != nil:
+		ctx = m.AudioMessage.GetContextInfo()
+	}
+	if ctx == nil {
+		return nil
+	}
+	return ctx.GetMentionedJID()
 }
 
 // translateMessageWithMedia layers extracted attachments, sticker

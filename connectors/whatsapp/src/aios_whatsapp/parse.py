@@ -59,6 +59,7 @@ class InboundMessage:
     reaction: InboundReaction | None = None
     edit_target_message_id: str | None = None
     revoke_target_message_id: str | None = None
+    mentioned_jids: tuple[str, ...] = field(default_factory=tuple)
 
 
 def parse_message(params: dict[str, Any]) -> InboundMessage | None:
@@ -110,6 +111,12 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
     reaction = _parse_reaction(params.get("reaction"))
     edit_target_message_id = _parse_target(params.get("edit"))
     revoke_target_message_id = _parse_target(params.get("revoke"))
+    raw_mentions = params.get("mentioned_jids")
+    mentioned_jids: tuple[str, ...] = (
+        tuple(j for j in raw_mentions if isinstance(j, str) and j)
+        if isinstance(raw_mentions, list)
+        else ()
+    )
 
     if (
         not text_is_signal
@@ -138,6 +145,7 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
         reaction=reaction,
         edit_target_message_id=edit_target_message_id,
         revoke_target_message_id=revoke_target_message_id,
+        mentioned_jids=mentioned_jids,
     )
 
 

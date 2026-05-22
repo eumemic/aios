@@ -91,7 +91,7 @@ func main() {
 // wameow package mustn't import handler (or vice versa) to keep the
 // wire-vs-logic boundary clean, so the per-call memcopy sits here.
 func sendAdapter(client *wameow.Client) handler.SendMessageFn {
-	return func(ctx context.Context, jid, text string, atts []handler.Attachment) ([]string, int64, error) {
+	return func(ctx context.Context, jid, text string, atts []handler.Attachment, mentionedJIDs []string) ([]string, int64, error) {
 		var wmAtts []wameow.Attachment
 		if len(atts) > 0 {
 			wmAtts = make([]wameow.Attachment, len(atts))
@@ -99,7 +99,7 @@ func sendAdapter(client *wameow.Client) handler.SendMessageFn {
 				wmAtts[i] = wameow.Attachment{Path: a.Path, Mimetype: a.Mimetype, Filename: a.Filename}
 			}
 		}
-		return client.SendMessage(ctx, jid, text, wmAtts)
+		return client.SendMessage(ctx, jid, text, wmAtts, mentionedJIDs)
 	}
 }
 

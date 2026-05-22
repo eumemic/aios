@@ -21,6 +21,7 @@ from .config import Settings
 from .daemon import WhatsappDaemon
 from .format import markdown_to_whatsapp
 from .management import WhatsappManagementMixin, normalize_phone
+from .mentions import encode_mentions
 from .parse import InboundMessage, parse_message
 
 log = structlog.get_logger(__name__)
@@ -104,6 +105,22 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
         if msg.revoke_target_message_id is not None:
             metadata["revoked"] = True
             metadata["revoke_target_message_id"] = msg.revoke_target_message_id
+        if msg.mentioned_jids:
+            # Surface in the harness's existing mentions-block shape.
+            # The context renderer reads ``uuid`` per entry; we
+            # populate it with the +E.164 phone (the value the model
+            # would use to @-mention this person in an outbound).
+            # The raw JID rides alongside for any consumer that
+            # wants it.
+            #
+            # ``self_mentioned`` is intentionally not computed here —
+            # the connector doesn't yet cache the bot's own JID
+            # locally.  A follow-up that plumbs the account JID
+            # through the pair-confirm flow can light up the
+            # harness's existing self_mentioned=true rendering.
+            metadata["mentions"] = [
+                {"uuid": _phone_from_jid(j), "jid": j} for j in msg.mentioned_jids
+            ]
         attachment_tuples = await self._read_attachments(msg) if msg.attachments else None
         if msg.attachments and attachment_tuples is None:
             # Daemon declared attachments but every Path.read_bytes
@@ -181,7 +198,16 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
             react/edit/delete-targetable individually.
         """
         state = self.state[connection_id]
-        params: dict[str, Any] = {"jid": chat_id, "text": markdown_to_whatsapp(text)}
+        # Mention encoding runs BEFORE markdown so the @<E.164>
+        # pattern is detected against the model's original text
+        # (markdown_to_whatsapp may interpolate sentinels).
+        text_with_mentions, mentioned_jids = encode_mentions(text)
+        params: dict[str, Any] = {
+            "jid": chat_id,
+            "text": markdown_to_whatsapp(text_with_mentions),
+        }
+        if mentioned_jids:
+            params["mentioned_jids"] = mentioned_jids
         if attachments:
             params["attachments"] = [_attachment_params(p) for p in attachments]
         result = await state.daemon.rpc.call("sendMessage", params)
@@ -283,6 +309,23 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
         if not isinstance(result, dict):
             raise RuntimeError(f"deleteMessage returned non-dict: {result!r}")
         return result
+
+
+def _phone_from_jid(jid: str) -> str:
+    """Convert a WhatsApp JID (``15551234567@s.whatsapp.net``) to the
+    +E.164 form the model uses for @-mentions in outbound text.
+
+    Falls back to the raw JID for non-standard shapes (LIDs, group
+    JIDs) so the model gets some non-empty identifier rather than
+    silently losing the mention.  Only ``@s.whatsapp.net`` JIDs map
+    to a phone — the ``@lid``/``@g.us``/etc. suffixes carry IDs that
+    aren't phone numbers even when the local part happens to be
+    all-digits.
+    """
+    local, sep, host = jid.partition("@")
+    if not sep or host != "s.whatsapp.net" or not local.isdigit():
+        return jid
+    return "+" + local
 
 
 def _attachment_params(host_path: Path) -> dict[str, str]:
