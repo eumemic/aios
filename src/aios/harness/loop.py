@@ -341,7 +341,9 @@ async def _run_session_step_body(
 
     try:
         step_ctx = await compose_step_context(
+            pool=pool,
             session=session,
+            account_id=account_id,
             agent=agent,
             channels=channels,
             prelude=prelude,
