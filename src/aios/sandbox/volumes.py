@@ -81,7 +81,9 @@ def ensure_workspace_path(raw_path: str) -> Path:
     return path
 
 
-def validate_workspace_path(raw_path: str, account_id: str) -> None:
+def validate_workspace_path(
+    raw_path: str, account_id: str, *, session_id: str | None = None
+) -> None:
     """Refuse ``raw_path`` if it resolves outside the account's
     workspace subdirectory.
 
@@ -101,6 +103,19 @@ def validate_workspace_path(raw_path: str, account_id: str) -> None:
     ``workspace_root/{other_account_id}``, and symlinks under the
     account's subdir that point outward at validate time.
 
+    ``session_id`` opens a tiny backward-compat carve-out for the
+    pre-#409 default ``<workspace_root>/<session_id>`` (no per-tenant
+    subdir).  Sessions created before PR #409 have ``workspace_volume_path``
+    rows in exactly that shape; without the carve-out the bind-mount
+    boundary re-check (added by PR #590) rejects them on every
+    cold-start, leaving the model staring at a ``ForbiddenError`` on
+    every tool call.  The carve-out is keyed on the session_id the
+    caller is currently provisioning — a path matching the legacy shape
+    but naming a *different* session_id is still rejected, so the
+    cross-tenant defense holds.  The create-time call sites leave
+    ``session_id`` unset so user-supplied paths remain strictly jailed
+    to the account subdir.
+
     Limitations: this is the create-time + bind-mount-time check on
     the workspace_path argument.  Symlinks WRITTEN inside the
     mounted ``/workspace`` after the bind-mount is live still resolve
@@ -117,12 +132,18 @@ def validate_workspace_path(raw_path: str, account_id: str) -> None:
     in audit logs as such.
     """
     path = Path(raw_path).resolve()
-    account_root = (get_settings().workspace_root / account_id).resolve()
-    if not path.is_relative_to(account_root):
-        raise ForbiddenError(
-            "workspace_path must resolve to within the account's workspace subdirectory",
-            detail={"workspace_path": raw_path},
-        )
+    workspace_root = get_settings().workspace_root.resolve()
+    account_root = (workspace_root / account_id).resolve()
+    if path.is_relative_to(account_root):
+        return
+    if session_id is not None:
+        legacy_path = (workspace_root / session_id).resolve()
+        if path == legacy_path:
+            return
+    raise ForbiddenError(
+        "workspace_path must resolve to within the account's workspace subdirectory",
+        detail={"workspace_path": raw_path},
+    )
 
 
 _MEMORY_STORES_ROOT = "_memory_stores"
