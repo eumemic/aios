@@ -57,6 +57,8 @@ class InboundMessage:
     attachments: tuple[InboundAttachment, ...] = field(default_factory=tuple)
     sticker_emoji: str | None = None
     reaction: InboundReaction | None = None
+    edit_target_message_id: str | None = None
+    revoke_target_message_id: str | None = None
 
 
 def parse_message(params: dict[str, Any]) -> InboundMessage | None:
@@ -100,8 +102,17 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
     sticker_emoji = raw_sticker if isinstance(raw_sticker, str) and raw_sticker else None
 
     reaction = _parse_reaction(params.get("reaction"))
+    edit_target_message_id = _parse_target(params.get("edit"))
+    revoke_target_message_id = _parse_target(params.get("revoke"))
 
-    if not text and not attachments and sticker_emoji is None and reaction is None:
+    if (
+        not text
+        and not attachments
+        and sticker_emoji is None
+        and reaction is None
+        and edit_target_message_id is None
+        and revoke_target_message_id is None
+    ):
         return None
 
     raw_chat_name = params.get("chat_name")
@@ -119,7 +130,22 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
         attachments=attachments,
         sticker_emoji=sticker_emoji,
         reaction=reaction,
+        edit_target_message_id=edit_target_message_id,
+        revoke_target_message_id=revoke_target_message_id,
     )
+
+
+def _parse_target(raw: Any) -> str | None:
+    """Pull ``target_message_id`` out of the daemon's ``edit`` / ``revoke``
+    block.  Returns None for missing blocks or missing ids — the model
+    has nothing to act on without an id, so silently drop.
+    """
+    if not isinstance(raw, dict):
+        return None
+    target_id = raw.get("target_message_id")
+    if not isinstance(target_id, str) or not target_id:
+        return None
+    return target_id
 
 
 def _parse_reaction(raw: Any) -> InboundReaction | None:

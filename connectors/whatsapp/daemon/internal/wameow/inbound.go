@@ -85,7 +85,54 @@ func (c *Client) translateMessageWithMedia(e *events.Message) map[string]any {
 	if rxn := extractReaction(e.Message); rxn != nil {
 		params["reaction"] = rxn
 	}
+	if info := extractProtocolInfo(e.Message); info != nil {
+		switch {
+		case info.edited:
+			params["edit"] = map[string]any{"target_message_id": info.targetID}
+			// Edits ship a fresh body in ProtocolMessage.EditedMessage;
+			// the outer Conversation/ExtendedTextMessage are empty, so
+			// override the base text with the inner content.
+			if info.newText != "" {
+				params["text"] = info.newText
+			}
+		case info.revoked:
+			params["revoke"] = map[string]any{"target_message_id": info.targetID}
+		}
+	}
 	return params
+}
+
+// extractProtocolInfo decodes the ProtocolMessage that whatsmeow uses
+// for in-band edits and revokes.  Returns nil when this isn't a
+// protocol message (the common case), or for ProtocolMessage types
+// the daemon doesn't surface yet (history sync, app-state sync, etc).
+type protocolInfo struct {
+	edited   bool
+	revoked  bool
+	targetID string
+	newText  string // populated for edits only
+}
+
+func extractProtocolInfo(m *waE2E.Message) *protocolInfo {
+	if m == nil || m.ProtocolMessage == nil {
+		return nil
+	}
+	pm := m.ProtocolMessage
+	targetID := ""
+	if key := pm.GetKey(); key != nil {
+		targetID = key.GetID()
+	}
+	switch pm.GetType() {
+	case waE2E.ProtocolMessage_MESSAGE_EDIT:
+		info := &protocolInfo{edited: true, targetID: targetID}
+		if edited := pm.GetEditedMessage(); edited != nil {
+			info.newText = extractText(edited)
+		}
+		return info
+	case waE2E.ProtocolMessage_REVOKE:
+		return &protocolInfo{revoked: true, targetID: targetID}
+	}
+	return nil
 }
 
 // extractReaction surfaces a peer's reaction to a message as a

@@ -152,3 +152,28 @@ async def test_handle_inbound_reaction_removal_passes_through(
 
     kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
     assert kwargs["metadata"]["reaction"]["emoji"] == ""
+
+
+async def test_handle_inbound_edit_stamps_metadata(connector: WhatsappConnector) -> None:
+    # Peer edited their earlier message — content is the new body,
+    # metadata.edited=True flags the rewrite for the harness's
+    # context renderer.
+    p = dm_payload(text="corrected text")
+    p["edit"] = {"target_message_id": "3EB0ORIGINAL"}
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["content"] == "corrected text"
+    assert kwargs["metadata"]["edited"] is True
+    assert kwargs["metadata"]["edit_target_message_id"] == "3EB0ORIGINAL"
+
+
+async def test_handle_inbound_revoke_stamps_metadata(connector: WhatsappConnector) -> None:
+    p = dm_payload(text="")
+    p["revoke"] = {"target_message_id": "3EB0ORIGINAL"}
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["content"] == ""
+    assert kwargs["metadata"]["revoked"] is True
+    assert kwargs["metadata"]["revoke_target_message_id"] == "3EB0ORIGINAL"

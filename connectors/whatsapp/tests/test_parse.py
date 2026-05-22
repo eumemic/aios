@@ -169,3 +169,38 @@ def test_parse_message_drops_reaction_without_target_id() -> None:
     p = dm_payload(text="")
     p["reaction"] = {"emoji": "👍"}
     assert parse_message(p) is None
+
+
+def test_parse_message_edit_carries_target_and_new_text() -> None:
+    # Daemon overrides text to the edited body and surfaces the
+    # target_message_id in an "edit" block.  parse.py exposes both
+    # so the connector can stamp "edited=true" on the metadata.
+    p = dm_payload(text="this is the corrected version")
+    p["edit"] = {"target_message_id": "3EB0ORIGINAL"}
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.text == "this is the corrected version"
+    assert msg.edit_target_message_id == "3EB0ORIGINAL"
+
+
+def test_parse_message_revoke_kept_with_empty_text() -> None:
+    # A revoke carries no replacement body — the empty text is the
+    # signal alongside the revoke block.  Must survive the "no
+    # signal" drop.
+    p = dm_payload(text="")
+    p["revoke"] = {"target_message_id": "3EB0ORIGINAL"}
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.text == ""
+    assert msg.revoke_target_message_id == "3EB0ORIGINAL"
+
+
+def test_parse_message_drops_edit_revoke_without_target_id() -> None:
+    # Same defense-in-depth as the reaction path: a target-less
+    # protocol message can't be matched, so silently drop.
+    p = dm_payload(text="")
+    p["edit"] = {}
+    assert parse_message(p) is None
+    p = dm_payload(text="")
+    p["revoke"] = {"target_message_id": ""}
+    assert parse_message(p) is None

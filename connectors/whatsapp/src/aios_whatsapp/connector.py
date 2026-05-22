@@ -97,6 +97,12 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
                 "emoji": msg.reaction.emoji,
                 "target_message_id": msg.reaction.target_message_id,
             }
+        if msg.edit_target_message_id is not None:
+            metadata["edited"] = True
+            metadata["edit_target_message_id"] = msg.edit_target_message_id
+        if msg.revoke_target_message_id is not None:
+            metadata["revoked"] = True
+            metadata["revoke_target_message_id"] = msg.revoke_target_message_id
         attachment_tuples = await self._read_attachments(msg) if msg.attachments else None
         await self.emit_inbound(
             connection_id=connection_id,
