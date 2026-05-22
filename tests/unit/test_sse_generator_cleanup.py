@@ -58,7 +58,6 @@ def _install_query_backfill(
 
 def _install_session_event_backfill(
     monkeypatch: pytest.MonkeyPatch,
-    attr: str,
     pool: MagicMock,
     exc: Exception | None,
 ) -> None:
@@ -84,7 +83,7 @@ def _install_session_event_backfill(
 _CASES = [
     pytest.param(
         lambda sub, pool: sse_event_stream(sub, pool, "ses_X", after_seq=0),
-        lambda mp, pool, exc: _install_session_event_backfill(mp, "fetch", pool, exc),
+        lambda mp, pool, exc: _install_session_event_backfill(mp, pool, exc),
         id="sse_event_stream",
     ),
     pytest.param(
