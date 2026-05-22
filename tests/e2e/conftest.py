@@ -36,27 +36,19 @@ _DEFAULT_DEFER_WAKE_PATCHES: tuple[str, ...] = (
 
 
 @contextlib.asynccontextmanager
-async def live_aios_server(
+async def _live_aios_server_impl(
     *,
-    defer_wake_patches: tuple[str, ...] = _DEFAULT_DEFER_WAKE_PATCHES,
-    pool_max_size: int = 4,
+    defer_wake_patches: tuple[str, ...],
+    pool_max_size: int,
+    readiness: Callable[[str, uvicorn.Server], Awaitable[None]],
 ) -> AsyncIterator[str]:
-    """Run uvicorn on a free port serving the aios app; yield base URL.
+    """Shared body for :func:`live_aios_server` and :func:`live_aios_server_cold`.
 
-    Used by e2e tests that need a real HTTP socket (SSE streaming,
-    chunked transfer, real-uvicorn behaviour) rather than the
-    ``ASGITransport`` shortcut. ``defer_wake_patches`` is mocked for
-    the context's lifetime — the tests drive session advancement
-    directly via the harness, so the production ``defer_wake`` would
-    queue jobs the test never executes. The default covers the three
-    production sites; SSE-only tests that never hit the connectors
-    router can pass a narrower tuple to keep the mock surface tight.
-
-    Uvicorn's ``should_exit`` is poll-based (500 ms tick); with an
-    open SSE stream the poll routinely loses the race and the test
-    eats the full ``wait_for`` timeout. ``server.shutdown()`` triggers
-    the graceful drain synchronously instead, then cancelling the
-    serve task frees the asyncio bookkeeping.
+    The two variants differ only in their readiness probe — health-GET
+    vs. polling ``server.started`` without sending any HTTP request.
+    Everything else (pool, app state, uvicorn config, defer_wake mocks,
+    graceful shutdown) is identical, so factoring it out keeps the two
+    public entry points to a thin wrapper each.
     """
     from aios.api.app import create_app
     from aios.config import get_settings
@@ -90,7 +82,7 @@ async def live_aios_server(
         serve_task = asyncio.create_task(_serve())
         try:
             url = f"http://127.0.0.1:{port}"
-            await wait_for_health(url)
+            await readiness(url, server)
             yield url
         finally:
             await server.shutdown()
@@ -98,6 +90,90 @@ async def live_aios_server(
             with contextlib.suppress(asyncio.CancelledError):
                 await serve_task
             await pool.close()
+
+
+async def _readiness_via_health(url: str, _server: uvicorn.Server) -> None:
+    await wait_for_health(url)
+
+
+async def _readiness_via_started_flag(
+    _url: str, server: uvicorn.Server, *, deadline_s: float = 5.0
+) -> None:
+    """Wait until uvicorn finishes ``startup()`` without issuing any HTTP request.
+
+    Polling ``server.started`` — set to ``True`` at the end of
+    :meth:`uvicorn.Server.startup` immediately after ``create_server()``
+    returns — confirms the listening socket is bound and the asyncio
+    server has been created, all without sending a packet to it. The
+    SSE-first-open regression (#377) reproduced exclusively when the
+    first request to land on uvicorn was the SSE GET itself; any
+    prior request (including a /v1/health probe) warmed the pool /
+    connector init enough to mask the bug. This probe deliberately
+    avoids opening any TCP connection so the test's first
+    ``client.stream(...)`` is genuinely uvicorn's first request.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + deadline_s
+    while not server.started:
+        if loop.time() >= deadline:
+            raise TimeoutError(f"uvicorn did not finish startup within {deadline_s}s")
+        await asyncio.sleep(0.01)
+
+
+@contextlib.asynccontextmanager
+async def live_aios_server(
+    *,
+    defer_wake_patches: tuple[str, ...] = _DEFAULT_DEFER_WAKE_PATCHES,
+    pool_max_size: int = 4,
+) -> AsyncIterator[str]:
+    """Run uvicorn on a free port serving the aios app; yield base URL.
+
+    Used by e2e tests that need a real HTTP socket (SSE streaming,
+    chunked transfer, real-uvicorn behaviour) rather than the
+    ``ASGITransport`` shortcut. ``defer_wake_patches`` is mocked for
+    the context's lifetime — the tests drive session advancement
+    directly via the harness, so the production ``defer_wake`` would
+    queue jobs the test never executes. The default covers the three
+    production sites; SSE-only tests that never hit the connectors
+    router can pass a narrower tuple to keep the mock surface tight.
+
+    Uvicorn's ``should_exit`` is poll-based (500 ms tick); with an
+    open SSE stream the poll routinely loses the race and the test
+    eats the full ``wait_for`` timeout. ``server.shutdown()`` triggers
+    the graceful drain synchronously instead, then cancelling the
+    serve task frees the asyncio bookkeeping.
+    """
+    async with _live_aios_server_impl(
+        defer_wake_patches=defer_wake_patches,
+        pool_max_size=pool_max_size,
+        readiness=_readiness_via_health,
+    ) as url:
+        yield url
+
+
+@contextlib.asynccontextmanager
+async def live_aios_server_cold(
+    *,
+    defer_wake_patches: tuple[str, ...] = _DEFAULT_DEFER_WAKE_PATCHES,
+    pool_max_size: int = 4,
+) -> AsyncIterator[str]:
+    """Like :func:`live_aios_server` but yields BEFORE any HTTP request hits uvicorn.
+
+    The SSE first-open regression (#377) only manifests when the very
+    first request landing on uvicorn is the SSE GET itself; any prior
+    HTTP traffic — including a ``GET /v1/health`` readiness probe —
+    triggers uvicorn's first-request initialisation and masks the bug.
+    This variant waits on ``server.started`` (set at the end of
+    :meth:`uvicorn.Server.startup`, after the listening socket is
+    bound) instead of polling the health endpoint, so the test's first
+    ``client.stream(...)`` is observably uvicorn's first request.
+    """
+    async with _live_aios_server_impl(
+        defer_wake_patches=defer_wake_patches,
+        pool_max_size=pool_max_size,
+        readiness=_readiness_via_started_flag,
+    ) as url:
+        yield url
 
 
 async def wait_for_predicate(

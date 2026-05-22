@@ -20,10 +20,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest import mock
 
 import httpx
+
+if TYPE_CHECKING:
+    import asyncpg
 
 
 def authed_client(base_url: str, token: str, **kwargs: Any) -> httpx.AsyncClient:
@@ -56,6 +59,31 @@ async def issue_runtime_token(api_key: str, base_url: str, connector: str) -> st
         r = await c.post("/v1/runtime-tokens", json={"connector": connector})
         r.raise_for_status()
         return str(r.json()["plaintext"])
+
+
+async def mint_runtime_token_via_db(
+    pool: asyncpg.Pool[Any],
+    *,
+    connector: str,
+    account_id: str = "acc_test_stub",
+    label: str | None = None,
+) -> str:
+    """Mint a runtime token by direct service call (not HTTP).
+
+    Use this in tests that must NOT hit uvicorn before the test's first
+    HTTP request — e.g. the SSE-first-open regression for #377. The
+    standard :func:`issue_runtime_token` POSTs to ``/v1/runtime-tokens``,
+    which itself warms up uvicorn (lazy lifespan + connection init) and
+    defeats the bug repro. This helper inserts the token row directly
+    against ``pool`` via the runtime-tokens service so the test's first
+    network request to the server is the SSE GET under examination.
+    """
+    from aios.services import runtime_tokens as runtime_tokens_service
+
+    _, plaintext = await runtime_tokens_service.issue(
+        pool, account_id=account_id, connector=connector, label=label
+    )
+    return plaintext
 
 
 async def create_connection(api_key: str, base_url: str, account: str) -> str:
