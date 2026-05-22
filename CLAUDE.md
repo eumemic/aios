@@ -61,6 +61,21 @@ uv run aios skills create --dir path/to/my-skill --title "My Skill"
 
 Every resource has CRUD subcommands. See `aios <resource> --help` for specifics. Operator commands (`aios api`, `aios worker`, `aios migrate`) are also typer-backed but keep their original behavior.
 
+## Code generation invariants
+
+Two pre-commit invariants are checked in CI; both fail if the committed
+artifact drifts from its source-of-truth:
+
+- `openapi.json` is regenerated from FastAPI introspection.
+  Fix on drift: `./scripts/regen-openapi.sh && git add openapi.json`.
+- `packages/aios-sdk/aios_sdk/_generated/` is regenerated from `openapi.json`.
+  Fix on drift: `./scripts/regen-client.sh && git add packages/aios-sdk`
+  (also regenerates openapi.json as a prerequisite).
+
+Trigger: any API route, response model, error envelope, or pydantic schema
+change that flows through FastAPI introspection. **Run both before pushing**
+when you've touched API-layer code.
+
 ## Architecture
 
 aios is an event-driven agent runtime. The headline property: **every tool is implicitly async** — the model stays responsive to user messages even while tools are running.
