@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -200,6 +200,18 @@ class Settings(BaseSettings):
 
     # ── observability ──────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")
+
+    @model_validator(mode="after")
+    def _require_absolute_workspace_root(self) -> Settings:
+        if not self.workspace_root.is_absolute():
+            raise ValueError(
+                f"AIOS_WORKSPACE_ROOT must be an absolute path; got '{self.workspace_root}'. "
+                "Note: pathlib does not expand '~'; write the full path. "
+                "API and worker processes resolve relative paths against their own CWD, "
+                "producing diverging session workspace_path values and ForbiddenError "
+                "on tool calls."
+            )
+        return self
 
 
 @lru_cache(maxsize=1)
