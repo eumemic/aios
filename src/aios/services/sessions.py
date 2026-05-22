@@ -244,7 +244,13 @@ async def compute_awaiting(
 
 
 async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> Session:
-    async with pool.acquire() as conn:
+    # REPEATABLE READ snapshot pins all three enrichment reads to one
+    # moment in time so a concurrent ``update_session`` committing
+    # between reads can't return a torn ``Session`` (e.g. row columns
+    # from before the update with ``resources`` from after).
+    # ``compute_awaiting`` is event-derived and monotonic — running it on
+    # a separate connection sees ≥ the snapshot's events, not a tear.
+    async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
         session = await queries.get_session(conn, session_id, account_id=account_id)
         vault_ids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
         echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
@@ -293,7 +299,8 @@ async def list_sessions(
     limit: int = 50,
     after: str | None = None,
 ) -> list[Session]:
-    async with pool.acquire() as conn:
+    # See ``get_session`` for the rationale on the snapshot wrap.
+    async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
         sessions = await queries.list_sessions(
             conn, agent_id=agent_id, status=status, limit=limit, after=after, account_id=account_id
         )
