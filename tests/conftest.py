@@ -278,7 +278,7 @@ async def aios_env(aios_env_minimal: dict[str, str], _reset_db_state: Any) -> di
 
 
 @pytest.fixture(autouse=True)
-def _configure_structlog_for_tests():
+def _configure_structlog_for_tests() -> Iterator[None]:
     """Configure structlog before every test so caplog captures all messages.
 
     Two changes vs. structlog's bare default (which is what tests see when

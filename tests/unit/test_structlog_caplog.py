@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 import structlog
 
 
@@ -30,7 +31,9 @@ def test_cache_logger_on_first_use_disabled() -> None:
     assert structlog.get_config()["cache_logger_on_first_use"] is False
 
 
-def test_caplog_captures_module_level_structlog_logger(caplog) -> None:
+def test_caplog_captures_module_level_structlog_logger(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """caplog must capture log records emitted via a module-level structlog logger.
 
     Imports a module with module-level log binding (a class of modules that
