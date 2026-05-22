@@ -86,13 +86,7 @@ async def _batch_list_all_echoes(
     github_map = await queries.batch_list_session_github_repo_echoes(
         conn, session_ids, account_id=account_id
     )
-    result: dict[str, list[SessionResourceEcho]] = {}
-    for sid in session_ids:
-        merged: list[SessionResourceEcho] = []
-        merged.extend(memory_map.get(sid, []))
-        merged.extend(github_map.get(sid, []))
-        result[sid] = merged
-    return result
+    return {sid: [*memory_map[sid], *github_map[sid]] for sid in session_ids}
 
 
 async def create_session(
@@ -309,16 +303,17 @@ async def list_sessions(
         vault_map = await queries.batch_get_session_vault_ids(conn, sid_list, account_id=account_id)
         echoes_map = await _batch_list_all_echoes(conn, sid_list, account_id=account_id)
     awaiting_by_sid = await compute_awaiting(pool, sessions, account_id=account_id)
-    return [
+    enriched: list[Session] = [
         s.model_copy(
             update={
-                "vault_ids": vault_map.get(s.id, []),
-                "resources": echoes_map.get(s.id, []),
+                "vault_ids": vault_map[s.id],
+                "resources": echoes_map[s.id],
                 "awaiting": awaiting_by_sid.get(s.id, []),
             }
         )
         for s in sessions
     ]
+    return enriched
 
 
 async def append_user_message(

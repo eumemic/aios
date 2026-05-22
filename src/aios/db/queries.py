@@ -5236,7 +5236,9 @@ async def batch_list_session_memory_store_echoes(
     if not session_ids:
         return {}
     rows = await conn.fetch(
-        "SELECT * FROM session_memory_stores "
+        "SELECT session_id, memory_store_id, access, instructions, "
+        "name_at_attach, description_at_attach "
+        "FROM session_memory_stores "
         "WHERE session_id = ANY($1) AND account_id = $2 "
         "ORDER BY session_id, rank",
         session_ids,
@@ -5244,7 +5246,7 @@ async def batch_list_session_memory_store_echoes(
     )
     result: dict[str, list[MemoryStoreResourceEcho]] = {sid: [] for sid in session_ids}
     for r in rows:
-        result[str(r["session_id"])].append(
+        result[r["session_id"]].append(
             MemoryStoreResourceEcho(
                 memory_store_id=r["memory_store_id"],
                 access=r["access"],
@@ -5267,7 +5269,9 @@ async def batch_list_session_github_repo_echoes(
     if not session_ids:
         return {}
     rows = await conn.fetch(
-        "SELECT * FROM session_github_repositories "
+        "SELECT session_id, id, repo_url, mount_path, created_at, updated_at, "
+        "git_user_name, git_user_email "
+        "FROM session_github_repositories "
         "WHERE session_id = ANY($1) AND account_id = $2 "
         "ORDER BY session_id, rank",
         session_ids,
@@ -5275,7 +5279,7 @@ async def batch_list_session_github_repo_echoes(
     )
     result: dict[str, list[GithubRepositoryResourceEcho]] = {sid: [] for sid in session_ids}
     for r in rows:
-        result[str(r["session_id"])].append(_row_to_github_repo_echo(r))
+        result[r["session_id"]].append(_row_to_github_repo_echo(r))
     return result
 
 

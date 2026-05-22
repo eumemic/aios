@@ -621,10 +621,10 @@ class TestSessionListResourcesBatched:
         zero_id = await _mk([])
         one_id = await _mk([store_c["id"]])
 
-        r = await http_client.get(f"/v1/sessions?agent_id={agent.id}&limit=50")
+        r = await http_client.get(f"/v1/sessions?agent_id={agent.id}")
         assert r.status_code == 200, r.text
         by_id = {s["id"]: s for s in r.json()["data"]}
-        assert {two_id, zero_id, one_id} <= by_id.keys()
+        assert by_id.keys() == {two_id, zero_id, one_id}
 
         ids_two = [e["memory_store_id"] for e in by_id[two_id]["resources"]]
         assert ids_two == [store_a["id"], store_b["id"]]
