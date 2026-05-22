@@ -1,23 +1,28 @@
-"""SSE event stream generator.
+"""SSE event stream generators.
 
-Used by ``GET /v1/sessions/{id}/stream``. The generator:
+Used by ``GET /v1/sessions/{id}/stream`` and the runtime-facing SSE
+endpoints in ``aios.api.routers.connectors``.  Each generator:
 
-1. Opens a dedicated asyncpg LISTEN connection (via
-   :func:`aios.db.listen.listen_for_events`) BEFORE issuing the backfill
-   SELECT — see the LISTEN-before-backfill discussion in ``db/listen.py``.
-2. Backfills events from ``after_seq``, tracking the highest seq seen as
-   ``cursor``.
-3. Tails live notifications. For each notify, fetches the matching event by
-   id and emits it ONLY if its seq exceeds ``cursor`` (dedup against the
-   backfill).
-4. Detects ``terminated`` lifecycle events and emits a ``done`` SSE event
-   before exiting.
+1. Accepts a pre-established :class:`aios.db.listen.ListenSubscription`
+   — the route handler opens it via ``open_listen_for_*`` BEFORE
+   constructing :class:`sse_starlette.EventSourceResponse`, so a setup
+   failure surfaces as a clean 503 instead of a half-open chunked stream
+   (issue #376).
+2. Backfills from the DB, tracking a cursor where ordering matters
+   (sessions stream).
+3. Tails live notifications from ``subscription.queue``.
+4. Owns terminating the subscription in ``finally`` — under cancellation
+   (client disconnect) AND under any in-body exception.
 
-Client disconnect handling is automatic: sse-starlette's
-``EventSourceResponse`` raises ``asyncio.CancelledError`` into the generator
-when the client closes the connection. The ``finally`` blocks in
-``listen_for_events`` and the pool acquires clean up. Don't trap
-CancelledError; let it propagate.
+Critical ordering invariant: the route handler must run ``LISTEN`` (i.e.
+call ``open_listen_for_*``) BEFORE the generator issues its backfill
+``SELECT``.  See the discussion in ``aios.db.listen``.
+
+Client disconnect handling: sse-starlette's ``EventSourceResponse`` raises
+``asyncio.CancelledError`` into the generator when the client closes the
+connection.  The ``finally`` block's ``subscription.terminate()`` is
+synchronous and safe under cancellation.  Don't trap ``CancelledError``;
+let it propagate.
 """
 
 from __future__ import annotations
@@ -29,16 +34,12 @@ import asyncpg
 from sse_starlette import ServerSentEvent
 
 from aios.db import queries
-from aios.db.listen import (
-    listen_for_connection_discovery,
-    listen_for_connector_calls_by_type,
-    listen_for_events,
-    listen_for_management_calls,
-)
 from aios.logging import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from aios.db.listen import ListenSubscription
 
 log = get_logger("aios.api.sse")
 
@@ -73,7 +74,7 @@ def _serialize_event(row: asyncpg.Record) -> dict[str, Any]:
 
 
 async def sse_event_stream(
-    db_url: str,
+    subscription: ListenSubscription,
     pool: asyncpg.Pool[Any],
     session_id: str,
     after_seq: int = 0,
@@ -81,12 +82,13 @@ async def sse_event_stream(
     """Yield ServerSentEvents for a session, backfilling from ``after_seq``
     and then tailing live notifications.
 
-    Critical ordering: open the LISTEN connection BEFORE running the backfill
-    SELECT. Otherwise events that commit during the backfill window are lost
-    (the SELECT can't see uncommitted-at-snapshot rows, and the listener
-    isn't yet attached to receive their NOTIFY).
+    The ``subscription`` must have been opened by the route handler via
+    ``open_listen_for_events`` before this generator runs — the
+    LISTEN-before-backfill invariant requires it.  This generator owns
+    terminating the subscription in ``finally``.
     """
-    async with listen_for_events(db_url, session_id) as queue:
+    queue = subscription.queue
+    try:
         cursor = after_seq
 
         # Backfill: read all events with seq > after_seq, in order.
@@ -134,10 +136,15 @@ async def sse_event_stream(
             if _is_terminal(event_data):
                 yield ServerSentEvent(data="{}", event="done")
                 return
+    except Exception:
+        log.exception("sse.session_events.body_raised", session_id=session_id)
+        raise
+    finally:
+        subscription.terminate()
 
 
 async def runtime_connector_calls_stream(
-    db_url: str,
+    subscription: ListenSubscription,
     pool: asyncpg.Pool[Any],
     connector: str,
     *,
@@ -160,7 +167,8 @@ async def runtime_connector_calls_stream(
     so the per-connection fetch is skipped for out-of-scope IDs.
     """
     allowlist = set(connection_ids) if connection_ids is not None else None
-    async with listen_for_connector_calls_by_type(db_url, connector) as queue:
+    queue = subscription.queue
+    try:
         emitted: set[str] = set()
 
         async with pool.acquire() as conn:
@@ -200,10 +208,15 @@ async def runtime_connector_calls_stream(
                 emitted.add(call["tool_call_id"])
                 call["connection_id"] = connection_id
                 yield ServerSentEvent(data=json.dumps(call), event="call")
+    except Exception:
+        log.exception("sse.runtime_calls.body_raised", connector=connector)
+        raise
+    finally:
+        subscription.terminate()
 
 
 async def management_calls_stream(
-    db_url: str,
+    subscription: ListenSubscription,
     pool: asyncpg.Pool[Any],
     connector: str,
     *,
@@ -215,7 +228,8 @@ async def management_calls_stream(
     ``connector_management_calls_<connector>``.  Each event:
     ``{"call_id": "mgmt_...", "method": str, "params": dict}``.
     """
-    async with listen_for_management_calls(db_url, connector) as queue:
+    queue = subscription.queue
+    try:
         emitted: set[str] = set()
 
         async with pool.acquire() as conn:
@@ -245,10 +259,15 @@ async def management_calls_stream(
                 ),
                 event="call",
             )
+    except Exception:
+        log.exception("sse.management_calls.body_raised", connector=connector)
+        raise
+    finally:
+        subscription.terminate()
 
 
 async def connection_discovery_stream(
-    db_url: str,
+    subscription: ListenSubscription,
     pool: asyncpg.Pool[Any],
     connector: str,
     *,
@@ -271,7 +290,8 @@ async def connection_discovery_stream(
     just doesn't see them.
     """
     allowlist = set(connection_ids) if connection_ids is not None else None
-    async with listen_for_connection_discovery(db_url, connector) as queue:
+    queue = subscription.queue
+    try:
         emitted_added: set[str] = set()
 
         # Page through all active connections of this type; the default
@@ -333,6 +353,11 @@ async def connection_discovery_stream(
                 ),
                 event="connection",
             )
+    except Exception:
+        log.exception("sse.connection_discovery.body_raised", connector=connector)
+        raise
+    finally:
+        subscription.terminate()
 
 
 def _is_terminal(payload: dict[str, Any]) -> bool:

@@ -62,12 +62,34 @@ the transaction block (after commit). This is the correct ordering — a
 subscriber must not see a payload for a row that isn't yet committed.
 **Don't move the NOTIFY inside the transaction.** Add a fat comment if
 anyone tries.
+
+## Why ``open_listen_for_*`` exists alongside ``listen_for_*``
+
+The four route-level SSE handlers used to instantiate ``listen_for_*`` as
+an ``@asynccontextmanager`` INSIDE the generator passed to
+``EventSourceResponse``.  That meant the ``asyncpg.connect`` + ``add_listener``
+setup happened AFTER 200 OK headers were already on the wire — any failure
+left the client holding a half-open chunked stream and the server logging
+"ASGI callable returned without completing response."
+
+``open_listen_for_*`` returns a ready-to-use :class:`ListenSubscription`,
+letting the route handler preflight setup BEFORE constructing
+``EventSourceResponse``.  Preflight failure surfaces as a clean 503 with
+proper headers; only on success is the subscription handed to the
+generator, which owns ``subscription.terminate()`` in a finally.
+
+The ``@asynccontextmanager`` wrappers stay for callers that don't need the
+two-phase shape (the long-poll ``wait_for_events`` endpoint, the
+session-interrupt and connector-result listeners that resolve fast
+enough that mid-body failures are negligible, plus the existing test
+suite).
 """
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import asyncpg
@@ -80,6 +102,201 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 log = get_logger("aios.db.listen")
+
+
+@dataclass(slots=True)
+class ListenSubscription:
+    """A dedicated asyncpg connection LISTENing on one channel, with its
+    delivery queue.
+
+    Returned by the ``open_listen_for_*`` functions.  The caller (an SSE
+    generator) owns calling :meth:`terminate` in a ``finally`` block to
+    release the Postgres backend.  ``terminate`` is synchronous — safe to
+    invoke under cancellation, where awaits would re-raise immediately
+    (see the module docstring on ``conn.terminate()`` vs ``conn.close()``).
+    """
+
+    queue: asyncio.Queue[str]
+    _conn: asyncpg.Connection[object]
+
+    def terminate(self) -> None:
+        self._conn.terminate()
+
+
+async def open_listen_for_events(
+    db_url: str,
+    session_id: str,
+    *,
+    queue_max: int = 1000,
+) -> ListenSubscription:
+    """Open a dedicated asyncpg connection, LISTEN events_<session_id>,
+    acquire the SSE subscriber lock, and return a :class:`ListenSubscription`.
+
+    Two-phase counterpart to :func:`listen_for_events` for callers (SSE
+    route handlers) that need to preflight setup BEFORE constructing the
+    streaming response.
+
+    Any failure after the initial ``asyncpg.connect`` succeeds will
+    ``conn.terminate()`` and re-raise.
+    """
+    conn = await asyncpg.connect(normalize_dsn(db_url))
+    try:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
+        channel = f"events_{session_id}"
+
+        def _callback(
+            _conn: asyncpg.Connection[object],
+            _pid: int,
+            _channel: str,
+            payload: str,
+        ) -> None:
+            # CRITICAL: this callback is invoked on asyncpg's connection read
+            # loop. It MUST be synchronous. No await calls allowed here.
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                log.warning(
+                    "listen.queue_full_drop",
+                    session_id=session_id,
+                    queue_max=queue_max,
+                )
+                # Drop oldest to make room. The SSE consumer can recover by
+                # reconnecting with `?after_seq=`.
+                try:
+                    queue.get_nowait()
+                    queue.put_nowait(payload)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
+
+        await conn.add_listener(channel, _callback)
+        # Hold a shared advisory lock on this dedicated connection so the
+        # worker can detect that an SSE subscriber exists (issue #81).
+        # pg_locks releases automatically on connection close — no cleanup.
+        await acquire_subscriber_lock(conn, session_id)
+    except BaseException:
+        conn.terminate()
+        raise
+    return ListenSubscription(queue=queue, _conn=conn)
+
+
+async def open_listen_for_connector_calls_by_type(
+    db_url: str,
+    connector: str,
+    *,
+    queue_max: int = 1000,
+) -> ListenSubscription:
+    """Open a dedicated asyncpg conn LISTENing ``connector_calls_<connector>``.
+
+    Two-phase counterpart to :func:`listen_for_connector_calls_by_type`.
+    """
+    conn = await asyncpg.connect(normalize_dsn(db_url))
+    try:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
+        channel = f"connector_calls_{connector}"
+
+        def _callback(
+            _conn: asyncpg.Connection[object],
+            _pid: int,
+            _channel: str,
+            payload: str,
+        ) -> None:
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                log.warning(
+                    "listen.connector_calls_type_queue_full_drop",
+                    connector=connector,
+                    queue_max=queue_max,
+                )
+                try:
+                    queue.get_nowait()
+                    queue.put_nowait(payload)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
+
+        await conn.add_listener(channel, _callback)
+    except BaseException:
+        conn.terminate()
+        raise
+    return ListenSubscription(queue=queue, _conn=conn)
+
+
+async def open_listen_for_management_calls(
+    db_url: str,
+    connector: str,
+    *,
+    queue_max: int = 1000,
+) -> ListenSubscription:
+    """Open a dedicated asyncpg conn LISTENing ``connector_management_calls_<connector>``."""
+    conn = await asyncpg.connect(normalize_dsn(db_url))
+    try:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
+        channel = f"connector_management_calls_{connector}"
+
+        def _callback(
+            _conn: asyncpg.Connection[object],
+            _pid: int,
+            _channel: str,
+            payload: str,
+        ) -> None:
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                log.warning(
+                    "listen.connector_management_calls_queue_full_drop",
+                    connector=connector,
+                    queue_max=queue_max,
+                )
+                try:
+                    queue.get_nowait()
+                    queue.put_nowait(payload)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
+
+        await conn.add_listener(channel, _callback)
+    except BaseException:
+        conn.terminate()
+        raise
+    return ListenSubscription(queue=queue, _conn=conn)
+
+
+async def open_listen_for_connection_discovery(
+    db_url: str,
+    connector: str,
+    *,
+    queue_max: int = 1000,
+) -> ListenSubscription:
+    """Open a dedicated asyncpg conn LISTENing ``connections_<connector>``."""
+    conn = await asyncpg.connect(normalize_dsn(db_url))
+    try:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
+        channel = f"connections_{connector}"
+
+        def _callback(
+            _conn: asyncpg.Connection[object],
+            _pid: int,
+            _channel: str,
+            payload: str,
+        ) -> None:
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                log.warning(
+                    "listen.connection_discovery_queue_full_drop",
+                    connector=connector,
+                    queue_max=queue_max,
+                )
+                try:
+                    queue.get_nowait()
+                    queue.put_nowait(payload)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
+
+        await conn.add_listener(channel, _callback)
+    except BaseException:
+        conn.terminate()
+        raise
+    return ListenSubscription(queue=queue, _conn=conn)
 
 
 @asynccontextmanager
@@ -137,6 +354,11 @@ async def listen_for_events(
     room for the new one and a warning is logged. SSE clients can recover
     from drops by reconnecting with ``?after_seq=<their last seq>``.
 
+    Thin wrapper over :func:`open_listen_for_events` for callers that
+    prefer context-manager scoping.  SSE route handlers should use the
+    ``open_*`` form directly so setup failures surface before
+    ``EventSourceResponse`` writes 200 OK headers.
+
     Parameters
     ----------
     db_url:
@@ -147,43 +369,11 @@ async def listen_for_events(
         Bound on the in-memory queue. Defaults to 1000 — generous enough
         that a slow consumer can fall behind by ~1000 events before drops.
     """
-    conn = await asyncpg.connect(normalize_dsn(db_url))
+    subscription = await open_listen_for_events(db_url, session_id, queue_max=queue_max)
     try:
-        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
-        channel = f"events_{session_id}"
-
-        def _callback(
-            _conn: asyncpg.Connection[object],
-            _pid: int,
-            _channel: str,
-            payload: str,
-        ) -> None:
-            # CRITICAL: this callback is invoked on asyncpg's connection read
-            # loop. It MUST be synchronous. No await calls allowed here.
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                log.warning(
-                    "listen.queue_full_drop",
-                    session_id=session_id,
-                    queue_max=queue_max,
-                )
-                # Drop oldest to make room. The SSE consumer can recover by
-                # reconnecting with `?after_seq=`.
-                try:
-                    queue.get_nowait()
-                    queue.put_nowait(payload)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
-
-        await conn.add_listener(channel, _callback)
-        # Hold a shared advisory lock on this dedicated connection so the
-        # worker can detect that an SSE subscriber exists (issue #81).
-        # pg_locks releases automatically on connection close — no cleanup.
-        await acquire_subscriber_lock(conn, session_id)
-        yield queue
+        yield subscription.queue
     finally:
-        conn.terminate()
+        subscription.terminate()
 
 
 @asynccontextmanager
@@ -199,36 +389,16 @@ async def listen_for_connector_calls_by_type(
     container subscribes once per ``connector`` type and fans out to
     its per-connection workers client-side via the ``connection_id``
     half of the payload.
+
+    Thin wrapper over :func:`open_listen_for_connector_calls_by_type`.
     """
-    conn = await asyncpg.connect(normalize_dsn(db_url))
+    subscription = await open_listen_for_connector_calls_by_type(
+        db_url, connector, queue_max=queue_max
+    )
     try:
-        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
-        channel = f"connector_calls_{connector}"
-
-        def _callback(
-            _conn: asyncpg.Connection[object],
-            _pid: int,
-            _channel: str,
-            payload: str,
-        ) -> None:
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                log.warning(
-                    "listen.connector_calls_type_queue_full_drop",
-                    connector=connector,
-                    queue_max=queue_max,
-                )
-                try:
-                    queue.get_nowait()
-                    queue.put_nowait(payload)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
-
-        await conn.add_listener(channel, _callback)
-        yield queue
+        yield subscription.queue
     finally:
-        conn.terminate()
+        subscription.terminate()
 
 
 @asynccontextmanager
@@ -238,36 +408,15 @@ async def listen_for_management_calls(
     *,
     queue_max: int = 1000,
 ) -> AsyncIterator[asyncio.Queue[str]]:
-    """LISTEN ``connector_management_calls_<connector>``; yield a queue of ``call_id`` payloads."""
-    conn = await asyncpg.connect(normalize_dsn(db_url))
+    """LISTEN ``connector_management_calls_<connector>``; yield a queue of ``call_id`` payloads.
+
+    Thin wrapper over :func:`open_listen_for_management_calls`.
+    """
+    subscription = await open_listen_for_management_calls(db_url, connector, queue_max=queue_max)
     try:
-        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
-        channel = f"connector_management_calls_{connector}"
-
-        def _callback(
-            _conn: asyncpg.Connection[object],
-            _pid: int,
-            _channel: str,
-            payload: str,
-        ) -> None:
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                log.warning(
-                    "listen.connector_management_calls_queue_full_drop",
-                    connector=connector,
-                    queue_max=queue_max,
-                )
-                try:
-                    queue.get_nowait()
-                    queue.put_nowait(payload)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
-
-        await conn.add_listener(channel, _callback)
-        yield queue
+        yield subscription.queue
     finally:
-        conn.terminate()
+        subscription.terminate()
 
 
 @asynccontextmanager
@@ -282,36 +431,16 @@ async def listen_for_connection_discovery(
     Backs the connection-discovery SSE (#328 PR 5). The emit side lives
     in :mod:`aios.services.connections.attach_connection` /
     ``archive_connection``.
+
+    Thin wrapper over :func:`open_listen_for_connection_discovery`.
     """
-    conn = await asyncpg.connect(normalize_dsn(db_url))
+    subscription = await open_listen_for_connection_discovery(
+        db_url, connector, queue_max=queue_max
+    )
     try:
-        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
-        channel = f"connections_{connector}"
-
-        def _callback(
-            _conn: asyncpg.Connection[object],
-            _pid: int,
-            _channel: str,
-            payload: str,
-        ) -> None:
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                log.warning(
-                    "listen.connection_discovery_queue_full_drop",
-                    connector=connector,
-                    queue_max=queue_max,
-                )
-                try:
-                    queue.get_nowait()
-                    queue.put_nowait(payload)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
-
-        await conn.add_listener(channel, _callback)
-        yield queue
+        yield subscription.queue
     finally:
-        conn.terminate()
+        subscription.terminate()
 
 
 SESSION_INTERRUPT_CHANNEL = "aios_session_interrupt"

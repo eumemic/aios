@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated
 
+import asyncpg
 from fastapi import APIRouter, File, Query, UploadFile, status
 from sse_starlette import EventSourceResponse
 
@@ -26,9 +27,14 @@ from aios.api.deps import (
 )
 from aios.api.sse import sse_event_stream
 from aios.db import queries
-from aios.db.listen import SESSION_INTERRUPT_CHANNEL, listen_for_events
-from aios.errors import ValidationError
+from aios.db.listen import (
+    SESSION_INTERRUPT_CHANNEL,
+    listen_for_events,
+    open_listen_for_events,
+)
+from aios.errors import SSEPreflightFailedError, ValidationError
 from aios.ids import GITHUB_REPOSITORY, split_id
+from aios.logging import get_logger
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
 from aios.models.files import FileUploadResponse
@@ -54,6 +60,8 @@ from aios.services import files as files_service
 from aios.services import github_repositories as github_repo_service
 from aios.services import sessions as service
 from aios.services.wake import defer_wake
+
+log = get_logger("aios.api.routers.sessions")
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 
@@ -579,10 +587,30 @@ async def stream_events(
     account_id: AccountIdDep,
     after_seq: int = 0,
 ) -> EventSourceResponse:
-    """Stream session events as Server-Sent Events."""
+    """Stream session events as Server-Sent Events.
+
+    Preflights the LISTEN connection BEFORE constructing the response
+    (issue #376): a transient ``asyncpg.connect`` failure during
+    testcontainer warmup or a brief Postgres outage surfaces as a clean
+    503 with proper headers rather than a half-open chunked stream
+    after 200 OK has gone out.
+    """
     await service.get_session_basic(pool, session_id, account_id=account_id)
+    try:
+        subscription = await open_listen_for_events(db_url, session_id)
+    except (asyncpg.PostgresError, OSError) as exc:
+        log.warning(
+            "sse.session_events.preflight_failed",
+            session_id=session_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        raise SSEPreflightFailedError(
+            "could not establish LISTEN connection for session events stream",
+            detail={"stream": "session_events"},
+        ) from exc
     return EventSourceResponse(
-        sse_event_stream(db_url, pool, session_id, after_seq=after_seq),
+        sse_event_stream(subscription, pool, session_id, after_seq=after_seq),
         ping=15,
     )
 

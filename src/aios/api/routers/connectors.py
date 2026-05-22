@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal
 
+import asyncpg
 from fastapi import APIRouter, File, Form, UploadFile, status
 from pydantic import BaseModel, ConfigDict
 from sse_starlette import EventSourceResponse
@@ -39,14 +40,21 @@ from aios.api.sse import (
     runtime_connector_calls_stream,
 )
 from aios.db import queries
+from aios.db.listen import (
+    open_listen_for_connection_discovery,
+    open_listen_for_connector_calls_by_type,
+    open_listen_for_management_calls,
+)
 from aios.errors import (
     AiosError,
     ConnectorCallFailedError,
     ForbiddenError,
     NotFoundError,
     PayloadTooLargeError,
+    SSEPreflightFailedError,
     ValidationError,
 )
+from aios.logging import get_logger
 from aios.models.connections import ConnectorSecrets
 from aios.services import connections as connections_service
 from aios.services import connectors as connectors_service
@@ -57,6 +65,18 @@ from aios.services.attachment_staging import InboundAttachment
 from aios.services.wake import defer_wake
 
 router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
+
+log = get_logger("aios.api.routers.connectors")
+
+
+# SSE preflight: the four runtime-facing streams (#376) call
+# ``open_listen_for_*`` BEFORE constructing ``EventSourceResponse`` so
+# that a failed ``asyncpg.connect`` / ``add_listener`` surfaces as a
+# clean 503 with an aios error envelope.  Only ``asyncpg.PostgresError``
+# and ``OSError`` (the realistic transient failures during testcontainer
+# Postgres warmup or socket churn) trigger the 503 path; anything else
+# bubbles as an unhandled 500.
+_SSE_PREFLIGHT_EXCEPTIONS = (asyncpg.PostgresError, OSError)
 
 
 # ─── connector-facing endpoints (#301) ──────────────────────────────────────
@@ -308,9 +328,22 @@ async def get_connection_discovery(
     loop just doesn't see them.
     """
     _, connector, account_id, auth_connection_ids = auth
+    try:
+        subscription = await open_listen_for_connection_discovery(db_url, connector)
+    except _SSE_PREFLIGHT_EXCEPTIONS as exc:
+        log.warning(
+            "sse.connection_discovery.preflight_failed",
+            connector=connector,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        raise SSEPreflightFailedError(
+            "could not establish LISTEN connection for connection-discovery stream",
+            detail={"stream": "connection_discovery"},
+        ) from exc
     return EventSourceResponse(
         connection_discovery_stream(
-            db_url,
+            subscription,
             pool,
             connector,
             account_id=account_id,
@@ -489,9 +522,22 @@ async def get_runtime_calls(
     filter to that set — out-of-scope calls are silently omitted.
     """
     _, connector, account_id, auth_connection_ids = auth
+    try:
+        subscription = await open_listen_for_connector_calls_by_type(db_url, connector)
+    except _SSE_PREFLIGHT_EXCEPTIONS as exc:
+        log.warning(
+            "sse.runtime_calls.preflight_failed",
+            connector=connector,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        raise SSEPreflightFailedError(
+            "could not establish LISTEN connection for runtime-calls stream",
+            detail={"stream": "runtime_calls"},
+        ) from exc
     return EventSourceResponse(
         runtime_connector_calls_stream(
-            db_url,
+            subscription,
             pool,
             connector,
             account_id=account_id,
@@ -518,8 +564,21 @@ async def get_runtime_management_calls(
     calls are connector-type-wide, not per-connection.
     """
     _, connector, account_id, _scope = auth
+    try:
+        subscription = await open_listen_for_management_calls(db_url, connector)
+    except _SSE_PREFLIGHT_EXCEPTIONS as exc:
+        log.warning(
+            "sse.management_calls.preflight_failed",
+            connector=connector,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        raise SSEPreflightFailedError(
+            "could not establish LISTEN connection for management-calls stream",
+            detail={"stream": "management_calls"},
+        ) from exc
     return EventSourceResponse(
-        management_calls_stream(db_url, pool, connector, account_id=account_id),
+        management_calls_stream(subscription, pool, connector, account_id=account_id),
         ping=15,
     )
 

@@ -2882,7 +2882,7 @@
           "sessions"
         ],
         "summary": "Stream Events",
-        "description": "Stream session events as Server-Sent Events.",
+        "description": "Stream session events as Server-Sent Events.\n\nPreflights the LISTEN connection BEFORE constructing the response\n(issue #376): a transient ``asyncpg.connect`` failure during\ntestcontainer warmup or a brief Postgres outage surfaces as a clean\n503 with proper headers rather than a half-open chunked stream\nafter 200 OK has gone out.",
         "operationId": "stream_events_v1_sessions__session_id__stream_get",
         "parameters": [
           {

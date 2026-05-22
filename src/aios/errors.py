@@ -158,6 +158,25 @@ class ConnectorCallFailedError(AiosError):
     status_code = 502
 
 
+class SSEPreflightFailedError(AiosError):
+    """SSE route handler couldn't establish its LISTEN connection before
+    streaming (issue #376).
+
+    The four SSE generators used to open their own ``asyncpg.connect`` +
+    ``add_listener`` INSIDE the ``EventSourceResponse`` body — failure
+    surfaced as a half-open chunked stream because the 200 OK headers
+    were already on the wire.  The preflight refactor moves setup into
+    the route handler; this error is the proper-headers reply on
+    failure.
+
+    ``detail.stream`` names the failing stream so clients can branch
+    on which SSE endpoint failed.
+    """
+
+    error_type = "sse_preflight_failed"
+    status_code = 503
+
+
 # ─── FastAPI integration ─────────────────────────────────────────────────────
 
 
