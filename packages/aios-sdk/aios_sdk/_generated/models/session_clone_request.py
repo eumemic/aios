@@ -19,8 +19,8 @@ class SessionCloneRequest:
 
         Attributes:
             workspace_path (None | str | Unset): Override the clone's workspace volume path. Defaults to a fresh
-                ``workspace_root/<new_session_id>`` so clones don't fight over files. The directory must exist; aios will not
-                create it.
+                ``workspace_root/<account_id>/<new_session_id>`` so clones don't fight over files. Must resolve within the
+                account's workspace subdirectory. The directory must exist; aios will not create it.
     """
 
     workspace_path: None | str | Unset = UNSET

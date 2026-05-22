@@ -126,7 +126,8 @@ class SessionCreate(BaseModel):
         default=None,
         description=(
             "Absolute host path to use as the session workspace. "
-            "If omitted, defaults to workspace_root/<session_id>. "
+            "If omitted, defaults to workspace_root/<account_id>/<session_id>. "
+            "Must resolve within the account's workspace subdirectory. "
             "The directory must exist; aios will not create it."
         ),
     )
@@ -240,8 +241,9 @@ class SessionCloneRequest(BaseModel):
         default=None,
         description=(
             "Override the clone's workspace volume path. Defaults to a fresh "
-            "``workspace_root/<new_session_id>`` so clones don't fight over "
-            "files. The directory must exist; aios will not create it."
+            "``workspace_root/<account_id>/<new_session_id>`` so clones don't "
+            "fight over files. Must resolve within the account's workspace "
+            "subdirectory. The directory must exist; aios will not create it."
         ),
     )
 

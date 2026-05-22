@@ -280,7 +280,12 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     # let ``ensure_workspace_path``'s ``Path.resolve()`` dereference
     # to an out-of-jail target.  Re-running the check immediately
     # before the bind-mount closes that TOCTOU window.
-    validate_workspace_path(raw_path, account_id)
+    #
+    # Passing ``session_id`` enables the legacy carve-out for pre-#409
+    # sessions whose row still holds ``<workspace_root>/<session_id>``
+    # (no per-tenant subdir).  Without it those sessions cannot
+    # cold-start a sandbox post-#590 (issue #626).
+    validate_workspace_path(raw_path, account_id, session_id=session_id)
     workspace_path = ensure_workspace_path(raw_path)
     env_config = await _load_environment_config(session_id, account_id=account_id)
     memory_echoes = await _materialize_memory_mounts(session_id, account_id=account_id)

@@ -10814,7 +10814,7 @@
               }
             ],
             "title": "Workspace Path",
-            "description": "Override the clone's workspace volume path. Defaults to a fresh ``workspace_root/<new_session_id>`` so clones don't fight over files. The directory must exist; aios will not create it."
+            "description": "Override the clone's workspace volume path. Defaults to a fresh ``workspace_root/<account_id>/<new_session_id>`` so clones don't fight over files. Must resolve within the account's workspace subdirectory. The directory must exist; aios will not create it."
           }
         },
         "additionalProperties": false,
@@ -10878,7 +10878,7 @@
               }
             ],
             "title": "Workspace Path",
-            "description": "Absolute host path to use as the session workspace. If omitted, defaults to workspace_root/<session_id>. The directory must exist; aios will not create it."
+            "description": "Absolute host path to use as the session workspace. If omitted, defaults to workspace_root/<account_id>/<session_id>. Must resolve within the account's workspace subdirectory. The directory must exist; aios will not create it."
           },
           "env": {
             "additionalProperties": {
