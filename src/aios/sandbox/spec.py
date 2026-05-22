@@ -200,50 +200,69 @@ async def _materialize_github_clones(
     proxy = GitProxy(repos_map)
     await proxy.start()
 
-    materialized: list[GithubRepositoryResourceEcho] = []
-    failures: list[tuple[GithubRepositoryResourceEcho, GithubCloneError]] = []
-    for echo, token in echo_tokens:
-        try:
-            cache_dir = await ensure_cache_clone(echo.url, token)
-            await ensure_session_working_tree(
-                session_id=session_id,
-                resource_id=echo.id,
-                repo_url=echo.url,
-                token=token,
-                cache_dir=cache_dir,
-                proxy_url=proxy.proxy_url(echo.url, host=WORKER_NETWORK_ALIAS),
-                git_user_name=echo.git_user_name,
-                git_user_email=echo.git_user_email,
-            )
-        except GithubCloneError as err:
-            failures.append((echo, err))
-            continue
-        materialized.append(echo)
+    # The per-repo except below catches only GithubCloneError. Anything
+    # else (OSError from a full disk during mkdir/rmtree in
+    # ensure_session_working_tree, CancelledError on step interrupt,
+    # asyncpg failure during the failure-event append) escapes — and
+    # the proxy is already running. Without this outer guard the
+    # uvicorn server, httpx client, bound TCP port, and in-memory
+    # token map leak for the worker's lifetime. Mirrors the cleanup
+    # pattern at build_spec_from_session below.
+    try:
+        materialized: list[GithubRepositoryResourceEcho] = []
+        failures: list[tuple[GithubRepositoryResourceEcho, GithubCloneError]] = []
+        for echo, token in echo_tokens:
+            try:
+                cache_dir = await ensure_cache_clone(echo.url, token)
+                await ensure_session_working_tree(
+                    session_id=session_id,
+                    resource_id=echo.id,
+                    repo_url=echo.url,
+                    token=token,
+                    cache_dir=cache_dir,
+                    proxy_url=proxy.proxy_url(echo.url, host=WORKER_NETWORK_ALIAS),
+                    git_user_name=echo.git_user_name,
+                    git_user_email=echo.git_user_email,
+                )
+            except GithubCloneError as err:
+                failures.append((echo, err))
+                continue
+            materialized.append(echo)
 
-    # Log + append failure events outside the conn block so we don't
-    # hold one connection while acquiring a second from the same pool.
-    if failures:
-        for failed_echo, failure in failures:
+        # Log + append failure events outside the conn block so we don't
+        # hold one connection while acquiring a second from the same pool.
+        if failures:
+            for failed_echo, failure in failures:
+                log.warning(
+                    "sandbox.github_clone_failed",
+                    session_id=session_id,
+                    resource_id=failed_echo.id,
+                    repo_url=failed_echo.url,
+                    error=str(failure),
+                )
+                await sessions_service.append_event(
+                    pool,
+                    session_id,
+                    "lifecycle",
+                    {
+                        "event": "github_clone_failed",
+                        "resource_id": failed_echo.id,
+                        "repo_url": failed_echo.url,
+                        "message": str(failure),
+                    },
+                    account_id=account_id,
+                )
+        return materialized, proxy
+    except BaseException:
+        try:
+            await proxy.stop()
+        except Exception as cleanup_err:
             log.warning(
-                "sandbox.github_clone_failed",
+                "sandbox.git_proxy_cleanup_after_materialize_failure",
                 session_id=session_id,
-                resource_id=failed_echo.id,
-                repo_url=failed_echo.url,
-                error=str(failure),
+                error=str(cleanup_err),
             )
-            await sessions_service.append_event(
-                pool,
-                session_id,
-                "lifecycle",
-                {
-                    "event": "github_clone_failed",
-                    "resource_id": failed_echo.id,
-                    "repo_url": failed_echo.url,
-                    "message": str(failure),
-                },
-                account_id=account_id,
-            )
-    return materialized, proxy
+        raise
 
 
 def _network_policy_from_config(env_config: EnvironmentConfig | None) -> NetworkPolicy:
