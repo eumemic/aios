@@ -31,6 +31,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
+import structlog
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -274,3 +275,41 @@ async def aios_env(aios_env_minimal: dict[str, str], _reset_db_state: Any) -> di
         hash_key(plaintext),
     )
     return aios_env_minimal
+
+
+@pytest.fixture(autouse=True)
+def _configure_structlog_for_tests():
+    """Configure structlog before every test so caplog captures all messages.
+
+    Two changes vs. structlog's bare default (which is what tests see when
+    nothing calls aios.logging.configure_logging at process start):
+
+    1. logger_factory=structlog.stdlib.LoggerFactory() — routes log records
+       through Python's stdlib logging, which is what caplog hooks. The bare
+       default uses PrintLoggerFactory, which writes to stdout and is invisible
+       to caplog.
+
+    2. cache_logger_on_first_use=False — modules with module-level
+       log = structlog.get_logger() bind their config on first call. Caching
+       freezes that binding, so tests reconfiguring structlog (e.g., here)
+       cannot affect already-bound loggers. Disabling caching costs ~1us
+       per call to rebind — negligible at test-suite scale.
+
+    Function scope (not session) is deliberate: mid-suite code reconfigures
+    structlog and would otherwise leak across tests. ``aios.api.app.create_app``
+    calls ``aios.logging.configure_logging`` (which sets
+    cache_logger_on_first_use=True), and the ``capture_logs`` fixtures in
+    test_db_pool.py / test_worker_exit_diagnostics.py call
+    ``structlog.reset_defaults()`` in teardown. A once-per-session fixture
+    cannot defend against either — re-applying before each test does.
+    """
+    current = structlog.get_config()
+    structlog.configure(
+        **{
+            **current,
+            "logger_factory": structlog.stdlib.LoggerFactory(),
+            "cache_logger_on_first_use": False,
+        }
+    )
+    yield
+    structlog.configure(**current)
