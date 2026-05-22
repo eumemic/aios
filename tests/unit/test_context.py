@@ -566,7 +566,7 @@ class TestMonotonicity:
                     "━━━ Channels ━━━"
                 ):
                     stop = i
-                    if i > 0 and msgs[i - 1] == {"role": "assistant", "content": ""}:
+                    if i > 0 and msgs[i - 1] == {"role": "assistant", "content": "."}:
                         stop = i - 1
                     return msgs[:stop]
             return msgs
@@ -1383,7 +1383,7 @@ class TestSeparateAdjacentUserMessages:
         ]
         assert separate_adjacent_user_messages(msgs) == [
             {"role": "user", "content": "one"},
-            {"role": "assistant", "content": ""},
+            {"role": "assistant", "content": "."},
             {"role": "user", "content": "two"},
         ]
 
@@ -1413,9 +1413,9 @@ class TestSeparateAdjacentUserMessages:
         ]
         assert separate_adjacent_user_messages(msgs) == [
             {"role": "user", "content": "a"},
-            {"role": "assistant", "content": ""},
+            {"role": "assistant", "content": "."},
             {"role": "user", "content": "b"},
-            {"role": "assistant", "content": ""},
+            {"role": "assistant", "content": "."},
             {"role": "user", "content": "c"},
         ]
 
@@ -1431,7 +1431,7 @@ class TestSeparateAdjacentUserMessages:
         assert separate_adjacent_user_messages(msgs) == [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "one"},
-            {"role": "assistant", "content": ""},
+            {"role": "assistant", "content": "."},
             {"role": "user", "content": "two"},
         ]
 
@@ -1462,17 +1462,17 @@ class TestStubMissingReasoningContent:
         stub_missing_reasoning_content(msgs)
         assert msgs[0] == {"role": "tool", "tool_call_id": "x", "content": "result"}
 
-    def test_stubs_empty_assistant_separator(self) -> None:
-        """The empty-assistant separator inserted by
+    def test_stubs_separator_placeholder(self) -> None:
+        """The placeholder assistant inserted by
         :func:`separate_adjacent_user_messages` is still an assistant
         message and must also carry the stub."""
         msgs = [
             {"role": "user", "content": "a"},
-            {"role": "assistant", "content": ""},
+            {"role": "assistant", "content": "."},
             {"role": "user", "content": "b"},
         ]
         stub_missing_reasoning_content(msgs)
-        assert msgs[1] == {"role": "assistant", "content": "", "reasoning_content": ""}
+        assert msgs[1] == {"role": "assistant", "content": ".", "reasoning_content": ""}
 
     def test_mutates_in_place_and_returns(self) -> None:
         msgs = [{"role": "assistant", "content": "x"}]
@@ -1498,7 +1498,7 @@ class TestSeparateAdjacentUserMessagesPipeline:
         msgs = _full_pipeline(events, ["signal/test/1"])
 
         assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
-        assert msgs[1] == {"role": "assistant", "content": ""}
+        assert msgs[1] == {"role": "assistant", "content": "."}
         assert msgs[2]["content"].startswith("━━━ Channels ━━━")
 
     def test_blind_spot_injection_adjacent_user_gets_separator(self) -> None:
@@ -1525,7 +1525,7 @@ class TestSeparateAdjacentUserMessagesPipeline:
             for i, m in enumerate(msgs)
             if m["role"] == "user" and "RESULT" in str(m.get("content", ""))
         )
-        assert msgs[injection_idx + 1] == {"role": "assistant", "content": ""}
+        assert msgs[injection_idx + 1] == {"role": "assistant", "content": "."}
         assert msgs[injection_idx + 2]["role"] == "user"
         assert msgs[injection_idx + 2]["content"] == "anything else?"
 
@@ -1541,7 +1541,7 @@ class TestSeparateAdjacentUserMessagesPipeline:
         msgs = _full_pipeline(events, channels=[])
 
         assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
-        assert not any(m == {"role": "assistant", "content": ""} for m in msgs)
+        assert not any(m == {"role": "assistant", "content": "."} for m in msgs)
 
 
 class TestEventDataImmutability:
