@@ -28,10 +28,11 @@ let it propagate.
 from __future__ import annotations
 
 import json
+import weakref
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
-from sse_starlette import ServerSentEvent
+from sse_starlette import EventSourceResponse, ServerSentEvent
 
 from aios.db import queries
 from aios.logging import get_logger
@@ -47,6 +48,43 @@ log = get_logger("aios.api.sse")
 # socket churn — these surface as a clean 503 from the SSE route handlers
 # (issue #376). Anything else bubbles as an unhandled 500.
 SSE_PREFLIGHT_EXCEPTIONS = (asyncpg.PostgresError, OSError)
+
+
+def make_sse_response(
+    subscription: ListenSubscription,
+    content: AsyncIterator[ServerSentEvent],
+    *,
+    ping: int = 15,
+) -> EventSourceResponse:
+    """Build an ``EventSourceResponse`` whose ``ListenSubscription`` is
+    cleaned up even on paths that never iterate the wrapped generator.
+
+    Normal lifecycle: ``__call__`` runs, the generator iterates, its
+    ``finally: subscription.terminate()`` fires on consumer disconnect
+    or stream end.
+
+    Pathological lifecycle (the bug this exists to close): the request
+    task is cancelled between FastAPI's ``response = await handler()``
+    and the subsequent ``await response(scope, receive, send)`` (e.g.
+    server shutdown striking mid-dispatch, or a fast client disconnect).
+    ``__call__`` never runs, the async generator is never started — and
+    Python's async-generator semantics guarantee that an
+    *unstarted* generator's ``finally`` block does NOT execute on
+    ``aclose`` or GC. Without a backup, the dedicated asyncpg
+    connection, its ``LISTEN``, and the SSE subscriber advisory lock
+    leak until TCP keepalive reaps the backend (~2h).
+
+    A ``weakref.finalize`` registers ``subscription.terminate`` to fire
+    when the response is GC'd, catching the un-invoked path. In the
+    normal path it fires *after* the generator's own ``finally`` has
+    already terminated the connection — ``terminate`` is idempotent at
+    asyncpg's transport layer (``transport.abort`` and the protocol's
+    ``_state`` transition both tolerate repeated calls), so the second
+    call is a no-op.
+    """
+    response = EventSourceResponse(content, ping=ping)
+    weakref.finalize(response, subscription.terminate)
+    return response
 
 
 def _event_to_sse(event_dict: dict[str, Any]) -> ServerSentEvent:
