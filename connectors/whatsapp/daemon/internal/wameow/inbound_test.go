@@ -155,7 +155,7 @@ func (n *captureNotifier) Broadcast(method string, params any) {
 
 func TestHandleEventDispatch(t *testing.T) {
 	notify := &captureNotifier{}
-	c := &Client{notify: notify, log: discardLogger()}
+	c := &Client{notify: notify, log: discardLogger(), msgs: newTestMessageStore(t)}
 
 	sender := types.NewJID("15553334444", types.DefaultUserServer)
 	c.handleEvent(&events.Message{
@@ -189,7 +189,7 @@ func TestHandleEventDispatch(t *testing.T) {
 
 func TestHandleEventLoggedOutOmitsReasonWhenStreamError(t *testing.T) {
 	notify := &captureNotifier{}
-	c := &Client{notify: notify, log: discardLogger()}
+	c := &Client{notify: notify, log: discardLogger(), msgs: newTestMessageStore(t)}
 
 	// OnConnect == false (stream:error path): Reason is the zero value
 	// and must not be surfaced to the wire as misleading data.

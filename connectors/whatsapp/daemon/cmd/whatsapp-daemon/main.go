@@ -68,6 +68,7 @@ func main() {
 
 	handler.RegisterSend(reg, client.SendMessage)
 	handler.RegisterPairing(reg, &clientPairAdapter{client: client})
+	handler.RegisterMessageOps(reg, client)
 
 	// Connect runs in parallel with srv.Run so the listener binds (and
 	// `version` RPC starts answering) while the WhatsApp handshake is

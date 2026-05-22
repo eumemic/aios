@@ -125,6 +125,101 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
             raise RuntimeError(f"sendMessage returned non-dict: {result!r}")
         return result
 
+    @tool()
+    async def whatsapp_react(
+        self,
+        message_id: str,
+        reaction: str,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any]:
+        """React to a previously-seen WhatsApp message.
+
+        Args:
+            message_id: The id of the message to react to.  Take this
+                from the ``message_id`` field of the inbound metadata
+                you're targeting (visible in the channel headers
+                rendered into your context).
+            reaction: The reaction emoji.  Pass an empty string to
+                clear any prior reaction you placed on the message.
+
+        Returns:
+            ``{"message_id": "...", "timestamp_ms": ...}`` of the
+            reaction send itself.  Raises if the daemon has never seen
+            the target message — typically because it predates the bot
+            joining the chat or is older than the daemon's local index.
+        """
+        state = self.state[connection_id]
+        result = await state.daemon.rpc.call(
+            "sendReaction",
+            {"message_id": message_id, "reaction": reaction},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(f"sendReaction returned non-dict: {result!r}")
+        return result
+
+    @tool()
+    async def whatsapp_edit_message(
+        self,
+        message_id: str,
+        text: str,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any]:
+        """Edit one of your own previously-sent WhatsApp messages.
+
+        WhatsApp only allows editing messages you sent, and only within
+        ~15 minutes of the original send; the daemon refuses outside
+        either window with a structured error you can read in the
+        failure path.
+
+        Args:
+            message_id: The id of your prior outbound message.
+            text: The replacement body.
+
+        Returns:
+            ``{"message_id": "...", "timestamp_ms": ...}`` of the edit
+            envelope (a separate, distinct id from the original).
+        """
+        state = self.state[connection_id]
+        result = await state.daemon.rpc.call(
+            "editMessage",
+            {"message_id": message_id, "text": text},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(f"editMessage returned non-dict: {result!r}")
+        return result
+
+    @tool()
+    async def whatsapp_delete_message(
+        self,
+        message_id: str,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any]:
+        """Delete one of your own previously-sent WhatsApp messages
+        (the \"delete for everyone\" action).
+
+        Like editing, deletion is only valid on your own outbounds;
+        the daemon enforces this rather than waiting for WhatsApp's
+        server to reject with an opaque error.
+
+        Args:
+            message_id: The id of your prior outbound message.
+
+        Returns:
+            ``{"message_id": "...", "timestamp_ms": ...}`` of the
+            revoke envelope.
+        """
+        state = self.state[connection_id]
+        result = await state.daemon.rpc.call(
+            "deleteMessage",
+            {"message_id": message_id},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(f"deleteMessage returned non-dict: {result!r}")
+        return result
+
 
 def _pick_free_port(host: str) -> int:
     """Bind to an OS-assigned loopback port and immediately release it.

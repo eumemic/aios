@@ -37,6 +37,7 @@ import (
 type Client struct {
 	wa     atomic.Pointer[whatsmeow.Client]
 	store  *sqlstore.Container
+	msgs   *MessageStore
 	notify Notifier
 	log    *slog.Logger
 	pair   pairing
@@ -62,8 +63,13 @@ func NewClient(
 		_ = container.Close()
 		return nil, fmt.Errorf("get first device: %w", err)
 	}
+	msgs, err := openMessageStore(storeDir)
+	if err != nil {
+		_ = container.Close()
+		return nil, err
+	}
 	wa := whatsmeow.NewClient(device, newWaLogger(log, "client"))
-	c := &Client{store: container, notify: notify, log: log}
+	c := &Client{store: container, msgs: msgs, notify: notify, log: log}
 	c.wa.Store(wa)
 	wa.AddEventHandler(c.handleEvent)
 	return c, nil
@@ -102,12 +108,35 @@ func (c *Client) SendMessage(ctx context.Context, jidStr, text string) (string, 
 	if err != nil {
 		return "", 0, err
 	}
+	c.recordOutbound(ctx, string(resp.ID), jid)
 	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
+}
+
+// recordOutbound stamps an outbound message into the message store so
+// the model can later react to / edit / revoke its own sends by id.
+// Best-effort: a store failure here is logged but doesn't fail the
+// send (the send already went through; failing the RPC would mislead
+// the caller).
+func (c *Client) recordOutbound(ctx context.Context, msgID string, chatJID types.JID) {
+	ourID := c.wa.Load().Store.ID
+	if ourID == nil {
+		// Edge case: outbound succeeded but our identity flipped to
+		// nil between SendMessage and here (e.g., concurrent unpair).
+		// Skip the record; the message_id is still returned to the
+		// caller for visibility.
+		return
+	}
+	if err := c.msgs.Put(ctx, msgID, chatJID.String(), ourID.String(), true); err != nil {
+		c.log.Warn("wameow.msgstore_put_failed", "id", msgID, "err", err)
+	}
 }
 
 // Close disconnects from WhatsApp and closes the sqlstore.
 func (c *Client) Close() {
 	c.wa.Load().Disconnect()
+	if err := c.msgs.Close(); err != nil {
+		c.log.Warn("wameow.msgstore_close_error", "err", err)
+	}
 	if err := c.store.Close(); err != nil {
 		c.log.Warn("wameow.store_close_error", "err", err)
 	}

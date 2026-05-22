@@ -1,6 +1,8 @@
 package wameow
 
 import (
+	"context"
+
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -14,6 +16,9 @@ type Notifier interface {
 func (c *Client) handleEvent(evt any) {
 	switch e := evt.(type) {
 	case *events.Message:
+		if e.Message != nil {
+			c.recordInbound(e)
+		}
 		if params := translateMessage(e); params != nil {
 			c.notify.Broadcast("message", params)
 		}
@@ -52,6 +57,25 @@ func translateMessage(e *events.Message) map[string]any {
 		"chat_type":      chatTypeFromJID(e.Info.Chat),
 		"is_self":        e.Info.IsFromMe,
 		"text":           extractText(e.Message),
+	}
+}
+
+// recordInbound stamps a received message into the message store so
+// the model can later react to / edit / revoke it by id.  Best-effort:
+// a store failure is logged but doesn't block the broadcast.
+//
+// Use a background context — handleEvent doesn't get one from whatsmeow,
+// and the put is tiny.
+func (c *Client) recordInbound(e *events.Message) {
+	err := c.msgs.Put(
+		context.Background(),
+		string(e.Info.ID),
+		e.Info.Chat.String(),
+		e.Info.Sender.String(),
+		e.Info.IsFromMe,
+	)
+	if err != nil {
+		c.log.Warn("wameow.msgstore_put_failed", "id", e.Info.ID, "err", err)
 	}
 }
 

@@ -132,8 +132,13 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
             # The raw int still goes to the model; only the ISO is dropped.
             parts.append(f"timestamp_ms={timestamp_ms}")
     message_id = metadata.get("message_id")
+    # Telegram surfaces ints; WhatsApp's whatsmeow IDs are hex strings
+    # like "3EB0E03B46303C22D750E2".  Both render the same — the model
+    # only needs the value verbatim to pass into react/edit/delete tools.
     if isinstance(message_id, int):
         parts.append(f"message_id={message_id}")
+    elif isinstance(message_id, str) and message_id:
+        parts.append(f"message_id={message_id!r}")
     if metadata.get("edited") is True:
         parts.append("edited=true")
     edit_target = metadata.get("edit_target_timestamp_ms")
