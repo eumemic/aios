@@ -205,10 +205,10 @@ class Settings(BaseSettings):
     def _require_absolute_workspace_root(self) -> Settings:
         if not self.workspace_root.is_absolute():
             raise ValueError(
-                "AIOS_WORKSPACE_ROOT must be an absolute path; got "
-                f"{self.workspace_root!r}. API and worker processes "
-                "resolve relative paths against their own CWD, producing "
-                "diverging session workspace_path values and ForbiddenError "
+                f"AIOS_WORKSPACE_ROOT must be an absolute path; got '{self.workspace_root}'. "
+                "Note: pathlib does not expand '~'; write the full path. "
+                "API and worker processes resolve relative paths against their own CWD, "
+                "producing diverging session workspace_path values and ForbiddenError "
                 "on tool calls."
             )
         return self

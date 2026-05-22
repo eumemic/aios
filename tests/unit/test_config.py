@@ -25,10 +25,32 @@ def test_workspace_root_must_be_absolute(tmp_path: Path, monkeypatch: pytest.Mon
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_API_KEY=k\nAIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", "./workspaces")
 
-    with pytest.raises(ValidationError, match="absolute"):
+    with pytest.raises(ValidationError, match="must be an absolute path"):
+        Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+
+
+def test_workspace_root_error_mentions_tilde(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The error message mentions that ``~`` is not expanded.
+
+    A common operator mistake is ``AIOS_WORKSPACE_ROOT=~/aios/workspaces``,
+    which pathlib stores verbatim — ``Path("~/aios/workspaces").is_absolute()``
+    is False. The message names this explicitly so the operator doesn't have
+    to relearn it.
+    """
+    from pydantic import ValidationError
+
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.setenv("AIOS_WORKSPACE_ROOT", "~/aios/workspaces")
+
+    with pytest.raises(ValidationError, match=r"does not expand '~'"):
         Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
 
 
@@ -37,7 +59,7 @@ def test_workspace_root_accepts_absolute(tmp_path: Path, monkeypatch: pytest.Mon
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_API_KEY=k\nAIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", "/var/lib/test")
 
     s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
@@ -51,7 +73,7 @@ def test_workspace_root_default_is_absolute(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_API_KEY=k\nAIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_WORKSPACE_ROOT", raising=False)
 
     s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
