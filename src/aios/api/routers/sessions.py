@@ -24,7 +24,7 @@ from aios.api.deps import (
     PoolDep,
     ProcrastinateDep,
 )
-from aios.api.sse import SSE_PREFLIGHT_EXCEPTIONS, sse_event_stream
+from aios.api.sse import SSE_PREFLIGHT_EXCEPTIONS, make_sse_response, sse_event_stream
 from aios.db import queries
 from aios.db.listen import (
     SESSION_INTERRUPT_CHANNEL,
@@ -615,9 +615,9 @@ async def stream_events(
             "could not establish LISTEN connection for session events stream",
             detail={"stream": "session_events"},
         ) from exc
-    return EventSourceResponse(
+    return make_sse_response(
+        subscription,
         sse_event_stream(subscription, pool, session_id, after_seq=after_seq),
-        ping=15,
     )
 
 

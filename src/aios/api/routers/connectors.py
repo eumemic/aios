@@ -36,6 +36,7 @@ from aios.api.deps import (
 from aios.api.sse import (
     SSE_PREFLIGHT_EXCEPTIONS,
     connection_discovery_stream,
+    make_sse_response,
     management_calls_stream,
     runtime_connector_calls_stream,
 )
@@ -331,7 +332,8 @@ async def get_connection_discovery(
             "could not establish LISTEN connection for connection-discovery stream",
             detail={"stream": "connection_discovery"},
         ) from exc
-    return EventSourceResponse(
+    return make_sse_response(
+        subscription,
         connection_discovery_stream(
             subscription,
             pool,
@@ -339,7 +341,6 @@ async def get_connection_discovery(
             account_id=account_id,
             connection_ids=auth_connection_ids,
         ),
-        ping=15,
     )
 
 
@@ -525,7 +526,8 @@ async def get_runtime_calls(
             "could not establish LISTEN connection for runtime-calls stream",
             detail={"stream": "runtime_calls"},
         ) from exc
-    return EventSourceResponse(
+    return make_sse_response(
+        subscription,
         runtime_connector_calls_stream(
             subscription,
             pool,
@@ -533,7 +535,6 @@ async def get_runtime_calls(
             account_id=account_id,
             connection_ids=auth_connection_ids,
         ),
-        ping=15,
     )
 
 
@@ -567,9 +568,9 @@ async def get_runtime_management_calls(
             "could not establish LISTEN connection for management-calls stream",
             detail={"stream": "management_calls"},
         ) from exc
-    return EventSourceResponse(
+    return make_sse_response(
+        subscription,
         management_calls_stream(subscription, pool, connector, account_id=account_id),
-        ping=15,
     )
 
 
