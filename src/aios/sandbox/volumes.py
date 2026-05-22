@@ -112,9 +112,13 @@ def validate_workspace_path(
     every tool call.  The carve-out is keyed on the session_id the
     caller is currently provisioning — a path matching the legacy shape
     but naming a *different* session_id is still rejected, so the
-    cross-tenant defense holds.  The create-time call sites leave
-    ``session_id`` unset so user-supplied paths remain strictly jailed
-    to the account subdir.
+    cross-tenant defense holds.  The carve-out also requires the
+    resolved path to remain under ``workspace_root``: a symlink at
+    ``<workspace_root>/<session_id>`` pointing at ``/etc`` (or any
+    other path outside the jail) is rejected, preserving the
+    host-FS-escape defense the strict branch provides.  The create-time
+    call sites leave ``session_id`` unset so user-supplied paths remain
+    strictly jailed to the account subdir.
 
     Limitations: this is the create-time + bind-mount-time check on
     the workspace_path argument.  Symlinks WRITTEN inside the
@@ -138,7 +142,7 @@ def validate_workspace_path(
         return
     if session_id is not None:
         legacy_path = (workspace_root / session_id).resolve()
-        if path == legacy_path:
+        if path == legacy_path and legacy_path.is_relative_to(workspace_root):
             return
     raise ForbiddenError(
         "workspace_path must resolve to within the account's workspace subdirectory",

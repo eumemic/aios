@@ -104,3 +104,18 @@ class TestLegacyDefaultCompat:
         other_session_legacy = str(workspace_root / "sess_other")
         with pytest.raises(ForbiddenError):
             validate_workspace_path(other_session_legacy, "acc_a", session_id="sess_01abc")
+
+    def test_legacy_path_symlinked_outside_workspace_root_rejected(
+        self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """If ``<workspace_root>/<session_id>`` is a symlink whose target
+        escapes ``workspace_root``, the carve-out must reject.  Without
+        this check ``Path.resolve()`` dereferences the symlink on both
+        sides of the equality comparison, the two resolved paths match,
+        and the bind-mount would target the symlink's destination —
+        re-opening the host-FS-escape vector that PR #590 closed."""
+        outside_target = tmp_path_factory.mktemp("outside")
+        symlink = workspace_root / "sess_01abc"
+        symlink.symlink_to(outside_target)
+        with pytest.raises(ForbiddenError):
+            validate_workspace_path(str(symlink), "acc_a", session_id="sess_01abc")
