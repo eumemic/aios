@@ -1117,6 +1117,55 @@ class TestFocalRendering:
         assert "reaction" in content
         assert "'?'" not in content
 
+    def test_focal_match_reaction_renders_string_target_message_id(self) -> None:
+        """WhatsApp reactions identify the target by string message_id
+        (no equivalent of Signal's author+timestamp pair).  Pre-fix the
+        renderer ignored the field, so the model saw `[reaction='👍']`
+        with no way to match against the original send."""
+        md = {
+            "channel": self._CHAN_A,
+            "reaction": {
+                "emoji": "👍",
+                "target_message_id": "3EB0ORIGINAL",
+            },
+        }
+        events = [_evt(1, "user", content="", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "[reaction='👍'" in content
+        assert "target_message_id='3EB0ORIGINAL'" in content
+
+    def test_focal_match_edit_renders_target_message_id(self) -> None:
+        """WhatsApp edits flag ``edited=True`` and identify the original
+        by string ``edit_target_message_id`` (no equivalent of Signal's
+        ``edit_target_timestamp_ms``).  Pre-fix the model saw
+        `edited=true` with no anchor."""
+        md = {
+            "channel": self._CHAN_A,
+            "edited": True,
+            "edit_target_message_id": "3EB0ORIGINAL",
+        }
+        events = [
+            _evt(1, "user", content="new body", metadata=md, focal_channel_at_arrival=self._CHAN_A)
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "edited=true" in content
+        assert "edit_target_message_id='3EB0ORIGINAL'" in content
+
+    def test_focal_match_revoke_renders_target_message_id(self) -> None:
+        """A peer revoking their message arrives with empty content and
+        ``revoked=True`` + ``revoke_target_message_id``.  Pre-fix
+        neither flag was rendered, so the revoke was invisible to the
+        model."""
+        md = {
+            "channel": self._CHAN_A,
+            "revoked": True,
+            "revoke_target_message_id": "3EB0ORIGINAL",
+        }
+        events = [_evt(1, "user", content="", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert "revoked=true" in content
+        assert "revoke_target_message_id='3EB0ORIGINAL'" in content
+
     def test_focal_match_iso_timestamp(self) -> None:
         md = {"channel": self._CHAN_A, "timestamp_ms": 1776401210703}
         events = [_evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival=self._CHAN_A)]

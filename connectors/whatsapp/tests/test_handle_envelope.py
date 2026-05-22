@@ -177,3 +177,22 @@ async def test_handle_inbound_revoke_stamps_metadata(connector: WhatsappConnecto
     assert kwargs["content"] == ""
     assert kwargs["metadata"]["revoked"] is True
     assert kwargs["metadata"]["revoke_target_message_id"] == "3EB0ORIGINAL"
+
+
+async def test_handle_inbound_all_attachments_unreadable_stamps_metadata(
+    connector: WhatsappConnector, tmp_path: Path
+) -> None:
+    # Daemon declared 2 attachments but both files are missing /
+    # truncated before connector reads.  Pre-fix: model saw an empty
+    # message with no clue bytes were lost.  Post-fix: metadata.
+    # attachments_unreadable=2 surfaces the loss to the model.
+    p = dm_payload(text="check these out")
+    p["attachments"] = [
+        {"path": str(tmp_path / "missing1.jpg"), "mimetype": "image/jpeg", "filename": "a.jpg"},
+        {"path": str(tmp_path / "missing2.jpg"), "mimetype": "image/jpeg", "filename": "b.jpg"},
+    ]
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["attachments"] is None
+    assert kwargs["metadata"]["attachments_unreadable"] == 2

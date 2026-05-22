@@ -17,6 +17,7 @@ type MessageOps interface {
 	Edit(ctx context.Context, msgID, newText string) (string, int64, error)
 	Revoke(ctx context.Context, msgID string) (string, int64, error)
 	IsNotFoundErr(err error) bool
+	IsNotOwnMessageErr(err error) bool
 }
 
 type reactArgs struct {
@@ -90,6 +91,13 @@ func RegisterMessageOps(reg *Registry, ops MessageOps) {
 func mapOpError(err error, ops MessageOps) *rpc.Error {
 	if ops.IsNotFoundErr(err) {
 		return &rpc.Error{Code: rpc.ErrCodeInvalidParams, Message: "unknown message_id"}
+	}
+	if ops.IsNotOwnMessageErr(err) {
+		// Edit/Revoke target exists in the store but was sent by a
+		// peer — surface as a precondition refusal, not a server
+		// failure, so the model retries with a different target
+		// rather than treating it as transient infra trouble.
+		return &rpc.Error{Code: rpc.ErrCodeInvalidParams, Message: err.Error()}
 	}
 	return &rpc.Error{Code: rpc.ErrCodeServerError, Message: err.Error()}
 }

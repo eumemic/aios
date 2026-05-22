@@ -144,6 +144,20 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
     edit_target = metadata.get("edit_target_timestamp_ms")
     if isinstance(edit_target, int):
         parts.append(f"edit_target_timestamp_ms={edit_target}")
+    edit_target_message_id = metadata.get("edit_target_message_id")
+    if isinstance(edit_target_message_id, str) and edit_target_message_id:
+        # WhatsApp identifies edit targets by string message_id, not
+        # by Signal's timestamp_ms.  Render verbatim so the model can
+        # match the target against the message_id of a prior event.
+        parts.append(f"edit_target_message_id={edit_target_message_id!r}")
+    if metadata.get("revoked") is True:
+        parts.append("revoked=true")
+    revoke_target_message_id = metadata.get("revoke_target_message_id")
+    if isinstance(revoke_target_message_id, str) and revoke_target_message_id:
+        # The peer revoked their own message; the original event is
+        # still in the log (monotonicity), but the model should treat
+        # it as retracted going forward.
+        parts.append(f"revoke_target_message_id={revoke_target_message_id!r}")
     if metadata.get("self_mentioned") is True:
         # Hoist ahead of the structured ``mentions`` list — for
         # group chats the model often only needs to know "was I
@@ -182,6 +196,13 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
         target_ts = reaction.get("target_timestamp_ms")
         if isinstance(target_ts, int):
             r_parts.append(f"target_timestamp_ms={target_ts}")
+        target_message_id = reaction.get("target_message_id")
+        if isinstance(target_message_id, str) and target_message_id:
+            # WhatsApp reactions identify their target by string
+            # message_id (no equivalent of Signal's author+timestamp
+            # pair).  Render verbatim so the model can match against
+            # the message_id of a prior event.
+            r_parts.append(f"target_message_id={target_message_id!r}")
         header += "\n[" + " · ".join(r_parts) + "]"
     reply_to = metadata.get("reply_to")
     if isinstance(reply_to, dict):

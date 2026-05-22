@@ -204,3 +204,22 @@ def test_parse_message_drops_edit_revoke_without_target_id() -> None:
     p = dm_payload(text="")
     p["revoke"] = {"target_message_id": ""}
     assert parse_message(p) is None
+
+
+def test_parse_message_drops_whitespace_only_text() -> None:
+    # Whitespace ("   ", "\n", etc.) is truthy in Python but carries
+    # no model-relevant signal — peer mis-tapped or sent an
+    # accessibility-input artifact.  Drop just like empty text.
+    assert parse_message(dm_payload(text="   ")) is None
+    assert parse_message(dm_payload(text="\n\t")) is None
+
+
+def test_parse_message_keeps_whitespace_text_when_other_signal_present() -> None:
+    # When there IS other signal (reaction/attachment/sticker), the
+    # whitespace-only text isn't load-bearing — but the event itself
+    # is, so don't drop.
+    p = dm_payload(text="   ")
+    p["reaction"] = {"emoji": "👍", "target_message_id": "X"}
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.text == "   "  # surfaces as-received; the drop is conditional only

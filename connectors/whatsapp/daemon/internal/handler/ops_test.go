@@ -16,9 +16,11 @@ type stubOps struct {
 	react  func(ctx context.Context, msgID, emoji string) (string, int64, error)
 	edit   func(ctx context.Context, msgID, text string) (string, int64, error)
 	revoke func(ctx context.Context, msgID string) (string, int64, error)
-	// notFoundErr is what IsNotFoundErr matches against — set in
-	// tests that want to verify the ErrCodeInvalidParams mapping.
+	// notFoundErr / notOwnErr are what IsNotFoundErr / IsNotOwnMessageErr
+	// match against — set in tests that want to verify the
+	// ErrCodeInvalidParams mapping for either branch.
 	notFoundErr error
+	notOwnErr   error
 }
 
 func (s *stubOps) React(ctx context.Context, msgID, emoji string) (string, int64, error) {
@@ -32,6 +34,9 @@ func (s *stubOps) Revoke(ctx context.Context, msgID string) (string, int64, erro
 }
 func (s *stubOps) IsNotFoundErr(err error) bool {
 	return s.notFoundErr != nil && errors.Is(err, s.notFoundErr)
+}
+func (s *stubOps) IsNotOwnMessageErr(err error) bool {
+	return s.notOwnErr != nil && errors.Is(err, s.notOwnErr)
 }
 
 func TestSendReactionDispatchesAndReturnsResult(t *testing.T) {
@@ -112,6 +117,28 @@ func TestDeleteMessageDispatches(t *testing.T) {
 	}
 	if seenID != "M1" {
 		t.Errorf("revoke arg = %q", seenID)
+	}
+}
+
+func TestMessageOpNotOwnMessageMapsToInvalidParams(t *testing.T) {
+	// Edit/Revoke on a peer's message returns ErrNotOwnMessage; the
+	// handler must surface it as a precondition refusal so the model
+	// distinguishes "you targeted a foreign message you can't edit"
+	// from a transient infra failure that should retry.
+	sentinel := errors.New("sentinel-not-own")
+	reg := NewRegistry()
+	RegisterMessageOps(reg, &stubOps{
+		edit: func(context.Context, string, string) (string, int64, error) {
+			return "", 0, sentinel
+		},
+		notOwnErr: sentinel,
+	})
+	_, rpcErr := reg.Dispatch(context.Background(), "editMessage", json.RawMessage(`{"message_id":"FOREIGN","text":"x"}`))
+	if rpcErr == nil {
+		t.Fatalf("expected rpc error")
+	}
+	if rpcErr.Code != rpc.ErrCodeInvalidParams {
+		t.Errorf("code = %d, want ErrCodeInvalidParams", rpcErr.Code)
 	}
 }
 

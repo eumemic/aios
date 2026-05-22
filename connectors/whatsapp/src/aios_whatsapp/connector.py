@@ -104,6 +104,13 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
             metadata["revoked"] = True
             metadata["revoke_target_message_id"] = msg.revoke_target_message_id
         attachment_tuples = await self._read_attachments(msg) if msg.attachments else None
+        if msg.attachments and attachment_tuples is None:
+            # Daemon declared attachments but every Path.read_bytes
+            # raised — the model would otherwise see an empty-content
+            # event with no signal that bytes were lost.  Stamp a
+            # diagnostic so the model can apologise to the user
+            # rather than ignore them.
+            metadata["attachments_unreadable"] = len(msg.attachments)
         await self.emit_inbound(
             connection_id=connection_id,
             event_id=f"whatsapp-{msg.sender_jid}-{msg.message_id}",

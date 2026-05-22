@@ -33,53 +33,109 @@ type Attachment struct {
 // One or more attachments: WhatsApp has no media-group equivalent,
 // so each attachment becomes its own message.  Caption (= text)
 // rides on the first attachment only; subsequent attachments arrive
-// caption-less.  Returns the FIRST send's id+timestamp — for the
-// caption-bearing path that's the most useful confirmation handle
-// for the model.  All-or-nothing semantics are impossible at the
-// WhatsApp protocol level (no atomic batch send); a mid-loop
-// failure leaves the already-sent attachments delivered and
-// surfaces an error that names which attachment failed.
+// caption-less.  Exception: WhatsApp's AudioMessage proto has no
+// Caption field — when text is non-empty AND the first attachment is
+// audio, the text is sent as a separate Conversation message first
+// so it isn't silently dropped on the wire.
+//
+// Returns the FULL slice of delivered message_ids (in send order)
+// plus the FIRST send's timestamp.  All-or-nothing semantics are
+// impossible at the WhatsApp protocol level (no atomic batch send);
+// a mid-loop failure returns a *PartialSendError carrying the ids
+// that DID make it onto the wire, so the model can still
+// react/edit/revoke each delivered attachment by id.
 func (c *Client) SendMessage(
 	ctx context.Context,
 	jidStr, text string,
 	attachments []Attachment,
-) (string, int64, error) {
+) ([]string, int64, error) {
 	wa, jid, err := c.prepareSend(jidStr)
 	if err != nil {
-		return "", 0, err
+		return nil, 0, err
 	}
 	if len(attachments) == 0 {
 		msg := &waE2E.Message{Conversation: proto.String(text)}
-		return c.sendOne(ctx, wa, jid, msg)
+		id, ts, sendErr := c.sendOne(ctx, wa, jid, msg)
+		if sendErr != nil {
+			return nil, 0, sendErr
+		}
+		return []string{id}, ts, nil
 	}
 
-	var firstID string
 	var firstTS int64
+	delivered := make([]string, 0, len(attachments)+1)
+	captionForFirstAttachment := text
+	if text != "" && classify(attachments[0].Mimetype) == attachKindAudio {
+		// Audio carries no caption surface.  Send the text as its
+		// own Conversation message FIRST so it isn't silently
+		// dropped, then send the audio caption-less.
+		textMsg := &waE2E.Message{Conversation: proto.String(text)}
+		id, ts, sendErr := c.sendOne(ctx, wa, jid, textMsg)
+		if sendErr != nil {
+			return nil, 0, fmt.Errorf("send accompanying text for audio: %w", sendErr)
+		}
+		delivered = append(delivered, id)
+		firstTS = ts
+		captionForFirstAttachment = ""
+	}
+
 	for i, att := range attachments {
 		caption := ""
 		if i == 0 {
-			caption = text
+			caption = captionForFirstAttachment
 		}
 		msg, buildErr := c.buildAttachmentMessage(ctx, wa, att, caption)
 		if buildErr != nil {
-			return firstID, firstTS, attachmentSendError(i, att.Filename, firstID, buildErr)
+			return delivered, firstTS, &PartialSendError{
+				Cause: buildErr, DeliveredIDs: append([]string{}, delivered...),
+				FailedIndex: i, FailedFilename: att.Filename,
+			}
 		}
 		id, ts, sendErr := c.sendOne(ctx, wa, jid, msg)
 		if sendErr != nil {
-			return firstID, firstTS, attachmentSendError(i, att.Filename, firstID, sendErr)
+			return delivered, firstTS, &PartialSendError{
+				Cause: sendErr, DeliveredIDs: append([]string{}, delivered...),
+				FailedIndex: i, FailedFilename: att.Filename,
+			}
 		}
-		if i == 0 {
-			firstID, firstTS = id, ts
+		delivered = append(delivered, id)
+		if firstTS == 0 {
+			firstTS = ts
 		}
 	}
-	return firstID, firstTS, nil
+	return delivered, firstTS, nil
 }
 
-func attachmentSendError(index int, filename, deliveredFirstID string, cause error) error {
-	if deliveredFirstID != "" {
-		return fmt.Errorf("attachment %d (%s): %w (first attachment %s already delivered)", index, filename, cause, deliveredFirstID)
+// PartialSendError wraps a mid-loop multi-attachment failure with the
+// ids that DID make it onto the wire before the loop aborted.  The
+// handler layer surfaces these ids via rpc.Error.Data so the model
+// can reference the delivered attachments by id (for react/edit/
+// revoke) instead of treating the partial delivery as a complete
+// loss.
+type PartialSendError struct {
+	Cause          error
+	DeliveredIDs   []string
+	FailedIndex    int
+	FailedFilename string
+}
+
+func (e *PartialSendError) Error() string {
+	if len(e.DeliveredIDs) > 0 {
+		return fmt.Sprintf(
+			"attachment %d (%s): %v (delivered ids before failure: %v)",
+			e.FailedIndex, e.FailedFilename, e.Cause, e.DeliveredIDs,
+		)
 	}
-	return fmt.Errorf("attachment %d (%s): %w", index, filename, cause)
+	return fmt.Sprintf("attachment %d (%s): %v", e.FailedIndex, e.FailedFilename, e.Cause)
+}
+
+func (e *PartialSendError) Unwrap() error { return e.Cause }
+
+// Partial fulfils the duck-typed interface that handler/send.go
+// expects via errors.As, keeping the handler package decoupled from
+// the wameow concrete type.
+func (e *PartialSendError) Partial() (delivered []string, failedIndex int, failedFilename string) {
+	return e.DeliveredIDs, e.FailedIndex, e.FailedFilename
 }
 
 func (c *Client) prepareSend(jidStr string) (*whatsmeow.Client, types.JID, error) {
@@ -99,7 +155,7 @@ func (c *Client) sendOne(ctx context.Context, wa *whatsmeow.Client, jid types.JI
 	if err != nil {
 		return "", 0, err
 	}
-	c.recordOutbound(ctx, string(resp.ID), jid)
+	c.recordOutbound(ctx, wa, string(resp.ID), jid)
 	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
 }
 

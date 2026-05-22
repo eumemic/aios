@@ -1,6 +1,7 @@
 package wameow
 
 import (
+	"context"
 	"log/slog"
 	"testing"
 	"time"
@@ -50,12 +51,105 @@ func TestExtractTextFromExtendedTextMessage(t *testing.T) {
 }
 
 func TestExtractTextReturnsEmptyForUnsupportedShape(t *testing.T) {
-	// Attachment-without-caption: empty text is the contract; the
-	// downstream layer drops attachment-only messages until PR adds
-	// attachment plumbing.
+	// Attachment-without-caption: empty text is the contract.  Sticker
+	// and audio messages don't carry a caption surface, so they
+	// always return empty here.
 	msg := &waE2E.Message{ImageMessage: &waE2E.ImageMessage{}}
 	if got := extractText(msg); got != "" {
-		t.Errorf("extractText image-only = %q, want empty", got)
+		t.Errorf("extractText image-no-caption = %q, want empty", got)
+	}
+	msg = &waE2E.Message{AudioMessage: &waE2E.AudioMessage{}}
+	if got := extractText(msg); got != "" {
+		t.Errorf("extractText audio = %q, want empty", got)
+	}
+}
+
+func TestExtractTextFromImageCaption(t *testing.T) {
+	// Pre-fix this returned "" — extractText didn't reach into
+	// ImageMessage.Caption, so an image with a caption surfaced to
+	// the model as a caption-less attachment with text="".
+	msg := &waE2E.Message{
+		ImageMessage: &waE2E.ImageMessage{
+			Caption: proto.String("look at this — meeting moved to 3pm"),
+		},
+	}
+	if got := extractText(msg); got != "look at this — meeting moved to 3pm" {
+		t.Errorf("extractText image-caption = %q, want the caption", got)
+	}
+}
+
+func TestExtractTextFromVideoCaption(t *testing.T) {
+	msg := &waE2E.Message{
+		VideoMessage: &waE2E.VideoMessage{Caption: proto.String("clip from yesterday")},
+	}
+	if got := extractText(msg); got != "clip from yesterday" {
+		t.Errorf("extractText video-caption = %q, want the caption", got)
+	}
+}
+
+func TestExtractTextFromDocumentCaption(t *testing.T) {
+	msg := &waE2E.Message{
+		DocumentMessage: &waE2E.DocumentMessage{Caption: proto.String("Q3 numbers")},
+	}
+	if got := extractText(msg); got != "Q3 numbers" {
+		t.Errorf("extractText document-caption = %q, want the caption", got)
+	}
+}
+
+func TestSanitizeFilenameNeutralizesDodgyChars(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"normal.pdf", "normal.pdf"},
+		{"with/slash.pdf", "with_slash.pdf"},
+		{`with\back.pdf`, "with_back.pdf"},
+		{".hidden", "hidden"},
+		{"with\x00null.pdf", "with_null.pdf"},
+		{"with\nnewline.pdf", "with_newline.pdf"},
+		{"with\ttab.pdf", "with_tab.pdf"},
+		{"\x7fdel.pdf", "_del.pdf"},
+		{"", "unnamed"},
+		{"...", "unnamed"},
+	}
+	for _, tc := range cases {
+		if got := sanitizeFilename(tc.in); got != tc.want {
+			t.Errorf("sanitizeFilename(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestIsPureProtocolMessage(t *testing.T) {
+	// Real user-facing message — even with a ProtocolMessage rider —
+	// must NOT be filtered out of msgstore writes.
+	withContent := &waE2E.Message{
+		Conversation:    proto.String("hello"),
+		ProtocolMessage: &waE2E.ProtocolMessage{},
+	}
+	if isPureProtocolMessage(withContent) {
+		t.Error("message with Conversation should not be treated as pure protocol")
+	}
+	// Pure protocol envelope (history sync, key share, edit-only) —
+	// recordInbound should skip these to avoid msgstore growing
+	// with rows the model can never target.
+	pure := &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{}}
+	if !isPureProtocolMessage(pure) {
+		t.Error("ProtocolMessage-only envelope should be treated as pure protocol")
+	}
+	// Reactions are user-facing, even though they ride alone too.
+	reaction := &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{}}
+	if isPureProtocolMessage(reaction) {
+		t.Error("ReactionMessage should not be treated as pure protocol")
+	}
+}
+
+func TestExtractTextPrefersConversationOverImageCaption(t *testing.T) {
+	// Defensive: if both fields are set (shouldn't happen in
+	// practice), Conversation wins — that's the dominant path and
+	// what existing tests assume.
+	msg := &waE2E.Message{
+		Conversation: proto.String("outer text"),
+		ImageMessage: &waE2E.ImageMessage{Caption: proto.String("ignored caption")},
+	}
+	if got := extractText(msg); got != "outer text" {
+		t.Errorf("extractText preference = %q, want 'outer text'", got)
 	}
 }
 
@@ -155,7 +249,7 @@ func (n *captureNotifier) Broadcast(method string, params any) {
 
 func TestHandleEventDispatch(t *testing.T) {
 	notify := &captureNotifier{}
-	c := &Client{notify: notify, log: discardLogger(), msgs: newTestMessageStore(t)}
+	c := &Client{notify: notify, log: discardLogger(), msgs: newTestMessageStore(t), lifetimeCtx: context.Background()}
 
 	sender := types.NewJID("15553334444", types.DefaultUserServer)
 	c.handleEvent(&events.Message{
@@ -189,7 +283,7 @@ func TestHandleEventDispatch(t *testing.T) {
 
 func TestHandleEventLoggedOutOmitsReasonWhenStreamError(t *testing.T) {
 	notify := &captureNotifier{}
-	c := &Client{notify: notify, log: discardLogger(), msgs: newTestMessageStore(t)}
+	c := &Client{notify: notify, log: discardLogger(), msgs: newTestMessageStore(t), lifetimeCtx: context.Background()}
 
 	// OnConnect == false (stream:error path): Reason is the zero value
 	// and must not be surfaced to the wire as misleading data.

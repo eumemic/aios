@@ -73,17 +73,26 @@ func (c *Client) extractAndDownloadMedia(
 		return nil, fmt.Errorf("download media for msg %s: %w", msgID, err)
 	}
 
-	if filename == "" {
-		filename = msgID + extensionForMimetype(mimetype)
-	}
-	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+	if err := os.MkdirAll(mediaDir, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir media dir: %w", err)
 	}
-	// Always sandwich msg_id into the filename so two inbounds with
-	// the same DocumentMessage.FileName don't clobber each other.
-	diskName := msgID + "_" + sanitizeFilename(filename)
+	// Build the on-disk filename.  Peer-supplied filenames get
+	// sandwiched with msgID so two inbounds with the same
+	// DocumentMessage.FileName don't clobber each other.  When no
+	// peer-supplied name exists, the daemon-built name already
+	// includes msgID, so don't double-prefix.
+	var diskName string
+	if filename == "" {
+		diskName = msgID + extensionForMimetype(mimetype)
+		filename = diskName // surface this back to the model too
+	} else {
+		diskName = msgID + "_" + sanitizeFilename(filename)
+	}
 	diskPath := filepath.Join(mediaDir, diskName)
-	if err := os.WriteFile(diskPath, data, 0o644); err != nil {
+	// 0o600: media files often contain sensitive content (photos,
+	// documents) — match whatsmeow's upstream store.db perms, not
+	// the world-readable 0o644 default.
+	if err := os.WriteFile(diskPath, data, 0o600); err != nil {
 		return nil, fmt.Errorf("write media to %s: %w", diskPath, err)
 	}
 	return &MediaAttachment{
@@ -106,16 +115,34 @@ func extractStickerEmoji(m *waE2E.Message) string {
 	return m.StickerMessage.GetEmojis()
 }
 
-// sanitizeFilename strips path separators + leading dots from a
-// peer-supplied filename so we can't be tricked into writing outside
-// mediaDir or to a hidden file.  Replaces any other dodgy bytes with
-// "_".  Empty result falls back to "unnamed".
+// sanitizeFilename neutralizes peer-supplied filenames so we can't be
+// tricked into writing outside mediaDir, to a hidden file, or to a
+// path whose name confuses downstream tooling.
+//
+// Rules:
+// * Path separators (/, \) → "_" (prevent directory traversal).
+// * Leading "." stripped (prevent hidden-file write).
+// * Control bytes (< 0x20) and NUL → "_" (prevent log/path
+//   misparsing; some downstream consumers truncate at NUL).
+// * Empty result → "unnamed".
 func sanitizeFilename(name string) string {
-	name = strings.TrimLeft(strings.ReplaceAll(strings.ReplaceAll(name, "/", "_"), "\\", "_"), ".")
-	if name == "" {
+	var out strings.Builder
+	for _, r := range name {
+		switch {
+		case r == '/' || r == '\\':
+			out.WriteByte('_')
+		case r < 0x20 || r == 0x7f:
+			// C0 controls + DEL
+			out.WriteByte('_')
+		default:
+			out.WriteRune(r)
+		}
+	}
+	cleaned := strings.TrimLeft(out.String(), ".")
+	if cleaned == "" {
 		return "unnamed"
 	}
-	return name
+	return cleaned
 }
 
 // extensionForMimetype returns ".jpg" / ".mp4" / etc. for the

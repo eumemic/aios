@@ -1,8 +1,6 @@
 package wameow
 
 import (
-	"context"
-
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -73,7 +71,7 @@ func (c *Client) translateMessageWithMedia(e *events.Message) map[string]any {
 		return nil
 	}
 	if attachment, err := c.extractAndDownloadMedia(
-		context.Background(), c.wa.Load(), string(e.Info.ID), e.Message, c.mediaDir,
+		c.lifetimeCtx, c.wa.Load(), string(e.Info.ID), e.Message, c.mediaDir,
 	); err != nil {
 		c.log.Warn("wameow.media_download_failed", "id", e.Info.ID, "err", err)
 	} else if attachment != nil {
@@ -158,11 +156,19 @@ func extractReaction(m *waE2E.Message) map[string]any {
 // the model can later react to / edit / revoke it by id.  Best-effort:
 // a store failure is logged but doesn't block the broadcast.
 //
-// Use a background context — handleEvent doesn't get one from whatsmeow,
-// and the put is tiny.
+// Filters out non-DM/group chat types (broadcasts, newsletters,
+// status updates) and pure ProtocolMessage envelopes (history sync,
+// app-state sync) — those ids are never user-visible and would just
+// grow the store with rows the model can never legitimately target.
+//
+// Uses the daemon-lifetime context so a shutdown-during-write
+// cancels cleanly rather than hitting a torn-down *sql.DB.
 func (c *Client) recordInbound(e *events.Message) {
+	if !c.isUserVisibleChat(e.Info.Chat) || isPureProtocolMessage(e.Message) {
+		return
+	}
 	err := c.msgs.Put(
-		context.Background(),
+		c.lifetimeCtx,
 		string(e.Info.ID),
 		e.Info.Chat.String(),
 		e.Info.Sender.String(),
@@ -173,12 +179,70 @@ func (c *Client) recordInbound(e *events.Message) {
 	}
 }
 
+// isUserVisibleChat reports whether the chat type can carry messages
+// the model legitimately interacts with.  DMs and groups qualify;
+// broadcasts/newsletters/status/server-status JIDs do not.
+func (c *Client) isUserVisibleChat(j types.JID) bool {
+	switch j.Server {
+	case types.DefaultUserServer, types.HiddenUserServer, types.GroupServer:
+		return true
+	}
+	return false
+}
+
+// isPureProtocolMessage reports whether the message body is ONLY a
+// ProtocolMessage (history sync, app-state sync, edit/revoke
+// envelopes, etc.) with no user-facing content.  Edit-envelope ids
+// are intentionally excluded from the messages.db too: the EDIT
+// envelope's id is distinct from the original target's id and the
+// model only needs the target_message_id (rendered in metadata).
+func isPureProtocolMessage(m *waE2E.Message) bool {
+	if m == nil || m.ProtocolMessage == nil {
+		return false
+	}
+	// If ANY user-facing content field is also set, treat as a real
+	// message that incidentally has a ProtocolMessage rider.
+	return m.Conversation == nil &&
+		m.ExtendedTextMessage == nil &&
+		m.ImageMessage == nil &&
+		m.VideoMessage == nil &&
+		m.AudioMessage == nil &&
+		m.DocumentMessage == nil &&
+		m.StickerMessage == nil &&
+		m.ReactionMessage == nil
+}
+
+// extractText returns the user-visible text body of a message,
+// covering both plain text (Conversation / ExtendedTextMessage) and
+// the Caption fields on Image/Video/Document attachments.  Sticker
+// and audio messages have no caption surface.
+//
+// Pre-fix this missed media captions entirely, so an inbound image
+// "Look at this — meeting moved to 3pm" arrived at the model as a
+// caption-less image (text="").
 func extractText(msg *waE2E.Message) string {
 	if conv := msg.GetConversation(); conv != "" {
 		return conv
 	}
 	if ext := msg.GetExtendedTextMessage(); ext != nil {
-		return ext.GetText()
+		if t := ext.GetText(); t != "" {
+			return t
+		}
+	}
+	if img := msg.GetImageMessage(); img != nil {
+		if c := img.GetCaption(); c != "" {
+			return c
+		}
+	}
+	if vid := msg.GetVideoMessage(); vid != nil {
+		if c := vid.GetCaption(); c != "" {
+			return c
+		}
+	}
+	if doc := msg.GetDocumentMessage(); doc != nil {
+		if c := doc.GetCaption(); c != "" {
+			return c
+		}
 	}
 	return ""
 }

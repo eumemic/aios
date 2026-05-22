@@ -18,6 +18,15 @@ func (c *Client) IsNotFoundErr(err error) bool {
 	return errors.Is(err, ErrMessageNotFound)
 }
 
+// IsNotOwnMessageErr reports whether err is ErrNotOwnMessage (the
+// "target message exists but was sent by a peer, not by us"
+// precondition refusal for Edit/Revoke).  Same handler treatment as
+// IsNotFoundErr: maps to ErrCodeInvalidParams so the model sees a
+// clear "wrong target" rather than a generic server error.
+func (c *Client) IsNotOwnMessageErr(err error) bool {
+	return errors.Is(err, ErrNotOwnMessage)
+}
+
 // React sends (or clears) a reaction to a message we've previously
 // seen.  Passing an empty reaction string clears any prior reaction
 // from us on that message — that's whatsmeow's documented contract
@@ -56,7 +65,7 @@ func (c *Client) React(ctx context.Context, msgID, emoji string) (string, int64,
 	if err != nil {
 		return "", 0, err
 	}
-	c.recordOutbound(ctx, string(resp.ID), chat)
+	c.recordOutbound(ctx, wa, string(resp.ID), chat)
 	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
 }
 
@@ -65,6 +74,13 @@ func (c *Client) React(ctx context.Context, msgID, emoji string) (string, int64,
 // minutes of the original send; whatsmeow surfaces the server's
 // rejection if either window is exceeded.
 func (c *Client) Edit(ctx context.Context, msgID, newText string) (string, int64, error) {
+	if newText == "" {
+		// An empty edit blanks the peer's view of the message — that
+		// almost certainly isn't the model's intent; reject explicitly
+		// rather than silently push a blank bubble.  The model can
+		// call whatsapp_delete_message if it wants the message gone.
+		return "", 0, errors.New("edit refused: new text is empty (use whatsapp_delete_message to revoke instead)")
+	}
 	wa := c.wa.Load()
 	if !wa.IsConnected() {
 		return "", 0, errors.New("whatsmeow: not connected")
@@ -74,7 +90,7 @@ func (c *Client) Edit(ctx context.Context, msgID, newText string) (string, int64
 		return "", 0, err
 	}
 	if !fromMe {
-		return "", 0, fmt.Errorf("edit refused: message %s was not sent by us", msgID)
+		return "", 0, fmt.Errorf("edit %s: %w", msgID, ErrNotOwnMessage)
 	}
 	chat, err := types.ParseJID(chatJIDStr)
 	if err != nil {
@@ -86,7 +102,7 @@ func (c *Client) Edit(ctx context.Context, msgID, newText string) (string, int64
 	if err != nil {
 		return "", 0, err
 	}
-	c.recordOutbound(ctx, string(resp.ID), chat)
+	c.recordOutbound(ctx, wa, string(resp.ID), chat)
 	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
 }
 
@@ -104,7 +120,7 @@ func (c *Client) Revoke(ctx context.Context, msgID string) (string, int64, error
 		return "", 0, err
 	}
 	if !fromMe {
-		return "", 0, fmt.Errorf("revoke refused: message %s was not sent by us", msgID)
+		return "", 0, fmt.Errorf("revoke %s: %w", msgID, ErrNotOwnMessage)
 	}
 	chat, err := types.ParseJID(chatJIDStr)
 	if err != nil {
@@ -119,6 +135,6 @@ func (c *Client) Revoke(ctx context.Context, msgID string) (string, int64, error
 	if err != nil {
 		return "", 0, err
 	}
-	c.recordOutbound(ctx, string(resp.ID), chat)
+	c.recordOutbound(ctx, wa, string(resp.ID), chat)
 	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
 }

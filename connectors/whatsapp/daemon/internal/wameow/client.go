@@ -39,6 +39,12 @@ type Client struct {
 	notify   Notifier
 	log      *slog.Logger
 	pair     pairing
+	// lifetimeCtx is the daemon-lifetime context (set by NewClient
+	// from main's signal-notify ctx).  Used as the background
+	// context for in-event-handler ops like media download and
+	// inbound msgstore writes, so they cancel on daemon shutdown
+	// instead of running against a torn-down store.
+	lifetimeCtx context.Context
 }
 
 // NewClient opens the sqlstore at <storeDir>/store.db, picks the first
@@ -68,11 +74,12 @@ func NewClient(
 	}
 	wa := whatsmeow.NewClient(device, newWaLogger(log, "client"))
 	c := &Client{
-		store:    container,
-		msgs:     msgs,
-		mediaDir: filepath.Join(storeDir, "media"),
-		notify:   notify,
-		log:      log,
+		store:       container,
+		msgs:        msgs,
+		mediaDir:    filepath.Join(storeDir, "media"),
+		notify:      notify,
+		log:         log,
+		lifetimeCtx: ctx,
 	}
 	c.wa.Store(wa)
 	wa.AddEventHandler(c.handleEvent)
@@ -97,18 +104,32 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-// recordOutbound stamps an outbound message into the message store so
-// the model can later react to / edit / revoke its own sends by id.
-// Best-effort: a store failure here is logged but doesn't fail the
-// send (the send already went through; failing the RPC would mislead
-// the caller).
-func (c *Client) recordOutbound(ctx context.Context, msgID string, chatJID types.JID) {
-	ourID := c.wa.Load().Store.ID
+// recordOutbound stamps an outbound message into the message store
+// so the model can later react to / edit / revoke its own sends by
+// id.  Best-effort: a store failure here is logged but doesn't fail
+// the send (the send already went through on the wire; failing the
+// RPC would push the model toward a retry that produces a duplicate
+// peer-visible message).  A later react/edit/delete on this id
+// returns ErrMessageNotFound — operators see the put_failed warning
+// and can diagnose; the model retries with the user's help if
+// needed.
+//
+// Takes the `wa` that performed the send rather than re-loading
+// c.wa.  A concurrent unpair could otherwise swap c.wa between
+// sendOne returning and recordOutbound reading Store.ID, stamping
+// the row with the NEW identity instead of the one that actually
+// sent — breaking subsequent edit/revoke routing.
+func (c *Client) recordOutbound(
+	ctx context.Context,
+	wa *whatsmeow.Client,
+	msgID string,
+	chatJID types.JID,
+) {
+	ourID := wa.Store.ID
 	if ourID == nil {
-		// Edge case: outbound succeeded but our identity flipped to
-		// nil between SendMessage and here (e.g., concurrent unpair).
-		// Skip the record; the message_id is still returned to the
-		// caller for visibility.
+		// Shouldn't happen: wa is the client that just successfully
+		// sent, so its Store.ID was populated.  Defensive: skip the
+		// record rather than panic.
 		return
 	}
 	if err := c.msgs.Put(ctx, msgID, chatJID.String(), ourID.String(), true); err != nil {

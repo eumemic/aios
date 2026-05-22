@@ -95,6 +95,12 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
 
     raw_text = params.get("text")
     text = raw_text if isinstance(raw_text, str) else ""
+    # Whitespace-only text is truthy in Python but carries no signal
+    # — peer mis-tapped or sent an accessibility-input artifact.
+    # Treat as empty for the "no signal" drop check below so we don't
+    # emit blank-bubble inbound events with nothing the model can act
+    # on.
+    text_is_signal = bool(text.strip())
 
     attachments = _parse_attachments(params.get("attachments"))
 
@@ -106,7 +112,7 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
     revoke_target_message_id = _parse_target(params.get("revoke"))
 
     if (
-        not text
+        not text_is_signal
         and not attachments
         and sticker_emoji is None
         and reaction is None

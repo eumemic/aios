@@ -207,8 +207,17 @@ func TestReplaceWhatsmeowClientRecoversFromDeletedDevice(t *testing.T) {
 	device := container.NewDevice()
 	wa := whatsmeow.NewClient(device, newWaLogger(discardLogger(), "test"))
 
-	c := &Client{store: container, log: discardLogger()}
+	c := &Client{store: container, msgs: newTestMessageStore(t), log: discardLogger()}
 	c.wa.Store(wa)
+
+	// Seed a row in the messages table — replaceWhatsmeowClient must
+	// truncate it so subsequent React/Edit/Revoke on this id fails
+	// with ErrMessageNotFound rather than succeeding under the new
+	// device identity (which can't authenticate the old whatsmeow
+	// Signal session for this msgID).
+	if err := c.msgs.Put(ctx, "STALE-MSG", "chat@s.whatsapp.net", "old-device@s.whatsapp.net", true); err != nil {
+		t.Fatalf("seed messages: %v", err)
+	}
 
 	// Simulate the post-Logout state.  whatsmeow's Logout calls
 	// device.Delete which sets Deleted=true on the in-memory Device
@@ -233,6 +242,12 @@ func TestReplaceWhatsmeowClientRecoversFromDeletedDevice(t *testing.T) {
 	}
 	if c.hasPairedDevice() {
 		t.Error("hasPairedDevice should be false after replace (fresh device has nil ID)")
+	}
+	// Stale row must be gone — otherwise a subsequent React/Edit
+	// would Lookup-succeed but reference a whatsmeow Signal session
+	// the new device identity can't address.
+	if _, _, _, err := c.msgs.Lookup(ctx, "STALE-MSG"); !errors.Is(err, ErrMessageNotFound) {
+		t.Errorf("STALE-MSG should be gone after replace, got err=%v", err)
 	}
 }
 

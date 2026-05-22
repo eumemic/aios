@@ -33,6 +33,14 @@ type MessageStore struct {
 // instead of silently no-oping.
 var ErrMessageNotFound = errors.New("message not found")
 
+// ErrNotOwnMessage is returned by Edit/Revoke when the target msgID
+// exists in the store but was sent by a peer (from_me=false).
+// WhatsApp only allows editing or revoking your own outbound
+// messages, so this is a precondition refusal — not a server error.
+// The handler layer maps it to ErrCodeInvalidParams so the model
+// distinguishes "wrong target" from "infrastructure failure".
+var ErrNotOwnMessage = errors.New("message not sent by us")
+
 func openMessageStore(storeDir string) (*MessageStore, error) {
 	dbPath := filepath.Join(storeDir, "messages.db")
 	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)", dbPath)
@@ -98,4 +106,15 @@ func (s *MessageStore) Lookup(ctx context.Context, id string) (chatJID, senderJI
 		return "", "", false, fmt.Errorf("lookup message %s: %w", id, scanErr)
 	}
 	return chatJID, senderJID, fromMeInt == 1, nil
+}
+
+// Truncate empties the messages table.  Called after Unpair so the
+// next pairing session doesn't carry stale MessageKey rows from the
+// previous device identity — those rows would Lookup-succeed but
+// reference whatsmeow Signal sessions the new device can't address.
+func (s *MessageStore) Truncate(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM messages`); err != nil {
+		return fmt.Errorf("truncate messages: %w", err)
+	}
+	return nil
 }
