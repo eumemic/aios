@@ -374,6 +374,83 @@ class TestVisionAwareRendering:
             f"renderer should have corrected image/png → image/jpeg, got {url[:50]}"
         )
 
+    def test_post_409_attachment_resolves_via_workspace_path(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """Issue #630: an attachment whose ``in_sandbox_path`` is under
+        ``/workspace`` must resolve against the explicitly-supplied
+        ``workspace_path`` (the post-#409 bind-mount source), not the
+        pre-#409 ``workspace_root/session_id`` synthetic path."""
+        nested = (temp_workspace_root / "acct-1" / "sess-1").resolve()
+        nested.mkdir(parents=True)
+        payload = b"JPGNESTED"
+        (nested / "img.png").write_bytes(payload)
+
+        event = _user_event(
+            content="hi",
+            attachments=[
+                {
+                    "filename": "img.png",
+                    "content_type": "image/png",
+                    "size": len(payload),
+                    "in_sandbox_path": "/workspace/img.png",
+                }
+            ],
+        )
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",
+            "echo/acct/chat-1",
+            model="model/vision",
+            session_id="sess-1",
+            workspace_path=nested,
+        )
+        content = msg["content"]
+        assert isinstance(content, list), (
+            f"expected inlined image_url part; got text-marker fallback: {content!r}"
+        )
+        url_parts = [p for p in content if p.get("type") == "image_url"]
+        assert len(url_parts) == 1
+        assert base64.b64encode(payload).decode() in url_parts[0]["image_url"]["url"]
+
+    def test_attachment_workspace_path_missing_returns_none_for_workspace_sandbox_path(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """Fail-closed: when ``workspace_path`` is None AND the
+        ``in_sandbox_path`` is under ``/workspace``, the attachment is
+        NOT inlined (degrades to a text marker)."""
+        # Stage bytes at a legacy synthetic location to make the contrast
+        # explicit — even though the file exists at the pre-#409 layout,
+        # the renderer must refuse to inline without a workspace_path.
+        legacy = (temp_workspace_root / "sess-1").resolve()
+        legacy.mkdir(parents=True)
+        (legacy / "img.png").write_bytes(b"LEGACY")
+
+        event = _user_event(
+            content="hi",
+            attachments=[
+                {
+                    "filename": "img.png",
+                    "content_type": "image/png",
+                    "size": 6,
+                    "in_sandbox_path": "/workspace/img.png",
+                }
+            ],
+        )
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",
+            "echo/acct/chat-1",
+            model="model/vision",
+            session_id="sess-1",
+            # workspace_path deliberately not passed.
+        )
+        # No inlined image — must fall back to a text marker.
+        assert isinstance(msg["content"], str), (
+            f"expected text-marker fallback; got inlined parts: {msg['content']!r}"
+        )
+        assert "[image: img.png" in msg["content"]
+
     def test_multiple_attachments_mixed(self, temp_workspace_root: Path) -> None:
         a = _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-a.jpg", b"AAA")
         b = _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-b.pdf", b"PDF")

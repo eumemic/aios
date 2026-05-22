@@ -40,11 +40,17 @@ def temp_workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 
 
 @pytest.fixture
-def stub_handle(tmp_path: Path, **kwargs: Any) -> SandboxHandle:
+def stub_handle(temp_workspace_root: Path, **kwargs: Any) -> SandboxHandle:
+    # Default to the legacy workspace_dir_for("sess_01TEST") shape so that
+    # the existing _stage_workspace_image helper (which writes under
+    # workspace_dir_for(session_id)) lines up with the handle's
+    # workspace_path. Tests covering the post-#409 layout build their own
+    # handle. Depends on temp_workspace_root so that the settings.workspace_root
+    # monkeypatch is already in place when workspace_dir_for() is called.
     handle = SandboxHandle(
         session_id="sess_01TEST",
         sandbox_id="container_abc",
-        workspace_path=tmp_path,
+        workspace_path=workspace_dir_for("sess_01TEST"),
     )
     return handle
 
@@ -187,6 +193,51 @@ class TestImageBranch:
         assert isinstance(result.content, str)
         assert "Inline cap: 2 MiB" in result.content
         assert result.is_error is False
+
+    async def test_image_read_uses_handle_workspace_path(
+        self,
+        temp_workspace_root: Path,
+        stub_get_session_model: Any,
+        canned_result: CommandResult,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Post-#409 regression (issue #630): ``_read_image`` must resolve
+        ``/workspace/...`` against ``handle.workspace_path`` (the actual
+        bind-mount source), NOT the pre-#409 ``workspace_root/session_id``
+        layout that ``workspace_dir_for`` returns."""
+        stub_get_session_model.value = "model/vision"
+
+        # Construct a handle whose workspace_path is the post-#409 nested
+        # ``<workspace_root>/<account>/<session>`` shape — distinct from
+        # the pre-#409 path ``workspace_dir_for`` would compute.
+        nested = (temp_workspace_root / "acct-X" / "sess_01TEST").resolve()
+        nested.mkdir(parents=True)
+        payload = b"PNG-NESTED"
+        (nested / "img.png").write_bytes(payload)
+
+        handle = SandboxHandle(
+            session_id="sess_01TEST",
+            sandbox_id="container_abc",
+            workspace_path=nested,
+        )
+
+        prev_registry = runtime.sandbox_registry
+        prev_pool = runtime.pool
+        stub = _StubRegistry(handle, canned_result)
+        runtime.sandbox_registry = stub  # type: ignore[assignment]
+        runtime.pool = MagicMock()
+        try:
+            result = await read_handler("sess_01TEST", {"path": "/workspace/img.png"})
+        finally:
+            runtime.sandbox_registry = prev_registry
+            runtime.pool = prev_pool
+
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, list), (
+            f"expected inlined image parts; got: {result.content!r}"
+        )
+        url = result.content[1]["image_url"]["url"]
+        assert base64.b64encode(payload).decode() in url
 
     async def test_missing_image_returns_error(
         self,

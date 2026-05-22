@@ -19,6 +19,7 @@ Errors do not mutate ``focal_channel``.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from aios.db import queries
@@ -302,6 +303,7 @@ def _render_recap_event(
     *,
     model: str | None = None,
     session_id: str | None = None,
+    workspace_path: Path | None = None,
 ) -> dict[str, Any] | None:
     """Render a single event into a chat-completions message dict for
     the recap body, or ``None`` if the event contributes nothing.
@@ -348,6 +350,7 @@ def _render_recap_event(
             event.orig_channel,
             model=model,
             session_id=session_id,
+            workspace_path=workspace_path,
         )
         content = rendered.get("content")
         if not content or not isinstance(content, (str, list)):

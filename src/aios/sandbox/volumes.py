@@ -49,6 +49,7 @@ def safe_filename(name: str | None) -> str:
     return cleaned[:_MAX_FILENAME_LEN]
 
 
+# DEPRECATED post-#409 — do not use in new code; see issue #630.
 def workspace_dir_for(session_id: str) -> Path:
     """Return the absolute host directory for ``session_id``'s workspace.
 
@@ -313,7 +314,12 @@ def ensure_session_uploads_dir(session_id: str) -> Path:
     return path
 
 
-def resolve_to_host_path(session_id: str, sandbox_path: str) -> Path | None:
+def resolve_to_host_path(
+    session_id: str,
+    sandbox_path: str,
+    *,
+    workspace_path: Path | None = None,
+) -> Path | None:
     """Map an in-sandbox path to its host-side equivalent for known bind mounts.
 
     Returns ``None`` when:
@@ -324,13 +330,26 @@ def resolve_to_host_path(session_id: str, sandbox_path: str) -> Path | None:
     * the resolved candidate escapes the bind-mount root after ``..``
       normalization or symlink dereferencing.
 
+    ``workspace_path`` is the actual host-side bind-mount source for
+    ``/workspace`` (recorded on the session row as
+    ``workspace_volume_path``).  Post-PR-#409 it lives at
+    ``<workspace_root>/<account_id>/<session_id>``; pre-#409 sessions
+    had it at ``<workspace_root>/<session_id>``.  Either way, the
+    caller is the authority — when ``workspace_path`` is ``None``,
+    ``/workspace*`` paths fail closed (return ``None``) rather than
+    silently falling back to a synthetic path that might no longer be
+    the bind-mount source.  The ``/mnt/attachments`` and
+    ``/mnt/uploads`` branches ignore ``workspace_path`` — their
+    locations are derived from ``session_id`` alone (see
+    :func:`session_attachments_dir` / :func:`session_uploads_dir`).
+
     The containment check defends model-controlled callers (notably the
     image branch of :mod:`aios.tools.read`): without it, a path like
     ``/workspace/../../etc/hostname`` or a symlink at
     ``/workspace/sneaky.jpg`` pointing outside the bind mount would
     let the model read arbitrary host files the worker can access.
     """
-    base, suffix = _bind_mount_base(session_id, sandbox_path)
+    base, suffix = _bind_mount_base(session_id, sandbox_path, workspace_path=workspace_path)
     if base is None:
         return None
     candidate = base if suffix is None else base / suffix
@@ -344,16 +363,27 @@ def resolve_to_host_path(session_id: str, sandbox_path: str) -> Path | None:
     return resolved
 
 
-def _bind_mount_base(session_id: str, sandbox_path: str) -> tuple[Path | None, str | None]:
+def _bind_mount_base(
+    session_id: str,
+    sandbox_path: str,
+    *,
+    workspace_path: Path | None = None,
+) -> tuple[Path | None, str | None]:
     """Return the host base dir + remainder for ``sandbox_path``.
 
     ``(None, None)`` when the path doesn't fall under a known bind
-    mount.  ``(base, None)`` when the path is exactly the root.
+    mount, or when ``sandbox_path`` is under ``/workspace`` and
+    ``workspace_path`` is ``None`` (fail-closed).  ``(base, None)``
+    when the path is exactly the root.
     """
     if sandbox_path == "/workspace":
-        return workspace_dir_for(session_id), None
+        if workspace_path is None:
+            return None, None
+        return workspace_path.resolve(), None
     if sandbox_path.startswith("/workspace/"):
-        return workspace_dir_for(session_id), sandbox_path[len("/workspace/") :]
+        if workspace_path is None:
+            return None, None
+        return workspace_path.resolve(), sandbox_path[len("/workspace/") :]
     if sandbox_path == "/mnt/attachments":
         return session_attachments_dir(session_id), None
     if sandbox_path.startswith("/mnt/attachments/"):

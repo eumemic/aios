@@ -281,13 +281,24 @@ async def compose_step_context(
     "still executing in the background" wording; everything else
     (custom, awaiting-confirm) gets the "external action" wording.
     """
+    from aios.harness import runtime as harness_runtime
     from aios.harness.channels import build_channels_tail_block
+
+    # Post-#409 fix (issue #630): the renderer's ``/workspace`` attachment
+    # branch needs the actual bind-mount source, not the legacy
+    # ``workspace_dir_for(session_id)`` synthetic path.  Peek at the
+    # sandbox registry to grab the live handle when one exists; sessions
+    # without a provisioned sandbox (chat-only, pre-cold-start) get
+    # ``None`` and the renderer fails closed for those.
+    cached = harness_runtime.require_sandbox_registry().peek(session.id)
+    workspace_path = cached.workspace_path if cached is not None else None
 
     ctx = build_messages(
         events,
         system_prompt=prelude.system_prompt,
         model=agent.model,
         session_id=session.id,
+        workspace_path=workspace_path,
         in_flight_tool_call_ids=in_flight_tool_call_ids,
     )
 
