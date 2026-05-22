@@ -1124,6 +1124,24 @@ class TestFocalRendering:
         assert "timestamp_ms=1776401210703" in content
         assert "(2026-04-17T" in content
 
+    def test_focal_match_timestamp_ms_out_of_range_does_not_brick_session(self) -> None:
+        """An int ``timestamp_ms`` outside the valid millisecond-Unix
+        range (a connector sending micro/nanoseconds, say) makes
+        ``datetime.fromtimestamp`` raise. ``_format_channel_header`` runs
+        on every wake, so an unguarded raise bricks the session
+        permanently (same failure class as #446)."""
+        # 1776401210703 ms is a sane 2026 timestamp; 1000x larger
+        # (microseconds mistaken for milliseconds) lands the divided
+        # value past datetime's MAXYEAR.
+        md = {"channel": self._CHAN_A, "timestamp_ms": 1_776_401_210_703_000}
+        events = [_evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        # The raw int is still surfaced — connector tools need it as an
+        # argument — but the unconvertible value yields no ISO
+        # parenthetical (the success path appends " (<iso>)").
+        assert "timestamp_ms=1776401210703000" in content
+        assert "timestamp_ms=1776401210703000 (" not in content
+
     def test_focal_match_message_id_inlined(self) -> None:
         """The ``message_id`` lets the model react/edit/delete the user
         message via the connector tools — without it, the model has to

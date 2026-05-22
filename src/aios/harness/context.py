@@ -119,8 +119,18 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
         parts.append(f"sender_id={sender_id}")
     timestamp_ms = metadata.get("timestamp_ms")
     if isinstance(timestamp_ms, int):
-        iso = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat(timespec="milliseconds")
-        parts.append(f"timestamp_ms={timestamp_ms} ({iso})")
+        try:
+            iso = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat(
+                timespec="milliseconds"
+            )
+            parts.append(f"timestamp_ms={timestamp_ms} ({iso})")
+        except (ValueError, OverflowError, OSError):
+            # An int outside the valid Unix-millisecond range (a connector
+            # sending micro/nanoseconds, say) makes datetime.fromtimestamp
+            # raise. The renderer runs on every wake, so an unguarded raise
+            # bricks the session permanently — same failure class as #446.
+            # The raw int still goes to the model; only the ISO is dropped.
+            parts.append(f"timestamp_ms={timestamp_ms}")
     message_id = metadata.get("message_id")
     if isinstance(message_id, int):
         parts.append(f"message_id={message_id}")
