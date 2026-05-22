@@ -7,12 +7,14 @@ daemon per phone keeps lifecycles isolated.
 
 from __future__ import annotations
 
+import mimetypes
 import socket
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import structlog
-from aios_connector_http import HttpConnector, iso_from_ms, tool
+from aios_connector_http import HttpConnector, SandboxPath, iso_from_ms, tool
 
 from .config import Settings
 from .daemon import WhatsappDaemon
@@ -103,24 +105,38 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
     async def whatsapp_send(
         self,
         text: str,
+        attachments: list[SandboxPath] | None = None,
         *,
         connection_id: str,
         chat_id: str,
     ) -> dict[str, Any]:
-        """Send a text message to your focal WhatsApp chat.
+        """Send a message to your focal WhatsApp chat.
 
         Args:
-            text: The message body.
+            text: The message body.  When ``attachments`` is set, this
+                becomes the caption on the FIRST attachment only;
+                subsequent attachments arrive caption-less (WhatsApp
+                has no media-group equivalent — each attachment is its
+                own message).  Pass an empty string to send the
+                attachment(s) without any caption.
+            attachments: Optional in-sandbox file paths to attach.
+                The SDK resolves each entry to a host path before
+                this method runs.  Mimetype is derived from the file
+                extension via Python's ``mimetypes`` module; unknown
+                types fall through to a generic document send.
 
         Returns:
-            ``{"message_id": "...", "timestamp_ms": ...}`` from the
-            daemon's whatsmeow SendMessage round-trip.
+            ``{"message_id": "...", "timestamp_ms": ...}`` of the
+            FIRST sent message — for multi-attachment sends, that's
+            the caption-bearer.  Subsequent attachment ids land in
+            the daemon's message store too and remain
+            react/edit/delete-targetable individually.
         """
         state = self.state[connection_id]
-        result = await state.daemon.rpc.call(
-            "sendMessage",
-            {"jid": chat_id, "text": text},
-        )
+        params: dict[str, Any] = {"jid": chat_id, "text": text}
+        if attachments:
+            params["attachments"] = [_attachment_params(p) for p in attachments]
+        result = await state.daemon.rpc.call("sendMessage", params)
         if not isinstance(result, dict):
             raise RuntimeError(f"sendMessage returned non-dict: {result!r}")
         return result
@@ -219,6 +235,26 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
         if not isinstance(result, dict):
             raise RuntimeError(f"deleteMessage returned non-dict: {result!r}")
         return result
+
+
+def _attachment_params(host_path: Path) -> dict[str, str]:
+    """Build the daemon RPC's attachment dict from a SandboxPath-resolved
+    host path.
+
+    Mimetype is derived from the file extension via Python's
+    ``mimetypes`` module; unknown types fall through to
+    ``application/octet-stream`` and the daemon classifies the
+    attachment as a document (whatsmeow's catch-all kind).  Filename
+    appears on the WhatsApp wire only for documents, but the daemon
+    carries it for every kind so inbound clients can see a meaningful
+    label.
+    """
+    mime, _ = mimetypes.guess_type(host_path.name)
+    return {
+        "path": str(host_path),
+        "mimetype": mime or "application/octet-stream",
+        "filename": host_path.name,
+    }
 
 
 def _pick_free_port(host: str) -> int:

@@ -7,17 +7,14 @@ package wameow
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
 	"sync/atomic"
 
 	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
-	"google.golang.org/protobuf/proto"
 
 	// modernc.org/sqlite is a pure-Go SQLite driver so the daemon
 	// compiles without CGo.  Registered under the driver name "sqlite".
@@ -91,25 +88,6 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("whatsmeow connect: %w", err)
 	}
 	return nil
-}
-
-// SendMessage matches handler.SendMessageFn.
-func (c *Client) SendMessage(ctx context.Context, jidStr, text string) (string, int64, error) {
-	wa := c.wa.Load()
-	if !wa.IsConnected() {
-		return "", 0, errors.New("whatsmeow: not connected")
-	}
-	jid, err := types.ParseJID(jidStr)
-	if err != nil {
-		return "", 0, fmt.Errorf("invalid JID %q: %w", jidStr, err)
-	}
-	msg := &waE2E.Message{Conversation: proto.String(text)}
-	resp, err := wa.SendMessage(ctx, jid, msg)
-	if err != nil {
-		return "", 0, err
-	}
-	c.recordOutbound(ctx, string(resp.ID), jid)
-	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
 }
 
 // recordOutbound stamps an outbound message into the message store so

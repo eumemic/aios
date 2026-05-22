@@ -66,7 +66,7 @@ func main() {
 	}
 	defer client.Close()
 
-	handler.RegisterSend(reg, client.SendMessage)
+	handler.RegisterSend(reg, sendAdapter(client))
 	handler.RegisterPairing(reg, &clientPairAdapter{client: client})
 	handler.RegisterMessageOps(reg, client)
 
@@ -84,6 +84,23 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("daemon.exit.ok")
+}
+
+// sendAdapter bridges handler.Attachment → wameow.Attachment in the
+// same shape as clientPairAdapter does for pairing outcomes: the
+// wameow package mustn't import handler (or vice versa) to keep the
+// wire-vs-logic boundary clean, so the per-call memcopy sits here.
+func sendAdapter(client *wameow.Client) handler.SendMessageFn {
+	return func(ctx context.Context, jid, text string, atts []handler.Attachment) (string, int64, error) {
+		var wmAtts []wameow.Attachment
+		if len(atts) > 0 {
+			wmAtts = make([]wameow.Attachment, len(atts))
+			for i, a := range atts {
+				wmAtts[i] = wameow.Attachment{Path: a.Path, Mimetype: a.Mimetype, Filename: a.Filename}
+			}
+		}
+		return client.SendMessage(ctx, jid, text, wmAtts)
+	}
 }
 
 // clientPairAdapter bridges wameow.Client to handler.Pairer.  The
