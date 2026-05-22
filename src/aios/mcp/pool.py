@@ -239,11 +239,23 @@ class McpSessionPool:
         """
         stale = [k for k, e in self._entries.items() if now - e.last_used > idle_timeout]
         for key in stale:
-            entry = self._entries.pop(key, None)
-            if entry is None:
-                continue
-            log.info("mcp_pool.idle_close", url=key[0])
-            await entry.close()
+            async with self._lock_for(key):
+                # Re-check under the lock: a concurrent get_or_connect
+                # warm hit (pool.py:193-196) bumps entry.last_used
+                # synchronously without acquiring the lock, so a freshen
+                # can race between the scan above and this iteration.
+                # Without the re-check, the reaper would close a session
+                # actively held by a caller — same shape as the
+                # SandboxRegistry reaper TOCTOU fixed in #654. evict()
+                # is also lockless and can drop the entry between scan
+                # and lock-acquire (the get() returning None handles
+                # that).
+                entry = self._entries.get(key)
+                if entry is None or time.monotonic() - entry.last_used <= idle_timeout:
+                    continue
+                del self._entries[key]
+                log.info("mcp_pool.idle_close", url=key[0])
+                await entry.close()
 
     async def _reap_idle_loop(self, idle_timeout: float, interval: float = 60.0) -> None:
         """Background loop: close pooled sessions idle > idle_timeout.

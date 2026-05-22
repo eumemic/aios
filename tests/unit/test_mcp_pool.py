@@ -6,6 +6,7 @@ All MCP SDK and httpx interactions are mocked. No network calls.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -264,6 +265,91 @@ class TestMcpSessionPool:
         )
         assert key_cold not in pool._entries
         assert key_warm in pool._entries
+
+    async def test_idle_reaper_skips_entry_freshened_during_close_of_another(self) -> None:
+        """The reaper must not close an entry whose ``last_used`` was
+        freshened by a concurrent ``get_or_connect`` between the scan
+        and the actual close.
+
+        Scenario: two pool entries (``vault_a``, ``vault_b``) both land
+        in the ``stale`` snapshot. While the reaper is awaiting
+        ``entry_a.close()``, a tool task warm-hits
+        ``get_or_connect(url, vault_b, ...)``, which bumps
+        ``entry_b.last_used`` to ``time.monotonic()``. The reaper must
+        NOT proceed to close ``entry_b`` — the entry is no longer idle.
+
+        Pre-fix, the reaper acted on the stale ``stale`` snapshot
+        without re-checking ``last_used`` under the per-key lock, so it
+        would close an entry actively held by a caller. Same failure
+        class as the SandboxRegistry reaper TOCTOU fixed in #654 — the
+        warm path (pool.py:193-196) takes no lock.
+        """
+        park_a = asyncio.Event()
+        continue_a = asyncio.Event()
+        closed: list[tuple[str, str | None]] = []
+
+        s_a, s_b = _make_mock_session(), _make_mock_session()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
+        ):
+            pool = McpSessionPool()
+            url = "https://m.example/"
+            await pool.get_or_connect(url, "vault_a", {"Authorization": "Bearer A"})
+            await pool.get_or_connect(url, "vault_b", {"Authorization": "Bearer B"})
+            assert len(pool._entries) == 2
+
+            key_a = next(k for k, e in pool._entries.items() if e.session is s_a)
+            key_b = next(k for k, e in pool._entries.items() if e.session is s_b)
+            entry_a = pool._entries[key_a]
+            entry_b = pool._entries[key_b]
+            orig_close_a = entry_a.close
+            orig_close_b = entry_b.close
+
+            async def _close_a() -> None:
+                closed.append(key_a)
+                park_a.set()
+                await continue_a.wait()
+                await orig_close_a()
+
+            async def _close_b() -> None:
+                closed.append(key_b)
+                await orig_close_b()
+
+            entry_a.close = _close_a  # type: ignore[method-assign]
+            entry_b.close = _close_b  # type: ignore[method-assign]
+
+            # Both deeply idle so they both land in ``stale`` on the scan.
+            entry_a.last_used = 1000.0
+            entry_b.last_used = 1000.0
+
+            # Insertion order pins key_a as the first iteration → reaper
+            # parks inside _close_a, yielding control to the test.
+            reap_task = asyncio.create_task(pool._reap_idle_once(idle_timeout=300.0, now=9100.0))
+            try:
+                await asyncio.wait_for(park_a.wait(), timeout=1.0)
+                # Reaper is parked inside entry_a.close(). Warm-hit
+                # vault_b — last_used is bumped to time.monotonic(), so
+                # the re-check at entry_b's iteration sees a fresh value.
+                returned_session, _ = await pool.get_or_connect(
+                    url, "vault_b", {"Authorization": "Bearer B"}
+                )
+                assert returned_session is s_b
+                continue_a.set()
+                await asyncio.wait_for(reap_task, timeout=1.0)
+            finally:
+                if not reap_task.done():
+                    reap_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await reap_task
+
+        assert key_b not in closed, (
+            f"reaper closed vault_b's session despite a concurrent "
+            f"get_or_connect freshening entry_b.last_used. The reaper "
+            f"must re-check idleness under the per-key lock before "
+            f"calling close(). closed={closed!r}"
+        )
+        assert key_b in pool._entries, "vault_b's entry must remain in the pool"
 
     async def test_oauth_refresh_does_not_orphan_entry(self) -> None:
         """A token rotation on the same vault must reuse the pool key.
