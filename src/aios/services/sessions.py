@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 from types import EllipsisType
 from typing import Any
 
@@ -49,6 +50,23 @@ async def load_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> s
     """
     async with pool.acquire() as conn:
         return await queries.unscoped_get_session_account_id(conn, session_id)
+
+
+async def load_session_workspace_path(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> Path:
+    """Return the session's host-side workspace directory as a ``Path``.
+
+    Reads ``sessions.workspace_volume_path`` — the authoritative bind-mount
+    source for ``/workspace``. The column is internal-only (not on the
+    public :class:`Session` model, since it leaks host layout), so callers
+    that need it for host-path resolution fetch it explicitly via this
+    helper rather than off the session object.
+    """
+    async with pool.acquire() as conn:
+        return Path(
+            await queries.get_session_workspace_path(conn, session_id, account_id=account_id)
+        )
 
 
 async def _list_all_echoes(

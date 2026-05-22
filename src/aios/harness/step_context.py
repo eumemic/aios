@@ -264,7 +264,9 @@ def _build_http_servers_block(http_servers: list[HttpServerSpec]) -> str:
 
 async def compose_step_context(
     *,
+    pool: asyncpg.Pool[Any],
     session: Session,
+    account_id: str,
     agent: Agent | AgentVersion,
     channels: list[str],
     prelude: StepPrelude,
@@ -276,29 +278,30 @@ async def compose_step_context(
     Takes a prelude built by :func:`compute_step_prelude` and the
     windowed events slate; glues them into the final message list.
 
+    ``pool`` + ``account_id`` back a single read-only query — the
+    session's ``workspace_volume_path`` — so the renderer can resolve
+    ``/workspace``-prefixed image attachments to host bytes.
+
     ``in_flight_tool_call_ids`` selects the pending placeholder variant
     for each unresolved tool_call. Background-executing tasks get the
     "still executing in the background" wording; everything else
     (custom, awaiting-confirm) gets the "external action" wording.
     """
-    from aios.harness import runtime as harness_runtime
     from aios.harness.channels import build_channels_tail_block
+    from aios.services import sessions as sessions_service
 
-    # Post-#409 fix (issue #630): the renderer's ``/workspace`` attachment
-    # branch needs the actual bind-mount source, not the legacy
-    # ``workspace_dir_for(session_id)`` synthetic path.  Peek at the
-    # sandbox registry to grab the live handle when one exists; sessions
-    # without a provisioned sandbox (chat-only, pre-cold-start) get
-    # ``None`` and the renderer fails closed for those.
-    #
-    # Read the module-level optional directly rather than via
-    # ``require_sandbox_registry()``: this function also runs in the API
-    # process (``GET /v1/sessions/:id/context``) where the registry is
-    # never initialized.  ``None`` cascades into the same fail-closed
-    # path as a missing handle, which is the correct preview behavior.
-    registry = harness_runtime.sandbox_registry
-    cached = registry.peek(session.id) if registry is not None else None
-    workspace_path = cached.workspace_path if cached is not None else None
+    # Issue #630 follow-up: the renderer's ``/workspace`` attachment branch
+    # needs the actual bind-mount source.  Read it from the session row
+    # (``workspace_volume_path``) — the authoritative, always-present
+    # source — rather than a live ``SandboxHandle``.  A handle is absent
+    # for chat-only sessions, idle-evicted sandboxes, the window between a
+    # worker restart and the next cold-start, and the API process
+    # (``GET /v1/sessions/:id/context``), which never initializes the
+    # sandbox registry.  Sourcing from the row resolves ``/workspace``
+    # attachments correctly in all of those cases.
+    workspace_path = await sessions_service.load_session_workspace_path(
+        pool, session.id, account_id=account_id
+    )
 
     ctx = build_messages(
         events,
