@@ -5226,6 +5226,63 @@ async def list_session_github_repo_echoes(
     return [_row_to_github_repo_echo(r) for r in rows]
 
 
+async def batch_list_session_memory_store_echoes(
+    conn: asyncpg.Connection[Any],
+    session_ids: list[str],
+    *,
+    account_id: str,
+) -> dict[str, list[MemoryStoreResourceEcho]]:
+    """Batch-fetch memory-store echoes for multiple sessions, keyed by session_id."""
+    if not session_ids:
+        return {}
+    rows = await conn.fetch(
+        "SELECT session_id, memory_store_id, access, instructions, "
+        "name_at_attach, description_at_attach "
+        "FROM session_memory_stores "
+        "WHERE session_id = ANY($1) AND account_id = $2 "
+        "ORDER BY session_id, rank",
+        session_ids,
+        account_id,
+    )
+    result: dict[str, list[MemoryStoreResourceEcho]] = {sid: [] for sid in session_ids}
+    for r in rows:
+        result[r["session_id"]].append(
+            MemoryStoreResourceEcho(
+                memory_store_id=r["memory_store_id"],
+                access=r["access"],
+                instructions=r["instructions"],
+                name=r["name_at_attach"],
+                description=r["description_at_attach"],
+                mount_path=f"/mnt/memory/{r['name_at_attach']}",
+            )
+        )
+    return result
+
+
+async def batch_list_session_github_repo_echoes(
+    conn: asyncpg.Connection[Any],
+    session_ids: list[str],
+    *,
+    account_id: str,
+) -> dict[str, list[GithubRepositoryResourceEcho]]:
+    """Batch-fetch github-repository echoes for multiple sessions, keyed by session_id."""
+    if not session_ids:
+        return {}
+    rows = await conn.fetch(
+        "SELECT session_id, id, repo_url, mount_path, created_at, updated_at, "
+        "git_user_name, git_user_email "
+        "FROM session_github_repositories "
+        "WHERE session_id = ANY($1) AND account_id = $2 "
+        "ORDER BY session_id, rank",
+        session_ids,
+        account_id,
+    )
+    result: dict[str, list[GithubRepositoryResourceEcho]] = {sid: [] for sid in session_ids}
+    for r in rows:
+        result[r["session_id"]].append(_row_to_github_repo_echo(r))
+    return result
+
+
 async def get_session_github_repo(
     conn: asyncpg.Connection[Any],
     session_id: str,
