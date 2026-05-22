@@ -194,3 +194,147 @@ def test_reaction_custom_emoji_only_returns_none(
 ) -> None:
     # Custom (premium) reactions are dropped — no glyph to surface.
     assert parse_reaction(reaction_custom_emoji_only, bot_id=bot_id) is None
+
+
+# ── mentions ──────────────────────────────────────────────────────────
+
+
+def test_no_mentions(message_dm_text: Message, bot_id: int) -> None:
+    msg = parse_message(message_dm_text, bot_id=bot_id)
+    assert msg is not None
+    assert msg.mentions == ()
+
+
+def test_text_mention_of_bot_populates_mentions(
+    message_text_mention_of_bot: Message, bot_id: int
+) -> None:
+    msg = parse_message(message_text_mention_of_bot, bot_id=bot_id)
+    assert msg is not None
+    assert len(msg.mentions) == 1
+    m = msg.mentions[0]
+    assert m.user_id == bot_id
+    assert m.name == "TestBot"
+
+
+def test_text_mention_of_other_user_populates_mentions(
+    message_text_mention_of_other_user: Message, bot_id: int
+) -> None:
+    msg = parse_message(message_text_mention_of_other_user, bot_id=bot_id)
+    assert msg is not None
+    assert len(msg.mentions) == 1
+    m = msg.mentions[0]
+    assert m.user_id == 444555666
+    assert m.name == "Carol Doe"
+
+
+def test_plain_username_mention_of_bot_with_bot_username_synthesizes(
+    message_plain_username_mention_of_bot: Message, bot_id: int
+) -> None:
+    """``@<bot_username>`` carries no user_id on the wire, but we
+    synthesize a structured mention when ``bot_username`` is supplied
+    so the model gets a consistent signal for self-tagging."""
+    msg = parse_message(
+        message_plain_username_mention_of_bot, bot_id=bot_id, bot_username="testbot"
+    )
+    assert msg is not None
+    assert len(msg.mentions) == 1
+    m = msg.mentions[0]
+    assert m.user_id == bot_id
+
+
+def test_plain_username_mention_of_other_does_not_surface(
+    message_plain_username_mention_of_other: Message, bot_id: int
+) -> None:
+    """Plain ``@user`` without text_mention carries no user_id; we don't
+    invent one. Only ``text_mention`` and self-username matches surface."""
+    msg = parse_message(
+        message_plain_username_mention_of_other, bot_id=bot_id, bot_username="testbot"
+    )
+    assert msg is not None
+    assert msg.mentions == ()
+
+
+def test_plain_bot_mention_without_bot_username_does_not_synthesize(
+    message_plain_username_mention_of_bot: Message, bot_id: int
+) -> None:
+    """When ``bot_username`` is not provided, plain ``@anything`` cannot
+    be matched against the bot and produces no structured mention."""
+    msg = parse_message(message_plain_username_mention_of_bot, bot_id=bot_id)
+    assert msg is not None
+    assert msg.mentions == ()
+
+
+def test_mention_in_caption_parses_from_caption_entities(
+    message_mention_in_caption: Message, bot_id: int
+) -> None:
+    msg = parse_message(message_mention_in_caption, bot_id=bot_id)
+    assert msg is not None
+    assert len(msg.mentions) == 1
+    assert msg.mentions[0].user_id == bot_id
+
+
+def test_plain_bot_mention_resolves_through_utf16_emoji_prefix(
+    message_emoji_prefix_bot_mention: Message, bot_id: int
+) -> None:
+    """Regression guard: Telegram entity offsets are UTF-16 code units;
+    a non-BMP char before the mention shifts the Python char index by
+    the surrogate-pair count. Naive ``text[offset:offset+length]``
+    misses the leading ``@`` and matches ``testbot `` instead of
+    ``@testbot``, so the synthesis wouldn't fire."""
+    msg = parse_message(message_emoji_prefix_bot_mention, bot_id=bot_id, bot_username="testbot")
+    assert msg is not None
+    assert len(msg.mentions) == 1
+    assert msg.mentions[0].user_id == bot_id
+
+
+def test_plain_bot_mention_in_caption_resolves_through_utf16(
+    message_plain_bot_mention_in_caption: Message, bot_id: int
+) -> None:
+    """Caption_entities path: same UTF-16 invariant as text_entities,
+    via ``message.parse_caption_entity``."""
+    msg = parse_message(message_plain_bot_mention_in_caption, bot_id=bot_id, bot_username="testbot")
+    assert msg is not None
+    assert len(msg.mentions) == 1
+    assert msg.mentions[0].user_id == bot_id
+
+
+def test_synthesized_self_mention_uses_bot_display_name(
+    message_plain_username_mention_of_bot: Message, bot_id: int
+) -> None:
+    """When ``bot_display_name`` is supplied, the synthesized self-mention
+    surfaces the display name (matching ``text_mention``'s
+    ``entity.user.full_name`` semantic) rather than the @-handle. This
+    keeps the same user_id from carrying two different ``name`` values
+    across events."""
+    msg = parse_message(
+        message_plain_username_mention_of_bot,
+        bot_id=bot_id,
+        bot_username="testbot",
+        bot_display_name="TestBot",
+    )
+    assert msg is not None
+    assert len(msg.mentions) == 1
+    assert msg.mentions[0].name == "TestBot"
+
+
+def test_multi_mention_preserves_order_and_self_detection(
+    message_multi_mentions: Message, bot_id: int
+) -> None:
+    """A single message can carry multiple mentions across entity types.
+
+    Order is preserved (text_mention of Carol → text_mention of bot →
+    plain ``@testbot`` → all three surface), and the bot's identity
+    appears twice without deduping — once via text_mention, once via
+    plain-username synthesis."""
+    msg = parse_message(
+        message_multi_mentions,
+        bot_id=bot_id,
+        bot_username="testbot",
+        bot_display_name="TestBot",
+    )
+    assert msg is not None
+    assert [(m.user_id, m.name) for m in msg.mentions] == [
+        (444555666, "Carol Doe"),
+        (bot_id, "TestBot"),
+        (bot_id, "TestBot"),
+    ]

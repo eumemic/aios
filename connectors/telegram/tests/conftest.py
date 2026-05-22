@@ -363,6 +363,210 @@ def message_edited(ptb_bot: Bot) -> Message:
 
 
 @pytest.fixture
+def message_text_mention_of_bot(ptb_bot: Bot) -> Message:
+    """Group message that text-mentions the bot via a ``text_mention`` entity.
+
+    ``text_mention`` is Telegram's user-link entity — the entity carries a
+    full ``User`` object including ``id``, so we can stamp a
+    user_id-bearing :class:`Mention` without a username lookup.
+    """
+    return _make_message(
+        {
+            "message_id": 750,
+            "date": 1700000050,
+            "chat": {"id": -987654321, "type": "group", "title": "Friends"},
+            "from": {"id": 111222333, "is_bot": False, "first_name": "Bob"},
+            "text": "Hey TestBot please help",
+            "entities": [
+                {
+                    "type": "text_mention",
+                    "offset": 4,
+                    "length": 7,
+                    "user": {"id": BOT_ID, "is_bot": True, "first_name": "TestBot"},
+                }
+            ],
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_text_mention_of_other_user(ptb_bot: Bot) -> Message:
+    """Group message that text-mentions a non-bot user."""
+    return _make_message(
+        {
+            "message_id": 751,
+            "date": 1700000051,
+            "chat": {"id": -987654321, "type": "group", "title": "Friends"},
+            "from": {"id": 111222333, "is_bot": False, "first_name": "Bob"},
+            "text": "cc Carol on this",
+            "entities": [
+                {
+                    "type": "text_mention",
+                    "offset": 3,
+                    "length": 5,
+                    "user": {
+                        "id": 444555666,
+                        "is_bot": False,
+                        "first_name": "Carol",
+                        "last_name": "Doe",
+                    },
+                }
+            ],
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_plain_username_mention_of_bot(ptb_bot: Bot) -> Message:
+    """Group message with a plain ``@testbot`` (mention entity)."""
+    return _make_message(
+        {
+            "message_id": 752,
+            "date": 1700000052,
+            "chat": {"id": -987654321, "type": "group", "title": "Friends"},
+            "from": {"id": 111222333, "is_bot": False, "first_name": "Bob"},
+            "text": "@testbot stand by",
+            "entities": [
+                {"type": "mention", "offset": 0, "length": 8},
+            ],
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_plain_username_mention_of_other(ptb_bot: Bot) -> Message:
+    """Plain ``@somebody_else`` — should NOT surface as a structured mention."""
+    return _make_message(
+        {
+            "message_id": 753,
+            "date": 1700000053,
+            "chat": {"id": -987654321, "type": "group", "title": "Friends"},
+            "from": {"id": 111222333, "is_bot": False, "first_name": "Bob"},
+            "text": "@randomuser check this",
+            "entities": [
+                {"type": "mention", "offset": 0, "length": 11},
+            ],
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_emoji_prefix_bot_mention(ptb_bot: Bot) -> Message:
+    """``🦄 @testbot help`` — emoji before the mention shifts UTF-16
+    offsets one slot past Python's code-point indexing. Telegram emits
+    ``offset=3, length=8`` for ``@testbot`` (emoji = 2 UTF-16 units +
+    space = 1, then ``@testbot`` starts at 3). Naive Python ``text[3:11]``
+    yields ``'testbot '`` (drops ``@``, includes trailing space) — only
+    ``message.parse_entity`` resolves correctly."""
+    return _make_message(
+        {
+            "message_id": 755,
+            "date": 1700000055,
+            "chat": {"id": -987654321, "type": "group", "title": "Friends"},
+            "from": {"id": 111222333, "is_bot": False, "first_name": "Bob"},
+            "text": "🦄 @testbot help",
+            "entities": [
+                {"type": "mention", "offset": 3, "length": 8},
+            ],
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_plain_bot_mention_in_caption(ptb_bot: Bot) -> Message:
+    """Photo with caption containing a plain ``@testbot`` mention.
+
+    Exercises the ``parse_caption_entity`` UTF-16 conversion path for
+    the synthesize-self-from-username branch — symmetric with
+    ``message_emoji_prefix_bot_mention`` but through the caption helper
+    instead of the text helper.
+    """
+    return _make_message(
+        {
+            "message_id": 756,
+            "date": 1700000056,
+            "chat": {"id": -987654321, "type": "group", "title": "Friends"},
+            "from": {"id": 111222333, "is_bot": False, "first_name": "Bob"},
+            "caption": "🦄 @testbot look",
+            "caption_entities": [
+                {"type": "mention", "offset": 3, "length": 8},
+            ],
+            "photo": [
+                {"file_id": "P2", "file_unique_id": "p2", "width": 90, "height": 90},
+            ],
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_multi_mentions(ptb_bot: Bot) -> Message:
+    """Group message that mixes a text_mention of another user, a
+    text_mention of the bot, and a plain ``@testbot`` self-tag."""
+    return _make_message(
+        {
+            "message_id": 757,
+            "date": 1700000057,
+            "chat": {"id": -987654321, "type": "group", "title": "Friends"},
+            "from": {"id": 111222333, "is_bot": False, "first_name": "Bob"},
+            "text": "Carol and TestBot, ping @testbot",
+            "entities": [
+                {
+                    "type": "text_mention",
+                    "offset": 0,
+                    "length": 5,
+                    "user": {
+                        "id": 444555666,
+                        "is_bot": False,
+                        "first_name": "Carol",
+                        "last_name": "Doe",
+                    },
+                },
+                {
+                    "type": "text_mention",
+                    "offset": 10,
+                    "length": 7,
+                    "user": {"id": BOT_ID, "is_bot": True, "first_name": "TestBot"},
+                },
+                {"type": "mention", "offset": 24, "length": 8},
+            ],
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
+def message_mention_in_caption(ptb_bot: Bot) -> Message:
+    """Photo with caption containing a text_mention — caption_entities path."""
+    return _make_message(
+        {
+            "message_id": 754,
+            "date": 1700000054,
+            "chat": {"id": -987654321, "type": "group", "title": "Friends"},
+            "from": {"id": 111222333, "is_bot": False, "first_name": "Bob"},
+            "caption": "TestBot see this",
+            "caption_entities": [
+                {
+                    "type": "text_mention",
+                    "offset": 0,
+                    "length": 7,
+                    "user": {"id": BOT_ID, "is_bot": True, "first_name": "TestBot"},
+                }
+            ],
+            "photo": [
+                {"file_id": "P1", "file_unique_id": "p1", "width": 90, "height": 90},
+            ],
+        },
+        ptb_bot,
+    )
+
+
+@pytest.fixture
 def reaction_added(ptb_bot: Bot) -> Any:
     """User added a 👍 reaction to a bot message (no prior reaction)."""
     from telegram import MessageReactionUpdated
