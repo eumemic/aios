@@ -288,17 +288,17 @@ class HttpConnector:
 
     # ── test-coordination primitives ──────────────────────────────────
 
-    async def wait_ready(self, deadline: float = 60.0) -> None:
+    async def wait_ready(self, deadline: float = 30.0) -> None:
         """Block until all three background loops have opened their SSE streams.
 
         Specifically: each of the discovery, tool, and management-call loops has
         received the synthetic ``"_open"`` event the SDK's
         :func:`aios_sdk.streaming._stream_sse` yields right after
         ``response.raise_for_status()`` succeeds — i.e. the HTTP handshake
-        returned 2xx headers.  At that moment the server-side body generator
-        has begun executing; within the same event-loop iteration its
-        ``listen_for_*`` context manager registers LISTEN, after which any
-        subsequent NOTIFY is queued and delivered to the SSE stream.
+        returned 2xx headers.  Since the server-side ``listen_for_*`` setup
+        runs in the route handler BEFORE ``EventSourceResponse`` is constructed
+        (issue #376), 2xx headers imply the LISTEN connection is already
+        established and any subsequent NOTIFY is queued.
 
         We deliberately do NOT depend on a server-emitted ``"connected"``
         event yielded before backfill, because yielding from an sse-starlette
@@ -306,33 +306,32 @@ class HttpConnector:
         returned without completing response" failure mode in CI (see aios#366
         commit-message archaeology).
 
-        Caveat for test authors: ``_open`` is a *best-effort* readiness
-        signal, not a strong handshake.  It fires when the client sees 2xx
-        headers, but the server-side generator may still be in the middle of
-        a slow ``asyncpg.connect()`` for its LISTEN connection.  In tests
-        that use an in-process uvicorn fixture, watch for the cross-test
-        ``sse_starlette.AppStatus.should_exit`` contamination noted in
-        :mod:`tests.conftest` (``_reset_sse_starlette_shutdown_state``);
-        without that reset, every SSE handshake after the first fixture
-        teardown can be cancelled immediately by the library's shutdown
-        watcher, defeating ``_open`` as a readiness oracle.
+        Caveat for test authors: in tests that use an in-process uvicorn
+        fixture, watch for the cross-test ``sse_starlette.AppStatus.should_exit``
+        contamination noted in :mod:`tests.conftest`
+        (``_reset_sse_starlette_shutdown_state``); without that reset, every
+        SSE handshake after the first fixture teardown can be cancelled
+        immediately by the library's shutdown watcher.
 
-        The default deadline is 60 s — generous for CI scheduler lag and the
-        exponential-backoff retry cycle on the SSE connection.
+        The default deadline is 30 s — comfortable headroom over worst-case
+        healthy CI scheduling (LISTEN preflight is now a single asyncpg
+        connect + add_listener inside the route handler, on the order of
+        tens of milliseconds in steady state).
 
         Raises ``TimeoutError`` if the loops have not all reached the live
         phase within ``deadline`` seconds.  Intended for test coordination.
         """
         await asyncio.wait_for(self._all_loops_live.wait(), timeout=deadline)
 
-    async def wait_connection_served(self, connection_id: str, deadline: float = 60.0) -> None:
+    async def wait_connection_served(self, connection_id: str, deadline: float = 30.0) -> None:
         """Block until serve_connection has been spawned for connection_id.
 
         The discovery loop must receive and process the ``added`` event for
-        ``connection_id`` before this returns.  Because the discovery SSE may
-        reconnect with exponential backoff before delivering the backfill, the
-        default deadline is 60 s (matches :meth:`wait_ready`'s deadline so
-        callers don't need to think about which is tighter).
+        ``connection_id`` before this returns.  Default deadline 30 s
+        matches :meth:`wait_ready`'s so callers don't need to think about
+        which is tighter; the SSE handshake itself is preflighted in the
+        route handler now (#376) so the discovery loop sees backfill
+        immediately after 2xx.
 
         Raises ``TimeoutError`` if the connection is not added within
         ``deadline`` seconds.  Intended for test coordination.

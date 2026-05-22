@@ -78,6 +78,12 @@ def sync_detailed(
 
      Stream session events as Server-Sent Events.
 
+    Preflights the LISTEN connection BEFORE constructing the response
+    (issue #376): a transient ``asyncpg.connect`` failure during
+    testcontainer warmup or a brief Postgres outage surfaces as a clean
+    503 with proper headers rather than a half-open chunked stream
+    after 200 OK has gone out.
+
     Args:
         session_id (str):
         after_seq (int | Unset):  Default: 0.
@@ -115,6 +121,12 @@ def sync(
 
      Stream session events as Server-Sent Events.
 
+    Preflights the LISTEN connection BEFORE constructing the response
+    (issue #376): a transient ``asyncpg.connect`` failure during
+    testcontainer warmup or a brief Postgres outage surfaces as a clean
+    503 with proper headers rather than a half-open chunked stream
+    after 200 OK has gone out.
+
     Args:
         session_id (str):
         after_seq (int | Unset):  Default: 0.
@@ -146,6 +158,12 @@ async def asyncio_detailed(
     """Stream Events
 
      Stream session events as Server-Sent Events.
+
+    Preflights the LISTEN connection BEFORE constructing the response
+    (issue #376): a transient ``asyncpg.connect`` failure during
+    testcontainer warmup or a brief Postgres outage surfaces as a clean
+    503 with proper headers rather than a half-open chunked stream
+    after 200 OK has gone out.
 
     Args:
         session_id (str):
@@ -181,6 +199,12 @@ async def asyncio(
     """Stream Events
 
      Stream session events as Server-Sent Events.
+
+    Preflights the LISTEN connection BEFORE constructing the response
+    (issue #376): a transient ``asyncpg.connect`` failure during
+    testcontainer warmup or a brief Postgres outage surfaces as a clean
+    503 with proper headers rather than a half-open chunked stream
+    after 200 OK has gone out.
 
     Args:
         session_id (str):
