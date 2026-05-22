@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sync/atomic"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -25,8 +26,16 @@ import (
 
 // Client wraps a whatsmeow.Client + its persistent sqlstore.  One per
 // paired phone; created in NewClient, owns its lifecycle until Close.
+//
+// wa is held behind an atomic.Pointer so Unpair can swap in a fresh
+// whatsmeow.Client (built from a new Device) after a successful Logout
+// without racing concurrent reads from RPC handlers.  whatsmeow marks
+// the Device as permanently Deleted on Logout and every subsequent
+// operation on it errors with ErrDeviceDeleted ("invalid use of
+// deleted device") — the swap is what lets a re-pair work in the same
+// daemon process.
 type Client struct {
-	wa     *whatsmeow.Client
+	wa     atomic.Pointer[whatsmeow.Client]
 	store  *sqlstore.Container
 	notify Notifier
 	log    *slog.Logger
@@ -54,13 +63,14 @@ func NewClient(
 		return nil, fmt.Errorf("get first device: %w", err)
 	}
 	wa := whatsmeow.NewClient(device, newWaLogger(log, "client"))
-	c := &Client{wa: wa, store: container, notify: notify, log: log}
+	c := &Client{store: container, notify: notify, log: log}
+	c.wa.Store(wa)
 	wa.AddEventHandler(c.handleEvent)
 	return c, nil
 }
 
 func (c *Client) hasPairedDevice() bool {
-	return c.wa.Store.ID != nil
+	return c.wa.Load().Store.ID != nil
 }
 
 // Connect attaches to WhatsApp if the device is paired.  Unpaired is
@@ -71,7 +81,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.log.Warn("wameow.no_paired_device")
 		return nil
 	}
-	if err := c.wa.Connect(); err != nil {
+	if err := c.wa.Load().Connect(); err != nil {
 		return fmt.Errorf("whatsmeow connect: %w", err)
 	}
 	return nil
@@ -79,7 +89,8 @@ func (c *Client) Connect(ctx context.Context) error {
 
 // SendMessage matches handler.SendMessageFn.
 func (c *Client) SendMessage(ctx context.Context, jidStr, text string) (string, int64, error) {
-	if !c.wa.IsConnected() {
+	wa := c.wa.Load()
+	if !wa.IsConnected() {
 		return "", 0, errors.New("whatsmeow: not connected")
 	}
 	jid, err := types.ParseJID(jidStr)
@@ -87,7 +98,7 @@ func (c *Client) SendMessage(ctx context.Context, jidStr, text string) (string, 
 		return "", 0, fmt.Errorf("invalid JID %q: %w", jidStr, err)
 	}
 	msg := &waE2E.Message{Conversation: proto.String(text)}
-	resp, err := c.wa.SendMessage(ctx, jid, msg)
+	resp, err := wa.SendMessage(ctx, jid, msg)
 	if err != nil {
 		return "", 0, err
 	}
@@ -96,7 +107,7 @@ func (c *Client) SendMessage(ctx context.Context, jidStr, text string) (string, 
 
 // Close disconnects from WhatsApp and closes the sqlstore.
 func (c *Client) Close() {
-	c.wa.Disconnect()
+	c.wa.Load().Disconnect()
 	if err := c.store.Close(); err != nil {
 		c.log.Warn("wameow.store_close_error", "err", err)
 	}

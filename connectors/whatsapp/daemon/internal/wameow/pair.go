@@ -66,12 +66,13 @@ func (c *Client) StartPairing(ctx context.Context) (string, error) {
 	c.pair.attempt = attempt
 	c.pair.mu.Unlock()
 
-	qrChan, err := c.wa.GetQRChannel(ctx)
+	wa := c.wa.Load()
+	qrChan, err := wa.GetQRChannel(ctx)
 	if err != nil {
 		c.completePair(PairingOutcome{Status: "error", Reason: err.Error()})
 		return "", fmt.Errorf("get qr channel: %w", err)
 	}
-	if err := c.wa.Connect(); err != nil {
+	if err := wa.Connect(); err != nil {
 		c.completePair(PairingOutcome{Status: "error", Reason: err.Error()})
 		return "", fmt.Errorf("connect: %w", err)
 	}
@@ -137,16 +138,34 @@ func (c *Client) Unpair(ctx context.Context) error {
 	if !c.hasPairedDevice() {
 		return errors.New("device not paired")
 	}
-	err := c.wa.Logout(ctx)
+	wa := c.wa.Load()
+	err := wa.Logout(ctx)
 	if err != nil {
 		c.log.Warn("wameow.logout_failed_forcing_local_cleanup", "err", err)
-		c.wa.Disconnect()
-		if delErr := c.wa.Store.Delete(ctx); delErr != nil {
+		wa.Disconnect()
+		if delErr := wa.Store.Delete(ctx); delErr != nil {
 			return fmt.Errorf("logout failed (%w); local store delete also failed: %v", err, delErr)
 		}
 	}
 	c.resetPairState()
+	// whatsmeow's Logout (and its Store.Delete fallback) marks the
+	// device as permanently Deleted; subsequent ops on this Client
+	// return ErrDeviceDeleted.  Swap in a fresh Client so the same
+	// daemon process can immediately serve a new StartPairing.
+	c.replaceWhatsmeowClient()
 	return nil
+}
+
+// replaceWhatsmeowClient builds a fresh whatsmeow.Client around a new
+// Device in the existing sqlstore container, rewires the event handler
+// to the same Notifier-bound Client receiver, and atomically swaps c.wa.
+// Concurrent reads see either the old (deleted) Client or the new one —
+// never a torn pointer.
+func (c *Client) replaceWhatsmeowClient() {
+	newDevice := c.store.NewDevice()
+	newWa := whatsmeow.NewClient(newDevice, newWaLogger(c.log, "client"))
+	newWa.AddEventHandler(c.handleEvent)
+	c.wa.Store(newWa)
 }
 
 // resetPairState forgets any cached pairing attempt.  Called after
@@ -209,7 +228,7 @@ func (c *Client) completeFromQRItem(item whatsmeow.QRChannelItem) {
 	switch item.Event {
 	case "success":
 		outcome = PairingOutcome{Status: "success"}
-		if id := c.wa.Store.ID; id != nil {
+		if id := c.wa.Load().Store.ID; id != nil {
 			outcome.JID = id.String()
 		}
 		// Intentionally not reading Store.PushName — whatsmeow doesn't
