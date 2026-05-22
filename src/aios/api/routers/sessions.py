@@ -510,11 +510,20 @@ async def get_context(
     Side effects (skill provisioning, session-status bumps, event
     appends) are omitted; the endpoint is read-only.
 
-    One known divergence from the worker's output: unresolved tool_calls
-    that the worker is currently executing render as ``_PENDING_EXTERNAL``
-    here (the API process has no view into the worker's task_registry).
-    The worker would render them as ``_PENDING_BACKGROUND``. Custom and
-    awaiting-confirm calls render identically on both sides.
+    Two known divergences from the worker's output:
+
+    1. Unresolved tool_calls that the worker is currently executing
+       render as ``_PENDING_EXTERNAL`` here (the API process has no view
+       into the worker's task_registry). The worker would render them
+       as ``_PENDING_BACKGROUND``. Custom and awaiting-confirm calls
+       render identically on both sides.
+    2. Image attachments whose ``in_sandbox_path`` is under
+       ``/workspace/...`` degrade to text markers here, because the
+       sandbox registry that holds the live workspace bind-mount path
+       only exists in the worker process. The worker inlines them as
+       ``image_url`` parts when a sandbox is provisioned. Attachments
+       under ``/mnt/attachments/...`` and ``/mnt/uploads/...`` render
+       identically on both sides.
     """
     from aios.harness.step_context import compose_step_context, compute_step_prelude
     from aios.harness.tokens import approx_tokens

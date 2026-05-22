@@ -27,6 +27,7 @@ import base64
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from aios.harness.vision import (
@@ -245,6 +246,7 @@ def render_user_event(
     *,
     model: str | None = None,
     session_id: str | None = None,
+    workspace_path: Path | None = None,
 ) -> dict[str, Any]:
     """Render a user event into its chat-completions message form.
 
@@ -290,6 +292,7 @@ def render_user_event(
                     attachments,
                     model=model,
                     session_id=session_id,
+                    workspace_path=workspace_path,
                 )
         return msg
 
@@ -306,6 +309,7 @@ def _apply_attachments(
     *,
     model: str | None,
     session_id: str | None,
+    workspace_path: Path | None = None,
 ) -> None:
     leading_text = msg.get("content") if isinstance(msg.get("content"), str) else ""
     marker_lines: list[str] = []
@@ -325,7 +329,7 @@ def _apply_attachments(
                 record_type=type(record).__name__,
             )
             continue
-        host_path = _resolve_attachment_host_path(record, session_id)
+        host_path = _resolve_attachment_host_path(record, session_id, workspace_path)
         size = record.get("size")
         content_type = record.get("content_type")
         if (
@@ -382,11 +386,15 @@ def _apply_attachments(
         msg["content"] = text
 
 
-def _resolve_attachment_host_path(record: dict[str, Any], session_id: str | None) -> Any:
+def _resolve_attachment_host_path(
+    record: dict[str, Any],
+    session_id: str | None,
+    workspace_path: Path | None = None,
+) -> Any:
     sandbox_path = record.get("in_sandbox_path")
     if not isinstance(sandbox_path, str) or session_id is None:
         return None
-    return resolve_to_host_path(session_id, sandbox_path)
+    return resolve_to_host_path(session_id, sandbox_path, workspace_path=workspace_path)
 
 
 def _sanitize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -544,6 +552,7 @@ def build_messages(
     system_prompt: str | None,
     model: str | None = None,
     session_id: str | None = None,
+    workspace_path: Path | None = None,
     in_flight_tool_call_ids: frozenset[str] = frozenset(),
 ) -> ContextResult:
     """Assemble a chat-completions message list from pre-windowed events.
@@ -610,6 +619,7 @@ def build_messages(
                 e.focal_channel_at_arrival,
                 model=model,
                 session_id=session_id,
+                workspace_path=workspace_path,
             )
             messages.append(msg)
             max_stimulus_seq = max(max_stimulus_seq, e.seq)

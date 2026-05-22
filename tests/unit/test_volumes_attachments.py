@@ -100,13 +100,16 @@ class TestResolveToHostPath:
     ) -> None:
         settings = get_settings()
         monkeypatch.setattr(settings, "workspace_root", tmp_path)
-        assert resolve_to_host_path("sess-1", "/workspace") == (tmp_path / "sess-1").resolve()
+        # Legacy pre-#409 layout: caller supplies the legacy workspace_path.
+        legacy = (tmp_path / "sess-1").resolve()
+        assert resolve_to_host_path("sess-1", "/workspace", workspace_path=legacy) == legacy
 
     def test_workspace_subpath(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         settings = get_settings()
         monkeypatch.setattr(settings, "workspace_root", tmp_path)
-        result = resolve_to_host_path("sess-1", "/workspace/sub/file.txt")
-        assert result == (tmp_path / "sess-1").resolve() / "sub" / "file.txt"
+        legacy = (tmp_path / "sess-1").resolve()
+        result = resolve_to_host_path("sess-1", "/workspace/sub/file.txt", workspace_path=legacy)
+        assert result == legacy / "sub" / "file.txt"
 
     def test_attachments_root_maps_to_session_attachments(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -157,6 +160,77 @@ class TestResolveToHostPath:
         # Not /workspace itself but starts with the literal prefix.
         assert resolve_to_host_path("sess-1", "/workspaces/foo") is None
 
+    def test_post_409_workspace_uses_explicit_workspace_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Post-#409 layout: nested ``<workspace_root>/<account>/<session>``
+        passed in as ``workspace_path`` and used as the base."""
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        nested = (tmp_path / "acct-1" / "sess-1").resolve()
+        nested.mkdir(parents=True)
+        result = resolve_to_host_path("sess-1", "/workspace/foo.png", workspace_path=nested)
+        assert result == nested / "foo.png"
+
+    def test_pre_409_workspace_layout_still_resolves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pre-#409 layout: caller supplies the legacy
+        ``<workspace_root>/<session>`` shape and it resolves fine."""
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        legacy = (tmp_path / "sess-1").resolve()
+        result = resolve_to_host_path("sess-1", "/workspace/file.txt", workspace_path=legacy)
+        assert result == legacy / "file.txt"
+
+    def test_workspace_path_missing_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-closed: ``/workspace*`` without ``workspace_path`` returns None.
+
+        No silent fallback to the legacy synthetic path.
+        """
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        assert resolve_to_host_path("sess-1", "/workspace/foo") is None
+        assert resolve_to_host_path("sess-1", "/workspace") is None
+
+    def test_attachments_branch_unaffected_by_workspace_path_param(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        without = resolve_to_host_path("sess-1", "/mnt/attachments/echo/x.jpg")
+        with_ws = resolve_to_host_path(
+            "sess-1",
+            "/mnt/attachments/echo/x.jpg",
+            workspace_path=tmp_path / "acct-1" / "sess-1",
+        )
+        assert without == with_ws
+
+    def test_uploads_branch_unaffected_by_workspace_path_param(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        without = resolve_to_host_path("sess-1", "/mnt/uploads/f/x.png")
+        with_ws = resolve_to_host_path(
+            "sess-1",
+            "/mnt/uploads/f/x.png",
+            workspace_path=tmp_path / "acct-1" / "sess-1",
+        )
+        assert without == with_ws
+
+    def test_workspace_path_with_workspace_exact_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        nested = (tmp_path / "acct-1" / "sess-1").resolve()
+        nested.mkdir(parents=True)
+        result = resolve_to_host_path("sess-1", "/workspace", workspace_path=nested)
+        assert result == nested
+
 
 class TestResolveToHostPathTraversal:
     """Containment check: model-controlled paths must not escape the
@@ -169,7 +243,11 @@ class TestResolveToHostPathTraversal:
         monkeypatch.setattr(settings, "workspace_root", tmp_path)
         # `/workspace/../../etc/hostname` resolves outside the session's
         # workspace dir → must be rejected.
-        assert resolve_to_host_path("sess-1", "/workspace/../../etc/hostname") is None
+        legacy = (tmp_path / "sess-1").resolve()
+        assert (
+            resolve_to_host_path("sess-1", "/workspace/../../etc/hostname", workspace_path=legacy)
+            is None
+        )
 
     def test_dotdot_escape_from_attachments_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -183,7 +261,15 @@ class TestResolveToHostPathTraversal:
     ) -> None:
         settings = get_settings()
         monkeypatch.setattr(settings, "workspace_root", tmp_path)
-        assert resolve_to_host_path("sess-1", "/workspace/sub/../../../../etc/passwd") is None
+        legacy = (tmp_path / "sess-1").resolve()
+        assert (
+            resolve_to_host_path(
+                "sess-1",
+                "/workspace/sub/../../../../etc/passwd",
+                workspace_path=legacy,
+            )
+            is None
+        )
 
     def test_innocuous_dotdot_inside_workspace_allowed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -191,8 +277,22 @@ class TestResolveToHostPathTraversal:
         """A ``..`` that stays inside the workspace after normalization is fine."""
         settings = get_settings()
         monkeypatch.setattr(settings, "workspace_root", tmp_path)
-        result = resolve_to_host_path("sess-1", "/workspace/sub/../foo.jpg")
-        assert result == (tmp_path / "sess-1").resolve() / "foo.jpg"
+        legacy = (tmp_path / "sess-1").resolve()
+        result = resolve_to_host_path("sess-1", "/workspace/sub/../foo.jpg", workspace_path=legacy)
+        assert result == legacy / "foo.jpg"
+
+    def test_dotdot_containment_with_explicit_workspace_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``..`` escape rejected against the explicit (post-#409) base."""
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspace_root", tmp_path)
+        nested = (tmp_path / "acct-1" / "sess-1").resolve()
+        nested.mkdir(parents=True)
+        assert (
+            resolve_to_host_path("sess-1", "/workspace/../../etc/passwd", workspace_path=nested)
+            is None
+        )
 
     def test_symlink_escape_via_workspace_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -211,7 +311,7 @@ class TestResolveToHostPathTraversal:
         outside.write_text("host-secret")
         (ws / "sneaky.jpg").symlink_to(outside)
 
-        assert resolve_to_host_path("sess-1", "/workspace/sneaky.jpg") is None
+        assert resolve_to_host_path("sess-1", "/workspace/sneaky.jpg", workspace_path=ws) is None
 
     def test_symlink_target_inside_workspace_allowed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -225,5 +325,5 @@ class TestResolveToHostPathTraversal:
         target.write_bytes(b"x")
         (ws / "alias.jpg").symlink_to(target)
 
-        result = resolve_to_host_path("sess-1", "/workspace/alias.jpg")
+        result = resolve_to_host_path("sess-1", "/workspace/alias.jpg", workspace_path=ws)
         assert result == target.resolve()

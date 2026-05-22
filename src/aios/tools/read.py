@@ -166,7 +166,7 @@ async def _read_image(
     mime = _EXT_TO_MIME[os.path.splitext(path)[1].lower()]
     model = await sessions_service.get_session_model(pool, session_id, account_id=account_id)
 
-    host_path = resolve_to_host_path(session_id, path)
+    host_path = resolve_to_host_path(session_id, path, workspace_path=handle.workspace_path)
     if host_path is not None:
         try:
             data = host_path.read_bytes()
