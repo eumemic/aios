@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -79,8 +79,11 @@ class Settings(BaseSettings):
     workspace_root: Path = Field(
         default=Path("/var/lib/aios/workspaces"),
         description="Host directory containing per-session workspace subdirectories. "
-        "Each session gets <workspace_root>/<session_id> bind-mounted to /workspace "
-        "inside its sandbox container.",
+        "Each session gets <workspace_root>/<account_id>/<session_id> bind-mounted to /workspace "
+        "inside its sandbox container. Must be an absolute path — every consumer "
+        "calls ``.resolve()`` at use time, so a relative value silently produces "
+        "CWD-dependent paths and API/worker processes running from different "
+        "working directories would compute divergent results.",
     )
     sandbox_cpu_quota: float | None = Field(
         default=None,
@@ -200,6 +203,13 @@ class Settings(BaseSettings):
 
     # ── observability ──────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")
+
+    @field_validator("workspace_root")
+    @classmethod
+    def _validate_workspace_root(cls, v: Path) -> Path:
+        if not v.is_absolute():
+            raise ValueError(f"workspace_root must be an absolute path; got {v!r}")
+        return v
 
 
 @lru_cache(maxsize=1)

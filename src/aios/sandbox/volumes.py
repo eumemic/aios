@@ -52,10 +52,8 @@ def safe_filename(name: str | None) -> str:
 def workspace_dir_for(session_id: str) -> Path:
     """Return the absolute host directory for ``session_id``'s workspace.
 
-    The returned path is always absolute — Docker bind mounts reject
-    relative paths. If ``workspace_root`` was configured as a relative
-    path (e.g. ``./workspaces`` in a dev ``.env``), it is resolved
-    against the current working directory at call time.
+    ``Settings.workspace_root`` is enforced absolute at config load time,
+    so the joined path is always absolute — required by Docker bind mounts.
 
     Pure — does not touch the filesystem. Use :func:`ensure_workspace_dir`
     to both compute and create.
