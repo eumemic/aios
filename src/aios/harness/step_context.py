@@ -290,7 +290,14 @@ async def compose_step_context(
     # sandbox registry to grab the live handle when one exists; sessions
     # without a provisioned sandbox (chat-only, pre-cold-start) get
     # ``None`` and the renderer fails closed for those.
-    cached = harness_runtime.require_sandbox_registry().peek(session.id)
+    #
+    # Read the module-level optional directly rather than via
+    # ``require_sandbox_registry()``: this function also runs in the API
+    # process (``GET /v1/sessions/:id/context``) where the registry is
+    # never initialized.  ``None`` cascades into the same fail-closed
+    # path as a missing handle, which is the correct preview behavior.
+    registry = harness_runtime.sandbox_registry
+    cached = registry.peek(session.id) if registry is not None else None
     workspace_path = cached.workspace_path if cached is not None else None
 
     ctx = build_messages(
