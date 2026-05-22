@@ -281,6 +281,88 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
         return result
 
     @tool()
+    async def whatsapp_list_groups(
+        self,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any]:
+        """List every WhatsApp group the bot is a member of.
+
+        Returns:
+            ``{"groups": [{"jid": "...", "name": "...", "topic": "...",
+            "participants": [{"jid": "...", "is_admin": false}, ...]},
+            ...]}``.  Use the ``jid`` field of a group as the
+            ``chat_id`` for whatsapp_send / whatsapp_react / etc.
+        """
+        state = self.state[connection_id]
+        result = await state.daemon.rpc.call("listGroups", {})
+        if not isinstance(result, dict):
+            raise RuntimeError(f"listGroups returned non-dict: {result!r}")
+        return result
+
+    @tool()
+    async def whatsapp_create_group(
+        self,
+        name: str,
+        participants: list[str],
+        *,
+        connection_id: str,
+    ) -> dict[str, Any]:
+        """Create a new WhatsApp group.
+
+        Args:
+            name: The group's display name (≤25 characters; WhatsApp
+                rejects longer names with 406 Not Acceptable).
+            participants: List of +E.164 phone numbers (e.g.
+                ``["+15551234567"]``) to invite.  The bot is added
+                implicitly by WhatsApp's server.
+
+        Returns:
+            The new group's summary: ``{"jid": "...", "name": "...",
+            "participants": [...]}``.  Use the ``jid`` as the
+            ``chat_id`` for subsequent sends to this group.
+        """
+        state = self.state[connection_id]
+        participant_jids = [_phone_to_jid(p) for p in participants]
+        result = await state.daemon.rpc.call(
+            "createGroup",
+            {"name": name, "participants": participant_jids},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(f"createGroup returned non-dict: {result!r}")
+        return result
+
+    @tool()
+    async def whatsapp_rename_group(
+        self,
+        chat_id: str,
+        name: str,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any]:
+        """Rename a WhatsApp group the bot is a member of (and admin in).
+
+        Args:
+            chat_id: The group's WhatsApp JID (e.g. ``"...@g.us"``);
+                take it from whatsapp_list_groups output or from a
+                group inbound's ``channel_id``.
+            name: The new display name.  ≤25 chars per WhatsApp's
+                cap.
+
+        Returns:
+            ``{"status": "ok"}`` on success.  Raises if the bot
+            isn't an admin in the group.
+        """
+        state = self.state[connection_id]
+        result = await state.daemon.rpc.call(
+            "renameGroup",
+            {"jid": chat_id, "name": name},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(f"renameGroup returned non-dict: {result!r}")
+        return result
+
+    @tool()
     async def whatsapp_delete_message(
         self,
         message_id: str,
@@ -309,6 +391,20 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
         if not isinstance(result, dict):
             raise RuntimeError(f"deleteMessage returned non-dict: {result!r}")
         return result
+
+
+def _phone_to_jid(phone: str) -> str:
+    """Normalize an operator-supplied phone (+E.164 or bare digits) to
+    a WhatsApp JID (``<digits>@s.whatsapp.net``).
+
+    Strips ``+``, spaces, and dashes; if the cleaned value is already
+    a full ``...@...`` JID it's returned verbatim so the model can
+    pass JIDs through if it has them.
+    """
+    if "@" in phone:
+        return phone
+    cleaned = phone.lstrip("+").replace(" ", "").replace("-", "")
+    return f"{cleaned}@s.whatsapp.net"
 
 
 def _phone_from_jid(jid: str) -> str:

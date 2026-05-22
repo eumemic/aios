@@ -69,6 +69,7 @@ func main() {
 	handler.RegisterSend(reg, sendAdapter(client))
 	handler.RegisterPairing(reg, &clientPairAdapter{client: client})
 	handler.RegisterMessageOps(reg, client)
+	handler.RegisterGroups(reg, &clientGroupsAdapter{client: client})
 
 	// Connect runs in parallel with srv.Run so the listener binds (and
 	// `version` RPC starts answering) while the WhatsApp handshake is
@@ -131,4 +132,50 @@ func (a *clientPairAdapter) ConfirmPairing(ctx context.Context) (handler.Pairing
 
 func (a *clientPairAdapter) Unpair(ctx context.Context) error {
 	return a.client.Unpair(ctx)
+}
+
+// clientGroupsAdapter bridges wameow.GroupSummary →
+// handler.GroupSummary so the handler package stays decoupled from
+// the wameow concrete type.  Same per-call memcopy pattern as
+// clientPairAdapter / sendAdapter.
+type clientGroupsAdapter struct {
+	client *wameow.Client
+}
+
+func (a *clientGroupsAdapter) ListGroups(ctx context.Context) ([]handler.GroupSummary, error) {
+	groups, err := a.client.ListGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]handler.GroupSummary, len(groups))
+	for i, g := range groups {
+		out[i] = wameowGroupToHandler(g)
+	}
+	return out, nil
+}
+
+func (a *clientGroupsAdapter) CreateGroup(ctx context.Context, name string, participantJIDs []string) (*handler.GroupSummary, error) {
+	g, err := a.client.CreateGroup(ctx, name, participantJIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := wameowGroupToHandler(*g)
+	return &out, nil
+}
+
+func (a *clientGroupsAdapter) RenameGroup(ctx context.Context, groupJID, name string) error {
+	return a.client.RenameGroup(ctx, groupJID, name)
+}
+
+func wameowGroupToHandler(g wameow.GroupSummary) handler.GroupSummary {
+	parts := make([]handler.GroupParticipantInfo, len(g.Participants))
+	for i, p := range g.Participants {
+		parts[i] = handler.GroupParticipantInfo{JID: p.JID, IsAdmin: p.IsAdmin}
+	}
+	return handler.GroupSummary{
+		JID:          g.JID,
+		Name:         g.Name,
+		Topic:        g.Topic,
+		Participants: parts,
+	}
 }
