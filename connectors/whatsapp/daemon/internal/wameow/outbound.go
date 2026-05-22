@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -159,7 +160,41 @@ func (c *Client) sendOne(ctx context.Context, wa *whatsmeow.Client, jid types.JI
 		return "", 0, err
 	}
 	c.recordOutbound(ctx, wa, string(resp.ID), jid)
+	// Implicit receipts-after-emit: the bot's reply means it has
+	// "read" the prior peer messages in this chat.  Done after the
+	// send succeeds so a failed send doesn't burn the read state.
+	c.flushReadReceipts(ctx, wa, jid)
 	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
+}
+
+// flushReadReceipts drains the per-chat unread queue and issues a
+// single MarkRead covering all peer messages.  Best-effort: a
+// MarkRead failure logs but doesn't fail the send (the message
+// already went through; failing the RPC would mislead the caller).
+func (c *Client) flushReadReceipts(ctx context.Context, wa *whatsmeow.Client, chat types.JID) {
+	keys := c.drainUnread(chat.String())
+	if len(keys) == 0 {
+		return
+	}
+	// WhatsApp's MarkRead takes a single sender JID, so we group by
+	// sender.  In a DM, all entries share the peer's JID; in a
+	// group, different participants may have different sender JIDs
+	// and need separate calls.
+	bySender := make(map[string][]types.MessageID)
+	for _, k := range keys {
+		bySender[k.sender] = append(bySender[k.sender], types.MessageID(k.id))
+	}
+	now := time.Now()
+	for senderStr, ids := range bySender {
+		sender, err := types.ParseJID(senderStr)
+		if err != nil {
+			c.log.Warn("wameow.mark_read.bad_sender", "sender", senderStr, "err", err)
+			continue
+		}
+		if err := wa.MarkRead(ctx, ids, now, chat, sender); err != nil {
+			c.log.Warn("wameow.mark_read_failed", "chat", chat, "sender", senderStr, "err", err)
+		}
+	}
 }
 
 // buildTextMessage shapes a text-only outbound message, attaching a

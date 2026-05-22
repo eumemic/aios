@@ -116,6 +116,53 @@ func TestSanitizeFilenameNeutralizesDodgyChars(t *testing.T) {
 	}
 }
 
+func TestRecordInboundEnqueuesUnreadForPeer(t *testing.T) {
+	// Peer-sent message (is_self=false) on a DM chat enqueues an
+	// unread entry so the next outbound to that chat marks it read.
+	c := &Client{
+		log:         discardLogger(),
+		msgs:        newTestMessageStore(t),
+		lifetimeCtx: context.Background(),
+	}
+	peer := types.NewJID("15553334444", types.DefaultUserServer)
+	c.recordInbound(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: peer, Sender: peer, IsFromMe: false},
+			ID:            "INBOUND-1",
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hi")},
+	})
+
+	got := c.drainUnread(peer.String())
+	if len(got) != 1 || got[0].id != "INBOUND-1" || got[0].sender != peer.String() {
+		t.Errorf("expected one unread entry, got %v", got)
+	}
+}
+
+func TestRecordInboundSkipsUnreadForOwnEchoes(t *testing.T) {
+	// Our own outbound messages echo back through *events.Message
+	// with is_self=true.  Those aren't "unread" by us; the unread
+	// queue should ignore them so a self-echo doesn't trigger a
+	// MarkRead on the bot's own send.
+	c := &Client{
+		log:         discardLogger(),
+		msgs:        newTestMessageStore(t),
+		lifetimeCtx: context.Background(),
+	}
+	peer := types.NewJID("15553334444", types.DefaultUserServer)
+	c.recordInbound(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: peer, Sender: peer, IsFromMe: true},
+			ID:            "OUR-ECHO",
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hi")},
+	})
+
+	if got := c.drainUnread(peer.String()); got != nil {
+		t.Errorf("self-echo unexpectedly enqueued: %v", got)
+	}
+}
+
 func TestIsPureProtocolMessage(t *testing.T) {
 	// Real user-facing message — even with a ProtocolMessage rider —
 	// must NOT be filtered out of msgstore writes.

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 
 	"go.mau.fi/whatsmeow"
@@ -45,6 +46,19 @@ type Client struct {
 	// inbound msgstore writes, so they cancel on daemon shutdown
 	// instead of running against a torn-down store.
 	lifetimeCtx context.Context
+	// unread tracks per-chat inbound message ids the peer is waiting
+	// on a read receipt for.  Populated in recordInbound; drained
+	// in sendOne after a successful send so the bot's reply
+	// implicitly marks the prior context as read (Signal-shape
+	// receipts-after-emit).  Each entry stores (msg_id, sender_jid)
+	// since whatsmeow's MarkRead needs both.
+	unreadMu sync.Mutex
+	unread   map[string][]unreadKey
+}
+
+type unreadKey struct {
+	id     string
+	sender string
 }
 
 // NewClient opens the sqlstore at <storeDir>/store.db, picks the first
@@ -80,6 +94,7 @@ func NewClient(
 		notify:      notify,
 		log:         log,
 		lifetimeCtx: ctx,
+		unread:      make(map[string][]unreadKey),
 	}
 	c.wa.Store(wa)
 	wa.AddEventHandler(c.handleEvent)
@@ -102,6 +117,38 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("whatsmeow connect: %w", err)
 	}
 	return nil
+}
+
+// markInboundUnread appends a peer-sent message to the per-chat
+// unread queue so the next bot reply to that chat drains it via
+// MarkRead.  Called from recordInbound for any *events.Message with
+// is_self=false on a user-visible chat.  Lazy-inits the map for
+// callers that construct Client directly (tests).
+func (c *Client) markInboundUnread(chatJID, msgID, senderJID string) {
+	c.unreadMu.Lock()
+	defer c.unreadMu.Unlock()
+	if c.unread == nil {
+		c.unread = make(map[string][]unreadKey)
+	}
+	c.unread[chatJID] = append(c.unread[chatJID], unreadKey{id: msgID, sender: senderJID})
+}
+
+// drainUnread atomically pulls + clears the per-chat unread queue.
+// Returns nil when the chat has no pending receipts.  Caller is
+// responsible for the actual MarkRead RPC; drainUnread just hands
+// over ownership of the slice.
+func (c *Client) drainUnread(chatJID string) []unreadKey {
+	c.unreadMu.Lock()
+	defer c.unreadMu.Unlock()
+	if c.unread == nil {
+		return nil
+	}
+	keys, ok := c.unread[chatJID]
+	if !ok {
+		return nil
+	}
+	delete(c.unread, chatJID)
+	return keys
 }
 
 // recordOutbound stamps an outbound message into the message store

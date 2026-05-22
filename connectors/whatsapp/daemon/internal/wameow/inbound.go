@@ -204,6 +204,16 @@ func (c *Client) recordInbound(e *events.Message) {
 	if err != nil {
 		c.log.Warn("wameow.msgstore_put_failed", "id", e.Info.ID, "err", err)
 	}
+	// Track unread peer messages so the next outbound to this chat
+	// implicitly marks them read.  is_self echoes of our own sends
+	// are not "unread" by us — skip.
+	if !e.Info.IsFromMe {
+		c.markInboundUnread(
+			e.Info.Chat.String(),
+			string(e.Info.ID),
+			e.Info.Sender.String(),
+		)
+	}
 }
 
 // isUserVisibleChat reports whether the chat type can carry messages
