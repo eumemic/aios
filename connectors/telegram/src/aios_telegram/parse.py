@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from telegram import Message, MessageReactionUpdated, ReactionTypeEmoji
-from telegram.constants import ChatType
+from telegram.constants import ChatType, MessageEntityType
 
 ChatKind = Literal["dm", "group", "supergroup", "channel"]
 
@@ -35,6 +35,21 @@ class Reply:
 
 
 @dataclass(slots=True, frozen=True)
+class Mention:
+    """One structured @-mention from a Telegram inbound.
+
+    Surfaced for ``text_mention`` entities (which embed a full ``User``
+    object with ``id``) and synthesized for plain ``@<bot_username>``
+    matches against the running bot. Plain ``@<other_user>`` mentions
+    carry no user_id on the wire and are intentionally not surfaced —
+    the model can substring-match ``text`` if it needs to inspect them.
+    """
+
+    user_id: int
+    name: str | None
+
+
+@dataclass(slots=True, frozen=True)
 class InboundMessage:
     chat_kind: ChatKind
     chat_id: int
@@ -45,6 +60,7 @@ class InboundMessage:
     timestamp_ms: int
     text: str
     attachments: tuple[Attachment, ...]
+    mentions: tuple[Mention, ...]
     reply: Reply | None
     edited: bool = False
     # Epoch-ms of the most recent edit, or None if never edited. Telegram
@@ -78,6 +94,62 @@ class InboundReaction:
     timestamp_ms: int
     old_emojis: tuple[str, ...]
     new_emojis: tuple[str, ...]
+
+
+def _parse_mentions(
+    message: Message,
+    *,
+    bot_id: int,
+    bot_username: str | None,
+    bot_display_name: str | None,
+) -> tuple[Mention, ...]:
+    """Extract structured mentions from Telegram entities.
+
+    Surfaces:
+    - ``text_mention`` entities directly — their embedded ``User`` carries
+      a stable ``id`` (and usually ``first_name``).
+    - Plain ``mention`` entities whose text equals ``@<bot_username>`` —
+      Telegram doesn't ship user_id for ``@username`` mentions on the
+      wire, but a self-tag is the high-value case the model needs to
+      detect, so we synthesize a structured entry against the bot's own
+      id when ``bot_username`` is supplied.
+
+    Plain ``mention`` entries for *other* users carry no resolvable
+    user_id and are intentionally not surfaced — substring-matching
+    ``text`` is the model's fallback for those.
+
+    Entity offsets/lengths are UTF-16 code units on the wire; PTB's
+    ``parse_entity`` / ``parse_caption_entity`` handles the conversion
+    to Python's code-point indexing, so we delegate to it rather than
+    indexing ``message.text`` directly.
+    """
+    if message.text:
+        entities = message.entities
+        get_entity_text = message.parse_entity
+    elif message.caption:
+        entities = message.caption_entities
+        get_entity_text = message.parse_caption_entity
+    else:
+        return ()
+    if not entities:
+        return ()
+    self_tag = f"@{bot_username}".casefold() if bot_username else None
+    out: list[Mention] = []
+    for entity in entities:
+        if entity.type == MessageEntityType.TEXT_MENTION and entity.user is not None:
+            out.append(
+                Mention(
+                    user_id=entity.user.id,
+                    name=entity.user.full_name or None,
+                )
+            )
+        elif (
+            entity.type == MessageEntityType.MENTION
+            and self_tag is not None
+            and get_entity_text(entity).casefold() == self_tag
+        ):
+            out.append(Mention(user_id=bot_id, name=bot_display_name or bot_username))
+    return tuple(out)
 
 
 def _chat_kind(chat_type: str) -> ChatKind:
@@ -182,7 +254,13 @@ def _extract_attachments(message: Message) -> tuple[Attachment, ...]:
     return tuple(out)
 
 
-def parse_message(message: Message, *, bot_id: int) -> InboundMessage | None:
+def parse_message(
+    message: Message,
+    *,
+    bot_id: int,
+    bot_username: str | None = None,
+    bot_display_name: str | None = None,
+) -> InboundMessage | None:
     sender = message.from_user
     if sender is None:
         # Channel posts and anonymous admins have no ``from_user``.
@@ -210,6 +288,13 @@ def parse_message(message: Message, *, bot_id: int) -> InboundMessage | None:
 
     sticker_emoji = message.sticker.emoji if message.sticker is not None else None
 
+    mentions = _parse_mentions(
+        message,
+        bot_id=bot_id,
+        bot_username=bot_username,
+        bot_display_name=bot_display_name,
+    )
+
     return InboundMessage(
         chat_kind=chat_kind,
         chat_id=chat.id,
@@ -220,6 +305,7 @@ def parse_message(message: Message, *, bot_id: int) -> InboundMessage | None:
         timestamp_ms=int(message.date.timestamp() * 1000),
         text=text,
         attachments=attachments,
+        mentions=mentions,
         reply=reply,
         edited=message.edit_date is not None,
         edit_date_ms=(

@@ -145,6 +145,8 @@ class TelegramConnector(HttpConnector):
             raise
 
         bot_id = int(me.id)
+        bot_username = me.username or None
+        bot_display_name = me.first_name
         inbound_queue: asyncio.Queue[InboundMessage | InboundReaction] = asyncio.Queue()
 
         # Handlers are tiny so PTB's worker doesn't block on our queue
@@ -155,7 +157,12 @@ class TelegramConnector(HttpConnector):
             message = update.message or update.edited_message
             if message is None:
                 return
-            parsed = parse_message(message, bot_id=bot_id)
+            parsed = parse_message(
+                message,
+                bot_id=bot_id,
+                bot_username=bot_username,
+                bot_display_name=bot_display_name,
+            )
             if parsed is None:
                 return
             await inbound_queue.put(parsed)
@@ -747,6 +754,11 @@ def build_metadata(msg: InboundMessage, bot_id: int) -> dict[str, Any]:
     (e.g. ``aios sessions events`` JSON output).  Reply-payload is
     nested so the model sees it as a structured sibling of ``content``
     rather than embedded prose.
+
+    Mentions ride as a structured list plus a derived ``self_mentioned``
+    bool, matching the shape the signal connector emits and the harness
+    renders.  ``uuid`` is the stringified telegram ``user_id`` — the
+    platform-stable identity the model needs for downstream addressing.
     """
     metadata: dict[str, Any] = {
         "channel": f"telegram/{bot_id}/{msg.chat_id}",
@@ -759,6 +771,9 @@ def build_metadata(msg: InboundMessage, bot_id: int) -> dict[str, Any]:
         metadata["sender_name"] = msg.sender_name
     if msg.chat_name is not None:
         metadata["chat_name"] = msg.chat_name
+    if msg.mentions:
+        metadata["mentions"] = [{"uuid": str(m.user_id), "name": m.name} for m in msg.mentions]
+        metadata["self_mentioned"] = any(m.user_id == bot_id for m in msg.mentions)
     if msg.reply is not None:
         metadata["reply_to"] = {
             "message_id": msg.reply.message_id,
