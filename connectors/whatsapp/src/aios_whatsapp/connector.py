@@ -19,6 +19,7 @@ from aios_connector_http import HttpConnector, SandboxPath, iso_from_ms, tool
 
 from .config import Settings
 from .daemon import WhatsappDaemon
+from .format import markdown_to_whatsapp
 from .management import WhatsappManagementMixin, normalize_phone
 from .parse import InboundMessage, parse_message
 
@@ -180,7 +181,7 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
             react/edit/delete-targetable individually.
         """
         state = self.state[connection_id]
-        params: dict[str, Any] = {"jid": chat_id, "text": text}
+        params: dict[str, Any] = {"jid": chat_id, "text": markdown_to_whatsapp(text)}
         if attachments:
             params["attachments"] = [_attachment_params(p) for p in attachments]
         result = await state.daemon.rpc.call("sendMessage", params)
@@ -247,7 +248,7 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
         state = self.state[connection_id]
         result = await state.daemon.rpc.call(
             "editMessage",
-            {"message_id": message_id, "text": text},
+            {"message_id": message_id, "text": markdown_to_whatsapp(text)},
         )
         if not isinstance(result, dict):
             raise RuntimeError(f"editMessage returned non-dict: {result!r}")
