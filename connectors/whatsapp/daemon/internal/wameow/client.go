@@ -32,12 +32,13 @@ import (
 // deleted device") — the swap is what lets a re-pair work in the same
 // daemon process.
 type Client struct {
-	wa     atomic.Pointer[whatsmeow.Client]
-	store  *sqlstore.Container
-	msgs   *MessageStore
-	notify Notifier
-	log    *slog.Logger
-	pair   pairing
+	wa       atomic.Pointer[whatsmeow.Client]
+	store    *sqlstore.Container
+	msgs     *MessageStore
+	mediaDir string
+	notify   Notifier
+	log      *slog.Logger
+	pair     pairing
 }
 
 // NewClient opens the sqlstore at <storeDir>/store.db, picks the first
@@ -66,7 +67,13 @@ func NewClient(
 		return nil, err
 	}
 	wa := whatsmeow.NewClient(device, newWaLogger(log, "client"))
-	c := &Client{store: container, msgs: msgs, notify: notify, log: log}
+	c := &Client{
+		store:    container,
+		msgs:     msgs,
+		mediaDir: filepath.Join(storeDir, "media"),
+		notify:   notify,
+		log:      log,
+	}
 	c.wa.Store(wa)
 	wa.AddEventHandler(c.handleEvent)
 	return c, nil

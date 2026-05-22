@@ -7,6 +7,7 @@ daemon per phone keeps lifecycles isolated.
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import socket
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ from aios_connector_http import HttpConnector, SandboxPath, iso_from_ms, tool
 from .config import Settings
 from .daemon import WhatsappDaemon
 from .management import WhatsappManagementMixin, normalize_phone
-from .parse import parse_message
+from .parse import InboundMessage, parse_message
 
 log = structlog.get_logger(__name__)
 
@@ -89,15 +90,43 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
         }
         if msg.chat_name is not None:
             metadata["chat_name"] = msg.chat_name
+        if msg.sticker_emoji is not None:
+            metadata["sticker_emoji"] = msg.sticker_emoji
+        attachment_tuples = await self._read_attachments(msg) if msg.attachments else None
         await self.emit_inbound(
             connection_id=connection_id,
             event_id=f"whatsapp-{msg.sender_jid}-{msg.message_id}",
             chat_id=msg.chat_jid,
             sender={"jid": msg.sender_jid, "display_name": msg.sender_name},
             content=msg.text,
+            attachments=attachment_tuples,
             metadata=metadata,
             timestamp=iso_from_ms(msg.timestamp_ms),
         )
+
+    async def _read_attachments(self, msg: InboundMessage) -> list[tuple[str, bytes, str]] | None:
+        """Pull each attachment's bytes off the event loop so a multi-MiB
+        photo doesn't stall the inbound dispatcher.
+
+        A read failure on any one attachment drops THAT entry but
+        keeps the others — preferable to discarding the whole message
+        when the daemon wrote two files and one got truncated.
+        Returns None if nothing readable survives (so emit_inbound
+        sees no ``attachments`` kwarg rather than an empty list).
+        """
+        results: list[tuple[str, bytes, str]] = []
+        for att in msg.attachments:
+            try:
+                data = await asyncio.to_thread(Path(att.host_path).read_bytes)
+            except OSError as err:
+                log.warning(
+                    "whatsapp.inbound.attachment_read_failed",
+                    host_path=att.host_path,
+                    error=str(err),
+                )
+                continue
+            results.append((att.filename, data, att.content_type))
+        return results or None
 
     # ── tools ──────────────────────────────────────────────────────────
 

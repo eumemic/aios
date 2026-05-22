@@ -19,7 +19,7 @@ func (c *Client) handleEvent(evt any) {
 		if e.Message != nil {
 			c.recordInbound(e)
 		}
-		if params := translateMessage(e); params != nil {
+		if params := c.translateMessageWithMedia(e); params != nil {
 			c.notify.Broadcast("message", params)
 		}
 	case *events.Connected:
@@ -58,6 +58,31 @@ func translateMessage(e *events.Message) map[string]any {
 		"is_self":        e.Info.IsFromMe,
 		"text":           extractText(e.Message),
 	}
+}
+
+// translateMessageWithMedia layers extracted attachments + sticker
+// emoji on top of the base translation.  Media download is done
+// inline (in whatsmeow's event-handler goroutine) — the broadcast
+// of THIS message waits for the download, but other events on the
+// same connection continue in parallel since whatsmeow's dispatcher
+// fans out per-event.  A download failure logs but doesn't drop the
+// message: the text/caption alone is still useful.
+func (c *Client) translateMessageWithMedia(e *events.Message) map[string]any {
+	params := translateMessage(e)
+	if params == nil {
+		return nil
+	}
+	if attachment, err := c.extractAndDownloadMedia(
+		context.Background(), c.wa.Load(), string(e.Info.ID), e.Message, c.mediaDir,
+	); err != nil {
+		c.log.Warn("wameow.media_download_failed", "id", e.Info.ID, "err", err)
+	} else if attachment != nil {
+		params["attachments"] = []*MediaAttachment{attachment}
+	}
+	if emoji := extractStickerEmoji(e.Message); emoji != "" {
+		params["sticker_emoji"] = emoji
+	}
+	return params
 }
 
 // recordInbound stamps a received message into the message store so

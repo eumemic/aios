@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from aios_whatsapp.connector import WhatsappConnector
 
 from .conftest import CONNECTION_ID, GROUP_JID, PEER_JID, dm_payload
@@ -61,3 +63,65 @@ async def test_handle_inbound_drops_broadcast(connector: WhatsappConnector) -> N
         dm_payload(chat_jid="12345@broadcast", chat_type="broadcast"),
     )
     connector.emit_inbound.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+async def test_handle_inbound_reads_attachment_bytes(
+    connector: WhatsappConnector, tmp_path: Path
+) -> None:
+    # Daemon writes media to disk; connector reads bytes off-loop and
+    # forwards (filename, bytes, content_type) tuples to emit_inbound.
+    img = tmp_path / "photo.jpg"
+    img.write_bytes(b"jpeg-bytes")
+    p = dm_payload(text="caption")
+    p["attachments"] = [{"path": str(img), "mimetype": "image/jpeg", "filename": "photo.jpg"}]
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["content"] == "caption"
+    assert kwargs["attachments"] == [("photo.jpg", b"jpeg-bytes", "image/jpeg")]
+
+
+async def test_handle_inbound_attachment_only_emits_with_empty_text(
+    connector: WhatsappConnector, tmp_path: Path
+) -> None:
+    img = tmp_path / "photo.jpg"
+    img.write_bytes(b"jpeg-bytes")
+    p = dm_payload(text="")
+    p["attachments"] = [{"path": str(img), "mimetype": "image/jpeg", "filename": "photo.jpg"}]
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["content"] == ""
+    assert len(kwargs["attachments"]) == 1
+
+
+async def test_handle_inbound_sticker_emoji_in_metadata(connector: WhatsappConnector) -> None:
+    p = dm_payload(text="")
+    p["sticker_emoji"] = "🎉"
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["metadata"]["sticker_emoji"] == "🎉"
+    # Sticker-only messages carry empty content — the emoji IS the signal.
+    assert kwargs["content"] == ""
+    assert kwargs["attachments"] is None
+
+
+async def test_handle_inbound_skips_unreadable_attachment(
+    connector: WhatsappConnector, tmp_path: Path
+) -> None:
+    # If the daemon wrote two attachments and one got truncated /
+    # removed before we read, surface the readable ones rather than
+    # drop the whole message.
+    good = tmp_path / "good.jpg"
+    good.write_bytes(b"jpeg")
+    bad = tmp_path / "missing.jpg"  # never created
+    p = dm_payload(text="see attached")
+    p["attachments"] = [
+        {"path": str(bad), "mimetype": "image/jpeg", "filename": "bad.jpg"},
+        {"path": str(good), "mimetype": "image/jpeg", "filename": "good.jpg"},
+    ]
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["attachments"] == [("good.jpg", b"jpeg", "image/jpeg")]

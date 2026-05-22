@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from aios_whatsapp.parse import InboundMessage, parse_message
+from aios_whatsapp.parse import InboundAttachment, InboundMessage, parse_message
 
 from .conftest import GROUP_JID, PEER_JID, dm_payload, group_payload
 
@@ -70,3 +70,68 @@ def test_parse_message_tolerates_missing_push_name() -> None:
     msg = parse_message(p)
     assert msg is not None
     assert msg.sender_name is None
+
+
+def test_parse_message_carries_attachments() -> None:
+    p = dm_payload(text="check this out")
+    p["attachments"] = [
+        {"path": "/tmp/media/3EB0X_photo.jpg", "mimetype": "image/jpeg", "filename": "photo.jpg"}
+    ]
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.attachments == (
+        InboundAttachment(
+            host_path="/tmp/media/3EB0X_photo.jpg",
+            filename="photo.jpg",
+            content_type="image/jpeg",
+        ),
+    )
+    assert msg.text == "check this out"
+
+
+def test_parse_message_keeps_attachment_only_message() -> None:
+    # Previously, an empty-text payload was dropped wholesale.  PR 5
+    # inverts that: an image-only message is signal worth surfacing —
+    # the harness can still render "received an image" via the
+    # attachment metadata.
+    p = dm_payload(text="")
+    p["attachments"] = [
+        {"path": "/tmp/m/3EB0Y.jpg", "mimetype": "image/jpeg", "filename": "photo.jpg"}
+    ]
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.text == ""
+    assert len(msg.attachments) == 1
+
+
+def test_parse_message_drops_malformed_attachment_entries() -> None:
+    # The daemon emits only complete entries on success, but defending
+    # against partial dicts protects the connector from a future
+    # daemon-side regression silently dropping a path field.
+    p = dm_payload(text="caption")
+    p["attachments"] = [
+        {"path": "/tmp/m/a.jpg", "mimetype": "image/jpeg", "filename": "a.jpg"},
+        {"path": "", "mimetype": "image/jpeg", "filename": "b.jpg"},  # bad path
+        {"path": "/tmp/m/c.jpg", "mimetype": "", "filename": "c.jpg"},  # bad mime
+        "not-a-dict",  # bad type entirely
+    ]
+    msg = parse_message(p)
+    assert msg is not None
+    assert len(msg.attachments) == 1
+    assert msg.attachments[0].filename == "a.jpg"
+
+
+def test_parse_message_sticker_emoji_kept_without_text() -> None:
+    p = dm_payload(text="")
+    p["sticker_emoji"] = "🎉"
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.sticker_emoji == "🎉"
+    assert msg.attachments == ()
+
+
+def test_parse_message_drops_when_no_signal_at_all() -> None:
+    # No text, no attachments, no sticker — nothing for the model
+    # to act on, so silently drop.
+    p = dm_payload(text="")
+    assert parse_message(p) is None
