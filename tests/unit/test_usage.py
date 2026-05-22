@@ -237,14 +237,15 @@ class TestInjectCacheBreakpoints:
 
     def test_skips_tail_and_adjacency_separator(self) -> None:
         """When the last stable event was user-role,
-        ``separate_adjacent_user_messages`` inserts an empty-assistant
-        separator before the tail.  The breakpoint must skip *both* —
-        annotating an empty content block would be a wasted breakpoint
-        (and may not survive Anthropic's empty-block sanitization).
+        ``separate_adjacent_user_messages`` inserts a placeholder
+        assistant before the tail.  The breakpoint must skip *both* —
+        annotating the single-byte placeholder would be a wasted
+        breakpoint that also wouldn't survive content normalization on
+        some routes.
         """
         tail = _msg("user", "━━━ Channels ━━━\n▸ channel_id=x (focal)")
         stable = _msg("user", "real peer message")
-        separator = {"role": "assistant", "content": ""}
+        separator = {"role": "assistant", "content": "."}
         msgs = [_msg("system", "sys"), stable, separator, tail]
         inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         # Breakpoint lands on the stable user message, not the separator.
@@ -252,7 +253,7 @@ class TestInjectCacheBreakpoints:
             {"type": "text", "text": "real peer message", "cache_control": _CACHE_CONTROL}
         ]
         # Separator stays bare; tail stays bare.
-        assert msgs[2] == {"role": "assistant", "content": ""}
+        assert msgs[2] == {"role": "assistant", "content": "."}
         assert msgs[3]["content"] == tail["content"]
 
     def test_tail_only_context_falls_back_to_system_and_tool(self) -> None:

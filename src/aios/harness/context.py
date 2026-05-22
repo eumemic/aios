@@ -790,10 +790,29 @@ def stub_missing_reasoning_content(
     return messages
 
 
+_USER_MESSAGE_SEPARATOR_CONTENT = "."
+"""Single-byte placeholder for the role-transition separator.
+
+Must survive every validator the messages array can traverse on the way
+to a provider.  An earlier implementation used ``""`` and relied on
+LiteLLM's ``modify_params = True`` Anthropic sanitizer to strip the
+empty block — that only fires when LiteLLM is itself the Anthropic
+provider.  When the model routes through a relay (``openrouter/*``,
+``openai-compatible/*``), the placeholder reaches the upstream provider
+unchanged.  Strict providers (Bedrock confirmed; Vertex likely) reject
+non-final assistant messages with empty content, wedging the session.
+
+``"."`` is the minimal change with maximum portability: one printable
+byte that every text-content validator accepts.  Recognizer in
+``completion.py`` (cache-breakpoint placement skips the placeholder)
+imports this constant to stay in lock-step.
+"""
+
+
 def separate_adjacent_user_messages(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Insert an empty assistant message between any two adjacent user messages.
+    """Insert a placeholder assistant message between any two adjacent user messages.
 
     LiteLLM's Anthropic translator enforces strict role alternation by
     merging adjacent same-role messages into a single multi-content-block
@@ -802,15 +821,15 @@ def separate_adjacent_user_messages(
     as one message with two text blocks — and models narrate "your
     message included the channel state" about their own scaffolding.
 
-    Inserting a no-content assistant turn between two consecutive user
-    messages blocks the merge.  LiteLLM's ``modify_params = True`` (set
-    in ``completion.py``) sanitizes the empty content block for
-    Anthropic at request time, so no visible turn is added to the
-    on-the-wire transcript — only the role transition remains.
+    Inserting an assistant turn between two consecutive user messages
+    blocks the merge.  The placeholder uses
+    :data:`_USER_MESSAGE_SEPARATOR_CONTENT` (a single printable byte) so
+    it survives validators on relay routes (OpenRouter → Bedrock, etc.)
+    that reject empty non-final assistant content.
     """
     result: list[dict[str, Any]] = []
     for msg in messages:
         if result and result[-1].get("role") == "user" and msg.get("role") == "user":
-            result.append({"role": "assistant", "content": ""})
+            result.append({"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT})
         result.append(msg)
     return result

@@ -58,11 +58,14 @@ class TestSeparatorAtLiteLLMBoundary:
         assert tail_idx > 0, "tail block should not be first — there's an inbound before it"
 
         prev = msgs[tail_idx - 1]
-        # The separator is an empty-assistant message.  ``reasoning_content``
-        # is stubbed empty too so thinking-mode providers don't reject the
-        # transcript (see ``stub_missing_reasoning_content``).
-        assert prev.get("role") == "assistant" and prev.get("content") == "", (
-            f"expected empty-assistant separator before tail, got prev={prev!r}, tail={msgs[tail_idx]!r}"
+        # The separator is an assistant message carrying a single-byte
+        # placeholder ("."); an empty content block leaks through relay
+        # routes (OpenRouter → Bedrock) that don't sanitize it.
+        # ``reasoning_content`` is stubbed empty too so thinking-mode
+        # providers don't reject the transcript (see
+        # ``stub_missing_reasoning_content``).
+        assert prev.get("role") == "assistant" and prev.get("content") == ".", (
+            f"expected placeholder-assistant separator before tail, got prev={prev!r}, tail={msgs[tail_idx]!r}"
         )
         assert prev.get("reasoning_content") == "", (
             f"expected reasoning_content stub on separator, got prev={prev!r}"
@@ -80,6 +83,6 @@ class TestSeparatorAtLiteLLMBoundary:
 
         assert len(harness.model_calls) == 1
         msgs = harness.model_calls[0]["messages"]
-        assert not any(m == {"role": "assistant", "content": ""} for m in msgs), (
-            f"gratuitous empty-assistant separator in messages: {msgs!r}"
+        assert not any(m.get("role") == "assistant" and m.get("content") == "." for m in msgs), (
+            f"gratuitous placeholder-assistant separator in messages: {msgs!r}"
         )

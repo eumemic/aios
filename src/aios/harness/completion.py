@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, Any
 
 import litellm
 
+from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT
+
 # Anthropic rejects empty text blocks that some OpenRouter models emit on
 # tool-call-only turns; modify_params tells LiteLLM to sanitize them.
 litellm.modify_params = True
@@ -259,17 +261,17 @@ def _last_stable_message_index(messages: list[dict[str, Any]]) -> int | None:
     * The channels tail block — identified by its content signature
       ``━━━ Channels ━━━`` (always the last user-role message when
       present).
-    * Any empty-assistant separator — inserted by
+    * Any role-transition separator — inserted by
       :func:`~aios.harness.context.separate_adjacent_user_messages` to
-      defeat Anthropic's adjacent-user-merge; carries no real content
-      and would be a wasted breakpoint.
+      defeat Anthropic's adjacent-user-merge; carries only a
+      single-byte placeholder and would be a wasted breakpoint.
 
     If nothing stable remains (messages list is just system + tail +
     separator), returns ``None``.
     """
     for i in range(len(messages) - 1, -1, -1):
         msg = messages[i]
-        if _is_tail_block(msg) or _is_empty_assistant(msg):
+        if _is_tail_block(msg) or _is_separator_placeholder(msg):
             continue
         return i
     return None
@@ -297,16 +299,23 @@ def _is_tail_block(msg: dict[str, Any]) -> bool:
     return False
 
 
-def _is_empty_assistant(msg: dict[str, Any]) -> bool:
-    """Detect the role-transition separator: ``assistant`` + empty content."""
+def _is_separator_placeholder(msg: dict[str, Any]) -> bool:
+    """Detect the role-transition separator placeholder.
+
+    Matches the exact shape produced by
+    :func:`~aios.harness.context.separate_adjacent_user_messages`:
+    ``assistant`` role, no tool calls, content equal to
+    :data:`~aios.harness.context._USER_MESSAGE_SEPARATOR_CONTENT`.
+
+    Strict matching (not a broader "empty-ish assistant" check) keeps
+    this recognizer aligned with the producer — if a genuine assistant
+    turn happens to be short, it still gets a cache breakpoint.
+    """
     if msg.get("role") != "assistant":
         return False
     if msg.get("tool_calls"):
         return False
-    content = msg.get("content")
-    if content == "" or content is None:
-        return True
-    return isinstance(content, list) and not content
+    return msg.get("content") == _USER_MESSAGE_SEPARATOR_CONTENT
 
 
 def _extract_cost(response: Any) -> float | None:
