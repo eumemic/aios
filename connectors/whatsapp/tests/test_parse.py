@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from aios_whatsapp.parse import InboundAttachment, InboundMessage, parse_message
+from aios_whatsapp.parse import (
+    InboundAttachment,
+    InboundMessage,
+    InboundReaction,
+    parse_message,
+)
 
 from .conftest import GROUP_JID, PEER_JID, dm_payload, group_payload
 
@@ -131,7 +136,36 @@ def test_parse_message_sticker_emoji_kept_without_text() -> None:
 
 
 def test_parse_message_drops_when_no_signal_at_all() -> None:
-    # No text, no attachments, no sticker — nothing for the model
-    # to act on, so silently drop.
+    # No text, no attachments, no sticker, no reaction — nothing for
+    # the model to act on, so silently drop.
     p = dm_payload(text="")
+    assert parse_message(p) is None
+
+
+def test_parse_message_carries_reaction() -> None:
+    p = dm_payload(text="")
+    p["reaction"] = {"emoji": "👍", "target_message_id": "3EB0ORIGINAL"}
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.reaction == InboundReaction(emoji="👍", target_message_id="3EB0ORIGINAL")
+    assert msg.text == ""
+
+
+def test_parse_message_reaction_removal_keeps_event() -> None:
+    # Empty emoji = peer cleared their prior reaction.  Surface
+    # explicitly so the model can update its mental model.
+    p = dm_payload(text="")
+    p["reaction"] = {"emoji": "", "target_message_id": "3EB0ORIGINAL"}
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.reaction is not None
+    assert msg.reaction.emoji == ""
+
+
+def test_parse_message_drops_reaction_without_target_id() -> None:
+    # A reaction with no target_message_id can't be matched against
+    # anything in the model's context — drop it rather than surface a
+    # half-populated event that confuses the model.
+    p = dm_payload(text="")
+    p["reaction"] = {"emoji": "👍"}
     assert parse_message(p) is None

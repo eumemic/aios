@@ -92,6 +92,11 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
             metadata["chat_name"] = msg.chat_name
         if msg.sticker_emoji is not None:
             metadata["sticker_emoji"] = msg.sticker_emoji
+        if msg.reaction is not None:
+            metadata["reaction"] = {
+                "emoji": msg.reaction.emoji,
+                "target_message_id": msg.reaction.target_message_id,
+            }
         attachment_tuples = await self._read_attachments(msg) if msg.attachments else None
         await self.emit_inbound(
             connection_id=connection_id,

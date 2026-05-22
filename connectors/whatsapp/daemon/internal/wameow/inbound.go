@@ -60,13 +60,13 @@ func translateMessage(e *events.Message) map[string]any {
 	}
 }
 
-// translateMessageWithMedia layers extracted attachments + sticker
-// emoji on top of the base translation.  Media download is done
-// inline (in whatsmeow's event-handler goroutine) — the broadcast
-// of THIS message waits for the download, but other events on the
-// same connection continue in parallel since whatsmeow's dispatcher
-// fans out per-event.  A download failure logs but doesn't drop the
-// message: the text/caption alone is still useful.
+// translateMessageWithMedia layers extracted attachments, sticker
+// emoji, and reaction metadata on top of the base translation.  Media
+// download is done inline (in whatsmeow's event-handler goroutine) —
+// the broadcast of THIS message waits for the download, but other
+// events on the same connection continue in parallel since whatsmeow's
+// dispatcher fans out per-event.  A download failure logs but doesn't
+// drop the message: the text/caption alone is still useful.
 func (c *Client) translateMessageWithMedia(e *events.Message) map[string]any {
 	params := translateMessage(e)
 	if params == nil {
@@ -82,7 +82,29 @@ func (c *Client) translateMessageWithMedia(e *events.Message) map[string]any {
 	if emoji := extractStickerEmoji(e.Message); emoji != "" {
 		params["sticker_emoji"] = emoji
 	}
+	if rxn := extractReaction(e.Message); rxn != nil {
+		params["reaction"] = rxn
+	}
 	return params
+}
+
+// extractReaction surfaces a peer's reaction to a message as a
+// metadata block — emoji + the target message_id the reaction
+// applies to.  Empty emoji means the peer removed an earlier
+// reaction; the model needs to see that explicitly so it can update
+// any "they reacted with X" state.
+func extractReaction(m *waE2E.Message) map[string]any {
+	if m == nil || m.ReactionMessage == nil {
+		return nil
+	}
+	rxn := m.ReactionMessage
+	out := map[string]any{
+		"emoji": rxn.GetText(),
+	}
+	if key := rxn.GetKey(); key != nil {
+		out["target_message_id"] = key.GetID()
+	}
+	return out
 }
 
 // recordInbound stamps a received message into the message store so

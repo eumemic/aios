@@ -125,3 +125,30 @@ async def test_handle_inbound_skips_unreadable_attachment(
 
     kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
     assert kwargs["attachments"] == [("good.jpg", b"jpeg", "image/jpeg")]
+
+
+async def test_handle_inbound_reaction_stamps_metadata(connector: WhatsappConnector) -> None:
+    # Peer reacts to one of our messages — surface as
+    # metadata.reaction with empty content; the model uses
+    # target_message_id to match against its own send history.
+    p = dm_payload(text="")
+    p["reaction"] = {"emoji": "👍", "target_message_id": "3EB0OURMSG"}
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["content"] == ""
+    assert kwargs["metadata"]["reaction"] == {
+        "emoji": "👍",
+        "target_message_id": "3EB0OURMSG",
+    }
+
+
+async def test_handle_inbound_reaction_removal_passes_through(
+    connector: WhatsappConnector,
+) -> None:
+    p = dm_payload(text="")
+    p["reaction"] = {"emoji": "", "target_message_id": "3EB0OURMSG"}
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["metadata"]["reaction"]["emoji"] == ""

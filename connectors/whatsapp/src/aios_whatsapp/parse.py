@@ -31,6 +31,20 @@ class InboundAttachment:
 
 
 @dataclass(slots=True, frozen=True)
+class InboundReaction:
+    """Peer-side reaction to a message, surfaced as a metadata block.
+
+    ``target_message_id`` identifies which message in our session
+    history the reaction targets.  Empty ``emoji`` means the peer
+    removed an earlier reaction — surfaced explicitly so the model
+    can update any "they reacted with X" state.
+    """
+
+    emoji: str
+    target_message_id: str
+
+
+@dataclass(slots=True, frozen=True)
 class InboundMessage:
     chat_type: ChatType
     chat_jid: str
@@ -42,6 +56,7 @@ class InboundMessage:
     text: str
     attachments: tuple[InboundAttachment, ...] = field(default_factory=tuple)
     sticker_emoji: str | None = None
+    reaction: InboundReaction | None = None
 
 
 def parse_message(params: dict[str, Any]) -> InboundMessage | None:
@@ -84,7 +99,9 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
     raw_sticker = params.get("sticker_emoji")
     sticker_emoji = raw_sticker if isinstance(raw_sticker, str) and raw_sticker else None
 
-    if not text and not attachments and sticker_emoji is None:
+    reaction = _parse_reaction(params.get("reaction"))
+
+    if not text and not attachments and sticker_emoji is None and reaction is None:
         return None
 
     raw_chat_name = params.get("chat_name")
@@ -101,7 +118,26 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
         text=text,
         attachments=attachments,
         sticker_emoji=sticker_emoji,
+        reaction=reaction,
     )
+
+
+def _parse_reaction(raw: Any) -> InboundReaction | None:
+    """Normalize the daemon's ``reaction`` payload.
+
+    Requires a target_message_id (otherwise the model can't match it
+    against anything in its context); emoji may be empty (peer
+    removing a prior reaction).
+    """
+    if not isinstance(raw, dict):
+        return None
+    target_id = raw.get("target_message_id")
+    if not isinstance(target_id, str) or not target_id:
+        return None
+    emoji = raw.get("emoji")
+    if not isinstance(emoji, str):
+        return None
+    return InboundReaction(emoji=emoji, target_message_id=target_id)
 
 
 def _parse_attachments(raw: Any) -> tuple[InboundAttachment, ...]:
