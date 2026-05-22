@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -223,3 +224,70 @@ async def test_idle_release_holds_per_session_lock() -> None:
         reaper.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await reaper
+
+
+async def test_reaper_skips_session_freshened_during_destroy_of_another() -> None:
+    """The reaper must not release a session whose ``_last_used`` was
+    freshened by a concurrent ``get_or_provision`` between the scan and
+    the actual release.
+
+    Scenario: two idle sessions ``sess_a`` and ``sess_b`` land in
+    ``to_release`` during the scan. While the reaper is awaiting
+    ``backend.destroy(handle_a)``, a tool task warm-hits
+    ``get_or_provision("sess_b")``, bumping ``_last_used["sess_b"]`` to
+    "now". The reaper must NOT proceed to destroy ``handle_b`` — the
+    session is no longer idle.
+
+    Pre-fix, the reaper acted on the stale ``to_release`` snapshot and
+    skipped a re-check of ``_last_used`` under the per-session lock, so
+    it destroyed a sandbox still in active use. The #566 lock fix did
+    not cover this residual race: ``get_or_provision``'s warm path
+    takes no lock, so it can freshen ``_last_used`` between the scan
+    and the release without ever serializing against the reaper.
+    """
+    destroy_a_started = asyncio.Event()
+    destroy_a_continue = asyncio.Event()
+    destroy_b_calls: list[SandboxHandle] = []
+
+    async def destroy(handle: SandboxHandle) -> None:
+        if handle.session_id == "sess_a":
+            destroy_a_started.set()
+            await destroy_a_continue.wait()
+        elif handle.session_id == "sess_b":
+            destroy_b_calls.append(handle)
+
+    registry = SandboxRegistry(_backend_with_destroy(AsyncMock(side_effect=destroy)))
+    # Insertion order is significant: _reap_idle_once iterates
+    # _last_used in dict-insertion order, so sess_a is processed first.
+    handle_a = _handle("sess_a")
+    handle_b = _handle("sess_b")
+    registry._handles["sess_a"] = handle_a
+    registry._handles["sess_b"] = handle_b
+    # Both sessions are deeply idle: _last_used set 1000s in the past,
+    # idle_timeout=300s — both land in to_release on the scan.
+    long_ago = time.monotonic() - 1000.0
+    registry._last_used["sess_a"] = long_ago
+    registry._last_used["sess_b"] = long_ago
+
+    reap_task = asyncio.create_task(registry._reap_idle_once(idle_timeout=300.0))
+    try:
+        await asyncio.wait_for(destroy_a_started.wait(), timeout=1.0)
+        # Reaper is now parked inside backend.destroy(handle_a). Warm-hit
+        # sess_b — _last_used["sess_b"] is bumped to "now", so sess_b is
+        # no longer idle by the time the reaper processes it.
+        returned = await registry.get_or_provision("sess_b")
+        assert returned is handle_b
+        destroy_a_continue.set()
+        await asyncio.wait_for(reap_task, timeout=1.0)
+    finally:
+        if not reap_task.done():
+            reap_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reap_task
+
+    assert destroy_b_calls == [], (
+        "reaper destroyed sess_b's container despite a concurrent "
+        'get_or_provision freshening _last_used["sess_b"]. The reaper '
+        "must re-check idleness under the per-session lock before "
+        "calling release()."
+    )
