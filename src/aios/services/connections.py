@@ -366,6 +366,28 @@ async def bind_chat_to_session(
     the requested one if the conflict path triggered.
     """
     async with pool.acquire() as conn, conn.transaction():
+        # Lock the connection row to serialize against concurrent
+        # archive_connection — the chat_sessions.connection_id FK
+        # accepts archived rows (no partial WHERE archived_at IS NULL),
+        # so without the lock + re-check, a racing archive could
+        # commit between our reads and the insert, leaving the
+        # chat_session pointing at an archived connection. Symmetric
+        # to the archive_connection / attach_connection fix (#661).
+        locked = await conn.fetchrow(
+            "SELECT archived_at FROM connections WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            connection_id,
+            account_id,
+        )
+        if locked is None:
+            raise NotFoundError(
+                f"connection {connection_id} not found",
+                detail={"id": connection_id},
+            )
+        if locked["archived_at"] is not None:
+            raise ConflictError(
+                f"connection {connection_id} is archived; cannot bind a chat to it",
+                detail={"id": connection_id},
+            )
         # Validate both FKs at the service boundary — without this,
         # asyncpg surfaces FK violations as 500s instead of clean 4xxs.
         await queries.get_connection(conn, connection_id, account_id=account_id)
@@ -506,6 +528,24 @@ async def archive_connection(
                     f"connection {connection_id} is in {binding.mode} mode; "
                     f"detach or unconfigure before archiving",
                     detail={"id": connection_id, "mode": binding.mode},
+                )
+            # Refuse archive when operator-curated chat_sessions rows
+            # reference the connection — symmetric to the binding
+            # check above, closes the bind_chat_to_session race
+            # (chat_sessions.connection_id FK accepts archived rows).
+            chat_session_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM chat_sessions WHERE connection_id = $1 AND account_id = $2",
+                connection_id,
+                account_id,
+            )
+            if chat_session_count > 0:
+                raise ConflictError(
+                    f"connection {connection_id} has {chat_session_count} "
+                    f"chat_session(s); detach or unbind before archiving",
+                    detail={
+                        "id": connection_id,
+                        "chat_session_count": chat_session_count,
+                    },
                 )
             archived = await queries.archive_connection(conn, connection_id, account_id=account_id)
         await queries.notify_connection_change(
