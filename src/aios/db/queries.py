@@ -1131,6 +1131,16 @@ async def delete_session(
             session_id,
             account_id,
         )
+        # bindings.session_id has no ON DELETE CASCADE — every other
+        # session-children FK does, but bindings (migration 0033) is
+        # the lone outlier. Without this explicit DELETE, any session
+        # that's ever been attached to a connection trips the FK on
+        # `DELETE FROM sessions` and the route surfaces a 500.
+        await conn.execute(
+            "DELETE FROM bindings WHERE session_id = $1 AND account_id = $2",
+            session_id,
+            account_id,
+        )
         await conn.execute(
             "DELETE FROM sessions WHERE id = $1 AND account_id = $2",
             session_id,
