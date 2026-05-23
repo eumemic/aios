@@ -184,14 +184,20 @@ class TestImageBranch:
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
+        from aios.harness.vision import INLINE_SIZE_CAP_BYTES
+
         stub_get_session_model.value = "model/vision"
-        _stage_workspace_image("sess_01TEST", "huge.png", b"\0" * (3 * 1024 * 1024))
+        _stage_workspace_image("sess_01TEST", "huge.png", b"\0" * (INLINE_SIZE_CAP_BYTES + 1))
 
         result = await read_handler("sess_01TEST", {"path": "/workspace/huge.png"})
 
         assert isinstance(result, ToolResult)
         assert isinstance(result.content, str)
-        assert "Inline cap: 2 MiB" in result.content
+        # Cap rendered with 2-decimal precision + explicit byte count so
+        # the model can't confuse a 3.8MB-rounded image with the 3.75 MiB
+        # cap (which ``human_size`` would also render as "3.8MB").
+        assert f"({INLINE_SIZE_CAP_BYTES} bytes)" in result.content
+        assert "Inline cap: 3.75 MiB" in result.content
         assert result.is_error is False
 
     async def test_image_read_uses_handle_workspace_path(

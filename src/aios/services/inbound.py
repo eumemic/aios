@@ -168,6 +168,22 @@ async def handle_inbound(
                 path.unlink(missing_ok=True)
         return InboundResult(None, target_session_id, InboundDrop.SESSION_MISSING, False)
 
+    if not appended:
+        # Dedup hit: an earlier delivery of this same ``event_id``
+        # already wrote the canonical event row.  Any files THIS call
+        # materialized — e.g. a freshly-encoded inline sibling on the
+        # post-feature-deploy replay of a pre-feature event whose
+        # metadata.attachments lacks an ``inline`` sub-record — are
+        # orphans.  The persisted record references whatever was on
+        # disk at first-delivery time, not what we just wrote.  Without
+        # this cleanup they'd sit inside the GC's 300s recent-file
+        # protection window until the next worker-restart sweep reaps
+        # them, accumulating during the deploy migration window in
+        # proportion to webhook-retry rate times pre-feature-event count.
+        for path in newly_staged_paths:
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+
     # Defer wake unconditionally — both first-append and dedup paths
     # heal the case where a prior attempt committed but failed to wake.
     await defer_wake(pool, target_session_id, cause="inbound", account_id=account_id)

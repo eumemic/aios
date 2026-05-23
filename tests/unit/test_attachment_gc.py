@@ -130,3 +130,77 @@ async def test_sweep_still_unlinks_genuinely_old_orphans(
         "disable-the-sweep refactor."
     )
     assert deleted == 1
+
+
+async def test_sweep_retains_inline_sibling_when_query_returns_it(
+    attachments_root: Path,
+    fake_pool: MagicMock,
+) -> None:
+    """When ``list_attachment_paths_for_sessions`` returns both the
+    original ``in_sandbox_path`` and the ``inline.in_sandbox_path``
+    from a staged attachment record, the sweep must retain both
+    files. Pre-feature the query only returned ``in_sandbox_path`` —
+    the inline sibling would have been reaped on every restart,
+    erasing the downsampled bytes the renderer relies on.
+    """
+    import os
+    import time
+
+    session_id = "sess_01STAGING0000000000000003"
+    original = _seed_attachment(attachments_root, session_id, "echo", "evt-1-big.jpg")
+    inline = _seed_attachment(attachments_root, session_id, "echo", "evt-1-big.jpg.inline.jpg")
+    # Both files older than the staging-txn window so the recent-file
+    # protection isn't what's saving them.
+    old = time.time() - 3600
+    os.utime(original, (old, old))
+    os.utime(inline, (old, old))
+
+    referenced = {
+        session_id: {
+            "/mnt/attachments/echo/evt-1-big.jpg",
+            "/mnt/attachments/echo/evt-1-big.jpg.inline.jpg",
+        }
+    }
+    with patch(
+        "aios.harness.attachment_gc.queries.list_attachment_paths_for_sessions",
+        AsyncMock(return_value=referenced),
+    ):
+        await sweep_orphan_attachments(fake_pool)
+
+    assert original.exists()
+    assert inline.exists()
+
+
+async def test_sweep_reaps_inline_sibling_when_event_predates_feature(
+    attachments_root: Path,
+    fake_pool: MagicMock,
+) -> None:
+    """Reverse case: an inline sibling on disk whose containing event's
+    record carries no ``inline`` sub-key (e.g. orphaned by a partial
+    write or a prior deploy state) must still be reaped. The sweep
+    treats every on-disk file as a candidate; the inline retention
+    above hinges entirely on the query returning the path.
+    """
+    import os
+    import time
+
+    session_id = "sess_01STAGING0000000000000004"
+    original = _seed_attachment(attachments_root, session_id, "echo", "evt-1-big.jpg")
+    inline = _seed_attachment(attachments_root, session_id, "echo", "evt-1-big.jpg.inline.jpg")
+    old = time.time() - 3600
+    os.utime(original, (old, old))
+    os.utime(inline, (old, old))
+
+    # Event referenced original only (no `inline` sub-record).
+    referenced = {
+        session_id: {"/mnt/attachments/echo/evt-1-big.jpg"},
+    }
+    with patch(
+        "aios.harness.attachment_gc.queries.list_attachment_paths_for_sessions",
+        AsyncMock(return_value=referenced),
+    ):
+        deleted = await sweep_orphan_attachments(fake_pool)
+
+    assert original.exists()
+    assert not inline.exists()
+    assert deleted == 1

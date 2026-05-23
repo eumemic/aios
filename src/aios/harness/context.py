@@ -339,9 +339,21 @@ def _apply_attachments(
                 record_type=type(record).__name__,
             )
             continue
-        host_path = _resolve_attachment_host_path(record, session_id, workspace_path)
-        size = record.get("size")
-        content_type = record.get("content_type")
+        # When staging produced a downsampled sibling for an oversize
+        # image, prefer it: the original may exceed the inline cap but
+        # the sibling is purpose-built to fit.  If the inline path
+        # itself fails to resolve or fails the inline gate (e.g. GC
+        # raced and deleted the sibling), the renderer drops straight
+        # to the marker — the original is NOT re-attempted as a
+        # fallback here.  ``text_marker`` always describes the
+        # ORIGINAL record because that's the path the model would
+        # ``read`` if it wants the bytes.
+        inline = record.get("inline")
+        effective = inline if isinstance(inline, dict) else record
+
+        host_path = _resolve_attachment_host_path(effective, session_id, workspace_path)
+        size = effective.get("size")
+        content_type = effective.get("content_type")
         if (
             host_path is None
             or model is None

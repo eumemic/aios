@@ -37,7 +37,17 @@ def correct_image_mime_b64(declared: str, data_b64: str) -> str:
     return sniffed
 
 
-INLINE_SIZE_CAP_BYTES = 2 * 1024 * 1024
+INLINE_SIZE_CAP_BYTES = 3_932_160  # 3.75 MiB — matches Anthropic's 5 MB base64 API ceiling.
+
+# Largest edge (px) for downsampled inline copies.  See
+# :mod:`aios.harness.image_resize` for the resize implementation.
+INLINE_MAX_DIMENSION = 2000
+
+# Upper bound on raw image size that we'll feed to Pillow.  Above this,
+# downsampling is skipped and the renderer falls through to the marker —
+# the worker would otherwise spend seconds decoding pathological inputs
+# (uploaded TIFFs, multi-100MP camera RAWs, etc.).
+PRE_RESIZE_CEILING_BYTES = 50 * 1024 * 1024
 
 _VISION_OVERRIDES: dict[str, bool] = {}
 

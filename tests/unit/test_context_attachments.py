@@ -159,9 +159,14 @@ class TestVisionAwareRendering:
         assert len(image_parts) == 1
         assert image_parts[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
-    def test_oversize_image_falls_back_to_marker(self, temp_workspace_root: Path) -> None:
+    def test_oversize_without_inline_falls_back_to_marker(self, temp_workspace_root: Path) -> None:
+        """An attachment whose original exceeds the inline cap but has no
+        ``inline`` sub-record (e.g. staging-time downsample failed, or the
+        event predates the auto-downsample feature) renders as a marker.
+        """
+        oversize = vision.INLINE_SIZE_CAP_BYTES + 1
         sandbox_path = _stage_image(
-            temp_workspace_root, "sess-1", "echo", "evt-1-big.jpg", b"\0" * (3 * 1024 * 1024)
+            temp_workspace_root, "sess-1", "echo", "evt-1-big.jpg", b"\0" * oversize
         )
         event = _user_event(
             content="big",
@@ -169,7 +174,7 @@ class TestVisionAwareRendering:
                 {
                     "filename": "big.jpg",
                     "content_type": "image/jpeg",
-                    "size": 3 * 1024 * 1024,
+                    "size": oversize,
                     "in_sandbox_path": sandbox_path,
                 }
             ],
@@ -184,6 +189,53 @@ class TestVisionAwareRendering:
         assert isinstance(msg["content"], str)
         assert "[image: big.jpg" in msg["content"]
         assert "/mnt/attachments/echo/evt-1-big.jpg" in msg["content"]
+
+    def test_oversize_with_inline_renders_inline_bytes(self, temp_workspace_root: Path) -> None:
+        """When staging produced a downsampled ``inline`` sibling, the
+        renderer prefers it: the model sees the resized pixels rather
+        than the path marker.
+        """
+        oversize = vision.INLINE_SIZE_CAP_BYTES + 1
+        _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-big.jpg", b"\0" * oversize)
+        inline_payload = b"resizedjpegbytes"
+        inline_sandbox_path = _stage_image(
+            temp_workspace_root,
+            "sess-1",
+            "echo",
+            "evt-1-big.jpg.inline.jpg",
+            inline_payload,
+        )
+        event = _user_event(
+            content="big",
+            attachments=[
+                {
+                    "filename": "big.jpg",
+                    "content_type": "image/jpeg",
+                    "size": oversize,
+                    "in_sandbox_path": "/mnt/attachments/echo/evt-1-big.jpg",
+                    "inline": {
+                        "in_sandbox_path": inline_sandbox_path,
+                        "content_type": "image/jpeg",
+                        "size": len(inline_payload),
+                        "width": 2000,
+                        "height": 1500,
+                    },
+                }
+            ],
+        )
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",
+            "echo/acct/chat-1",
+            model="model/vision",
+            session_id="sess-1",
+        )
+        content = msg["content"]
+        assert isinstance(content, list)
+        image_parts = [p for p in content if p.get("type") == "image_url"]
+        assert len(image_parts) == 1
+        expected_url = f"data:image/jpeg;base64,{base64.b64encode(inline_payload).decode()}"
+        assert image_parts[0]["image_url"]["url"] == expected_url
 
     def test_non_vision_mind_renders_marker(self, temp_workspace_root: Path) -> None:
         sandbox_path = _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-photo.jpg", b"x")
