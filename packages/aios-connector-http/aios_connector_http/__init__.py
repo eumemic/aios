@@ -10,6 +10,7 @@ they need an operation not exposed at the base-class level.
 
 from __future__ import annotations
 
+from ._time import iso_from_ms
 from .runner import (
     HttpConnector,
     ManagementHandlerError,
@@ -28,6 +29,7 @@ __all__ = [
     "SandboxPath",
     "SandboxPathError",
     "SqliteAnsweredSpool",
+    "iso_from_ms",
     "management_handler",
     "tool",
 ]

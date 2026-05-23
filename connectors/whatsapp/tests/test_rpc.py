@@ -21,6 +21,19 @@ async def _start_server(handler: Handler) -> tuple[asyncio.Server, int]:
     return server, port
 
 
+async def _ack_subscribe(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> dict[str, Any]:
+    """Consume RpcListener.connect's subscribe handshake and ack it.
+
+    Returns the parsed subscribe request so callers can assert on it.
+    """
+    line = await r.readline()
+    req = json.loads(line)
+    resp = {"jsonrpc": "2.0", "id": req["id"], "result": {"status": "subscribed"}}
+    w.write(json.dumps(resp).encode() + b"\n")
+    await w.drain()
+    return req
+
+
 async def test_rpc_client_opens_fresh_connection_per_call() -> None:
     connection_count = 0
 
@@ -82,12 +95,12 @@ async def test_rpc_client_timeout() -> None:
 
 
 async def test_rpc_listener_yields_method_and_params() -> None:
-    """The listener generalises Signal's hard-coded ``"receive"``: it
-    yields ``(method, params)`` for every JSON-RPC notification frame so
-    the connector can dispatch on method itself.
+    """The listener yields ``(method, params)`` for every JSON-RPC
+    notification frame so the connector can dispatch on method itself.
     """
 
     async def handler(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+        await _ack_subscribe(r, w)
         for method, params in [
             ("message", {"id": "m1", "text": "hello"}),
             ("reaction", {"target_id": "m1", "emoji": "👍"}),
@@ -121,6 +134,7 @@ async def test_rpc_listener_ignores_responses_and_malformed_frames() -> None:
     """
 
     async def handler(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+        await _ack_subscribe(r, w)
         for msg in [
             {"jsonrpc": "2.0", "id": 99, "result": {"ignored": True}},  # response
             {"jsonrpc": "2.0", "method": 7, "params": {}},  # non-string method
@@ -153,3 +167,49 @@ async def test_rpc_listener_connect_failure(unused_port: int) -> None:
     listener = RpcListener("127.0.0.1", unused_port)
     with pytest.raises(ListenerClosedError):
         await listener.connect()
+
+
+async def test_rpc_listener_sends_subscribe_on_connect() -> None:
+    """connect() must send a ``subscribe`` JSON-RPC request before
+    iterating — that's what tells the daemon to fan-out notifications
+    to this socket.
+    """
+    seen_request: dict[str, Any] = {}
+
+    async def handler(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+        nonlocal seen_request
+        seen_request = await _ack_subscribe(r, w)
+        w.close()
+
+    server, port = await _start_server(handler)
+    async with server:
+        listener = RpcListener("127.0.0.1", port)
+        await listener.connect()
+        await listener.aclose()
+    assert seen_request.get("method") == "subscribe"
+    assert seen_request.get("jsonrpc") == "2.0"
+
+
+async def test_rpc_listener_subscribe_rejected_raises() -> None:
+    """If the daemon returns an error on the subscribe handshake,
+    ``connect`` raises :class:`ListenerClosedError` rather than
+    silently entering a no-op notification loop.
+    """
+
+    async def handler(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+        line = await r.readline()
+        req = json.loads(line)
+        resp = {
+            "jsonrpc": "2.0",
+            "id": req["id"],
+            "error": {"code": -32601, "message": "subscribe not supported"},
+        }
+        w.write(json.dumps(resp).encode() + b"\n")
+        await w.drain()
+        w.close()
+
+    server, port = await _start_server(handler)
+    async with server:
+        listener = RpcListener("127.0.0.1", port)
+        with pytest.raises(ListenerClosedError, match="subscribe"):
+            await listener.connect()

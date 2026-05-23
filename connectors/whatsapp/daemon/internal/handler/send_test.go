@@ -1,0 +1,78 @@
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+
+	"aios.dev/connectors/whatsapp/daemon/internal/rpc"
+)
+
+func TestSendMessageDispatchesAndReturnsResult(t *testing.T) {
+	var seenJID, seenText string
+	fn := func(_ context.Context, jid, text string) (string, int64, error) {
+		seenJID = jid
+		seenText = text
+		return "MSG-1", 1700000000000, nil
+	}
+	reg := NewRegistry()
+	RegisterSend(reg, fn)
+
+	params := json.RawMessage(`{"jid":"15553334444@s.whatsapp.net","text":"hello"}`)
+	result, rpcErr := reg.Dispatch(context.Background(), "sendMessage", params)
+	if rpcErr != nil {
+		t.Fatalf("unexpected rpc error: %+v", rpcErr)
+	}
+	if seenJID != "15553334444@s.whatsapp.net" || seenText != "hello" {
+		t.Fatalf("send fn args = (%q, %q)", seenJID, seenText)
+	}
+	out, _ := json.Marshal(result)
+	if string(out) != `{"message_id":"MSG-1","timestamp_ms":1700000000000}` {
+		t.Fatalf("result json = %s", out)
+	}
+}
+
+func TestSendMessageRejectsMissingJID(t *testing.T) {
+	reg := NewRegistry()
+	RegisterSend(reg, func(context.Context, string, string) (string, int64, error) {
+		t.Fatalf("send fn should not be called when jid missing")
+		return "", 0, nil
+	})
+	_, rpcErr := reg.Dispatch(context.Background(), "sendMessage", json.RawMessage(`{"text":"hi"}`))
+	if rpcErr == nil {
+		t.Fatalf("expected rpc error for missing jid")
+	}
+	if rpcErr.Code != rpc.ErrCodeInvalidParams {
+		t.Fatalf("expected ErrCodeInvalidParams, got %d", rpcErr.Code)
+	}
+}
+
+func TestSendMessagePropagatesSendError(t *testing.T) {
+	reg := NewRegistry()
+	RegisterSend(reg, func(context.Context, string, string) (string, int64, error) {
+		return "", 0, errors.New("network down")
+	})
+	params := json.RawMessage(`{"jid":"15553334444@s.whatsapp.net","text":"hi"}`)
+	_, rpcErr := reg.Dispatch(context.Background(), "sendMessage", params)
+	if rpcErr == nil {
+		t.Fatalf("expected rpc error from send failure")
+	}
+	if rpcErr.Code != rpc.ErrCodeServerError {
+		t.Fatalf("expected ErrCodeServerError, got %d", rpcErr.Code)
+	}
+	if rpcErr.Message != "network down" {
+		t.Fatalf("rpc error message = %q", rpcErr.Message)
+	}
+}
+
+func TestSendMessageRejectsMalformedParams(t *testing.T) {
+	reg := NewRegistry()
+	RegisterSend(reg, func(context.Context, string, string) (string, int64, error) {
+		return "", 0, nil
+	})
+	_, rpcErr := reg.Dispatch(context.Background(), "sendMessage", json.RawMessage(`not json`))
+	if rpcErr == nil || rpcErr.Code != rpc.ErrCodeInvalidParams {
+		t.Fatalf("expected ErrCodeInvalidParams for malformed json, got %+v", rpcErr)
+	}
+}
