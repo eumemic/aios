@@ -330,9 +330,11 @@ jobs:
       - name: E2E tests (non-docker shard)
         # signal_connector / signal_registration / telegram_connector need
         # external daemon RPC infrastructure (signal-cli, a live telegram
-        # bot) that GitHub Actions doesn't supply; they live in the docker
-        # shard but the ignore list is repeated so a misclassified test
-        # doesn't accidentally run here.
+        # bot) that GitHub Actions does not supply.  Those files carry
+        # the ``docker`` marker, so ``-m "not docker"`` excludes them
+        # here naturally — the explicit ``--ignore`` list on the docker
+        # shard below remains the source of truth for "needs daemon
+        # infrastructure, skip in CI."
         if: matrix.shard == 'non-docker'
         run: |
           uv run pytest tests/e2e -q -m "not docker"
