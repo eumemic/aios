@@ -61,7 +61,10 @@ jobs:
           # Anything that can affect lint / types / tests / sandbox
           # build / the workflow itself counts as build-affecting.
           # Everything else (READMEs, LICENSE, prose docs) skips.
-          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^\.github/workflows/'; then
+          # ``bin/tool`` is a sandbox-image input (COPY-d by the Dockerfile)
+          # and must invalidate the cheap-skip path alongside the source
+          # tree even though it lives outside ``src/``.
+          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^bin/tool$|^\.github/workflows/'; then
             echo "Build-affecting changes detected — running checks."
             echo "run_checks=true" >> "$GITHUB_OUTPUT"
           else
@@ -69,12 +72,14 @@ jobs:
             echo "run_checks=false" >> "$GITHUB_OUTPUT"
           fi
 
-          # Sandbox image inputs: the Dockerfile itself and the ``bin/tool``
-          # binary it COPYs in.  When neither changed, the ``e2e`` job can
+          # Sandbox image inputs: anything under ``docker/`` (currently
+          # only ``Dockerfile.sandbox``, but future COPY-source files
+          # added here would also count) plus the ``bin/tool`` binary the
+          # Dockerfile COPYs in.  When none changed, the ``e2e`` job can
           # pull ``ghcr.io/eumemic/aios-sandbox:smoked`` (published by
           # ``build-sandbox.yml`` after its smoke test passes) instead of
           # rebuilding from scratch — saves ~29 s per run.
-          if echo "$changed" | grep -qE '^docker/Dockerfile\.sandbox$|^bin/tool$'; then
+          if echo "$changed" | grep -qE '^docker/|^bin/tool$'; then
             echo "Sandbox inputs changed — rebuilding image."
             echo "sandbox_changed=true" >> "$GITHUB_OUTPUT"
           else
