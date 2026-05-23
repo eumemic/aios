@@ -187,11 +187,16 @@ async def _read_image(
 
     if not can_inline_image(model=model, content_type=mime, size_bytes=size):
         vision = "yes" if supports_vision(model) else "no"
+        # Render the cap with higher precision than ``human_size`` to
+        # avoid the model getting "Image is 3.8MB, cap is 3.8MB" when
+        # the truth is 3.93 MB > 3.75 MiB — ``human_size`` rounds both
+        # to the same string.
+        cap_mib = INLINE_SIZE_CAP_BYTES / (1024 * 1024)
         return ToolResult(
             content=(
                 f"Image at {path} exists ({human_size(size)}, {mime}) but cannot "
                 f"be inlined. Mind vision support: {vision}. "
-                f"Inline cap: {human_size(INLINE_SIZE_CAP_BYTES)}."
+                f"Inline cap: {cap_mib:.2f} MiB ({INLINE_SIZE_CAP_BYTES} bytes)."
             ),
             is_error=False,
         )

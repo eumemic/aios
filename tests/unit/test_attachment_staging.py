@@ -512,3 +512,225 @@ class TestInlineDownsample:
         sess_dir = temp_workspace_root / "_attachments" / "sess-1" / "echo"
         if sess_dir.exists():
             assert list(sess_dir.iterdir()) == []
+
+
+def _solid_jpeg_bytes(width: int, height: int) -> bytes:
+    """Return a small JPEG with given dimensions.  Solid-color content
+    compresses to a few KB regardless of dimensions, exercising the
+    small-bytes-large-dim path that the byte-size guard would otherwise
+    let through to providers uncapped."""
+    img = Image.new("RGB", (width, height), (200, 100, 50))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
+
+
+def _gif_bytes(width: int, height: int) -> bytes:
+    """Return a real GIF (used to verify the replay-path format
+    mapping rejects non-JPEG/PNG siblings rather than mislabeling)."""
+    img = Image.new("P", (width, height), 0)
+    buf = io.BytesIO()
+    img.save(buf, format="GIF")
+    return buf.getvalue()
+
+
+class TestInlineDownsampleHardening:
+    """Coverage for the post-code-review hardening of the inline path:
+    dimension cap, collision pre-reservation, replay-path resilience,
+    ceiling observability, atomic writes."""
+
+    async def test_small_bytes_large_dim_still_downsampled(self, temp_workspace_root: Path) -> None:
+        """A small but high-resolution JPEG (e.g. a 3000x3000 solid-color
+        gradient compressing to a few KB) must STILL be downsampled —
+        the pre-fix byte-size guard let these through, then Anthropic
+        bricked the session on its 8000px hard limit.
+        """
+        wide_solid = _solid_jpeg_bytes(3000, 3000)
+        assert len(wide_solid) < INLINE_SIZE_CAP_BYTES  # bypasses the byte guard
+
+        records, _ = await stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            attachments=[
+                InboundAttachment(
+                    stream=_FakeUploadStream(wide_solid, "wide.jpg", "image/jpeg"),
+                    filename="wide.jpg",
+                    content_type="image/jpeg",
+                )
+            ],
+        )
+        record = records[0]
+        assert "inline" in record, (
+            "small-bytes/large-dim image must still produce an inline sub-record "
+            "so the renderer doesn't ship dims-over-cap bytes to providers"
+        )
+        assert record["inline"]["width"] <= 2000
+        assert record["inline"]["height"] <= 2000
+
+    async def test_inline_name_collision_pre_reserved(self, temp_workspace_root: Path) -> None:
+        """A user uploading both ``photo.jpg`` (triggers inline) and
+        ``photo.jpg.inline.jpg`` must fail hard via the same-inbound
+        collision guard — the second can't be allowed to silently
+        inherit the first's downsampled bytes by hitting the replay
+        branch on the auto-generated inline sibling."""
+        big = _real_jpeg_bytes(3500, 3500)
+        small = _real_jpeg_bytes(50, 50)
+
+        with pytest.raises(AttachmentStagingError, match="sanitize to the same"):
+            await stage_inbound_attachments(
+                session_id="sess-1",
+                connector_name="echo",
+                event_id="evt-1",
+                attachments=[
+                    InboundAttachment(
+                        stream=_FakeUploadStream(big, "photo.jpg", "image/jpeg"),
+                        filename="photo.jpg",
+                        content_type="image/jpeg",
+                    ),
+                    InboundAttachment(
+                        stream=_FakeUploadStream(small, "photo.jpg.inline.jpg", "image/jpeg"),
+                        filename="photo.jpg.inline.jpg",
+                        content_type="image/jpeg",
+                    ),
+                ],
+            )
+
+    async def test_corrupt_replay_inline_sibling_falls_back_to_marker(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """A partial/corrupt ``.inline.jpg`` sibling (e.g. left by a
+        prior staging crash mid-write) must NOT propagate Pillow's
+        ``OSError`` past staging — pre-fix this 500'd the inbound and
+        the connector would retry forever against the same bytes."""
+        big = _real_jpeg_bytes(3500, 3500)
+
+        # Manually seed a corrupt inline sibling so the replay path
+        # finds it on the call (simulating a prior crash that left it
+        # behind).
+        sess_dir = temp_workspace_root / "_attachments" / "sess-1" / "echo"
+        sess_dir.mkdir(parents=True, exist_ok=True)
+        original_target = sess_dir / "evt-1-photo.jpg"
+        original_target.write_bytes(big)  # original is on disk (replay)
+        corrupt_inline = sess_dir / "evt-1-photo.jpg.inline.jpg"
+        corrupt_inline.write_bytes(b"\xff\xd8\xff\x00" + b"\x00" * 50)
+
+        records, _ = await stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            attachments=[
+                InboundAttachment(
+                    stream=_FakeUploadStream(big, "photo.jpg", "image/jpeg"),
+                    filename="photo.jpg",
+                    content_type="image/jpeg",
+                )
+            ],
+        )
+        # Inbound completes successfully — no exception propagated.
+        assert "inline" not in records[0]
+        # Original is preserved.
+        assert original_target.exists()
+
+    async def test_unrecognized_format_in_inline_sibling_falls_back(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """An on-disk ``.inline.jpg`` whose bytes are actually GIF (e.g.
+        operator restore or future-format regression) must NOT be
+        mislabeled as image/png and shipped to providers — providers
+        reject mime/magic mismatches and brick the session."""
+        big = _real_jpeg_bytes(3500, 3500)
+
+        sess_dir = temp_workspace_root / "_attachments" / "sess-1" / "echo"
+        sess_dir.mkdir(parents=True, exist_ok=True)
+        original_target = sess_dir / "evt-1-photo.jpg"
+        original_target.write_bytes(big)
+        # GIF bytes at the .inline.jpg sibling path — Pillow detects
+        # format='GIF' which is not in the JPEG-or-PNG map.
+        gif_at_jpg_name = sess_dir / "evt-1-photo.jpg.inline.jpg"
+        gif_at_jpg_name.write_bytes(_gif_bytes(100, 100))
+
+        records, _ = await stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            attachments=[
+                InboundAttachment(
+                    stream=_FakeUploadStream(big, "photo.jpg", "image/jpeg"),
+                    filename="photo.jpg",
+                    content_type="image/jpeg",
+                )
+            ],
+        )
+        # Replay-path treats unrecognized format as decode failure →
+        # warn + return None → no inline sub-record on the persisted
+        # record.  Renderer falls through to text marker; model can
+        # still ``read`` the original from sandbox.
+        assert "inline" not in records[0]
+
+    async def test_ceiling_skip_emits_warn_log(
+        self,
+        temp_workspace_root: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Above-ceiling images must warn-log so operators can spot a
+        systematic class of inbound silently degrading.  Pre-fix the
+        ceiling branch returned None with zero log signal."""
+        from aios.harness.vision import PRE_RESIZE_CEILING_BYTES
+
+        oversize = b"\xff\xd8\xff" + b"\x00" * (PRE_RESIZE_CEILING_BYTES + 10)
+
+        records, _ = await stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            attachments=[
+                InboundAttachment(
+                    stream=_FakeUploadStream(oversize, "huge.jpg", "image/jpeg"),
+                    filename="huge.jpg",
+                    content_type="image/jpeg",
+                )
+            ],
+        )
+        assert "inline" not in records[0]
+        # Structlog routes via stdlib logging in this project, so caplog
+        # captures the event.  Match against either the message or the
+        # structlog event key.
+        ceiling_logs = [
+            r
+            for r in caplog.records
+            if "inline_skipped_ceiling" in r.getMessage()
+            or "inline_skipped_ceiling" in str(getattr(r, "event", ""))
+        ]
+        assert ceiling_logs, (
+            f"expected a staging.inline_skipped_ceiling log; got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    async def test_inline_write_atomic_no_part_left_after_success(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """Successful inline staging must leave no .part orphans.
+        Confirms the atomic write convention so any leftover .part files
+        in production genuinely indicate a crashed write (catchable by
+        GC) rather than the success path."""
+        big = _real_jpeg_bytes(3500, 3500)
+
+        records, _ = await stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            attachments=[
+                InboundAttachment(
+                    stream=_FakeUploadStream(big, "big.jpg", "image/jpeg"),
+                    filename="big.jpg",
+                    content_type="image/jpeg",
+                )
+            ],
+        )
+        assert "inline" in records[0]
+        sess_dir = temp_workspace_root / "_attachments" / "sess-1" / "echo"
+        part_files = [p for p in sess_dir.iterdir() if p.name.endswith(".part")]
+        assert part_files == [], (
+            f"successful staging must leave no .part orphans; got {part_files!r}"
+        )

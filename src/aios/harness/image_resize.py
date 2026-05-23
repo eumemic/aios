@@ -19,9 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import io
-from typing import NamedTuple
-
-from PIL import Image
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from aios.harness.vision import (
     INLINE_MAX_DIMENSION,
@@ -30,7 +28,32 @@ from aios.harness.vision import (
 )
 from aios.logging import get_logger
 
+if TYPE_CHECKING:
+    from PIL import Image as PILImage
+
 log = get_logger("aios.harness.image_resize")
+
+# Decompression-bomb ceiling.  Pillow's default is 89 MP; we tighten to
+# 100 MP (~10000² inputs) — well above any realistic phone/screenshot
+# upload but well below the multi-100-MP pathological inputs that would
+# decode to a 600 MB+ RGB matrix and OOM the worker.  Applied once at
+# first decode (idempotent assignment to the PIL module attribute).
+_PIXEL_LIMIT = 100_000_000
+
+
+def _pillow() -> Any:
+    """Deferred Pillow accessor.
+
+    Avoids pulling Pillow (200-400ms cold) into every API/worker boot,
+    matching the deferred-import pattern this codebase uses for heavy
+    third-party modules (see ``vision.py:67`` for litellm).  Idempotently
+    applies ``MAX_IMAGE_PIXELS`` on every call so the ceiling is in
+    effect by the time the caller invokes ``Image.open``.
+    """
+    from PIL import Image
+
+    Image.MAX_IMAGE_PIXELS = _PIXEL_LIMIT
+    return Image
 
 
 class ImageDownsampleError(Exception):
@@ -92,9 +115,19 @@ def _blocking_downsample(
     cap_bytes: int,
     max_dim: int,
 ) -> ImageDownsampleResult | None:
+    pil = _pillow()
     try:
-        img = Image.open(io.BytesIO(data))
-        img.load()  # Force full decode now so format errors surface here.
+        img = pil.open(io.BytesIO(data))
+        # ``Image.open`` parses the header (.size, .format, .mode populated)
+        # but does NOT decode pixel data — ``img.load()`` does.  If the
+        # image already fits both caps, skip the decode entirely; this
+        # keeps the common-case "small image goes through staging" path
+        # cheap even though the caller now always invokes us (so that
+        # high-resolution-but-well-compressed inputs can't bypass the
+        # dimension cap via the byte-size guard).
+        if len(data) <= cap_bytes and img.width <= max_dim and img.height <= max_dim:
+            return None
+        img.load()
     except Exception as err:
         # Pillow throws a mix of UnidentifiedImageError (subclass of
         # OSError), DecompressionBombError, ValueError, and provider-
@@ -105,18 +138,15 @@ def _blocking_downsample(
 
     has_transparency = img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info
 
-    if len(data) <= cap_bytes and img.width <= max_dim and img.height <= max_dim:
-        return None
-
     if img.width > max_dim or img.height > max_dim:
-        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+        img.thumbnail((max_dim, max_dim), pil.Resampling.LANCZOS)
 
     if has_transparency:
         return _encode_with_transparency(img, cap_bytes)
     return _encode_as_jpeg(img, cap_bytes)
 
 
-def _encode_as_jpeg(img: Image.Image, cap_bytes: int) -> ImageDownsampleResult:
+def _encode_as_jpeg(img: PILImage.Image, cap_bytes: int) -> ImageDownsampleResult:
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
     buf = io.BytesIO()
@@ -138,9 +168,10 @@ def _encode_as_jpeg(img: Image.Image, cap_bytes: int) -> ImageDownsampleResult:
     )
 
 
-def _encode_with_transparency(img: Image.Image, cap_bytes: int) -> ImageDownsampleResult:
+def _encode_with_transparency(img: PILImage.Image, cap_bytes: int) -> ImageDownsampleResult:
     """Encode a transparency-bearing image, preferring PNG fidelity but
     falling back to palette PNG when the cap is tight."""
+    pil = _pillow()
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     if buf.tell() <= cap_bytes:
@@ -150,7 +181,7 @@ def _encode_with_transparency(img: Image.Image, cap_bytes: int) -> ImageDownsamp
             width=img.width,
             height=img.height,
         )
-    palette = img.convert("P", palette=Image.Palette.ADAPTIVE, colors=256)
+    palette = img.convert("P", palette=pil.Palette.ADAPTIVE, colors=256)
     buf = io.BytesIO()
     palette.save(buf, format="PNG", optimize=True)
     final_size = buf.tell()
