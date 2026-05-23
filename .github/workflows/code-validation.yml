@@ -317,11 +317,21 @@ jobs:
           uv run pytest tests/e2e -q -m "not docker"
 
       - name: E2E tests (docker shard)
+        # ``-n 2 --dist=loadfile`` runs the docker shard in two parallel
+        # xdist workers, one whole-file at a time.  ``loadfile`` is load-
+        # bearing: ``test_memory_cross_session_sync.py`` uses a module-
+        # scoped ``shared_docker_harness`` fixture which would be torn
+        # down + rebuilt per test under the default ``load`` dist.  Two
+        # workers matches the GHA standard runner's 2 cores; ``auto``
+        # over-subscribes on this hardware.  Local measurement: 84 s with
+        # ``-n 2`` vs. ~280 s serial — 3.3× speedup on the docker shard,
+        # amortizing the per-worker testcontainer-Postgres + Docker setup
+        # over ~100 tests each.
         if: matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
         run: |
-          uv run pytest tests/e2e -q -m docker \
+          uv run pytest tests/e2e -q -m docker -n 2 --dist=loadfile \
             --ignore=tests/e2e/test_signal_connector.py \
             --ignore=tests/e2e/test_signal_registration.py \
             --ignore=tests/e2e/test_telegram_connector.py
