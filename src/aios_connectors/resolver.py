@@ -178,8 +178,23 @@ async def _dispatch_routing_target(
         raise AssertionError(f"unknown routing_rules.target_type: {target_type!r}")
 
     # Direct-session dispatch: stamp the ledger so future inbounds
-    # short-circuit. Race-safe via ON CONFLICT DO NOTHING.
-    async with pool.acquire() as conn:
+    # short-circuit. Race-safe via ON CONFLICT DO NOTHING. Also takes
+    # SELECT FOR UPDATE on the connections row + re-checks archived
+    # — without it, a concurrent detach+archive can commit between
+    # the resolver's binding load and the insert, leaving the
+    # chat_session row on an archived connection (chat_sessions.
+    # connection_id FK accepts archived rows). Symmetric to
+    # bind_chat_to_session's #663 fix; archive_connection's
+    # chat_sessions presence check (also #663) closes the opposite
+    # race direction.
+    async with pool.acquire() as conn, conn.transaction():
+        locked = await conn.fetchrow(
+            "SELECT archived_at FROM connections WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            connection.id,
+            account_id,
+        )
+        if locked is None or locked["archived_at"] is not None:
+            return ResolveResult(session_id=None, drop=ResolveDrop.DETACHED)
         registered = await queries.insert_chat_session(
             conn,
             connection_id=connection.id,
@@ -220,8 +235,19 @@ async def _spawn_per_chat_session(
 
     # Race-safe register: loser gets the winner's session_id; just-spawned
     # orphan is left for operator cleanup (same posture as pre-#328
-    # ``_resolve_per_chat``).
-    async with pool.acquire() as conn:
+    # ``_resolve_per_chat``). Also takes SELECT FOR UPDATE on the
+    # connections row + re-checks archived — see _dispatch_routing_target
+    # above for the rationale. The just-created session may end up an
+    # orphan when DETACHED is returned; that matches the existing
+    # "loser orphan" posture and operator cleanup expectation.
+    async with pool.acquire() as conn, conn.transaction():
+        locked = await conn.fetchrow(
+            "SELECT archived_at FROM connections WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            connection.id,
+            account_id,
+        )
+        if locked is None or locked["archived_at"] is not None:
+            return ResolveResult(session_id=None, drop=ResolveDrop.DETACHED)
         registered = await queries.insert_chat_session(
             conn,
             connection_id=connection.id,
