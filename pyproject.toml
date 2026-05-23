@@ -181,6 +181,11 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
+    # Surface slow tests in every CI log so regressions don't accumulate
+    # silently.  ``--durations-min=0.5`` filters out the noise floor so
+    # the report stays a sentence, not a screenful.
+    "--durations=20",
+    "--durations-min=0.5",
 ]
 markers = [
     "integration: tests requiring a Postgres testcontainer",
