@@ -119,8 +119,8 @@ async def _seed_session(db_url: str, *, session_id: str, workspace_volume_path: 
         )
         await conn.execute(
             """
-            INSERT INTO environments (id, account_id, name, config, created_at, updated_at)
-            VALUES ('env_test', 'acc_a', 'test', '{}'::jsonb, now(), now())
+            INSERT INTO environments (id, account_id, name, config, created_at)
+            VALUES ('env_test', 'acc_a', 'test', '{}'::jsonb, now())
             ON CONFLICT DO NOTHING
             """
         )

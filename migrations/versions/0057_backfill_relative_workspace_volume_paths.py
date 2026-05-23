@@ -137,6 +137,34 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Same count-first short-circuit as ``upgrade``: if no row matches the
+    # absolute-prefix pattern, there's nothing to rewrite and we don't
+    # need the env var. Fresh-DB upgrade->downgrade test fixtures and
+    # zero-data prod rollbacks both pass cleanly. When rows DO exist,
+    # ``_workspace_root_prefix`` fail-louds on missing/relative env.
+    raw_prefix = os.environ.get("AIOS_WORKSPACE_ROOT", "")
+    if raw_prefix:
+        # Cheap check using the raw env value (no normalization needed
+        # for COUNT): if the prefix is empty we definitely have no matches.
+        bind = op.get_bind()
+        candidate_count = bind.execute(
+            text(
+                "SELECT COUNT(*) FROM sessions WHERE workspace_volume_path LIKE :pattern"
+            ).bindparams(pattern=f"{raw_prefix.rstrip('/')}/%")
+        ).scalar()
+        if candidate_count == 0:
+            return
+    else:
+        # No env var → either no matching rows (clean rollback) or the
+        # operator forgot to set it. Probe with a generic absolute pattern
+        # first so we no-op cleanly in the former case.
+        bind = op.get_bind()
+        absolute_count = bind.execute(
+            text("SELECT COUNT(*) FROM sessions WHERE workspace_volume_path LIKE '/%'")
+        ).scalar()
+        if absolute_count == 0:
+            return
+
     prefix = _workspace_root_prefix()
     # Reverse the upgrade: strip the absolute prefix and prepend the
     # legacy ``workspaces`` segment so ``<prefix>/<acc>/<sess>`` returns to
