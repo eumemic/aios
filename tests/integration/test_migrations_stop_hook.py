@@ -55,7 +55,7 @@ async def _version_num(db_url: str) -> str:
 @needs_docker
 @pytest.mark.integration
 def test_full_chain_from_scratch_has_no_stop_hook(postgres: object) -> None:
-    """A fresh upgrade-to-head lands at 0056 with no ``stop_hook`` column."""
+    """A fresh upgrade-to-head lands past 0056 with no ``stop_hook`` column."""
     db_url = _alembic_url(postgres)
 
     result = _run_alembic(["upgrade", "head"], db_url)
@@ -63,7 +63,10 @@ def test_full_chain_from_scratch_has_no_stop_hook(postgres: object) -> None:
 
     columns = asyncio.run(_sessions_columns(db_url))
     assert "stop_hook" not in columns
-    assert asyncio.run(_version_num(db_url)) == "0056"
+    # ``stop_hook`` is dropped by 0056; later migrations don't re-add it.
+    # Pin to "drop occurred" rather than a specific head so future migrations
+    # don't churn this test.
+    assert asyncio.run(_version_num(db_url)) >= "0056"
 
 
 @needs_docker
@@ -79,7 +82,8 @@ def test_forward_from_stamped_0055_drops_stop_hook(postgres: object) -> None:
 
     result = _run_alembic(["upgrade", "head"], db_url)
     assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}\n{result.stdout}"
-    assert asyncio.run(_version_num(db_url)) == "0056"
+    # Past 0056 — stop_hook is dropped by that revision and stays gone.
+    assert asyncio.run(_version_num(db_url)) >= "0056"
     assert "stop_hook" not in asyncio.run(_sessions_columns(db_url))
 
 
