@@ -51,6 +51,21 @@ os.environ.setdefault(
 )
 os.environ.setdefault("AIOS_DB_URL", "postgresql://x:x@localhost:5432/x")
 
+# Scope ``AIOS_INSTANCE_ID`` per pytest-xdist worker so that
+# ``SandboxRegistry.reap_orphans`` (which lists containers by the
+# ``aios.instance_id`` label) only ever sees this worker's containers.
+# ``Settings.instance_id`` defaults to the literal ``"default"`` —
+# without this override, two xdist workers in the same CI job would
+# share an instance_id and a hypothetical future test that triggers
+# the orphan-reaper path would ``docker rm -f`` the sibling worker's
+# live sandbox.  Today no test exercises that path, but pre-empting
+# the footgun is cheap and keeps ``-n 2`` safe for future test growth.
+# ``PYTEST_XDIST_WORKER`` is set by xdist to ``gw0`` / ``gw1`` / ...
+# per worker and is absent in single-process runs.
+_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER")
+if _xdist_worker:
+    os.environ.setdefault("AIOS_INSTANCE_ID", f"test_{_xdist_worker}")
+
 
 def _docker_available() -> bool:
     """Check if Docker is available, ensuring ``DOCKER_HOST`` is set.
