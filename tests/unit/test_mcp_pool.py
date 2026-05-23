@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -319,13 +320,18 @@ class TestMcpSessionPool:
             entry_a.close = _close_a  # type: ignore[method-assign]
             entry_b.close = _close_b  # type: ignore[method-assign]
 
-            # Both deeply idle so they both land in ``stale`` on the scan.
-            entry_a.last_used = 1000.0
-            entry_b.last_used = 1000.0
+            # Use a single reference time so the reaper's ``now`` snapshot
+            # and ``get_or_connect``'s warm-hit (which bumps last_used to
+            # the real ``time.monotonic()``) live in the same clock frame.
+            # The fake-time pattern at line 256-261 only works because
+            # that test doesn't exercise a live warm-hit.
+            t0 = time.monotonic()
+            entry_a.last_used = t0 - 1000.0
+            entry_b.last_used = t0 - 1000.0
 
             # Insertion order pins key_a as the first iteration → reaper
             # parks inside _close_a, yielding control to the test.
-            reap_task = asyncio.create_task(pool._reap_idle_once(idle_timeout=300.0, now=9100.0))
+            reap_task = asyncio.create_task(pool._reap_idle_once(idle_timeout=300.0, now=t0))
             try:
                 await asyncio.wait_for(park_a.wait(), timeout=1.0)
                 # Reaper is parked inside entry_a.close(). Warm-hit

@@ -251,7 +251,7 @@ class McpSessionPool:
                 # and lock-acquire (the get() returning None handles
                 # that).
                 entry = self._entries.get(key)
-                if entry is None or time.monotonic() - entry.last_used <= idle_timeout:
+                if entry is None or now - entry.last_used <= idle_timeout:
                     continue
                 del self._entries[key]
                 log.info("mcp_pool.idle_close", url=key[0])
