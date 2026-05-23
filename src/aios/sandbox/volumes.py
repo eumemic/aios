@@ -152,8 +152,11 @@ def validate_workspace_path(
     """
     if not Path(raw_path).is_absolute():
         raise ForbiddenError(
-            "workspace_path must be an absolute path",
-            detail={"workspace_path": raw_path},
+            "workspace_volume_path must be absolute (starts with '/'); got "
+            f"non-absolute value {raw_path!r}. This usually indicates a "
+            "stale pre-#409 session row that needs the absolute-legacy "
+            "backfill migration (see aios#626).",
+            detail={"workspace_path": raw_path, "session_id": session_id},
         )
     path = Path(raw_path).resolve()
     workspace_root = get_settings().workspace_root.resolve()
