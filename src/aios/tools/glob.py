@@ -100,6 +100,7 @@ def _register() -> None:
         description=GLOB_DESCRIPTION,
         parameters_schema=GLOB_PARAMETERS_SCHEMA,
         handler=glob_handler,
+        transport="agent_tool",
     )
 
 

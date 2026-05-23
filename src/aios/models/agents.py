@@ -9,9 +9,9 @@ the full history. The ``model`` field is a free-form LiteLLM model string
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aios.models.skills import AgentSkillRef
 
@@ -35,6 +35,19 @@ BuiltinToolType = Literal[
 # Permission policy for built-in tools. Custom tools are always client-controlled
 # and ignore this field.
 PermissionPolicy = Literal["always_allow", "always_ask"]
+
+# Transport classification — which callers may invoke a tool.
+#   "agent_tool": model only (the LLM's tool-call surface).
+#   "cli":        sandbox-side ``tool`` CLI only (bash inside the session).
+#   "both":       reachable from either.
+# The substrate's security frontier: outbound-side-effect tools live as
+# ``agent_tool`` so the model is the bottleneck for irreversible effects.
+# Enforcement is structural (the broker refuses non-CLI tools). Built-ins
+# get a registry default; an agent's ``ToolSpec`` /
+# ``McpToolsetConfig`` / ``McpToolConfig`` can override per-tool.
+ToolTransport = Literal["cli", "agent_tool", "both"]
+
+_BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
 
 
 # ── MCP server declaration ────────────────────────────────────────────────────
@@ -62,6 +75,21 @@ class McpServerSpec(BaseModel):
     url: str = Field(min_length=1)
     include_instructions: bool = True
 
+    @field_validator("name")
+    @classmethod
+    def _name_not_builtin(cls, v: str) -> str:
+        # The ``tool`` CLI uses a flat top-level namespace (``tool <name>``
+        # for built-ins, ``tool <server> <method>`` for MCP). Reserving
+        # built-in names on ``McpServerSpec`` keeps the broker's
+        # name-resolution unambiguous.
+        if v in _BUILTIN_NAMES:
+            raise ValueError(
+                f"MCP server name {v!r} collides with a built-in tool name; "
+                f"the `tool` CLI uses a flat top-level namespace where "
+                f"built-in tool names are reserved. Pick a different name."
+            )
+        return v
+
 
 # ── MCP toolset config (permission policies for discovered tools) ──────────
 
@@ -81,6 +109,7 @@ class McpToolsetConfig(BaseModel):
 
     enabled: bool = True
     permission_policy: McpPermissionPolicy | None = None
+    transport: ToolTransport | None = None
 
 
 class McpToolConfig(BaseModel):
@@ -91,6 +120,7 @@ class McpToolConfig(BaseModel):
     name: str
     enabled: bool = True
     permission_policy: McpPermissionPolicy | None = None
+    transport: ToolTransport | None = None
 
 
 # ── HTTP server declaration ──────────────────────────────────────────────────
@@ -175,6 +205,12 @@ class ToolSpec(BaseModel):
     input_schema: dict[str, Any] | None = None
     enabled: bool = True
     permission: PermissionPolicy | None = None
+    # Override the registry default transport for a built-in (or the
+    # system ``"both"`` default for a custom tool). ``None`` = inherit.
+    # Ignored for ``type == "mcp_toolset"`` — per-server / per-tool MCP
+    # transport overrides live on ``default_config`` and ``configs[]``,
+    # paralleling ``permission_policy``.
+    transport: ToolTransport | None = None
 
     # mcp_toolset fields
     mcp_server_name: str | None = None
@@ -316,16 +352,88 @@ def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> PermissionPoli
 def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> PermissionPolicy | None:
     """Look up the permission policy for an MCP tool by namespaced name.
 
-    Returns the matched ``mcp_toolset`` entry's
-    ``default_config.permission_policy.type`` (or its bare ``permission``
-    if no policy is set), or ``None`` if no entry matches. ``None``
-    callers fall back to ``AIOS_DEFAULT_MCP_PERMISSION_POLICY``.
+    Precedence (mirrors the broker's resolution so the model path and CLI
+    path agree on overrides): per-tool ``configs[]`` entry → ``default_config``
+    → bare ``ToolSpec.permission``. Returns ``None`` when nothing is set;
+    callers then fall back to ``AIOS_DEFAULT_MCP_PERMISSION_POLICY``.
     """
-    server_name = name.split("__", 2)[1]
+    parts = name.split("__", 2)
+    if len(parts) < 3:
+        return None
+    server_name = parts[1]
+    tool_name = parts[2]
     for spec in agent_tools:
         if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
-            cfg = spec.default_config
-            if cfg and cfg.permission_policy:
-                return cfg.permission_policy.type
+            if spec.configs:
+                for cfg in spec.configs:
+                    if cfg.name == tool_name:
+                        return cfg.permission_policy.type if cfg.permission_policy else None
+            if spec.default_config and spec.default_config.permission_policy:
+                return spec.default_config.permission_policy.type
             return spec.permission
+    return None
+
+
+def resolve_mcp_transport(name: str, agent_tools: list[ToolSpec]) -> ToolTransport | None:
+    """Look up the transport classification for an MCP tool by namespaced name.
+
+    Precedence parallels :func:`resolve_mcp_permission`: per-tool
+    ``configs[]`` entry → ``default_config.transport``. Returns ``None``
+    when no override is set — callers fall back to the system default
+    ``"both"``.
+    """
+    parts = name.split("__", 2)
+    if len(parts) < 3:
+        return None
+    server_name = parts[1]
+    tool_name = parts[2]
+    for spec in agent_tools:
+        if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
+            if spec.configs:
+                for cfg in spec.configs:
+                    if cfg.name == tool_name:
+                        return cfg.transport
+            if spec.default_config:
+                return spec.default_config.transport
+            return None
+    return None
+
+
+def resolve_mcp_enabled(name: str, agent_tools: list[ToolSpec]) -> bool:
+    """Resolve whether an MCP tool is enabled given the agent's config.
+
+    Precedence parallels :func:`resolve_mcp_permission`: per-tool
+    ``configs[]`` entry → ``default_config.enabled`` → ``True`` (the
+    field default). Returns ``False`` if no matching ``mcp_toolset``
+    entry exists at all — a tool the agent hasn't declared a toolset
+    for is implicitly off.
+    """
+    parts = name.split("__", 2)
+    if len(parts) < 3:
+        return False
+    server_name = parts[1]
+    tool_name = parts[2]
+    for spec in agent_tools:
+        if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
+            if spec.configs:
+                for cfg in spec.configs:
+                    if cfg.name == tool_name:
+                        return cfg.enabled
+            if spec.default_config is not None:
+                return spec.default_config.enabled
+            return True
+    return False
+
+
+def resolve_builtin_transport(name: str, agent_tools: list[ToolSpec]) -> ToolTransport | None:
+    """Look up the transport override for a built-in or custom tool by name.
+
+    Returns the matching ``ToolSpec.transport`` (which may be ``None`` if
+    the operator left it unset, meaning "inherit the registry default").
+    Returns ``None`` if no matching entry exists at all.
+    """
+    for spec in agent_tools:
+        tool_name = spec.name if spec.type == "custom" else spec.type
+        if tool_name == name:
+            return spec.transport
     return None

@@ -323,9 +323,9 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     from aios.harness import runtime
     from aios.harness.task_registry import TaskRegistry
     from aios.sandbox.backends.docker import DockerBackend
-    from aios.sandbox.mcp_proxy import McpBroker
     from aios.sandbox.network import ensure_sandbox_network
     from aios.sandbox.registry import SandboxRegistry
+    from aios.sandbox.tool_broker import ToolBroker
     from aios.tools.registry import registry
     from aios_connectors.providers import SubsystemToolProvider
 
@@ -339,15 +339,15 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     # provisions hits ``docker run --network aios-sandbox`` against a
     # network that doesn't exist on this host yet.
     await ensure_sandbox_network()
-    mcp_broker = McpBroker()
-    await mcp_broker.start()
+    tool_broker = ToolBroker()
+    await tool_broker.start()
 
     prev = (
         runtime.pool,
         runtime.crypto_box,
         runtime.task_registry,
         runtime.sandbox_registry,
-        runtime.mcp_broker,
+        runtime.tool_broker,
         runtime.worker_id,
         runtime.tool_provider,
     )
@@ -355,7 +355,7 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     runtime.crypto_box = crypto_box
     runtime.task_registry = task_reg
     runtime.sandbox_registry = sandbox_reg
-    runtime.mcp_broker = mcp_broker
+    runtime.tool_broker = tool_broker
     runtime.worker_id = "worker_test"
     runtime.tool_provider = SubsystemToolProvider()
 
@@ -383,13 +383,13 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
         runtime.crypto_box,
         runtime.task_registry,
         runtime.sandbox_registry,
-        runtime.mcp_broker,
+        runtime.tool_broker,
         runtime.worker_id,
         runtime.tool_provider,
     ) = prev
     await task_reg.shutdown()
     await sandbox_reg.release_all()
-    await mcp_broker.stop()
+    await tool_broker.stop()
     await pool.close()
 
 

@@ -172,6 +172,7 @@ def _register() -> None:
         description=BASH_DESCRIPTION,
         parameters_schema=BASH_PARAMETERS_SCHEMA,
         handler=bash_handler,
+        transport="agent_tool",
     )
 
 

@@ -59,7 +59,7 @@ async def shared_docker_harness(
     """Module-scoped variant of the conftest ``docker_harness`` fixture.
 
     The default ``docker_harness`` (in ``tests/e2e/conftest.py``) is
-    function-scoped: every test pays for ``McpBroker.start()``,
+    function-scoped: every test pays for ``ToolBroker.start()``,
     ``SandboxRegistry`` init, the runtime-globals swap, and the
     asyncpg-pool spin-up.  This file's 13 tests don't need that
     per-test reset — they just need the per-test data layer reset,
@@ -76,9 +76,9 @@ async def shared_docker_harness(
     from aios.db.pool import create_pool
     from aios.harness.task_registry import TaskRegistry
     from aios.sandbox.backends.docker import DockerBackend
-    from aios.sandbox.mcp_proxy import McpBroker
     from aios.sandbox.network import ensure_sandbox_network
     from aios.sandbox.registry import SandboxRegistry
+    from aios.sandbox.tool_broker import ToolBroker
     from aios.services.accounts import hash_key
     from aios.tools.registry import registry
     from aios_connectors.providers import SubsystemToolProvider
@@ -118,15 +118,15 @@ async def shared_docker_harness(
         task_reg = TaskRegistry()
         sandbox_reg = SandboxRegistry(backend=DockerBackend())
         await ensure_sandbox_network()
-        mcp_broker = McpBroker()
-        await mcp_broker.start()
+        tool_broker = ToolBroker()
+        await tool_broker.start()
 
         prev = (
             runtime.pool,
             runtime.crypto_box,
             runtime.task_registry,
             runtime.sandbox_registry,
-            runtime.mcp_broker,
+            runtime.tool_broker,
             runtime.worker_id,
             runtime.tool_provider,
         )
@@ -134,7 +134,7 @@ async def shared_docker_harness(
         runtime.crypto_box = crypto_box
         runtime.task_registry = task_reg
         runtime.sandbox_registry = sandbox_reg
-        runtime.mcp_broker = mcp_broker
+        runtime.tool_broker = tool_broker
         runtime.worker_id = "worker_test"
         runtime.tool_provider = SubsystemToolProvider()
 
@@ -162,13 +162,13 @@ async def shared_docker_harness(
             runtime.crypto_box,
             runtime.task_registry,
             runtime.sandbox_registry,
-            runtime.mcp_broker,
+            runtime.tool_broker,
             runtime.worker_id,
             runtime.tool_provider,
         ) = prev
         await task_reg.shutdown()
         await sandbox_reg.release_all()
-        await mcp_broker.stop()
+        await tool_broker.stop()
         await pool.close()
         get_settings.cache_clear()
 

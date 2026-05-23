@@ -301,6 +301,7 @@ def _register() -> None:
         description=EDIT_DESCRIPTION,
         parameters_schema=EDIT_PARAMETERS_SCHEMA,
         handler=edit_handler,
+        transport="agent_tool",
     )
 
 

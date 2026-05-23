@@ -57,13 +57,13 @@ from aios.services import sessions as sessions_service
 
 log = get_logger("aios.sandbox.spec")
 
-# Path inside the sandbox container where the worker's MCP-broker UDS
-# is bind-mounted when ``settings.mcp_broker_socket_path`` is set. The
-# in-sandbox ``bin/mcp`` CLI reads ``MCP_BROKER_URL`` which the worker
+# Path inside the sandbox container where the worker's tool-broker UDS
+# is bind-mounted when ``settings.tool_broker_socket_path`` is set. The
+# in-sandbox ``bin/tool`` CLI reads ``TOOL_BROKER_URL`` which the worker
 # sets to ``unix://`` + this path. The directory matches the well-known
 # location for ephemeral host runtime sockets so it doesn't collide
 # with any sandbox workspace path.
-MCP_BROKER_SOCKET_SANDBOX_PATH = "/var/run/aios/mcp-broker.sock"
+TOOL_BROKER_SOCKET_SANDBOX_PATH = "/var/run/aios/tool-broker.sock"
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,18 +310,18 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     memory_echoes = await _materialize_memory_mounts(session_id, account_id=account_id)
     github_echoes, git_proxy = await _materialize_github_clones(session_id, account_id=account_id)
 
-    mcp_broker = runtime.require_mcp_broker()
-    mcp_broker_secret = secrets.token_urlsafe(32)
-    mcp_broker.register_session(session_id, mcp_broker_secret)
+    tool_broker = runtime.require_tool_broker()
+    tool_broker_secret = secrets.token_urlsafe(32)
+    tool_broker.register_session(session_id, tool_broker_secret)
     # Prefer the UDS transport when the operator configured one: it
     # works in deployments where the worker's TCP port isn't reachable
     # from the sandbox network (e.g. Coolify production). Otherwise
     # fall back to the ephemeral TCP URL.
-    mcp_socket_host_path = settings.mcp_broker_socket_path
-    if mcp_socket_host_path is not None:
-        mcp_broker_url = f"unix://{MCP_BROKER_SOCKET_SANDBOX_PATH}"
+    tool_socket_host_path = settings.tool_broker_socket_path
+    if tool_socket_host_path is not None:
+        tool_broker_url = f"unix://{TOOL_BROKER_SOCKET_SANDBOX_PATH}"
     else:
-        mcp_broker_url = f"http://{WORKER_NETWORK_ALIAS}:{mcp_broker.port}"
+        tool_broker_url = f"http://{WORKER_NETWORK_ALIAS}:{tool_broker.port}"
 
     try:
         return _assemble_plan(
@@ -334,16 +334,16 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
             memory_echoes=memory_echoes,
             github_echoes=github_echoes,
             git_proxy=git_proxy,
-            mcp_broker_url=mcp_broker_url,
-            mcp_broker_secret=mcp_broker_secret,
-            mcp_socket_host_path=mcp_socket_host_path,
+            tool_broker_url=tool_broker_url,
+            tool_broker_secret=tool_broker_secret,
+            tool_socket_host_path=tool_socket_host_path,
         )
     except BaseException:
         # Both proxies hold worker-process state (ports, token maps,
         # secret-to-session bindings). Anything that raises before we
         # hand back a plan must clean up both on the way out, otherwise
         # state leaks for the worker's lifetime.
-        mcp_broker.unregister_session(session_id)
+        tool_broker.unregister_session(session_id)
         if git_proxy is not None:
             try:
                 await git_proxy.stop()
@@ -367,16 +367,16 @@ def _assemble_plan(
     memory_echoes: list[MemoryStoreResourceEcho],
     github_echoes: list[GithubRepositoryResourceEcho],
     git_proxy: GitProxy | None,
-    mcp_broker_url: str,
-    mcp_broker_secret: str,
-    mcp_socket_host_path: Path | None = None,
+    tool_broker_url: str,
+    tool_broker_secret: str,
+    tool_socket_host_path: Path | None = None,
 ) -> ProvisioningPlan:
     """Pure assembly of the plan from already-materialized inputs.
 
-    When ``mcp_socket_host_path`` is set, a read-write bind mount of the
-    broker socket file is appended at ``MCP_BROKER_SOCKET_SANDBOX_PATH``;
-    the caller is expected to have set ``mcp_broker_url`` to the
-    matching ``unix://`` URL.
+    When ``tool_socket_host_path`` is set, a read-write bind mount of
+    the broker socket file is appended at
+    ``TOOL_BROKER_SOCKET_SANDBOX_PATH``; the caller is expected to have
+    set ``tool_broker_url`` to the matching ``unix://`` URL.
     """
     from aios.sandbox.volumes import (
         ensure_session_attachments_dir,
@@ -389,8 +389,8 @@ def _assemble_plan(
         **WORKSPACE_RUNTIME_ENV,
         **(env_config.env if env_config and env_config.env else {}),
         **session_env,
-        "MCP_BROKER_URL": mcp_broker_url,
-        "MCP_BROKER_SECRET": mcp_broker_secret,
+        "TOOL_BROKER_URL": tool_broker_url,
+        "TOOL_BROKER_SECRET": tool_broker_secret,
     }
 
     # Bind the per-session attachments and uploads dirs at every provision
@@ -431,15 +431,15 @@ def _assemble_plan(
             )
         )
 
-    if mcp_socket_host_path is not None:
+    if tool_socket_host_path is not None:
         # Read-write so the sandbox can write request bytes through the
         # bound socket file. The kernel routes the actual I/O through
         # the AF_UNIX endpoint regardless of file mode, but Docker
         # still applies the read_only bit to the inode itself.
         extra_mounts.append(
             Mount(
-                host_path=mcp_socket_host_path,
-                sandbox_path=MCP_BROKER_SOCKET_SANDBOX_PATH,
+                host_path=tool_socket_host_path,
+                sandbox_path=TOOL_BROKER_SOCKET_SANDBOX_PATH,
                 read_only=False,
             )
         )

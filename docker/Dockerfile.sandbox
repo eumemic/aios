@@ -3,7 +3,7 @@
 # This is the image every aios v1 session runs inside. It's intentionally
 # minimal: a Python runtime for scripted tool calls, standard POSIX
 # utilities, curl for HTTP fetches, git, ripgrep for the grep/glob tools,
-# jq for JSON-from-bash composition (notably ``mcp <server> <tool> | jq
+# jq for JSON-from-bash composition (notably ``tool <name> '{...}' | jq
 # ...`` flows), and Node + npm so agents can ``npm install -g`` into the
 # persistent workspace npm prefix without first apt-installing the
 # runtime themselves. No other languages; no package manager state at
@@ -21,7 +21,7 @@
 # then point ``AIOS_DOCKER_IMAGE`` at the local tag.
 #
 # Build context is the repo root (NOT ``docker/``) because the image
-# COPYs ``bin/mcp`` from the repo root. See issue #392 for the prior
+# COPYs ``bin/tool`` from the repo root. See issue #392 for the prior
 # bind-mount approach and why it was replaced.
 #
 # The image is labelled `aios.managed=true` at runtime (not build time) via
@@ -53,14 +53,15 @@ RUN apt-get update \
         ripgrep \
  && rm -rf /var/lib/apt/lists/*
 
-# The ``mcp`` CLI lets agents invoke permitted MCP server tools through
-# the worker-side broker (see ``aios/sandbox/spec.py`` for ``MCP_BROKER_URL``
-# / ``MCP_BROKER_SECRET`` injection). Baked into the image rather than
-# bind-mounted from the worker container — see issue #392 for why the
-# prior bind-mount approach was incorrect (Docker resolves bind sources
-# on the daemon's filesystem, not the calling container's).
-COPY bin/mcp /usr/local/bin/mcp
-RUN chmod 0755 /usr/local/bin/mcp
+# The ``tool`` CLI lets agents invoke their CLI-reachable built-ins and
+# MCP-server tools through the worker-side broker (see
+# ``aios/sandbox/spec.py`` for ``TOOL_BROKER_URL`` / ``TOOL_BROKER_SECRET``
+# injection). Baked into the image rather than bind-mounted from the
+# worker container — see issue #392 for why the prior bind-mount
+# approach was incorrect (Docker resolves bind sources on the daemon's
+# filesystem, not the calling container's).
+COPY bin/tool /usr/local/bin/tool
+RUN chmod 0755 /usr/local/bin/tool
 
 # Workspace directory. The host mounts a per-session directory here at
 # container start via `-v <workspace_root>/<session_id>:/workspace`. The

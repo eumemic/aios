@@ -193,7 +193,7 @@ def _classify_awaiting(
     """
     # Late import: aios.tools package init pulls in services.wake which
     # imports this module.
-    from aios.harness.tool_dispatch import _parse_arguments
+    from aios.tools.invoke import parse_arguments
     from aios.tools.registry import registry as tool_registry
 
     name = tc["name"]
@@ -212,7 +212,7 @@ def _classify_awaiting(
         perm_route: str | None = None
         tool_def = tool_registry.get(name)
         if tool_def.classify_permission is not None:
-            args = _parse_arguments(tc.get("arguments"))
+            args = parse_arguments(tc.get("arguments"))
             if args is not None:
                 perm_route = tool_def.classify_permission(args, agent)
         if (perm_tool == "always_ask" or perm_route == "always_ask") and not has_allow_lifecycle:

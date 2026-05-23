@@ -60,24 +60,24 @@ def _unit_runtime_tool_provider() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _unit_runtime_mcp_broker() -> Iterator[None]:
-    """Register an unstarted ``McpBroker`` on ``runtime`` for unit tests.
+def _unit_runtime_tool_broker() -> Iterator[None]:
+    """Register an unstarted ``ToolBroker`` on ``runtime`` for unit tests.
 
     Sandbox provisioning and teardown paths call
-    ``runtime.require_mcp_broker()`` to register and clear per-session
+    ``runtime.require_tool_broker()`` to register and clear per-session
     secrets; without an instance the helper raises. Tests that exercise
     those paths don't need a live HTTP server — only the in-memory
     secret map — so we hand them an instance that was never ``.start()``-ed.
     Tests that actually need ``.port`` should set ``broker._port`` directly.
     """
     from aios.harness import runtime
-    from aios.sandbox.mcp_proxy import McpBroker
+    from aios.sandbox.tool_broker import ToolBroker
 
-    runtime.mcp_broker = McpBroker()
+    runtime.tool_broker = ToolBroker()
     try:
         yield
     finally:
-        runtime.mcp_broker = None
+        runtime.tool_broker = None
 
 
 @pytest.fixture

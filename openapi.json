@@ -9736,6 +9736,22 @@
                 "type": "null"
               }
             ]
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "cli",
+                  "agent_tool",
+                  "both"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transport"
           }
         },
         "additionalProperties": false,
@@ -9762,6 +9778,22 @@
                 "type": "null"
               }
             ]
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "cli",
+                  "agent_tool",
+                  "both"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transport"
           }
         },
         "additionalProperties": false,
@@ -11858,6 +11890,22 @@
               }
             ],
             "title": "Permission"
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "cli",
+                  "agent_tool",
+                  "both"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transport"
           },
           "mcp_server_name": {
             "anyOf": [

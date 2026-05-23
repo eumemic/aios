@@ -90,7 +90,9 @@ from .mcp_permission_policy import McpPermissionPolicy
 from .mcp_permission_policy_type import McpPermissionPolicyType
 from .mcp_server_spec import McpServerSpec
 from .mcp_tool_config import McpToolConfig
+from .mcp_tool_config_transport_type_0 import McpToolConfigTransportType0
 from .mcp_toolset_config import McpToolsetConfig
+from .mcp_toolset_config_transport_type_0 import McpToolsetConfigTransportType0
 from .memory import Memory
 from .memory_create import MemoryCreate
 from .memory_prefix import MemoryPrefix
@@ -164,6 +166,7 @@ from .tool_result_request_content_type_1_item import ToolResultRequestContentTyp
 from .tool_spec import ToolSpec
 from .tool_spec_input_schema_type_0 import ToolSpecInputSchemaType0
 from .tool_spec_permission_type_0 import ToolSpecPermissionType0
+from .tool_spec_transport_type_0 import ToolSpecTransportType0
 from .tool_spec_type_type_0 import ToolSpecTypeType0
 from .tool_spec_type_type_1 import ToolSpecTypeType1
 from .tools_schema_update import ToolsSchemaUpdate
@@ -277,7 +280,9 @@ __all__ = (
     "McpPermissionPolicyType",
     "McpServerSpec",
     "McpToolConfig",
+    "McpToolConfigTransportType0",
     "McpToolsetConfig",
+    "McpToolsetConfigTransportType0",
     "Memory",
     "MemoryCreate",
     "MemoryPrefix",
@@ -349,6 +354,7 @@ __all__ = (
     "ToolSpec",
     "ToolSpecInputSchemaType0",
     "ToolSpecPermissionType0",
+    "ToolSpecTransportType0",
     "ToolSpecTypeType0",
     "ToolSpecTypeType1",
     "ToolsSchemaUpdate",

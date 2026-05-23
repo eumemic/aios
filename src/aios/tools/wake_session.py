@@ -305,6 +305,7 @@ def _register() -> None:
         description=WAKE_SESSION_DESCRIPTION,
         parameters_schema=WAKE_SESSION_PARAMETERS_SCHEMA,
         handler=wake_session_handler,
+        transport="agent_tool",
     )
 
 

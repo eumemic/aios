@@ -1,10 +1,8 @@
-"""Unit tests for the Unix-domain-socket transport on :class:`McpBroker`.
+"""Unit tests for the Unix-domain-socket transport on :class:`ToolBroker`.
 
-The TCP path is covered by ``test_mcp_proxy.py`` and the request envelope
-contract by ``test_broker_http_contract.py``. These tests pin the
-lifecycle of the socket file itself — creation, permissions, cleanup,
-stale-overwrite — plus the dual-listen behavior when ``socket_path`` is
-set.
+Pin the lifecycle of the socket file itself — creation, permissions,
+cleanup, stale-overwrite — plus the dual-listen behavior when
+``socket_path`` is set.
 """
 
 from __future__ import annotations
@@ -17,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from aios.sandbox.mcp_proxy import McpBroker
+from aios.sandbox.tool_broker import ToolBroker
 
 
 @pytest.fixture
@@ -41,7 +39,7 @@ def short_tmp_path() -> Iterator[Path]:
 class TestUdsLifecycle:
     async def test_broker_creates_socket_file_on_start(self, short_tmp_path: Path) -> None:
         sock_path = short_tmp_path / "b.sock"
-        broker = McpBroker(socket_path=sock_path)
+        broker = ToolBroker(socket_path=sock_path)
         await broker.start()
         try:
             assert sock_path.exists()
@@ -51,7 +49,7 @@ class TestUdsLifecycle:
 
     async def test_broker_removes_socket_file_on_stop(self, short_tmp_path: Path) -> None:
         sock_path = short_tmp_path / "b.sock"
-        broker = McpBroker(socket_path=sock_path)
+        broker = ToolBroker(socket_path=sock_path)
         await broker.start()
         assert sock_path.exists()
         await broker.stop()
@@ -61,7 +59,7 @@ class TestUdsLifecycle:
         """Sandbox container's non-root user must be able to write to the
         socket. ``chmod 0o666`` is the simplest portable answer."""
         sock_path = short_tmp_path / "b.sock"
-        broker = McpBroker(socket_path=sock_path)
+        broker = ToolBroker(socket_path=sock_path)
         await broker.start()
         try:
             mode = sock_path.stat().st_mode & 0o777
@@ -76,7 +74,7 @@ class TestUdsLifecycle:
         sock_path.write_bytes(b"stale")
         assert sock_path.exists()
 
-        broker = McpBroker(socket_path=sock_path)
+        broker = ToolBroker(socket_path=sock_path)
         await broker.start()
         try:
             assert sock_path.exists()
@@ -91,7 +89,7 @@ class TestUdsLifecycle:
         worker start — broker creates it."""
         sock_path = short_tmp_path / "d" / "n" / "b.sock"
         assert not sock_path.parent.exists()
-        broker = McpBroker(socket_path=sock_path)
+        broker = ToolBroker(socket_path=sock_path)
         await broker.start()
         try:
             assert sock_path.exists()
@@ -105,7 +103,7 @@ class TestDualListen:
     ) -> None:
         """When socket_path is set, both transports must accept connections."""
         sock_path = short_tmp_path / "b.sock"
-        broker = McpBroker(socket_path=sock_path)
+        broker = ToolBroker(socket_path=sock_path)
         await broker.start()
         try:
             # TCP still bound on an ephemeral port.
@@ -124,7 +122,7 @@ class TestDualListen:
 
     async def test_tcp_only_when_socket_path_none(self) -> None:
         """No socket_path → broker.socket_path is None and only TCP is up."""
-        broker = McpBroker()
+        broker = ToolBroker()
         await broker.start()
         try:
             assert broker.socket_path is None
@@ -139,7 +137,7 @@ class TestDualListen:
 class TestSocketPathProperty:
     async def test_socket_path_property_mirrors_constructor(self, short_tmp_path: Path) -> None:
         sock_path = short_tmp_path / "b.sock"
-        broker = McpBroker(socket_path=sock_path)
+        broker = ToolBroker(socket_path=sock_path)
         await broker.start()
         try:
             assert broker.socket_path == sock_path

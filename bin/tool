@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""``tool`` — sandbox-side CLI for invoking the agent's CLI-reachable tools.
+
+The worker injects ``TOOL_BROKER_URL`` and a per-session
+``TOOL_BROKER_SECRET`` into the sandbox at provisioning time. Every
+invocation here is one HTTP round-trip to the worker-side broker, which
+applies the session's authorization envelope and proxies to the
+underlying built-in handler or MCP server. Credentials never enter the
+sandbox.
+
+Generalises the prior ``mcp`` CLI: built-in tools (``web_fetch``,
+``http_request``, …) are now reachable alongside MCP-server tools, gated
+by the per-tool ``cli`` / ``agent_tool`` / ``both`` classification (see
+issue #635). Tools marked ``agent_tool`` (e.g. ``bash`` itself, channel-
+control primitives, any future outbound side-effect tool) are *not*
+reachable here — the broker refuses by construction.
+
+Grammar:
+
+  tool                         list available built-ins + MCP servers
+  tool <builtin>               show built-in's description + schema
+  tool <builtin> '{...}'       invoke built-in with JSON arguments
+  tool <builtin> '{}'          invoke with empty arguments
+  tool <server>                list MCP server's CLI-reachable methods
+  tool <server> <method>       show MCP method's description + schema
+  tool <server> <method> '{...}' invoke MCP method
+
+  Add ``--help`` or ``-h`` after any name to force schema view.
+  Add ``--full`` on invocation to print the full ``{content|error,code}``
+  envelope as JSON instead of just the content text.
+
+Exit codes:
+  0  success (invocation returned ``content``)
+  1  tool returned an ``error`` envelope, or named tool isn't reachable
+  2  client-side error: broker unreachable, env vars unset, JSON unparseable
+
+``tool`` performs a single discovery round-trip on each invocation to
+disambiguate built-in vs. MCP-server names (broker is on loopback/UDS,
+sub-ms cost). No client-side cache: the broker's listing is the source
+of truth for what's currently reachable, and an agent's tools can be
+reconfigured mid-session.
+"""
+
+from __future__ import annotations
+
+import http.client
+import json
+import os
+import socket
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+USAGE = """Usage:
+  tool                              list built-ins + MCP servers
+  tool <builtin>                    show built-in help
+  tool <builtin> '{...}'            invoke built-in
+  tool <server>                     list MCP methods on a server
+  tool <server> <method>            show MCP method help
+  tool <server> <method> '{...}'    invoke MCP method
+
+Options:
+  --help, -h     show schema instead of invoking
+  --full         print full {content|error,code} envelope as JSON
+"""
+
+_REQUEST_TIMEOUT_S = 30.0
+
+
+# ── transport ─────────────────────────────────────────────────────────────────
+
+
+def _env(name: str) -> str:
+    val = os.environ.get(name)
+    if not val:
+        sys.stderr.write(f"tool: {name} is not set in the environment\n")
+        sys.exit(2)
+    return val
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """``HTTPConnection`` that speaks HTTP/1.1 over a Unix domain socket.
+
+    Used when ``TOOL_BROKER_URL`` is a ``unix://`` URL — the deployment
+    publishes the broker via a bind-mounted socket file rather than a
+    TCP port. Everything above ``connect()`` (request framing, response
+    parsing) is reused from ``http.client``.
+    """
+
+    def __init__(self, socket_path: str, timeout: float) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self._socket_path = socket_path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self._socket_path)
+        self.sock = sock
+
+
+def _request_uds(socket_path: str, method: str, path: str, body: dict | None) -> dict:
+    """One HTTP round trip over a Unix-domain socket."""
+    conn = _UnixHTTPConnection(socket_path, timeout=_REQUEST_TIMEOUT_S)
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Content-Type": "application/json"} if data else {}
+    try:
+        conn.request(method, path, body=data, headers=headers)
+        resp = conn.getresponse()
+        payload = resp.read()
+        if 200 <= resp.status < 300:
+            return json.loads(payload) if payload else {}
+        try:
+            err_body = json.loads(payload)
+            msg = err_body.get("error") or err_body.get("detail") or f"HTTP {resp.status}"
+        except Exception:
+            msg = f"HTTP {resp.status}"
+        sys.stderr.write(f"tool: {msg}\n")
+        sys.exit(1)
+    except OSError as e:
+        sys.stderr.write(f"tool: broker unreachable: {e}\n")
+        sys.exit(2)
+    finally:
+        conn.close()
+
+
+def _request(method: str, path: str, body: dict | None = None) -> dict:
+    """One round trip to the broker's ``/v1/{secret}<path>`` URL.
+
+    Transports: ``http://...`` uses urllib over TCP; ``unix://...`` uses
+    the ``_UnixHTTPConnection`` adapter. The secret is path-encoded.
+    """
+    base = _env("TOOL_BROKER_URL").rstrip("/")
+    secret = _env("TOOL_BROKER_SECRET")
+    full_path = f"/v1/{urllib.parse.quote(secret)}{path}"
+
+    parsed = urllib.parse.urlsplit(base)
+    if parsed.scheme == "unix":
+        # ``unix:///var/run/aios/tool-broker.sock`` → socket path is the
+        # parsed path. Request line carries only the application path
+        # (``/v1/.../tools``); the broker doesn't see the socket path.
+        return _request_uds(parsed.path, method, full_path, body)
+
+    url = f"{base}{full_path}"
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Content-Type": "application/json"} if data else {}
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_S) as resp:
+            payload = resp.read()
+            return json.loads(payload) if payload else {}
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read())
+            msg = err_body.get("error") or err_body.get("detail") or f"HTTP {e.code}"
+        except Exception:
+            msg = f"HTTP {e.code}"
+        sys.stderr.write(f"tool: {msg}\n")
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        sys.stderr.write(f"tool: broker unreachable: {e.reason}\n")
+        sys.exit(2)
+
+
+# ── command actions ───────────────────────────────────────────────────────────
+
+
+def _list_surface() -> None:
+    """``tool`` (no args): list the CLI-reachable surface."""
+    result = _request("GET", "/tools")
+    builtins = result.get("builtins") or []
+    servers = result.get("servers") or []
+    if not builtins and not servers:
+        print("(no tools available to this session)")
+        return
+    if builtins:
+        print("Built-ins:")
+        for t in builtins:
+            name = t.get("name", "?")
+            desc = (t.get("description") or "").split("\n", 1)[0]
+            print(f"  {name}\t{desc}" if desc else f"  {name}")
+    if servers:
+        if builtins:
+            print()
+        print("MCP servers:")
+        for s in servers:
+            name = s.get("name", "?")
+            host = s.get("host", "")
+            print(f"  {name}\t{host}" if host else f"  {name}")
+
+
+def _print_help_builtin(name: str, info: dict) -> None:
+    print(f"TOOL: {name}")
+    print()
+    print("DESCRIPTION:")
+    print(f"  {info.get('description') or '(no description)'}")
+    print()
+    print("ARGUMENTS (JSON Schema):")
+    print(json.dumps(info.get("input_schema") or {}, indent=2))
+    print()
+    print("INVOKE:")
+    print(f"  tool {name} '{{...}}'")
+
+
+def _print_help_mcp(server: str, tool: str, info: dict) -> None:
+    print(f"TOOL: {server} {tool}")
+    print()
+    print("DESCRIPTION:")
+    print(f"  {info.get('description') or '(no description)'}")
+    print()
+    print("ARGUMENTS (JSON Schema):")
+    print(json.dumps(info.get("input_schema") or {}, indent=2))
+    print()
+    print("INVOKE:")
+    print(f"  tool {server} {tool} '{{...}}'")
+
+
+def _list_mcp_methods(server: str) -> None:
+    result = _request("GET", f"/mcp/{urllib.parse.quote(server)}")
+    tools = result.get("tools") or []
+    if not tools:
+        print(f"(no methods available on server '{server}')")
+        return
+    for t in tools:
+        name = t.get("name", "?")
+        desc = (t.get("description") or "").split("\n", 1)[0]
+        print(f"{name}\t{desc}" if desc else name)
+
+
+def _resolve_name(name: str) -> str:
+    """Return ``"builtin"`` or ``"server"`` for the first positional token.
+
+    A single discovery round-trip is the source of truth — the broker
+    knows what's currently reachable; the CLI shouldn't second-guess
+    via a stale cache or guess heuristics. On no match, exit 1 with a
+    message that mirrors the broker's own diagnostics.
+    """
+    result = _request("GET", "/tools")
+    builtins = {t.get("name") for t in result.get("builtins") or []}
+    servers = {s.get("name") for s in result.get("servers") or []}
+    if name in builtins:
+        return "builtin"
+    if name in servers:
+        return "server"
+    sys.stderr.write(
+        f"tool: {name!r} is not a CLI-reachable built-in or MCP server "
+        f"available to this session. Run `tool` to see what is.\n"
+    )
+    sys.exit(1)
+
+
+def _show_builtin_help(name: str) -> None:
+    info = _request("GET", f"/builtins/{urllib.parse.quote(name)}")
+    _print_help_builtin(name, info)
+
+
+def _show_mcp_help(server: str, tool: str) -> None:
+    info = _request(
+        "GET",
+        f"/mcp/{urllib.parse.quote(server)}/{urllib.parse.quote(tool)}",
+    )
+    _print_help_mcp(server, tool, info)
+
+
+def _invoke_builtin(name: str, json_arg: str, *, full_envelope: bool) -> None:
+    args = _parse_json_arg(json_arg)
+    result = _request(
+        "POST",
+        f"/builtins/{urllib.parse.quote(name)}",
+        {"arguments": args},
+    )
+    _print_envelope(result, full_envelope=full_envelope)
+
+
+def _invoke_mcp(server: str, tool: str, json_arg: str, *, full_envelope: bool) -> None:
+    args = _parse_json_arg(json_arg)
+    result = _request(
+        "POST",
+        f"/mcp/{urllib.parse.quote(server)}/{urllib.parse.quote(tool)}",
+        {"arguments": args},
+    )
+    _print_envelope(result, full_envelope=full_envelope)
+
+
+def _parse_json_arg(json_arg: str) -> dict:
+    try:
+        args = json.loads(json_arg)
+    except json.JSONDecodeError as e:
+        sys.stderr.write(f"tool: arguments are not valid JSON: {e}\n")
+        sys.exit(2)
+    if not isinstance(args, dict):
+        sys.stderr.write("tool: arguments must be a JSON object\n")
+        sys.exit(2)
+    return args
+
+
+def _print_envelope(result: dict, *, full_envelope: bool) -> None:
+    if full_envelope:
+        print(json.dumps(result, indent=2))
+        return
+    if "error" in result:
+        sys.stderr.write(f"tool: {result['error']}\n")
+        sys.exit(1)
+    content = result.get("content", "")
+    if content:
+        print(content)
+
+
+# ── argv parsing ──────────────────────────────────────────────────────────────
+
+
+def _looks_like_json(token: str) -> bool:
+    """A positional token is treated as a JSON argument iff it starts
+    with ``{`` or ``[``. Anything else is a name (tool / method).
+    """
+    s = token.lstrip()
+    return s.startswith(("{", "["))
+
+
+def main(argv: list[str]) -> None:
+    # No args → list surface.
+    if len(argv) <= 1:
+        _list_surface()
+        return
+    if argv[1] in ("-h", "--help"):
+        sys.stdout.write(USAGE)
+        return
+
+    # Parse: collect positionals + flags. ``--help``/`-h` anywhere
+    # forces the help (schema) view; ``--full`` forces full envelope.
+    positionals: list[str] = []
+    show_help = False
+    full_envelope = False
+    for arg in argv[1:]:
+        if arg in ("-h", "--help"):
+            show_help = True
+        elif arg == "--full":
+            full_envelope = True
+        elif arg.startswith("-"):
+            sys.stderr.write(f"tool: unknown option: {arg}\n")
+            sys.exit(2)
+        else:
+            positionals.append(arg)
+
+    if not positionals:
+        # ``tool --help`` already returned; this branch only fires if
+        # the user passed ``--full`` with no positional.
+        sys.stderr.write("tool: --full requires a tool name to invoke\n")
+        sys.exit(2)
+
+    name = positionals[0]
+
+    # Resolve name kind via discovery — single round-trip, broker is
+    # authoritative.
+    kind = _resolve_name(name)
+
+    if kind == "builtin":
+        # tool <builtin> [--help] [json] [--full]
+        if show_help and len(positionals) == 1:
+            _show_builtin_help(name)
+            return
+        if len(positionals) == 1:
+            # ``tool <builtin>`` with no args defaults to showing help —
+            # invoking with empty args is ``tool <builtin> '{}'``.
+            _show_builtin_help(name)
+            return
+        if len(positionals) == 2:
+            _invoke_builtin(name, positionals[1], full_envelope=full_envelope)
+            return
+        sys.stderr.write(
+            f"tool: extra positional after JSON argument: {positionals[2]!r}\n"
+        )
+        sys.exit(2)
+
+    # kind == "server"
+    if len(positionals) == 1:
+        if show_help:
+            # ``tool <server> --help``: there's no single schema, list methods.
+            _list_mcp_methods(name)
+            return
+        _list_mcp_methods(name)
+        return
+
+    method = positionals[1]
+    if show_help and len(positionals) == 2:
+        _show_mcp_help(name, method)
+        return
+    if len(positionals) == 2:
+        # ``tool <server> <method>`` with no JSON: show schema.
+        _show_mcp_help(name, method)
+        return
+    if len(positionals) == 3:
+        if not _looks_like_json(positionals[2]):
+            sys.stderr.write(
+                f"tool: third argument must be a JSON object "
+                f"(got {positionals[2]!r})\n"
+            )
+            sys.exit(2)
+        _invoke_mcp(name, method, positionals[2], full_envelope=full_envelope)
+        return
+    sys.stderr.write(
+        f"tool: extra positional after JSON argument: {positionals[3]!r}\n"
+    )
+    sys.exit(2)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

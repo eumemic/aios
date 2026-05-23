@@ -299,6 +299,7 @@ def _register() -> None:
         description=SEARCH_EVENTS_DESCRIPTION,
         parameters_schema=SEARCH_EVENTS_PARAMETERS_SCHEMA,
         handler=search_events_handler,
+        transport="both",
     )
 
 

@@ -240,6 +240,7 @@ def _register() -> None:
         description=READ_DESCRIPTION,
         parameters_schema=READ_PARAMETERS_SCHEMA,
         handler=read_handler,
+        transport="agent_tool",
     )
 
 
