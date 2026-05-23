@@ -217,8 +217,10 @@ def test_migration_is_idempotent(postgres: object) -> None:
     result = _run_alembic_with_env(["upgrade", "head"], db_url, workspace_root=workspace_root)
     assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}\n{result.stdout}"
 
-    # Down then up — the row is absolute when we re-enter ``upgrade``, so the
-    # WHERE clause skips it.
+    # Down then up — downgrade restores the legacy relative form so the
+    # second ``upgrade`` matches it again and rewrites to the same absolute
+    # value as the first upgrade.  Idempotency here means "two upgrade runs
+    # converge on the same row", not "the WHERE clause skips on re-entry".
     result = _run_alembic_with_env(["downgrade", "0056"], db_url, workspace_root=workspace_root)
     assert result.returncode == 0, f"alembic downgrade failed:\n{result.stderr}\n{result.stdout}"
     result = _run_alembic_with_env(["upgrade", "head"], db_url, workspace_root=workspace_root)

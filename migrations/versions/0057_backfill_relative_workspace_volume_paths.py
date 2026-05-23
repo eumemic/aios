@@ -40,11 +40,18 @@ from collections.abc import Sequence
 from pathlib import PurePosixPath
 
 from alembic import op
+from sqlalchemy import text
 
 revision: str = "0057"
 down_revision: str = "0056"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+# Legacy ``insert_session`` stored ``str(workspace_root / acc / sess)`` where
+# ``workspace_root`` was the relative string ``'workspaces'``; every legacy
+# row therefore begins with this literal segment.  Backfill = strip this
+# leading component and replace with the absolute ``AIOS_WORKSPACE_ROOT``.
+_LEGACY_PREFIX = "workspaces"
 
 
 def _workspace_root_prefix() -> str:
@@ -76,33 +83,66 @@ def _workspace_root_prefix() -> str:
 
 def upgrade() -> None:
     prefix = _workspace_root_prefix()
+    # Replace the leading ``workspaces`` component with the absolute prefix
+    # so ``workspaces/<acc>/<sess>`` becomes ``<prefix>/<acc>/<sess>`` —
+    # exactly what ``str(workspace_root_absolute / acc / sess)`` would have
+    # produced if ``AIOS_WORKSPACE_ROOT`` had been absolute at insert time.
+    #
     # Idempotent guard: ``NOT LIKE '/%'`` skips absolute rows on a
     # re-upgrade.  ``LIKE 'workspaces/%'`` narrows to the legacy
     # ``insert_session`` shape so an unrelated relative string a future
     # caller might stash (e.g. a future feature using
     # ``workspace_volume_path`` for something else) isn't accidentally
     # absolutized.
+    #
+    # ``text(...).bindparams`` keeps ``prefix`` out of the SQL string so an
+    # exotic ``AIOS_WORKSPACE_ROOT`` (quote chars, etc.) can't break parsing
+    # or inject SQL.  ``_workspace_root_prefix`` validates the value is set
+    # and absolute but does not escape SQL metacharacters.
     op.execute(
-        f"""
-        UPDATE sessions
-           SET workspace_volume_path = '{prefix}' || '/' || workspace_volume_path
-         WHERE workspace_volume_path NOT LIKE '/%'
-           AND workspace_volume_path LIKE 'workspaces/%'
-        """
+        text(
+            """
+            UPDATE sessions
+               SET workspace_volume_path =
+                       :prefix
+                       || SUBSTRING(workspace_volume_path FROM :legacy_len + 1)
+             WHERE workspace_volume_path NOT LIKE '/%'
+               AND workspace_volume_path LIKE :legacy_pattern
+            """
+        ).bindparams(
+            prefix=prefix,
+            legacy_len=len(_LEGACY_PREFIX),
+            legacy_pattern=f"{_LEGACY_PREFIX}/%",
+        )
     )
 
 
 def downgrade() -> None:
     prefix = _workspace_root_prefix()
-    # Strip the prepended prefix.  Only touch rows that match the
-    # post-upgrade shape (``{prefix}/workspaces/...``) so an absolute
-    # path that was already absolute pre-upgrade stays put.
+    # Reverse the upgrade: strip the absolute prefix and prepend the
+    # legacy ``workspaces`` segment so ``<prefix>/<acc>/<sess>`` returns to
+    # ``workspaces/<acc>/<sess>``.  The resulting relative path would fail
+    # at provision time per the volumes.py guard, so callers should not
+    # downgrade across this revision on a live system — this exists only
+    # so the migration is symmetric.
+    #
+    # ``LIKE :prefix_pattern`` matches every row sitting under the
+    # configured workspace root.  Pre-upgrade absolute rows that happened
+    # to live under the same prefix would also be rewritten here, but
+    # downgrading is already destructive (turns absolute paths back into
+    # relative ones), so the asymmetry is acceptable.
     op.execute(
-        f"""
-        UPDATE sessions
-           SET workspace_volume_path = SUBSTRING(
-                   workspace_volume_path FROM CHAR_LENGTH('{prefix}/') + 1
-               )
-         WHERE workspace_volume_path LIKE '{prefix}/workspaces/%'
-        """
+        text(
+            """
+            UPDATE sessions
+               SET workspace_volume_path =
+                       :legacy_prefix
+                       || SUBSTRING(workspace_volume_path FROM :prefix_len + 1)
+             WHERE workspace_volume_path LIKE :prefix_pattern
+            """
+        ).bindparams(
+            legacy_prefix=_LEGACY_PREFIX,
+            prefix_len=len(prefix),
+            prefix_pattern=f"{prefix}/%",
+        )
     )
