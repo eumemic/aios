@@ -119,3 +119,57 @@ class TestLegacyDefaultCompat:
         symlink.symlink_to(outside_target)
         with pytest.raises(ForbiddenError):
             validate_workspace_path(str(symlink), "acc_a", session_id="sess_01abc")
+
+
+class TestNonAbsoluteGuard:
+    """Fail-fast guard: any non-absolute ``raw_path`` is rejected with a
+    diagnostic message before ``Path.resolve()`` runs.
+
+    Without this guard a stale pre-#409 session row whose
+    ``workspace_volume_path`` was persisted as a relative path (e.g.
+    ``workspaces/sess_X``) would be silently resolved against the
+    worker's CWD by ``Path.resolve()``, yielding a confusing
+    "must resolve to within the account's workspace subdirectory" error
+    that hides the real cause — a row that needs the absolute-legacy
+    backfill migration. See aios#668 (and #626 for the broader
+    legacy-row story)."""
+
+    def test_relative_path_raises_with_diagnostic_message(self, workspace_root: Path) -> None:
+        with pytest.raises(ForbiddenError) as excinfo:
+            validate_workspace_path("workspaces/sess_X", "acc_Y")
+        assert "must be absolute" in excinfo.value.message
+        assert "got non-absolute value 'workspaces/sess_X'" in excinfo.value.message
+
+    def test_relative_path_detail_includes_session_id_and_raw_path(
+        self, workspace_root: Path
+    ) -> None:
+        with pytest.raises(ForbiddenError) as excinfo:
+            validate_workspace_path("relative/path", "acc_Y", session_id="sess_ABC")
+        assert excinfo.value.detail == {
+            "workspace_path": "relative/path",
+            "session_id": "sess_ABC",
+        }
+
+    def test_relative_path_detail_with_no_session_id_is_none(self, workspace_root: Path) -> None:
+        with pytest.raises(ForbiddenError) as excinfo:
+            validate_workspace_path("relative/path", "acc_Y")
+        assert excinfo.value.detail == {
+            "workspace_path": "relative/path",
+            "session_id": None,
+        }
+
+    def test_empty_string_treated_as_non_absolute(self, workspace_root: Path) -> None:
+        with pytest.raises(ForbiddenError) as excinfo:
+            validate_workspace_path("", "acc_Y")
+        assert "must be absolute" in excinfo.value.message
+
+    def test_guard_fires_before_other_checks(self, workspace_root: Path) -> None:
+        """The non-absolute guard short-circuits — the caller sees the
+        "must be absolute" diagnostic, not the generic
+        "must resolve to within..." message produced by the downstream
+        jail check. This documents the ordering invariant: a relative
+        ``raw_path`` is never silently resolved against CWD."""
+        with pytest.raises(ForbiddenError) as excinfo:
+            validate_workspace_path("some/relative/path", "acc_Y")
+        assert "must be absolute" in excinfo.value.message
+        assert "must resolve to within" not in excinfo.value.message
