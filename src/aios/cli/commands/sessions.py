@@ -530,7 +530,30 @@ scheduled_tasks_app = typer.Typer(
 )
 app.add_typer(scheduled_tasks_app)
 
-_SCHED_COLS = ("id", "name", "schedule", "enabled", "next_fire", "last_fire_status")
+_SCHED_COLS = ("id", "name", "trigger", "enabled", "next_fire", "last_fire_status")
+
+
+def _trigger_summary(row: dict[str, Any]) -> str:
+    """Synthesize the ``trigger`` cell for a scheduled-task row.
+
+    Three shapes:
+      - ``wake: <reason>`` for one-shot rows tagged ``metadata.kind == "wake"``
+        (created by the ``schedule_wake`` tool); reason is more useful than
+        the underlying curl.
+      - ``cron: <expr>`` for recurring rows.
+      - ``once @ <fire_at>`` for raw one-shot bash rows.
+    """
+    metadata = row.get("metadata") or {}
+    if isinstance(metadata, dict) and metadata.get("kind") == "wake":
+        reason = metadata.get("reason") or ""
+        return f"wake: {reason}" if reason else "wake"
+    schedule = row.get("schedule")
+    if schedule:
+        return f"cron: {schedule}"
+    fire_at = row.get("fire_at")
+    if fire_at:
+        return f"once @ {fire_at}"
+    return ""
 
 
 @scheduled_tasks_app.command("list", help="List scheduled tasks for a session.")
@@ -540,6 +563,15 @@ def scheduled_tasks_list(ctx: typer.Context, session_id: str) -> None:
         state, client = with_client(ctx)
         with client:
             envelope = client.request("GET", f"/v1/sessions/{session_id}/scheduled-tasks")
+        # Annotate each row with the synthesized ``trigger`` cell before
+        # the renderer reads its columns. JSON output keeps the raw shape
+        # — only the table view collapses ``schedule`` / ``fire_at`` /
+        # metadata into one human-friendly line.
+        if state.output_format != "json":
+            data = envelope.get("data") or []
+            for row in data:
+                if isinstance(row, dict):
+                    row["trigger"] = _trigger_summary(row)
         render_list(state.output_format, envelope, columns=_SCHED_COLS)
 
     run_or_die(_run)
