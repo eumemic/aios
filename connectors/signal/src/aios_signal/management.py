@@ -42,9 +42,7 @@ class SignalManagementMixin:
     ) -> dict[str, Any]:
         assert self._daemon is not None
         try:
-            await self._daemon.register(
-                phone=external_account_id, captcha=captcha, voice=voice
-            )
+            await self._daemon.register(phone=external_account_id, captcha=captcha, voice=voice)
         except RpcError as exc:
             if _is_captcha_required(exc):
                 raise ManagementHandlerError(

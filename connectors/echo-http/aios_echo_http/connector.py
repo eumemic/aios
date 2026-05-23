@@ -55,9 +55,7 @@ class EchoConnector(HttpConnector):
         # ``None`` when the api drops a routine 4xx envelope; surface that
         # to the test instead of swallowing it.
         if result is None:
-            raise RuntimeError(
-                f"emit_inbound dropped envelope for connection {connection_id!r}"
-            )
+            raise RuntimeError(f"emit_inbound dropped envelope for connection {connection_id!r}")
         return {"event_id": result.get("appended_event_id")}
 
 

@@ -74,7 +74,10 @@ def sync_detailed(
             \"name\": \"...\",
             \"arguments\": \"...\",       // JSON string from the model
             \"focal_channel\": \"...\",
-            \"connection_id\": \"...\"
+            \"connection_id\": \"...\",
+            \"workspace_path\": \"...\"  // host-side bind-mount source for
+                                     // /workspace; the SDK uses it to
+                                     // resolve SandboxPath args
         }
 
     The ``connection_id`` field lets the runtime container fan out to
@@ -123,7 +126,10 @@ def sync(
             \"name\": \"...\",
             \"arguments\": \"...\",       // JSON string from the model
             \"focal_channel\": \"...\",
-            \"connection_id\": \"...\"
+            \"connection_id\": \"...\",
+            \"workspace_path\": \"...\"  // host-side bind-mount source for
+                                     // /workspace; the SDK uses it to
+                                     // resolve SandboxPath args
         }
 
     The ``connection_id`` field lets the runtime container fan out to
@@ -167,7 +173,10 @@ async def asyncio_detailed(
             \"name\": \"...\",
             \"arguments\": \"...\",       // JSON string from the model
             \"focal_channel\": \"...\",
-            \"connection_id\": \"...\"
+            \"connection_id\": \"...\",
+            \"workspace_path\": \"...\"  // host-side bind-mount source for
+                                     // /workspace; the SDK uses it to
+                                     // resolve SandboxPath args
         }
 
     The ``connection_id`` field lets the runtime container fan out to
@@ -214,7 +223,10 @@ async def asyncio(
             \"name\": \"...\",
             \"arguments\": \"...\",       // JSON string from the model
             \"focal_channel\": \"...\",
-            \"connection_id\": \"...\"
+            \"connection_id\": \"...\",
+            \"workspace_path\": \"...\"  // host-side bind-mount source for
+                                     // /workspace; the SDK uses it to
+                                     // resolve SandboxPath args
         }
 
     The ``connection_id`` field lets the runtime container fan out to

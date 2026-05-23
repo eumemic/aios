@@ -26,15 +26,44 @@ from aios_connector_http.sandbox import resolve_sandbox_path, workspace_root
 
 
 class TestResolveSandboxPath:
-    def test_workspace_path_resolves_to_session_subdir(self, tmp_path: Path) -> None:
-        (tmp_path / "sess_1").mkdir()
-        (tmp_path / "sess_1" / "photo.jpg").write_bytes(b"x")
+    def test_workspace_path_used_as_base(self, tmp_path: Path) -> None:
+        """``workspace_path`` is the bind-mount source for ``/workspace*``.
+
+        The SDK never synthesises that path from ``session_id``; the
+        worker hands it over per call.
+        """
+        ws = tmp_path / "acc_1" / "sess_1"
+        ws.mkdir(parents=True)
+        (ws / "photo.jpg").write_bytes(b"x")
+        out = resolve_sandbox_path(
+            session_id="sess_1",
+            sandbox_path="/workspace/photo.jpg",
+            workspace_path=ws,
+            root=tmp_path,
+        )
+        assert out == (ws / "photo.jpg").resolve()
+
+    def test_workspace_root_resolves_when_no_suffix(self, tmp_path: Path) -> None:
+        ws = tmp_path / "acc_1" / "sess_1"
+        ws.mkdir(parents=True)
+        out = resolve_sandbox_path(
+            session_id="sess_1",
+            sandbox_path="/workspace",
+            workspace_path=ws,
+            root=tmp_path,
+        )
+        assert out == ws.resolve()
+
+    def test_workspace_path_missing_returns_none(self, tmp_path: Path) -> None:
+        """Fail-closed: without ``workspace_path``, ``/workspace*`` paths
+        must return None.  The SDK never falls back to synthesising a
+        path from ``session_id`` — the worker is the authority."""
         out = resolve_sandbox_path(
             session_id="sess_1",
             sandbox_path="/workspace/photo.jpg",
             root=tmp_path,
         )
-        assert out == (tmp_path / "sess_1" / "photo.jpg").resolve()
+        assert out is None
 
     def test_attachments_path_resolves_under_attachments_root(self, tmp_path: Path) -> None:
         (tmp_path / "_attachments" / "sess_1").mkdir(parents=True)
@@ -45,11 +74,26 @@ class TestResolveSandboxPath:
         )
         assert out == (tmp_path / "_attachments" / "sess_1" / "inbound.png").resolve()
 
+    def test_attachments_branch_ignores_workspace_path(self, tmp_path: Path) -> None:
+        """``/mnt/attachments`` layout is ``<root>/_attachments/<session>``
+        regardless of account scoping — supplying ``workspace_path``
+        must not redirect attachment resolution."""
+        (tmp_path / "_attachments" / "sess_1").mkdir(parents=True)
+        out = resolve_sandbox_path(
+            session_id="sess_1",
+            sandbox_path="/mnt/attachments/inbound.png",
+            workspace_path=tmp_path / "acc_1" / "sess_1",
+            root=tmp_path,
+        )
+        assert out == (tmp_path / "_attachments" / "sess_1" / "inbound.png").resolve()
+
     def test_traversal_returns_none(self, tmp_path: Path) -> None:
-        (tmp_path / "sess_1").mkdir()
+        ws = tmp_path / "acc_1" / "sess_1"
+        ws.mkdir(parents=True)
         out = resolve_sandbox_path(
             session_id="sess_1",
             sandbox_path="/workspace/../../../etc/passwd",
+            workspace_path=ws,
             root=tmp_path,
         )
         assert out is None
@@ -67,6 +111,21 @@ class TestResolveSandboxPath:
         out = resolve_sandbox_path(
             session_id="sess_1",
             sandbox_path="/workspaces/foo",
+            workspace_path=tmp_path / "acc_1" / "sess_1",
+            root=tmp_path,
+        )
+        assert out is None
+
+    def test_null_byte_in_path_returns_none(self, tmp_path: Path) -> None:
+        """``Path(...).resolve()`` raises ``ValueError`` on embedded NUL
+        bytes; the resolver must catch that and fail closed instead of
+        letting it escape as a generic exception."""
+        ws = tmp_path / "acc_1" / "sess_1"
+        ws.mkdir(parents=True)
+        out = resolve_sandbox_path(
+            session_id="sess_1",
+            sandbox_path="/workspace/foo\x00bar",
+            workspace_path=ws,
             root=tmp_path,
         )
         assert out is None
@@ -198,50 +257,66 @@ class _PathConsumer(HttpConnector):
 
 
 @pytest.fixture
+def workspace_path(tmp_path: Path) -> Path:
+    """Per-session bind-mount source, post-#409 nested layout."""
+    ws = tmp_path / "acc_1" / "sess_1"
+    ws.mkdir(parents=True)
+    (ws / "photo.jpg").write_bytes(b"x")
+    (ws / "doc.pdf").write_bytes(b"x")
+    return ws
+
+
+@pytest.fixture
 def consumer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _PathConsumer:
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
-    (tmp_path / "sess_1").mkdir()
-    (tmp_path / "sess_1" / "photo.jpg").write_bytes(b"x")
-    (tmp_path / "sess_1" / "doc.pdf").write_bytes(b"x")
     c = _PathConsumer(tmp_path)
     c._client = AsyncMock()
     return c
 
 
 class TestDispatchSandboxPathResolution:
-    async def test_scalar_path_resolved(self, consumer: _PathConsumer) -> None:
+    async def test_scalar_path_resolved(
+        self, consumer: _PathConsumer, workspace_path: Path
+    ) -> None:
         await consumer.dispatch_call(
             {
                 "tool_call_id": "c1",
                 "session_id": "sess_1",
                 "name": "send_one",
                 "arguments": json.dumps({"path": "/workspace/photo.jpg"}),
+                "workspace_path": str(workspace_path),
             }
         )
         assert len(consumer.calls) == 1
         resolved = consumer.calls[0]["path"]
-        assert resolved.name == "photo.jpg"
+        assert resolved == (workspace_path / "photo.jpg").resolve()
         assert resolved.is_file()
 
-    async def test_list_paths_each_resolved(self, consumer: _PathConsumer) -> None:
+    async def test_list_paths_each_resolved(
+        self, consumer: _PathConsumer, workspace_path: Path
+    ) -> None:
         await consumer.dispatch_call(
             {
                 "tool_call_id": "c2",
                 "session_id": "sess_1",
                 "name": "send_many",
                 "arguments": json.dumps({"paths": ["/workspace/photo.jpg", "/workspace/doc.pdf"]}),
+                "workspace_path": str(workspace_path),
             }
         )
         paths = consumer.calls[0]["paths"]
         assert {p.name for p in paths} == {"photo.jpg", "doc.pdf"}
 
-    async def test_traversal_rejected_as_error_result(self, consumer: _PathConsumer) -> None:
+    async def test_traversal_rejected_as_error_result(
+        self, consumer: _PathConsumer, workspace_path: Path
+    ) -> None:
         await consumer.dispatch_call(
             {
                 "tool_call_id": "c3",
                 "session_id": "sess_1",
                 "name": "send_one",
                 "arguments": json.dumps({"path": "/workspace/../../../etc/passwd"}),
+                "workspace_path": str(workspace_path),
             }
         )
         assert consumer.calls == []  # tool body never ran
@@ -251,13 +326,65 @@ class TestDispatchSandboxPathResolution:
         body = json.loads(result["content"])
         assert "outside" in body["error"]
 
-    async def test_optional_list_none_passes_through(self, consumer: _PathConsumer) -> None:
+    async def test_workspace_path_missing_surfaces_error(self, consumer: _PathConsumer) -> None:
+        """Without ``workspace_path`` in the call dict, the resolver fails
+        closed and the model sees a clear error.
+
+        The dispatcher disambiguates "workspace bind-mount unavailable"
+        (transport bug) from "path is outside the legal prefixes" (model
+        error) so the model isn't told its prefix is wrong when the
+        real issue is upstream.
+        """
+        await consumer.dispatch_call(
+            {
+                "tool_call_id": "c5",
+                "session_id": "sess_1",
+                "name": "send_one",
+                "arguments": json.dumps({"path": "/workspace/photo.jpg"}),
+            }
+        )
+        assert consumer.calls == []
+        assert len(consumer.tool_results) == 1
+        result = consumer.tool_results[0]
+        assert result["is_error"] is True
+        body = json.loads(result["content"])
+        assert "workspace bind-mount unavailable" in body["error"]
+        assert "outside" not in body["error"]
+
+    async def test_relative_workspace_path_treated_as_missing(
+        self, consumer: _PathConsumer
+    ) -> None:
+        """A non-absolute ``workspace_path`` value is treated as absent.
+
+        Anything except an absolute-path string would otherwise be
+        resolved against the connector container's CWD — silently
+        wrong.  Reject at the dispatch boundary so the model sees the
+        clear "bind-mount unavailable" error instead.
+        """
+        await consumer.dispatch_call(
+            {
+                "tool_call_id": "c6",
+                "session_id": "sess_1",
+                "name": "send_one",
+                "arguments": json.dumps({"path": "/workspace/photo.jpg"}),
+                "workspace_path": "relative/path",
+            }
+        )
+        assert consumer.calls == []
+        assert len(consumer.tool_results) == 1
+        body = json.loads(consumer.tool_results[0]["content"])
+        assert "workspace bind-mount unavailable" in body["error"]
+
+    async def test_optional_list_none_passes_through(
+        self, consumer: _PathConsumer, workspace_path: Path
+    ) -> None:
         await consumer.dispatch_call(
             {
                 "tool_call_id": "c4",
                 "session_id": "sess_1",
                 "name": "send_optional",
                 "arguments": json.dumps({}),
+                "workspace_path": str(workspace_path),
             }
         )
         # Default kwarg None — not in args dict, so resolver leaves alone.

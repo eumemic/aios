@@ -283,8 +283,8 @@ async def test_telegram_send_dispatch_resolves_sandbox_path(
     real :class:`Path` for every ``SandboxPath`` argument so PTB's
     upload code can ``open()`` it directly."""
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
-    ws = (tmp_path / "sess-1").resolve()
-    ws.mkdir()
+    ws = (tmp_path / "acc-1" / "sess-1").resolve()
+    ws.mkdir(parents=True)
     (ws / "cat.jpg").write_bytes(b"x")
     connector._client = AsyncMock()
 
@@ -301,6 +301,7 @@ async def test_telegram_send_dispatch_resolves_sandbox_path(
             "name": "telegram_send",
             "arguments": json.dumps({"text": "look", "attachments": ["/workspace/cat.jpg"]}),
             "focal_channel": "telegram/0/123",
+            "workspace_path": str(ws),
         }
     )
 

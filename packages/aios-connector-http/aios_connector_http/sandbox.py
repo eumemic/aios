@@ -5,14 +5,15 @@ the SDK's dispatcher resolves each value to its host-side
 :class:`pathlib.Path` before the tool body runs.  Connector authors
 never call the resolver directly.
 
-The connector container must have ``<workspace_root>`` bind-mounted at
-the same path as the worker process — set ``AIOS_WORKSPACE_ROOT`` to
-match.  Without that mount, resolved paths exist in the resolver's
-namespace but the bytes aren't reachable to the connector runtime.
+The connector container must share a filesystem view with the worker
+process so the resolved host paths are reachable from inside the
+connector runtime.  For ``/workspace*`` the bind-mount source is
+session-specific and carried on each tool-call event as
+``workspace_path``; for ``/mnt/attachments*`` it's derived from
+``AIOS_WORKSPACE_ROOT`` and ``session_id``.
 
 Mirrors :func:`aios.sandbox.volumes.resolve_to_host_path` rather than
-importing it: the SDK has zero aios-server dependency, and the path
-mapping convention is small and stable.
+importing it: the SDK has zero aios-server dependency.
 """
 
 from __future__ import annotations
@@ -64,6 +65,7 @@ def resolve_sandbox_path(
     *,
     session_id: str,
     sandbox_path: str,
+    workspace_path: Path | None = None,
     root: Path | None = None,
 ) -> Path | None:
     """Map an in-sandbox path to its host equivalent, or ``None``.
@@ -71,13 +73,24 @@ def resolve_sandbox_path(
     Returns ``None`` when ``sandbox_path`` falls outside ``/workspace/``
     and ``/mnt/attachments/``, or when the resolved path escapes the
     bind-mount root after ``..`` / symlink resolution.
+
+    ``workspace_path`` is the host-side bind-mount source for
+    ``/workspace`` (the session row's ``workspace_volume_path``).  The
+    worker is the authority — when ``workspace_path`` is ``None``,
+    ``/workspace*`` paths fail closed (return ``None``) rather than
+    silently falling back to a synthetic path that might not be the
+    bind-mount source.
     """
     base_root = root or workspace_root()
     if sandbox_path.startswith(_WORKSPACE_PREFIX):
-        base = base_root / session_id
+        if workspace_path is None:
+            return None
+        base = workspace_path
         suffix = sandbox_path[len(_WORKSPACE_PREFIX) :]
     elif sandbox_path == "/workspace":
-        base = base_root / session_id
+        if workspace_path is None:
+            return None
+        base = workspace_path
         suffix = ""
     elif sandbox_path.startswith(_ATTACHMENTS_PREFIX):
         base = base_root / _ATTACHMENTS_HOST_SUBDIR / session_id
@@ -92,7 +105,10 @@ def resolve_sandbox_path(
     try:
         resolved = candidate.resolve(strict=False)
         resolved_base = base.resolve(strict=False)
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError covers embedded NUL bytes (``Path('foo\x00bar')``);
+        # OSError covers symlink-loop / path-too-long. Both are model-
+        # induced garbage — fail closed.
         return None
     if resolved != resolved_base and not resolved.is_relative_to(resolved_base):
         return None

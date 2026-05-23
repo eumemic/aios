@@ -85,8 +85,8 @@ async def test_signal_send_dispatch_resolves_sandbox_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
-    ws = (tmp_path / "sess-1").resolve()
-    ws.mkdir()
+    ws = (tmp_path / "acc-1" / "sess-1").resolve()
+    ws.mkdir(parents=True)
     (ws / "cat.jpg").write_bytes(b"x")
     connector._client = AsyncMock()
 
@@ -107,6 +107,7 @@ async def test_signal_send_dispatch_resolves_sandbox_path(
             "name": "signal_send",
             "arguments": json.dumps({"text": "look", "attachments": ["/workspace/cat.jpg"]}),
             "focal_channel": f"signal/bot-uuid/{ALICE_UUID}",
+            "workspace_path": str(ws),
         }
     )
 
@@ -122,7 +123,8 @@ async def test_signal_send_dispatch_traversal_returns_error_result(
     """A path that escapes the bind-mount root surfaces as an error
     result; the tool body never runs and signal-cli is never called."""
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", str(tmp_path))
-    (tmp_path / "sess-1").mkdir()
+    ws = (tmp_path / "acc-1" / "sess-1").resolve()
+    ws.mkdir(parents=True)
     connector._client = AsyncMock()
 
     captured: list[dict[str, Any]] = []
@@ -157,6 +159,7 @@ async def test_signal_send_dispatch_traversal_returns_error_result(
             "name": "signal_send",
             "arguments": json.dumps({"text": "look", "attachments": ["/workspace/../escape.jpg"]}),
             "focal_channel": f"signal/bot-uuid/{ALICE_UUID}",
+            "workspace_path": str(ws),
         }
     )
 

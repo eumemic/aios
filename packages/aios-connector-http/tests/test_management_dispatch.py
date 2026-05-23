@@ -51,9 +51,7 @@ class _ManagementProbeConnector(HttpConnector):
         )
 
     @management_handler(method="updateProfile")
-    async def update_profile(
-        self, *, external_account_id: str, given_name: str
-    ) -> dict[str, str]:
+    async def update_profile(self, *, external_account_id: str, given_name: str) -> dict[str, str]:
         self.calls.append(
             (
                 "update_profile",
