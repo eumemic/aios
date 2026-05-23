@@ -315,7 +315,19 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
 
 @pytest.fixture
 async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
-    """Like ``harness`` but with a real SandboxRegistry for Docker tests."""
+    """Like ``harness`` but with a real SandboxRegistry for Docker tests.
+
+    pytest-xdist note: ``SANDBOX_NETWORK_NAME`` is a hardcoded host-global
+    name (``aios-sandbox``).  Under ``-n 2``, both xdist workers' sandbox
+    containers join the same bridge.  This is safe for the current test
+    set — assertions are per-container (iptables rules, broker
+    reachability) and don't depend on bridge composition or
+    inter-container reachability.  If you add a test that asserts "this
+    container is the only/first/last thing on aios-sandbox" or relies on
+    cross-container DNS resolution, you'll need to either run it
+    serially (``--dist=no``) or thread a per-worker network name through
+    ``aios.sandbox.network``.
+    """
     import aios.tools  # noqa: F401
     from aios.config import get_settings
     from aios.crypto.vault import CryptoBox
