@@ -8,8 +8,12 @@ authenticate.
 
 from __future__ import annotations
 
+import pytest
+
 from tests.conftest import needs_docker
 from tests.helpers.connections import bearer
+
+pytestmark = pytest.mark.docker
 
 
 async def _issue_runtime_token(http_client: object, connector: str) -> tuple[str, str]:

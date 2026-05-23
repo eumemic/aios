@@ -39,6 +39,8 @@ from tests.conftest import needs_docker
 from tests.e2e.conftest import live_aios_server_cold
 from tests.helpers.connections import mint_runtime_token_via_db
 
+pytestmark = pytest.mark.docker
+
 _SSE_ENDPOINTS: tuple[str, ...] = (
     "/v1/connectors/connections",
     "/v1/connectors/runtime/calls",

@@ -30,6 +30,8 @@ from tests.e2e.conftest import live_aios_server
 from tests.e2e.harness import Harness, assistant, last_assistant_content, tool_call
 from tests.helpers.connections import create_connection, issue_runtime_token
 
+pytestmark = pytest.mark.docker
+
 
 @pytest.fixture
 async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:

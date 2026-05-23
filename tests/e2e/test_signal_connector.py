@@ -29,6 +29,8 @@ from tests.e2e.conftest import live_aios_server
 from tests.e2e.harness import Harness, assistant, last_assistant_content, tool_call
 from tests.helpers.connections import authed_client, issue_runtime_token
 
+pytestmark = pytest.mark.docker
+
 # Two phones, two connections — the demux subjects.
 PHONE_A = "+15550000111"
 PHONE_B = "+15550000222"

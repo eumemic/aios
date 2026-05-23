@@ -12,9 +12,12 @@ from typing import Any
 from unittest import mock
 
 import litellm
+import pytest
 
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, last_assistant_content
+
+pytestmark = pytest.mark.docker
 
 
 def _make_bad_gateway() -> litellm.exceptions.BadGatewayError:

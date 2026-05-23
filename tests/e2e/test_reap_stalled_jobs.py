@@ -23,6 +23,8 @@ from procrastinate.manager import JobManager
 from aios.harness.sweep import reap_stalled_jobs
 from tests.conftest import needs_docker
 
+pytestmark = pytest.mark.docker
+
 
 @pytest.fixture
 async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:

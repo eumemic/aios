@@ -27,6 +27,8 @@ from aios.tools.registry import ToolResult
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness
 
+pytestmark = pytest.mark.docker
+
 
 @needs_docker
 class TestWorkspaceImageRead:

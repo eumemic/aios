@@ -20,11 +20,14 @@ covered by the manual smoke documented in PR 1's verification section.
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from aios.ids import EVENT, make_id, split_id
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness
 from tests.helpers.connections import bearer
+
+pytestmark = pytest.mark.docker
 
 
 def _new_event_id() -> str:

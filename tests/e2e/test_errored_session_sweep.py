@@ -23,6 +23,8 @@ from aios.models.sessions import SessionStatus
 from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
 
+pytestmark = pytest.mark.docker
+
 
 async def _ensure_agent_and_env(pool: asyncpg.Pool[Any]) -> tuple[str, str]:
     """Idempotently seed the FK targets ``create_session`` needs."""

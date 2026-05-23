@@ -34,7 +34,7 @@ from aios.sandbox.network import (
 )
 from tests.conftest import needs_docker
 
-pytestmark = needs_docker
+pytestmark = [needs_docker, pytest.mark.docker]
 
 IMAGE = os.environ.get("AIOS_DOCKER_IMAGE", "ghcr.io/eumemic/aios-sandbox:latest")
 SIDECAR_PORT = 7777

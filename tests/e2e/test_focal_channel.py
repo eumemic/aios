@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.harness.channels import (
@@ -36,6 +38,8 @@ from aios.harness.channels import (
 from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, msg_text, tool_call
+
+pytestmark = pytest.mark.docker
 
 _TAIL_HEADER = "━━━ Channels ━━━"
 _PARADIGM_HEADER = "## Channels & focal attention"

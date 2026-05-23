@@ -6,9 +6,13 @@ rules actually block/allow outbound traffic.
 
 from __future__ import annotations
 
+import pytest
+
 from aios.models.environments import EnvironmentConfig, LimitedNetworking, UnrestrictedNetworking
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, bash
+
+pytestmark = pytest.mark.docker
 
 
 @needs_docker

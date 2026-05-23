@@ -17,10 +17,13 @@ across ``CryptoBox`` + queries + service + routes.
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from tests.conftest import needs_docker
 from tests.e2e.test_echo_http_connector import live_server  # noqa: F401  fixture re-export
 from tests.helpers.connections import authed_client, issue_runtime_token
+
+pytestmark = pytest.mark.docker
 
 
 async def _create_with_secrets(
