@@ -28,6 +28,12 @@ from aios.models.memory_stores import (
     MemoryStoreResourceEcho,
 )
 from aios.models.memory_stores import validate_resources as _validate_memory_resources
+from aios.models.scheduled_tasks import (
+    MAX_SCHEDULED_TASKS_PER_SESSION,
+    ScheduledTaskCreate,
+    ScheduledTaskEcho,
+    validate_scheduled_tasks,
+)
 
 # Discriminated union over resource types. New types extend this union.
 SessionResource = Annotated[
@@ -156,6 +162,19 @@ class SessionCreate(BaseModel):
             "replace the set after creation."
         ),
     )
+    scheduled_tasks: list[ScheduledTaskCreate] = Field(
+        default_factory=list,
+        max_length=MAX_SCHEDULED_TASKS_PER_SESSION,
+        description=(
+            "Cron-fired bash tasks attached at session creation. Each task "
+            "fires its command in the session's sandbox at its schedule "
+            "without waking the model — bash must explicitly POST a "
+            "user-role event back to escalate. Manage after creation via "
+            "``POST/DELETE/PUT /v1/sessions/{id}/scheduled-tasks``; "
+            "``SessionUpdate`` deliberately does not accept this field "
+            "(granular ops only)."
+        ),
+    )
 
     @field_validator("workspace_path")
     @classmethod
@@ -167,6 +186,11 @@ class SessionCreate(BaseModel):
     @model_validator(mode="after")
     def _validate_resources(self) -> SessionCreate:
         _validate_session_resources(self.resources)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_scheduled_tasks_list(self) -> SessionCreate:
+        validate_scheduled_tasks(self.scheduled_tasks)
         return self
 
 
@@ -219,6 +243,7 @@ class Session(BaseModel):
     last_event_seq: int
     usage: SessionUsage = Field(default_factory=SessionUsage)
     resources: list[SessionResourceEcho] = Field(default_factory=list)
+    scheduled_tasks: list[ScheduledTaskEcho] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

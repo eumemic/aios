@@ -391,6 +391,11 @@ def _assemble_plan(
         **session_env,
         "TOOL_BROKER_URL": tool_broker_url,
         "TOOL_BROKER_SECRET": tool_broker_secret,
+        # Scheduled-tasks escalation (#636): bash inside a cron sandbox
+        # POSTs to ``$TOOL_BROKER_URL/v1/$TOOL_BROKER_SECRET/sessions/messages``
+        # to wake the session. AIOS_SESSION_ID is also exposed so the
+        # bash can name its own session in logs / messages.
+        "AIOS_SESSION_ID": session_id,
     }
 
     # Bind the per-session attachments and uploads dirs at every provision
