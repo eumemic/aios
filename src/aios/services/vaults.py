@@ -58,6 +58,16 @@ _BEARER_FIELDS = ("token",)
 _BASIC_FIELDS = ("username", "password")
 _CUSTOM_HEADER_FIELDS = ("header_name", "header_value")
 
+# Fields required by each auth_type. Used by both create-time validation
+# (against the request body) and post-merge validation (against the merged
+# decrypted payload).
+_AUTH_REQUIRED: dict[AuthType, tuple[str, ...]] = {
+    "bearer_header": _BEARER_FIELDS,
+    "basic": _BASIC_FIELDS,
+    "custom_header": _CUSTOM_HEADER_FIELDS,
+    "oauth2_refresh": ("access_token",),
+}
+
 
 def _fields_for(auth_type: AuthType) -> tuple[str, ...]:
     if auth_type == "oauth2_refresh":
@@ -296,29 +306,11 @@ def _extract_auth_payload(body: VaultCredentialCreate) -> dict[str, Any]:
     Validates required fields per auth_type. Returns the dict to be
     JSON-serialized and encrypted.
     """
-    if body.auth_type == "bearer_header" and body.token is None:
+    missing = [f for f in _AUTH_REQUIRED[body.auth_type] if getattr(body, f) is None]
+    if missing:
         raise ValidationError(
-            "bearer_header credentials require 'token'",
-            detail={"auth_type": body.auth_type},
-        )
-    if body.auth_type == "basic":
-        missing = [f for f in _BASIC_FIELDS if getattr(body, f) is None]
-        if missing:
-            raise ValidationError(
-                f"basic credentials require {missing}",
-                detail={"auth_type": body.auth_type, "missing": missing},
-            )
-    if body.auth_type == "custom_header":
-        missing = [f for f in _CUSTOM_HEADER_FIELDS if getattr(body, f) is None]
-        if missing:
-            raise ValidationError(
-                f"custom_header credentials require {missing}",
-                detail={"auth_type": body.auth_type, "missing": missing},
-            )
-    if body.auth_type == "oauth2_refresh" and body.access_token is None:
-        raise ValidationError(
-            "oauth2_refresh credentials require 'access_token'",
-            detail={"auth_type": body.auth_type},
+            f"{body.auth_type} credentials require {missing}",
+            detail={"auth_type": body.auth_type, "missing": missing},
         )
 
     payload: dict[str, Any] = {}
@@ -380,29 +372,11 @@ def _validate_required_in_payload(payload: dict[str, Any], auth_type: AuthType) 
     PUT can't land an incomplete credential under the unset-via-null
     contract.
     """
-    if auth_type == "bearer_header" and not payload.get("token"):
+    missing = [f for f in _AUTH_REQUIRED[auth_type] if not payload.get(f)]
+    if missing:
         raise ValidationError(
-            "bearer_header credentials require 'token'",
-            detail={"auth_type": auth_type},
-        )
-    if auth_type == "basic":
-        missing = [f for f in _BASIC_FIELDS if not payload.get(f)]
-        if missing:
-            raise ValidationError(
-                f"basic credentials require {missing}",
-                detail={"auth_type": auth_type, "missing": missing},
-            )
-    if auth_type == "custom_header":
-        missing = [f for f in _CUSTOM_HEADER_FIELDS if not payload.get(f)]
-        if missing:
-            raise ValidationError(
-                f"custom_header credentials require {missing}",
-                detail={"auth_type": auth_type, "missing": missing},
-            )
-    if auth_type == "oauth2_refresh" and not payload.get("access_token"):
-        raise ValidationError(
-            "oauth2_refresh credentials require 'access_token'",
-            detail={"auth_type": auth_type},
+            f"{auth_type} credentials require {missing}",
+            detail={"auth_type": auth_type, "missing": missing},
         )
 
 
