@@ -152,13 +152,17 @@ async def _archive_scoped(
     id_: str,
     account_id: str,
     noun: str,
+    bump_updated_at: bool = True,
 ) -> asyncpg.Record:
-    """Soft-archive: ``SET archived_at = now(), updated_at = now()`` scoped by
+    """Soft-archive: ``SET archived_at = now()`` (and ``updated_at = now()``
+    unless ``bump_updated_at=False`` — the ``environments`` table has no
+    ``updated_at`` column, so its archive must skip the bump) scoped by
     id + account_id + ``archived_at IS NULL``.  Raises NotFound on miss or
     already-archived row.  Callers that need the model map the returned
     Record themselves; callers that return ``None`` simply discard it."""
+    extra = ", updated_at = now()" if bump_updated_at else ""
     rec = await conn.fetchrow(
-        f"UPDATE {table} SET archived_at = now(), updated_at = now() "
+        f"UPDATE {table} SET archived_at = now(){extra} "
         f"WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
         id_,
         account_id,
@@ -247,6 +251,7 @@ async def archive_environment(
         id_=env_id,
         account_id=account_id,
         noun="environment",
+        bump_updated_at=False,
     )
 
 
