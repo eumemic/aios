@@ -64,7 +64,7 @@ jobs:
           # ``bin/tool`` is a sandbox-image input (COPY-d by the Dockerfile)
           # and must invalidate the cheap-skip path alongside the source
           # tree even though it lives outside ``src/``.
-          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^bin/tool$|^\.github/workflows/'; then
+          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^connectors/[^/]+/Dockerfile$|^bin/tool$|^\.github/workflows/'; then
             echo "Build-affecting changes detected — running checks."
             echo "run_checks=true" >> "$GITHUB_OUTPUT"
           else
