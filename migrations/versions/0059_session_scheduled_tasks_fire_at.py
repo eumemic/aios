@@ -8,11 +8,13 @@ to a unified scheduling substrate (cron + one-shot):
   cron rows recur per ``schedule``; one-shot rows fire once at ``fire_at``
   and self-delete in the runner.
 - AFTER INSERT/UPDATE/DELETE trigger emits ``pg_notify('aios_scheduled_tasks_due', id)``
-  on changes that affect scheduling (``schedule``, ``fire_at``, ``enabled``,
-  ``next_fire``). The trigger gates UPDATE notifies to those columns so
-  scheduler-internal writes (``running_since`` cleared, ``last_fire_at``
-  bumped, ``consecutive_failures`` advanced) don't wake the scheduler for
-  no reason.
+  on changes that can shift the next-due time the scheduler is waiting for:
+  ``schedule``, ``fire_at``, ``enabled``. Scheduler-internal writes
+  (``next_fire`` advanced post-claim for cron rows, ``running_since``
+  cleared, ``last_fire_at`` / ``consecutive_failures`` bumped) are NOT
+  gated — those are the scheduler's own bookkeeping and waking itself for
+  them would be wasted work. The loop naturally recomputes the next
+  sleep deadline after each claim cycle.
 
 Revision ID: 0059
 Revises: 0058
@@ -43,13 +45,14 @@ def upgrade() -> None:
         )
     """)
 
-    # NOTIFY trigger: wakes the event-driven scheduler when something
-    # scheduling-relevant changes. Gates UPDATE notifies to only the
-    # columns that can affect the scheduler's MIN(next_event) query —
-    # internal writes from the runner (clearing ``running_since`` on
-    # completion, bumping ``last_fire_at`` and ``consecutive_failures``)
-    # do NOT notify, which would otherwise cause the scheduler to wake
-    # itself for its own bookkeeping writes.
+    # NOTIFY trigger: wakes the event-driven scheduler when something it
+    # can't predict from its own loop changes. Gates UPDATE notifies to
+    # the user-facing fields (``schedule``, ``fire_at``, ``enabled``) so
+    # scheduler-internal writes — the claim's ``next_fire`` advance for
+    # cron rows, plus the runner's ``running_since`` / ``last_fire_at`` /
+    # ``consecutive_failures`` updates — don't wake the scheduler for its
+    # own bookkeeping. The loop recomputes ``MIN(next_fire)`` after every
+    # claim cycle, so missing the self-notify is correct-by-construction.
     op.execute(r"""
         CREATE OR REPLACE FUNCTION notify_scheduled_tasks_due() RETURNS TRIGGER AS $$
         BEGIN
@@ -60,7 +63,6 @@ def upgrade() -> None:
                     OLD.schedule IS DISTINCT FROM NEW.schedule
                     OR OLD.fire_at IS DISTINCT FROM NEW.fire_at
                     OR OLD.enabled IS DISTINCT FROM NEW.enabled
-                    OR OLD.next_fire IS DISTINCT FROM NEW.next_fire
                 ) THEN
                     PERFORM pg_notify('aios_scheduled_tasks_due', NEW.id);
                 END IF;

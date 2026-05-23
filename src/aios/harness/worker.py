@@ -39,7 +39,7 @@ from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
 from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.procrastinate_app import app as procrastinate_app
-from aios.harness.scheduler import periodic_scheduler_tick
+from aios.harness.scheduler import event_driven_scheduler
 from aios.harness.sweep import (
     reap_stalled_jobs,
     wake_sessions_needing_inference,
@@ -186,11 +186,15 @@ async def worker_main() -> None:
             name="interrupt_listener",
         )
 
-        # Start scheduled_tasks tick (every 30s). Each tick claims due
-        # session_scheduled_tasks rows and defers run_scheduled_task jobs.
+        # Start event-driven scheduler. Sleeps until the next due
+        # ``next_fire``, woken early by NOTIFY on
+        # ``aios_scheduled_tasks_due`` (insert/delete or
+        # scheduling-relevant UPDATE via the trigger from migration
+        # 0058). On wake, claims due rows and defers
+        # ``run_scheduled_task`` jobs.
         scheduler_task = asyncio.create_task(
-            periodic_scheduler_tick(pool, interval=30),
-            name="scheduler_tick",
+            event_driven_scheduler(pool, settings.db_url),
+            name="scheduler",
         )
 
         # Start liveness heartbeat AFTER all critical resources are up,

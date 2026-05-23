@@ -7026,3 +7026,47 @@ async def delete_scheduled_task_by_id(
         "DELETE FROM session_scheduled_tasks WHERE id = $1",
         task_id,
     )
+
+
+async def fetch_next_scheduled_task_event(
+    conn: asyncpg.Connection[Any],
+    *,
+    stale_threshold_seconds: int = 7200,
+) -> datetime | None:
+    """Return when the event-driven scheduler should next wake.
+
+    Computed as ``MIN(GREATEST(next_fire, running_since + stale_threshold))``
+    across enabled rows on non-archived sessions:
+
+    - Idle rows (``running_since IS NULL``) contribute ``next_fire`` — the
+      earliest of these is the next genuine fire.
+    - Running rows contribute ``running_since + stale_threshold`` — they're
+      either in-flight (and the handler will clear ``running_since`` long
+      before the threshold elapses) or stuck (in which case the threshold
+      is when we'll re-claim them).
+
+    Returns ``None`` when no enabled rows exist — the scheduler then
+    sleeps until either a NOTIFY or the cold-path heartbeat.
+
+    Cheap: the ``sched_tasks_due`` partial index covers the WHERE clause.
+    """
+    from datetime import timedelta
+
+    stale_threshold = timedelta(seconds=stale_threshold_seconds)
+    result: datetime | None = await conn.fetchval(
+        """
+        SELECT MIN(
+            CASE
+                WHEN st.running_since IS NULL THEN st.next_fire
+                ELSE GREATEST(st.next_fire, st.running_since + $1)
+            END
+        )
+        FROM session_scheduled_tasks AS st
+        JOIN sessions AS s ON s.id = st.session_id
+        WHERE st.enabled
+          AND s.archived_at IS NULL
+          AND st.next_fire IS NOT NULL
+        """,
+        stale_threshold,
+    )
+    return result
