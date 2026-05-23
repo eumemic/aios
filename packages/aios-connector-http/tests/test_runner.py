@@ -258,9 +258,7 @@ class _FocalConnector(_ProbeConnector):
         return f"sent to {chat_id}"
 
     @tool()
-    async def needs_both(
-        self, *, external_account_id: str, chat_id: str, text: str
-    ) -> str:
+    async def needs_both(self, *, external_account_id: str, chat_id: str, text: str) -> str:
         self.focal_calls.append(
             {"external_account_id": external_account_id, "chat_id": chat_id, "text": text}
         )
@@ -528,7 +526,7 @@ class TestLogging:
         # Inject the tool into the probe's registry.
         from aios_connector_http.runner import _build_tool_meta
 
-        probe._tools["bad_dict_access"] = _build_tool_meta(_bad_dict.__get__(probe))  # type: ignore[attr-defined]
+        probe._tools["bad_dict_access"] = _build_tool_meta(_bad_dict.__get__(probe))
 
         with structlog.testing.capture_logs() as records:
             await probe.dispatch_call(

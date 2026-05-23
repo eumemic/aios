@@ -1912,6 +1912,10 @@ async def list_pending_calls_for_connector(
     Each emitted record carries ``connection_id`` so the runtime can
     fan out to the right per-connection worker.
 
+    ``workspace_path`` is the session's host-side bind-mount source for
+    ``/workspace`` (the ``workspace_volume_path`` column); the connector
+    SDK uses it to resolve ``SandboxPath`` arguments to host paths.
+
     Output dict shape::
 
         {
@@ -1921,6 +1925,7 @@ async def list_pending_calls_for_connector(
             "arguments": "{...}",       # JSON string from the model
             "focal_channel": "telegram/bot1/chat123" | None,
             "connection_id": "conn_zzz",
+            "workspace_path": "/var/lib/aios/workspaces/acc_xxx/sess_xxx",
         }
     """
     # The connector type's tool schema gates which tool_calls we surface.
@@ -1943,7 +1948,8 @@ async def list_pending_calls_for_connector(
     bound_rows = await conn.fetch(
         """
         SELECT DISTINCT c.id AS connection_id,
-               s.id AS session_id, s.focal_channel
+               s.id AS session_id, s.focal_channel,
+               s.workspace_volume_path AS workspace_path
           FROM connections c
           JOIN sessions s
             ON s.archived_at IS NULL
@@ -1966,16 +1972,19 @@ async def list_pending_calls_for_connector(
         return []
 
     by_session: dict[str, list[tuple[str, str | None]]] = {}
+    workspace_path_by_session: dict[str, str] = {}
     for row in bound_rows:
         by_session.setdefault(row["session_id"], []).append(
             (row["connection_id"], row["focal_channel"])
         )
+        workspace_path_by_session[row["session_id"]] = row["workspace_path"]
 
     raw_by_sid = await _latest_unresolved_tool_calls(
         conn, list(by_session.keys()), account_id=account_id
     )
     out: list[dict[str, Any]] = []
     for sid, calls in raw_by_sid.items():
+        workspace_path = workspace_path_by_session[sid]
         for conn_id, focal in by_session[sid]:
             for tc in calls:
                 fn = tc.get("function") or {}
@@ -1990,6 +1999,7 @@ async def list_pending_calls_for_connector(
                         "arguments": fn.get("arguments", "{}"),
                         "connection_id": conn_id,
                         "focal_channel": focal,
+                        "workspace_path": workspace_path,
                     }
                 )
     return out
@@ -2009,7 +2019,8 @@ async def list_pending_calls_for_session_and_connection(
     """
     conn_row = await conn.fetchrow(
         f"""
-        SELECT cat.tools_schema AS tools, s.focal_channel
+        SELECT cat.tools_schema AS tools, s.focal_channel,
+               s.workspace_volume_path AS workspace_path
           FROM connections c
           JOIN connectors cat ON cat.connector = c.connector
           JOIN sessions s
@@ -2034,6 +2045,7 @@ async def list_pending_calls_for_session_and_connection(
 
     raw_by_sid = await _latest_unresolved_tool_calls(conn, [session_id], account_id=account_id)
     focal = conn_row["focal_channel"]
+    workspace_path = conn_row["workspace_path"]
     out: list[dict[str, Any]] = []
     for tc in raw_by_sid.get(session_id, []):
         fn = tc.get("function") or {}
@@ -2048,6 +2060,7 @@ async def list_pending_calls_for_session_and_connection(
                 "arguments": fn.get("arguments", "{}"),
                 "connection_id": connection_id,
                 "focal_channel": focal,
+                "workspace_path": workspace_path,
             }
         )
     return out

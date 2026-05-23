@@ -747,6 +747,8 @@ class HttpConnector:
         tool_call_id = call.get("tool_call_id", "")
         session_id = call.get("session_id", "")
         connection_id = call.get("connection_id", "")
+        workspace_path_str = call.get("workspace_path")
+        workspace_path = Path(workspace_path_str) if workspace_path_str else None
         log.info(
             "connector.tool_call.dispatched",
             name=name,
@@ -779,7 +781,9 @@ class HttpConnector:
         focal_channel = call.get("focal_channel") or ""
         args = _inject_focal_kwargs(meta, args, focal_channel, connection_id)
         try:
-            args = _resolve_sandbox_paths(meta, args, session_id=session_id)
+            args = _resolve_sandbox_paths(
+                meta, args, session_id=session_id, workspace_path=workspace_path
+            )
         except SandboxPathError as exc:
             log.warning(
                 "connector.tool_call.failed",
@@ -1063,9 +1067,7 @@ class HttpConnector:
         return out
 
 
-_FOCAL_INJECTABLE: frozenset[str] = frozenset(
-    {"connection_id", "external_account_id", "chat_id"}
-)
+_FOCAL_INJECTABLE: frozenset[str] = frozenset({"connection_id", "external_account_id", "chat_id"})
 
 
 def _build_tool_meta(fn: ToolFn) -> _ToolMeta:
@@ -1094,7 +1096,11 @@ class SandboxPathError(ValueError):
 
 
 def _resolve_sandbox_paths(
-    meta: _ToolMeta, args: dict[str, Any], *, session_id: str
+    meta: _ToolMeta,
+    args: dict[str, Any],
+    *,
+    session_id: str,
+    workspace_path: Path | None,
 ) -> dict[str, Any]:
     """Translate ``SandboxPath`` argument strings into host :class:`Path`s."""
     if not meta.sandbox_params or not session_id:
@@ -1105,20 +1111,27 @@ def _resolve_sandbox_paths(
             continue
         value = out[param_name]
         if kind == "scalar":
-            out[param_name] = _resolve_one(value, session_id=session_id, name=param_name)
+            out[param_name] = _resolve_one(
+                value, session_id=session_id, workspace_path=workspace_path, name=param_name
+            )
         else:
             if not isinstance(value, list):
                 raise SandboxPathError(f"{param_name!r} must be a list of in-sandbox paths")
             out[param_name] = [
-                _resolve_one(v, session_id=session_id, name=param_name) for v in value
+                _resolve_one(
+                    v, session_id=session_id, workspace_path=workspace_path, name=param_name
+                )
+                for v in value
             ]
     return out
 
 
-def _resolve_one(value: Any, *, session_id: str, name: str) -> Path:
+def _resolve_one(value: Any, *, session_id: str, workspace_path: Path | None, name: str) -> Path:
     if not isinstance(value, str):
         raise SandboxPathError(f"{name!r} must be an in-sandbox path string; got {value!r}")
-    resolved = resolve_sandbox_path(session_id=session_id, sandbox_path=value)
+    resolved = resolve_sandbox_path(
+        session_id=session_id, sandbox_path=value, workspace_path=workspace_path
+    )
     if resolved is None:
         raise SandboxPathError(
             f"{name!r}: path {value!r} is outside /workspace/ and /mnt/attachments/"
@@ -1174,10 +1187,7 @@ def _inject_focal_kwargs(
         parts = focal_channel.split("/", 2)
         if len(parts) >= 3:
             _connector, external_account_id, chat_id = parts
-            if (
-                "external_account_id" in meta.focal_params
-                and "external_account_id" not in out
-            ):
+            if "external_account_id" in meta.focal_params and "external_account_id" not in out:
                 out["external_account_id"] = external_account_id
             if "chat_id" in meta.focal_params and "chat_id" not in out:
                 out["chat_id"] = chat_id
