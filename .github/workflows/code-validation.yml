@@ -66,31 +66,23 @@ jobs:
             echo "run_checks=false" >> "$GITHUB_OUTPUT"
           fi
 
-  validate:
+  # The four check jobs below run in parallel.  Splitting them off the
+  # previous monolithic ``validate`` job collapses the critical path from
+  # ``sum(lint, mypy, unit, integration, sandbox build, e2e)`` to
+  # ``max(...)`` — in practice ~max(e2e) ≈ 7 min instead of ~9.5 min.  Each
+  # job pays its own checkout + uv-setup overhead (~10-15 s), but they pay
+  # in parallel.  The setup-uv cache is shared across jobs by the action.
+  lint:
     needs: detect
     if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
 
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: aios
-          POSTGRES_PASSWORD: aios
-          POSTGRES_DB: aios_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-
     env:
+      # ``get_settings()`` is called at module import by code that ruff/mypy
+      # also import (``aios.harness.worker`` → ``procrastinate_app``).  The
+      # URL is never reached — these are static analysis steps — but it
+      # must parse as a valid Postgres DSN for the import to succeed.
       AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
-      # Dummy values so import-time get_settings() doesn't fail in tests
-      # that import aios.harness.worker (and transitively procrastinate_app)
-      # at collection time. Real production keys are set in Coolify.
       AIOS_API_KEY: test-key-for-ci
       AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
 
@@ -115,11 +107,110 @@ jobs:
       - name: Type check (mypy)
         run: uv run mypy src
 
+  unit:
+    needs: detect
+    if: needs.detect.outputs.run_checks == 'true'
+    runs-on: ubuntu-latest
+
+    env:
+      AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
+      AIOS_API_KEY: test-key-for-ci
+      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
       - name: Unit tests
         run: uv run pytest tests/unit -q
 
+  integration:
+    needs: detect
+    if: needs.detect.outputs.run_checks == 'true'
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: aios
+          POSTGRES_PASSWORD: aios
+          POSTGRES_DB: aios_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
+      AIOS_API_KEY: test-key-for-ci
+      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
       - name: Integration tests
         run: uv run pytest tests/integration -q
+
+  e2e:
+    needs: detect
+    if: needs.detect.outputs.run_checks == 'true'
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: aios
+          POSTGRES_PASSWORD: aios
+          POSTGRES_DB: aios_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
+      AIOS_API_KEY: test-key-for-ci
+      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
 
       - name: Build sandbox image
         # CI-local tag (no registry prefix) — pairs with the
