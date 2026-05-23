@@ -218,13 +218,24 @@ async def get_environment_config_for_session(
     *,
     account_id: str,
 ) -> EnvironmentConfig | None:
-    """Return the environment config for a session, or None if not found."""
+    """Return the environment config for a session, or None if not found.
+
+    Filters both ``s.account_id`` AND ``e.account_id`` against the same
+    caller account: ``insert_session`` only relies on the
+    ``environment_id REFERENCES environments(id)`` FK and does not
+    validate cross-account ownership, so a session row can carry an
+    ``environment_id`` from a different tenant. Without the
+    ``e.account_id`` predicate this read would surface the foreign
+    tenant's ``EnvironmentConfig`` — env vars, networking, packages —
+    inside the worker's step context [security].
+    """
     row = await conn.fetchrow(
         """
         SELECT e.config FROM environments e
         JOIN sessions s ON s.environment_id = e.id
         WHERE s.id = $1
           AND s.account_id = $2
+          AND e.account_id = $2
         """,
         session_id,
         account_id,
@@ -941,6 +952,16 @@ async def get_session_model(
 
     Pinned ``agent_version`` wins when set; otherwise the live agent's
     current ``model`` is returned.
+
+    Filters ``s.account_id``, ``a.account_id``, and ``av.account_id``
+    against the same caller account — ``insert_session`` only relies on
+    the ``agent_id REFERENCES agents(id)`` FK and does not validate
+    cross-account ownership, so a session row can carry an ``agent_id``
+    from a different tenant. Without these predicates this read would
+    surface the foreign tenant's bound model (which may itself be a
+    sensitive routing target) [security]. The ``av.account_id``
+    predicate lives in the LEFT JOIN's ON clause so an unpinned session
+    (av-side NULL) still resolves to the agent's current model.
     """
     row = await conn.fetchrow(
         """
@@ -948,9 +969,12 @@ async def get_session_model(
           FROM sessions s
           JOIN agents a ON a.id = s.agent_id
      LEFT JOIN agent_versions av
-            ON av.agent_id = s.agent_id AND av.version = s.agent_version
+            ON av.agent_id = s.agent_id
+           AND av.version = s.agent_version
+           AND av.account_id = $2
          WHERE s.id = $1
            AND s.account_id = $2
+           AND a.account_id = $2
         """,
         session_id,
         account_id,
