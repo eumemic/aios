@@ -244,10 +244,6 @@ async def runtime_connector_calls_stream(
             for call in pending:
                 if call["tool_call_id"] in emitted:
                     continue
-                # Defensive post-fetch check — keeps the emit honest even
-                # if a future refactor changes the partition logic.
-                if allowlist is not None and connection_id not in allowlist:
-                    continue
                 emitted.add(call["tool_call_id"])
                 call["connection_id"] = connection_id
                 yield ServerSentEvent(data=json.dumps(call), event="call")
