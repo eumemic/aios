@@ -6552,7 +6552,8 @@ class ScheduledTaskRow(NamedTuple):
     session_id: str
     account_id: str
     name: str
-    schedule: str
+    schedule: str | None
+    fire_at: datetime | None
     command: str
     enabled: bool
     timeout_seconds: int
@@ -6733,7 +6734,7 @@ async def update_scheduled_task(
     session_id: str,
     name: str,
     *,
-    schedule: str | None = None,
+    schedule: str | None | EllipsisType = ...,
     fire_at: datetime | None | EllipsisType = ...,
     command: str | None = None,
     enabled: bool | None = None,
@@ -6745,11 +6746,13 @@ async def update_scheduled_task(
 ) -> ScheduledTaskEcho:
     """Update fields by name. Raises :class:`NotFoundError` if absent.
 
-    For most fields, ``None`` means 'leave alone.' ``next_fire`` and
-    ``fire_at`` use ``...`` (Ellipsis) as the leave-alone sentinel
-    because ``None`` is a meaningful clear-to-null value for both.
+    For most fields, ``None`` means 'leave alone.' For trigger fields
+    (``schedule``, ``fire_at``) and ``next_fire``, ``...`` (Ellipsis)
+    is the leave-alone sentinel because ``None`` is a meaningful
+    clear-to-null value (used when converting cron↔one-shot or disabling).
     The DB CHECK constraint enforces that exactly one of (schedule,
-    fire_at) ends up non-null after the merged write.
+    fire_at) ends up non-null after the merged write; a violation raises
+    :class:`ValidationError` (not the raw asyncpg error).
     """
     set_clauses: list[str] = []
     args: list[Any] = []
@@ -6758,7 +6761,7 @@ async def update_scheduled_task(
         args.append(value)
         set_clauses.append(f"{col} = ${len(args)}")
 
-    if schedule is not None:
+    if not isinstance(schedule, EllipsisType):
         add("schedule", schedule)
     if not isinstance(fire_at, EllipsisType):
         add("fire_at", fire_at)
@@ -6787,7 +6790,15 @@ async def update_scheduled_task(
           AND account_id = ${len(args)}
         RETURNING *
     """
-    row = await conn.fetchrow(sql, *args)
+    try:
+        row = await conn.fetchrow(sql, *args)
+    except asyncpg.CheckViolationError as exc:
+        raise ValidationError(
+            "scheduled task update would violate substrate invariants — "
+            "after merging, exactly one of `schedule` (cron) or `fire_at` "
+            "(one-shot) must be set",
+            detail={"name": name, "session_id": session_id},
+        ) from exc
     if row is None:
         raise NotFoundError(
             f"scheduled task {name!r} not found",
@@ -6809,9 +6820,10 @@ async def unscoped_get_scheduled_task_row(
     """
     row = await conn.fetchrow(
         "SELECT st.id, st.session_id, st.account_id, st.name, st.schedule, "
-        "st.command, st.enabled, st.timeout_seconds, st.max_output_bytes, "
-        "st.next_fire, st.running_since, st.last_fire_at, st.last_fire_status, "
-        "st.consecutive_failures, s.archived_at AS session_archived_at "
+        "st.fire_at, st.command, st.enabled, st.timeout_seconds, "
+        "st.max_output_bytes, st.next_fire, st.running_since, st.last_fire_at, "
+        "st.last_fire_status, st.consecutive_failures, "
+        "s.archived_at AS session_archived_at "
         "FROM session_scheduled_tasks AS st "
         "JOIN sessions AS s ON s.id = st.session_id "
         "WHERE st.id = $1",
@@ -6828,6 +6840,7 @@ async def unscoped_get_scheduled_task_row(
         account_id=row["account_id"],
         name=row["name"],
         schedule=row["schedule"],
+        fire_at=row["fire_at"],
         command=row["command"],
         enabled=row["enabled"],
         timeout_seconds=row["timeout_seconds"],
@@ -6873,9 +6886,9 @@ async def fetch_and_claim_due_scheduled_tasks(
     rows = await conn.fetch(
         """
         SELECT st.id, st.session_id, st.account_id, st.name, st.schedule,
-               st.command, st.enabled, st.timeout_seconds, st.max_output_bytes,
-               st.next_fire, st.running_since, st.last_fire_at,
-               st.last_fire_status, st.consecutive_failures,
+               st.fire_at, st.command, st.enabled, st.timeout_seconds,
+               st.max_output_bytes, st.next_fire, st.running_since,
+               st.last_fire_at, st.last_fire_status, st.consecutive_failures,
                s.archived_at AS session_archived_at
         FROM session_scheduled_tasks AS st
         JOIN sessions AS s ON s.id = st.session_id
@@ -6894,17 +6907,34 @@ async def fetch_and_claim_due_scheduled_tasks(
     )
     claimed: list[ScheduledTaskRow] = []
     for r in rows:
-        new_next_fire = compute_next_fire(r["schedule"], now_utc)
-        await conn.execute(
-            """
-            UPDATE session_scheduled_tasks
-            SET running_since = $1, next_fire = $2, updated_at = $1
-            WHERE id = $3
-            """,
-            now_utc,
-            new_next_fire,
-            r["id"],
-        )
+        if r["schedule"] is not None:
+            # Cron row — advance next_fire so subsequent ticks skip until
+            # the next scheduled slot.
+            new_next_fire = compute_next_fire(r["schedule"], now_utc)
+            await conn.execute(
+                """
+                UPDATE session_scheduled_tasks
+                SET running_since = $1, next_fire = $2, updated_at = $1
+                WHERE id = $3
+                """,
+                now_utc,
+                new_next_fire,
+                r["id"],
+            )
+        else:
+            # One-shot row (fire_at set) — leave next_fire alone; the
+            # runner deletes the row after the fire completes, so we
+            # never need to skip-by-next_fire.
+            new_next_fire = r["next_fire"]
+            await conn.execute(
+                """
+                UPDATE session_scheduled_tasks
+                SET running_since = $1, updated_at = $1
+                WHERE id = $2
+                """,
+                now_utc,
+                r["id"],
+            )
         claimed.append(
             ScheduledTaskRow(
                 id=r["id"],
@@ -6912,12 +6942,13 @@ async def fetch_and_claim_due_scheduled_tasks(
                 account_id=r["account_id"],
                 name=r["name"],
                 schedule=r["schedule"],
+                fire_at=r["fire_at"],
                 command=r["command"],
                 enabled=r["enabled"],
                 timeout_seconds=r["timeout_seconds"],
                 max_output_bytes=r["max_output_bytes"],
                 # next_fire on the returned row reflects the *advanced* value
-                # so callers see the new schedule slot, not the just-fired one.
+                # for cron, or the unchanged value for one-shot.
                 next_fire=new_next_fire,
                 running_since=now_utc,
                 last_fire_at=r["last_fire_at"],
@@ -6975,5 +7006,23 @@ async def disable_scheduled_task(
         SET enabled = false, next_fire = NULL, updated_at = now()
         WHERE id = $1
         """,
+        task_id,
+    )
+
+
+async def delete_scheduled_task_by_id(
+    conn: asyncpg.Connection[Any],
+    task_id: str,
+) -> None:
+    """Delete a scheduled task by id, unscoped.
+
+    Used by the runner for one-shot rows after the fire completes — the
+    marker event the bash command delivered is the receipt; the row's
+    job is done and keeping it would let it fire again on the next tick
+    (next_fire is still in the past for one-shot rows). No-op if the
+    row doesn't exist (e.g. raced with an API DELETE).
+    """
+    await conn.execute(
+        "DELETE FROM session_scheduled_tasks WHERE id = $1",
         task_id,
     )

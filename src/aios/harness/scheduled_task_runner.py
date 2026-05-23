@@ -129,19 +129,34 @@ async def run_scheduled_task_step(task_id: str) -> None:
     new_failures = 0 if status == "ok" else task.consecutive_failures + 1
 
     async with pool.acquire() as conn, conn.transaction():
-        await queries.record_scheduled_task_fire(
-            conn,
-            task_id,
-            status=status,
-            consecutive_failures=new_failures,
-            fired_at=started_at,
-        )
-        if new_failures >= MAX_CONSECUTIVE_FAILURES:
-            await queries.disable_scheduled_task(conn, task_id)
-            log.warning(
-                "scheduled_task.auto_disabled",
+        if task.fire_at is not None:
+            # One-shot row — the marker event (delivered by the bash command,
+            # if it chose to escalate) is the receipt. The row's job is done;
+            # keeping it would let it fire again on the next tick because its
+            # ``next_fire`` (= ``fire_at``) stays in the past. Delete it. No
+            # ``record_scheduled_task_fire`` because the row is gone.
+            await queries.delete_scheduled_task_by_id(conn, task_id)
+            log.info(
+                "scheduled_task.one_shot_deleted",
                 task_id=task_id,
                 session_id=task.session_id,
                 name=task.name,
-                consecutive_failures=new_failures,
+                status=status,
             )
+        else:
+            await queries.record_scheduled_task_fire(
+                conn,
+                task_id,
+                status=status,
+                consecutive_failures=new_failures,
+                fired_at=started_at,
+            )
+            if new_failures >= MAX_CONSECUTIVE_FAILURES:
+                await queries.disable_scheduled_task(conn, task_id)
+                log.warning(
+                    "scheduled_task.auto_disabled",
+                    task_id=task_id,
+                    session_id=task.session_id,
+                    name=task.name,
+                    consecutive_failures=new_failures,
+                )

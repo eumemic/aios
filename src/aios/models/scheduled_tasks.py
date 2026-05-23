@@ -100,6 +100,17 @@ class ScheduledTaskCreate(BaseModel):
             return v
         return _validate_cron_expression(v)
 
+    @field_validator("fire_at")
+    @classmethod
+    def _validate_fire_at_tz_aware(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v.tzinfo is None:
+            raise ValueError(
+                "fire_at must be timezone-aware (e.g. ISO 8601 with a `Z` or "
+                "explicit offset) — naive datetimes are ambiguous against the "
+                "`timestamptz` column"
+            )
+        return v
+
     @model_validator(mode="after")
     def _validate_trigger_xor(self) -> ScheduledTaskCreate:
         if (self.schedule is None) == (self.fire_at is None):
@@ -156,12 +167,25 @@ class ScheduledTaskUpdate(BaseModel):
             return v
         return _validate_cron_expression(v)
 
+    @field_validator("fire_at")
+    @classmethod
+    def _validate_fire_at_tz_aware(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v.tzinfo is None:
+            raise ValueError(
+                "fire_at must be timezone-aware (e.g. ISO 8601 with a `Z` "
+                "or explicit offset) — naive datetimes are ambiguous against "
+                "the `timestamptz` column"
+            )
+        return v
+
     @model_validator(mode="after")
     def _reject_both_triggers_in_one_patch(self) -> ScheduledTaskUpdate:
         if self.schedule is not None and self.fire_at is not None:
             raise ValueError(
                 "PATCH may set at most one of `schedule` or `fire_at` — they're "
-                "mutually exclusive on the row"
+                "mutually exclusive on the row. (Cross-merge violations after "
+                "the PATCH lands are caught by the service layer's XOR check "
+                "against the merged row state.)"
             )
         return self
 
