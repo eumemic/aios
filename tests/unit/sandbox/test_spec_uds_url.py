@@ -53,7 +53,7 @@ def _call_assemble(
 
 class TestSpecToolBrokerUrlSelection:
     def test_uses_unix_url_when_socket_path_set(self) -> None:
-        sock_path = Path("/var/run/aios/mcp-broker.sock")
+        sock_path = Path("/var/run/aios/tool-broker.sock")
         plan = _call_assemble(
             tool_broker_url=f"unix://{TOOL_BROKER_SOCKET_SANDBOX_PATH}",
             tool_socket_host_path=sock_path,

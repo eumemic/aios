@@ -95,7 +95,11 @@ def hijack_tool() -> AsyncIterator[
         name: str,
         handler: Callable[[str, dict[str, Any]], Awaitable[Any]],
     ) -> None:
-        saved[name] = registry.get(name)
+        # Save the *original* on first hijack only — re-hijacking the same
+        # name within a single test would otherwise capture the prior stub
+        # and restore that on teardown instead of the true original.
+        if name not in saved:
+            saved[name] = registry.get(name)
         registry._tools[name] = ToolDefinition(
             name=name,
             description=f"hijacked {name}",

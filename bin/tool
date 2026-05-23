@@ -17,17 +17,19 @@ reachable here — the broker refuses by construction.
 
 Grammar:
 
-  tool                         list available built-ins + MCP servers
-  tool <builtin>               show built-in's description + schema
-  tool <builtin> '{...}'       invoke built-in with JSON arguments
-  tool <builtin> '{}'          invoke with empty arguments
-  tool <server>                list MCP server's CLI-reachable methods
-  tool <server> <method>       show MCP method's description + schema
-  tool <server> <method> '{...}' invoke MCP method
+  tool                          list available built-ins + MCP servers
+  tool <builtin>                invoke built-in with empty arguments ({})
+  tool <builtin> '{...}'        invoke built-in with JSON arguments
+  tool <builtin> --help         show built-in's description + schema
+  tool <server>                 list MCP server's CLI-reachable methods
+  tool <server> <method>        invoke MCP method with empty arguments ({})
+  tool <server> <method> '{...}' invoke MCP method with JSON arguments
+  tool <server> <method> --help show MCP method's description + schema
 
-  Add ``--help`` or ``-h`` after any name to force schema view.
   Add ``--full`` on invocation to print the full ``{content|error,code}``
-  envelope as JSON instead of just the content text.
+  envelope as JSON instead of just the content text. The empty-args
+  default preserves the prior ``mcp <server> <tool>`` shorthand for
+  zero-arg tools so existing scripts keep working.
 
 Exit codes:
   0  success (invocation returned ``content``)
@@ -54,11 +56,13 @@ import urllib.request
 
 USAGE = """Usage:
   tool                              list built-ins + MCP servers
-  tool <builtin>                    show built-in help
-  tool <builtin> '{...}'            invoke built-in
+  tool <builtin>                    invoke built-in with empty args ({})
+  tool <builtin> '{...}'            invoke built-in with JSON args
+  tool <builtin> --help             show built-in description + schema
   tool <server>                     list MCP methods on a server
-  tool <server> <method>            show MCP method help
-  tool <server> <method> '{...}'    invoke MCP method
+  tool <server> <method>            invoke MCP method with empty args ({})
+  tool <server> <method> '{...}'    invoke MCP method with JSON args
+  tool <server> <method> --help     show MCP method description + schema
 
 Options:
   --help, -h     show schema instead of invoking
@@ -360,9 +364,11 @@ def main(argv: list[str]) -> None:
             _show_builtin_help(name)
             return
         if len(positionals) == 1:
-            # ``tool <builtin>`` with no args defaults to showing help —
-            # invoking with empty args is ``tool <builtin> '{}'``.
-            _show_builtin_help(name)
+            # No JSON arg: invoke with empty ``{}`` — matches the prior
+            # ``mcp <server> <tool>`` (no JSON) behavior so scripts that
+            # call zero-arg tools don't regress. Tools with required
+            # arguments surface the schema-validation error.
+            _invoke_builtin(name, "{}", full_envelope=full_envelope)
             return
         if len(positionals) == 2:
             _invoke_builtin(name, positionals[1], full_envelope=full_envelope)
@@ -374,10 +380,8 @@ def main(argv: list[str]) -> None:
 
     # kind == "server"
     if len(positionals) == 1:
-        if show_help:
-            # ``tool <server> --help``: there's no single schema, list methods.
-            _list_mcp_methods(name)
-            return
+        # ``tool <server>``: list its CLI-reachable methods. ``--help``
+        # would yield the same listing — there's no whole-server schema.
         _list_mcp_methods(name)
         return
 
@@ -386,8 +390,9 @@ def main(argv: list[str]) -> None:
         _show_mcp_help(name, method)
         return
     if len(positionals) == 2:
-        # ``tool <server> <method>`` with no JSON: show schema.
-        _show_mcp_help(name, method)
+        # No JSON arg: invoke with empty ``{}`` (parity with prior
+        # ``mcp <server> <tool>`` behavior).
+        _invoke_mcp(name, method, "{}", full_envelope=full_envelope)
         return
     if len(positionals) == 3:
         if not _looks_like_json(positionals[2]):
