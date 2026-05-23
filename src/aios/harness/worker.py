@@ -47,9 +47,9 @@ from aios.harness.task_registry import TaskRegistry
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
 from aios.sandbox.backends.docker import DockerBackend
-from aios.sandbox.mcp_proxy import McpBroker
 from aios.sandbox.network import ensure_sandbox_network
 from aios.sandbox.registry import SandboxRegistry
+from aios.sandbox.tool_broker import ToolBroker
 
 # Hashed (via Postgres ``hashtextextended($1, 0)``) into the 64-bit
 # advisory-lock key enforcing the worker-process singleton. The string
@@ -98,7 +98,7 @@ async def worker_main() -> None:
     sandbox_registry: SandboxRegistry | None = None
     task_registry: TaskRegistry | None = None
     mcp_session_pool: McpSessionPool | None = None
-    mcp_broker: McpBroker | None = None
+    tool_broker: ToolBroker | None = None
     procrastinate_opened = False
     sweep_task: asyncio.Task[None] | None = None
     interrupt_task: asyncio.Task[None] | None = None
@@ -111,8 +111,8 @@ async def worker_main() -> None:
         task_registry = TaskRegistry()
         mcp_session_pool = McpSessionPool()
         await ensure_sandbox_network()
-        mcp_broker = McpBroker(socket_path=settings.mcp_broker_socket_path)
-        await mcp_broker.start()
+        tool_broker = ToolBroker(socket_path=settings.tool_broker_socket_path)
+        await tool_broker.start()
 
         # Register the connector subsystem's ToolProvider impl against the
         # Protocol slot from PR 3 (#328). The harness reaches the
@@ -128,7 +128,7 @@ async def worker_main() -> None:
         runtime.sandbox_registry = sandbox_registry
         runtime.task_registry = task_registry
         runtime.mcp_session_pool = mcp_session_pool
-        runtime.mcp_broker = mcp_broker
+        runtime.tool_broker = tool_broker
         runtime.tool_provider = SubsystemToolProvider()
 
         await procrastinate_app.open_async()
@@ -230,8 +230,8 @@ async def worker_main() -> None:
         if mcp_session_pool is not None:
             mcp_session_pool.stop_reaper()
             await mcp_session_pool.close_all()
-        if mcp_broker is not None:
-            await mcp_broker.stop()
+        if tool_broker is not None:
+            await tool_broker.stop()
         if procrastinate_opened:
             await procrastinate_app.close_async()
         if pool is not None:

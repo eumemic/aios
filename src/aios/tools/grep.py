@@ -182,6 +182,7 @@ def _register() -> None:
         description=GREP_DESCRIPTION,
         parameters_schema=GREP_PARAMETERS_SCHEMA,
         handler=grep_handler,
+        transport="agent_tool",
     )
 
 

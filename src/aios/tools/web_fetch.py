@@ -75,6 +75,7 @@ def _register() -> None:
         description=WEB_FETCH_DESCRIPTION,
         parameters_schema=WEB_FETCH_PARAMETERS_SCHEMA,
         handler=web_fetch_handler,
+        transport="both",
     )
 
 

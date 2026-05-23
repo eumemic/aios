@@ -269,6 +269,7 @@ def _register() -> None:
         description=HTTP_REQUEST_DESCRIPTION,
         parameters_schema=HTTP_REQUEST_PARAMETERS_SCHEMA,
         handler=http_request_handler,
+        transport="both",
         classify_permission=_classify_permission,
     )
 

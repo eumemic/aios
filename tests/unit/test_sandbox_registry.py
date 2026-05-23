@@ -235,7 +235,7 @@ class TestLocksDictCleanup:
         caller holds is no longer findable in the dict — a concurrent
         ``get_or_provision`` would call ``_lock_for()``, see no entry,
         and create a NEW lock.  Both tasks then run unprotected, and
-        ``release()``'s subsequent ``_release_mcp_broker_secret`` call
+        ``release()``'s subsequent ``_release_tool_broker_secret`` call
         unregisters the new provision's broker secret, wedging the
         new sandbox with no MCP authentication until the next eviction
         cycle.

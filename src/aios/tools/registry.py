@@ -5,19 +5,22 @@ singleton that tool modules register themselves against at import time.
 The harness imports :mod:`aios.tools` once at worker startup, which causes
 every built-in tool module to run its registration call.
 
-Each :class:`ToolSpec` holds:
+Each :class:`ToolDefinition` holds:
 
 * ``name`` — the string the model uses in ``tool_calls[*].function.name``
 * ``description`` — what the tool does, shown to the model
 * ``parameters_schema`` — JSON Schema describing the ``arguments`` shape
 * ``handler`` — an async callable that runs the tool
+* ``transport`` — which callers may invoke the tool (``cli`` /
+  ``agent_tool`` / ``both``); see ``ToolTransport`` for the security
+  frontier framing
 
 The :func:`to_openai_tools` helper translates an agent's ``tools`` list
 (``[{type: 'bash'}, {type: 'read'}, ...]``) into the
-chat-completions/OpenAI ``tools`` parameter that LiteLLM expects.
-Translation is lookup + shape conversion — no per-tool customization yet.
-Later phases may add per-tool config (``{type: 'bash', timeout: 60}``)
-but the registry shape won't change.
+chat-completions/OpenAI ``tools`` parameter that LiteLLM expects, filtering
+``cli``-only tools out of the model's view. :func:`effective_transport`
+resolves a tool's transport given the agent's overrides — used by the
+``ToolBroker`` (CLI side) and by MCP discovery (model side).
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from aios.errors import AiosError
-from aios.models.agents import PermissionPolicy
+from aios.models.agents import PermissionPolicy, ToolTransport
 from aios.models.agents import ToolSpec as AgentToolSpec
 
 
@@ -90,12 +93,21 @@ ClassifyPermission = Callable[[dict[str, Any], Any], PermissionPolicy | None]
 
 @dataclass(slots=True, frozen=True)
 class ToolDefinition:
-    """A registered tool's full definition."""
+    """A registered tool's full definition.
+
+    ``transport`` is the registry-level default classification: which
+    callers may invoke this tool absent an agent-level override. See
+    :data:`aios.models.agents.ToolTransport`. Outbound-side-effect tools
+    ship as ``"agent_tool"`` so the model stays the bottleneck for
+    irreversible effects; an operator can override per-agent via
+    ``ToolSpec.transport``.
+    """
 
     name: str
     description: str
     parameters_schema: dict[str, Any]
     handler: ToolHandler
+    transport: ToolTransport = "both"
     classify_permission: ClassifyPermission | None = None
 
 
@@ -112,6 +124,7 @@ class ToolRegistry:
         description: str,
         parameters_schema: dict[str, Any],
         handler: ToolHandler,
+        transport: ToolTransport = "both",
         classify_permission: ClassifyPermission | None = None,
     ) -> None:
         """Register a tool. Raises :class:`DuplicateToolError` on name clash.
@@ -129,6 +142,7 @@ class ToolRegistry:
             description=description,
             parameters_schema=parameters_schema,
             handler=handler,
+            transport=transport,
             classify_permission=classify_permission,
         )
 
@@ -176,8 +190,10 @@ def to_openai_tools(agent_tools: list[AgentToolSpec]) -> list[dict[str, Any]]:
             ...
         ]
 
-    Unknown tool types raise :class:`ToolNotFoundError`. If the agent
-    declares no tools, returns an empty list.
+    Tools whose effective transport is ``"cli"`` are filtered out — they
+    aren't reachable from the model. Unknown tool types raise
+    :class:`ToolNotFoundError`. If the agent declares no tools (or every
+    tool resolves to ``"cli"``), returns an empty list.
     """
     result: list[dict[str, Any]] = []
     for entry in agent_tools:
@@ -187,6 +203,9 @@ def to_openai_tools(agent_tools: list[AgentToolSpec]) -> list[dict[str, Any]]:
             continue  # MCP tools are added via discovery, not from registry.
         if entry.type == "custom":
             # Custom tools carry their own schema — not in the registry.
+            effective: ToolTransport = entry.transport or "both"
+            if effective == "cli":
+                continue
             result.append(
                 {
                     "type": "function",
@@ -199,6 +218,9 @@ def to_openai_tools(agent_tools: list[AgentToolSpec]) -> list[dict[str, Any]]:
             )
         else:
             tool = registry.get(entry.type)
+            effective = entry.transport or tool.transport
+            if effective == "cli":
+                continue
             result.append(
                 {
                     "type": "function",
@@ -210,3 +232,36 @@ def to_openai_tools(agent_tools: list[AgentToolSpec]) -> list[dict[str, Any]]:
                 }
             )
     return result
+
+
+def effective_transport(name: str, agent_tools: list[AgentToolSpec]) -> ToolTransport:
+    """Resolve a tool's effective transport given an agent's tool list.
+
+    Dispatches by name kind:
+
+    * MCP-namespaced (``mcp__<server>__<tool>``): per-tool ``configs[]``
+      entry → ``default_config.transport`` → system default ``"both"``.
+    * Built-in / custom: ``ToolSpec.transport`` override → registry
+      default for built-ins, ``"both"`` for custom.
+
+    Names not in the registry and not MCP-namespaced (shouldn't normally
+    happen — caller should validate name resolution first) get the
+    permissive ``"both"`` fallback; the broker's per-call resolution
+    chain rejects unknown names before this is reached.
+    """
+    # Deferred to avoid extending the top imports for a single helper.
+    # ``aios.models.agents`` is already imported at module load.
+    from aios.models.agents import (
+        is_mcp_tool_name,
+        resolve_builtin_transport,
+        resolve_mcp_transport,
+    )
+
+    if is_mcp_tool_name(name):
+        return resolve_mcp_transport(name, agent_tools) or "both"
+    override = resolve_builtin_transport(name, agent_tools)
+    if override is not None:
+        return override
+    if registry.has(name):
+        return registry.get(name).transport
+    return "both"

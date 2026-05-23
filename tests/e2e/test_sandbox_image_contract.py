@@ -91,8 +91,8 @@ def _docker_run(
         "curl",
         "git",
         "iptables",  # required for limited-networking mode
-        "jq",  # JSON-from-bash composition, esp. piping `mcp <server> <tool>`
-        "mcp",  # sandbox-native MCP CLI bridge (baked from repo bin/mcp; #378, fixed #392)
+        "jq",  # JSON-from-bash composition, esp. piping `tool <name> '{...}'`
+        "tool",  # sandbox-native broker CLI (baked from repo bin/tool; #635)
         "node",  # so agents can run npm packages without first apt-installing the runtime
         "npm",
         "tail",  # the image CMD is `tail -f /dev/null`

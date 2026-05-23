@@ -122,7 +122,28 @@ jobs:
         run: uv run pytest tests/integration -q
 
       - name: Build sandbox image
-        run: docker build -t ghcr.io/eumemic/aios-sandbox:latest -f docker/Dockerfile.sandbox .
+        # CI-local tag (no registry prefix) — pairs with the
+        # ``AIOS_DOCKER_IMAGE`` env on the E2E step. The
+        # ``test_sandbox_image_contract`` fixture falls through to
+        # ``docker pull`` if a local lookup fails for any reason; with
+        # the previous ``ghcr.io/eumemic/aios-sandbox:latest`` tag that
+        # silently masked a missed local build by using the stale
+        # registry image instead (PR #670 hit exactly that). A
+        # non-GHCR tag makes the fallback pull fail loudly.
+        #
+        # Post-build sanity probes the daemon's image store and the
+        # one binary the build added; if either is missing the step
+        # fails here rather than letting a silent fallback misroute
+        # later. ``set -euo pipefail`` is the workflow default but
+        # the explicit ``|| exit 1`` after the ``docker run`` makes
+        # the failure mode obvious in the log.
+        run: |
+          docker build -t aios-sandbox:ci -f docker/Dockerfile.sandbox .
+          docker image inspect aios-sandbox:ci --format 'image registered: {{.Id}}'
+          docker run --rm aios-sandbox:ci which tool || {
+            echo "::error::bin/tool not found in built image — build step did not produce expected artifacts"
+            exit 1
+          }
 
       - name: E2E tests
         # The signal_connector / signal_registration / telegram_connector
@@ -130,6 +151,8 @@ jobs:
         # telegram bot) that GitHub Actions doesn't supply; they are
         # consistently failing in CI even when nothing about their code
         # path has changed. Run them locally with the daemons up.
+        env:
+          AIOS_DOCKER_IMAGE: aios-sandbox:ci
         run: |
           uv run pytest tests/e2e -q \
             --ignore=tests/e2e/test_signal_connector.py \

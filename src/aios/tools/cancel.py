@@ -72,6 +72,7 @@ def _register() -> None:
         description=CANCEL_DESCRIPTION,
         parameters_schema=CANCEL_PARAMETERS_SCHEMA,
         handler=cancel_handler,
+        transport="agent_tool",
     )
 
 

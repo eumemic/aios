@@ -465,6 +465,7 @@ def _register() -> None:
         description=SWITCH_CHANNEL_DESCRIPTION,
         parameters_schema=SWITCH_CHANNEL_PARAMETERS_SCHEMA,
         handler=switch_channel_handler,
+        transport="agent_tool",
     )
 
 

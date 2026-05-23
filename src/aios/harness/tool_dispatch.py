@@ -1,10 +1,12 @@
-"""Async fire-and-forget tool dispatch.
+"""Async fire-and-forget tool dispatch (model path).
 
 When the step function gets an assistant message with ``tool_calls``,
 it calls :func:`launch_tool_calls` which spawns one ``asyncio.Task``
 per tool call. Each task:
 
-1. Parses the arguments, looks up the handler, and invokes it.
+1. Invokes the tool via :func:`aios.tools.invoke.invoke_builtin`
+   (parse, lookup, validate, call) — the same pure core the
+   sandbox CLI broker drives.
 2. Appends a tool-role event to the session log (success or error).
 3. Triggers the sweep so the next step picks up the result.
 
@@ -30,12 +32,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import asyncpg
-import jsonschema  # type: ignore[import-untyped]
 
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.services import sessions as sessions_service
-from aios.tools.registry import ToolNotFoundError, ToolResult, registry
+from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments
+from aios.tools.registry import ToolResult
 
 log = get_logger("aios.harness.tool_dispatch")
 
@@ -72,13 +74,6 @@ class _ToolCall:
     raw_args: Any
     bound_log: Any
     is_error: bool = False
-
-
-class _ToolBail(Exception):
-    """Intentional bail from a tool body: the lifecycle treats it as a
-    clean model-visible error, not a handler crash (no type prefix on
-    the message, no ``on_exception`` callback).
-    """
 
 
 @asynccontextmanager
@@ -122,7 +117,7 @@ async def _tool_lifecycle(
         await _append_tool_result(
             pool, session_id, call_id, name, account_id=account_id, error="cancelled"
         )
-    except _ToolBail as err:
+    except ToolBail as err:
         bound_log.info(f"{log_prefix}.bail", error=str(err))
         tc.is_error = True
         await _append_tool_result(
@@ -181,7 +176,14 @@ async def _execute_tool_async(
     *,
     account_id: str,
 ) -> None:
-    """Execute one built-in tool call: parse, invoke, append result."""
+    """Execute one built-in tool call via the shared invoke core, then
+    append the tool-role result event.
+
+    The pure core (parse → lookup → validate → call) is shared with the
+    sandbox CLI broker via :func:`aios.tools.invoke.invoke_builtin`;
+    only the event-append + sweep + sandbox eviction are model-path
+    specific (wrapped here by :func:`_tool_lifecycle`).
+    """
     async with _tool_lifecycle(
         pool,
         session_id,
@@ -190,31 +192,7 @@ async def _execute_tool_async(
         log_prefix="tool",
         on_exception=_evict_session_container,
     ) as tc:
-        arguments = _parse_arguments(tc.raw_args)
-        if arguments is None:
-            raise _ToolBail("arguments were not valid JSON")
-
-        try:
-            tool = registry.get(tc.name)
-        except ToolNotFoundError as err:
-            raise _ToolBail(err.message) from err
-
-        # Validate arguments against the tool's parameters_schema before
-        # dispatch.  Weaker models often emit tool calls with wrong
-        # parameter names or types; without validation, the handler runs
-        # against partially-malformed input (e.g. a missing required key
-        # becomes ``None``, a bad-name key becomes an ignored extra) and
-        # silently returns a no-op-shaped result.  The model sees the
-        # no-op as "worked," loops forever.  Surfacing the schema errors
-        # explicitly gives the model feedback to self-correct.
-        schema_error = _validate_arguments(arguments, tool.parameters_schema)
-        if schema_error is not None:
-            raise _ToolBail(schema_error)
-
-        # Invoke handler.  Handlers return either a plain dict (JSON-
-        # encoded into the tool message's content) or a ToolResult
-        # (carries per-event metadata and/or a plain-string content).
-        result = await tool.handler(session_id, arguments)
+        result = await invoke_builtin(session_id, tc.name, tc.raw_args)
         event_data: dict[str, Any] = {
             "role": "tool",
             "tool_call_id": tc.call_id,
@@ -240,47 +218,6 @@ async def _execute_tool_async(
             event_data,
             account_id=account_id,
         )
-
-
-def _parse_arguments(raw_args: Any) -> dict[str, Any] | None:
-    """Parse tool arguments from a JSON string or dict. Returns None on failure."""
-    if isinstance(raw_args, dict):
-        return raw_args
-    try:
-        parsed = json.loads(raw_args) if raw_args else {}
-    except (json.JSONDecodeError, TypeError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> str | None:
-    """Validate ``arguments`` against the tool's JSON Schema.
-
-    Returns ``None`` on success, or a human-readable error string that
-    enumerates every validation failure (missing required keys,
-    unexpected extra keys, wrong types).  The string is what ends up in
-    the tool_result's ``error`` body, so the model sees every issue at
-    once and can self-correct without iterating one-at-a-time.
-
-    The schema is the same dict registered with the tool and sent to
-    the model as the tool's ``parameters``, so a mismatch genuinely
-    indicates the model didn't follow the contract — not a framework
-    bug.  Surfacing specific paths (e.g. ``foo.bar[2]``) and
-    passed-value previews keeps the feedback actionable.
-    """
-    validator = jsonschema.Draft202012Validator(schema)
-    errors = sorted(validator.iter_errors(arguments), key=lambda e: list(e.absolute_path))
-    if not errors:
-        return None
-    lines = [
-        f"Arguments failed schema validation. You sent: {json.dumps(arguments)}",
-        "Errors:",
-    ]
-    for err in errors:
-        path = ".".join(str(p) for p in err.absolute_path) or "<root>"
-        lines.append(f"  - at {path}: {err.message}")
-    lines.append("Look at the tool's `parameters` schema for the correct shape and retry.")
-    return "\n".join(lines)
 
 
 async def _append_tool_result_event(
@@ -487,14 +424,14 @@ async def _execute_mcp_tool_async(
         account_id=account_id,
         log_prefix="mcp_tool",
     ) as tc:
-        arguments = _parse_arguments(tc.raw_args)
+        arguments = parse_arguments(tc.raw_args)
         if arguments is None:
-            raise _ToolBail("arguments were not valid JSON")
+            raise ToolBail("arguments were not valid JSON")
 
         try:
             server_name, tool_name = _parse_mcp_tool_name(tc.name)
         except ValueError as err:
-            raise _ToolBail(str(err)) from err
+            raise ToolBail(str(err)) from err
 
         from aios.harness.channels import (
             FOCAL_CHANNEL_META_KEY,
@@ -509,7 +446,7 @@ async def _execute_mcp_tool_async(
 
         url = mcp_server_map.get(server_name)
         if url is None:
-            raise _ToolBail(f"MCP server {server_name!r} not found")
+            raise ToolBail(f"MCP server {server_name!r} not found")
 
         from aios.mcp.client import call_mcp_tool, resolve_auth_for_target_url
 

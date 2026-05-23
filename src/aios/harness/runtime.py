@@ -26,8 +26,8 @@ if TYPE_CHECKING:
     from aios.harness.task_registry import TaskRegistry
     from aios.mcp.pool import McpSessionPool
     from aios.models.memory_stores import MemoryStoreResourceEcho
-    from aios.sandbox.mcp_proxy import McpBroker
     from aios.sandbox.registry import SandboxRegistry
+    from aios.sandbox.tool_broker import ToolBroker
     from aios.tools.providers import ToolProvider
 
 
@@ -37,7 +37,7 @@ worker_id: str | None = None
 sandbox_registry: SandboxRegistry | None = None
 task_registry: TaskRegistry | None = None
 mcp_session_pool: McpSessionPool | None = None
-mcp_broker: McpBroker | None = None
+tool_broker: ToolBroker | None = None
 tool_provider: ToolProvider | None = None
 
 # Per-session memory-mount cache. Populated at the top of every step (in
@@ -119,8 +119,8 @@ def require_task_registry() -> TaskRegistry:
     return _require("task_registry", task_registry)
 
 
-def require_mcp_broker() -> McpBroker:
-    return _require("mcp_broker", mcp_broker)
+def require_tool_broker() -> ToolBroker:
+    return _require("tool_broker", tool_broker)
 
 
 def require_tool_provider() -> ToolProvider:

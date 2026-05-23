@@ -162,7 +162,7 @@ class SandboxRegistry:
             self._git_proxies.pop(session_id, None)
             if plan.git_proxy is not None:
                 await self._stop_proxy_silently(plan.git_proxy, session_id)
-            self._release_mcp_broker_secret(session_id)
+            self._release_tool_broker_secret(session_id)
             raise
 
         # Setup steps after create. If any of these raise, tear the
@@ -195,7 +195,7 @@ class SandboxRegistry:
         if not isinstance(networking, LimitedNetworking):
             return
         extra_host_ports: list[tuple[str, int]] = [
-            (WORKER_NETWORK_ALIAS, runtime.require_mcp_broker().port),
+            (WORKER_NETWORK_ALIAS, runtime.require_tool_broker().port),
         ]
         if plan.git_proxy is not None:
             extra_host_ports.append((WORKER_NETWORK_ALIAS, plan.git_proxy.port))
@@ -222,8 +222,8 @@ class SandboxRegistry:
                 error=str(err),
             )
 
-    def _release_mcp_broker_secret(self, session_id: str) -> None:
-        """Drop the per-session entry from the MCP broker's secret map.
+    def _release_tool_broker_secret(self, session_id: str) -> None:
+        """Drop the per-session entry from the tool broker's secret map.
 
         Idempotent: a missing entry is silently ignored. Called at every
         sandbox teardown site so the broker doesn't accumulate dangling
@@ -231,7 +231,7 @@ class SandboxRegistry:
         """
         from aios.harness import runtime
 
-        runtime.require_mcp_broker().unregister_session(session_id)
+        runtime.require_tool_broker().unregister_session(session_id)
 
     async def _destroy_quietly(self, handle: SandboxHandle, session_id: str) -> None:
         """Tear down the handle's sandbox and stop the session's proxy.
@@ -252,7 +252,7 @@ class SandboxRegistry:
         proxy = self._git_proxies.pop(session_id, None)
         if proxy is not None:
             await self._stop_proxy_silently(proxy, session_id)
-        self._release_mcp_broker_secret(session_id)
+        self._release_tool_broker_secret(session_id)
 
     async def exec(
         self,
@@ -287,7 +287,7 @@ class SandboxRegistry:
 
         Deferred import of ``aios.harness.runtime`` matches the existing
         pattern at :meth:`_provision_with_span` (line 191) and
-        :meth:`_release_mcp_broker_secret`-adjacent paths — the runtime
+        :meth:`_release_tool_broker_secret`-adjacent paths — the runtime
         module lists ``aios.sandbox.registry`` under ``TYPE_CHECKING``,
         so a top-level import here would create a runtime cycle.
 
@@ -309,7 +309,7 @@ class SandboxRegistry:
         # findable in the dict, so a concurrent ``get_or_provision``
         # would call ``_lock_for()``, see no entry, create a new
         # lock, and race with the in-progress release.  The race
-        # leaks: ``_release_mcp_broker_secret`` below would
+        # leaks: ``_release_tool_broker_secret`` below would
         # unregister the new provision's broker secret, wedging the
         # new sandbox.  The accumulation of one ``asyncio.Lock`` per
         # ever-touched session is a bounded leak that the worker's
@@ -319,7 +319,7 @@ class SandboxRegistry:
 
         if proxy is not None:
             await self._stop_proxy_silently(proxy, session_id)
-        self._release_mcp_broker_secret(session_id)
+        self._release_tool_broker_secret(session_id)
         runtime.clear_session_memory_mounts(session_id)
         runtime.clear_session_read_shas(session_id)
         if handle is None:
@@ -387,7 +387,7 @@ class SandboxRegistry:
         # (awaiting ``_provision``) would have its lock disappear
         # from the dict; a subsequent third task arriving via
         # ``_lock_for(sid)`` would see no entry, create a new lock,
-        # and race with the in-flight provision.  ``_release_mcp_broker_secret``
+        # and race with the in-flight provision.  ``_release_tool_broker_secret``
         # below would then unregister that in-flight provision's
         # broker secret, wedging the new sandbox.
         if self._handles.pop(session_id, None) is not None:
@@ -402,9 +402,9 @@ class SandboxRegistry:
             )
             self._evict_proxy_stop_tasks.add(task)
             task.add_done_callback(self._evict_proxy_stop_tasks.discard)
-        # Same story for the MCP broker secret: drop it immediately; a
+        # Same story for the tool broker secret: drop it immediately; a
         # fresh sandbox will get a fresh secret from the next provision.
-        self._release_mcp_broker_secret(session_id)
+        self._release_tool_broker_secret(session_id)
         # Drop the runtime read-sha cache so a fresh sandbox doesn't
         # serve a stale precondition match against a different
         # container's file state. Memory mounts are re-populated at the

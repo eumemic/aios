@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from attrs import define as _attrs_define
 
 from ..models.tool_spec_permission_type_0 import ToolSpecPermissionType0
+from ..models.tool_spec_transport_type_0 import ToolSpecTransportType0
 from ..models.tool_spec_type_type_0 import ToolSpecTypeType0
 from ..models.tool_spec_type_type_1 import ToolSpecTypeType1
 from ..types import UNSET, Unset
@@ -46,6 +47,7 @@ class ToolSpec:
             input_schema (None | ToolSpecInputSchemaType0 | Unset):
             enabled (bool | Unset):  Default: True.
             permission (None | ToolSpecPermissionType0 | Unset):
+            transport (None | ToolSpecTransportType0 | Unset):
             mcp_server_name (None | str | Unset):
             default_config (McpToolsetConfig | None | Unset):
             configs (list[McpToolConfig] | None | Unset):
@@ -57,6 +59,7 @@ class ToolSpec:
     input_schema: None | ToolSpecInputSchemaType0 | Unset = UNSET
     enabled: bool | Unset = True
     permission: None | ToolSpecPermissionType0 | Unset = UNSET
+    transport: None | ToolSpecTransportType0 | Unset = UNSET
     mcp_server_name: None | str | Unset = UNSET
     default_config: McpToolsetConfig | None | Unset = UNSET
     configs: list[McpToolConfig] | None | Unset = UNSET
@@ -101,6 +104,14 @@ class ToolSpec:
         else:
             permission = self.permission
 
+        transport: None | str | Unset
+        if isinstance(self.transport, Unset):
+            transport = UNSET
+        elif isinstance(self.transport, ToolSpecTransportType0):
+            transport = self.transport.value
+        else:
+            transport = self.transport
+
         mcp_server_name: None | str | Unset
         if isinstance(self.mcp_server_name, Unset):
             mcp_server_name = UNSET
@@ -144,6 +155,8 @@ class ToolSpec:
             field_dict["enabled"] = enabled
         if permission is not UNSET:
             field_dict["permission"] = permission
+        if transport is not UNSET:
+            field_dict["transport"] = transport
         if mcp_server_name is not UNSET:
             field_dict["mcp_server_name"] = mcp_server_name
         if default_config is not UNSET:
@@ -234,6 +247,23 @@ class ToolSpec:
 
         permission = _parse_permission(d.pop("permission", UNSET))
 
+        def _parse_transport(data: object) -> None | ToolSpecTransportType0 | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                transport_type_0 = ToolSpecTransportType0(data)
+
+                return transport_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | ToolSpecTransportType0 | Unset, data)
+
+        transport = _parse_transport(d.pop("transport", UNSET))
+
         def _parse_mcp_server_name(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -291,6 +321,7 @@ class ToolSpec:
             input_schema=input_schema,
             enabled=enabled,
             permission=permission,
+            transport=transport,
             mcp_server_name=mcp_server_name,
             default_config=default_config,
             configs=configs,

@@ -85,6 +85,7 @@ def _register() -> None:
         description=WEB_SEARCH_DESCRIPTION,
         parameters_schema=WEB_SEARCH_PARAMETERS_SCHEMA,
         handler=web_search_handler,
+        transport="both",
     )
 
 

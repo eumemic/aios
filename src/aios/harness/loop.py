@@ -676,7 +676,8 @@ def _classify_tool_call(
       registered.  Routed to immediate tool-error so the model can
       self-correct rather than leaving the call unresolved.
     """
-    from aios.harness.tool_dispatch import _parse_arguments, _parse_mcp_tool_name
+    from aios.harness.tool_dispatch import _parse_mcp_tool_name
+    from aios.tools.invoke import parse_arguments
     from aios.tools.registry import registry as tool_registry
 
     function = tool_call.get("function") or {}
@@ -707,7 +708,7 @@ def _classify_tool_call(
         # ``agent.http_servers``).  Malformed args fall through to
         # dispatch so the schema validator emits a typed error the
         # model can self-correct from.
-        args = _parse_arguments(function.get("arguments"))
+        args = parse_arguments(function.get("arguments"))
         if args is not None:
             perm_route = tool_def.classify_permission(args, agent)
 
@@ -733,6 +734,7 @@ async def discover_session_mcp_tools(
     omitted from the dict.
     """
     from aios.mcp.client import discover_mcp_tools, resolve_auth_for_target_url
+    from aios.tools.registry import effective_transport
 
     enabled_server_names: set[str] = set()
     for spec in agent.tools:
@@ -774,7 +776,15 @@ async def discover_session_mcp_tools(
             )
             continue
         tool_list, instructions = result
-        tools.extend(tool_list)
+        # Filter out ``cli``-only MCP tools — the model can't see them.
+        # Per-tool transport overrides via the agent's ``mcp_toolset``
+        # config (default_config / configs) are resolved via the shared
+        # ``effective_transport`` helper.
+        for td in tool_list:
+            qualified = td.get("function", {}).get("name", "")
+            if effective_transport(qualified, agent.tools) == "cli":
+                continue
+            tools.append(td)
         if instructions:
             instructions_by_server[name] = instructions
     return tools, instructions_by_server
