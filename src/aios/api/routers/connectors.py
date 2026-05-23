@@ -68,9 +68,9 @@ from aios.services import sessions as sessions_service
 from aios.services.attachment_staging import InboundAttachment
 from aios.services.wake import defer_wake
 
-router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
-
 log = get_logger("aios.api.routers.connectors")
+
+router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
 
 
 # ─── connector-facing endpoints (#301) ──────────────────────────────────────
@@ -481,15 +481,36 @@ async def post_runtime_lifecycle(
         payload["reason"] = body.reason
     if body.data is not None:
         payload["data"] = body.data
+    # Per-session try/except: a single archived/missing session shouldn't
+    # 500 the whole call and leave callers unable to tell which sessions
+    # actually got the event.  Each successful append is committed by its
+    # own pool acquire in append_event, so partials are visible to clients
+    # whether or not we surface them — surface them.
+    appended: list[str] = []
+    failed: list[dict[str, str]] = []
     for sess_id in session_ids:
-        await sessions_service.append_event(
-            pool,
-            sess_id,
-            "lifecycle",
-            payload,
-            account_id=account_id,
-        )
-    return {"appended_session_ids": session_ids}
+        try:
+            await sessions_service.append_event(
+                pool,
+                sess_id,
+                "lifecycle",
+                payload,
+                account_id=account_id,
+            )
+            appended.append(sess_id)
+        except Exception as exc:
+            log.warning(
+                "connector.lifecycle.append_failed",
+                connection_id=body.connection_id,
+                session_id=sess_id,
+                error=type(exc).__name__,
+                detail=str(exc)[:300],
+            )
+            failed.append({"session_id": sess_id, "error": type(exc).__name__})
+    result: dict[str, Any] = {"appended_session_ids": appended}
+    if failed:
+        result["failed_session_ids"] = failed
+    return result
 
 
 @router.post(

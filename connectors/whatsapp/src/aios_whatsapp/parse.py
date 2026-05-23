@@ -145,6 +145,7 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
         and reaction is None
         and edit_target_message_id is None
         and revoke_target_message_id is None
+        and quoted_message_id is None
     ):
         return None
 

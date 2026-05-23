@@ -4133,6 +4133,7 @@ async def list_session_ids_for_connection(
         SELECT session_id FROM chat_sessions
          WHERE connection_id = $1
            AND account_id = $2
+         ORDER BY session_id
         """,
         connection_id,
         account_id,

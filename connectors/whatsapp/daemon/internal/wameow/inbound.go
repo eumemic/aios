@@ -201,10 +201,15 @@ func (c *Client) extractEditInfo(evt *events.Message) *editInfo {
 	msg := evt.Message
 	// Legacy: ProtocolMessage envelope.
 	if pm := msg.GetProtocolMessage(); pm != nil && pm.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT {
-		out := &editInfo{}
-		if key := pm.GetKey(); key != nil {
-			out.targetID = key.GetID()
+		// Same rationale as the SecretEncryptedMessage branch below:
+		// an edit envelope without a target id is meaningless to the
+		// model, so drop it rather than emit an orphan signal.
+		key := pm.GetKey()
+		if key == nil || key.GetID() == "" {
+			c.log.Warn("wameow.legacy_edit_missing_target", "id", string(evt.Info.ID))
+			return nil
 		}
+		out := &editInfo{targetID: key.GetID()}
 		if edited := pm.GetEditedMessage(); edited != nil {
 			out.newText = extractText(edited)
 		}
@@ -212,10 +217,17 @@ func (c *Client) extractEditInfo(evt *events.Message) *editInfo {
 	}
 	// Current: SecretEncryptedMessage envelope.
 	if enc := msg.GetSecretEncryptedMessage(); enc != nil && enc.GetSecretEncType() == waE2E.SecretEncryptedMessage_MESSAGE_EDIT {
-		out := &editInfo{}
-		if key := enc.GetTargetMessageKey(); key != nil {
-			out.targetID = key.GetID()
+		// A malformed envelope without TargetMessageKey would leave us
+		// emitting an edit signal with no target the model can match
+		// against any prior message_id — return nil so the inbound
+		// flows the no-signal drop path instead of confusing the
+		// model with an orphan edit.
+		key := enc.GetTargetMessageKey()
+		if key == nil || key.GetID() == "" {
+			c.log.Warn("wameow.secret_edit_missing_target", "id", string(evt.Info.ID))
+			return nil
 		}
+		out := &editInfo{targetID: key.GetID()}
 		decrypted, err := c.wa.Load().DecryptSecretEncryptedMessage(c.lifetimeCtx, evt)
 		if err != nil {
 			c.log.Warn(

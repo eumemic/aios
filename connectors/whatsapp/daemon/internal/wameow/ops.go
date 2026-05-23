@@ -131,8 +131,19 @@ func (c *Client) Edit(ctx context.Context, msgID, newText string, mentionedJIDs 
 	if !rec.FromMe {
 		return "", 0, fmt.Errorf("edit %s: %w", msgID, ErrNotOwnMessage)
 	}
-	if elapsed := time.Now().UnixMilli() - rec.SentAtMs; rec.SentAtMs > 0 && elapsed > EditWindowMs {
-		return "", 0, fmt.Errorf("edit %s: %w (elapsed=%ds)", msgID, ErrEditWindowExpired, elapsed/1000)
+	if rec.SentAtMs > 0 {
+		elapsed := time.Now().UnixMilli() - rec.SentAtMs
+		// Negative elapsed = host clock went backwards between
+		// recordOutbound and now (NTP correction, VM resume from
+		// snapshot, container clock drift).  Refuse the edit rather
+		// than silently allow it: a negative value means we genuinely
+		// don't know how much wall-clock has passed.  The cluster's
+		// next NTP cycle straightens the clock and the operator can
+		// retry — preferable to letting an unbounded-age edit slip
+		// through the very guard we added to catch silent edit drops.
+		if elapsed < 0 || elapsed > EditWindowMs {
+			return "", 0, fmt.Errorf("edit %s: %w (elapsed=%ds)", msgID, ErrEditWindowExpired, elapsed/1000)
+		}
 	}
 	chat, err := types.ParseJID(rec.ChatJID)
 	if err != nil {

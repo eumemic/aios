@@ -175,10 +175,14 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
     if isinstance(sticker_emoji, str):
         # Empty string means the connector saw a StickerMessage but
         # the sender's WhatsApp client didn't pick an emoji label
-        # (custom stickers from the sticker maker land this way);
-        # surface a placeholder so the model still knows a sticker
-        # arrived rather than silently dropping the signal.
-        parts.append(f"sticker_emoji={sticker_emoji!r}" if sticker_emoji else "sticker=true")
+        # (custom stickers from the sticker maker land this way).
+        # Always render under the ``sticker_emoji=`` field name so
+        # the model's prompt contract (per the connector prompts.py
+        # mentioning ``metadata.sticker_emoji`` verbatim) stays
+        # consistent across labeled and unlabeled stickers — empty
+        # value still signals "a sticker arrived" without breaking
+        # the established field-name pattern.
+        parts.append(f"sticker_emoji={sticker_emoji!r}")
     header = "[" + " · ".join(parts) + "]"
     mentions = metadata.get("mentions")
     if isinstance(mentions, list) and mentions:
