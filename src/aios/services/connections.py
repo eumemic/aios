@@ -169,8 +169,19 @@ async def attach_connection(
     active ``bindings`` row.
 
     Returns the freshly-read connection with its derived
-    ``session_id`` populated.  Race-safe via the partial-unique index
-    on ``bindings (connection_id) WHERE archived_at IS NULL``.
+    ``session_id`` populated.  Race-safe along two axes:
+
+    * Attach-vs-attach: the partial-unique index on
+      ``bindings (connection_id) WHERE archived_at IS NULL`` rejects
+      a second concurrent attach on the same connection.
+    * Attach-vs-archive: a ``SELECT … FOR UPDATE`` on the
+      ``connections`` row serializes attach against concurrent
+      ``archive_connection``, and the archived-state re-check under
+      that lock refuses to bind to an archived connection. Without
+      the lock + re-check, archive could commit between a stale
+      ``get_active_binding`` read and the binding insert, leaving the
+      binding on an archived connection (the ``bindings.connection_id``
+      FK accepts archived rows).
 
     Refuses binding to an archived session — the FK constraint accepts
     archived rows (no partial ``WHERE archived_at IS NULL`` on the FK),
@@ -181,25 +192,45 @@ async def attach_connection(
     only point where the operator can correct the action that caused
     the misconfiguration.
     """
-    # pool.acquire() yields an autocommit connection; the INSERT commits
-    # before the NOTIFY fires.  Do NOT wrap these in
-    # ``async with conn.transaction()`` — see db/listen.py for why
-    # NOTIFY-after-commit is load-bearing for subscribers.
+    # The data ops run inside ``conn.transaction()`` with a ``SELECT
+    # FOR UPDATE`` row lock on ``connections``. This serializes attach
+    # against concurrent ``archive_connection``, which also takes the
+    # same lock — without it, archive can read 'no active binding',
+    # commit the archive, and the binding lands on an archived
+    # connection (the ``bindings.connection_id`` FK accepts archived
+    # rows). NOTIFY fires AFTER the transaction commits — see
+    # ``db/listen.py`` on why NOTIFY-after-commit is load-bearing.
     async with pool.acquire() as conn:
-        session = await queries.get_session(conn, session_id, account_id=account_id)
-        if session.archived_at is not None:
-            raise ConflictError(
-                f"session {session_id} is archived; cannot attach a connection to it",
-                detail={"id": connection_id, "session_id": session_id},
+        async with conn.transaction():
+            locked = await conn.fetchrow(
+                "SELECT archived_at FROM connections WHERE id = $1 AND account_id = $2 FOR UPDATE",
+                connection_id,
+                account_id,
             )
-        await queries.insert_binding(
-            conn,
-            connection_id=connection_id,
-            mode="single_session",
-            session_id=session_id,
-            account_id=account_id,
-        )
-        connection = await queries.get_connection(conn, connection_id, account_id=account_id)
+            if locked is None:
+                raise NotFoundError(
+                    f"connection {connection_id} not found",
+                    detail={"id": connection_id},
+                )
+            if locked["archived_at"] is not None:
+                raise ConflictError(
+                    f"connection {connection_id} is archived; cannot attach a session to it",
+                    detail={"id": connection_id},
+                )
+            session = await queries.get_session(conn, session_id, account_id=account_id)
+            if session.archived_at is not None:
+                raise ConflictError(
+                    f"session {session_id} is archived; cannot attach a connection to it",
+                    detail={"id": connection_id, "session_id": session_id},
+                )
+            await queries.insert_binding(
+                conn,
+                connection_id=connection_id,
+                mode="single_session",
+                session_id=session_id,
+                account_id=account_id,
+            )
+            connection = await queries.get_connection(conn, connection_id, account_id=account_id)
         await queries.notify_connection_change(
             conn,
             connector=connection.connector,
@@ -232,8 +263,30 @@ async def configure_per_chat(
 ) -> Connection:
     """Bind the connection in per_chat mode by inserting an active
     ``bindings`` row pointing at the session template.
+
+    Wraps the data ops in ``conn.transaction()`` with ``SELECT FOR
+    UPDATE`` on the connections row so a concurrent
+    ``archive_connection`` cannot complete between the archived-check
+    and the ``insert_binding`` — that race would otherwise leave an
+    archived connection with an active binding (the
+    ``bindings.connection_id`` FK accepts archived rows).
     """
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        locked = await conn.fetchrow(
+            "SELECT archived_at FROM connections WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            connection_id,
+            account_id,
+        )
+        if locked is None:
+            raise NotFoundError(
+                f"connection {connection_id} not found",
+                detail={"id": connection_id},
+            )
+        if locked["archived_at"] is not None:
+            raise ConflictError(
+                f"connection {connection_id} is archived; cannot configure",
+                detail={"id": connection_id},
+            )
         await queries.insert_binding(
             conn,
             connection_id=connection_id,
@@ -413,21 +466,48 @@ async def archive_connection(
     live single_session, or from stranding the template a per_chat
     binding spawns from.
     """
-    # pool.acquire() yields an autocommit connection; the archive UPDATE
-    # commits before the NOTIFY fires.  See ``attach_connection`` and
-    # ``services/management_calls.py`` for the same pattern + rationale.
+    # The data ops run inside ``conn.transaction()`` with a ``SELECT
+    # FOR UPDATE`` row lock on ``connections``. This serializes archive
+    # against concurrent ``attach_connection`` / ``configure_per_chat``,
+    # which both also take ``FOR UPDATE`` on the same row — without the
+    # lock, archive's ``get_active_binding`` could return None while a
+    # racing attach committed a binding, leaving the archive UPDATE to
+    # produce ``archived_at IS NOT NULL`` + active binding (the
+    # ``bindings.connection_id`` FK accepts archived rows).
+    # NOTIFY fires AFTER the transaction commits — see ``db/listen.py``
+    # on why NOTIFY-after-commit is load-bearing for subscribers. The
+    # nested ``with`` is required: the inner txn must exit BEFORE the
+    # NOTIFY runs, while the outer pool.acquire stays open.
     async with pool.acquire() as conn:
-        connection = await queries.get_connection(conn, connection_id, account_id=account_id)
-        if connection.archived_at is not None:
-            return await queries.archive_connection(conn, connection_id, account_id=account_id)
-        binding = await queries.get_active_binding(conn, connection_id, account_id=account_id)
-        if binding is not None:
-            raise ConflictError(
-                f"connection {connection_id} is in {binding.mode} mode; "
-                f"detach or unconfigure before archiving",
-                detail={"id": connection_id, "mode": binding.mode},
+        async with conn.transaction():
+            locked = await conn.fetchrow(
+                "SELECT id FROM connections WHERE id = $1 AND account_id = $2 FOR UPDATE",
+                connection_id,
+                account_id,
             )
-        archived = await queries.archive_connection(conn, connection_id, account_id=account_id)
+            if locked is None:
+                raise NotFoundError(
+                    f"connection {connection_id} not found",
+                    detail={"id": connection_id},
+                )
+            connection = await queries.get_connection(conn, connection_id, account_id=account_id)
+            if connection.archived_at is not None:
+                # Preserve pre-fix surface: double-archive raised
+                # ``NotFoundError`` (pre-fix called
+                # ``queries.archive_connection`` whose WHERE
+                # archived_at IS NULL did not match).
+                raise NotFoundError(
+                    f"connection {connection_id} not found or already archived",
+                    detail={"id": connection_id},
+                )
+            binding = await queries.get_active_binding(conn, connection_id, account_id=account_id)
+            if binding is not None:
+                raise ConflictError(
+                    f"connection {connection_id} is in {binding.mode} mode; "
+                    f"detach or unconfigure before archiving",
+                    detail={"id": connection_id, "mode": binding.mode},
+                )
+            archived = await queries.archive_connection(conn, connection_id, account_id=account_id)
         await queries.notify_connection_change(
             conn,
             connector=archived.connector,
