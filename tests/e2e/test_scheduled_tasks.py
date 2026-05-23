@@ -238,6 +238,88 @@ class TestServiceLayer:
         assert re_enabled.next_fire is not None
 
 
+class TestPerAccountCap:
+    """The ``scheduled_tasks_per_account_max`` cap shipped in Phase 3 of
+    the schedule_wake unification."""
+
+    async def test_add_at_cap_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str], monkeypatch: Any
+    ) -> None:
+        from aios.config import Settings
+        from aios.errors import RateLimitedError
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = f"acc_cap_{_uniq()}"
+
+        # Drop the cap to 2 for the test so we don't have to insert 100 rows.
+        original = Settings()
+        monkeypatch.setattr(
+            "aios.services.scheduled_tasks.get_settings",
+            lambda: original.model_copy(update={"scheduled_tasks_per_account_max": 2}),
+        )
+
+        await st_service.add_task(pool, sid, _spec("a"), account_id=account_id)
+        await st_service.add_task(pool, sid, _spec("b"), account_id=account_id)
+        with pytest.raises(RateLimitedError, match="active-timer cap"):
+            await st_service.add_task(pool, sid, _spec("c"), account_id=account_id)
+
+    async def test_disabled_does_not_count(
+        self, pool: Any, env_and_agent: tuple[str, str], monkeypatch: Any
+    ) -> None:
+        from aios.config import Settings
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = f"acc_cap_dis_{_uniq()}"
+
+        original = Settings()
+        monkeypatch.setattr(
+            "aios.services.scheduled_tasks.get_settings",
+            lambda: original.model_copy(update={"scheduled_tasks_per_account_max": 1}),
+        )
+
+        # Fill the cap with one enabled row, then add many disabled — fine.
+        await st_service.add_task(pool, sid, _spec("enabled-1"), account_id=account_id)
+        disabled = ScheduledTaskCreate.model_validate(
+            {"name": "paused", "schedule": "*/5 * * * *", "command": "true", "enabled": False}
+        )
+        await st_service.add_task(pool, sid, disabled, account_id=account_id)
+
+    async def test_reenable_at_cap_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str], monkeypatch: Any
+    ) -> None:
+        from aios.config import Settings
+        from aios.errors import RateLimitedError
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = f"acc_cap_re_{_uniq()}"
+
+        original = Settings()
+        monkeypatch.setattr(
+            "aios.services.scheduled_tasks.get_settings",
+            lambda: original.model_copy(update={"scheduled_tasks_per_account_max": 1}),
+        )
+
+        # One enabled (at cap), one disabled — re-enabling the second
+        # should now hit the cap.
+        await st_service.add_task(pool, sid, _spec("enabled"), account_id=account_id)
+        disabled = ScheduledTaskCreate.model_validate(
+            {"name": "paused", "schedule": "*/5 * * * *", "command": "true", "enabled": False}
+        )
+        await st_service.add_task(pool, sid, disabled, account_id=account_id)
+
+        with pytest.raises(RateLimitedError, match="active-timer cap"):
+            await st_service.update_task(
+                pool,
+                sid,
+                "paused",
+                ScheduledTaskUpdate.model_validate({"enabled": True}),
+                account_id=account_id,
+            )
+
+
 # ─── tick claim semantics ─────────────────────────────────────────────────
 
 

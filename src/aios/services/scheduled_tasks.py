@@ -17,8 +17,9 @@ from typing import Any
 
 import asyncpg
 
+from aios.config import get_settings
 from aios.db import queries
-from aios.errors import ValidationError
+from aios.errors import RateLimitedError, ValidationError
 from aios.models.scheduled_tasks import (
     ScheduledTaskCreate,
     ScheduledTaskEcho,
@@ -40,13 +41,31 @@ async def add_task(
     Initial ``next_fire`` is computed from the schedule (cron) or copied
     from ``fire_at`` (one-shot), unless the task is disabled — in which
     case ``next_fire`` stays ``NULL``.
+
+    Enforces ``Settings.scheduled_tasks_per_account_max`` against the
+    account's count of enabled rows. Disabled rows don't consume a slot
+    (paused entries don't load the scheduler). Single COUNT + INSERT
+    aren't transactionally tied — a race could overshoot the cap by one
+    or two; bumping the limit by the worker concurrency would cover the
+    worst case, but the cap is approximate by design (it's a quota, not
+    a contractual ceiling).
     """
+    cap = get_settings().scheduled_tasks_per_account_max
     next_fire = (
         compute_initial_next_fire(spec.schedule, spec.fire_at, datetime.now(UTC))
         if spec.enabled
         else None
     )
     async with pool.acquire() as conn:
+        if spec.enabled:
+            existing = await queries.count_account_scheduled_tasks(
+                conn, account_id=account_id, enabled_only=True
+            )
+            if existing >= cap:
+                raise RateLimitedError(
+                    f"account at active-timer cap ({existing}/{cap}); remove or "
+                    "disable an existing scheduled task to free a slot"
+                )
         return await queries.add_scheduled_task(
             conn,
             session_id,
@@ -125,6 +144,18 @@ async def update_task(
             next_fire = None
         elif new_enabled and (trigger_changed or not current.enabled):
             # Trigger changed, or task re-enabled: recompute from merged state.
+            # Re-enable also has to honor the per-account active-timer cap,
+            # since a disabled row didn't consume a slot.
+            if not current.enabled:
+                cap = get_settings().scheduled_tasks_per_account_max
+                existing = await queries.count_account_scheduled_tasks(
+                    conn, account_id=account_id, enabled_only=True
+                )
+                if existing >= cap:
+                    raise RateLimitedError(
+                        f"account at active-timer cap ({existing}/{cap}); remove "
+                        "or disable another scheduled task before re-enabling this one"
+                    )
             if new_fire_at is not None:
                 next_fire = new_fire_at
             else:

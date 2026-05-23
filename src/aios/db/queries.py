@@ -7028,6 +7028,31 @@ async def delete_scheduled_task_by_id(
     )
 
 
+async def count_account_scheduled_tasks(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    enabled_only: bool = True,
+) -> int:
+    """Count scheduled_tasks rows owned by ``account_id``.
+
+    Backs the per-account cap enforced in ``services.scheduled_tasks.add_task``.
+    Defaults to counting only enabled rows — paused/disabled entries don't
+    consume a "slot" against the cap. Pass ``enabled_only=False`` for an
+    operator-visible total.
+    """
+    where_enabled = " AND enabled" if enabled_only else ""
+    result: int | None = await conn.fetchval(
+        f"""
+        SELECT COUNT(*)
+        FROM session_scheduled_tasks
+        WHERE account_id = $1{where_enabled}
+        """,
+        account_id,
+    )
+    return result or 0
+
+
 async def fetch_next_scheduled_task_event(
     conn: asyncpg.Connection[Any],
     *,

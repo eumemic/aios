@@ -16,9 +16,10 @@ from typing import Any
 
 import asyncpg
 
+from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.errors import ConflictError, NotFoundError, PayloadTooLargeError
+from aios.errors import ConflictError, NotFoundError, PayloadTooLargeError, RateLimitedError
 from aios.models.agents import (
     Agent,
     AgentVersion,
@@ -182,6 +183,19 @@ async def create_session(
             session = session.model_copy(update={"resources": echoes})
         if scheduled_tasks:
             now = datetime.now(UTC)
+            enabled_new = sum(1 for spec in scheduled_tasks if spec.enabled)
+            if enabled_new:
+                cap = get_settings().scheduled_tasks_per_account_max
+                existing = await queries.count_account_scheduled_tasks(
+                    conn, account_id=account_id, enabled_only=True
+                )
+                if existing + enabled_new > cap:
+                    raise RateLimitedError(
+                        f"account at active-timer cap ({existing}/{cap}); the "
+                        f"{enabled_new} enabled scheduled task(s) in this session "
+                        "would exceed the cap — disable some entries or remove an "
+                        "older session's tasks first"
+                    )
             for spec in scheduled_tasks:
                 next_fire = (
                     compute_initial_next_fire(spec.schedule, spec.fire_at, now)
