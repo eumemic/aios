@@ -271,7 +271,13 @@ jobs:
         # (e.g. ``bin/tool`` advanced on master between this PR's base
         # and the last ``build-sandbox.yml`` publish) would silently
         # produce a misroute later in the E2E run.
+        #
+        # ``continue-on-error`` lets the next step fall back to a local
+        # build when this fails — GHCR outage, ``:smoked`` not yet
+        # published, fork-PR token cannot read a private package.
+        id: pull_sandbox
         if: matrix.shard == 'docker' && needs.detect.outputs.sandbox_changed == 'false'
+        continue-on-error: true
         run: |
           docker pull ghcr.io/eumemic/aios-sandbox:smoked
           docker tag ghcr.io/eumemic/aios-sandbox:smoked aios-sandbox:ci
@@ -297,8 +303,18 @@ jobs:
         # later. ``set -euo pipefail`` is the workflow default but
         # the explicit ``|| exit 1`` after the ``docker run`` makes
         # the failure mode obvious in the log.
-        if: matrix.shard == 'docker' && needs.detect.outputs.sandbox_changed == 'true'
+        #
+        # Fires when the Dockerfile/bin/tool inputs changed (so the pull
+        # path was skipped) OR when the pull path attempted and failed.
+        if: |
+          matrix.shard == 'docker' && (
+            needs.detect.outputs.sandbox_changed == 'true' ||
+            steps.pull_sandbox.outcome == 'failure'
+          )
         run: |
+          if [[ "${{ steps.pull_sandbox.outcome }}" == "failure" ]]; then
+            echo "::warning::GHCR pull failed; falling back to local sandbox build"
+          fi
           docker build -t aios-sandbox:ci -f docker/Dockerfile.sandbox .
           docker image inspect aios-sandbox:ci --format 'image registered: {{.Id}}'
           docker run --rm aios-sandbox:ci which tool || {
