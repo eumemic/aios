@@ -191,15 +191,9 @@ def _build_set_assignments(
     fragments (e.g. ``updated_at = now()``, which not every table has)."""
     sets: list[str] = []
     for column, value, pg_cast in fields:
-        if pg_cast == "jsonb":
-            args.append(json.dumps(value))
-            sets.append(f"{column} = ${len(args)}::jsonb")
-        elif pg_cast is None:
-            args.append(value)
-            sets.append(f"{column} = ${len(args)}")
-        else:
-            args.append(value)
-            sets.append(f"{column} = ${len(args)}::{pg_cast}")
+        args.append(json.dumps(value) if pg_cast == "jsonb" else value)
+        suffix = f"::{pg_cast}" if pg_cast is not None else ""
+        sets.append(f"{column} = ${len(args)}{suffix}")
     return sets
 
 
