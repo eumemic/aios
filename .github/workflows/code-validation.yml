@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run_checks: ${{ steps.filter.outputs.run_checks }}
+      sandbox_changed: ${{ steps.filter.outputs.sandbox_changed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,10 +44,12 @@ jobs:
 
           # First push to a new branch, force-push from a non-fast-forward,
           # or any case where `before` is the all-zeros SHA: be conservative
-          # and run the full pipeline.
+          # and run the full pipeline AND rebuild the sandbox image (since
+          # we cannot tell whether its inputs changed).
           if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
-            echo "No usable base ref — running checks."
+            echo "No usable base ref — running checks and rebuilding sandbox."
             echo "run_checks=true" >> "$GITHUB_OUTPUT"
+            echo "sandbox_changed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -64,6 +67,19 @@ jobs:
           else
             echo "Docs/config-only changes — skipping checks."
             echo "run_checks=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Sandbox image inputs: the Dockerfile itself and the ``bin/tool``
+          # binary it COPYs in.  When neither changed, the ``e2e`` job can
+          # pull ``ghcr.io/eumemic/aios-sandbox:smoked`` (published by
+          # ``build-sandbox.yml`` after its smoke test passes) instead of
+          # rebuilding from scratch — saves ~29 s per run.
+          if echo "$changed" | grep -qE '^docker/Dockerfile\.sandbox$|^bin/tool$'; then
+            echo "Sandbox inputs changed — rebuilding image."
+            echo "sandbox_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Sandbox inputs unchanged — will pull pre-built image."
+            echo "sandbox_changed=false" >> "$GITHUB_OUTPUT"
           fi
 
   # The four check jobs below run in parallel.  Splitting them off the
@@ -179,6 +195,13 @@ jobs:
     if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
 
+    # Required to ``docker pull`` the sandbox image from GHCR when its
+    # inputs are unchanged.  Read-only; the ``build-sandbox.yml`` workflow
+    # is the only writer.
+    permissions:
+      contents: read
+      packages: read
+
     services:
       postgres:
         image: postgres:17
@@ -212,6 +235,41 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
+      - name: Log in to GHCR
+        # Needed only for the ``docker pull`` path below.  When the sandbox
+        # is being rebuilt locally this login is unused but harmless.
+        if: needs.detect.outputs.sandbox_changed == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull sandbox image from GHCR
+        # ``:smoked`` is set by ``build-sandbox.yml``'s smoke job after the
+        # contract test passes, so PRs never get an unverified image.
+        # Retag under the CI-local ``aios-sandbox:ci`` name the E2E step's
+        # ``AIOS_DOCKER_IMAGE`` env points at — see the build step below
+        # for why a non-GHCR-prefixed tag matters (the
+        # ``test_sandbox_image_contract`` silent-fallback footgun from
+        # PR #670).
+        #
+        # The sanity probes (``image inspect`` + ``which tool``) mirror
+        # the build step's probes: the pulled image must satisfy the
+        # same contract the built one does, otherwise a stale ``:smoked``
+        # (e.g. ``bin/tool`` advanced on master between this PR's base
+        # and the last ``build-sandbox.yml`` publish) would silently
+        # produce a misroute later in the E2E run.
+        if: needs.detect.outputs.sandbox_changed == 'false'
+        run: |
+          docker pull ghcr.io/eumemic/aios-sandbox:smoked
+          docker tag ghcr.io/eumemic/aios-sandbox:smoked aios-sandbox:ci
+          docker image inspect aios-sandbox:ci --format 'image registered: {{.Id}}'
+          docker run --rm aios-sandbox:ci which tool || {
+            echo "::error::bin/tool not found in pulled image — :smoked tag is stale relative to HEAD"
+            exit 1
+          }
+
       - name: Build sandbox image
         # CI-local tag (no registry prefix) — pairs with the
         # ``AIOS_DOCKER_IMAGE`` env on the E2E step. The
@@ -228,6 +286,7 @@ jobs:
         # later. ``set -euo pipefail`` is the workflow default but
         # the explicit ``|| exit 1`` after the ``docker run`` makes
         # the failure mode obvious in the log.
+        if: needs.detect.outputs.sandbox_changed == 'true'
         run: |
           docker build -t aios-sandbox:ci -f docker/Dockerfile.sandbox .
           docker image inspect aios-sandbox:ci --format 'image registered: {{.Id}}'
