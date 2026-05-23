@@ -82,6 +82,25 @@ def _workspace_root_prefix() -> str:
 
 
 def upgrade() -> None:
+    # Skip the env-var requirement when there's nothing to backfill.
+    # Fresh-DB test fixtures (no legacy rows) and prod re-runs (already
+    # backfilled) both hit this path — the migration becomes a no-op
+    # without forcing the operator to thread AIOS_WORKSPACE_ROOT through
+    # contexts where it's irrelevant. When real legacy rows exist,
+    # _workspace_root_prefix() still fail-louds on missing/relative env.
+    bind = op.get_bind()
+    legacy_count = bind.execute(
+        text(
+            """
+            SELECT COUNT(*) FROM sessions
+             WHERE workspace_volume_path NOT LIKE '/%'
+               AND workspace_volume_path LIKE :legacy_pattern
+            """
+        ).bindparams(legacy_pattern=f"{_LEGACY_PREFIX}/%")
+    ).scalar()
+    if legacy_count == 0:
+        return
+
     prefix = _workspace_root_prefix()
     # Replace the leading ``workspaces`` component with the absolute prefix
     # so ``workspaces/<acc>/<sess>`` becomes ``<prefix>/<acc>/<sess>`` —
