@@ -197,9 +197,15 @@ def test_absolute_paths_untouched(postgres: object) -> None:
 @needs_docker
 @pytest.mark.integration
 def test_migration_is_idempotent(postgres: object) -> None:
-    """Running 0057 a second time (downgrade then upgrade) doesn't double the
-    prefix.  ``WHERE workspace_volume_path NOT LIKE '/%'`` ensures the
-    already-rewritten absolute rows don't re-match on a re-upgrade."""
+    """``upgrade -> downgrade -> upgrade`` converges on the same absolute path.
+
+    Idempotency here means "the migration is reversible and re-applicable":
+    the downgrade restores the legacy relative form, the second upgrade
+    re-runs the rewrite and lands on the same absolute path as the first
+    run — no double prefix.  (The ``WHERE NOT LIKE '/%'`` guard that
+    protects a hypothetical ``upgrade -> upgrade`` against double-prefixing
+    is exercised indirectly: it's what ensures a re-application produces a
+    stable result rather than compounding.)"""
     db_url = _alembic_url(postgres)
     workspace_root = "/var/lib/aios/workspaces"
 

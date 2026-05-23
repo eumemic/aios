@@ -131,18 +131,26 @@ def downgrade() -> None:
     # to live under the same prefix would also be rewritten here, but
     # downgrading is already destructive (turns absolute paths back into
     # relative ones), so the asymmetry is acceptable.
+    #
+    # ``AIOS_WORKSPACE_ROOT`` is operator-supplied and may contain LIKE
+    # metacharacters (``_``, ``%``, or ``\\``); escape them so the pattern
+    # matches the literal prefix rather than over-matching.  The companion
+    # ``ESCAPE '\\'`` clause tells Postgres the backslash is the escape
+    # character (otherwise its default behavior is implementation-defined
+    # and surprising to read).
+    escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     op.execute(
         text(
-            """
+            r"""
             UPDATE sessions
                SET workspace_volume_path =
                        :legacy_prefix
                        || SUBSTRING(workspace_volume_path FROM :prefix_len + 1)
-             WHERE workspace_volume_path LIKE :prefix_pattern
+             WHERE workspace_volume_path LIKE :prefix_pattern ESCAPE '\'
             """
         ).bindparams(
             legacy_prefix=_LEGACY_PREFIX,
             prefix_len=len(prefix),
-            prefix_pattern=f"{prefix}/%",
+            prefix_pattern=f"{escaped_prefix}/%",
         )
     )
