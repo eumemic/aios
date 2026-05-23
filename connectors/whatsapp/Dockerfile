@@ -61,6 +61,7 @@ WORKDIR /app
 COPY packages/aios-sdk /app/packages/aios-sdk
 COPY packages/aios-connector-http /app/packages/aios-connector-http
 COPY connectors/whatsapp/pyproject.toml /app/connectors/whatsapp/pyproject.toml
+COPY connectors/whatsapp/README.md /app/connectors/whatsapp/README.md
 COPY connectors/whatsapp/src /app/connectors/whatsapp/src
 
 # ``--no-sources`` ignores ``[tool.uv.sources]`` workspace-deps which
