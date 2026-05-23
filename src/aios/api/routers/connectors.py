@@ -462,21 +462,16 @@ async def post_runtime_lifecycle(
         connection = await queries.get_connection(conn, body.connection_id, account_id=account_id)
         _check_runtime_scope(auth_connector, connection.connector)
         _check_runtime_connection_scope(auth_connection_ids, body.connection_id)
-        bound = await queries.list_chat_sessions_for_connection(
+        # Both binding lineages: the active single_session binding on
+        # this connection AND any per-chat-spawned chat_sessions rows.
+        # list_session_ids_for_connection unions+dedups.  Without the
+        # union the smoke (single_session-bound bot) saw the endpoint
+        # silently succeed against an empty list.
+        session_ids = await queries.list_session_ids_for_connection(
             conn,
             body.connection_id,
             account_id=account_id,
         )
-    # Dedup session ids — per-chat-spawning can register the same
-    # session against multiple chat_ids and we don't want to double-
-    # append the same lifecycle event on those rows.
-    seen: set[str] = set()
-    session_ids: list[str] = []
-    for _chat_id, sess_id, _created in bound:
-        if sess_id in seen:
-            continue
-        seen.add(sess_id)
-        session_ids.append(sess_id)
     payload: dict[str, Any] = {
         "event": body.event,
         "connection_id": body.connection_id,

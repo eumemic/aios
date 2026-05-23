@@ -4105,6 +4105,41 @@ async def list_chat_sessions_for_connection(
     return [(r["chat_id"], r["session_id"], r["created_at"]) for r in rows]
 
 
+async def list_session_ids_for_connection(
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    account_id: str,
+) -> list[str]:
+    """List every distinct session_id bound to ``connection_id`` via
+    either lineage path:
+
+    * Active single_session binding on this connection.
+    * Per-chat-spawned rows in ``chat_sessions`` for this connection.
+
+    Same union :func:`is_session_bound_to_connection` checks for, but
+    enumerated — used by the runtime/lifecycle endpoint to broadcast
+    a connection-broken event onto every bound session at once.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT session_id FROM bindings
+         WHERE connection_id = $1
+           AND account_id = $2
+           AND mode = 'single_session'
+           AND archived_at IS NULL
+           AND session_id IS NOT NULL
+        UNION
+        SELECT session_id FROM chat_sessions
+         WHERE connection_id = $1
+           AND account_id = $2
+        """,
+        connection_id,
+        account_id,
+    )
+    return [r["session_id"] for r in rows]
+
+
 # ─── routing_rules (#328 PR 2/4 — per-binding prefix demux) ─────────────────
 
 
