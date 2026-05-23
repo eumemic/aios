@@ -226,7 +226,19 @@ func (c *Client) extractEditInfo(evt *events.Message) *editInfo {
 			)
 			return out
 		}
-		out.newText = extractText(decrypted)
+		// The decrypted plaintext is itself wrapped as a
+		// ProtocolMessage{Type: MESSAGE_EDIT, EditedMessage: {…}} —
+		// same shape as the legacy path's outer envelope, just one
+		// level deeper.  Unwrap to reach the new body; fall back to
+		// the top-level Message for forward-compatibility if a future
+		// whatsmeow version flattens the structure.
+		if pm := decrypted.GetProtocolMessage(); pm != nil && pm.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT {
+			if edited := pm.GetEditedMessage(); edited != nil {
+				out.newText = extractText(edited)
+			}
+		} else {
+			out.newText = extractText(decrypted)
+		}
 		return out
 	}
 	return nil
