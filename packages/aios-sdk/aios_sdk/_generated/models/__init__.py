@@ -114,7 +114,12 @@ from .mint_account_request import MintAccountRequest
 from .mint_account_response import MintAccountResponse
 from .mint_key_request import MintKeyRequest
 from .mint_key_response import MintKeyResponse
+from .post_connector_runtime_lifecycle_response_post_connector_runtime_lifecycle import (
+    PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle,
+)
 from .recent_chat import RecentChat
+from .runtime_lifecycle_request import RuntimeLifecycleRequest
+from .runtime_lifecycle_request_data_type_0 import RuntimeLifecycleRequestDataType0
 from .runtime_management_call_result_request import RuntimeManagementCallResultRequest
 from .runtime_token import RuntimeToken
 from .runtime_token_issue import RuntimeTokenIssue
@@ -192,6 +197,14 @@ from .vault_update_metadata_type_0 import VaultUpdateMetadataType0
 from .wait_response import WaitResponse
 from .wait_response_session_status import WaitResponseSessionStatus
 from .wait_response_session_stop_reason_type_0 import WaitResponseSessionStopReasonType0
+from .whatsapp_confirm_pairing_request import WhatsappConfirmPairingRequest
+from .whatsapp_confirm_pairing_response import WhatsappConfirmPairingResponse
+from .whatsapp_confirm_pairing_response_status import (
+    WhatsappConfirmPairingResponseStatus,
+)
+from .whatsapp_start_pairing_request import WhatsappStartPairingRequest
+from .whatsapp_start_pairing_response import WhatsappStartPairingResponse
+from .whatsapp_unpair_request import WhatsappUnpairRequest
 
 __all__ = (
     "Account",
@@ -304,7 +317,10 @@ __all__ = (
     "MintAccountResponse",
     "MintKeyRequest",
     "MintKeyResponse",
+    "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "RecentChat",
+    "RuntimeLifecycleRequest",
+    "RuntimeLifecycleRequestDataType0",
     "RuntimeManagementCallResultRequest",
     "RuntimeToken",
     "RuntimeTokenIssue",
@@ -380,4 +396,10 @@ __all__ = (
     "WaitResponse",
     "WaitResponseSessionStatus",
     "WaitResponseSessionStopReasonType0",
+    "WhatsappConfirmPairingRequest",
+    "WhatsappConfirmPairingResponse",
+    "WhatsappConfirmPairingResponseStatus",
+    "WhatsappStartPairingRequest",
+    "WhatsappStartPairingResponse",
+    "WhatsappUnpairRequest",
 )

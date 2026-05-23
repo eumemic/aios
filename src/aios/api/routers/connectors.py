@@ -9,9 +9,12 @@ The file groups three sections:
    ``/runtime/management-call-results``.  The bearer scopes the caller
    to one ``connector`` type; ``connection_id`` rides as a form/query
    field for the routes that operate on a specific connection.
-2. **Operator-facing signal management** (``AuthDep``, operator API key):
-   ``/signal/register``, ``/signal/verify``, ``/signal/profile``.  These
-   block-await the connector's resolution via the
+2. **Operator-facing per-connector management** (``AuthDep``, operator
+   API key):
+   * Signal: ``/signal/register``, ``/signal/verify``, ``/signal/profile``.
+   * WhatsApp: ``/whatsapp/start-pairing``, ``/whatsapp/confirm-pairing``,
+     ``/whatsapp/unpair``.
+   These block-await the connector's resolution via the
    ``connector_result_<call_id>`` LISTEN channel.
 
 Section banners (``# ───`) below mark the boundary.
@@ -65,9 +68,9 @@ from aios.services import sessions as sessions_service
 from aios.services.attachment_staging import InboundAttachment
 from aios.services.wake import defer_wake
 
-router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
-
 log = get_logger("aios.api.routers.connectors")
+
+router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
 
 
 # ─── connector-facing endpoints (#301) ──────────────────────────────────────
@@ -218,6 +221,31 @@ class RuntimeToolResultRequest(BaseModel):
     tool_call_id: str
     content: str | list[dict[str, Any]]
     is_error: bool = False
+
+
+class RuntimeLifecycleRequest(BaseModel):
+    """Body for ``POST /v1/connectors/runtime/lifecycle``.
+
+    Lets a connector emit a lifecycle event onto each session bound to
+    ``connection_id`` — used today for "the underlying transport just
+    went away" notifications (WhatsApp daemon crashed, peer logged the
+    device out, etc.) so the model sees the connection-broken state in
+    its context instead of silently failing the next outbound.
+
+    ``event`` is a connector-namespaced kind ("whatsapp.connection.lost",
+    "signal.daemon.exited") — the connector chooses the vocabulary.
+    ``reason`` is an optional short tag the harness surfaces alongside
+    the event for the model to act on ("daemon_crashed", "peer_logout").
+    ``data`` is an optional free-form dict for connector-specific
+    context (current device count, last successful timestamp, etc.).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connection_id: str
+    event: str
+    reason: str | None = None
+    data: dict[str, Any] | None = None
 
 
 def _check_runtime_scope(auth_connector: str, target_connector: str) -> None:
@@ -405,6 +433,84 @@ async def post_runtime_inbound(
         timestamp=timestamp,
         attachments=attachments,
     )
+
+
+@router.post(
+    "/runtime/lifecycle",
+    operation_id="post_connector_runtime_lifecycle",
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_runtime_lifecycle(
+    body: RuntimeLifecycleRequest,
+    pool: PoolDep,
+    auth: RuntimeAuthDep,
+) -> dict[str, Any]:
+    """Append a ``kind=lifecycle`` event onto every session bound to
+    ``body.connection_id``.
+
+    Authorization mirrors the inbound + tool-result paths: the bearer's
+    connector must match ``body.connection_id``'s connector, and any
+    bearer-side allowlist must include the connection_id (#350).
+
+    Returns ``{"appended_session_ids": [...]}`` enumerating the sessions
+    that received the event.  An empty list means no sessions were
+    bound at the time of the call (e.g. the operator detached every
+    session before the connector finished tearing down); not an error.
+    """
+    _, auth_connector, account_id, auth_connection_ids = auth
+    async with pool.acquire() as conn:
+        connection = await queries.get_connection(conn, body.connection_id, account_id=account_id)
+        _check_runtime_scope(auth_connector, connection.connector)
+        _check_runtime_connection_scope(auth_connection_ids, body.connection_id)
+        # Both binding lineages: the active single_session binding on
+        # this connection AND any per-chat-spawned chat_sessions rows.
+        # list_session_ids_for_connection unions+dedups.  Without the
+        # union the smoke (single_session-bound bot) saw the endpoint
+        # silently succeed against an empty list.
+        session_ids = await queries.list_session_ids_for_connection(
+            conn,
+            body.connection_id,
+            account_id=account_id,
+        )
+    payload: dict[str, Any] = {
+        "event": body.event,
+        "connection_id": body.connection_id,
+        "connector": connection.connector,
+    }
+    if body.reason is not None:
+        payload["reason"] = body.reason
+    if body.data is not None:
+        payload["data"] = body.data
+    # Per-session try/except: a single archived/missing session shouldn't
+    # 500 the whole call and leave callers unable to tell which sessions
+    # actually got the event.  Each successful append is committed by its
+    # own pool acquire in append_event, so partials are visible to clients
+    # whether or not we surface them — surface them.
+    appended: list[str] = []
+    failed: list[dict[str, str]] = []
+    for sess_id in session_ids:
+        try:
+            await sessions_service.append_event(
+                pool,
+                sess_id,
+                "lifecycle",
+                payload,
+                account_id=account_id,
+            )
+            appended.append(sess_id)
+        except Exception as exc:
+            log.warning(
+                "connector.lifecycle.append_failed",
+                connection_id=body.connection_id,
+                session_id=sess_id,
+                error=type(exc).__name__,
+                detail=str(exc)[:300],
+            )
+            failed.append({"session_id": sess_id, "error": type(exc).__name__})
+    result: dict[str, Any] = {"appended_session_ids": appended}
+    if failed:
+        result["failed_session_ids"] = failed
+    return result
 
 
 @router.post(
@@ -733,6 +839,181 @@ async def post_signal_profile(
         pool,
         account_id=account_id,
         method="updateProfile",
+        params=body.model_dump(exclude_none=True),
+        timeout_s=30.0,
+    )
+
+
+# ─── operator-facing whatsapp management routes ───────────────────────
+
+
+class WhatsappStartPairingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_account_id: str
+
+
+class WhatsappStartPairingResponse(BaseModel):
+    external_account_id: str
+    code: str
+
+
+class WhatsappConfirmPairingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_account_id: str
+
+
+class WhatsappConfirmPairingResponse(BaseModel):
+    """``status`` is the terminal pairing outcome; ``jid`` / ``push_name``
+    are populated on success, ``reason`` on error / timeout."""
+
+    external_account_id: str
+    status: Literal["success", "timeout", "error"]
+    jid: str | None = None
+    push_name: str | None = None
+    reason: str | None = None
+
+
+class WhatsappUnpairRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_account_id: str
+
+
+async def _whatsapp_management_call(
+    db_url: str,
+    pool: PoolDep,
+    *,
+    account_id: str,
+    method: str,
+    params: dict[str, Any],
+    timeout_s: float,
+) -> Any:
+    result, is_error = await management_calls.submit_call(
+        db_url,
+        pool,
+        connector="whatsapp",
+        method=method,
+        params=params,
+        timeout_s=timeout_s,
+        account_id=account_id,
+    )
+    if is_error:
+        # The connector emits a structured ``no_active_connection``
+        # payload when the operator's external_account_id doesn't
+        # match any running connection.  Surface as 404 so operator
+        # tooling can discriminate "wrong target" from "daemon crashed".
+        if isinstance(result, dict) and result.get("status") == "no_active_connection":
+            raise NotFoundError(
+                f"no active whatsapp connection for {result.get('external_account_id')!r}",
+                detail={"external_account_id": result.get("external_account_id")},
+            )
+        raise ConnectorCallFailedError(
+            f"whatsapp connector failed {method!r}",
+            detail={"method": method, "connector_error": result},
+        )
+    return result
+
+
+@router.post(
+    "/whatsapp/start-pairing",
+    operation_id="post_connector_whatsapp_start_pairing",
+)
+async def post_whatsapp_start_pairing(
+    body: WhatsappStartPairingRequest,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> WhatsappStartPairingResponse:
+    """Initiate QR pairing.  Returns the first QR code; the operator
+    scans within whatsmeow's QR window (~20 s before rotation, ~100 s
+    total).  The follow-up ``/confirm-pairing`` blocks until the
+    pairing terminates."""
+    result = await _whatsapp_management_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="startPairing",
+        params=body.model_dump(exclude_none=True),
+        timeout_s=30.0,
+    )
+    code = result.get("code") if isinstance(result, dict) else None
+    if not code:
+        # Fail loud rather than 200 OK with an empty QR — operators
+        # printing the response would otherwise show a blank code with
+        # no diagnostic.
+        raise ConnectorCallFailedError(
+            "whatsapp connector startPairing returned no code",
+            detail={"method": "startPairing", "connector_result": result},
+        )
+    return WhatsappStartPairingResponse(
+        external_account_id=body.external_account_id,
+        code=str(code),
+    )
+
+
+@router.post(
+    "/whatsapp/confirm-pairing",
+    operation_id="post_connector_whatsapp_confirm_pairing",
+)
+async def post_whatsapp_confirm_pairing(
+    body: WhatsappConfirmPairingRequest,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> WhatsappConfirmPairingResponse:
+    """Block until pairing terminates.  Long-poll: up to ~180 s server-side
+    so a slow scan doesn't trip the HTTP timeout before the daemon
+    itself reports timeout."""
+    result = await _whatsapp_management_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="confirmPairing",
+        params=body.model_dump(exclude_none=True),
+        timeout_s=240.0,
+    )
+    raw_status = result.get("status") if isinstance(result, dict) else None
+    if raw_status not in ("success", "timeout", "error"):
+        # Unknown / empty daemon status: surface as "error" with the
+        # raw value as reason so the Pydantic Literal doesn't 500.
+        return WhatsappConfirmPairingResponse(
+            external_account_id=body.external_account_id,
+            status="error",
+            reason=(
+                f"unrecognized daemon status: {raw_status!r}"
+                if raw_status
+                else "daemon returned empty status"
+            ),
+        )
+    return WhatsappConfirmPairingResponse(
+        external_account_id=body.external_account_id,
+        status=raw_status,
+        jid=result.get("jid"),
+        push_name=result.get("push_name"),
+        reason=result.get("reason"),
+    )
+
+
+@router.post(
+    "/whatsapp/unpair",
+    operation_id="post_connector_whatsapp_unpair",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def post_whatsapp_unpair(
+    body: WhatsappUnpairRequest,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> None:
+    """Log out the WhatsApp device on the server; clears the local
+    sqlstore so the next ``/start-pairing`` provisions a fresh device."""
+    await _whatsapp_management_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="unpair",
         params=body.model_dump(exclude_none=True),
         timeout_s=30.0,
     )

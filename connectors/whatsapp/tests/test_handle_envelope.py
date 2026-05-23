@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from aios_whatsapp.connector import WhatsappConnector
 
 from .conftest import CONNECTION_ID, GROUP_JID, PEER_JID, dm_payload
@@ -61,3 +63,166 @@ async def test_handle_inbound_drops_broadcast(connector: WhatsappConnector) -> N
         dm_payload(chat_jid="12345@broadcast", chat_type="broadcast"),
     )
     connector.emit_inbound.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+async def test_handle_inbound_reads_attachment_bytes(
+    connector: WhatsappConnector, tmp_path: Path
+) -> None:
+    # Daemon writes media to disk; connector reads bytes off-loop and
+    # forwards (filename, bytes, content_type) tuples to emit_inbound.
+    img = tmp_path / "photo.jpg"
+    img.write_bytes(b"jpeg-bytes")
+    p = dm_payload(text="caption")
+    p["attachments"] = [{"path": str(img), "mimetype": "image/jpeg", "filename": "photo.jpg"}]
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["content"] == "caption"
+    assert kwargs["attachments"] == [("photo.jpg", b"jpeg-bytes", "image/jpeg")]
+
+
+async def test_handle_inbound_attachment_only_emits_with_empty_text(
+    connector: WhatsappConnector, tmp_path: Path
+) -> None:
+    img = tmp_path / "photo.jpg"
+    img.write_bytes(b"jpeg-bytes")
+    p = dm_payload(text="")
+    p["attachments"] = [{"path": str(img), "mimetype": "image/jpeg", "filename": "photo.jpg"}]
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["content"] == ""
+    assert len(kwargs["attachments"]) == 1
+
+
+async def test_handle_inbound_sticker_emoji_in_metadata(connector: WhatsappConnector) -> None:
+    p = dm_payload(text="")
+    p["sticker_emoji"] = "🎉"
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["metadata"]["sticker_emoji"] == "🎉"
+    # Sticker-only messages carry empty content — the emoji IS the signal.
+    assert kwargs["content"] == ""
+    assert kwargs["attachments"] is None
+
+
+async def test_handle_inbound_skips_unreadable_attachment(
+    connector: WhatsappConnector, tmp_path: Path
+) -> None:
+    # If the daemon wrote two attachments and one got truncated /
+    # removed before we read, surface the readable ones rather than
+    # drop the whole message.
+    good = tmp_path / "good.jpg"
+    good.write_bytes(b"jpeg")
+    bad = tmp_path / "missing.jpg"  # never created
+    p = dm_payload(text="see attached")
+    p["attachments"] = [
+        {"path": str(bad), "mimetype": "image/jpeg", "filename": "bad.jpg"},
+        {"path": str(good), "mimetype": "image/jpeg", "filename": "good.jpg"},
+    ]
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["attachments"] == [("good.jpg", b"jpeg", "image/jpeg")]
+
+
+async def test_handle_inbound_reaction_stamps_metadata(connector: WhatsappConnector) -> None:
+    # Peer reacts to one of our messages — surface as
+    # metadata.reaction with empty content; the model uses
+    # target_message_id to match against its own send history.
+    p = dm_payload(text="")
+    p["reaction"] = {"emoji": "👍", "target_message_id": "3EB0OURMSG"}
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["content"] == ""
+    assert kwargs["metadata"]["reaction"] == {
+        "emoji": "👍",
+        "target_message_id": "3EB0OURMSG",
+    }
+
+
+async def test_handle_inbound_reaction_removal_passes_through(
+    connector: WhatsappConnector,
+) -> None:
+    p = dm_payload(text="")
+    p["reaction"] = {"emoji": "", "target_message_id": "3EB0OURMSG"}
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["metadata"]["reaction"]["emoji"] == ""
+
+
+async def test_handle_inbound_edit_stamps_metadata(connector: WhatsappConnector) -> None:
+    # Peer edited their earlier message — content is the new body,
+    # metadata.edited=True flags the rewrite for the harness's
+    # context renderer.
+    p = dm_payload(text="corrected text")
+    p["edit"] = {"target_message_id": "3EB0ORIGINAL"}
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["content"] == "corrected text"
+    assert kwargs["metadata"]["edited"] is True
+    assert kwargs["metadata"]["edit_target_message_id"] == "3EB0ORIGINAL"
+
+
+async def test_handle_inbound_revoke_stamps_metadata(connector: WhatsappConnector) -> None:
+    p = dm_payload(text="")
+    p["revoke"] = {"target_message_id": "3EB0ORIGINAL"}
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["content"] == ""
+    assert kwargs["metadata"]["revoked"] is True
+    assert kwargs["metadata"]["revoke_target_message_id"] == "3EB0ORIGINAL"
+
+
+async def test_handle_inbound_mentions_surface_as_phone_in_uuid_field(
+    connector: WhatsappConnector,
+) -> None:
+    # Inbound mentioned_jids surface as metadata.mentions list with
+    # ``uuid`` holding the +E.164 form (what the model would write
+    # in outbound text) and ``jid`` for completeness.
+    p = dm_payload(text="hey @+15551234567")
+    p["mentioned_jids"] = ["15551234567@s.whatsapp.net"]
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["metadata"]["mentions"] == [
+        {"uuid": "+15551234567", "jid": "15551234567@s.whatsapp.net"},
+    ]
+
+
+async def test_handle_inbound_lid_mention_falls_back_to_raw_jid(
+    connector: WhatsappConnector,
+) -> None:
+    # LID JIDs (linked-device identity) and group JIDs aren't phone-
+    # like; the connector falls back to the raw JID rather than
+    # losing the mention entirely.
+    p = dm_payload(text="hey")
+    p["mentioned_jids"] = ["98765@lid"]
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["metadata"]["mentions"] == [{"uuid": "98765@lid", "jid": "98765@lid"}]
+
+
+async def test_handle_inbound_all_attachments_unreadable_stamps_metadata(
+    connector: WhatsappConnector, tmp_path: Path
+) -> None:
+    # Daemon declared 2 attachments but both files are missing /
+    # truncated before connector reads.  Pre-fix: model saw an empty
+    # message with no clue bytes were lost.  Post-fix: metadata.
+    # attachments_unreadable=2 surfaces the loss to the model.
+    p = dm_payload(text="check these out")
+    p["attachments"] = [
+        {"path": str(tmp_path / "missing1.jpg"), "mimetype": "image/jpeg", "filename": "a.jpg"},
+        {"path": str(tmp_path / "missing2.jpg"), "mimetype": "image/jpeg", "filename": "b.jpg"},
+    ]
+    await connector._handle_inbound_message(CONNECTION_ID, p)
+
+    kwargs = connector.emit_inbound.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["attachments"] is None
+    assert kwargs["metadata"]["attachments_unreadable"] == 2

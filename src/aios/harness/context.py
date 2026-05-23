@@ -132,13 +132,39 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
             # The raw int still goes to the model; only the ISO is dropped.
             parts.append(f"timestamp_ms={timestamp_ms}")
     message_id = metadata.get("message_id")
+    # Telegram surfaces ints; WhatsApp's whatsmeow IDs are hex strings
+    # like "3EB0E03B46303C22D750E2".  Both render the same — the model
+    # only needs the value verbatim to pass into react/edit/delete tools.
     if isinstance(message_id, int):
         parts.append(f"message_id={message_id}")
+    elif isinstance(message_id, str) and message_id:
+        parts.append(f"message_id={message_id!r}")
     if metadata.get("edited") is True:
         parts.append("edited=true")
     edit_target = metadata.get("edit_target_timestamp_ms")
     if isinstance(edit_target, int):
         parts.append(f"edit_target_timestamp_ms={edit_target}")
+    edit_target_message_id = metadata.get("edit_target_message_id")
+    if isinstance(edit_target_message_id, str) and edit_target_message_id:
+        # WhatsApp identifies edit targets by string message_id, not
+        # by Signal's timestamp_ms.  Render verbatim so the model can
+        # match the target against the message_id of a prior event.
+        parts.append(f"edit_target_message_id={edit_target_message_id!r}")
+    if metadata.get("revoked") is True:
+        parts.append("revoked=true")
+    revoke_target_message_id = metadata.get("revoke_target_message_id")
+    if isinstance(revoke_target_message_id, str) and revoke_target_message_id:
+        # The peer revoked their own message; the original event is
+        # still in the log (monotonicity), but the model should treat
+        # it as retracted going forward.
+        parts.append(f"revoke_target_message_id={revoke_target_message_id!r}")
+    quoted_message_id = metadata.get("quoted_message_id")
+    if isinstance(quoted_message_id, str) and quoted_message_id:
+        # The peer replied to a previous message in the chat (WhatsApp's
+        # reply gesture).  Renders the same shape as the edit/revoke
+        # target ids so the model can match it against the message_id
+        # header on a prior event.
+        parts.append(f"quoted_message_id={quoted_message_id!r}")
     if metadata.get("self_mentioned") is True:
         # Hoist ahead of the structured ``mentions`` list — for
         # group chats the model often only needs to know "was I
@@ -146,7 +172,16 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
         # alternative that #5 set out to eliminate.
         parts.append("self_mentioned=true")
     sticker_emoji = metadata.get("sticker_emoji")
-    if isinstance(sticker_emoji, str) and sticker_emoji:
+    if isinstance(sticker_emoji, str):
+        # Empty string means the connector saw a StickerMessage but
+        # the sender's WhatsApp client didn't pick an emoji label
+        # (custom stickers from the sticker maker land this way).
+        # Always render under the ``sticker_emoji=`` field name so
+        # the model's prompt contract (per the connector prompts.py
+        # mentioning ``metadata.sticker_emoji`` verbatim) stays
+        # consistent across labeled and unlabeled stickers — empty
+        # value still signals "a sticker arrived" without breaking
+        # the established field-name pattern.
         parts.append(f"sticker_emoji={sticker_emoji!r}")
     header = "[" + " · ".join(parts) + "]"
     mentions = metadata.get("mentions")
@@ -177,6 +212,13 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
         target_ts = reaction.get("target_timestamp_ms")
         if isinstance(target_ts, int):
             r_parts.append(f"target_timestamp_ms={target_ts}")
+        target_message_id = reaction.get("target_message_id")
+        if isinstance(target_message_id, str) and target_message_id:
+            # WhatsApp reactions identify their target by string
+            # message_id (no equivalent of Signal's author+timestamp
+            # pair).  Render verbatim so the model can match against
+            # the message_id of a prior event.
+            r_parts.append(f"target_message_id={target_message_id!r}")
         header += "\n[" + " · ".join(r_parts) + "]"
     reply_to = metadata.get("reply_to")
     if isinstance(reply_to, dict):

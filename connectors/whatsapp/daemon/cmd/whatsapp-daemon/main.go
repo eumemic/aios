@@ -66,7 +66,10 @@ func main() {
 	}
 	defer client.Close()
 
-	handler.RegisterSend(reg, client.SendMessage)
+	handler.RegisterSend(reg, sendAdapter(client))
+	handler.RegisterPairing(reg, &clientPairAdapter{client: client})
+	handler.RegisterMessageOps(reg, client)
+	handler.RegisterGroups(reg, &clientGroupsAdapter{client: client})
 
 	// Connect runs in parallel with srv.Run so the listener binds (and
 	// `version` RPC starts answering) while the WhatsApp handshake is
@@ -82,4 +85,101 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("daemon.exit.ok")
+}
+
+// sendAdapter bridges handler.Attachment → wameow.Attachment in the
+// same shape as clientPairAdapter does for pairing outcomes: the
+// wameow package mustn't import handler (or vice versa) to keep the
+// wire-vs-logic boundary clean, so the per-call memcopy sits here.
+func sendAdapter(client *wameow.Client) handler.SendMessageFn {
+	return func(ctx context.Context, jid, text string, atts []handler.Attachment, mentionedJIDs []string, quotedMessageID string) ([]string, int64, error) {
+		var wmAtts []wameow.Attachment
+		if len(atts) > 0 {
+			wmAtts = make([]wameow.Attachment, len(atts))
+			for i, a := range atts {
+				wmAtts[i] = wameow.Attachment{Path: a.Path, Mimetype: a.Mimetype, Filename: a.Filename}
+			}
+		}
+		return client.SendMessage(ctx, jid, text, wmAtts, mentionedJIDs, quotedMessageID)
+	}
+}
+
+// clientPairAdapter bridges wameow.Client to handler.Pairer.  The
+// translation step is a wameow.PairingOutcome → handler.PairingOutcome
+// memcopy; the wameow package can't import handler (would be a
+// dependency cycle once handler grows wameow-typed methods) so the
+// adapter sits in main.
+type clientPairAdapter struct {
+	client *wameow.Client
+}
+
+func (a *clientPairAdapter) StartPairing(ctx context.Context) (string, error) {
+	return a.client.StartPairing(ctx)
+}
+
+func (a *clientPairAdapter) ConfirmPairing(ctx context.Context) (handler.PairingOutcome, error) {
+	outcome, err := a.client.ConfirmPairing(ctx)
+	if err != nil {
+		return handler.PairingOutcome{}, err
+	}
+	return handler.PairingOutcome{
+		Status:   outcome.Status,
+		JID:      outcome.JID,
+		PushName: outcome.PushName,
+		Reason:   outcome.Reason,
+	}, nil
+}
+
+func (a *clientPairAdapter) Unpair(ctx context.Context) error {
+	return a.client.Unpair(ctx)
+}
+
+// clientGroupsAdapter bridges wameow.GroupSummary →
+// handler.GroupSummary so the handler package stays decoupled from
+// the wameow concrete type.  Same per-call memcopy pattern as
+// clientPairAdapter / sendAdapter.
+type clientGroupsAdapter struct {
+	client *wameow.Client
+}
+
+func (a *clientGroupsAdapter) ListGroups(ctx context.Context) ([]handler.GroupSummary, error) {
+	groups, err := a.client.ListGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]handler.GroupSummary, len(groups))
+	for i, g := range groups {
+		out[i] = wameowGroupToHandler(g)
+	}
+	return out, nil
+}
+
+func (a *clientGroupsAdapter) CreateGroup(ctx context.Context, name string, participantJIDs []string) (*handler.GroupSummary, error) {
+	g, err := a.client.CreateGroup(ctx, name, participantJIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := wameowGroupToHandler(*g)
+	return &out, nil
+}
+
+func (a *clientGroupsAdapter) RenameGroup(ctx context.Context, groupJID, name string) error {
+	return a.client.RenameGroup(ctx, groupJID, name)
+}
+
+func wameowGroupToHandler(g wameow.GroupSummary) handler.GroupSummary {
+	parts := make([]handler.GroupParticipantInfo, len(g.Participants))
+	for i, p := range g.Participants {
+		parts[i] = handler.GroupParticipantInfo{
+			JID:      p.JID,
+			IsAdmin:  p.IsAdmin,
+			AddError: p.AddError,
+		}
+	}
+	return handler.GroupSummary{
+		JID:          g.JID,
+		Name:         g.Name,
+		Topic:        g.Topic,
+		Participants: parts,
+	}
 }

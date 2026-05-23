@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from aios_whatsapp.parse import InboundMessage, parse_message
+from aios_whatsapp.parse import (
+    InboundAttachment,
+    InboundMessage,
+    InboundReaction,
+    parse_message,
+)
 
 from .conftest import GROUP_JID, PEER_JID, dm_payload, group_payload
 
@@ -70,3 +75,196 @@ def test_parse_message_tolerates_missing_push_name() -> None:
     msg = parse_message(p)
     assert msg is not None
     assert msg.sender_name is None
+
+
+def test_parse_message_carries_attachments() -> None:
+    p = dm_payload(text="check this out")
+    p["attachments"] = [
+        {"path": "/tmp/media/3EB0X_photo.jpg", "mimetype": "image/jpeg", "filename": "photo.jpg"}
+    ]
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.attachments == (
+        InboundAttachment(
+            host_path="/tmp/media/3EB0X_photo.jpg",
+            filename="photo.jpg",
+            content_type="image/jpeg",
+        ),
+    )
+    assert msg.text == "check this out"
+
+
+def test_parse_message_keeps_attachment_only_message() -> None:
+    # Previously, an empty-text payload was dropped wholesale.  PR 5
+    # inverts that: an image-only message is signal worth surfacing —
+    # the harness can still render "received an image" via the
+    # attachment metadata.
+    p = dm_payload(text="")
+    p["attachments"] = [
+        {"path": "/tmp/m/3EB0Y.jpg", "mimetype": "image/jpeg", "filename": "photo.jpg"}
+    ]
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.text == ""
+    assert len(msg.attachments) == 1
+
+
+def test_parse_message_drops_malformed_attachment_entries() -> None:
+    # The daemon emits only complete entries on success, but defending
+    # against partial dicts protects the connector from a future
+    # daemon-side regression silently dropping a path field.
+    p = dm_payload(text="caption")
+    p["attachments"] = [
+        {"path": "/tmp/m/a.jpg", "mimetype": "image/jpeg", "filename": "a.jpg"},
+        {"path": "", "mimetype": "image/jpeg", "filename": "b.jpg"},  # bad path
+        {"path": "/tmp/m/c.jpg", "mimetype": "", "filename": "c.jpg"},  # bad mime
+        "not-a-dict",  # bad type entirely
+    ]
+    msg = parse_message(p)
+    assert msg is not None
+    assert len(msg.attachments) == 1
+    assert msg.attachments[0].filename == "a.jpg"
+
+
+def test_parse_message_sticker_emoji_kept_without_text() -> None:
+    p = dm_payload(text="")
+    p["sticker_emoji"] = "🎉"
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.sticker_emoji == "🎉"
+    assert msg.attachments == ()
+
+
+def test_parse_message_keeps_sticker_with_empty_emoji() -> None:
+    # Custom stickers from WhatsApp's sticker maker often carry no
+    # emoji label; the daemon now emits sticker_emoji="" instead of
+    # omitting the key so parse_message must keep the envelope.
+    # Pre-fix the message would land here without the key set, get
+    # dropped as "no signal", and the model would never know the peer
+    # sent a sticker.
+    p = dm_payload(text="")
+    p["sticker_emoji"] = ""
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.sticker_emoji == ""
+
+
+def test_parse_message_drops_when_no_signal_at_all() -> None:
+    # No text, no attachments, no sticker, no reaction — nothing for
+    # the model to act on, so silently drop.
+    p = dm_payload(text="")
+    assert parse_message(p) is None
+
+
+def test_parse_message_carries_quoted_message_id() -> None:
+    p = dm_payload(text="thanks for that")
+    p["quoted_message_id"] = "3EB0PEERTARGET"
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.quoted_message_id == "3EB0PEERTARGET"
+
+
+def test_parse_message_quoted_message_id_absent_by_default() -> None:
+    p = dm_payload(text="hello")
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.quoted_message_id is None
+
+
+def test_parse_message_carries_reaction() -> None:
+    p = dm_payload(text="")
+    p["reaction"] = {"emoji": "👍", "target_message_id": "3EB0ORIGINAL"}
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.reaction == InboundReaction(emoji="👍", target_message_id="3EB0ORIGINAL")
+    assert msg.text == ""
+
+
+def test_parse_message_reaction_removal_keeps_event() -> None:
+    # Empty emoji = peer cleared their prior reaction.  Surface
+    # explicitly so the model can update its mental model.
+    p = dm_payload(text="")
+    p["reaction"] = {"emoji": "", "target_message_id": "3EB0ORIGINAL"}
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.reaction is not None
+    assert msg.reaction.emoji == ""
+
+
+def test_parse_message_drops_reaction_without_target_id() -> None:
+    # A reaction with no target_message_id can't be matched against
+    # anything in the model's context — drop it rather than surface a
+    # half-populated event that confuses the model.
+    p = dm_payload(text="")
+    p["reaction"] = {"emoji": "👍"}
+    assert parse_message(p) is None
+
+
+def test_parse_message_edit_carries_target_and_new_text() -> None:
+    # Daemon overrides text to the edited body and surfaces the
+    # target_message_id in an "edit" block.  parse.py exposes both
+    # so the connector can stamp "edited=true" on the metadata.
+    p = dm_payload(text="this is the corrected version")
+    p["edit"] = {"target_message_id": "3EB0ORIGINAL"}
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.text == "this is the corrected version"
+    assert msg.edit_target_message_id == "3EB0ORIGINAL"
+
+
+def test_parse_message_revoke_kept_with_empty_text() -> None:
+    # A revoke carries no replacement body — the empty text is the
+    # signal alongside the revoke block.  Must survive the "no
+    # signal" drop.
+    p = dm_payload(text="")
+    p["revoke"] = {"target_message_id": "3EB0ORIGINAL"}
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.text == ""
+    assert msg.revoke_target_message_id == "3EB0ORIGINAL"
+
+
+def test_parse_message_drops_edit_revoke_without_target_id() -> None:
+    # Same defense-in-depth as the reaction path: a target-less
+    # protocol message can't be matched, so silently drop.
+    p = dm_payload(text="")
+    p["edit"] = {}
+    assert parse_message(p) is None
+    p = dm_payload(text="")
+    p["revoke"] = {"target_message_id": ""}
+    assert parse_message(p) is None
+
+
+def test_parse_message_drops_whitespace_only_text() -> None:
+    # Whitespace ("   ", "\n", etc.) is truthy in Python but carries
+    # no model-relevant signal — peer mis-tapped or sent an
+    # accessibility-input artifact.  Drop just like empty text.
+    assert parse_message(dm_payload(text="   ")) is None
+    assert parse_message(dm_payload(text="\n\t")) is None
+
+
+def test_parse_message_keeps_whitespace_text_when_other_signal_present() -> None:
+    # When there IS other signal (reaction/attachment/sticker), the
+    # whitespace-only text isn't load-bearing — but the event itself
+    # is, so don't drop.
+    p = dm_payload(text="   ")
+    p["reaction"] = {"emoji": "👍", "target_message_id": "X"}
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.text == "   "  # surfaces as-received; the drop is conditional only
+
+
+def test_parse_message_carries_mentioned_jids() -> None:
+    p = dm_payload(text="hey @+15551234567")
+    p["mentioned_jids"] = ["15551234567@s.whatsapp.net"]
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.mentioned_jids == ("15551234567@s.whatsapp.net",)
+
+
+def test_parse_message_handles_malformed_mention_list() -> None:
+    p = dm_payload(text="hey")
+    p["mentioned_jids"] = ["valid@s.whatsapp.net", "", 12345, None]
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.mentioned_jids == ("valid@s.whatsapp.net",)

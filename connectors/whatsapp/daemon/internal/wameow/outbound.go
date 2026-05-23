@@ -1,0 +1,415 @@
+package wameow
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
+)
+
+// Attachment is a host-path-referenced media payload bound for one of
+// whatsmeow's typed messages.  Kind is derived from Mimetype at send
+// time; Filename appears on the wire only for DocumentMessage but the
+// daemon carries it unconditionally so the inference layer can decide
+// based on full context.
+type Attachment struct {
+	Path     string
+	Mimetype string
+	Filename string
+}
+
+// SendMessage dispatches text and/or N media attachments.  This is
+// the single outbound entry point — handler/send.go's SendMessageFn
+// wires to it.
+//
+// Empty attachments: a single text-only Conversation message.
+//
+// One or more attachments: WhatsApp has no media-group equivalent,
+// so each attachment becomes its own message.  Caption (= text)
+// rides on the first attachment only; subsequent attachments arrive
+// caption-less.  Exception: WhatsApp's AudioMessage proto has no
+// Caption field — when text is non-empty AND the first attachment is
+// audio, the text is sent as a separate Conversation message first
+// so it isn't silently dropped on the wire.
+//
+// Returns the FULL slice of delivered message_ids (in send order)
+// plus the FIRST send's timestamp.  All-or-nothing semantics are
+// impossible at the WhatsApp protocol level (no atomic batch send);
+// a mid-loop failure returns a *PartialSendError carrying the ids
+// that DID make it onto the wire, so the model can still
+// react/edit/revoke each delivered attachment by id.
+func (c *Client) SendMessage(
+	ctx context.Context,
+	jidStr, text string,
+	attachments []Attachment,
+	mentionedJIDs []string,
+	quotedMessageID string,
+) ([]string, int64, error) {
+	wa, jid, err := c.prepareSend(jidStr)
+	if err != nil {
+		return nil, 0, err
+	}
+	// Quote rides on the FIRST outbound only (text-message or first
+	// attachment).  Subsequent attachments in a multi-attachment send
+	// are sibling messages, not the reply itself.
+	quoteCtx, err := c.buildQuoteContextInfo(ctx, quotedMessageID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(attachments) == 0 {
+		msg := buildTextMessage(text, mentionedJIDs, quoteCtx)
+		id, ts, sendErr := c.sendOne(ctx, wa, jid, msg)
+		if sendErr != nil {
+			return nil, 0, sendErr
+		}
+		return []string{id}, ts, nil
+	}
+
+	var firstTS int64
+	delivered := make([]string, 0, len(attachments)+1)
+	captionForFirstAttachment := text
+	firstAttachmentMentions := mentionedJIDs
+	firstAttachmentQuote := quoteCtx
+	if text != "" && classify(attachments[0].Mimetype) == attachKindAudio {
+		// Audio carries no caption surface.  Send the text as its
+		// own Conversation message FIRST (taking the mentions AND
+		// quote with it so the reply pointer attaches to the text
+		// bubble the user actually reads), then send the audio
+		// caption-less, mention-less, AND quote-less — without the
+		// clear here, the audio's ContextInfo would carry duplicate
+		// MentionedJID + quote pointers.
+		textMsg := buildTextMessage(text, mentionedJIDs, quoteCtx)
+		id, ts, sendErr := c.sendOne(ctx, wa, jid, textMsg)
+		if sendErr != nil {
+			return nil, 0, fmt.Errorf("send accompanying text for audio: %w", sendErr)
+		}
+		delivered = append(delivered, id)
+		firstTS = ts
+		captionForFirstAttachment = ""
+		firstAttachmentMentions = nil
+		firstAttachmentQuote = nil
+	}
+
+	for i, att := range attachments {
+		caption := ""
+		var captionMentions []string
+		var captionQuote *waE2E.ContextInfo
+		if i == 0 {
+			caption = captionForFirstAttachment
+			captionMentions = firstAttachmentMentions
+			captionQuote = firstAttachmentQuote
+		}
+		msg, buildErr := c.buildAttachmentMessage(ctx, wa, att, caption, captionMentions, captionQuote)
+		if buildErr != nil {
+			return delivered, firstTS, &PartialSendError{
+				Cause: buildErr, DeliveredIDs: append([]string{}, delivered...),
+				FailedIndex: i, FailedFilename: att.Filename,
+			}
+		}
+		id, ts, sendErr := c.sendOne(ctx, wa, jid, msg)
+		if sendErr != nil {
+			return delivered, firstTS, &PartialSendError{
+				Cause: sendErr, DeliveredIDs: append([]string{}, delivered...),
+				FailedIndex: i, FailedFilename: att.Filename,
+			}
+		}
+		delivered = append(delivered, id)
+		if firstTS == 0 {
+			firstTS = ts
+		}
+	}
+	return delivered, firstTS, nil
+}
+
+// buildQuoteContextInfo looks up the target message and returns a
+// partial ``ContextInfo`` carrying ``StanzaID``, ``Participant``, and a
+// minimal ``QuotedMessage`` stub.  Returns nil ContextInfo + nil error
+// when ``quotedMessageID`` is empty (the common "not a reply" case).
+//
+// Returns ErrMessageNotFound when the model passed an id that isn't in
+// the msgstore — fail loud rather than silently strip the quote, so
+// the model can retry with a known target.
+func (c *Client) buildQuoteContextInfo(ctx context.Context, quotedMessageID string) (*waE2E.ContextInfo, error) {
+	if quotedMessageID == "" {
+		return nil, nil
+	}
+	rec, err := c.msgs.Lookup(ctx, quotedMessageID)
+	if err != nil {
+		return nil, fmt.Errorf("quote target %s: %w", quotedMessageID, err)
+	}
+	ci := &waE2E.ContextInfo{
+		StanzaID:    proto.String(quotedMessageID),
+		Participant: proto.String(rec.SenderJID),
+		// Minimal QuotedMessage stub.  WhatsApp clients render the
+		// reply bubble using StanzaID for the pointer; the
+		// QuotedMessage body populates the snippet preview above the
+		// reply.  Empty text (e.g. quoting a sticker we recorded with
+		// "") falls back to "Quoted message unavailable" on the peer
+		// side — better than silently dropping the quote pointer.
+		QuotedMessage: &waE2E.Message{Conversation: proto.String(rec.Text)},
+	}
+	return ci, nil
+}
+
+// PartialSendError wraps a mid-loop multi-attachment failure with the
+// ids that DID make it onto the wire before the loop aborted.  The
+// handler layer surfaces these ids via rpc.Error.Data so the model
+// can reference the delivered attachments by id (for react/edit/
+// revoke) instead of treating the partial delivery as a complete
+// loss.
+type PartialSendError struct {
+	Cause          error
+	DeliveredIDs   []string
+	FailedIndex    int
+	FailedFilename string
+}
+
+func (e *PartialSendError) Error() string {
+	if len(e.DeliveredIDs) > 0 {
+		return fmt.Sprintf(
+			"attachment %d (%s): %v (delivered ids before failure: %v)",
+			e.FailedIndex, e.FailedFilename, e.Cause, e.DeliveredIDs,
+		)
+	}
+	return fmt.Sprintf("attachment %d (%s): %v", e.FailedIndex, e.FailedFilename, e.Cause)
+}
+
+func (e *PartialSendError) Unwrap() error { return e.Cause }
+
+// Partial fulfils the duck-typed interface that handler/send.go
+// expects via errors.As, keeping the handler package decoupled from
+// the wameow concrete type.
+func (e *PartialSendError) Partial() (delivered []string, failedIndex int, failedFilename string) {
+	return e.DeliveredIDs, e.FailedIndex, e.FailedFilename
+}
+
+func (c *Client) prepareSend(jidStr string) (*whatsmeow.Client, types.JID, error) {
+	wa := c.wa.Load()
+	if !wa.IsConnected() {
+		return nil, types.EmptyJID, errors.New("whatsmeow: not connected")
+	}
+	jid, err := types.ParseJID(jidStr)
+	if err != nil {
+		return nil, types.EmptyJID, fmt.Errorf("invalid JID %q: %w", jidStr, err)
+	}
+	return wa, jid, nil
+}
+
+func (c *Client) sendOne(ctx context.Context, wa *whatsmeow.Client, jid types.JID, msg *waE2E.Message) (string, int64, error) {
+	resp, err := wa.SendMessage(ctx, jid, msg)
+	if err != nil {
+		return "", 0, err
+	}
+	c.recordOutbound(ctx, wa, string(resp.ID), jid, resp.Timestamp.UnixMilli(), extractText(msg))
+	// Implicit receipts-after-emit: the bot's reply means it has
+	// "read" the prior peer messages in this chat.  Done after the
+	// send succeeds so a failed send doesn't burn the read state.
+	c.flushReadReceipts(ctx, wa, jid)
+	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
+}
+
+// flushReadReceipts drains the per-chat unread queue and issues a
+// single MarkRead covering all peer messages.  Best-effort: a
+// MarkRead failure logs but doesn't fail the send (the message
+// already went through; failing the RPC would mislead the caller).
+func (c *Client) flushReadReceipts(ctx context.Context, wa *whatsmeow.Client, chat types.JID) {
+	keys := c.drainUnread(chat.String())
+	if len(keys) == 0 {
+		return
+	}
+	// WhatsApp's MarkRead takes a single sender JID, so we group by
+	// sender.  In a DM, all entries share the peer's JID; in a
+	// group, different participants may have different sender JIDs
+	// and need separate calls.
+	bySender := make(map[string][]types.MessageID)
+	for _, k := range keys {
+		bySender[k.sender] = append(bySender[k.sender], types.MessageID(k.id))
+	}
+	now := time.Now()
+	for senderStr, ids := range bySender {
+		sender, err := types.ParseJID(senderStr)
+		if err != nil {
+			c.log.Warn("wameow.mark_read.bad_sender", "sender", senderStr, "err", err)
+			continue
+		}
+		if err := wa.MarkRead(ctx, ids, now, chat, sender); err != nil {
+			c.log.Warn("wameow.mark_read_failed", "chat", chat, "sender", senderStr, "err", err)
+		}
+	}
+}
+
+// buildTextMessage shapes a text-only outbound message, attaching a
+// ContextInfo carrying ``MentionedJID`` (so WhatsApp clients render
+// @-mentions as pills) and/or the quote pointer fields when the model
+// requested a threaded reply.  When neither applies the message uses
+// the plain Conversation form to keep ContextInfo off the wire.
+func buildTextMessage(text string, mentionedJIDs []string, quoteCtx *waE2E.ContextInfo) *waE2E.Message {
+	ci := mergeMentionAndQuote(mentionedJIDs, quoteCtx)
+	if ci == nil {
+		return &waE2E.Message{Conversation: proto.String(text)}
+	}
+	return &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text:        proto.String(text),
+			ContextInfo: ci,
+		},
+	}
+}
+
+func (c *Client) buildAttachmentMessage(
+	ctx context.Context,
+	wa *whatsmeow.Client,
+	att Attachment,
+	caption string,
+	captionMentions []string,
+	quoteCtx *waE2E.ContextInfo,
+) (*waE2E.Message, error) {
+	data, err := os.ReadFile(att.Path)
+	if err != nil {
+		return nil, fmt.Errorf("read attachment: %w", err)
+	}
+	kind := classify(att.Mimetype)
+	uploaded, err := wa.Upload(ctx, data, mediaTypeForKind(kind))
+	if err != nil {
+		return nil, fmt.Errorf("upload: %w", err)
+	}
+	size := uint64(len(data))
+	mime := att.Mimetype
+	ctxInfo := mergeMentionAndQuote(captionMentions, quoteCtx)
+
+	switch kind {
+	case attachKindImage:
+		return &waE2E.Message{
+			ImageMessage: &waE2E.ImageMessage{
+				URL:           proto.String(uploaded.URL),
+				DirectPath:    proto.String(uploaded.DirectPath),
+				Mimetype:      proto.String(mime),
+				FileEncSHA256: uploaded.FileEncSHA256,
+				FileSHA256:    uploaded.FileSHA256,
+				FileLength:    proto.Uint64(size),
+				MediaKey:      uploaded.MediaKey,
+				Caption:       maybeString(caption),
+				ContextInfo:   ctxInfo,
+			},
+		}, nil
+	case attachKindVideo:
+		return &waE2E.Message{
+			VideoMessage: &waE2E.VideoMessage{
+				URL:           proto.String(uploaded.URL),
+				DirectPath:    proto.String(uploaded.DirectPath),
+				Mimetype:      proto.String(mime),
+				FileEncSHA256: uploaded.FileEncSHA256,
+				FileSHA256:    uploaded.FileSHA256,
+				FileLength:    proto.Uint64(size),
+				MediaKey:      uploaded.MediaKey,
+				Caption:       maybeString(caption),
+				ContextInfo:   ctxInfo,
+			},
+		}, nil
+	case attachKindAudio:
+		return &waE2E.Message{
+			AudioMessage: &waE2E.AudioMessage{
+				URL:           proto.String(uploaded.URL),
+				DirectPath:    proto.String(uploaded.DirectPath),
+				Mimetype:      proto.String(mime),
+				FileEncSHA256: uploaded.FileEncSHA256,
+				FileSHA256:    uploaded.FileSHA256,
+				FileLength:    proto.Uint64(size),
+				MediaKey:      uploaded.MediaKey,
+				ContextInfo:   ctxInfo,
+			},
+		}, nil
+	default:
+		// Documents carry a filename on the wire; everything else
+		// folds back into this default arm too (unknown mimetype).
+		return &waE2E.Message{
+			DocumentMessage: &waE2E.DocumentMessage{
+				URL:           proto.String(uploaded.URL),
+				DirectPath:    proto.String(uploaded.DirectPath),
+				Mimetype:      proto.String(mime),
+				FileEncSHA256: uploaded.FileEncSHA256,
+				FileSHA256:    uploaded.FileSHA256,
+				FileLength:    proto.Uint64(size),
+				MediaKey:      uploaded.MediaKey,
+				FileName:      proto.String(att.Filename),
+				Caption:       maybeString(caption),
+				ContextInfo:   ctxInfo,
+			},
+		}, nil
+	}
+}
+
+// mergeMentionAndQuote combines optional MentionedJID + quote-pointer
+// fields into a single ContextInfo, or returns nil when neither is
+// populated.  Keeping a single helper means the four buildAttachment
+// arms + buildTextMessage stay consistent about which sub-fields ride
+// on the wire — a divergence here would manifest as "quote works on
+// text but not on image captions" or vice versa.
+func mergeMentionAndQuote(mentionedJIDs []string, quoteCtx *waE2E.ContextInfo) *waE2E.ContextInfo {
+	if len(mentionedJIDs) == 0 && quoteCtx == nil {
+		return nil
+	}
+	ci := &waE2E.ContextInfo{}
+	if quoteCtx != nil {
+		// Copy the quote-pointer fields into the shared ContextInfo
+		// rather than ovewriting.  buildQuoteContextInfo only ever
+		// populates StanzaID / Participant / QuotedMessage so this is
+		// safe; if it grows more fields, update this merge.
+		ci.StanzaID = quoteCtx.StanzaID
+		ci.Participant = quoteCtx.Participant
+		ci.QuotedMessage = quoteCtx.QuotedMessage
+	}
+	if len(mentionedJIDs) > 0 {
+		ci.MentionedJID = mentionedJIDs
+	}
+	return ci
+}
+
+type attachKind int
+
+const (
+	attachKindDocument attachKind = iota
+	attachKindImage
+	attachKindVideo
+	attachKindAudio
+)
+
+func classify(mimetype string) attachKind {
+	switch {
+	case strings.HasPrefix(mimetype, "image/"):
+		return attachKindImage
+	case strings.HasPrefix(mimetype, "video/"):
+		return attachKindVideo
+	case strings.HasPrefix(mimetype, "audio/"):
+		return attachKindAudio
+	default:
+		return attachKindDocument
+	}
+}
+
+func mediaTypeForKind(k attachKind) whatsmeow.MediaType {
+	switch k {
+	case attachKindImage:
+		return whatsmeow.MediaImage
+	case attachKindVideo:
+		return whatsmeow.MediaVideo
+	case attachKindAudio:
+		return whatsmeow.MediaAudio
+	default:
+		return whatsmeow.MediaDocument
+	}
+}
+
+func maybeString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return proto.String(s)
+}

@@ -6547,6 +6547,68 @@
         }
       }
     },
+    "/v1/connectors/runtime/lifecycle": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Runtime Lifecycle",
+        "description": "Append a ``kind=lifecycle`` event onto every session bound to\n``body.connection_id``.\n\nAuthorization mirrors the inbound + tool-result paths: the bearer's\nconnector must match ``body.connection_id``'s connector, and any\nbearer-side allowlist must include the connection_id (#350).\n\nReturns ``{\"appended_session_ids\": [...]}`` enumerating the sessions\nthat received the event.  An empty list means no sessions were\nbound at the time of the call (e.g. the operator detached every\nsession before the connector finished tearing down); not an error.",
+        "operationId": "post_connector_runtime_lifecycle",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeLifecycleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Post Connector Runtime Lifecycle"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/runtime/tool-results": {
       "post": {
         "tags": [
@@ -6920,6 +6982,179 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SignalProfileRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/whatsapp/start-pairing": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Whatsapp Start Pairing",
+        "description": "Initiate QR pairing.  Returns the first QR code; the operator\nscans within whatsmeow's QR window (~20 s before rotation, ~100 s\ntotal).  The follow-up ``/confirm-pairing`` blocks until the\npairing terminates.",
+        "operationId": "post_connector_whatsapp_start_pairing",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhatsappStartPairingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhatsappStartPairingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/whatsapp/confirm-pairing": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Whatsapp Confirm Pairing",
+        "description": "Block until pairing terminates.  Long-poll: up to ~180 s server-side\nso a slow scan doesn't trip the HTTP timeout before the daemon\nitself reports timeout.",
+        "operationId": "post_connector_whatsapp_confirm_pairing",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhatsappConfirmPairingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhatsappConfirmPairingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/whatsapp/unpair": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Whatsapp Unpair",
+        "description": "Log out the WhatsApp device on the server; clears the local\nsqlstore so the next ``/start-pairing`` provisions a fresh device.",
+        "operationId": "post_connector_whatsapp_unpair",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhatsappUnpairRequest"
               }
             }
           }
@@ -10413,6 +10648,49 @@
         "title": "RecentChat",
         "description": "Distinct chat_id observed on a connection's account, with the\nmost-recent inbound timestamp.\n\nReturned by ``GET /v1/connections/{id}/recent-chats`` so operators\ncan find the chat_id for a specific peer without digging through\nevent logs before calling ``bind-chat``."
       },
+      "RuntimeLifecycleRequest": {
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "event": {
+            "type": "string",
+            "title": "Event"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connection_id",
+          "event"
+        ],
+        "title": "RuntimeLifecycleRequest",
+        "description": "Body for ``POST /v1/connectors/runtime/lifecycle``.\n\nLets a connector emit a lifecycle event onto each session bound to\n``connection_id`` \u2014 used today for \"the underlying transport just\nwent away\" notifications (WhatsApp daemon crashed, peer logged the\ndevice out, etc.) so the model sees the connection-broken state in\nits context instead of silently failing the next outbound.\n\n``event`` is a connector-namespaced kind (\"whatsapp.connection.lost\",\n\"signal.daemon.exited\") \u2014 the connector chooses the vocabulary.\n``reason`` is an optional short tag the harness surfaces alongside\nthe event for the model to act on (\"daemon_crashed\", \"peer_logout\").\n``data`` is an optional free-form dict for connector-specific\ncontext (current device count, last successful timestamp, etc.)."
+      },
       "RuntimeManagementCallResultRequest": {
         "properties": {
           "call_id": {
@@ -12714,6 +12992,123 @@
         ],
         "title": "WaitResponse",
         "description": "Response for ``GET /v1/sessions/{id}/wait``."
+      },
+      "WhatsappConfirmPairingRequest": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "external_account_id"
+        ],
+        "title": "WhatsappConfirmPairingRequest"
+      },
+      "WhatsappConfirmPairingResponse": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "success",
+              "timeout",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "jid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Jid"
+          },
+          "push_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Push Name"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "external_account_id",
+          "status"
+        ],
+        "title": "WhatsappConfirmPairingResponse",
+        "description": "``status`` is the terminal pairing outcome; ``jid`` / ``push_name``\nare populated on success, ``reason`` on error / timeout."
+      },
+      "WhatsappStartPairingRequest": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "external_account_id"
+        ],
+        "title": "WhatsappStartPairingRequest"
+      },
+      "WhatsappStartPairingResponse": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          }
+        },
+        "type": "object",
+        "required": [
+          "external_account_id",
+          "code"
+        ],
+        "title": "WhatsappStartPairingResponse"
+      },
+      "WhatsappUnpairRequest": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "external_account_id"
+        ],
+        "title": "WhatsappUnpairRequest"
       }
     }
   }

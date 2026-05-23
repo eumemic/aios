@@ -1,11 +1,14 @@
 package wameow
 
 import (
+	"context"
 	"log/slog"
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -50,12 +53,177 @@ func TestExtractTextFromExtendedTextMessage(t *testing.T) {
 }
 
 func TestExtractTextReturnsEmptyForUnsupportedShape(t *testing.T) {
-	// Attachment-without-caption: empty text is the contract; the
-	// downstream layer drops attachment-only messages until PR adds
-	// attachment plumbing.
+	// Attachment-without-caption: empty text is the contract.  Sticker
+	// and audio messages don't carry a caption surface, so they
+	// always return empty here.
 	msg := &waE2E.Message{ImageMessage: &waE2E.ImageMessage{}}
 	if got := extractText(msg); got != "" {
-		t.Errorf("extractText image-only = %q, want empty", got)
+		t.Errorf("extractText image-no-caption = %q, want empty", got)
+	}
+	msg = &waE2E.Message{AudioMessage: &waE2E.AudioMessage{}}
+	if got := extractText(msg); got != "" {
+		t.Errorf("extractText audio = %q, want empty", got)
+	}
+}
+
+func TestExtractTextFromImageCaption(t *testing.T) {
+	// Pre-fix this returned "" — extractText didn't reach into
+	// ImageMessage.Caption, so an image with a caption surfaced to
+	// the model as a caption-less attachment with text="".
+	msg := &waE2E.Message{
+		ImageMessage: &waE2E.ImageMessage{
+			Caption: proto.String("look at this — meeting moved to 3pm"),
+		},
+	}
+	if got := extractText(msg); got != "look at this — meeting moved to 3pm" {
+		t.Errorf("extractText image-caption = %q, want the caption", got)
+	}
+}
+
+func TestExtractTextFromVideoCaption(t *testing.T) {
+	msg := &waE2E.Message{
+		VideoMessage: &waE2E.VideoMessage{Caption: proto.String("clip from yesterday")},
+	}
+	if got := extractText(msg); got != "clip from yesterday" {
+		t.Errorf("extractText video-caption = %q, want the caption", got)
+	}
+}
+
+func TestExtractTextFromDocumentCaption(t *testing.T) {
+	msg := &waE2E.Message{
+		DocumentMessage: &waE2E.DocumentMessage{Caption: proto.String("Q3 numbers")},
+	}
+	if got := extractText(msg); got != "Q3 numbers" {
+		t.Errorf("extractText document-caption = %q, want the caption", got)
+	}
+}
+
+func TestSanitizeFilenameNeutralizesDodgyChars(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"normal.pdf", "normal.pdf"},
+		{"with/slash.pdf", "with_slash.pdf"},
+		{`with\back.pdf`, "with_back.pdf"},
+		{".hidden", "hidden"},
+		{"with\x00null.pdf", "with_null.pdf"},
+		{"with\nnewline.pdf", "with_newline.pdf"},
+		{"with\ttab.pdf", "with_tab.pdf"},
+		{"\x7fdel.pdf", "_del.pdf"},
+		{"", "unnamed"},
+		{"...", "unnamed"},
+	}
+	for _, tc := range cases {
+		if got := sanitizeFilename(tc.in); got != tc.want {
+			t.Errorf("sanitizeFilename(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestRecordInboundEnqueuesUnreadForPeer(t *testing.T) {
+	// Peer-sent message (is_self=false) on a DM chat enqueues an
+	// unread entry so the next outbound to that chat marks it read.
+	c := &Client{
+		log:         discardLogger(),
+		msgs:        newTestMessageStore(t),
+		lifetimeCtx: context.Background(),
+	}
+	peer := types.NewJID("15553334444", types.DefaultUserServer)
+	c.recordInbound(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: peer, Sender: peer, IsFromMe: false},
+			ID:            "INBOUND-1",
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hi")},
+	})
+
+	got := c.drainUnread(peer.String())
+	if len(got) != 1 || got[0].id != "INBOUND-1" || got[0].sender != peer.String() {
+		t.Errorf("expected one unread entry, got %v", got)
+	}
+}
+
+func TestRecordInboundSkipsUnreadForReactionOnly(t *testing.T) {
+	// Pre-fix: reaction-only inbounds entered the unread queue,
+	// causing the next outbound to MarkRead a reaction id which
+	// whatsmeow rejects with a noisy mark_read_failed warning.
+	// Post-fix: reaction envelopes are tracked in msgstore but not
+	// in the unread queue.
+	c := &Client{
+		log:         discardLogger(),
+		msgs:        newTestMessageStore(t),
+		lifetimeCtx: context.Background(),
+	}
+	peer := types.NewJID("15553334444", types.DefaultUserServer)
+	c.recordInbound(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: peer, Sender: peer, IsFromMe: false},
+			ID:            "REACTION-1",
+		},
+		Message: &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{}},
+	})
+
+	if got := c.drainUnread(peer.String()); got != nil {
+		t.Errorf("reaction-only inbound enqueued unread: %v", got)
+	}
+}
+
+func TestRecordInboundSkipsUnreadForOwnEchoes(t *testing.T) {
+	// Our own outbound messages echo back through *events.Message
+	// with is_self=true.  Those aren't "unread" by us; the unread
+	// queue should ignore them so a self-echo doesn't trigger a
+	// MarkRead on the bot's own send.
+	c := &Client{
+		log:         discardLogger(),
+		msgs:        newTestMessageStore(t),
+		lifetimeCtx: context.Background(),
+	}
+	peer := types.NewJID("15553334444", types.DefaultUserServer)
+	c.recordInbound(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: peer, Sender: peer, IsFromMe: true},
+			ID:            "OUR-ECHO",
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hi")},
+	})
+
+	if got := c.drainUnread(peer.String()); got != nil {
+		t.Errorf("self-echo unexpectedly enqueued: %v", got)
+	}
+}
+
+func TestIsPureProtocolMessage(t *testing.T) {
+	// Real user-facing message — even with a ProtocolMessage rider —
+	// must NOT be filtered out of msgstore writes.
+	withContent := &waE2E.Message{
+		Conversation:    proto.String("hello"),
+		ProtocolMessage: &waE2E.ProtocolMessage{},
+	}
+	if isPureProtocolMessage(withContent) {
+		t.Error("message with Conversation should not be treated as pure protocol")
+	}
+	// Pure protocol envelope (history sync, key share, edit-only) —
+	// recordInbound should skip these to avoid msgstore growing
+	// with rows the model can never target.
+	pure := &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{}}
+	if !isPureProtocolMessage(pure) {
+		t.Error("ProtocolMessage-only envelope should be treated as pure protocol")
+	}
+	// Reactions are user-facing, even though they ride alone too.
+	reaction := &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{}}
+	if isPureProtocolMessage(reaction) {
+		t.Error("ReactionMessage should not be treated as pure protocol")
+	}
+}
+
+func TestExtractTextPrefersConversationOverImageCaption(t *testing.T) {
+	// Defensive: if both fields are set (shouldn't happen in
+	// practice), Conversation wins — that's the dominant path and
+	// what existing tests assume.
+	msg := &waE2E.Message{
+		Conversation: proto.String("outer text"),
+		ImageMessage: &waE2E.ImageMessage{Caption: proto.String("ignored caption")},
+	}
+	if got := extractText(msg); got != "outer text" {
+		t.Errorf("extractText preference = %q, want 'outer text'", got)
 	}
 }
 
@@ -155,7 +323,7 @@ func (n *captureNotifier) Broadcast(method string, params any) {
 
 func TestHandleEventDispatch(t *testing.T) {
 	notify := &captureNotifier{}
-	c := &Client{notify: notify, log: discardLogger()}
+	c := &Client{notify: notify, log: discardLogger(), msgs: newTestMessageStore(t), lifetimeCtx: context.Background()}
 
 	sender := types.NewJID("15553334444", types.DefaultUserServer)
 	c.handleEvent(&events.Message{
@@ -188,8 +356,29 @@ func TestHandleEventDispatch(t *testing.T) {
 }
 
 func TestHandleEventLoggedOutOmitsReasonWhenStreamError(t *testing.T) {
+	ctx := context.Background()
+	container, err := sqlstore.New(
+		ctx,
+		"sqlite",
+		"file::memory:?_pragma=foreign_keys(1)",
+		newWaLogger(discardLogger(), "test"),
+	)
+	if err != nil {
+		t.Fatalf("sqlstore.New: %v", err)
+	}
+	defer func() { _ = container.Close() }()
+	device := container.NewDevice()
+	wa := whatsmeow.NewClient(device, newWaLogger(discardLogger(), "test"))
+
 	notify := &captureNotifier{}
-	c := &Client{notify: notify, log: discardLogger()}
+	c := &Client{
+		notify:      notify,
+		log:         discardLogger(),
+		msgs:        newTestMessageStore(t),
+		lifetimeCtx: ctx,
+		store:       container,
+	}
+	c.wa.Store(wa)
 
 	// OnConnect == false (stream:error path): Reason is the zero value
 	// and must not be surfaced to the wire as misleading data.
@@ -211,10 +400,97 @@ func TestHandleEventLoggedOutOmitsReasonWhenStreamError(t *testing.T) {
 	if _, hasReason := params["reason"]; hasReason {
 		t.Errorf("reason should be omitted when OnConnect=false; got %v", params["reason"])
 	}
+	// Verify the LoggedOut handler also called replaceWhatsmeowClient —
+	// the in-memory Client must be swapped so a subsequent StartPairing
+	// against this daemon doesn't fail with "invalid use of deleted
+	// device".
+	if c.wa.Load() == wa {
+		t.Error("handleEvent did not swap c.wa after LoggedOut; re-pair would fail")
+	}
 }
 
 func discardLogger() *slog.Logger {
 	// slog.DiscardHandler short-circuits in Enabled() so the Sprintf
 	// gate in slogWaLogger never fires either.
 	return slog.New(slog.DiscardHandler)
+}
+
+func TestExtractQuotedMessageID(t *testing.T) {
+	target := "3A1234DEADBEEF"
+	cases := []struct {
+		name string
+		msg  *waE2E.Message
+		want string
+	}{
+		{
+			name: "extended_text_with_quote",
+			msg: &waE2E.Message{
+				ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+					Text:        proto.String("a reply"),
+					ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String(target)},
+				},
+			},
+			want: target,
+		},
+		{
+			name: "image_caption_with_quote",
+			msg: &waE2E.Message{
+				ImageMessage: &waE2E.ImageMessage{
+					Caption:     proto.String("look"),
+					ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String(target)},
+				},
+			},
+			want: target,
+		},
+		{
+			name: "plain_conversation_no_quote",
+			msg:  &waE2E.Message{Conversation: proto.String("just text")},
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractQuotedMessageID(tc.msg); got != tc.want {
+				t.Errorf("extractQuotedMessageID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTranslateMessageWithMediaSurfacesStickerWithoutEmoji(t *testing.T) {
+	// Custom stickers (made via WhatsApp's sticker maker) frequently
+	// carry an empty Emojis tag.  Pre-fix the daemon's emoji != ""
+	// guard dropped these and parse.py's "no_signal" filter then
+	// swallowed the message — the model never knew the peer sent a
+	// sticker.  Verify the message now surfaces sticker_emoji="" so
+	// downstream can render "(sticker, no emoji label)".
+	c := &Client{
+		log:         discardLogger(),
+		msgs:        newTestMessageStore(t),
+		lifetimeCtx: context.Background(),
+	}
+	peer := types.NewJID("15551112222", types.DefaultUserServer)
+	params := c.translateMessageWithMedia(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: peer, Sender: peer, IsFromMe: false},
+			ID:            "STICKER-1",
+			Timestamp:     time.Now(),
+		},
+		Message: &waE2E.Message{
+			StickerMessage: &waE2E.StickerMessage{
+				URL: proto.String("https://example/sticker.webp"),
+				// Emojis intentionally nil — the custom-sticker case.
+			},
+		},
+	})
+	if params == nil {
+		t.Fatal("translateMessageWithMedia dropped a sticker; expected sticker_emoji='' to be emitted")
+	}
+	emoji, ok := params["sticker_emoji"]
+	if !ok {
+		t.Fatalf("sticker_emoji key missing from params: %#v", params)
+	}
+	if emoji != "" {
+		t.Errorf("sticker_emoji = %q, want '' for emoji-less sticker", emoji)
+	}
 }
