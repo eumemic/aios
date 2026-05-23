@@ -21,7 +21,7 @@ import pytest
 
 from tests.conftest import needs_docker
 
-pytestmark = needs_docker
+pytestmark = [needs_docker, pytest.mark.docker]
 
 # Read directly from env to keep this file free of aios package imports.
 # The env var name is stable -- derived from env_prefix="AIOS_" + field "docker_image"

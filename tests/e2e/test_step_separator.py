@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, msg_text
+
+pytestmark = pytest.mark.docker
 
 _TAIL_HEADER = "━━━ Channels ━━━"
 

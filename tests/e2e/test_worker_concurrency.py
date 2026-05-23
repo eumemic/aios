@@ -20,6 +20,7 @@ from typing import Any
 from unittest import mock
 
 import asyncpg
+import pytest
 from procrastinate import PsycopgConnector
 
 from aios.models.agents import ToolSpec
@@ -27,6 +28,8 @@ from aios.services import agents as agents_service
 from aios.services import environments as environments_service
 from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
+
+pytestmark = pytest.mark.docker
 
 
 async def _create_session(pool: asyncpg.Pool[Any], agent_id: str, env_id: str) -> str:

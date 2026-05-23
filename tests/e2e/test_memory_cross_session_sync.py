@@ -36,7 +36,7 @@ from tests.e2e.harness import Harness
 # pytest-asyncio's default function-scoped loops cause "another
 # operation in progress" errors when a pool created on the module
 # setup loop is acquired from on a test-body loop.
-pytestmark = pytest.mark.asyncio(loop_scope="module")
+pytestmark = [pytest.mark.asyncio(loop_scope="module"), pytest.mark.docker]
 
 # Tables this file's tests mutate.  Truncating just these between tests
 # (instead of every public-schema table from conftest's ``_reset_db_state``)

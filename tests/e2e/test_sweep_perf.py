@@ -32,6 +32,8 @@ from aios.harness.sweep import CANDIDATE_ROWS_SQL, UNREACTED_ROWS_SQL
 from tests.conftest import needs_docker
 from tests.support import find_subplans_over_events
 
+pytestmark = pytest.mark.docker
+
 # ─── fixture: pathological session ───────────────────────────────────────────
 
 

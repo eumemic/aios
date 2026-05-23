@@ -38,6 +38,8 @@ from aios.services import github_repositories as github_service
 from aios.services import sessions as sessions_service
 from tests.helpers.connections import authed_client
 
+pytestmark = pytest.mark.docker
+
 _OCTOCAT_REPO = "https://github.com/octocat/Hello-World"
 
 

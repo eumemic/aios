@@ -26,6 +26,8 @@ from tests.e2e.harness import (
     tool_results,
 )
 
+pytestmark = pytest.mark.docker
+
 # ─── fast tier (no Docker) ───────────────────────────────────────────────────
 
 

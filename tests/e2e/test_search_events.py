@@ -17,6 +17,8 @@ from aios.tools.search_events import search_events_handler
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant
 
+pytestmark = pytest.mark.docker
+
 
 @needs_docker
 class TestSearchEvents:

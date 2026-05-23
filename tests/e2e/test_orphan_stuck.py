@@ -16,9 +16,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from tests.conftest import needs_docker
 from tests.e2e.conftest import wait_for_predicate
 from tests.e2e.harness import Harness, assistant, tool_call
+
+pytestmark = pytest.mark.docker
 
 
 @needs_docker

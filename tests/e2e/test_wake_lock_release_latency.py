@@ -17,6 +17,8 @@ from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
 from tests.e2e.conftest import wait_for_predicate
 
+pytestmark = pytest.mark.docker
+
 
 @needs_docker
 class TestWakeLockReleaseLatencyE2E:

@@ -36,6 +36,8 @@ from tests.e2e.conftest import live_aios_server, wait_for_predicate
 from tests.helpers.db import count_active_backends
 from tests.integration.conftest import seed_agent_env_session
 
+pytestmark = pytest.mark.docker
+
 
 @pytest.fixture
 async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:

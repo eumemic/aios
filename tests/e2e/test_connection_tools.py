@@ -21,11 +21,14 @@ This file pins the contract end-to-end with the real harness:
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries as db_queries
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, last_assistant_content, tool_call
+
+pytestmark = pytest.mark.docker
 
 
 @needs_docker

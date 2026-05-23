@@ -24,6 +24,8 @@ from tests.conftest import needs_docker
 from tests.e2e.conftest import live_aios_server
 from tests.helpers.connections import authed_client, bearer, create_connection
 
+pytestmark = pytest.mark.docker
+
 
 @pytest.fixture
 async def live_server(aios_env: dict[str, str]) -> AsyncIterator[str]:

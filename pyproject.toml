@@ -54,6 +54,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-mock>=3.14",
+    "pytest-xdist>=3.6",          # parallel test execution on docker e2e shard
     "httpx>=0.27",                # FastAPI TestClient backend
     "testcontainers[postgres]>=4.8",
     "ruff>=0.8",
@@ -181,9 +182,15 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
+    # Surface slow tests in every CI log so regressions don't accumulate
+    # silently.  ``--durations-min=0.5`` filters out the noise floor so
+    # the report stays a sentence, not a screenful.
+    "--durations=20",
+    "--durations-min=0.5",
 ]
 markers = [
     "integration: tests requiring a Postgres testcontainer",
     "e2e: end-to-end tests requiring Docker + a real or recorded model",
     "slow: heavy tests (benchmarks, large fixtures) — skipped on PR CI, run nightly",
+    "docker: e2e tests that need the sandbox image (selected by CI's docker shard)",
 ]

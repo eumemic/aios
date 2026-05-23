@@ -17,6 +17,8 @@ from tests.conftest import needs_docker
 from tests.e2e.conftest import live_aios_server
 from tests.helpers.connections import authed_client, issue_runtime_token
 
+pytestmark = pytest.mark.docker
+
 
 class _FakeSignalConnector(HttpConnector):
     """Real SDK, scripted management handlers.

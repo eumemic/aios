@@ -20,6 +20,8 @@ from aios.config import get_settings
 from aios.sandbox.volumes import session_uploads_dir
 from tests.e2e.harness import Harness
 
+pytestmark = pytest.mark.docker
+
 
 async def _make_session(harness: Harness) -> str:
     account_id = "acc_test_stub"  # PR 3 scaffolding
