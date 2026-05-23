@@ -105,7 +105,10 @@ def resolve_sandbox_path(
     try:
         resolved = candidate.resolve(strict=False)
         resolved_base = base.resolve(strict=False)
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError covers embedded NUL bytes (``Path('foo\x00bar')``);
+        # OSError covers symlink-loop / path-too-long. Both are model-
+        # induced garbage — fail closed.
         return None
     if resolved != resolved_base and not resolved.is_relative_to(resolved_base):
         return None

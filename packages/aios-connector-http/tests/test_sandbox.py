@@ -116,6 +116,20 @@ class TestResolveSandboxPath:
         )
         assert out is None
 
+    def test_null_byte_in_path_returns_none(self, tmp_path: Path) -> None:
+        """``Path(...).resolve()`` raises ``ValueError`` on embedded NUL
+        bytes; the resolver must catch that and fail closed instead of
+        letting it escape as a generic exception."""
+        ws = tmp_path / "acc_1" / "sess_1"
+        ws.mkdir(parents=True)
+        out = resolve_sandbox_path(
+            session_id="sess_1",
+            sandbox_path="/workspace/foo\x00bar",
+            workspace_path=ws,
+            root=tmp_path,
+        )
+        assert out is None
+
     def test_workspace_root_env_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("AIOS_WORKSPACE_ROOT", raising=False)
         assert workspace_root() == Path("/var/lib/aios/workspaces")
@@ -314,8 +328,13 @@ class TestDispatchSandboxPathResolution:
 
     async def test_workspace_path_missing_surfaces_error(self, consumer: _PathConsumer) -> None:
         """Without ``workspace_path`` in the call dict, the resolver fails
-        closed and the model sees a tool error rather than a synthesised
-        path that would silently miss the post-#409 nested layout."""
+        closed and the model sees a clear error.
+
+        The dispatcher disambiguates "workspace bind-mount unavailable"
+        (transport bug) from "path is outside the legal prefixes" (model
+        error) so the model isn't told its prefix is wrong when the
+        real issue is upstream.
+        """
         await consumer.dispatch_call(
             {
                 "tool_call_id": "c5",
@@ -329,7 +348,32 @@ class TestDispatchSandboxPathResolution:
         result = consumer.tool_results[0]
         assert result["is_error"] is True
         body = json.loads(result["content"])
-        assert "outside" in body["error"]
+        assert "workspace bind-mount unavailable" in body["error"]
+        assert "outside" not in body["error"]
+
+    async def test_relative_workspace_path_treated_as_missing(
+        self, consumer: _PathConsumer
+    ) -> None:
+        """A non-absolute ``workspace_path`` value is treated as absent.
+
+        Anything except an absolute-path string would otherwise be
+        resolved against the connector container's CWD — silently
+        wrong.  Reject at the dispatch boundary so the model sees the
+        clear "bind-mount unavailable" error instead.
+        """
+        await consumer.dispatch_call(
+            {
+                "tool_call_id": "c6",
+                "session_id": "sess_1",
+                "name": "send_one",
+                "arguments": json.dumps({"path": "/workspace/photo.jpg"}),
+                "workspace_path": "relative/path",
+            }
+        )
+        assert consumer.calls == []
+        assert len(consumer.tool_results) == 1
+        body = json.loads(consumer.tool_results[0]["content"])
+        assert "workspace bind-mount unavailable" in body["error"]
 
     async def test_optional_list_none_passes_through(
         self, consumer: _PathConsumer, workspace_path: Path

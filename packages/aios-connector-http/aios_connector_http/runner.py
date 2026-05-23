@@ -747,14 +747,23 @@ class HttpConnector:
         tool_call_id = call.get("tool_call_id", "")
         session_id = call.get("session_id", "")
         connection_id = call.get("connection_id", "")
-        workspace_path_str = call.get("workspace_path")
-        workspace_path = Path(workspace_path_str) if workspace_path_str else None
+        # ``workspace_path`` must be an absolute string — anything else
+        # (empty, whitespace, relative, wrong type) is treated as absent
+        # and routed through the fail-closed branch below.  An absolute
+        # path is the only shape the worker writes via ``insert_session``.
+        raw_workspace_path = call.get("workspace_path")
+        workspace_path: Path | None
+        if isinstance(raw_workspace_path, str) and raw_workspace_path.startswith("/"):
+            workspace_path = Path(raw_workspace_path)
+        else:
+            workspace_path = None
         log.info(
             "connector.tool_call.dispatched",
             name=name,
             tool_call_id=tool_call_id,
             session_id=session_id,
             connection_id=connection_id,
+            workspace_path=str(workspace_path) if workspace_path else None,
         )
         meta = self._tools.get(name)
         if meta is None:
@@ -1133,6 +1142,21 @@ def _resolve_one(value: Any, *, session_id: str, workspace_path: Path | None, na
         session_id=session_id, sandbox_path=value, workspace_path=workspace_path
     )
     if resolved is None:
+        # The resolver returns None for two distinct reasons: the path
+        # really is outside the bind-mounted prefixes (model picked a
+        # wrong prefix — model-actionable), or the path is under
+        # ``/workspace`` but the runtime didn't supply a
+        # ``workspace_path`` (operator/transport bug — not
+        # model-actionable).  Disambiguate so the model isn't told its
+        # prefix is wrong when the real issue is upstream.
+        if workspace_path is None and (value == "/workspace" or value.startswith("/workspace/")):
+            log.error(
+                "connector.tool_call.missing_workspace_path",
+                name=name,
+                value=value,
+                session_id=session_id,
+            )
+            raise SandboxPathError(f"{name!r}: workspace bind-mount unavailable for this call")
         raise SandboxPathError(
             f"{name!r}: path {value!r} is outside /workspace/ and /mnt/attachments/"
         )
