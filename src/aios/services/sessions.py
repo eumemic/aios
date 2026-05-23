@@ -28,7 +28,7 @@ from aios.models.agents import (
 from aios.models.events import Event, EventKind
 from aios.models.scheduled_tasks import (
     ScheduledTaskCreate,
-    compute_next_fire,
+    compute_initial_next_fire,
 )
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -183,12 +183,17 @@ async def create_session(
         if scheduled_tasks:
             now = datetime.now(UTC)
             for spec in scheduled_tasks:
-                next_fire = compute_next_fire(spec.schedule, now) if spec.enabled else None
+                next_fire = (
+                    compute_initial_next_fire(spec.schedule, spec.fire_at, now)
+                    if spec.enabled
+                    else None
+                )
                 await queries.add_scheduled_task(
                     conn,
                     session.id,
                     name=spec.name,
                     schedule=spec.schedule,
+                    fire_at=spec.fire_at,
                     command=spec.command,
                     enabled=spec.enabled,
                     timeout_seconds=spec.timeout_seconds,

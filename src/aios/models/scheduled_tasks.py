@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from croniter import croniter
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MAX_SCHEDULED_TASKS_PER_SESSION = 32
 
@@ -42,6 +42,11 @@ def _validate_cron_expression(value: str) -> str:
 class ScheduledTaskCreate(BaseModel):
     """Request body for adding a scheduled task to a session.
 
+    Each row carries either a cron ``schedule`` (recurring) or a
+    ``fire_at`` absolute time (one-shot — self-deletes after firing).
+    Exactly one must be set; enforced by both a Pydantic ``model_validator``
+    here and a DB CHECK constraint.
+
     Also accepted in :class:`SessionCreate.scheduled_tasks` for initial
     attachment at session creation.
     """
@@ -54,10 +59,21 @@ class ScheduledTaskCreate(BaseModel):
         pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
         description="Stable user-chosen identifier; unique per session.",
     )
-    schedule: str = Field(
+    schedule: str | None = Field(
+        default=None,
         min_length=1,
         max_length=MAX_SCHEDULE_CHARS,
-        description="Standard 5-field cron expression in UTC.",
+        description=(
+            "Standard 5-field cron expression in UTC for recurring rows. "
+            "Mutually exclusive with ``fire_at``."
+        ),
+    )
+    fire_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Absolute UTC time for one-shot rows; the row self-deletes "
+            "after firing. Mutually exclusive with ``schedule``."
+        ),
     )
     command: str = Field(
         min_length=1,
@@ -79,8 +95,16 @@ class ScheduledTaskCreate(BaseModel):
 
     @field_validator("schedule")
     @classmethod
-    def _validate_schedule(cls, v: str) -> str:
+    def _validate_schedule(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
         return _validate_cron_expression(v)
+
+    @model_validator(mode="after")
+    def _validate_trigger_xor(self) -> ScheduledTaskCreate:
+        if (self.schedule is None) == (self.fire_at is None):
+            raise ValueError("exactly one of `schedule` (cron) or `fire_at` (one-shot) must be set")
+        return self
 
 
 class ScheduledTaskUpdate(BaseModel):
@@ -90,6 +114,10 @@ class ScheduledTaskUpdate(BaseModel):
     a session. All other fields are optional; omitted fields are left
     unchanged. Toggling ``enabled`` true→false clears ``next_fire``;
     false→true recomputes it from now.
+
+    Updates can adjust the trigger by setting ``schedule`` (cron) or
+    ``fire_at`` (one-shot) — but not both in the same PATCH; the DB
+    CHECK constraint enforces the XOR invariant after the merged write.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -98,6 +126,10 @@ class ScheduledTaskUpdate(BaseModel):
         default=None,
         min_length=1,
         max_length=MAX_SCHEDULE_CHARS,
+    )
+    fire_at: datetime | None = Field(
+        default=None,
+        description="Update the one-shot fire time. Mutually exclusive with `schedule`.",
     )
     command: str | None = Field(
         default=None,
@@ -124,10 +156,20 @@ class ScheduledTaskUpdate(BaseModel):
             return v
         return _validate_cron_expression(v)
 
+    @model_validator(mode="after")
+    def _reject_both_triggers_in_one_patch(self) -> ScheduledTaskUpdate:
+        if self.schedule is not None and self.fire_at is not None:
+            raise ValueError(
+                "PATCH may set at most one of `schedule` or `fire_at` — they're "
+                "mutually exclusive on the row"
+            )
+        return self
+
 
 class ScheduledTaskEcho(BaseModel):
     """Read view of a scheduled task as echoed on ``Session.scheduled_tasks``.
 
+    Exactly one of ``schedule`` (cron) or ``fire_at`` (one-shot) is set.
     Runtime fields (``last_fire_at`` / ``last_fire_status`` /
     ``consecutive_failures``) reflect the most recent fire outcome.
     ``running_since`` is internal scheduler bookkeeping and is not
@@ -136,7 +178,8 @@ class ScheduledTaskEcho(BaseModel):
 
     id: str
     name: str
-    schedule: str
+    schedule: str | None
+    fire_at: datetime | None
     command: str
     enabled: bool
     timeout_seconds: int
@@ -161,6 +204,23 @@ def compute_next_fire(schedule: str, from_time: datetime) -> datetime:
     next_time = it.get_next(datetime)
     assert isinstance(next_time, datetime)
     return next_time
+
+
+def compute_initial_next_fire(
+    schedule: str | None, fire_at: datetime | None, now: datetime
+) -> datetime | None:
+    """Return the initial ``next_fire`` for a freshly-created row.
+
+    For a cron row (``schedule`` set): the next slot strictly after
+    ``now``. For a one-shot row (``fire_at`` set): the absolute time
+    verbatim — even if ``fire_at`` is in the past, the scheduler will
+    treat it as due immediately and fire-and-delete on the next tick.
+    """
+    if fire_at is not None:
+        return fire_at
+    if schedule is not None:
+        return compute_next_fire(schedule, now)
+    raise ValueError("either schedule or fire_at must be provided")
 
 
 def validate_scheduled_tasks(tasks: list[ScheduledTaskCreate]) -> None:

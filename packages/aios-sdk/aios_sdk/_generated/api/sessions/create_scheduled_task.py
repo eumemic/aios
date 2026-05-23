@@ -84,6 +84,11 @@ def sync_detailed(
         authorization (None | str | Unset):
         body (ScheduledTaskCreate): Request body for adding a scheduled task to a session.
 
+            Each row carries either a cron ``schedule`` (recurring) or a
+            ``fire_at`` absolute time (one-shot — self-deletes after firing).
+            Exactly one must be set; enforced by both a Pydantic ``model_validator``
+            here and a DB CHECK constraint.
+
             Also accepted in :class:`SessionCreate.scheduled_tasks` for initial
             attachment at session creation.
 
@@ -125,6 +130,11 @@ def sync(
         authorization (None | str | Unset):
         body (ScheduledTaskCreate): Request body for adding a scheduled task to a session.
 
+            Each row carries either a cron ``schedule`` (recurring) or a
+            ``fire_at`` absolute time (one-shot — self-deletes after firing).
+            Exactly one must be set; enforced by both a Pydantic ``model_validator``
+            here and a DB CHECK constraint.
+
             Also accepted in :class:`SessionCreate.scheduled_tasks` for initial
             attachment at session creation.
 
@@ -160,6 +170,11 @@ async def asyncio_detailed(
         session_id (str):
         authorization (None | str | Unset):
         body (ScheduledTaskCreate): Request body for adding a scheduled task to a session.
+
+            Each row carries either a cron ``schedule`` (recurring) or a
+            ``fire_at`` absolute time (one-shot — self-deletes after firing).
+            Exactly one must be set; enforced by both a Pydantic ``model_validator``
+            here and a DB CHECK constraint.
 
             Also accepted in :class:`SessionCreate.scheduled_tasks` for initial
             attachment at session creation.
@@ -199,6 +214,11 @@ async def asyncio(
         session_id (str):
         authorization (None | str | Unset):
         body (ScheduledTaskCreate): Request body for adding a scheduled task to a session.
+
+            Each row carries either a cron ``schedule`` (recurring) or a
+            ``fire_at`` absolute time (one-shot — self-deletes after firing).
+            Exactly one must be set; enforced by both a Pydantic ``model_validator``
+            here and a DB CHECK constraint.
 
             Also accepted in :class:`SessionCreate.scheduled_tasks` for initial
             attachment at session creation.

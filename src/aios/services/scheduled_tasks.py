@@ -22,6 +22,7 @@ from aios.models.scheduled_tasks import (
     ScheduledTaskCreate,
     ScheduledTaskEcho,
     ScheduledTaskUpdate,
+    compute_initial_next_fire,
     compute_next_fire,
 )
 
@@ -35,16 +36,22 @@ async def add_task(
 ) -> ScheduledTaskEcho:
     """Add a scheduled task to a session.
 
-    Initial ``next_fire`` is computed from the schedule iff the task is
-    enabled; disabled tasks store ``next_fire = NULL``.
+    Initial ``next_fire`` is computed from the schedule (cron) or copied
+    from ``fire_at`` (one-shot), unless the task is disabled — in which
+    case ``next_fire`` stays ``NULL``.
     """
-    next_fire = compute_next_fire(spec.schedule, datetime.now(UTC)) if spec.enabled else None
+    next_fire = (
+        compute_initial_next_fire(spec.schedule, spec.fire_at, datetime.now(UTC))
+        if spec.enabled
+        else None
+    )
     async with pool.acquire() as conn:
         return await queries.add_scheduled_task(
             conn,
             session_id,
             name=spec.name,
             schedule=spec.schedule,
+            fire_at=spec.fire_at,
             command=spec.command,
             enabled=spec.enabled,
             timeout_seconds=spec.timeout_seconds,
@@ -87,20 +94,27 @@ async def update_task(
 
         new_enabled = update.enabled if update.enabled is not None else current.enabled
         new_schedule = update.schedule if update.schedule is not None else current.schedule
+        new_fire_at = update.fire_at if update.fire_at is not None else current.fire_at
 
         next_fire: datetime | None | EllipsisType = ...  # ... = leave alone
         if not new_enabled and current.enabled:
             # Disabling: clear next_fire.
             next_fire = None
-        elif new_enabled and (update.schedule is not None or not current.enabled):
-            # Schedule changed while enabled, or task re-enabled: recompute.
-            next_fire = compute_next_fire(new_schedule, datetime.now(UTC))
+        elif new_enabled and (
+            update.schedule is not None or update.fire_at is not None or not current.enabled
+        ):
+            # Trigger changed (schedule or fire_at), or task re-enabled: recompute.
+            if new_fire_at is not None:
+                next_fire = new_fire_at
+            elif new_schedule is not None:
+                next_fire = compute_next_fire(new_schedule, datetime.now(UTC))
 
         return await queries.update_scheduled_task(
             conn,
             session_id,
             name,
             schedule=update.schedule,
+            fire_at=update.fire_at,
             command=update.command,
             enabled=update.enabled,
             timeout_seconds=update.timeout_seconds,

@@ -6570,6 +6570,7 @@ def _row_to_scheduled_task_echo(row: asyncpg.Record) -> ScheduledTaskEcho:
         id=row["id"],
         name=row["name"],
         schedule=row["schedule"],
+        fire_at=row["fire_at"],
         command=row["command"],
         enabled=row["enabled"],
         timeout_seconds=row["timeout_seconds"],
@@ -6589,7 +6590,8 @@ async def add_scheduled_task(
     session_id: str,
     *,
     name: str,
-    schedule: str,
+    schedule: str | None,
+    fire_at: datetime | None,
     command: str,
     enabled: bool,
     timeout_seconds: int,
@@ -6598,17 +6600,18 @@ async def add_scheduled_task(
     next_fire: datetime | None,
     account_id: str,
 ) -> ScheduledTaskEcho:
-    """Insert a scheduled task. Maps unique-name violations to
-    :class:`ConflictError` and missing-session FK violations to
-    :class:`NotFoundError`."""
+    """Insert a scheduled task. Exactly one of ``schedule`` / ``fire_at``
+    must be set (enforced by DB CHECK constraint). Maps unique-name
+    violations to :class:`ConflictError` and missing-session FK
+    violations to :class:`NotFoundError`."""
     task_id = make_id(SCHEDULED_TASK)
     try:
         row = await conn.fetchrow(
             """
             INSERT INTO session_scheduled_tasks
-                (id, session_id, account_id, name, schedule, command, enabled,
-                 timeout_seconds, max_output_bytes, next_fire, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                (id, session_id, account_id, name, schedule, fire_at, command,
+                 enabled, timeout_seconds, max_output_bytes, next_fire, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING *
             """,
             task_id,
@@ -6616,6 +6619,7 @@ async def add_scheduled_task(
             account_id,
             name,
             schedule,
+            fire_at,
             command,
             enabled,
             timeout_seconds,
@@ -6730,6 +6734,7 @@ async def update_scheduled_task(
     name: str,
     *,
     schedule: str | None = None,
+    fire_at: datetime | None | EllipsisType = ...,
     command: str | None = None,
     enabled: bool | None = None,
     timeout_seconds: int | None = None,
@@ -6740,9 +6745,11 @@ async def update_scheduled_task(
 ) -> ScheduledTaskEcho:
     """Update fields by name. Raises :class:`NotFoundError` if absent.
 
-    For non-``next_fire`` fields, ``None`` means 'leave alone.' ``next_fire``
-    uses ``...`` (Ellipsis) as the leave-alone sentinel because ``None`` is
-    a meaningful clear-to-null value (used when disabling a task).
+    For most fields, ``None`` means 'leave alone.' ``next_fire`` and
+    ``fire_at`` use ``...`` (Ellipsis) as the leave-alone sentinel
+    because ``None`` is a meaningful clear-to-null value for both.
+    The DB CHECK constraint enforces that exactly one of (schedule,
+    fire_at) ends up non-null after the merged write.
     """
     set_clauses: list[str] = []
     args: list[Any] = []
@@ -6753,6 +6760,8 @@ async def update_scheduled_task(
 
     if schedule is not None:
         add("schedule", schedule)
+    if not isinstance(fire_at, EllipsisType):
+        add("fire_at", fire_at)
     if command is not None:
         add("command", command)
     if enabled is not None:

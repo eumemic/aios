@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import datetime
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
+from dateutil.parser import isoparse
 
 from ..types import UNSET, Unset
 
@@ -25,8 +27,13 @@ class ScheduledTaskUpdate:
     unchanged. Toggling ``enabled`` true→false clears ``next_fire``;
     false→true recomputes it from now.
 
+    Updates can adjust the trigger by setting ``schedule`` (cron) or
+    ``fire_at`` (one-shot) — but not both in the same PATCH; the DB
+    CHECK constraint enforces the XOR invariant after the merged write.
+
         Attributes:
             schedule (None | str | Unset):
+            fire_at (datetime.datetime | None | Unset): Update the one-shot fire time. Mutually exclusive with `schedule`.
             command (None | str | Unset):
             enabled (bool | None | Unset):
             timeout_seconds (int | None | Unset):
@@ -35,6 +42,7 @@ class ScheduledTaskUpdate:
     """
 
     schedule: None | str | Unset = UNSET
+    fire_at: datetime.datetime | None | Unset = UNSET
     command: None | str | Unset = UNSET
     enabled: bool | None | Unset = UNSET
     timeout_seconds: int | None | Unset = UNSET
@@ -51,6 +59,14 @@ class ScheduledTaskUpdate:
             schedule = UNSET
         else:
             schedule = self.schedule
+
+        fire_at: None | str | Unset
+        if isinstance(self.fire_at, Unset):
+            fire_at = UNSET
+        elif isinstance(self.fire_at, datetime.datetime):
+            fire_at = self.fire_at.isoformat()
+        else:
+            fire_at = self.fire_at
 
         command: None | str | Unset
         if isinstance(self.command, Unset):
@@ -89,6 +105,8 @@ class ScheduledTaskUpdate:
         field_dict.update({})
         if schedule is not UNSET:
             field_dict["schedule"] = schedule
+        if fire_at is not UNSET:
+            field_dict["fire_at"] = fire_at
         if command is not UNSET:
             field_dict["command"] = command
         if enabled is not UNSET:
@@ -118,6 +136,23 @@ class ScheduledTaskUpdate:
             return cast(None | str | Unset, data)
 
         schedule = _parse_schedule(d.pop("schedule", UNSET))
+
+        def _parse_fire_at(data: object) -> datetime.datetime | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                fire_at_type_0 = isoparse(data)
+
+                return fire_at_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(datetime.datetime | None | Unset, data)
+
+        fire_at = _parse_fire_at(d.pop("fire_at", UNSET))
 
         def _parse_command(data: object) -> None | str | Unset:
             if data is None:
@@ -176,6 +211,7 @@ class ScheduledTaskUpdate:
 
         scheduled_task_update = cls(
             schedule=schedule,
+            fire_at=fire_at,
             command=command,
             enabled=enabled,
             timeout_seconds=timeout_seconds,

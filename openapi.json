@@ -11239,11 +11239,31 @@
             "description": "Stable user-chosen identifier; unique per session."
           },
           "schedule": {
-            "type": "string",
-            "maxLength": 128,
-            "minLength": 1,
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Schedule",
-            "description": "Standard 5-field cron expression in UTC."
+            "description": "Standard 5-field cron expression in UTC for recurring rows. Mutually exclusive with ``fire_at``."
+          },
+          "fire_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fire At",
+            "description": "Absolute UTC time for one-shot rows; the row self-deletes after firing. Mutually exclusive with ``schedule``."
           },
           "command": {
             "type": "string",
@@ -11281,11 +11301,10 @@
         "type": "object",
         "required": [
           "name",
-          "schedule",
           "command"
         ],
         "title": "ScheduledTaskCreate",
-        "description": "Request body for adding a scheduled task to a session.\n\nAlso accepted in :class:`SessionCreate.scheduled_tasks` for initial\nattachment at session creation."
+        "description": "Request body for adding a scheduled task to a session.\n\nEach row carries either a cron ``schedule`` (recurring) or a\n``fire_at`` absolute time (one-shot \u2014 self-deletes after firing).\nExactly one must be set; enforced by both a Pydantic ``model_validator``\nhere and a DB CHECK constraint.\n\nAlso accepted in :class:`SessionCreate.scheduled_tasks` for initial\nattachment at session creation."
       },
       "ScheduledTaskEcho": {
         "properties": {
@@ -11298,8 +11317,27 @@
             "title": "Name"
           },
           "schedule": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Schedule"
+          },
+          "fire_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fire At"
           },
           "command": {
             "type": "string",
@@ -11383,6 +11421,7 @@
           "id",
           "name",
           "schedule",
+          "fire_at",
           "command",
           "enabled",
           "timeout_seconds",
@@ -11396,7 +11435,7 @@
           "updated_at"
         ],
         "title": "ScheduledTaskEcho",
-        "description": "Read view of a scheduled task as echoed on ``Session.scheduled_tasks``.\n\nRuntime fields (``last_fire_at`` / ``last_fire_status`` /\n``consecutive_failures``) reflect the most recent fire outcome.\n``running_since`` is internal scheduler bookkeeping and is not\nexposed here."
+        "description": "Read view of a scheduled task as echoed on ``Session.scheduled_tasks``.\n\nExactly one of ``schedule`` (cron) or ``fire_at`` (one-shot) is set.\nRuntime fields (``last_fire_at`` / ``last_fire_status`` /\n``consecutive_failures``) reflect the most recent fire outcome.\n``running_since`` is internal scheduler bookkeeping and is not\nexposed here."
       },
       "ScheduledTaskUpdate": {
         "properties": {
@@ -11412,6 +11451,19 @@
               }
             ],
             "title": "Schedule"
+          },
+          "fire_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fire At",
+            "description": "Update the one-shot fire time. Mutually exclusive with `schedule`."
           },
           "command": {
             "anyOf": [
@@ -11479,7 +11531,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "ScheduledTaskUpdate",
-        "description": "PATCH body for updating a scheduled task.\n\n``name`` cannot be changed \u2014 it is the addressable identifier within\na session. All other fields are optional; omitted fields are left\nunchanged. Toggling ``enabled`` true\u2192false clears ``next_fire``;\nfalse\u2192true recomputes it from now."
+        "description": "PATCH body for updating a scheduled task.\n\n``name`` cannot be changed \u2014 it is the addressable identifier within\na session. All other fields are optional; omitted fields are left\nunchanged. Toggling ``enabled`` true\u2192false clears ``next_fire``;\nfalse\u2192true recomputes it from now.\n\nUpdates can adjust the trigger by setting ``schedule`` (cron) or\n``fire_at`` (one-shot) \u2014 but not both in the same PATCH; the DB\nCHECK constraint enforces the XOR invariant after the merged write."
       },
       "Session": {
         "properties": {
