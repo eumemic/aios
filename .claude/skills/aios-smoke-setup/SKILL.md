@@ -34,16 +34,19 @@ Reads source `.env` from `~/code/aios/.env`, writes a worktree-scoped `.env` wit
 
 3. **Bot identity.** The connector calls `Bot.get_me()` at startup; the returned `bot_id` becomes the `account` field of every connection and the `<account>` segment of channel addresses.  The script captures this from `aios connectors list` and uses it for `aios connections create --account=<bot_id>`.
 
-## The four overrides that always belong in the worktree's .env
+## The five overrides that always belong in the worktree's .env
 
 ```dotenv
 AIOS_DB_URL=postgresql://aios:aios@localhost:5433/aios_smoke_<branch_short>
 AIOS_API_PORT=8091   # or next free port from 8091
 AIOS_CONNECTORS_ENABLED=telegram   # narrow to what's actually installed in this venv
 AIOS_DEFAULT_MCP_PERMISSION_POLICY=always_allow
+AIOS_WORKSPACE_ROOT=/abs/path/to/<worktree>/workspaces   # MUST be absolute
 ```
 
 Without the **DB** and **port** overrides, two parallel smoke sessions will deadlock each other on the procrastinate supervisor lock and the uvicorn bind.  Without **`always_allow`**, every model tool call parks in `requires_action` until you POST a `tool-confirmation` — fine for production, terrible for unattended smoke.  Without **narrowing `AIOS_CONNECTORS_ENABLED`**, a missing connector entry-point in this worktree's venv (e.g. signal not installed) crashes the worker at startup.
+
+**`AIOS_WORKSPACE_ROOT` must be absolute** since #665 — a relative path like `./workspaces` now fails Pydantic validation at Settings load.  Symptom: `pytest tests/unit` crashes during collection with `pydantic_core._pydantic_core.ValidationError: AIOS_WORKSPACE_ROOT must be an absolute path; got 'workspaces'.`, which then blocks the pre-commit hook from passing.  Use the resolved absolute path of the worktree's `workspaces/` directory; don't rely on `~` expansion (Pydantic doesn't expand it).
 
 ## The migration step is `aios migrate`, not `alembic upgrade head`
 
