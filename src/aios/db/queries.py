@@ -894,6 +894,34 @@ async def list_sessions(
     return [_row_to_session(r) for r in rows]
 
 
+async def lock_active_session_for_update(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> None:
+    """Enforce the active-session precondition: ``SELECT FOR UPDATE`` the
+    session row, raise :class:`NotFoundError` on miss / wrong account,
+    :class:`ConflictError` when status is ``errored`` (a user message is
+    required to resume).
+
+    Must be called inside an outer ``conn.transaction()`` block — the
+    row lock is what serialises concurrent retries on the same session.
+    """
+    row = await conn.fetchrow(
+        "SELECT status FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+        session_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"session {session_id} not found",
+            detail={"session_id": session_id},
+        )
+    if row["status"] == "errored":
+        raise ConflictError(
+            f"session {session_id} is errored; post a user message to resume",
+            detail={"session_id": session_id, "status": "errored"},
+        )
+
+
 async def set_session_status(
     conn: asyncpg.Connection[Any],
     session_id: str,
