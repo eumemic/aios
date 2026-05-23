@@ -145,6 +145,32 @@ async def _list_scoped[T](
     return [row(r) for r in await conn.fetch(sql, *args)]
 
 
+async def _archive_scoped(
+    conn: asyncpg.Connection[Any],
+    *,
+    table: str,
+    id_: str,
+    account_id: str,
+    noun: str,
+) -> asyncpg.Record:
+    """Soft-archive: ``SET archived_at = now(), updated_at = now()`` scoped by
+    id + account_id + ``archived_at IS NULL``.  Raises NotFound on miss or
+    already-archived row.  Callers that need the model map the returned
+    Record themselves; callers that return ``None`` simply discard it."""
+    rec = await conn.fetchrow(
+        f"UPDATE {table} SET archived_at = now(), updated_at = now() "
+        f"WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
+        id_,
+        account_id,
+    )
+    if rec is None:
+        raise NotFoundError(
+            f"{noun} {id_} not found or already archived",
+            detail={"id": id_},
+        )
+    return rec
+
+
 # ─── environments ─────────────────────────────────────────────────────────────
 
 
@@ -215,14 +241,13 @@ async def list_environments(
 async def archive_environment(
     conn: asyncpg.Connection[Any], env_id: str, *, account_id: str
 ) -> None:
-    result = await conn.execute(
-        "UPDATE environments SET archived_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
-        env_id,
-        account_id,
+    await _archive_scoped(
+        conn,
+        table="environments",
+        id_=env_id,
+        account_id=account_id,
+        noun="environment",
     )
-    if result == "UPDATE 0":
-        raise NotFoundError(f"environment {env_id} not found or already archived")
 
 
 async def update_environment(
@@ -484,14 +509,13 @@ async def list_agents(
 
 
 async def archive_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str) -> None:
-    result = await conn.execute(
-        "UPDATE agents SET archived_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
-        agent_id,
-        account_id,
+    await _archive_scoped(
+        conn,
+        table="agents",
+        id_=agent_id,
+        account_id=account_id,
+        noun="agent",
     )
-    if result == "UPDATE 0":
-        raise NotFoundError(f"agent {agent_id} not found or already archived")
 
 
 async def update_agent(
@@ -1178,17 +1202,13 @@ async def update_session(
 async def archive_session(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> Session:
-    row = await conn.fetchrow(
-        "UPDATE sessions SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
-        session_id,
-        account_id,
+    row = await _archive_scoped(
+        conn,
+        table="sessions",
+        id_=session_id,
+        account_id=account_id,
+        noun="session",
     )
-    if row is None:
-        raise NotFoundError(
-            f"session {session_id} not found or already archived",
-            detail={"id": session_id},
-        )
     return _row_to_session(row)
 
 
@@ -3241,14 +3261,13 @@ async def list_skills(
 
 
 async def archive_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id: str) -> None:
-    result = await conn.execute(
-        "UPDATE skills SET archived_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
-        skill_id,
-        account_id,
+    await _archive_scoped(
+        conn,
+        table="skills",
+        id_=skill_id,
+        account_id=account_id,
+        noun="skill",
     )
-    if result == "UPDATE 0":
-        raise NotFoundError(f"skill {skill_id} not found or already archived")
 
 
 async def insert_skill_version(
@@ -4492,17 +4511,13 @@ async def archive_session_template(
     working; new chat sessions on connections referencing this template
     will fail at the inbound handler.
     """
-    row = await conn.fetchrow(
-        "UPDATE session_templates SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
-        template_id,
-        account_id,
+    row = await _archive_scoped(
+        conn,
+        table="session_templates",
+        id_=template_id,
+        account_id=account_id,
+        noun="session template",
     )
-    if row is None:
-        raise NotFoundError(
-            f"session template {template_id} not found or already archived",
-            detail={"id": template_id},
-        )
     return _row_to_session_template(row)
 
 
@@ -4684,17 +4699,13 @@ async def update_memory_store(
 async def archive_memory_store(
     conn: asyncpg.Connection[Any], store_id: str, *, account_id: str
 ) -> MemoryStore:
-    row = await conn.fetchrow(
-        "UPDATE memory_stores SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
-        store_id,
-        account_id,
+    row = await _archive_scoped(
+        conn,
+        table="memory_stores",
+        id_=store_id,
+        account_id=account_id,
+        noun="memory store",
     )
-    if row is None:
-        raise NotFoundError(
-            f"memory store {store_id} not found or already archived",
-            detail={"id": store_id},
-        )
     return _row_to_memory_store(row)
 
 
