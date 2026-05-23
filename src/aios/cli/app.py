@@ -107,6 +107,7 @@ from aios.cli.commands import skills as _skills  # noqa: E402
 from aios.cli.commands import status as _status  # noqa: E402
 from aios.cli.commands import tail as _tail  # noqa: E402
 from aios.cli.commands import vaults as _vaults  # noqa: E402
+from aios.cli.commands import whatsapp as _whatsapp  # noqa: E402
 
 app.add_typer(_accounts.app, name="accounts")
 app.add_typer(_agents.app, name="agents")
@@ -118,6 +119,7 @@ app.add_typer(_connections.app, name="connections")
 app.add_typer(_envs.app, name="envs")
 app.add_typer(_dev.app, name="dev")
 app.add_typer(_signal.app, name="signal")
+app.add_typer(_whatsapp.app, name="whatsapp")
 
 _ops.register(app)
 _status.register(app)
