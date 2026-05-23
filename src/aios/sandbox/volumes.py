@@ -88,6 +88,20 @@ def validate_workspace_path(
     """Refuse ``raw_path`` if it resolves outside the account's
     workspace subdirectory.
 
+    ``raw_path`` MUST be absolute.  Relative inputs are rejected
+    before any ``Path.resolve()`` runs: ``resolve()`` would
+    interpret them against the current process's working directory,
+    which differs between the API and worker (and between worker
+    restarts), producing diverging targets across boundaries.  See
+    #626 — legacy session rows persisted relative
+    ``workspaces/<account>/<session>`` strings (back when
+    ``AIOS_WORKSPACE_ROOT`` itself was permitted to be relative);
+    every cold-start re-validation surfaced ``ForbiddenError``
+    blamed on whatever path the model had just tried to use.
+    Failing fast on the relative-input branch produces an
+    unambiguous error identifying the stored
+    ``workspace_volume_path`` as the culprit.
+
     Without this check an authenticated client could POST
     ``/v1/sessions`` with e.g. ``workspace_path="/etc"`` and the
     sandbox would bind-mount the host's ``/etc`` read-write at
@@ -136,6 +150,14 @@ def validate_workspace_path(
     and surfacing it under the auth-tier error family makes it visible
     in audit logs as such.
     """
+    if not Path(raw_path).is_absolute():
+        raise ForbiddenError(
+            "workspace_volume_path must be absolute (starts with '/'); got "
+            f"non-absolute value {raw_path!r}. This usually indicates a "
+            "stale pre-#409 session row that needs the absolute-legacy "
+            "backfill migration (see aios#626).",
+            detail={"workspace_path": raw_path, "session_id": session_id},
+        )
     path = Path(raw_path).resolve()
     workspace_root = get_settings().workspace_root.resolve()
     account_root = (workspace_root / account_id).resolve()
