@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections.abc import Callable
 from datetime import datetime
 from types import EllipsisType
 from typing import Any, NamedTuple, NoReturn, cast
@@ -84,6 +85,35 @@ def parse_jsonb(raw: Any) -> Any:
     return json.loads(raw) if isinstance(raw, str) else raw
 
 
+# ─── shared scoping helpers ──────────────────────────────────────────────────
+#
+# These helpers extract the per-resource CRUD/pagination/tenant-scoping
+# boilerplate that was previously repeated across ~10 resource blocks.
+# ``table``/``column``/``noun`` args are always static literals from this
+# module — never user input — so f-string interpolation carries no injection
+# risk.
+
+
+async def _get_scoped[T](
+    conn: asyncpg.Connection[Any],
+    *,
+    table: str,
+    id_: str,
+    account_id: str,
+    row: Callable[[asyncpg.Record], T],
+    noun: str,
+) -> T:
+    """``SELECT * FROM <table> WHERE id=$1 AND account_id=$2`` — raise NotFound on miss."""
+    rec = await conn.fetchrow(
+        f"SELECT * FROM {table} WHERE id = $1 AND account_id = $2",
+        id_,
+        account_id,
+    )
+    if rec is None:
+        raise NotFoundError(f"{noun} {id_} not found", detail={"id": id_})
+    return row(rec)
+
+
 # ─── environments ─────────────────────────────────────────────────────────────
 
 
@@ -128,14 +158,14 @@ async def insert_environment(
 async def get_environment(
     conn: asyncpg.Connection[Any], env_id: str, *, account_id: str
 ) -> Environment:
-    row = await conn.fetchrow(
-        "SELECT * FROM environments WHERE id = $1 AND account_id = $2",
-        env_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="environments",
+        id_=env_id,
+        account_id=account_id,
+        row=_row_to_environment,
+        noun="environment",
     )
-    if row is None:
-        raise NotFoundError(f"environment {env_id} not found", detail={"id": env_id})
-    return _row_to_environment(row)
 
 
 async def list_environments(
@@ -397,14 +427,14 @@ async def insert_agent(
 
 
 async def get_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str) -> Agent:
-    row = await conn.fetchrow(
-        "SELECT * FROM agents WHERE id = $1 AND account_id = $2",
-        agent_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="agents",
+        id_=agent_id,
+        account_id=account_id,
+        row=_row_to_agent,
+        noun="agent",
     )
-    if row is None:
-        raise NotFoundError(f"agent {agent_id} not found", detail={"id": agent_id})
-    return _row_to_agent(row)
 
 
 async def list_agents(
@@ -769,14 +799,14 @@ async def insert_session(
 async def get_session(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> Session:
-    row = await conn.fetchrow(
-        "SELECT * FROM sessions WHERE id = $1 AND account_id = $2",
-        session_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="sessions",
+        id_=session_id,
+        account_id=account_id,
+        row=_row_to_session,
+        noun="session",
     )
-    if row is None:
-        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
-    return _row_to_session(row)
 
 
 async def get_session_workspace_path(
@@ -2552,14 +2582,14 @@ async def insert_vault(
 
 
 async def get_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_id: str) -> Vault:
-    row = await conn.fetchrow(
-        "SELECT * FROM vaults WHERE id = $1 AND account_id = $2",
-        vault_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="vaults",
+        id_=vault_id,
+        account_id=account_id,
+        row=_row_to_vault,
+        noun="vault",
     )
-    if row is None:
-        raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
-    return _row_to_vault(row)
 
 
 async def list_vaults(
@@ -3172,14 +3202,14 @@ async def insert_skill(
 
 
 async def get_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id: str) -> Skill:
-    row = await conn.fetchrow(
-        "SELECT * FROM skills WHERE id = $1 AND account_id = $2",
-        skill_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="skills",
+        id_=skill_id,
+        account_id=account_id,
+        row=_row_to_skill,
+        noun="skill",
     )
-    if row is None:
-        raise NotFoundError(f"skill {skill_id} not found", detail={"id": skill_id})
-    return _row_to_skill(row)
 
 
 async def list_skills(
@@ -4336,17 +4366,14 @@ async def insert_session_template(
 async def get_session_template(
     conn: asyncpg.Connection[Any], template_id: str, *, account_id: str
 ) -> SessionTemplate:
-    row = await conn.fetchrow(
-        "SELECT * FROM session_templates WHERE id = $1 AND account_id = $2",
-        template_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="session_templates",
+        id_=template_id,
+        account_id=account_id,
+        row=_row_to_session_template,
+        noun="session template",
     )
-    if row is None:
-        raise NotFoundError(
-            f"session template {template_id} not found",
-            detail={"id": template_id},
-        )
-    return _row_to_session_template(row)
 
 
 async def list_session_templates(
