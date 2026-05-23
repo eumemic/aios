@@ -161,6 +161,13 @@ func (c *Client) drainUnread(chatJID string) []unreadKey {
 // and can diagnose; the model retries with the user's help if
 // needed.
 //
+// ``sentAtMs`` is the server-acknowledged send timestamp (from
+// ``SendResponse.Timestamp``), used by the Edit window guard at
+// :func:`Client.Edit` to refuse out-of-window edit attempts before
+// the protocol-level rejection.  ``text`` is the message body the
+// peer received, used to build the QuotedMessage stub when the model
+// later issues a reply with ``quoted_message_id``.
+//
 // Takes the `wa` that performed the send rather than re-loading
 // c.wa.  A concurrent unpair could otherwise swap c.wa between
 // sendOne returning and recordOutbound reading Store.ID, stamping
@@ -171,6 +178,8 @@ func (c *Client) recordOutbound(
 	wa *whatsmeow.Client,
 	msgID string,
 	chatJID types.JID,
+	sentAtMs int64,
+	text string,
 ) {
 	ourID := wa.Store.ID
 	if ourID == nil {
@@ -179,7 +188,7 @@ func (c *Client) recordOutbound(
 		// record rather than panic.
 		return
 	}
-	if err := c.msgs.Put(ctx, msgID, chatJID.String(), ourID.String(), true); err != nil {
+	if err := c.msgs.Put(ctx, msgID, chatJID.String(), ourID.String(), true, sentAtMs, text); err != nil {
 		c.log.Warn("wameow.msgstore_put_failed", "id", msgID, "err", err)
 	}
 }

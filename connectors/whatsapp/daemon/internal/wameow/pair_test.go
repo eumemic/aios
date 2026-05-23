@@ -215,7 +215,7 @@ func TestReplaceWhatsmeowClientRecoversFromDeletedDevice(t *testing.T) {
 	// with ErrMessageNotFound rather than succeeding under the new
 	// device identity (which can't authenticate the old whatsmeow
 	// Signal session for this msgID).
-	if err := c.msgs.Put(ctx, "STALE-MSG", "chat@s.whatsapp.net", "old-device@s.whatsapp.net", true); err != nil {
+	if err := c.msgs.Put(ctx, "STALE-MSG", "chat@s.whatsapp.net", "old-device@s.whatsapp.net", true, 0, ""); err != nil {
 		t.Fatalf("seed messages: %v", err)
 	}
 
@@ -246,7 +246,7 @@ func TestReplaceWhatsmeowClientRecoversFromDeletedDevice(t *testing.T) {
 	// Stale row must be gone — otherwise a subsequent React/Edit
 	// would Lookup-succeed but reference a whatsmeow Signal session
 	// the new device identity can't address.
-	if _, _, _, err := c.msgs.Lookup(ctx, "STALE-MSG"); !errors.Is(err, ErrMessageNotFound) {
+	if _, err := c.msgs.Lookup(ctx, "STALE-MSG"); !errors.Is(err, ErrMessageNotFound) {
 		t.Errorf("STALE-MSG should be gone after replace, got err=%v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	// modernc.org/sqlite is already registered by client.go's import.
 	_ "modernc.org/sqlite"
@@ -62,11 +63,27 @@ func openMessageStoreDSN(dsn string) (*MessageStore, error) {
 			chat_jid TEXT NOT NULL,
 			sender_jid TEXT NOT NULL,
 			from_me INTEGER NOT NULL CHECK (from_me IN (0, 1)),
+			sent_at INTEGER NOT NULL DEFAULT 0,
+			text TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') * 1000 AS INTEGER))
 		)
 	`); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("create messages table: %w", err)
+	}
+	// Forward-migrate older stores that pre-date the sent_at + text
+	// columns.  Bare ALTER TABLE ADD COLUMN on a column that already
+	// exists raises "duplicate column name" — swallow that specific
+	// error so the migration is idempotent on fresh AND pre-existing
+	// databases.
+	for _, alter := range []string{
+		`ALTER TABLE messages ADD COLUMN sent_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE messages ADD COLUMN text TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(alter); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			_ = db.Close()
+			return nil, fmt.Errorf("alter messages: %w", err)
+		}
 	}
 	return &MessageStore{db: db}, nil
 }
@@ -77,35 +94,53 @@ func (s *MessageStore) Close() error {
 
 // Put records a message's MessageKey.  Idempotent on conflict: a
 // duplicate id is a no-op so retries and re-deliveries don't fail.
-func (s *MessageStore) Put(ctx context.Context, id, chatJID, senderJID string, fromMe bool) error {
+//
+// ``sentAtMs`` is the message's wall-clock send time (whatsmeow's
+// ``MessageInfo.Timestamp``), used by Edit/Revoke window guards.
+// ``text`` is the message body, used to build the QuotedMessage stub
+// when the model issues a reply with ``quoted_message_id``.
+func (s *MessageStore) Put(ctx context.Context, id, chatJID, senderJID string, fromMe bool, sentAtMs int64, text string) error {
 	fromMeInt := 0
 	if fromMe {
 		fromMeInt = 1
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO messages (id, chat_jid, sender_jid, from_me)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO messages (id, chat_jid, sender_jid, from_me, sent_at, text)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO NOTHING
-	`, id, chatJID, senderJID, fromMeInt)
+	`, id, chatJID, senderJID, fromMeInt, sentAtMs, text)
 	if err != nil {
 		return fmt.Errorf("insert message %s: %w", id, err)
 	}
 	return nil
 }
 
-// Lookup returns the MessageKey for id, or ErrMessageNotFound.
-func (s *MessageStore) Lookup(ctx context.Context, id string) (chatJID, senderJID string, fromMe bool, err error) {
-	var fromMeInt int
+// MessageRecord is the row returned by Lookup.
+type MessageRecord struct {
+	ChatJID   string
+	SenderJID string
+	FromMe    bool
+	SentAtMs  int64
+	Text      string
+}
+
+// Lookup returns the MessageRecord for id, or ErrMessageNotFound.
+func (s *MessageStore) Lookup(ctx context.Context, id string) (MessageRecord, error) {
+	var (
+		rec       MessageRecord
+		fromMeInt int
+	)
 	row := s.db.QueryRowContext(ctx, `
-		SELECT chat_jid, sender_jid, from_me FROM messages WHERE id = ?
+		SELECT chat_jid, sender_jid, from_me, sent_at, text FROM messages WHERE id = ?
 	`, id)
-	if scanErr := row.Scan(&chatJID, &senderJID, &fromMeInt); scanErr != nil {
+	if scanErr := row.Scan(&rec.ChatJID, &rec.SenderJID, &fromMeInt, &rec.SentAtMs, &rec.Text); scanErr != nil {
 		if errors.Is(scanErr, sql.ErrNoRows) {
-			return "", "", false, ErrMessageNotFound
+			return MessageRecord{}, ErrMessageNotFound
 		}
-		return "", "", false, fmt.Errorf("lookup message %s: %w", id, scanErr)
+		return MessageRecord{}, fmt.Errorf("lookup message %s: %w", id, scanErr)
 	}
-	return chatJID, senderJID, fromMeInt == 1, nil
+	rec.FromMe = fromMeInt == 1
+	return rec, nil
 }
 
 // Truncate empties the messages table.  Called after Unpair so the

@@ -19,6 +19,7 @@ from aios_connector_http import HttpConnector, SandboxPath, iso_from_ms, tool
 
 from .config import Settings
 from .daemon import WhatsappDaemon
+from .errors import ListenerClosedError
 from .format import markdown_to_whatsapp
 from .management import WhatsappManagementMixin, normalize_phone
 from .mentions import encode_mentions
@@ -67,7 +68,22 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
                 phone=phone,
                 port=port,
             )
-            await self._dispatch_notifications(connection_id, daemon)
+            try:
+                await self._dispatch_notifications(connection_id, daemon)
+            except ListenerClosedError as err:
+                # Daemon process exited (crash, pkill, or clean
+                # shutdown) while we were still listening.  Post a
+                # lifecycle event onto every session bound to this
+                # connection so the model sees the connection-broken
+                # state in its context rather than silently sending
+                # into the void on the next outbound.
+                await self.emit_lifecycle(
+                    connection_id=connection_id,
+                    event="whatsapp.connection.lost",
+                    reason="daemon_exited",
+                    data={"detail": str(err)},
+                )
+                raise
 
     async def _dispatch_notifications(self, connection_id: str, daemon: WhatsappDaemon) -> None:
         async for method, params in daemon.listener.notifications():
@@ -80,11 +96,27 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
                 # daemon's IsConnected() check.  Surface this loudly
                 # so operators see the state change rather than
                 # debugging cryptic ``not connected`` errors.
+                wa_reason = params.get("reason")
                 log.warning(
                     "whatsapp.connection.logged_out",
                     connection_id=connection_id,
                     on_connect=params.get("on_connect"),
-                    reason=params.get("reason"),
+                    reason=wa_reason,
+                )
+                # Post a session-level lifecycle event too so the
+                # bound model sees the connection-broken state in its
+                # context (not just the operator log).  Daemon stays
+                # alive — pair.go's LoggedOut handler now calls
+                # replaceWhatsmeowClient so a subsequent
+                # ``start-pairing`` recovers in-process.
+                lifecycle_data: dict[str, Any] = {}
+                if isinstance(wa_reason, str) and wa_reason:
+                    lifecycle_data["whatsmeow_reason"] = wa_reason
+                await self.emit_lifecycle(
+                    connection_id=connection_id,
+                    event="whatsapp.connection.lost",
+                    reason="peer_logout",
+                    data=lifecycle_data or None,
                 )
             elif method == "connectionState":
                 # Diagnostic: ``connected`` / ``disconnected`` from
@@ -127,6 +159,11 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
         if msg.revoke_target_message_id is not None:
             metadata["revoked"] = True
             metadata["revoke_target_message_id"] = msg.revoke_target_message_id
+        if msg.quoted_message_id is not None:
+            # The peer replied to a previous message in this chat.
+            # Surface the target so the model can address the right
+            # thread instead of inferring from message order.
+            metadata["quoted_message_id"] = msg.quoted_message_id
         if msg.mentioned_jids:
             # Surface in the harness's existing mentions-block shape.
             # The context renderer reads ``uuid`` per entry; we
@@ -193,6 +230,7 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
         self,
         text: str,
         attachments: list[SandboxPath] | None = None,
+        quoted_message_id: str | None = None,
         *,
         connection_id: str,
         chat_id: str,
@@ -211,6 +249,14 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
                 this method runs.  Mimetype is derived from the file
                 extension via Python's ``mimetypes`` module; unknown
                 types fall through to a generic document send.
+            quoted_message_id: Optional id of a previously-seen message
+                in this chat to thread this send as a reply to.  Pass
+                the ``message_id`` from the inbound metadata you want
+                to reply to.  The recipient's WhatsApp client renders
+                the reply bubble with a quote preview pointing at the
+                target.  Raises if the target id isn't in the daemon's
+                local message store (typically because it predates the
+                bot joining the chat).
 
         Returns:
             ``{"message_id": "...", "timestamp_ms": ...}`` of the
@@ -232,6 +278,8 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
             params["mentioned_jids"] = mentioned_jids
         if attachments:
             params["attachments"] = [_attachment_params(p) for p in attachments]
+        if quoted_message_id:
+            params["quoted_message_id"] = quoted_message_id
         result = await state.daemon.rpc.call("sendMessage", params)
         if not isinstance(result, dict):
             raise RuntimeError(f"sendMessage returned non-dict: {result!r}")

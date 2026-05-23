@@ -135,11 +135,40 @@ def test_parse_message_sticker_emoji_kept_without_text() -> None:
     assert msg.attachments == ()
 
 
+def test_parse_message_keeps_sticker_with_empty_emoji() -> None:
+    # Custom stickers from WhatsApp's sticker maker often carry no
+    # emoji label; the daemon now emits sticker_emoji="" instead of
+    # omitting the key so parse_message must keep the envelope.
+    # Pre-fix the message would land here without the key set, get
+    # dropped as "no signal", and the model would never know the peer
+    # sent a sticker.
+    p = dm_payload(text="")
+    p["sticker_emoji"] = ""
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.sticker_emoji == ""
+
+
 def test_parse_message_drops_when_no_signal_at_all() -> None:
     # No text, no attachments, no sticker, no reaction — nothing for
     # the model to act on, so silently drop.
     p = dm_payload(text="")
     assert parse_message(p) is None
+
+
+def test_parse_message_carries_quoted_message_id() -> None:
+    p = dm_payload(text="thanks for that")
+    p["quoted_message_id"] = "3EB0PEERTARGET"
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.quoted_message_id == "3EB0PEERTARGET"
+
+
+def test_parse_message_quoted_message_id_absent_by_default() -> None:
+    p = dm_payload(text="hello")
+    msg = parse_message(p)
+    assert msg is not None
+    assert msg.quoted_message_id is None
 
 
 def test_parse_message_carries_reaction() -> None:

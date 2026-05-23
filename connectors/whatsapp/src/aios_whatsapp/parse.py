@@ -55,10 +55,23 @@ class InboundMessage:
     timestamp_ms: int
     text: str
     attachments: tuple[InboundAttachment, ...] = field(default_factory=tuple)
+    # ``sticker_emoji`` is None when no sticker was attached.  An empty
+    # string means "sticker received but the sender's WhatsApp client
+    # didn't pick an emoji label" (custom stickers from the sticker
+    # maker frequently land this way) — the connector surfaces this as
+    # a metadata-only signal so the model still knows the peer sent
+    # one.  Pre-fix both empty AND missing collapsed to None, so the
+    # parser dropped no-emoji stickers entirely.
     sticker_emoji: str | None = None
     reaction: InboundReaction | None = None
     edit_target_message_id: str | None = None
     revoke_target_message_id: str | None = None
+    # ``quoted_message_id`` is set when this inbound is a reply to one
+    # of the bot's earlier messages (or to any prior message in the
+    # chat the peer chose to quote).  The harness threads it into the
+    # event metadata so the model can address the right thread instead
+    # of inferring from message order.
+    quoted_message_id: str | None = None
     mentioned_jids: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -69,9 +82,10 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
 
     * ``is_self=True`` — echoes of our own sends.
     * ``chat_type`` not in ``{"dm", "group"}``.
-    * Empty text AND empty attachments AND no sticker — no signal to
-      surface (e.g. an empty reaction-only message that slipped past
-      whatsmeow's protocol-message filter).
+    * Empty text AND empty attachments AND no sticker AND no other
+      metadata signal — no signal to surface (e.g. an empty
+      reaction-only message that slipped past whatsmeow's
+      protocol-message filter).
     * Required fields (``id``, ``chat_jid``, ``from_jid``, ``timestamp_ms``)
       missing or wrong type.
     """
@@ -105,12 +119,18 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
 
     attachments = _parse_attachments(params.get("attachments"))
 
+    # Sticker presence is the signal; the emoji label is informational
+    # and may be empty for custom stickers without a sender-picked tag.
+    # Accepting "" (not just truthy strings) lets the drop check below
+    # keep no-emoji stickers, which pre-fix were silently swallowed.
     raw_sticker = params.get("sticker_emoji")
-    sticker_emoji = raw_sticker if isinstance(raw_sticker, str) and raw_sticker else None
+    sticker_emoji = raw_sticker if isinstance(raw_sticker, str) else None
 
     reaction = _parse_reaction(params.get("reaction"))
     edit_target_message_id = _parse_target(params.get("edit"))
     revoke_target_message_id = _parse_target(params.get("revoke"))
+    raw_quoted = params.get("quoted_message_id")
+    quoted_message_id = raw_quoted if isinstance(raw_quoted, str) and raw_quoted else None
     raw_mentions = params.get("mentioned_jids")
     mentioned_jids: tuple[str, ...] = (
         tuple(j for j in raw_mentions if isinstance(j, str) and j)
@@ -145,6 +165,7 @@ def parse_message(params: dict[str, Any]) -> InboundMessage | None:
         reaction=reaction,
         edit_target_message_id=edit_target_message_id,
         revoke_target_message_id=revoke_target_message_id,
+        quoted_message_id=quoted_message_id,
         mentioned_jids=mentioned_jids,
     )
 

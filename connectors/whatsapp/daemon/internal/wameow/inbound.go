@@ -20,6 +20,13 @@ func (c *Client) handleEvent(evt any) {
 		if params := c.translateMessageWithMedia(e); params != nil {
 			c.notify.Broadcast("message", params)
 		}
+	case *events.UndecryptableMessage:
+		// Peer sent us a message we couldn't decrypt — usually a stale
+		// Signal session from before a re-pair, or a key-rotation
+		// race.  whatsmeow has already requested a retry on its end.
+		// Surface this loudly so operators see the failure mode
+		// rather than wondering why a known-good chat went silent.
+		c.log.Warn("wameow.undecryptable_message", "from_jid", e.Info.Sender.String(), "id", string(e.Info.ID))
 	case *events.Connected:
 		c.notify.Broadcast("connectionState", map[string]any{"state": "connected"})
 	case *events.Disconnected:
@@ -34,6 +41,12 @@ func (c *Client) handleEvent(evt any) {
 			params["reason"] = e.Reason.String()
 		}
 		c.notify.Broadcast("loggedOut", params)
+		// whatsmeow's LoggedOut handler internally marks the device as
+		// Deleted (same path as our operator-initiated Unpair).  Swap
+		// in a fresh Client so a subsequent StartPairing on this same
+		// daemon process works without a restart — symmetric with the
+		// Unpair side at pair.go:155.
+		c.replaceWhatsmeowClient()
 	}
 }
 
@@ -66,23 +79,47 @@ func translateMessage(e *events.Message) map[string]any {
 // addresses by @-tag.  Pulled from whatever submessage carries a
 // ContextInfo (text, image caption, video caption, etc.).
 func extractMentions(m *waE2E.Message) []string {
-	var ctx *waE2E.ContextInfo
-	switch {
-	case m.ExtendedTextMessage != nil:
-		ctx = m.ExtendedTextMessage.GetContextInfo()
-	case m.ImageMessage != nil:
-		ctx = m.ImageMessage.GetContextInfo()
-	case m.VideoMessage != nil:
-		ctx = m.VideoMessage.GetContextInfo()
-	case m.DocumentMessage != nil:
-		ctx = m.DocumentMessage.GetContextInfo()
-	case m.AudioMessage != nil:
-		ctx = m.AudioMessage.GetContextInfo()
-	}
+	ctx := messageContextInfo(m)
 	if ctx == nil {
 		return nil
 	}
 	return ctx.GetMentionedJID()
+}
+
+// extractQuotedMessageID returns the StanzaID of the message the peer is
+// quoting/replying to, or "" when this isn't a reply.  Source is the same
+// ContextInfo as :func:`extractMentions`: WhatsApp threads the quoted-
+// message id on the new envelope so peers can render the "↪ Replying to"
+// bubble without re-sending the original content.
+func extractQuotedMessageID(m *waE2E.Message) string {
+	ctx := messageContextInfo(m)
+	if ctx == nil {
+		return ""
+	}
+	return ctx.GetStanzaID()
+}
+
+// messageContextInfo walks the submessage variants that can carry a
+// ContextInfo (text, captioned media, audio) and returns the populated
+// one, or nil when the envelope has none.  Centralises the per-variant
+// switch shared by extractMentions and extractQuotedMessageID.
+func messageContextInfo(m *waE2E.Message) *waE2E.ContextInfo {
+	if m == nil {
+		return nil
+	}
+	switch {
+	case m.ExtendedTextMessage != nil:
+		return m.ExtendedTextMessage.GetContextInfo()
+	case m.ImageMessage != nil:
+		return m.ImageMessage.GetContextInfo()
+	case m.VideoMessage != nil:
+		return m.VideoMessage.GetContextInfo()
+	case m.DocumentMessage != nil:
+		return m.DocumentMessage.GetContextInfo()
+	case m.AudioMessage != nil:
+		return m.AudioMessage.GetContextInfo()
+	}
+	return nil
 }
 
 // translateMessageWithMedia layers extracted attachments, sticker
@@ -104,60 +141,114 @@ func (c *Client) translateMessageWithMedia(e *events.Message) map[string]any {
 	} else if attachment != nil {
 		params["attachments"] = []*MediaAttachment{attachment}
 	}
-	if emoji := extractStickerEmoji(e.Message); emoji != "" {
-		params["sticker_emoji"] = emoji
+	// Stickers: always emit when StickerMessage is present, even when
+	// the emoji label is empty.  Custom stickers (made via WhatsApp's
+	// sticker maker) frequently carry no emoji tag — without an explicit
+	// signal here the parse.py "no signal" drop would silently swallow
+	// the message and the model would never know the peer sent a sticker.
+	if e.Message != nil && e.Message.StickerMessage != nil {
+		params["sticker_emoji"] = extractStickerEmoji(e.Message)
 	}
 	if rxn := extractReaction(e.Message); rxn != nil {
 		params["reaction"] = rxn
 	}
-	if info := extractProtocolInfo(e.Message); info != nil {
-		switch {
-		case info.edited:
-			params["edit"] = map[string]any{"target_message_id": info.targetID}
-			// Edits ship a fresh body in ProtocolMessage.EditedMessage;
-			// the outer Conversation/ExtendedTextMessage are empty, so
-			// override the base text with the inner content.
-			if info.newText != "" {
-				params["text"] = info.newText
-			}
-		case info.revoked:
-			params["revoke"] = map[string]any{"target_message_id": info.targetID}
+	if edit := c.extractEditInfo(e); edit != nil {
+		params["edit"] = map[string]any{"target_message_id": edit.targetID}
+		// Edits ship a fresh body either in
+		// ProtocolMessage.EditedMessage (legacy) or in the decrypted
+		// SecretEncryptedMessage payload (newer encrypted edits) —
+		// either way the outer Conversation/ExtendedTextMessage is
+		// empty, so override the base text with the inner content.
+		if edit.newText != "" {
+			params["text"] = edit.newText
 		}
+	} else if target := extractRevokeTargetID(e.Message); target != "" {
+		params["revoke"] = map[string]any{"target_message_id": target}
+	}
+	if quoted := extractQuotedMessageID(e.Message); quoted != "" {
+		params["quoted_message_id"] = quoted
 	}
 	return params
 }
 
-// extractProtocolInfo decodes the ProtocolMessage that whatsmeow uses
-// for in-band edits and revokes.  Returns nil when this isn't a
-// protocol message (the common case), or for ProtocolMessage types
-// the daemon doesn't surface yet (history sync, app-state sync, etc).
-type protocolInfo struct {
-	edited   bool
-	revoked  bool
+// editInfo carries the target message id + new body text of a peer's
+// edit, regardless of which on-the-wire envelope shape the edit used.
+type editInfo struct {
 	targetID string
-	newText  string // populated for edits only
+	newText  string // may be empty if the edit's encrypted payload couldn't be decoded
 }
 
-func extractProtocolInfo(m *waE2E.Message) *protocolInfo {
-	if m == nil || m.ProtocolMessage == nil {
+// extractEditInfo decodes a peer's edit envelope.  WhatsApp delivers
+// edits over TWO distinct wire shapes:
+//
+//   - LEGACY: ProtocolMessage{Type: MESSAGE_EDIT, EditedMessage: …}
+//     with the new body in plaintext inside the protobuf.
+//
+//   - CURRENT: SecretEncryptedMessage{SecretEncType: MESSAGE_EDIT,
+//     TargetMessageKey: …, EncPayload: …} — the new body is encrypted
+//     and must be decrypted via :func:`whatsmeow.Client.DecryptSecretEncryptedMessage`
+//     against the recipient-derived msg-secret key.
+//
+// Returns nil when the envelope is neither shape.  When the
+// SecretEncryptedMessage decrypt fails (key rotation race, stale
+// session, etc.), the returned editInfo still carries the targetID so
+// the model knows an edit happened on a known message even if it can't
+// see the new content.
+func (c *Client) extractEditInfo(evt *events.Message) *editInfo {
+	if evt == nil || evt.Message == nil {
 		return nil
 	}
-	pm := m.ProtocolMessage
-	targetID := ""
-	if key := pm.GetKey(); key != nil {
-		targetID = key.GetID()
-	}
-	switch pm.GetType() {
-	case waE2E.ProtocolMessage_MESSAGE_EDIT:
-		info := &protocolInfo{edited: true, targetID: targetID}
-		if edited := pm.GetEditedMessage(); edited != nil {
-			info.newText = extractText(edited)
+	msg := evt.Message
+	// Legacy: ProtocolMessage envelope.
+	if pm := msg.GetProtocolMessage(); pm != nil && pm.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT {
+		out := &editInfo{}
+		if key := pm.GetKey(); key != nil {
+			out.targetID = key.GetID()
 		}
-		return info
-	case waE2E.ProtocolMessage_REVOKE:
-		return &protocolInfo{revoked: true, targetID: targetID}
+		if edited := pm.GetEditedMessage(); edited != nil {
+			out.newText = extractText(edited)
+		}
+		return out
+	}
+	// Current: SecretEncryptedMessage envelope.
+	if enc := msg.GetSecretEncryptedMessage(); enc != nil && enc.GetSecretEncType() == waE2E.SecretEncryptedMessage_MESSAGE_EDIT {
+		out := &editInfo{}
+		if key := enc.GetTargetMessageKey(); key != nil {
+			out.targetID = key.GetID()
+		}
+		decrypted, err := c.wa.Load().DecryptSecretEncryptedMessage(c.lifetimeCtx, evt)
+		if err != nil {
+			c.log.Warn(
+				"wameow.decrypt_secret_edit_failed",
+				"id", string(evt.Info.ID),
+				"target_id", out.targetID,
+				"err", err,
+			)
+			return out
+		}
+		out.newText = extractText(decrypted)
+		return out
 	}
 	return nil
+}
+
+// extractRevokeTargetID returns the id of the message the peer is
+// revoking ("Delete for everyone"), or "" when this envelope isn't a
+// revoke.  Revokes are always delivered via the legacy ProtocolMessage
+// envelope (whatsmeow's SecretEncryptedMessage path doesn't carry a
+// MESSAGE_REVOKE secret-enc-type as of v0.0.0-20260516…).
+func extractRevokeTargetID(m *waE2E.Message) string {
+	if m == nil || m.ProtocolMessage == nil {
+		return ""
+	}
+	pm := m.ProtocolMessage
+	if pm.GetType() != waE2E.ProtocolMessage_REVOKE {
+		return ""
+	}
+	if key := pm.GetKey(); key != nil {
+		return key.GetID()
+	}
+	return ""
 }
 
 // extractReaction surfaces a peer's reaction to a message as a
@@ -200,6 +291,8 @@ func (c *Client) recordInbound(e *events.Message) {
 		e.Info.Chat.String(),
 		e.Info.Sender.String(),
 		e.Info.IsFromMe,
+		e.Info.Timestamp.UnixMilli(),
+		extractText(e.Message),
 	)
 	if err != nil {
 		c.log.Warn("wameow.msgstore_put_failed", "id", e.Info.ID, "err", err)

@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -354,8 +356,29 @@ func TestHandleEventDispatch(t *testing.T) {
 }
 
 func TestHandleEventLoggedOutOmitsReasonWhenStreamError(t *testing.T) {
+	ctx := context.Background()
+	container, err := sqlstore.New(
+		ctx,
+		"sqlite",
+		"file::memory:?_pragma=foreign_keys(1)",
+		newWaLogger(discardLogger(), "test"),
+	)
+	if err != nil {
+		t.Fatalf("sqlstore.New: %v", err)
+	}
+	defer func() { _ = container.Close() }()
+	device := container.NewDevice()
+	wa := whatsmeow.NewClient(device, newWaLogger(discardLogger(), "test"))
+
 	notify := &captureNotifier{}
-	c := &Client{notify: notify, log: discardLogger(), msgs: newTestMessageStore(t), lifetimeCtx: context.Background()}
+	c := &Client{
+		notify:      notify,
+		log:         discardLogger(),
+		msgs:        newTestMessageStore(t),
+		lifetimeCtx: ctx,
+		store:       container,
+	}
+	c.wa.Store(wa)
 
 	// OnConnect == false (stream:error path): Reason is the zero value
 	// and must not be surfaced to the wire as misleading data.
@@ -377,10 +400,97 @@ func TestHandleEventLoggedOutOmitsReasonWhenStreamError(t *testing.T) {
 	if _, hasReason := params["reason"]; hasReason {
 		t.Errorf("reason should be omitted when OnConnect=false; got %v", params["reason"])
 	}
+	// Verify the LoggedOut handler also called replaceWhatsmeowClient —
+	// the in-memory Client must be swapped so a subsequent StartPairing
+	// against this daemon doesn't fail with "invalid use of deleted
+	// device".
+	if c.wa.Load() == wa {
+		t.Error("handleEvent did not swap c.wa after LoggedOut; re-pair would fail")
+	}
 }
 
 func discardLogger() *slog.Logger {
 	// slog.DiscardHandler short-circuits in Enabled() so the Sprintf
 	// gate in slogWaLogger never fires either.
 	return slog.New(slog.DiscardHandler)
+}
+
+func TestExtractQuotedMessageID(t *testing.T) {
+	target := "3A1234DEADBEEF"
+	cases := []struct {
+		name string
+		msg  *waE2E.Message
+		want string
+	}{
+		{
+			name: "extended_text_with_quote",
+			msg: &waE2E.Message{
+				ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+					Text:        proto.String("a reply"),
+					ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String(target)},
+				},
+			},
+			want: target,
+		},
+		{
+			name: "image_caption_with_quote",
+			msg: &waE2E.Message{
+				ImageMessage: &waE2E.ImageMessage{
+					Caption:     proto.String("look"),
+					ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String(target)},
+				},
+			},
+			want: target,
+		},
+		{
+			name: "plain_conversation_no_quote",
+			msg:  &waE2E.Message{Conversation: proto.String("just text")},
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractQuotedMessageID(tc.msg); got != tc.want {
+				t.Errorf("extractQuotedMessageID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTranslateMessageWithMediaSurfacesStickerWithoutEmoji(t *testing.T) {
+	// Custom stickers (made via WhatsApp's sticker maker) frequently
+	// carry an empty Emojis tag.  Pre-fix the daemon's emoji != ""
+	// guard dropped these and parse.py's "no_signal" filter then
+	// swallowed the message — the model never knew the peer sent a
+	// sticker.  Verify the message now surfaces sticker_emoji="" so
+	// downstream can render "(sticker, no emoji label)".
+	c := &Client{
+		log:         discardLogger(),
+		msgs:        newTestMessageStore(t),
+		lifetimeCtx: context.Background(),
+	}
+	peer := types.NewJID("15551112222", types.DefaultUserServer)
+	params := c.translateMessageWithMedia(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: peer, Sender: peer, IsFromMe: false},
+			ID:            "STICKER-1",
+			Timestamp:     time.Now(),
+		},
+		Message: &waE2E.Message{
+			StickerMessage: &waE2E.StickerMessage{
+				URL: proto.String("https://example/sticker.webp"),
+				// Emojis intentionally nil — the custom-sticker case.
+			},
+		},
+	})
+	if params == nil {
+		t.Fatal("translateMessageWithMedia dropped a sticker; expected sticker_emoji='' to be emitted")
+	}
+	emoji, ok := params["sticker_emoji"]
+	if !ok {
+		t.Fatalf("sticker_emoji key missing from params: %#v", params)
+	}
+	if emoji != "" {
+		t.Errorf("sticker_emoji = %q, want '' for emoji-less sticker", emoji)
+	}
 }

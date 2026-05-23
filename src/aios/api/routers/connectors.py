@@ -223,6 +223,31 @@ class RuntimeToolResultRequest(BaseModel):
     is_error: bool = False
 
 
+class RuntimeLifecycleRequest(BaseModel):
+    """Body for ``POST /v1/connectors/runtime/lifecycle``.
+
+    Lets a connector emit a lifecycle event onto each session bound to
+    ``connection_id`` — used today for "the underlying transport just
+    went away" notifications (WhatsApp daemon crashed, peer logged the
+    device out, etc.) so the model sees the connection-broken state in
+    its context instead of silently failing the next outbound.
+
+    ``event`` is a connector-namespaced kind ("whatsapp.connection.lost",
+    "signal.daemon.exited") — the connector chooses the vocabulary.
+    ``reason`` is an optional short tag the harness surfaces alongside
+    the event for the model to act on ("daemon_crashed", "peer_logout").
+    ``data`` is an optional free-form dict for connector-specific
+    context (current device count, last successful timestamp, etc.).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connection_id: str
+    event: str
+    reason: str | None = None
+    data: dict[str, Any] | None = None
+
+
 def _check_runtime_scope(auth_connector: str, target_connector: str) -> None:
     """Raise 403 if a runtime bearer reaches outside its connector type."""
     if auth_connector != target_connector:
@@ -408,6 +433,68 @@ async def post_runtime_inbound(
         timestamp=timestamp,
         attachments=attachments,
     )
+
+
+@router.post(
+    "/runtime/lifecycle",
+    operation_id="post_connector_runtime_lifecycle",
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_runtime_lifecycle(
+    body: RuntimeLifecycleRequest,
+    pool: PoolDep,
+    auth: RuntimeAuthDep,
+) -> dict[str, Any]:
+    """Append a ``kind=lifecycle`` event onto every session bound to
+    ``body.connection_id``.
+
+    Authorization mirrors the inbound + tool-result paths: the bearer's
+    connector must match ``body.connection_id``'s connector, and any
+    bearer-side allowlist must include the connection_id (#350).
+
+    Returns ``{"appended_session_ids": [...]}`` enumerating the sessions
+    that received the event.  An empty list means no sessions were
+    bound at the time of the call (e.g. the operator detached every
+    session before the connector finished tearing down); not an error.
+    """
+    _, auth_connector, account_id, auth_connection_ids = auth
+    async with pool.acquire() as conn:
+        connection = await queries.get_connection(conn, body.connection_id, account_id=account_id)
+        _check_runtime_scope(auth_connector, connection.connector)
+        _check_runtime_connection_scope(auth_connection_ids, body.connection_id)
+        bound = await queries.list_chat_sessions_for_connection(
+            conn,
+            body.connection_id,
+            account_id=account_id,
+        )
+    # Dedup session ids — per-chat-spawning can register the same
+    # session against multiple chat_ids and we don't want to double-
+    # append the same lifecycle event on those rows.
+    seen: set[str] = set()
+    session_ids: list[str] = []
+    for _chat_id, sess_id, _created in bound:
+        if sess_id in seen:
+            continue
+        seen.add(sess_id)
+        session_ids.append(sess_id)
+    payload: dict[str, Any] = {
+        "event": body.event,
+        "connection_id": body.connection_id,
+        "connector": connection.connector,
+    }
+    if body.reason is not None:
+        payload["reason"] = body.reason
+    if body.data is not None:
+        payload["data"] = body.data
+    for sess_id in session_ids:
+        await sessions_service.append_event(
+            pool,
+            sess_id,
+            "lifecycle",
+            payload,
+            account_id=account_id,
+        )
+    return {"appended_session_ids": session_ids}
 
 
 @router.post(

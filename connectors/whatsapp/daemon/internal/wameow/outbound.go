@@ -50,13 +50,21 @@ func (c *Client) SendMessage(
 	jidStr, text string,
 	attachments []Attachment,
 	mentionedJIDs []string,
+	quotedMessageID string,
 ) ([]string, int64, error) {
 	wa, jid, err := c.prepareSend(jidStr)
 	if err != nil {
 		return nil, 0, err
 	}
+	// Quote rides on the FIRST outbound only (text-message or first
+	// attachment).  Subsequent attachments in a multi-attachment send
+	// are sibling messages, not the reply itself.
+	quoteCtx, err := c.buildQuoteContextInfo(ctx, quotedMessageID)
+	if err != nil {
+		return nil, 0, err
+	}
 	if len(attachments) == 0 {
-		msg := buildTextMessage(text, mentionedJIDs)
+		msg := buildTextMessage(text, mentionedJIDs, quoteCtx)
 		id, ts, sendErr := c.sendOne(ctx, wa, jid, msg)
 		if sendErr != nil {
 			return nil, 0, sendErr
@@ -68,14 +76,16 @@ func (c *Client) SendMessage(
 	delivered := make([]string, 0, len(attachments)+1)
 	captionForFirstAttachment := text
 	firstAttachmentMentions := mentionedJIDs
+	firstAttachmentQuote := quoteCtx
 	if text != "" && classify(attachments[0].Mimetype) == attachKindAudio {
 		// Audio carries no caption surface.  Send the text as its
-		// own Conversation message FIRST (taking the mentions with
-		// it so they render as a pill), then send the audio
-		// caption-less AND mention-less — without the mention-clear
-		// here, the audio's ContextInfo would carry MentionedJID
-		// too and the peer would get a duplicate @-notification.
-		textMsg := buildTextMessage(text, mentionedJIDs)
+		// own Conversation message FIRST (taking the mentions AND
+		// quote with it so the reply pointer attaches to the text
+		// bubble the user actually reads), then send the audio
+		// caption-less, mention-less, AND quote-less — without the
+		// clear here, the audio's ContextInfo would carry duplicate
+		// MentionedJID + quote pointers.
+		textMsg := buildTextMessage(text, mentionedJIDs, quoteCtx)
 		id, ts, sendErr := c.sendOne(ctx, wa, jid, textMsg)
 		if sendErr != nil {
 			return nil, 0, fmt.Errorf("send accompanying text for audio: %w", sendErr)
@@ -84,16 +94,19 @@ func (c *Client) SendMessage(
 		firstTS = ts
 		captionForFirstAttachment = ""
 		firstAttachmentMentions = nil
+		firstAttachmentQuote = nil
 	}
 
 	for i, att := range attachments {
 		caption := ""
 		var captionMentions []string
+		var captionQuote *waE2E.ContextInfo
 		if i == 0 {
 			caption = captionForFirstAttachment
 			captionMentions = firstAttachmentMentions
+			captionQuote = firstAttachmentQuote
 		}
-		msg, buildErr := c.buildAttachmentMessage(ctx, wa, att, caption, captionMentions)
+		msg, buildErr := c.buildAttachmentMessage(ctx, wa, att, caption, captionMentions, captionQuote)
 		if buildErr != nil {
 			return delivered, firstTS, &PartialSendError{
 				Cause: buildErr, DeliveredIDs: append([]string{}, delivered...),
@@ -113,6 +126,36 @@ func (c *Client) SendMessage(
 		}
 	}
 	return delivered, firstTS, nil
+}
+
+// buildQuoteContextInfo looks up the target message and returns a
+// partial ``ContextInfo`` carrying ``StanzaID``, ``Participant``, and a
+// minimal ``QuotedMessage`` stub.  Returns nil ContextInfo + nil error
+// when ``quotedMessageID`` is empty (the common "not a reply" case).
+//
+// Returns ErrMessageNotFound when the model passed an id that isn't in
+// the msgstore — fail loud rather than silently strip the quote, so
+// the model can retry with a known target.
+func (c *Client) buildQuoteContextInfo(ctx context.Context, quotedMessageID string) (*waE2E.ContextInfo, error) {
+	if quotedMessageID == "" {
+		return nil, nil
+	}
+	rec, err := c.msgs.Lookup(ctx, quotedMessageID)
+	if err != nil {
+		return nil, fmt.Errorf("quote target %s: %w", quotedMessageID, err)
+	}
+	ci := &waE2E.ContextInfo{
+		StanzaID:    proto.String(quotedMessageID),
+		Participant: proto.String(rec.SenderJID),
+		// Minimal QuotedMessage stub.  WhatsApp clients render the
+		// reply bubble using StanzaID for the pointer; the
+		// QuotedMessage body populates the snippet preview above the
+		// reply.  Empty text (e.g. quoting a sticker we recorded with
+		// "") falls back to "Quoted message unavailable" on the peer
+		// side — better than silently dropping the quote pointer.
+		QuotedMessage: &waE2E.Message{Conversation: proto.String(rec.Text)},
+	}
+	return ci, nil
 }
 
 // PartialSendError wraps a mid-loop multi-attachment failure with the
@@ -164,7 +207,7 @@ func (c *Client) sendOne(ctx context.Context, wa *whatsmeow.Client, jid types.JI
 	if err != nil {
 		return "", 0, err
 	}
-	c.recordOutbound(ctx, wa, string(resp.ID), jid)
+	c.recordOutbound(ctx, wa, string(resp.ID), jid, resp.Timestamp.UnixMilli(), extractText(msg))
 	// Implicit receipts-after-emit: the bot's reply means it has
 	// "read" the prior peer messages in this chat.  Done after the
 	// send succeeds so a failed send doesn't burn the read state.
@@ -203,19 +246,19 @@ func (c *Client) flushReadReceipts(ctx context.Context, wa *whatsmeow.Client, ch
 }
 
 // buildTextMessage shapes a text-only outbound message, attaching a
-// ContextInfo.MentionedJID list when the model has @-tagged anyone.
-// WhatsApp clients render the mentions as pills if the JIDs resolve
-// to chat participants; non-participants fall through as plain text.
-func buildTextMessage(text string, mentionedJIDs []string) *waE2E.Message {
-	if len(mentionedJIDs) == 0 {
+// ContextInfo carrying ``MentionedJID`` (so WhatsApp clients render
+// @-mentions as pills) and/or the quote pointer fields when the model
+// requested a threaded reply.  When neither applies the message uses
+// the plain Conversation form to keep ContextInfo off the wire.
+func buildTextMessage(text string, mentionedJIDs []string, quoteCtx *waE2E.ContextInfo) *waE2E.Message {
+	ci := mergeMentionAndQuote(mentionedJIDs, quoteCtx)
+	if ci == nil {
 		return &waE2E.Message{Conversation: proto.String(text)}
 	}
 	return &waE2E.Message{
 		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
-			Text: proto.String(text),
-			ContextInfo: &waE2E.ContextInfo{
-				MentionedJID: mentionedJIDs,
-			},
+			Text:        proto.String(text),
+			ContextInfo: ci,
 		},
 	}
 }
@@ -226,6 +269,7 @@ func (c *Client) buildAttachmentMessage(
 	att Attachment,
 	caption string,
 	captionMentions []string,
+	quoteCtx *waE2E.ContextInfo,
 ) (*waE2E.Message, error) {
 	data, err := os.ReadFile(att.Path)
 	if err != nil {
@@ -238,7 +282,7 @@ func (c *Client) buildAttachmentMessage(
 	}
 	size := uint64(len(data))
 	mime := att.Mimetype
-	ctxInfo := maybeMentionContextInfo(captionMentions)
+	ctxInfo := mergeMentionAndQuote(captionMentions, quoteCtx)
 
 	switch kind {
 	case attachKindImage:
@@ -302,15 +346,30 @@ func (c *Client) buildAttachmentMessage(
 	}
 }
 
-// maybeMentionContextInfo builds a ContextInfo populated only with
-// MentionedJID, or nil when no mentions need to ride on this
-// submessage.  Returning nil keeps unrelated ContextInfo fields off
-// the wire.
-func maybeMentionContextInfo(mentionedJIDs []string) *waE2E.ContextInfo {
-	if len(mentionedJIDs) == 0 {
+// mergeMentionAndQuote combines optional MentionedJID + quote-pointer
+// fields into a single ContextInfo, or returns nil when neither is
+// populated.  Keeping a single helper means the four buildAttachment
+// arms + buildTextMessage stay consistent about which sub-fields ride
+// on the wire — a divergence here would manifest as "quote works on
+// text but not on image captions" or vice versa.
+func mergeMentionAndQuote(mentionedJIDs []string, quoteCtx *waE2E.ContextInfo) *waE2E.ContextInfo {
+	if len(mentionedJIDs) == 0 && quoteCtx == nil {
 		return nil
 	}
-	return &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
+	ci := &waE2E.ContextInfo{}
+	if quoteCtx != nil {
+		// Copy the quote-pointer fields into the shared ContextInfo
+		// rather than ovewriting.  buildQuoteContextInfo only ever
+		// populates StanzaID / Participant / QuotedMessage so this is
+		// safe; if it grows more fields, update this merge.
+		ci.StanzaID = quoteCtx.StanzaID
+		ci.Participant = quoteCtx.Participant
+		ci.QuotedMessage = quoteCtx.QuotedMessage
+	}
+	if len(mentionedJIDs) > 0 {
+		ci.MentionedJID = mentionedJIDs
+	}
+	return ci
 }
 
 type attachKind int

@@ -53,22 +53,28 @@ func TestMessageStorePutLookup(t *testing.T) {
 	ctx := context.Background()
 	s := newTestMessageStore(t)
 
-	if err := s.Put(ctx, "MSG1", "chat@s.whatsapp.net", "sender@s.whatsapp.net", false); err != nil {
+	if err := s.Put(ctx, "MSG1", "chat@s.whatsapp.net", "sender@s.whatsapp.net", false, 12345, "hello"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
-	chat, sender, fromMe, err := s.Lookup(ctx, "MSG1")
+	rec, err := s.Lookup(ctx, "MSG1")
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
-	if chat != "chat@s.whatsapp.net" || sender != "sender@s.whatsapp.net" || fromMe {
-		t.Errorf("Lookup got (%q, %q, %t); want (chat@..., sender@..., false)", chat, sender, fromMe)
+	if rec.ChatJID != "chat@s.whatsapp.net" || rec.SenderJID != "sender@s.whatsapp.net" || rec.FromMe {
+		t.Errorf("Lookup got %+v; want chat/sender pair with FromMe=false", rec)
+	}
+	if rec.SentAtMs != 12345 {
+		t.Errorf("SentAtMs = %d, want 12345", rec.SentAtMs)
+	}
+	if rec.Text != "hello" {
+		t.Errorf("Text = %q, want %q", rec.Text, "hello")
 	}
 }
 
 func TestMessageStoreLookupNotFound(t *testing.T) {
 	s := newTestMessageStore(t)
-	_, _, _, err := s.Lookup(context.Background(), "DOES-NOT-EXIST")
+	_, err := s.Lookup(context.Background(), "DOES-NOT-EXIST")
 	if !errors.Is(err, ErrMessageNotFound) {
 		t.Errorf("Lookup miss returned %v, want ErrMessageNotFound", err)
 	}
@@ -81,21 +87,21 @@ func TestMessageStorePutIsIdempotent(t *testing.T) {
 	// echo we don't ignore).
 	ctx := context.Background()
 	s := newTestMessageStore(t)
-	if err := s.Put(ctx, "MSG1", "chat", "us", true); err != nil {
+	if err := s.Put(ctx, "MSG1", "chat", "us", true, 100, "first"); err != nil {
 		t.Fatalf("first Put: %v", err)
 	}
-	// The conflict path must NOT overwrite the existing row's
-	// from_me — re-delivery from the same sender shouldn't downgrade
-	// "ours" to "theirs".  Try a "different" payload and verify the
-	// first one wins.
-	if err := s.Put(ctx, "MSG1", "chat2", "them", false); err != nil {
+	// The conflict path must NOT overwrite the existing row — re-
+	// delivery from the same sender shouldn't downgrade "ours" to
+	// "theirs", and a later inbound carrying a duplicate id (rare but
+	// possible) shouldn't rewrite sent_at/text either.
+	if err := s.Put(ctx, "MSG1", "chat2", "them", false, 200, "second"); err != nil {
 		t.Fatalf("second Put: %v", err)
 	}
-	chat, sender, fromMe, err := s.Lookup(ctx, "MSG1")
+	rec, err := s.Lookup(ctx, "MSG1")
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
-	if chat != "chat" || sender != "us" || !fromMe {
-		t.Errorf("idempotent Put: row was overwritten — got (%q, %q, %t)", chat, sender, fromMe)
+	if rec.ChatJID != "chat" || rec.SenderJID != "us" || !rec.FromMe || rec.SentAtMs != 100 || rec.Text != "first" {
+		t.Errorf("idempotent Put: row was overwritten — got %+v", rec)
 	}
 }

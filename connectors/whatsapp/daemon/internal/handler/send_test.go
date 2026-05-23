@@ -12,7 +12,7 @@ import (
 func TestSendMessageDispatchesAndReturnsResult(t *testing.T) {
 	var seenJID, seenText string
 	var seenAttachments []Attachment
-	fn := func(_ context.Context, jid, text string, atts []Attachment, _ []string) ([]string, int64, error) {
+	fn := func(_ context.Context, jid, text string, atts []Attachment, _ []string, _ string) ([]string, int64, error) {
 		seenJID = jid
 		seenText = text
 		seenAttachments = atts
@@ -44,7 +44,7 @@ func TestSendMessageSurfacesAllDeliveredIDs(t *testing.T) {
 	// result so the model can address each by id for follow-up
 	// react/edit/delete.  Previously only the first id was exposed.
 	reg := NewRegistry()
-	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string) ([]string, int64, error) {
+	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string, string) ([]string, int64, error) {
 		return []string{"M0", "M1", "M2"}, 1700000000000, nil
 	})
 	params := json.RawMessage(`{
@@ -96,7 +96,7 @@ func TestSendMessagePartialFailureSurfacesDeliveredIDs(t *testing.T) {
 		filename:  "broken.mp4",
 	}
 	reg := NewRegistry()
-	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string) ([]string, int64, error) {
+	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string, string) ([]string, int64, error) {
 		return []string{"M0", "M1"}, 1700000000000, partial
 	})
 	params := json.RawMessage(`{"jid":"x@s.whatsapp.net","text":"cap","attachments":[
@@ -122,7 +122,7 @@ func TestSendMessagePartialFailureSurfacesDeliveredIDs(t *testing.T) {
 
 func TestSendMessageRejectsMissingJID(t *testing.T) {
 	reg := NewRegistry()
-	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string) ([]string, int64, error) {
+	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string, string) ([]string, int64, error) {
 		t.Fatalf("send fn should not be called when jid missing")
 		return nil, 0, nil
 	})
@@ -140,7 +140,7 @@ func TestSendMessageRejectsEmptyBody(t *testing.T) {
 	// error — the daemon refuses rather than silently sending an empty
 	// Conversation message that the peer would see as a blank bubble.
 	reg := NewRegistry()
-	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string) ([]string, int64, error) {
+	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string, string) ([]string, int64, error) {
 		t.Fatalf("send fn should not be called for empty body")
 		return nil, 0, nil
 	})
@@ -152,7 +152,7 @@ func TestSendMessageRejectsEmptyBody(t *testing.T) {
 
 func TestSendMessagePropagatesSendError(t *testing.T) {
 	reg := NewRegistry()
-	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string) ([]string, int64, error) {
+	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string, string) ([]string, int64, error) {
 		return nil, 0, errors.New("network down")
 	})
 	params := json.RawMessage(`{"jid":"15553334444@s.whatsapp.net","text":"hi"}`)
@@ -170,7 +170,7 @@ func TestSendMessagePropagatesSendError(t *testing.T) {
 
 func TestSendMessageRejectsMalformedParams(t *testing.T) {
 	reg := NewRegistry()
-	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string) ([]string, int64, error) {
+	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string, string) ([]string, int64, error) {
 		return []string{"MSG"}, 0, nil
 	})
 	_, rpcErr := reg.Dispatch(context.Background(), "sendMessage", json.RawMessage(`not json`))
@@ -182,7 +182,7 @@ func TestSendMessageRejectsMalformedParams(t *testing.T) {
 func TestSendMessageForwardsAttachments(t *testing.T) {
 	var seenAttachments []Attachment
 	reg := NewRegistry()
-	RegisterSend(reg, func(_ context.Context, _ string, _ string, atts []Attachment, _ []string) ([]string, int64, error) {
+	RegisterSend(reg, func(_ context.Context, _ string, _ string, atts []Attachment, _ []string, _ string) ([]string, int64, error) {
 		seenAttachments = atts
 		return []string{"MSG-2"}, 1700000001000, nil
 	})
@@ -212,7 +212,7 @@ func TestSendMessageForwardsAttachments(t *testing.T) {
 func TestSendMessageForwardsMentionedJIDs(t *testing.T) {
 	var seenMentions []string
 	reg := NewRegistry()
-	RegisterSend(reg, func(_ context.Context, _, _ string, _ []Attachment, m []string) ([]string, int64, error) {
+	RegisterSend(reg, func(_ context.Context, _, _ string, _ []Attachment, m []string, _ string) ([]string, int64, error) {
 		seenMentions = m
 		return []string{"MSG"}, 1700000000000, nil
 	})
@@ -232,7 +232,7 @@ func TestSendMessageForwardsMentionedJIDs(t *testing.T) {
 func TestSendMessageAcceptsAttachmentsWithoutText(t *testing.T) {
 	called := false
 	reg := NewRegistry()
-	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string) ([]string, int64, error) {
+	RegisterSend(reg, func(context.Context, string, string, []Attachment, []string, string) ([]string, int64, error) {
 		called = true
 		return []string{"MSG-3"}, 1700000002000, nil
 	})

@@ -114,7 +114,12 @@ from .mint_account_request import MintAccountRequest
 from .mint_account_response import MintAccountResponse
 from .mint_key_request import MintKeyRequest
 from .mint_key_response import MintKeyResponse
+from .post_connector_runtime_lifecycle_response_post_connector_runtime_lifecycle import (
+    PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle,
+)
 from .recent_chat import RecentChat
+from .runtime_lifecycle_request import RuntimeLifecycleRequest
+from .runtime_lifecycle_request_data_type_0 import RuntimeLifecycleRequestDataType0
 from .runtime_management_call_result_request import RuntimeManagementCallResultRequest
 from .runtime_token import RuntimeToken
 from .runtime_token_issue import RuntimeTokenIssue
@@ -312,7 +317,10 @@ __all__ = (
     "MintAccountResponse",
     "MintKeyRequest",
     "MintKeyResponse",
+    "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "RecentChat",
+    "RuntimeLifecycleRequest",
+    "RuntimeLifecycleRequestDataType0",
     "RuntimeManagementCallResultRequest",
     "RuntimeToken",
     "RuntimeTokenIssue",

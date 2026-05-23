@@ -22,7 +22,14 @@ import (
 //
 // ``mentionedJIDs`` are attached to the outbound message's ContextInfo
 // so WhatsApp clients render @-mentions as pills.  Pass nil for none.
-type SendMessageFn func(ctx context.Context, jid, text string, attachments []Attachment, mentionedJIDs []string) (deliveredIDs []string, timestampMs int64, err error)
+//
+// ``quotedMessageID`` is the id of a previously-seen message in the
+// same chat that this send should reply to.  When non-empty the
+// daemon looks up the original via its msgstore and threads
+// ``ContextInfo.{StanzaID, Participant, QuotedMessage}`` onto the
+// outbound so the peer's WhatsApp client renders a proper threaded
+// reply.  Passing an unknown id surfaces :var:`wameow.ErrMessageNotFound`.
+type SendMessageFn func(ctx context.Context, jid, text string, attachments []Attachment, mentionedJIDs []string, quotedMessageID string) (deliveredIDs []string, timestampMs int64, err error)
 
 // PartialSendErrorUnwrapper exposes the partial-delivery ids the
 // closure carries on a multi-attachment failure.  handler/send.go
@@ -46,10 +53,11 @@ type Attachment struct {
 }
 
 type sendArgs struct {
-	JID           string       `json:"jid"`
-	Text          string       `json:"text"`
-	Attachments   []Attachment `json:"attachments"`
-	MentionedJIDs []string     `json:"mentioned_jids,omitempty"`
+	JID             string       `json:"jid"`
+	Text            string       `json:"text"`
+	Attachments     []Attachment `json:"attachments"`
+	MentionedJIDs   []string     `json:"mentioned_jids,omitempty"`
+	QuotedMessageID string       `json:"quoted_message_id,omitempty"`
 }
 
 type sendResult struct {
@@ -81,7 +89,7 @@ func RegisterSend(reg *Registry, fn SendMessageFn) {
 		if args.Text == "" && len(args.Attachments) == 0 {
 			return nil, &rpc.Error{Code: rpc.ErrCodeInvalidParams, Message: "sendMessage: text or attachments required"}
 		}
-		ids, ts, err := fn(ctx, args.JID, args.Text, args.Attachments, args.MentionedJIDs)
+		ids, ts, err := fn(ctx, args.JID, args.Text, args.Attachments, args.MentionedJIDs, args.QuotedMessageID)
 		if err != nil {
 			rpcErr := &rpc.Error{Code: rpc.ErrCodeServerError, Message: err.Error()}
 			// Partial-delivery error: surface the ids that landed
