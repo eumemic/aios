@@ -18,6 +18,7 @@ from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
 from aios.harness.vision import (
+    INLINE_SIZE_CAP_BYTES,
     can_inline_image,
     human_size,
     make_image_url_part,
@@ -189,7 +190,8 @@ async def _read_image(
         return ToolResult(
             content=(
                 f"Image at {path} exists ({human_size(size)}, {mime}) but cannot "
-                f"be inlined. Mind vision support: {vision}. Inline cap: 2 MiB."
+                f"be inlined. Mind vision support: {vision}. "
+                f"Inline cap: {human_size(INLINE_SIZE_CAP_BYTES)}."
             ),
             is_error=False,
         )

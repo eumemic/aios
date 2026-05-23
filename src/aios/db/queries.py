@@ -1005,12 +1005,20 @@ async def list_attachment_paths_for_sessions(
     result: dict[str, set[str]] = {sid: set() for sid in session_ids}
     if not session_ids:
         return result
+    # Each attachment record carries the original at ``in_sandbox_path``
+    # plus, when staging produced a downsampled inline copy, a sibling
+    # at ``inline.in_sandbox_path``.  The GC sweep deletes any file under
+    # the session's ``_attachments`` dir whose sandbox path isn't in the
+    # returned set, so both paths must be returned or the inline siblings
+    # will be reaped as orphans.  ``->>`` returns NULL when the key is
+    # missing — those rows drop out at the application-level filter below.
     rows = await conn.fetch(
         """
         SELECT session_id,
-               jsonb_array_elements(data->'metadata'->'attachments')->>'in_sandbox_path'
-                 AS path
-          FROM events
+               attachment->>'in_sandbox_path' AS path,
+               attachment->'inline'->>'in_sandbox_path' AS inline_path
+          FROM events,
+               jsonb_array_elements(data->'metadata'->'attachments') AS attachment
          WHERE session_id = ANY($1::text[])
            AND data->'metadata' ? 'attachments'
            AND jsonb_typeof(data->'metadata'->'attachments') = 'array'
@@ -1021,6 +1029,9 @@ async def list_attachment_paths_for_sessions(
         path = row["path"]
         if path is not None:
             result[row["session_id"]].add(path)
+        inline_path = row["inline_path"]
+        if inline_path is not None:
+            result[row["session_id"]].add(inline_path)
     return result
 
 

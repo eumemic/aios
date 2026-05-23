@@ -8,17 +8,37 @@ matches the :class:`aios.services.files.UploadStream` Protocol.
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from aios.config import get_settings
+from aios.harness.vision import INLINE_SIZE_CAP_BYTES
 from aios.sandbox.volumes import safe_filename
 from aios.services.attachment_staging import (
     AttachmentStagingError,
     InboundAttachment,
     stage_inbound_attachments,
 )
+
+
+def _real_jpeg_bytes(width: int, height: int, *, quality: int = 95) -> bytes:
+    """Return real JPEG bytes Pillow can decode (the staging downsample
+    path actually opens the file, so opaque ``b"\\0"`` payloads aren't
+    enough to exercise it).
+    """
+    img = Image.new("RGB", (width, height))
+    pixels = img.load()
+    assert pixels is not None
+    for y in range(height):
+        for x in range(width):
+            v = (x * 2654435761 + y * 40503) & 0xFFFFFF
+            pixels[x, y] = (v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
 
 
 @pytest.fixture
@@ -304,3 +324,191 @@ class TestStaging:
             f"would then fail. Directory contents: "
             f"{list((temp_workspace_root / '_attachments' / 'sess-1' / 'echo').iterdir()) if (temp_workspace_root / '_attachments' / 'sess-1' / 'echo').exists() else 'dir missing'}"
         )
+
+
+class TestInlineDownsample:
+    """Coverage for the staging-time inline-downsample path.
+
+    The bytes are real JPEGs so Pillow's decode succeeds and the size
+    relationship to ``INLINE_SIZE_CAP_BYTES`` is genuine — synthetic
+    ``b"\\0" * N`` payloads decode as garbage and the staging code
+    would log warn + skip inline instead of exercising the resize.
+    """
+
+    async def test_under_cap_image_has_no_inline_subrecord(self, temp_workspace_root: Path) -> None:
+        small = _real_jpeg_bytes(200, 200)
+        assert len(small) < INLINE_SIZE_CAP_BYTES
+
+        records, _ = await stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            attachments=[
+                InboundAttachment(
+                    stream=_FakeUploadStream(small, "small.jpg", "image/jpeg"),
+                    filename="small.jpg",
+                    content_type="image/jpeg",
+                )
+            ],
+        )
+        assert "inline" not in records[0]
+        sess_dir = temp_workspace_root / "_attachments" / "sess-1" / "echo"
+        assert sorted(p.name for p in sess_dir.iterdir()) == ["evt-1-small.jpg"]
+
+    async def test_oversize_image_produces_inline_subrecord_and_sibling(
+        self, temp_workspace_root: Path
+    ) -> None:
+        # Big and noisy enough that the JPEG re-encode genuinely shrinks
+        # bytes (palette-PNG and dimension downscale both kick in).
+        big = _real_jpeg_bytes(3500, 3500)
+        assert len(big) > INLINE_SIZE_CAP_BYTES
+
+        records, staged_paths = await stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            attachments=[
+                InboundAttachment(
+                    stream=_FakeUploadStream(big, "big.jpg", "image/jpeg"),
+                    filename="big.jpg",
+                    content_type="image/jpeg",
+                )
+            ],
+        )
+
+        record = records[0]
+        assert record["filename"] == "big.jpg"
+        assert record["size"] == len(big)
+        assert record["in_sandbox_path"] == "/mnt/attachments/echo/evt-1-big.jpg"
+
+        inline = record["inline"]
+        assert inline["content_type"] == "image/jpeg"
+        assert inline["size"] <= INLINE_SIZE_CAP_BYTES
+        assert inline["width"] <= 2000
+        assert inline["height"] <= 2000
+        assert inline["in_sandbox_path"] == ("/mnt/attachments/echo/evt-1-big.jpg.inline.jpg")
+
+        # Both original and inline live on disk and both are registered
+        # for compensating cleanup on downstream rollback.
+        sess_dir = temp_workspace_root / "_attachments" / "sess-1" / "echo"
+        on_disk = sorted(p.name for p in sess_dir.iterdir())
+        assert on_disk == ["evt-1-big.jpg", "evt-1-big.jpg.inline.jpg"]
+        assert len(staged_paths) == 2
+
+    async def test_non_image_content_type_skips_inline(self, temp_workspace_root: Path) -> None:
+        big_pdf = b"%PDF-" + b"\0" * (INLINE_SIZE_CAP_BYTES + 1)
+        records, _ = await stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            attachments=[
+                InboundAttachment(
+                    stream=_FakeUploadStream(big_pdf, "doc.pdf", "application/pdf"),
+                    filename="doc.pdf",
+                    content_type="application/pdf",
+                )
+            ],
+        )
+        assert "inline" not in records[0]
+
+    async def test_undecodable_oversize_image_falls_through_without_inline(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """An image-typed payload Pillow can't decode (corrupt header,
+        truncated bytes) skips the inline path silently — the renderer
+        still gets a marker, but the original is staged normally so the
+        sandbox tools can read it.
+        """
+        garbage = b"\xff\xd8\xff" + b"\x00" * (INLINE_SIZE_CAP_BYTES + 1)
+        records, staged_paths = await stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            attachments=[
+                InboundAttachment(
+                    stream=_FakeUploadStream(garbage, "bad.jpg", "image/jpeg"),
+                    filename="bad.jpg",
+                    content_type="image/jpeg",
+                )
+            ],
+        )
+        assert "inline" not in records[0]
+        # Original still on disk (staging-time downsample failure must
+        # not block the upload — model can still ``read`` the path).
+        sess_dir = temp_workspace_root / "_attachments" / "sess-1" / "echo"
+        assert (sess_dir / "evt-1-bad.jpg").exists()
+        assert len(staged_paths) == 1
+
+    async def test_replay_reconstructs_inline_record_from_disk(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """Webhook replays of an event already on disk skip the upload
+        stream and read size from ``stat``.  When the inline sibling
+        also exists, we reconstruct the sub-record from disk rather
+        than re-encoding.
+        """
+        big = _real_jpeg_bytes(3500, 3500)
+        first_records, first_paths = await stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            attachments=[
+                InboundAttachment(
+                    stream=_FakeUploadStream(big, "big.jpg", "image/jpeg"),
+                    filename="big.jpg",
+                    content_type="image/jpeg",
+                )
+            ],
+        )
+        second_records, second_paths = await stage_inbound_attachments(
+            session_id="sess-1",
+            connector_name="echo",
+            event_id="evt-1",
+            attachments=[
+                InboundAttachment(
+                    stream=_FakeUploadStream(big, "big.jpg", "image/jpeg"),
+                    filename="big.jpg",
+                    content_type="image/jpeg",
+                )
+            ],
+        )
+        # Replay returns the same record shape, and materializes zero
+        # new files (both original and inline are on disk from the
+        # first call).
+        assert first_records == second_records
+        assert second_paths == []
+        assert len(first_paths) == 2  # original + inline sibling
+
+    async def test_compensating_cleanup_unlinks_inline_sibling(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """Same-inbound collision (two attachments sanitizing to the
+        same name) fails hard; both the original and the inline sibling
+        from the first iteration must be unlinked so the orphan GC
+        sees nothing.
+        """
+        big = _real_jpeg_bytes(3500, 3500)
+        small = _real_jpeg_bytes(100, 100)
+
+        with pytest.raises(AttachmentStagingError, match="sanitize to the same"):
+            await stage_inbound_attachments(
+                session_id="sess-1",
+                connector_name="echo",
+                event_id="evt-1",
+                attachments=[
+                    InboundAttachment(
+                        stream=_FakeUploadStream(big, "image.jpg", "image/jpeg"),
+                        filename="image.jpg",
+                        content_type="image/jpeg",
+                    ),
+                    InboundAttachment(
+                        stream=_FakeUploadStream(small, "image.jpg", "image/jpeg"),
+                        filename="image.jpg",
+                        content_type="image/jpeg",
+                    ),
+                ],
+            )
+
+        sess_dir = temp_workspace_root / "_attachments" / "sess-1" / "echo"
+        if sess_dir.exists():
+            assert list(sess_dir.iterdir()) == []

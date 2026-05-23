@@ -14,17 +14,32 @@ Replay-safe: a redelivered ``event_id`` finds the target path
 already populated and skips the upload read. Files stranded by a
 rolled-back transaction are reclaimed by
 :mod:`aios.harness.attachment_gc` at worker startup.
+
+Oversize images (above :data:`vision.INLINE_SIZE_CAP_BYTES`) get a
+sibling ``<target>.inline.<ext>`` produced by :func:`maybe_downsample`;
+the record carries an ``inline`` sub-record pointing at it so the
+renderer can show the model pixels instead of a path marker.  The
+original file is untouched — sandbox tools still see the unresized
+bytes at ``/mnt/attachments/...``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from PIL import Image
+
+from aios.harness.image_resize import ImageDownsampleError, maybe_downsample
+from aios.harness.vision import INLINE_SIZE_CAP_BYTES, PRE_RESIZE_CEILING_BYTES
+from aios.logging import get_logger
 from aios.sandbox.volumes import ensure_session_attachments_dir, safe_filename
 from aios.services.files import UploadStream
+
+log = get_logger("aios.services.attachment_staging")
 
 _CHUNK_SIZE = 1 << 20  # 1 MiB — matches stage_upload's chunk size.
 
@@ -122,14 +137,23 @@ async def stage_inbound_attachments(
                 size = await _stream_to_disk(attachment.stream, target)
                 newly_staged_paths.append(target)
 
-            staged_records.append(
-                {
-                    "filename": attachment.filename,
-                    "content_type": attachment.content_type,
-                    "size": size,
-                    "in_sandbox_path": f"/mnt/attachments/{connector_name}/{target_name}",
-                }
+            inline_record = await _maybe_stage_inline(
+                original_path=target,
+                original_size=size,
+                content_type=attachment.content_type,
+                connector_name=connector_name,
+                newly_staged_paths=newly_staged_paths,
             )
+
+            record: dict[str, Any] = {
+                "filename": attachment.filename,
+                "content_type": attachment.content_type,
+                "size": size,
+                "in_sandbox_path": f"/mnt/attachments/{connector_name}/{target_name}",
+            }
+            if inline_record is not None:
+                record["inline"] = inline_record
+            staged_records.append(record)
 
         return staged_records, newly_staged_paths
     except Exception:
@@ -137,6 +161,106 @@ async def stage_inbound_attachments(
             with contextlib.suppress(OSError):
                 path.unlink(missing_ok=True)
         raise
+
+
+async def _maybe_stage_inline(
+    *,
+    original_path: Path,
+    original_size: int,
+    content_type: str,
+    connector_name: str,
+    newly_staged_paths: list[Path],
+) -> dict[str, Any] | None:
+    """Return an ``inline`` sub-record for the renderer (and possibly
+    write a sibling ``.inline.<ext>`` file) when the original needs
+    downsampling to fit the inline cap.
+
+    Returns ``None`` when no inline copy is needed or possible:
+      - Non-image content type.
+      - Original already fits the inline cap.
+      - Original exceeds the pre-resize ceiling (would be slow to decode).
+      - Pillow can't decode or compress under the cap (warn-logged; the
+        renderer falls through to the marker).
+
+    Replay-safe: when an ``.inline.<ext>`` sibling already exists on
+    disk (prior call of this same ``event_id`` succeeded but the dedup
+    transaction is replaying), the record is reconstructed from disk
+    without re-encoding.
+    """
+    if not content_type.startswith("image/"):
+        return None
+    if original_size <= INLINE_SIZE_CAP_BYTES:
+        return None
+    if original_size > PRE_RESIZE_CEILING_BYTES:
+        return None
+
+    # Inline siblings live next to the original.  We only ever write
+    # ``.inline.jpg`` (non-transparent path) or ``.inline.png``
+    # (transparency-preserving path); probe both on replay so we don't
+    # re-encode an image whose bytes already exist on disk.
+    for ext in ("jpg", "png"):
+        candidate = original_path.with_name(f"{original_path.name}.inline.{ext}")
+        if candidate.exists():
+            return await asyncio.to_thread(
+                _inline_record_from_existing,
+                inline_path=candidate,
+                connector_name=connector_name,
+            )
+
+    # ASYNC240: small disk read into an existing per-attachment async
+    # boundary — wrapping in to_thread would add scheduling overhead
+    # for no real concurrency win, matching the policy in
+    # :func:`_stream_to_disk` above.  Pillow itself, called below via
+    # ``maybe_downsample``, is the heavy work and is already in a
+    # thread.
+    original_bytes = original_path.read_bytes()  # noqa: ASYNC240
+    try:
+        resized = await maybe_downsample(original_bytes, content_type)
+    except ImageDownsampleError as err:
+        log.warning(
+            "staging.downsample_failed",
+            target=str(original_path),
+            content_type=content_type,
+            size=original_size,
+            error=str(err),
+        )
+        return None
+    if resized is None:
+        # Unreachable in practice (original_size > cap above), but the
+        # type narrowing wants the explicit branch.
+        return None
+
+    ext = "jpg" if resized.content_type == "image/jpeg" else "png"
+    inline_path = original_path.with_name(f"{original_path.name}.inline.{ext}")
+    inline_path.write_bytes(resized.data)
+    newly_staged_paths.append(inline_path)
+    return {
+        "in_sandbox_path": f"/mnt/attachments/{connector_name}/{inline_path.name}",
+        "content_type": resized.content_type,
+        "size": len(resized.data),
+        "width": resized.width,
+        "height": resized.height,
+    }
+
+
+def _inline_record_from_existing(*, inline_path: Path, connector_name: str) -> dict[str, Any]:
+    """Reconstruct an inline sub-record from an on-disk sibling.
+
+    Pillow's ``Image.open`` is lazy — reading ``.size`` and ``.format``
+    decodes only the header, not the pixel data.  Cheap even on a 4 MB
+    image.
+    """
+    with Image.open(inline_path) as img:
+        width, height = img.size
+        fmt = img.format
+    content_type = "image/jpeg" if fmt == "JPEG" else "image/png"
+    return {
+        "in_sandbox_path": f"/mnt/attachments/{connector_name}/{inline_path.name}",
+        "content_type": content_type,
+        "size": inline_path.stat().st_size,
+        "width": width,
+        "height": height,
+    }
 
 
 async def _stream_to_disk(stream: UploadStream, target: Path) -> int:

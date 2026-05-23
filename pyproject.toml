@@ -44,6 +44,9 @@ dependencies = [
     # for renderer-side mime correction so the same magic-byte detector
     # runs at the connector boundary and at replay time.
     "aios-connector-http",
+    # Inbound image downsampling at staging time so vision-capable models
+    # see the pixels instead of a path marker.  See harness/image_resize.py.
+    "pillow>=10.0",
 ]
 
 [dependency-groups]
