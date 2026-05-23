@@ -119,3 +119,38 @@ class TestLegacyDefaultCompat:
         symlink.symlink_to(outside_target)
         with pytest.raises(ForbiddenError):
             validate_workspace_path(str(symlink), "acc_a", session_id="sess_01abc")
+
+
+class TestRelativePathRejection:
+    """Relative ``workspace_path`` strings must be rejected with a
+    clear error before ``Path.resolve()`` gets a chance to interpret
+    them against the current process's CWD.
+
+    See #626: legacy session rows persisted ``workspaces/<account>/<session>``
+    when ``AIOS_WORKSPACE_ROOT`` was historically configured as a
+    relative path.  ``Path.resolve()`` resolves these against the
+    worker's CWD, the result lands outside the workspace jail, and
+    every tool call surfaces ``ForbiddenError`` blamed on whatever
+    path the model was just trying to read or write.  Failing fast
+    on the relative-input case produces an unambiguous error that
+    correctly identifies the stored ``workspace_volume_path`` as
+    the culprit instead.
+    """
+
+    def test_relative_path_rejected_with_clear_message(self, workspace_root: Path) -> None:
+        """A relative ``workspace_path`` must raise ``ForbiddenError``
+        with the new ``must be an absolute path`` message and the raw
+        input echoed back as ``detail['workspace_path']``."""
+        with pytest.raises(ForbiddenError) as exc_info:
+            validate_workspace_path("workspaces/sess_01abc", "acc_a")
+        assert "absolute path" in str(exc_info.value)
+        assert exc_info.value.detail == {"workspace_path": "workspaces/sess_01abc"}
+
+    def test_relative_path_with_session_id_still_rejected(self, workspace_root: Path) -> None:
+        """The legacy carve-out (``session_id`` provided) must not save
+        a relative path: relative inputs are rejected before any
+        equality-with-legacy-shape comparison runs, so an attacker
+        cannot bypass the new guard by also matching the legacy shape."""
+        with pytest.raises(ForbiddenError) as exc_info:
+            validate_workspace_path("workspaces/sess_01abc", "acc_a", session_id="sess_01abc")
+        assert "absolute path" in str(exc_info.value)
