@@ -158,6 +158,13 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
         # still in the log (monotonicity), but the model should treat
         # it as retracted going forward.
         parts.append(f"revoke_target_message_id={revoke_target_message_id!r}")
+    quoted_message_id = metadata.get("quoted_message_id")
+    if isinstance(quoted_message_id, str) and quoted_message_id:
+        # The peer replied to a previous message in the chat (WhatsApp's
+        # reply gesture).  Renders the same shape as the edit/revoke
+        # target ids so the model can match it against the message_id
+        # header on a prior event.
+        parts.append(f"quoted_message_id={quoted_message_id!r}")
     if metadata.get("self_mentioned") is True:
         # Hoist ahead of the structured ``mentions`` list — for
         # group chats the model often only needs to know "was I
@@ -165,8 +172,13 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
         # alternative that #5 set out to eliminate.
         parts.append("self_mentioned=true")
     sticker_emoji = metadata.get("sticker_emoji")
-    if isinstance(sticker_emoji, str) and sticker_emoji:
-        parts.append(f"sticker_emoji={sticker_emoji!r}")
+    if isinstance(sticker_emoji, str):
+        # Empty string means the connector saw a StickerMessage but
+        # the sender's WhatsApp client didn't pick an emoji label
+        # (custom stickers from the sticker maker land this way);
+        # surface a placeholder so the model still knows a sticker
+        # arrived rather than silently dropping the signal.
+        parts.append(f"sticker_emoji={sticker_emoji!r}" if sticker_emoji else "sticker=true")
     header = "[" + " · ".join(parts) + "]"
     mentions = metadata.get("mentions")
     if isinstance(mentions, list) and mentions:
