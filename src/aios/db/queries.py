@@ -175,6 +175,34 @@ async def _archive_scoped(
     return rec
 
 
+def _build_set_assignments(
+    fields: list[tuple[str, Any, str | None]],
+    args: list[Any],
+) -> list[str]:
+    """Build ``col = $N[::cast]`` SET fragments for the given fields, appending
+    each value to ``args`` (mutated in order).
+
+    ``cast`` is one of: ``None`` (no cast); ``"jsonb"`` (value gets
+    ``json.dumps`` + ``::jsonb`` suffix); or any other Postgres cast string
+    like ``"text[]"`` (value passed through, ``::cast`` suffix appended).
+
+    Caller is responsible for pre-filtering omitted fields (its own
+    ``None``-vs-``Ellipsis`` convention) and for any out-of-band SET
+    fragments (e.g. ``updated_at = now()``, which not every table has)."""
+    sets: list[str] = []
+    for column, value, pg_cast in fields:
+        if pg_cast == "jsonb":
+            args.append(json.dumps(value))
+            sets.append(f"{column} = ${len(args)}::jsonb")
+        elif pg_cast is None:
+            args.append(value)
+            sets.append(f"{column} = ${len(args)}")
+        else:
+            args.append(value)
+            sets.append(f"{column} = ${len(args)}::{pg_cast}")
+    return sets
+
+
 # ─── environments ─────────────────────────────────────────────────────────────
 
 
@@ -270,15 +298,13 @@ async def update_environment(
     if current.archived_at is not None:
         raise ConflictError(f"environment {env_id} is archived", detail={"id": env_id})
 
-    sets: list[str] = []
     args: list[Any] = [env_id]
+    fields: list[tuple[str, Any, str | None]] = []
     if name is not None:
-        args.append(name)
-        sets.append(f"name = ${len(args)}")
+        fields.append(("name", name, None))
     if config is not None:
-        args.append(json.dumps(config.model_dump(exclude_none=True)))
-        sets.append(f"config = ${len(args)}::jsonb")
-
+        fields.append(("config", config.model_dump(exclude_none=True), "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return current
 
@@ -1171,22 +1197,17 @@ async def update_session(
             detail={"id": session_id},
         )
 
-    sets: list[str] = []
     args: list[Any] = [session_id]  # $1 = session_id
-
+    fields: list[tuple[str, Any, str | None]] = []
     if agent_id is not None:
-        args.append(agent_id)
-        sets.append(f"agent_id = ${len(args)}")
+        fields.append(("agent_id", agent_id, None))
     if agent_version is not ...:
-        args.append(agent_version)
-        sets.append(f"agent_version = ${len(args)}")
+        fields.append(("agent_version", agent_version, None))
     if title is not ...:
-        args.append(title)
-        sets.append(f"title = ${len(args)}")
+        fields.append(("title", title, None))
     if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
-
+        fields.append(("metadata", metadata, "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return current
 
@@ -2669,14 +2690,13 @@ async def update_vault(
             detail={"id": vault_id},
         )
 
-    sets: list[str] = []
     args: list[Any] = [vault_id]
+    fields: list[tuple[str, Any, str | None]] = []
     if display_name is not None:
-        args.append(display_name)
-        sets.append(f"display_name = ${len(args)}")
+        fields.append(("display_name", display_name, None))
     if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
+        fields.append(("metadata", metadata, "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return current
     sets.append("updated_at = now()")
@@ -4455,29 +4475,23 @@ async def update_session_template(
             detail={"id": template_id},
         )
 
-    sets: list[str] = []
     args: list[Any] = [template_id]
+    fields: list[tuple[str, Any, str | None]] = []
     if name is not None:
-        args.append(name)
-        sets.append(f"name = ${len(args)}")
+        fields.append(("name", name, None))
     if agent_id is not None:
-        args.append(agent_id)
-        sets.append(f"agent_id = ${len(args)}")
+        fields.append(("agent_id", agent_id, None))
     if agent_version is not ...:
-        args.append(agent_version)
-        sets.append(f"agent_version = ${len(args)}")
+        fields.append(("agent_version", agent_version, None))
     if environment_id is not None:
-        args.append(environment_id)
-        sets.append(f"environment_id = ${len(args)}")
+        fields.append(("environment_id", environment_id, None))
     if vault_ids is not None:
-        args.append(vault_ids)
-        sets.append(f"vault_ids = ${len(args)}::text[]")
+        fields.append(("vault_ids", vault_ids, "text[]"))
     if memory_store_ids is not None:
-        args.append(memory_store_ids)
-        sets.append(f"memory_store_ids = ${len(args)}::text[]")
+        fields.append(("memory_store_ids", memory_store_ids, "text[]"))
     if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
+        fields.append(("metadata", metadata, "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return await get_session_template(conn, template_id, account_id=account_id)
     sets.append("updated_at = now()")
@@ -4676,17 +4690,15 @@ async def update_memory_store(
     # shape).
     current = await get_memory_store(conn, store_id, allow_archived=False, account_id=account_id)
 
-    sets: list[str] = []
     args: list[Any] = [store_id]
+    fields: list[tuple[str, Any, str | None]] = []
     if name is not None:
-        args.append(name)
-        sets.append(f"name = ${len(args)}")
+        fields.append(("name", name, None))
     if description is not None:
-        args.append(description)
-        sets.append(f"description = ${len(args)}")
+        fields.append(("description", description, None))
     if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
+        fields.append(("metadata", metadata, "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return current
     sets.append("updated_at = now()")
