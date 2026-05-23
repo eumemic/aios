@@ -114,6 +114,37 @@ async def _get_scoped[T](
     return row(rec)
 
 
+async def _list_scoped[T](
+    conn: asyncpg.Connection[Any],
+    *,
+    table: str,
+    account_id: str,
+    row: Callable[[asyncpg.Record], T],
+    limit: int = 50,
+    after: str | None = None,
+    filters: list[tuple[str, Any]] | None = None,
+) -> list[T]:
+    """Keyset-paginated SELECT scoped by ``account_id`` + ``archived_at IS NULL``.
+
+    ``filters`` is a list of ``(column, value)`` equality predicates;
+    entries whose ``value`` is ``None`` are skipped (mirrors the per-arg
+    ``if x is not None`` guards in the originals).  ``column`` names are
+    static literals from this module — never user input."""
+    args: list[Any] = [account_id]
+    where = ["archived_at IS NULL", "account_id = $1"]
+    for column, value in filters or []:
+        if value is None:
+            continue
+        args.append(value)
+        where.append(f"{column} = ${len(args)}")
+    if after is not None:
+        args.append(after)
+        where.append(f"id < ${len(args)}")
+    args.append(limit)
+    sql = f"SELECT * FROM {table} WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
+    return [row(r) for r in await conn.fetch(sql, *args)]
+
+
 # ─── environments ─────────────────────────────────────────────────────────────
 
 
@@ -171,18 +202,14 @@ async def get_environment(
 async def list_environments(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Environment]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = (
-        f"SELECT * FROM environments WHERE {' AND '.join(where)} "
-        f"ORDER BY id DESC LIMIT ${len(args)}"
+    return await _list_scoped(
+        conn,
+        table="environments",
+        account_id=account_id,
+        row=_row_to_environment,
+        limit=limit,
+        after=after,
     )
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_environment(r) for r in rows]
 
 
 async def archive_environment(
@@ -445,18 +472,15 @@ async def list_agents(
     after: str | None = None,
     name: str | None = None,
 ) -> list[Agent]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if name is not None:
-        args.append(name)
-        where.append(f"name = ${len(args)}")
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = f"SELECT * FROM agents WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_agent(r) for r in rows]
+    return await _list_scoped(
+        conn,
+        table="agents",
+        account_id=account_id,
+        row=_row_to_agent,
+        limit=limit,
+        after=after,
+        filters=[("name", name)],
+    )
 
 
 async def archive_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str) -> None:
@@ -905,23 +929,15 @@ async def list_sessions(
     limit: int = 50,
     after: str | None = None,
 ) -> list[Session]:
-    args: list[Any] = [account_id]
-    clauses: list[str] = ["archived_at IS NULL", "account_id = $1"]
-    if agent_id is not None:
-        args.append(agent_id)
-        clauses.append(f"agent_id = ${len(args)}")
-    if status is not None:
-        args.append(status)
-        clauses.append(f"status = ${len(args)}")
-    if after is not None:
-        args.append(after)
-        clauses.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = (
-        f"SELECT * FROM sessions WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ${len(args)}"
+    return await _list_scoped(
+        conn,
+        table="sessions",
+        account_id=account_id,
+        row=_row_to_session,
+        limit=limit,
+        after=after,
+        filters=[("agent_id", agent_id), ("status", status)],
     )
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_session(r) for r in rows]
 
 
 async def lock_active_session_for_update(
@@ -2595,15 +2611,14 @@ async def get_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_id:
 async def list_vaults(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Vault]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = f"SELECT * FROM vaults WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_vault(r) for r in rows]
+    return await _list_scoped(
+        conn,
+        table="vaults",
+        account_id=account_id,
+        row=_row_to_vault,
+        limit=limit,
+        after=after,
+    )
 
 
 async def update_vault(
@@ -3215,15 +3230,14 @@ async def get_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id:
 async def list_skills(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Skill]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = f"SELECT * FROM skills WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_skill(r) for r in rows]
+    return await _list_scoped(
+        conn,
+        table="skills",
+        account_id=account_id,
+        row=_row_to_skill,
+        limit=limit,
+        after=after,
+    )
 
 
 async def archive_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id: str) -> None:
@@ -4379,18 +4393,14 @@ async def get_session_template(
 async def list_session_templates(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[SessionTemplate]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = (
-        f"SELECT * FROM session_templates WHERE {' AND '.join(where)} "
-        f"ORDER BY id DESC LIMIT ${len(args)}"
+    return await _list_scoped(
+        conn,
+        table="session_templates",
+        account_id=account_id,
+        row=_row_to_session_template,
+        limit=limit,
+        after=after,
     )
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_session_template(r) for r in rows]
 
 
 async def update_session_template(
