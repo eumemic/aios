@@ -161,11 +161,26 @@ func (c *Client) Unpair(ctx context.Context) error {
 // to the same Notifier-bound Client receiver, and atomically swaps c.wa.
 // Concurrent reads see either the old (deleted) Client or the new one —
 // never a torn pointer.
+//
+// Also truncates the MessageStore: post-unpair, the old MessageKey
+// rows are unreachable by the new client (different device identity,
+// different whatsmeow Signal sessions).  Leaving them would let a
+// subsequent React/Edit/Revoke Lookup-succeed and then either fail
+// at the protocol layer or — worse — misdeliver, since BuildEdit/
+// BuildRevoke would emit an envelope referencing an msgID created
+// under the old identity.  A truncate failure logs but doesn't
+// abort the replace: a stale row that the new client can't
+// authenticate is at worst a confusing "edit refused" later, which
+// is observable; aborting here would leave the daemon with a dead
+// Client and no recovery path.
 func (c *Client) replaceWhatsmeowClient() {
 	newDevice := c.store.NewDevice()
 	newWa := whatsmeow.NewClient(newDevice, newWaLogger(c.log, "client"))
 	newWa.AddEventHandler(c.handleEvent)
 	c.wa.Store(newWa)
+	if err := c.msgs.Truncate(context.Background()); err != nil {
+		c.log.Warn("wameow.msgstore_truncate_failed", "err", err)
+	}
 }
 
 // resetPairState forgets any cached pairing attempt.  Called after

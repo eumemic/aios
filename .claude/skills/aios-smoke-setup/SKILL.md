@@ -1,6 +1,6 @@
 ---
 name: aios-smoke-setup
-description: This skill should be used when the user asks to "smoke test the connector", "DM the bot in this worktree", "set up a fresh aios runtime", "spin up aios", "prep a smoke session", "bring up aios on this branch", or otherwise wants to point a real Telegram (or Signal) bot at the code in the current worktree.  Bundles the pre-flight checks (bot getUpdates conflict, sibling worktree non-interference, free port), the isolated `.env` overrides (separate DB + port + ``AIOS_DEFAULT_MCP_PERMISSION_POLICY=always_allow``), the right migration command (``aios migrate``, not ``alembic upgrade head``), and the env/agent/connection/session/attach resource chain in one ``setup.sh`` so the first DM round-trips in seconds instead of forty-five minutes.  Hand off to ``aios-live-monitor`` once the runtime is up.
+description: This skill should be used when the user asks to "smoke test the connector", "DM the bot in this worktree", "set up a fresh aios runtime", "spin up aios", "prep a smoke session", "bring up aios on this branch", or otherwise wants to point a real Telegram, Signal, or WhatsApp bot at the code in the current worktree.  Bundles the pre-flight checks (bot getUpdates conflict, sibling worktree non-interference, free port), the isolated `.env` overrides (separate DB + port + ``AIOS_DEFAULT_MCP_PERMISSION_POLICY=always_allow``), the right migration command (``aios migrate``, not ``alembic upgrade head``), and the env/agent/connection/session/attach resource chain in one ``setup.sh`` so the first DM round-trips in seconds instead of forty-five minutes.  For WhatsApp specifically the pair flow differs (QR scan, no bot-token) — once this skill brings up the runtime, hand off to ``aios-whatsapp-pair`` to actually link the account, then ``aios-live-monitor`` for narration.
 ---
 
 # aios smoke session setup
@@ -62,6 +62,26 @@ uv run aios connections attach <conn_id> --session-id=<sess_id>                 
 ```
 
 CLI quirks: `envs` is plural; `--session-id` not `--session`; `sessions create` requires both `--agent` AND `--environment-id`; the `agent.json` `tools[]` items must use bare type names (`bash`, `read`, `write`, …) and **`switch_channel` is auto-included — do not list it** (the API rejects it).
+
+## WhatsApp variant
+
+Telegram and Signal pair via a bot token / signal-cli registration that
+the setup script can resolve up-front.  WhatsApp's pair is interactive
+(QR scan) and so happens *after* `setup.sh` brings up the runtime, not
+during it.  Variant flow:
+
+1. Run `setup.sh --connector whatsapp` (no `--bot-token` needed — that
+   flag is Telegram-only).  This brings up api+worker+connector+empty
+   resource chain.
+2. Hand off to `aios-whatsapp-pair` to scan the QR and bind the
+   account.  That skill owns the daemon spawn, ASCII QR rendering, and
+   `confirm-pairing` block.
+3. Hand off to `aios-live-monitor` for chat narration.
+
+The connection-create step also differs: WhatsApp connections take a
+`--secret phone=+<E.164>` instead of Telegram's `--account=<bot_id>`.
+The setup script handles that branch when `--connector whatsapp` is
+passed.
 
 ## After setup: hand off to aios-live-monitor
 

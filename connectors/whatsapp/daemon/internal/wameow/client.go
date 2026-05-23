@@ -7,17 +7,15 @@ package wameow
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 
 	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
-	"google.golang.org/protobuf/proto"
 
 	// modernc.org/sqlite is a pure-Go SQLite driver so the daemon
 	// compiles without CGo.  Registered under the driver name "sqlite".
@@ -35,11 +33,32 @@ import (
 // deleted device") — the swap is what lets a re-pair work in the same
 // daemon process.
 type Client struct {
-	wa     atomic.Pointer[whatsmeow.Client]
-	store  *sqlstore.Container
-	notify Notifier
-	log    *slog.Logger
-	pair   pairing
+	wa       atomic.Pointer[whatsmeow.Client]
+	store    *sqlstore.Container
+	msgs     *MessageStore
+	mediaDir string
+	notify   Notifier
+	log      *slog.Logger
+	pair     pairing
+	// lifetimeCtx is the daemon-lifetime context (set by NewClient
+	// from main's signal-notify ctx).  Used as the background
+	// context for in-event-handler ops like media download and
+	// inbound msgstore writes, so they cancel on daemon shutdown
+	// instead of running against a torn-down store.
+	lifetimeCtx context.Context
+	// unread tracks per-chat inbound message ids the peer is waiting
+	// on a read receipt for.  Populated in recordInbound; drained
+	// in sendOne after a successful send so the bot's reply
+	// implicitly marks the prior context as read (Signal-shape
+	// receipts-after-emit).  Each entry stores (msg_id, sender_jid)
+	// since whatsmeow's MarkRead needs both.
+	unreadMu sync.Mutex
+	unread   map[string][]unreadKey
+}
+
+type unreadKey struct {
+	id     string
+	sender string
 }
 
 // NewClient opens the sqlstore at <storeDir>/store.db, picks the first
@@ -62,8 +81,21 @@ func NewClient(
 		_ = container.Close()
 		return nil, fmt.Errorf("get first device: %w", err)
 	}
+	msgs, err := openMessageStore(storeDir)
+	if err != nil {
+		_ = container.Close()
+		return nil, err
+	}
 	wa := whatsmeow.NewClient(device, newWaLogger(log, "client"))
-	c := &Client{store: container, notify: notify, log: log}
+	c := &Client{
+		store:       container,
+		msgs:        msgs,
+		mediaDir:    filepath.Join(storeDir, "media"),
+		notify:      notify,
+		log:         log,
+		lifetimeCtx: ctx,
+		unread:      make(map[string][]unreadKey),
+	}
 	c.wa.Store(wa)
 	wa.AddEventHandler(c.handleEvent)
 	return c, nil
@@ -87,27 +119,86 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-// SendMessage matches handler.SendMessageFn.
-func (c *Client) SendMessage(ctx context.Context, jidStr, text string) (string, int64, error) {
-	wa := c.wa.Load()
-	if !wa.IsConnected() {
-		return "", 0, errors.New("whatsmeow: not connected")
+// markInboundUnread appends a peer-sent message to the per-chat
+// unread queue so the next bot reply to that chat drains it via
+// MarkRead.  Called from recordInbound for any *events.Message with
+// is_self=false on a user-visible chat.  Lazy-inits the map for
+// callers that construct Client directly (tests).
+func (c *Client) markInboundUnread(chatJID, msgID, senderJID string) {
+	c.unreadMu.Lock()
+	defer c.unreadMu.Unlock()
+	if c.unread == nil {
+		c.unread = make(map[string][]unreadKey)
 	}
-	jid, err := types.ParseJID(jidStr)
-	if err != nil {
-		return "", 0, fmt.Errorf("invalid JID %q: %w", jidStr, err)
+	c.unread[chatJID] = append(c.unread[chatJID], unreadKey{id: msgID, sender: senderJID})
+}
+
+// drainUnread atomically pulls + clears the per-chat unread queue.
+// Returns nil when the chat has no pending receipts.  Caller is
+// responsible for the actual MarkRead RPC; drainUnread just hands
+// over ownership of the slice.
+func (c *Client) drainUnread(chatJID string) []unreadKey {
+	c.unreadMu.Lock()
+	defer c.unreadMu.Unlock()
+	if c.unread == nil {
+		return nil
 	}
-	msg := &waE2E.Message{Conversation: proto.String(text)}
-	resp, err := wa.SendMessage(ctx, jid, msg)
-	if err != nil {
-		return "", 0, err
+	keys, ok := c.unread[chatJID]
+	if !ok {
+		return nil
 	}
-	return string(resp.ID), resp.Timestamp.UnixMilli(), nil
+	delete(c.unread, chatJID)
+	return keys
+}
+
+// recordOutbound stamps an outbound message into the message store
+// so the model can later react to / edit / revoke its own sends by
+// id.  Best-effort: a store failure here is logged but doesn't fail
+// the send (the send already went through on the wire; failing the
+// RPC would push the model toward a retry that produces a duplicate
+// peer-visible message).  A later react/edit/delete on this id
+// returns ErrMessageNotFound — operators see the put_failed warning
+// and can diagnose; the model retries with the user's help if
+// needed.
+//
+// ``sentAtMs`` is the server-acknowledged send timestamp (from
+// ``SendResponse.Timestamp``), used by the Edit window guard at
+// :func:`Client.Edit` to refuse out-of-window edit attempts before
+// the protocol-level rejection.  ``text`` is the message body the
+// peer received, used to build the QuotedMessage stub when the model
+// later issues a reply with ``quoted_message_id``.
+//
+// Takes the `wa` that performed the send rather than re-loading
+// c.wa.  A concurrent unpair could otherwise swap c.wa between
+// sendOne returning and recordOutbound reading Store.ID, stamping
+// the row with the NEW identity instead of the one that actually
+// sent — breaking subsequent edit/revoke routing.
+func (c *Client) recordOutbound(
+	ctx context.Context,
+	wa *whatsmeow.Client,
+	msgID string,
+	chatJID types.JID,
+	sentAtMs int64,
+	text string,
+) {
+	ourID := wa.Store.ID
+	if ourID == nil {
+		// Shouldn't happen: wa is the client that just successfully
+		// sent, so its Store.ID was populated.  Defensive: skip the
+		// record rather than panic.
+		return
+	}
+	if err := c.msgs.Put(ctx, msgID, chatJID.String(), ourID.String(), true, sentAtMs, text); err != nil {
+		c.log.Warn("wameow.msgstore_put_failed", "id", msgID, "err", err)
+	}
 }
 
 // Close disconnects from WhatsApp and closes the sqlstore.
 func (c *Client) Close() {
 	c.wa.Load().Disconnect()
+	if err := c.msgs.Close(); err != nil {
+		c.log.Warn("wameow.msgstore_close_error", "err", err)
+	}
 	if err := c.store.Close(); err != nil {
 		c.log.Warn("wameow.store_close_error", "err", err)
 	}
