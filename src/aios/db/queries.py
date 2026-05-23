@@ -1429,6 +1429,38 @@ async def clone_session(
             new_gh_ids,
         )
 
+        # session_scheduled_tasks.id is a global PK — mint fresh per clone.
+        # Runtime state (running_since / last_fire_* / consecutive_failures)
+        # is RESET on the clone: it inherits the schedule + next_fire so it
+        # continues firing on the parent's cadence, but starts with fresh
+        # failure counters and no in-flight claim. Cumulative-token reset
+        # below uses the same principle — clone is a fresh runtime instance
+        # of the parent's logical configuration.
+        sched_count: int = await conn.fetchval(
+            "SELECT COUNT(*) FROM session_scheduled_tasks WHERE session_id = $1",
+            parent_session_id,
+        )
+        new_sched_ids = [make_id(SCHEDULED_TASK) for _ in range(sched_count)]
+        await conn.execute(
+            """
+            INSERT INTO session_scheduled_tasks (
+                id, session_id, account_id, name, schedule, command, enabled,
+                timeout_seconds, max_output_bytes, next_fire, metadata
+            )
+            SELECT i.id, $2, s.account_id, s.name, s.schedule, s.command,
+                   s.enabled, s.timeout_seconds, s.max_output_bytes,
+                   s.next_fire, s.metadata
+              FROM (
+                SELECT *, row_number() OVER (ORDER BY created_at) AS rn
+                  FROM session_scheduled_tasks WHERE session_id = $1
+              ) s
+              JOIN unnest($3::text[]) WITH ORDINALITY AS i(id, rn) USING (rn)
+            """,
+            parent_session_id,
+            new_id,
+            new_sched_ids,
+        )
+
         # Events are gapless 1..last_event_seq per session, so we pre-generate
         # exactly that many fresh evt_ ids and join by ordinal.  Event ids are
         # PRIMARY KEY so they must change; everything else is preserved
@@ -6509,9 +6541,11 @@ async def count_active_child_accounts(conn: asyncpg.Connection[Any], parent_acco
 class ScheduledTaskRow(NamedTuple):
     """Internal record for scheduled-task fire-handler lookups.
 
-    Carries ``session_id`` and ``account_id`` alongside the user-visible
-    fields so the unscoped fire-job handler (which only has the task id)
-    can resolve the owning session without an extra join.
+    Carries ``session_id``, ``account_id``, and the owning session's
+    ``session_archived_at`` alongside the user-visible fields so the
+    unscoped fire-job handler (which only has the task id) can resolve
+    the owning session and verify it hasn't been archived between claim
+    and fire — without an extra round-trip.
     """
 
     id: str
@@ -6528,6 +6562,7 @@ class ScheduledTaskRow(NamedTuple):
     last_fire_at: datetime | None
     last_fire_status: ScheduledTaskStatus | None
     consecutive_failures: int
+    session_archived_at: datetime | None
 
 
 def _row_to_scheduled_task_echo(row: asyncpg.Record) -> ScheduledTaskEcho:
@@ -6731,10 +6766,8 @@ async def update_scheduled_task(
     if not isinstance(next_fire, EllipsisType):
         add("next_fire", next_fire)
 
-    if not set_clauses:
-        # No fields to change — surface current state (still verifies existence).
-        return await get_scheduled_task_by_name(conn, session_id, name, account_id=account_id)
-
+    # Always bump ``updated_at`` so a no-op PATCH still records a write —
+    # external pollers using ``updated_at > <since>`` mustn't miss it.
     set_clauses.append("updated_at = now()")
     args.extend([session_id, name, account_id])
     sql = f"""
@@ -6761,13 +6794,18 @@ async def unscoped_get_scheduled_task_row(
     """Fetch a scheduled task by id without account_id scope.
 
     Used by the fire-job handler which runs cross-tenant in the worker;
-    each row carries its ``account_id`` denormalized.
+    each row carries its ``account_id`` denormalized. JOINs ``sessions``
+    so the handler can re-check the owning session's archive state and
+    skip a fire whose session was archived between claim and execute.
     """
     row = await conn.fetchrow(
-        "SELECT id, session_id, account_id, name, schedule, command, enabled, "
-        "timeout_seconds, max_output_bytes, next_fire, running_since, "
-        "last_fire_at, last_fire_status, consecutive_failures "
-        "FROM session_scheduled_tasks WHERE id = $1",
+        "SELECT st.id, st.session_id, st.account_id, st.name, st.schedule, "
+        "st.command, st.enabled, st.timeout_seconds, st.max_output_bytes, "
+        "st.next_fire, st.running_since, st.last_fire_at, st.last_fire_status, "
+        "st.consecutive_failures, s.archived_at AS session_archived_at "
+        "FROM session_scheduled_tasks AS st "
+        "JOIN sessions AS s ON s.id = st.session_id "
+        "WHERE st.id = $1",
         task_id,
     )
     if row is None:
@@ -6790,6 +6828,7 @@ async def unscoped_get_scheduled_task_row(
         last_fire_at=row["last_fire_at"],
         last_fire_status=row["last_fire_status"],
         consecutive_failures=row["consecutive_failures"],
+        session_archived_at=row["session_archived_at"],
     )
 
 
@@ -6827,7 +6866,8 @@ async def fetch_and_claim_due_scheduled_tasks(
         SELECT st.id, st.session_id, st.account_id, st.name, st.schedule,
                st.command, st.enabled, st.timeout_seconds, st.max_output_bytes,
                st.next_fire, st.running_since, st.last_fire_at,
-               st.last_fire_status, st.consecutive_failures
+               st.last_fire_status, st.consecutive_failures,
+               s.archived_at AS session_archived_at
         FROM session_scheduled_tasks AS st
         JOIN sessions AS s ON s.id = st.session_id
         WHERE st.enabled
@@ -6874,6 +6914,7 @@ async def fetch_and_claim_due_scheduled_tasks(
                 last_fire_at=r["last_fire_at"],
                 last_fire_status=r["last_fire_status"],
                 consecutive_failures=r["consecutive_failures"],
+                session_archived_at=r["session_archived_at"],
             )
         )
     return claimed

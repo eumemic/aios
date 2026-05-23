@@ -611,8 +611,22 @@ async def increment_usage(
 
 
 async def archive_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> Session:
+    # Enrich vault_ids / resources / scheduled_tasks so the API response
+    # shape matches GET /sessions/{id}. Archive itself is a single column
+    # flip; the lists are read post-update to surface any concurrent
+    # mutation that committed before archive landed.
     async with pool.acquire() as conn:
-        return await queries.archive_session(conn, session_id, account_id=account_id)
+        session = await queries.archive_session(conn, session_id, account_id=account_id)
+        vault_ids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
+        echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
+        task_echoes = await queries.list_scheduled_tasks(conn, session_id, account_id=account_id)
+    return session.model_copy(
+        update={
+            "vault_ids": vault_ids,
+            "resources": echoes,
+            "scheduled_tasks": task_echoes,
+        }
+    )
 
 
 async def clone_session(
@@ -631,7 +645,14 @@ async def clone_session(
         )
         vault_ids = await queries.get_session_vault_ids(conn, session.id, account_id=account_id)
         echoes = await _list_all_echoes(conn, session.id, account_id=account_id)
-        return session.model_copy(update={"vault_ids": vault_ids, "resources": echoes})
+        task_echoes = await queries.list_scheduled_tasks(conn, session.id, account_id=account_id)
+        return session.model_copy(
+            update={
+                "vault_ids": vault_ids,
+                "resources": echoes,
+                "scheduled_tasks": task_echoes,
+            }
+        )
 
 
 async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> None:
@@ -687,7 +708,14 @@ async def update_session(
                 )
         vids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
         echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
-        return session.model_copy(update={"vault_ids": vids, "resources": echoes})
+        task_echoes = await queries.list_scheduled_tasks(conn, session_id, account_id=account_id)
+        return session.model_copy(
+            update={
+                "vault_ids": vids,
+                "resources": echoes,
+                "scheduled_tasks": task_echoes,
+            }
+        )
 
 
 # ─── tool confirmations ────────────────────────────────────────────────────

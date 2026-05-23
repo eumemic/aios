@@ -29,11 +29,19 @@ from aios.tools.registry import registry
 SCHEDULE_TASK_ADD_DESCRIPTION = (
     "Add a cron-fired bash task to this session. The task runs at the "
     "specified schedule in the session's sandbox WITHOUT waking the "
-    "model — to wake the model, the bash command must POST back to "
-    '"$TOOL_BROKER_URL/v1/$TOOL_BROKER_SECRET/sessions/messages" with a '
-    'JSON body ``{"content": "..."}``. Use this for deterministic '
-    "polling (file watchers, API checks, periodic state syncs) without "
-    "burning model tokens per fire. Names must be unique per session."
+    "model. To escalate (wake the model with a user-role message), the "
+    "bash command must POST to the broker. The canonical invocation, "
+    "which works in both TCP and Unix-socket broker transports (the "
+    "broker exposes ``unix://`` or ``http://`` via TOOL_BROKER_URL), is:\n"
+    "\n"
+    '  curl -fsS "$TOOL_BROKER_URL/v1/$TOOL_BROKER_SECRET/sessions/messages" \\\n'
+    "       -X POST -H 'Content-Type: application/json' \\\n"
+    '       -d \'{"content":"<message to deliver to yourself>"}\'\n'
+    "\n"
+    "Use this primitive for deterministic polling (file watchers, API "
+    "checks, periodic state syncs) without burning model tokens per "
+    "fire. Names must be unique per session; cron expressions are "
+    "standard 5-field, UTC."
 )
 
 SCHEDULE_TASK_ADD_PARAMETERS_SCHEMA: dict[str, Any] = {

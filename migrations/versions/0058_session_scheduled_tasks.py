@@ -54,10 +54,16 @@ def upgrade() -> None:
         CREATE INDEX sched_tasks_by_session
             ON session_scheduled_tasks (session_id)
     """)
+    # Partial index for the scheduler-tick hot path. Covers BOTH the
+    # idle branch (``running_since IS NULL``) and the stale-recovery
+    # branch (``running_since <= cutoff``) of the SELECT in
+    # ``fetch_and_claim_due_scheduled_tasks`` — the predicate is kept
+    # broad enough that stuck rows don't fall out of the index and
+    # force a table scan during recovery.
     op.execute("""
         CREATE INDEX sched_tasks_due
             ON session_scheduled_tasks (next_fire)
-            WHERE enabled AND running_since IS NULL AND next_fire IS NOT NULL
+            WHERE enabled AND next_fire IS NOT NULL
     """)
 
 

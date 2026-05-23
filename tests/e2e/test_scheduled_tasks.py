@@ -540,3 +540,199 @@ class TestHttp:
         )
         # extra="forbid" on SessionUpdate → 422.
         assert r.status_code == 422, r.text
+
+
+# ─── enrichment + clone propagation (post-review fixes) ────────────────────
+
+
+class TestEnrichmentOnSessionMutations:
+    """Regression guards on the code-review finding that ``clone``,
+    ``update``, and ``archive`` were dropping ``scheduled_tasks`` from
+    their response envelopes."""
+
+    async def test_get_session_includes_scheduled_tasks(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        await st_service.add_task(pool, sid, _spec("p"), account_id="acc_test_stub")
+        s = await sessions_service.get_session(pool, sid, account_id="acc_test_stub")
+        assert [t.name for t in s.scheduled_tasks] == ["p"]
+
+    async def test_archive_session_enriches_scheduled_tasks(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        await st_service.add_task(pool, sid, _spec("p"), account_id="acc_test_stub")
+        s = await sessions_service.archive_session(pool, sid, account_id="acc_test_stub")
+        # Rows are preserved across archive; the enriched response must
+        # reflect them (tick filter is what stops firing, not row removal).
+        assert [t.name for t in s.scheduled_tasks] == ["p"]
+
+    async def test_update_session_enriches_scheduled_tasks(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        await st_service.add_task(pool, sid, _spec("p"), account_id="acc_test_stub")
+        s = await sessions_service.update_session(
+            pool, sid, title="renamed", account_id="acc_test_stub"
+        )
+        assert [t.name for t in s.scheduled_tasks] == ["p"]
+
+    async def test_clone_session_enriches_and_copies_scheduled_tasks(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """The clone must (1) DB-side copy the rows, and (2) enrich the
+        response with the copied list. Pre-fix, neither happened."""
+        env_id, agent_id = env_and_agent
+        parent_sid = await _create_session(pool, env_id, agent_id)
+        await st_service.add_task(
+            pool,
+            parent_sid,
+            _spec("p", schedule="0 9 * * *"),
+            account_id="acc_test_stub",
+        )
+
+        clone = await sessions_service.clone_session(pool, parent_sid, account_id="acc_test_stub")
+        # Response is enriched.
+        assert [t.name for t in clone.scheduled_tasks] == ["p"]
+
+        # DB rows actually exist on the clone (independent IDs, fresh
+        # runtime state, parent's next_fire preserved).
+        clone_tasks = await st_service.list_tasks(pool, clone.id, account_id="acc_test_stub")
+        assert len(clone_tasks) == 1
+        parent_tasks = await st_service.list_tasks(pool, parent_sid, account_id="acc_test_stub")
+        assert clone_tasks[0].id != parent_tasks[0].id  # fresh ULID
+        assert clone_tasks[0].schedule == "0 9 * * *"
+        assert clone_tasks[0].consecutive_failures == 0
+        assert clone_tasks[0].last_fire_at is None
+        # next_fire is preserved (the clone fires on the parent's cadence).
+        assert clone_tasks[0].next_fire == parent_tasks[0].next_fire
+
+
+class TestUpdatedAtAlwaysBumps:
+    async def test_empty_patch_still_bumps_updated_at(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """A no-field PATCH (e.g. ``{}``) must still record an
+        ``updated_at`` write — external pollers using
+        ``updated_at > <since>`` mustn't miss the call."""
+        from aios.models.scheduled_tasks import ScheduledTaskUpdate
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        initial = await st_service.add_task(pool, sid, _spec("p"), account_id="acc_test_stub")
+
+        # Sleep enough to let ``now()`` actually advance.
+        import asyncio
+
+        await asyncio.sleep(0.05)
+
+        patched = await st_service.update_task(
+            pool,
+            sid,
+            "p",
+            ScheduledTaskUpdate.model_validate({}),
+            account_id="acc_test_stub",
+        )
+        assert patched.updated_at > initial.updated_at
+
+
+class TestArchiveRacePrevention:
+    """The fire-handler must re-check ``session_archived_at`` between
+    claim and execute — pre-fix, the tick filter held but the handler
+    didn't, so an archive that landed in the race window would fire
+    bash anyway."""
+
+    async def test_archived_at_in_row_after_session_archive(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        echo = await st_service.add_task(pool, sid, _spec("p"), account_id="acc_test_stub")
+        await sessions_service.archive_session(pool, sid, account_id="acc_test_stub")
+
+        async with pool.acquire() as conn:
+            row = await queries.unscoped_get_scheduled_task_row(conn, echo.id)
+        # Handler reads session_archived_at off the row and skips when
+        # set — verify the JOIN actually surfaces it.
+        assert row.session_archived_at is not None
+
+    async def test_handler_skips_archived_session(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """End-to-end of the archive-race fix: drive the handler with
+        a sandbox_registry that would raise if entered. The handler
+        must short-circuit before the sandbox call."""
+        from unittest import mock
+
+        from aios.harness import runtime, scheduled_task_runner
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        echo = await st_service.add_task(pool, sid, _spec("p"), account_id="acc_test_stub")
+
+        # Simulate the tick having claimed the row (running_since=now,
+        # next_fire advanced) before archive.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE session_scheduled_tasks SET running_since = now() WHERE id = $1",
+                echo.id,
+            )
+
+        # Archive lands between claim and fire-handler-execute.
+        await sessions_service.archive_session(pool, sid, account_id="acc_test_stub")
+
+        # Sandbox that would explode if the handler ever calls into it.
+        fake_sandbox = mock.MagicMock()
+        fake_sandbox.get_or_provision = mock.AsyncMock(
+            side_effect=AssertionError("handler must skip archived session")
+        )
+        fake_sandbox.exec = mock.AsyncMock(
+            side_effect=AssertionError("handler must skip archived session")
+        )
+
+        prev_pool = runtime.pool
+        prev_sandbox = runtime.sandbox_registry
+        runtime.pool = pool
+        runtime.sandbox_registry = fake_sandbox
+        try:
+            await scheduled_task_runner.run_scheduled_task_step(echo.id)
+        finally:
+            runtime.pool = prev_pool
+            runtime.sandbox_registry = prev_sandbox
+
+        # Post-skip, running_since must be cleared so the row doesn't
+        # stay stuck if the session is later unarchived.
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT running_since, last_fire_status FROM session_scheduled_tasks WHERE id = $1",
+                echo.id,
+            )
+        assert row is not None
+        assert row["running_since"] is None
+        assert row["last_fire_status"] == "skipped"
+
+
+class TestRowDeletedRace:
+    """If the row is deleted between tick-claim and fire-handler-execute
+    (e.g. agent calls schedule_task_remove), the handler must exit
+    silently — no exception out of the procrastinate task."""
+
+    async def test_handler_swallows_deleted_row(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        from aios.harness import runtime, scheduled_task_runner
+        from aios.ids import SCHEDULED_TASK, make_id
+
+        prev_pool = runtime.pool
+        runtime.pool = pool
+        try:
+            # An ID that doesn't exist in the DB.
+            phantom = make_id(SCHEDULED_TASK)
+            # Must not raise.
+            await scheduled_task_runner.run_scheduled_task_step(phantom)
+        finally:
+            runtime.pool = prev_pool

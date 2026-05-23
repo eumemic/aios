@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from aios.db import queries
+from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.scheduled_tasks import ScheduledTaskStatus
@@ -28,8 +29,8 @@ async def run_scheduled_task_step(task_id: str) -> None:
     """Run one fire of a scheduled task.
 
     Steps:
-      1. Load the task; exit silently if it was removed or disabled
-         between claim and execute.
+      1. Load the task; exit silently if it was removed, disabled, or
+         had its owning session archived between claim and execute.
       2. Acquire the session's sandbox (lazy provisioning via the
          registry; reused across fires of the same session).
       3. Run the command via the sandbox handle; classify outcome as
@@ -38,10 +39,36 @@ async def run_scheduled_task_step(task_id: str) -> None:
          threshold.
     """
     pool = runtime.require_pool()
-    sandbox_registry = runtime.require_sandbox_registry()
 
-    async with pool.acquire() as conn:
-        task = await queries.unscoped_get_scheduled_task_row(conn, task_id)
+    try:
+        async with pool.acquire() as conn:
+            task = await queries.unscoped_get_scheduled_task_row(conn, task_id)
+    except NotFoundError:
+        # Row was deleted between claim and execute (e.g. the agent or
+        # operator removed it). No cleanup needed — the row is gone, so
+        # ``running_since`` doesn't matter. Log and exit silently.
+        log.info("scheduled_task.skip_deleted", task_id=task_id)
+        return
+
+    if task.session_archived_at is not None:
+        # Session was archived between tick-claim and fire-handler-execute.
+        # Archive is the lifecycle boundary: stop firing. Clear
+        # ``running_since`` so a future unarchive doesn't see a stuck row.
+        log.info(
+            "scheduled_task.skip_archived",
+            task_id=task_id,
+            session_id=task.session_id,
+            name=task.name,
+        )
+        async with pool.acquire() as conn:
+            await queries.record_scheduled_task_fire(
+                conn,
+                task_id,
+                status="skipped",
+                consecutive_failures=task.consecutive_failures,
+                fired_at=datetime.now(UTC),
+            )
+        return
 
     if not task.enabled:
         # Disabled between claim and execute — exit silently. ``running_since``
@@ -56,6 +83,11 @@ async def run_scheduled_task_step(task_id: str) -> None:
                 fired_at=datetime.now(UTC),
             )
         return
+
+    # Only the actual-fire path needs the sandbox registry; the early-skip
+    # paths above don't, so we resolve it here to keep the skip-only paths
+    # independent of sandbox-registry availability.
+    sandbox_registry = runtime.require_sandbox_registry()
 
     started_at = datetime.now(UTC)
     status: ScheduledTaskStatus
