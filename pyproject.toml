@@ -65,6 +65,7 @@ dev = [
     "aios-echo-http",
     "aios-signal",
     "aios-telegram",
+    "aios-whatsapp",
 ]
 
 [project.scripts]
@@ -83,6 +84,7 @@ members = [
     "connectors/echo-http",
     "connectors/signal",
     "connectors/telegram",
+    "connectors/whatsapp",
     "packages/aios-connector-http",
     "packages/aios-sdk",
 ]
@@ -96,6 +98,7 @@ aios-echo-http = { workspace = true }
 aios-sdk = { workspace = true }
 aios-signal = { workspace = true }
 aios-telegram = { workspace = true }
+aios-whatsapp = { workspace = true }
 
 # ─── ruff ────────────────────────────────────────────────────────────────────
 [tool.ruff]
