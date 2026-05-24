@@ -238,7 +238,11 @@ class SandboxRegistry:
         from aios.config import get_settings
         from aios.harness import runtime
 
-        runtime.require_tool_broker().unregister_session(session_id)
+        # Skip broker-side unregistration when worker_main never ran (e.g.
+        # in unit tests that wire the registry directly). The cleanup of
+        # the on-disk .secret file is independent and still runs.
+        if runtime.tool_broker is not None:
+            runtime.tool_broker.unregister_session(session_id)
         settings = get_settings()
         cleanup_session_secret_file(session_id, settings.tool_broker_socket_path)
 
