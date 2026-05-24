@@ -29,7 +29,11 @@ BuiltinToolType = Literal[
     "cancel",
     "schedule_wake",
     "wake_session",
+    "wake_self",
     "http_request",
+    "schedule_task_add",
+    "schedule_task_remove",
+    "schedule_task_update",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled

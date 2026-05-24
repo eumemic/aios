@@ -202,7 +202,6 @@ jobs:
   # ``fail-fast: false`` so one shard's failure doesn't abort the other.
   e2e:
     needs: detect
-    if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
 
     strategy:
@@ -239,22 +238,34 @@ jobs:
       AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
 
     steps:
+      # Matrix jobs whose per-shard names are required status contexts must
+      # gate their *steps*, not the job, so the matrix always expands and
+      # each shard reports a real status even on docs-only PRs — see #683.
+      - name: Skip (docs-only PR — no-op shard)
+        if: needs.detect.outputs.run_checks != 'true'
+        run: |
+          echo "run_checks=false: ${{ matrix.shard == 'docker' && 'e2e (docker)' || 'e2e (non-docker)' }} is a no-op; reporting success to satisfy branch protection."
+
       - uses: actions/checkout@v4
+        if: needs.detect.outputs.run_checks == 'true'
 
       - uses: astral-sh/setup-uv@v4
+        if: needs.detect.outputs.run_checks == 'true'
         with:
           enable-cache: true
 
       - name: Install Python 3.13
+        if: needs.detect.outputs.run_checks == 'true'
         run: uv python install 3.13
 
       - name: Install dependencies
+        if: needs.detect.outputs.run_checks == 'true'
         run: uv sync --dev
 
       - name: Log in to GHCR
         # Needed only for the ``docker pull`` path below.  When the sandbox
         # is being rebuilt locally this login is unused but harmless.
-        if: matrix.shard == 'docker' && needs.detect.outputs.sandbox_changed == 'false'
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker' && needs.detect.outputs.sandbox_changed == 'false'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -281,7 +292,7 @@ jobs:
         # build when this fails — GHCR outage, ``:smoked`` not yet
         # published, fork-PR token cannot read a private package.
         id: pull_sandbox
-        if: matrix.shard == 'docker' && needs.detect.outputs.sandbox_changed == 'false'
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker' && needs.detect.outputs.sandbox_changed == 'false'
         continue-on-error: true
         run: |
           docker pull ghcr.io/eumemic/aios-sandbox:smoked
@@ -311,11 +322,7 @@ jobs:
         #
         # Fires when the Dockerfile/bin/tool inputs changed (so the pull
         # path was skipped) OR when the pull path attempted and failed.
-        if: |
-          matrix.shard == 'docker' && (
-            needs.detect.outputs.sandbox_changed == 'true' ||
-            steps.pull_sandbox.outcome == 'failure'
-          )
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker' && ( needs.detect.outputs.sandbox_changed == 'true' || steps.pull_sandbox.outcome == 'failure' )
         run: |
           if [[ "${{ steps.pull_sandbox.outcome }}" == "failure" ]]; then
             echo "::warning::GHCR pull failed; falling back to local sandbox build"
@@ -335,7 +342,7 @@ jobs:
         # here naturally — the explicit ``--ignore`` list on the docker
         # shard below remains the source of truth for "needs daemon
         # infrastructure, skip in CI."
-        if: matrix.shard == 'non-docker'
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
         run: |
           uv run pytest tests/e2e -q -m "not docker"
 
@@ -350,7 +357,7 @@ jobs:
         # ``-n 2`` vs. ~280 s serial — 3.3× speedup on the docker shard,
         # amortizing the per-worker testcontainer-Postgres + Docker setup
         # over ~100 tests each.
-        if: matrix.shard == 'docker'
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
         run: |

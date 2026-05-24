@@ -96,10 +96,15 @@ class TestWakeSessionHandlerArguments:
             await wake_session_handler("sess_01SOURCE", {"target_session_id": "", "prompt": "hi"})
 
     async def test_self_wake_rejects(self) -> None:
-        with pytest.raises(WakeSessionArgumentError, match="schedule_wake"):
+        # The error must recommend wake_self for immediate self-delivery
+        # and mention schedule_wake for the delayed case (issue #703 #704).
+        with pytest.raises(WakeSessionArgumentError) as exc_info:
             await wake_session_handler(
                 "sess_01SAME", {"target_session_id": "sess_01SAME", "prompt": "hi"}
             )
+        message = str(exc_info.value)
+        assert "wake_self" in message
+        assert "schedule_wake" in message
 
 
 class TestWakeSessionHandlerPermission:

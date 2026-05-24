@@ -28,7 +28,6 @@ async def defer_wake(
     account_id: str,
     cause: str = "message",
     delay_seconds: float | None = None,
-    wake_reason: str | None = None,
 ) -> None:
     """Enqueue a ``wake_session`` job, swallowing ``AlreadyEnqueued``.
 
@@ -37,9 +36,10 @@ async def defer_wake(
     it runs — no need for a second job.
 
     ``delay_seconds`` schedules the job that many seconds in the future
-    (procrastinate's ``schedule_in``).  ``wake_reason`` is a short string
-    carried as a task kwarg and surfaced to the agent at wake time when
-    ``cause == "scheduled"``; see ``run_session_step``.
+    (procrastinate's ``schedule_in``). Used for the harness retry-backoff
+    path; the user-visible scheduled-wake feature now goes through
+    :mod:`aios.tools.schedule_wake` and creates one-shot scheduled_tasks
+    rows instead.
 
     Appends a ``wake_deferred`` span event before enqueuing — emitted
     regardless of whether procrastinate coalesces this deferral with
@@ -54,8 +54,6 @@ async def defer_wake(
     await sessions_service.append_event(pool, session_id, "span", span_data, account_id=account_id)
 
     task_kwargs: dict[str, JSONValue] = {"session_id": session_id, "cause": cause}
-    if wake_reason is not None:
-        task_kwargs["wake_reason"] = wake_reason
 
     if delay_seconds is not None:
         deferrer = app.configure_task(

@@ -143,6 +143,7 @@ They don't share connections; they share Postgres state.
 - **Push back on bad requests** — if a request conflicts with existing architecture, or has an obvious root-cause fix the user missed, flag it before implementing. You have context the user may not in the moment.
 - **Don't deprecate, delete** — remove old code paths rather than leaving shims. Git history preserves them.
 - **After refactors, grep exhaustively** — for any rename or move, search the whole tree (including tests) for the old name before declaring done.
+- **Seek the perfected design, not the smallest diff** — when the "minimal change" is shaped around avoiding some adjacent system (branch-protection rules, schema migrations, default settings, fixture organization, an upstream config someone else owns), that adjacent system is usually in scope. Update it. The right configuration at the time of writing compounds; the workaround accumulates and obscures intent. Constraints that feel like "I don't want to mess with X" are almost always negotiable — interrogate them, don't accept them. Proactive complement to broken windows: not just "fix what's flagged" but "build it as if from scratch every time." Scope discipline still applies — pick the right *shape* for the change, but its *breadth* should still match the task.
 - **Broken windows policy** — when a review (or your own pass) flags a clear quality issue, fix it now even if it's pre-existing. Don't pile new code on top of broken patterns or label them "out of scope." This complements rather than contradicts "don't add features beyond the task": the rule is reactive, not proactive — you don't go hunting for cleanup, but you don't ignore what you've already seen. Premature abstractions are still bad; three similar lines is still better than one over-engineered helper. The policy targets *flagged* issues, not aesthetic preferences.
 
 ## Key invariants
@@ -157,7 +158,8 @@ They don't share connections; they share Postgres state.
 ## Environment variables
 
 All aios settings use the `AIOS_` prefix (Pydantic settings with `env_prefix="AIOS_"`):
-- `AIOS_API_KEY` — bearer auth key
+- `AIOS_API_KEY` — bearer auth key. Must hash to a row in `account_keys`; auth is no longer an env-var direct compare. On a fresh DB, mint one by POSTing to `/v1/accounts/bootstrap` (gated by `AIOS_BOOTSTRAP_TOKEN`) and store the returned `plaintext_key` as `AIOS_API_KEY` for both the API service and clients. A placeholder value (e.g. `test-aios-key-do-not-deploy`) will silently 401 against every request.
+- `AIOS_BOOTSTRAP_TOKEN` — bearer token that gates `POST /v1/accounts/bootstrap`; required to mint the root account's first API key on a fresh DB.
 - `AIOS_VAULT_KEY` — base64-encoded 32-byte libsodium key (do NOT regenerate if Postgres has encrypted data)
 - `AIOS_DB_URL` — Postgres connection string
 - `AIOS_API_PORT` — default 8080

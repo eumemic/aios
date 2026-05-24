@@ -33,6 +33,7 @@ from .connection_create import ConnectionCreate
 from .connection_create_metadata import ConnectionCreateMetadata
 from .connection_create_secrets_type_0 import ConnectionCreateSecretsType0
 from .connection_metadata import ConnectionMetadata
+from .connection_reparent import ConnectionReparent
 from .connection_set_secrets import ConnectionSetSecrets
 from .connection_set_secrets_secrets import ConnectionSetSecretsSecrets
 from .connector_inbound_response import ConnectorInboundResponse
@@ -75,6 +76,7 @@ from .list_response_memory_store import ListResponseMemoryStore
 from .list_response_memory_version import ListResponseMemoryVersion
 from .list_response_recent_chat import ListResponseRecentChat
 from .list_response_runtime_token import ListResponseRuntimeToken
+from .list_response_scheduled_task_echo import ListResponseScheduledTaskEcho
 from .list_response_session import ListResponseSession
 from .list_response_session_template import ListResponseSessionTemplate
 from .list_response_skill import ListResponseSkill
@@ -128,6 +130,15 @@ from .runtime_tool_result_request import RuntimeToolResultRequest
 from .runtime_tool_result_request_content_type_1_item import (
     RuntimeToolResultRequestContentType1Item,
 )
+from .scheduled_task_create import ScheduledTaskCreate
+from .scheduled_task_create_metadata import ScheduledTaskCreateMetadata
+from .scheduled_task_echo import ScheduledTaskEcho
+from .scheduled_task_echo_last_fire_status_type_0 import (
+    ScheduledTaskEchoLastFireStatusType0,
+)
+from .scheduled_task_echo_metadata import ScheduledTaskEchoMetadata
+from .scheduled_task_update import ScheduledTaskUpdate
+from .scheduled_task_update_metadata_type_0 import ScheduledTaskUpdateMetadataType0
 from .session import Session
 from .session_clone_request import SessionCloneRequest
 from .session_create import SessionCreate
@@ -240,6 +251,7 @@ __all__ = (
     "ConnectionCreateMetadata",
     "ConnectionCreateSecretsType0",
     "ConnectionMetadata",
+    "ConnectionReparent",
     "ConnectionSetSecrets",
     "ConnectionSetSecretsSecrets",
     "ConnectorInboundResponse",
@@ -280,6 +292,7 @@ __all__ = (
     "ListResponseMemoryVersion",
     "ListResponseRecentChat",
     "ListResponseRuntimeToken",
+    "ListResponseScheduledTaskEcho",
     "ListResponseSession",
     "ListResponseSessionTemplate",
     "ListResponseSkill",
@@ -327,6 +340,13 @@ __all__ = (
     "RuntimeTokenIssued",
     "RuntimeToolResultRequest",
     "RuntimeToolResultRequestContentType1Item",
+    "ScheduledTaskCreate",
+    "ScheduledTaskCreateMetadata",
+    "ScheduledTaskEcho",
+    "ScheduledTaskEchoLastFireStatusType0",
+    "ScheduledTaskEchoMetadata",
+    "ScheduledTaskUpdate",
+    "ScheduledTaskUpdateMetadataType0",
     "Session",
     "SessionCloneRequest",
     "SessionCreate",

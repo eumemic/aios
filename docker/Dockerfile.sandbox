@@ -63,6 +63,13 @@ RUN apt-get update \
 COPY bin/tool /usr/local/bin/tool
 RUN chmod 0755 /usr/local/bin/tool
 
+# Default broker URL for bash scripts inside the sandbox that read
+# $TOOL_BROKER_URL directly (the python ``tool`` CLI has its own
+# default). Always overridden by ``docker run --env TOOL_BROKER_URL=...``
+# from the worker's spec.py; this default only kicks in if env injection
+# somehow lapses.
+ENV TOOL_BROKER_URL=unix:///var/run/aios/tool-broker.sock
+
 # Workspace directory. The host mounts a per-session directory here at
 # container start via `-v <workspace_root>/<session_id>:/workspace`. The
 # directory is created empty on the host on first provision.

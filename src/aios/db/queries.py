@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections.abc import Callable
 from datetime import datetime
 from types import EllipsisType
 from typing import Any, NamedTuple, NoReturn, cast
@@ -44,6 +45,7 @@ from aios.ids import (
     MEMORY_STORE,
     MEMORY_VERSION,
     RUNTIME_TOKEN,
+    SCHEDULED_TASK,
     SESSION,
     SESSION_TEMPLATE,
     SKILL,
@@ -68,6 +70,11 @@ from aios.models.memory_stores import (
     MemoryVersion,
 )
 from aios.models.runtime_tokens import RuntimeToken
+from aios.models.scheduled_tasks import (
+    ScheduledTaskEcho,
+    ScheduledTaskStatus,
+    compute_next_fire,
+)
 from aios.models.session_templates import SessionTemplate
 from aios.models.sessions import Session, SessionStatus, SessionUsage
 from aios.models.skills import AgentSkillRef, Skill, SkillVersion
@@ -82,6 +89,118 @@ def parse_jsonb(raw: Any) -> Any:
     already-parsed dict/list, which is what callers want either way.
     """
     return json.loads(raw) if isinstance(raw, str) else raw
+
+
+# ─── shared scoping helpers ──────────────────────────────────────────────────
+#
+# These helpers extract the per-resource CRUD/pagination/tenant-scoping
+# boilerplate that was previously repeated across ~10 resource blocks.
+# ``table``/``column``/``noun`` args are always static literals from this
+# module — never user input — so f-string interpolation carries no injection
+# risk.
+
+
+async def _get_scoped[T](
+    conn: asyncpg.Connection[Any],
+    *,
+    table: str,
+    id_: str,
+    account_id: str,
+    row: Callable[[asyncpg.Record], T],
+    noun: str,
+) -> T:
+    """``SELECT * FROM <table> WHERE id=$1 AND account_id=$2`` — raise NotFound on miss."""
+    rec = await conn.fetchrow(
+        f"SELECT * FROM {table} WHERE id = $1 AND account_id = $2",
+        id_,
+        account_id,
+    )
+    if rec is None:
+        raise NotFoundError(f"{noun} {id_} not found", detail={"id": id_})
+    return row(rec)
+
+
+async def _list_scoped[T](
+    conn: asyncpg.Connection[Any],
+    *,
+    table: str,
+    account_id: str,
+    row: Callable[[asyncpg.Record], T],
+    limit: int = 50,
+    after: str | None = None,
+    filters: list[tuple[str, Any]] | None = None,
+) -> list[T]:
+    """Keyset-paginated SELECT scoped by ``account_id`` + ``archived_at IS NULL``.
+
+    ``filters`` is a list of ``(column, value)`` equality predicates;
+    entries whose ``value`` is ``None`` are skipped (mirrors the per-arg
+    ``if x is not None`` guards in the originals).  ``column`` names are
+    static literals from this module — never user input."""
+    args: list[Any] = [account_id]
+    where = ["archived_at IS NULL", "account_id = $1"]
+    for column, value in filters or []:
+        if value is None:
+            continue
+        args.append(value)
+        where.append(f"{column} = ${len(args)}")
+    if after is not None:
+        args.append(after)
+        where.append(f"id < ${len(args)}")
+    args.append(limit)
+    sql = f"SELECT * FROM {table} WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
+    return [row(r) for r in await conn.fetch(sql, *args)]
+
+
+async def _archive_scoped(
+    conn: asyncpg.Connection[Any],
+    *,
+    table: str,
+    id_: str,
+    account_id: str,
+    noun: str,
+    bump_updated_at: bool = True,
+) -> asyncpg.Record:
+    """Soft-archive: ``SET archived_at = now()`` (and ``updated_at = now()``
+    unless ``bump_updated_at=False`` — the ``environments`` table has no
+    ``updated_at`` column, so its archive must skip the bump) scoped by
+    id + account_id + ``archived_at IS NULL``.  Raises NotFound on miss or
+    already-archived row.  Callers that need the model map the returned
+    Record themselves; callers that return ``None`` simply discard it."""
+    extra = ", updated_at = now()" if bump_updated_at else ""
+    rec = await conn.fetchrow(
+        f"UPDATE {table} SET archived_at = now(){extra} "
+        f"WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
+        id_,
+        account_id,
+    )
+    if rec is None:
+        raise NotFoundError(
+            f"{noun} {id_} not found or already archived",
+            detail={"id": id_},
+        )
+    return rec
+
+
+def _build_set_assignments(
+    fields: list[tuple[str, Any, str | None]],
+    args: list[Any],
+) -> list[str]:
+    """Build ``col = $N[::cast]`` SET fragments for the given fields, appending
+    each value to ``args`` (mutated in order).
+
+    ``cast`` is one of: ``None`` (no cast); ``"jsonb"`` (value gets
+    ``json.dumps`` + ``::jsonb`` suffix); or any other Postgres cast string
+    like ``"text[]"`` (value passed through, ``::cast`` suffix appended).
+
+    Caller is responsible for pre-filtering omitted fields (its own
+    ``None``-vs-``Ellipsis`` convention) and for any out-of-band SET
+    fragments (e.g. ``updated_at = now()``, which not every table has)."""
+    sets: list[str] = []
+    for column, value, pg_cast in fields:
+        args.append(json.dumps(value) if pg_cast == "jsonb" else value)
+        suffix = f"::{pg_cast}" if pg_cast is not None else ""
+        sets.append(f"{column} = ${len(args)}{suffix}")
+    return sets
 
 
 # ─── environments ─────────────────────────────────────────────────────────────
@@ -128,44 +247,40 @@ async def insert_environment(
 async def get_environment(
     conn: asyncpg.Connection[Any], env_id: str, *, account_id: str
 ) -> Environment:
-    row = await conn.fetchrow(
-        "SELECT * FROM environments WHERE id = $1 AND account_id = $2",
-        env_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="environments",
+        id_=env_id,
+        account_id=account_id,
+        row=_row_to_environment,
+        noun="environment",
     )
-    if row is None:
-        raise NotFoundError(f"environment {env_id} not found", detail={"id": env_id})
-    return _row_to_environment(row)
 
 
 async def list_environments(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Environment]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = (
-        f"SELECT * FROM environments WHERE {' AND '.join(where)} "
-        f"ORDER BY id DESC LIMIT ${len(args)}"
+    return await _list_scoped(
+        conn,
+        table="environments",
+        account_id=account_id,
+        row=_row_to_environment,
+        limit=limit,
+        after=after,
     )
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_environment(r) for r in rows]
 
 
 async def archive_environment(
     conn: asyncpg.Connection[Any], env_id: str, *, account_id: str
 ) -> None:
-    result = await conn.execute(
-        "UPDATE environments SET archived_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
-        env_id,
-        account_id,
+    await _archive_scoped(
+        conn,
+        table="environments",
+        id_=env_id,
+        account_id=account_id,
+        noun="environment",
+        bump_updated_at=False,
     )
-    if result == "UPDATE 0":
-        raise NotFoundError(f"environment {env_id} not found or already archived")
 
 
 async def update_environment(
@@ -183,15 +298,13 @@ async def update_environment(
     if current.archived_at is not None:
         raise ConflictError(f"environment {env_id} is archived", detail={"id": env_id})
 
-    sets: list[str] = []
     args: list[Any] = [env_id]
+    fields: list[tuple[str, Any, str | None]] = []
     if name is not None:
-        args.append(name)
-        sets.append(f"name = ${len(args)}")
+        fields.append(("name", name, None))
     if config is not None:
-        args.append(json.dumps(config.model_dump(exclude_none=True)))
-        sets.append(f"config = ${len(args)}::jsonb")
-
+        fields.append(("config", config.model_dump(exclude_none=True), "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return current
 
@@ -397,14 +510,14 @@ async def insert_agent(
 
 
 async def get_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str) -> Agent:
-    row = await conn.fetchrow(
-        "SELECT * FROM agents WHERE id = $1 AND account_id = $2",
-        agent_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="agents",
+        id_=agent_id,
+        account_id=account_id,
+        row=_row_to_agent,
+        noun="agent",
     )
-    if row is None:
-        raise NotFoundError(f"agent {agent_id} not found", detail={"id": agent_id})
-    return _row_to_agent(row)
 
 
 async def list_agents(
@@ -415,29 +528,25 @@ async def list_agents(
     after: str | None = None,
     name: str | None = None,
 ) -> list[Agent]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if name is not None:
-        args.append(name)
-        where.append(f"name = ${len(args)}")
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = f"SELECT * FROM agents WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_agent(r) for r in rows]
+    return await _list_scoped(
+        conn,
+        table="agents",
+        account_id=account_id,
+        row=_row_to_agent,
+        limit=limit,
+        after=after,
+        filters=[("name", name)],
+    )
 
 
 async def archive_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str) -> None:
-    result = await conn.execute(
-        "UPDATE agents SET archived_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
-        agent_id,
-        account_id,
+    await _archive_scoped(
+        conn,
+        table="agents",
+        id_=agent_id,
+        account_id=account_id,
+        noun="agent",
     )
-    if result == "UPDATE 0":
-        raise NotFoundError(f"agent {agent_id} not found or already archived")
 
 
 async def update_agent(
@@ -769,14 +878,14 @@ async def insert_session(
 async def get_session(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> Session:
-    row = await conn.fetchrow(
-        "SELECT * FROM sessions WHERE id = $1 AND account_id = $2",
-        session_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="sessions",
+        id_=session_id,
+        account_id=account_id,
+        row=_row_to_session,
+        noun="session",
     )
-    if row is None:
-        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
-    return _row_to_session(row)
 
 
 async def get_session_workspace_path(
@@ -875,23 +984,15 @@ async def list_sessions(
     limit: int = 50,
     after: str | None = None,
 ) -> list[Session]:
-    args: list[Any] = [account_id]
-    clauses: list[str] = ["archived_at IS NULL", "account_id = $1"]
-    if agent_id is not None:
-        args.append(agent_id)
-        clauses.append(f"agent_id = ${len(args)}")
-    if status is not None:
-        args.append(status)
-        clauses.append(f"status = ${len(args)}")
-    if after is not None:
-        args.append(after)
-        clauses.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = (
-        f"SELECT * FROM sessions WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ${len(args)}"
+    return await _list_scoped(
+        conn,
+        table="sessions",
+        account_id=account_id,
+        row=_row_to_session,
+        limit=limit,
+        after=after,
+        filters=[("agent_id", agent_id), ("status", status)],
     )
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_session(r) for r in rows]
 
 
 async def lock_active_session_for_update(
@@ -1096,22 +1197,17 @@ async def update_session(
             detail={"id": session_id},
         )
 
-    sets: list[str] = []
     args: list[Any] = [session_id]  # $1 = session_id
-
+    fields: list[tuple[str, Any, str | None]] = []
     if agent_id is not None:
-        args.append(agent_id)
-        sets.append(f"agent_id = ${len(args)}")
+        fields.append(("agent_id", agent_id, None))
     if agent_version is not ...:
-        args.append(agent_version)
-        sets.append(f"agent_version = ${len(args)}")
+        fields.append(("agent_version", agent_version, None))
     if title is not ...:
-        args.append(title)
-        sets.append(f"title = ${len(args)}")
+        fields.append(("title", title, None))
     if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
-
+        fields.append(("metadata", metadata, "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return current
 
@@ -1132,17 +1228,13 @@ async def update_session(
 async def archive_session(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> Session:
-    row = await conn.fetchrow(
-        "UPDATE sessions SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
-        session_id,
-        account_id,
+    row = await _archive_scoped(
+        conn,
+        table="sessions",
+        id_=session_id,
+        account_id=account_id,
+        noun="session",
     )
-    if row is None:
-        raise NotFoundError(
-            f"session {session_id} not found or already archived",
-            detail={"id": session_id},
-        )
     return _row_to_session(row)
 
 
@@ -1335,6 +1427,38 @@ async def clone_session(
             parent_session_id,
             new_id,
             new_gh_ids,
+        )
+
+        # session_scheduled_tasks.id is a global PK — mint fresh per clone.
+        # Runtime state (running_since / last_fire_* / consecutive_failures)
+        # is RESET on the clone: it inherits the schedule + next_fire so it
+        # continues firing on the parent's cadence, but starts with fresh
+        # failure counters and no in-flight claim. Cumulative-token reset
+        # below uses the same principle — clone is a fresh runtime instance
+        # of the parent's logical configuration.
+        sched_count: int = await conn.fetchval(
+            "SELECT COUNT(*) FROM session_scheduled_tasks WHERE session_id = $1",
+            parent_session_id,
+        )
+        new_sched_ids = [make_id(SCHEDULED_TASK) for _ in range(sched_count)]
+        await conn.execute(
+            """
+            INSERT INTO session_scheduled_tasks (
+                id, session_id, account_id, name, schedule, command, enabled,
+                timeout_seconds, max_output_bytes, next_fire, metadata
+            )
+            SELECT i.id, $2, s.account_id, s.name, s.schedule, s.command,
+                   s.enabled, s.timeout_seconds, s.max_output_bytes,
+                   s.next_fire, s.metadata
+              FROM (
+                SELECT *, row_number() OVER (ORDER BY created_at) AS rn
+                  FROM session_scheduled_tasks WHERE session_id = $1
+              ) s
+              JOIN unnest($3::text[]) WITH ORDINALITY AS i(id, rn) USING (rn)
+            """,
+            parent_session_id,
+            new_id,
+            new_sched_ids,
         )
 
         # Events are gapless 1..last_event_seq per session, so we pre-generate
@@ -2552,28 +2676,27 @@ async def insert_vault(
 
 
 async def get_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_id: str) -> Vault:
-    row = await conn.fetchrow(
-        "SELECT * FROM vaults WHERE id = $1 AND account_id = $2",
-        vault_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="vaults",
+        id_=vault_id,
+        account_id=account_id,
+        row=_row_to_vault,
+        noun="vault",
     )
-    if row is None:
-        raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
-    return _row_to_vault(row)
 
 
 async def list_vaults(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Vault]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = f"SELECT * FROM vaults WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_vault(r) for r in rows]
+    return await _list_scoped(
+        conn,
+        table="vaults",
+        account_id=account_id,
+        row=_row_to_vault,
+        limit=limit,
+        after=after,
+    )
 
 
 async def update_vault(
@@ -2599,14 +2722,13 @@ async def update_vault(
             detail={"id": vault_id},
         )
 
-    sets: list[str] = []
     args: list[Any] = [vault_id]
+    fields: list[tuple[str, Any, str | None]] = []
     if display_name is not None:
-        args.append(display_name)
-        sets.append(f"display_name = ${len(args)}")
+        fields.append(("display_name", display_name, None))
     if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
+        fields.append(("metadata", metadata, "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return current
     sets.append("updated_at = now()")
@@ -3172,39 +3294,37 @@ async def insert_skill(
 
 
 async def get_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id: str) -> Skill:
-    row = await conn.fetchrow(
-        "SELECT * FROM skills WHERE id = $1 AND account_id = $2",
-        skill_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="skills",
+        id_=skill_id,
+        account_id=account_id,
+        row=_row_to_skill,
+        noun="skill",
     )
-    if row is None:
-        raise NotFoundError(f"skill {skill_id} not found", detail={"id": skill_id})
-    return _row_to_skill(row)
 
 
 async def list_skills(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Skill]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = f"SELECT * FROM skills WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_skill(r) for r in rows]
+    return await _list_scoped(
+        conn,
+        table="skills",
+        account_id=account_id,
+        row=_row_to_skill,
+        limit=limit,
+        after=after,
+    )
 
 
 async def archive_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id: str) -> None:
-    result = await conn.execute(
-        "UPDATE skills SET archived_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
-        skill_id,
-        account_id,
+    await _archive_scoped(
+        conn,
+        table="skills",
+        id_=skill_id,
+        account_id=account_id,
+        noun="skill",
     )
-    if result == "UPDATE 0":
-        raise NotFoundError(f"skill {skill_id} not found or already archived")
 
 
 async def insert_skill_version(
@@ -3637,12 +3757,12 @@ async def insert_connection(
     the supervisor's auto-create-on-first-inbound path race-safely
     converge on a single row via ``INSERT ... ON CONFLICT DO NOTHING
     RETURNING``. The unique index
-    ``(connector, external_account_id) WHERE archived_at IS NULL`` is
-    globally exclusive across tenants, mirroring real-world identities
-    (Signal phone numbers, Telegram bot tokens, etc. are universally
-    unique by construction). On conflict, re-read within the tenant; a
-    same-tenant miss is either an archive race (loop once) or a
-    cross-tenant collision (raise :class:`ConflictError`).
+    ``(account_id, connector, external_account_id) WHERE archived_at IS
+    NULL`` is per-account (relaxed from global by migration 0060 to
+    support the reparent primitive #694): two accounts may hold the
+    same external identity simultaneously, but a single account may
+    not. On same-tenant conflict, re-read; a miss after re-read is an
+    archive race (loop once).
 
     ``secrets_blob`` carries the encrypted credential dict.  ``None``
     leaves both secret columns NULL; the schema's
@@ -3674,7 +3794,7 @@ async def insert_connection(
                     secrets_ciphertext, secrets_nonce, account_id
                 )
                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
-                ON CONFLICT (connector, external_account_id)
+                ON CONFLICT (account_id, connector, external_account_id)
                     WHERE archived_at IS NULL DO NOTHING
                 RETURNING *
             )
@@ -3702,17 +3822,6 @@ async def insert_connection(
         )
         if existing is not None:
             return existing
-        other_row = await conn.fetchrow(
-            "SELECT 1 FROM connections "
-            "WHERE connector = $1 AND external_account_id = $2 AND archived_at IS NULL",
-            connector,
-            external_account_id,
-        )
-        if other_row is not None:
-            raise ConflictError(
-                "connector external_account_id already registered",
-                detail={"connector": connector, "external_account_id": external_account_id},
-            )
     # The archive race converges within two iterations under any realistic
     # contention pattern; if a third attempt would still be needed, the
     # system is in a hot insert/archive cycle that no retry resolves.
@@ -3931,6 +4040,132 @@ _MODE_PREDICATES: dict[ConnectionMode, str] = {
     "single_session": "b.mode = 'single_session'",
     "per_chat": "b.mode = 'per_chat'",
 }
+
+
+async def reparent_connection(
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    destination_account_id: str,
+    secrets_blob: EncryptedBlob | None = None,
+) -> Connection:
+    """Transfer an active connection to a different account.
+
+    Updates ``account_id`` in place, preserving the ``connection.id`` so
+    any dependent connector-daemon state (signal-cli's ``account.dat``,
+    whatsmeow's ``sqlstore.db``, telegram webhook config, etc. — all
+    keyed by ``connection.id``) carries over without churn.
+
+    Also rewrites ``account_id`` on every account-scoped child row whose
+    routing fate is tied to this connection: the active ``bindings`` row,
+    every ``chat_sessions`` row, and every ``routing_rules`` row reachable
+    through ``bindings.id``. All three resolver tiers
+    (:mod:`aios_connectors.resolver`) filter on ``account_id``: leaving
+    these children on the source account would make
+    ``get_active_binding`` / ``list_routing_rules_for_connection`` /
+    ``lookup_chat_session`` return ``None`` under the destination's scope,
+    silently DETACH-dropping every inbound until an operator manually
+    re-bound the connection. Doing all four UPDATEs in one statement
+    keeps the carry-over atomic — there is no observable mid-reparent
+    state where some children point at the source and others at the
+    destination.
+
+    Refuses on archived connection rows (the WHERE clause filters them
+    out, so a zero-row UPDATE → :class:`NotFoundError`). Archived
+    ``bindings`` are still moved (they're inert but stay tenant-coherent
+    in case an operator un-archives one).
+
+    Catches the per-account partial-unique index violation
+    (``connections_active_account_external_uniq``) and surfaces it as
+    :class:`ConflictError` — that's the destination-collision case
+    documented in the operator-facing 409 response.
+
+    ``secrets_blob`` rewrites the encrypted secret columns inside the
+    same UPDATE. Secrets are keyed to the owning ``account_id`` via
+    :meth:`CryptoBox.derive_account_subkey`, so the source-keyed
+    ciphertext is unreadable under the destination's derived key.
+    Service-layer callers decrypt with the source subkey and re-encrypt
+    with the destination subkey before passing the new blob; passing
+    ``None`` is reserved for connections that had no secrets to begin
+    with (the schema's ``connections_secrets_pair_ck`` keeps the
+    pair-or-neither invariant intact when both columns flip to NULL).
+
+    The caller is responsible for the root-operator gate; this query
+    deliberately doesn't scope by source ``account_id`` because the
+    semantic of reparent is "cross-account move," and the service
+    layer is what decides whether the caller is allowed to do that.
+    """
+    ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
+    nonce = secrets_blob.nonce if secrets_blob is not None else None
+    try:
+        # Single CTE: move the connection row, then carry every
+        # account-scoped child (bindings, chat_sessions, routing_rules)
+        # across in the same statement. The child UPDATEs gate on
+        # ``EXISTS (SELECT 1 FROM updated)`` so an archived/missing
+        # source connection (the ``updated`` CTE returns zero rows)
+        # leaves the children alone — the service layer's SELECT FOR
+        # UPDATE already rejects archived before calling this query,
+        # but the EXISTS gate keeps the query correct in isolation too.
+        # routing_rules joins through bindings on connection_id (the
+        # binding's account_id was just rewritten; we still match on
+        # ``b.connection_id`` because that column is connection-keyed
+        # and tenant-neutral).
+        row = await conn.fetchrow(
+            f"""
+            WITH updated AS (
+                UPDATE connections
+                   SET account_id         = $2,
+                       secrets_ciphertext = $3,
+                       secrets_nonce      = $4,
+                       updated_at         = now()
+                 WHERE id = $1 AND archived_at IS NULL
+                RETURNING *
+            ),
+            b_updated AS (
+                UPDATE bindings
+                   SET account_id = $2
+                 WHERE connection_id = $1
+                   AND EXISTS (SELECT 1 FROM updated)
+                RETURNING id
+            ),
+            c_updated AS (
+                UPDATE chat_sessions
+                   SET account_id = $2
+                 WHERE connection_id = $1
+                   AND EXISTS (SELECT 1 FROM updated)
+                RETURNING connection_id
+            ),
+            r_updated AS (
+                UPDATE routing_rules
+                   SET account_id = $2
+                  FROM bindings b
+                 WHERE routing_rules.binding_id = b.id
+                   AND b.connection_id = $1
+                   AND EXISTS (SELECT 1 FROM updated)
+                RETURNING routing_rules.id
+            )
+            {_CONNECTION_UPDATE_CTE_TAIL}
+            """,
+            connection_id,
+            destination_account_id,
+            ciphertext,
+            nonce,
+        )
+    except asyncpg.UniqueViolationError as exc:
+        # The destination account already has an active connection for
+        # the same ``(connector, external_account_id)`` — operator must
+        # archive the existing destination row before reparenting.
+        raise ConflictError(
+            f"destination account {destination_account_id} already has an active "
+            "connection for this (connector, external_account_id)",
+            detail={"destination_account_id": destination_account_id},
+        ) from exc
+    if row is None:
+        raise NotFoundError(
+            f"connection {connection_id} not found or archived",
+            detail={"id": connection_id},
+        )
+    return _row_to_connection(row)
 
 
 async def archive_connection(
@@ -4336,34 +4571,27 @@ async def insert_session_template(
 async def get_session_template(
     conn: asyncpg.Connection[Any], template_id: str, *, account_id: str
 ) -> SessionTemplate:
-    row = await conn.fetchrow(
-        "SELECT * FROM session_templates WHERE id = $1 AND account_id = $2",
-        template_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="session_templates",
+        id_=template_id,
+        account_id=account_id,
+        row=_row_to_session_template,
+        noun="session template",
     )
-    if row is None:
-        raise NotFoundError(
-            f"session template {template_id} not found",
-            detail={"id": template_id},
-        )
-    return _row_to_session_template(row)
 
 
 async def list_session_templates(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[SessionTemplate]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = (
-        f"SELECT * FROM session_templates WHERE {' AND '.join(where)} "
-        f"ORDER BY id DESC LIMIT ${len(args)}"
+    return await _list_scoped(
+        conn,
+        table="session_templates",
+        account_id=account_id,
+        row=_row_to_session_template,
+        limit=limit,
+        after=after,
     )
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_session_template(r) for r in rows]
 
 
 async def update_session_template(
@@ -4394,29 +4622,23 @@ async def update_session_template(
             detail={"id": template_id},
         )
 
-    sets: list[str] = []
     args: list[Any] = [template_id]
+    fields: list[tuple[str, Any, str | None]] = []
     if name is not None:
-        args.append(name)
-        sets.append(f"name = ${len(args)}")
+        fields.append(("name", name, None))
     if agent_id is not None:
-        args.append(agent_id)
-        sets.append(f"agent_id = ${len(args)}")
+        fields.append(("agent_id", agent_id, None))
     if agent_version is not ...:
-        args.append(agent_version)
-        sets.append(f"agent_version = ${len(args)}")
+        fields.append(("agent_version", agent_version, None))
     if environment_id is not None:
-        args.append(environment_id)
-        sets.append(f"environment_id = ${len(args)}")
+        fields.append(("environment_id", environment_id, None))
     if vault_ids is not None:
-        args.append(vault_ids)
-        sets.append(f"vault_ids = ${len(args)}::text[]")
+        fields.append(("vault_ids", vault_ids, "text[]"))
     if memory_store_ids is not None:
-        args.append(memory_store_ids)
-        sets.append(f"memory_store_ids = ${len(args)}::text[]")
+        fields.append(("memory_store_ids", memory_store_ids, "text[]"))
     if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
+        fields.append(("metadata", metadata, "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return await get_session_template(conn, template_id, account_id=account_id)
     sets.append("updated_at = now()")
@@ -4455,17 +4677,13 @@ async def archive_session_template(
     working; new chat sessions on connections referencing this template
     will fail at the inbound handler.
     """
-    row = await conn.fetchrow(
-        "UPDATE session_templates SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
-        template_id,
-        account_id,
+    row = await _archive_scoped(
+        conn,
+        table="session_templates",
+        id_=template_id,
+        account_id=account_id,
+        noun="session template",
     )
-    if row is None:
-        raise NotFoundError(
-            f"session template {template_id} not found or already archived",
-            detail={"id": template_id},
-        )
     return _row_to_session_template(row)
 
 
@@ -4619,17 +4837,15 @@ async def update_memory_store(
     # shape).
     current = await get_memory_store(conn, store_id, allow_archived=False, account_id=account_id)
 
-    sets: list[str] = []
     args: list[Any] = [store_id]
+    fields: list[tuple[str, Any, str | None]] = []
     if name is not None:
-        args.append(name)
-        sets.append(f"name = ${len(args)}")
+        fields.append(("name", name, None))
     if description is not None:
-        args.append(description)
-        sets.append(f"description = ${len(args)}")
+        fields.append(("description", description, None))
     if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
+        fields.append(("metadata", metadata, "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return current
     sets.append("updated_at = now()")
@@ -4647,17 +4863,13 @@ async def update_memory_store(
 async def archive_memory_store(
     conn: asyncpg.Connection[Any], store_id: str, *, account_id: str
 ) -> MemoryStore:
-    row = await conn.fetchrow(
-        "UPDATE memory_stores SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
-        store_id,
-        account_id,
+    row = await _archive_scoped(
+        conn,
+        table="memory_stores",
+        id_=store_id,
+        account_id=account_id,
+        noun="memory store",
     )
-    if row is None:
-        raise NotFoundError(
-            f"memory store {store_id} not found or already archived",
-            detail={"id": store_id},
-        )
     return _row_to_memory_store(row)
 
 
@@ -6436,3 +6648,641 @@ async def count_active_child_accounts(conn: asyncpg.Connection[Any], parent_acco
     )
     assert row is not None
     return cast("int", row["cnt"])
+
+
+# ─── session scheduled tasks ────────────────────────────────────────────────
+
+
+class ScheduledTaskRow(NamedTuple):
+    """Internal record for scheduled-task fire-handler lookups.
+
+    Carries ``session_id``, ``account_id``, and the owning session's
+    ``session_archived_at`` alongside the user-visible fields so the
+    unscoped fire-job handler (which only has the task id) can resolve
+    the owning session and verify it hasn't been archived between claim
+    and fire — without an extra round-trip.
+    """
+
+    id: str
+    session_id: str
+    account_id: str
+    name: str
+    schedule: str | None
+    fire_at: datetime | None
+    command: str
+    enabled: bool
+    timeout_seconds: int
+    max_output_bytes: int
+    next_fire: datetime | None
+    running_since: datetime | None
+    last_fire_at: datetime | None
+    last_fire_status: ScheduledTaskStatus | None
+    consecutive_failures: int
+    session_archived_at: datetime | None
+
+
+def _row_to_scheduled_task_echo(row: asyncpg.Record) -> ScheduledTaskEcho:
+    return ScheduledTaskEcho(
+        id=row["id"],
+        name=row["name"],
+        schedule=row["schedule"],
+        fire_at=row["fire_at"],
+        command=row["command"],
+        enabled=row["enabled"],
+        timeout_seconds=row["timeout_seconds"],
+        max_output_bytes=row["max_output_bytes"],
+        next_fire=row["next_fire"],
+        last_fire_at=row["last_fire_at"],
+        last_fire_status=row["last_fire_status"],
+        consecutive_failures=row["consecutive_failures"],
+        metadata=parse_jsonb(row["metadata"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+async def add_scheduled_task(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    name: str,
+    schedule: str | None,
+    fire_at: datetime | None,
+    command: str,
+    enabled: bool,
+    timeout_seconds: int,
+    max_output_bytes: int,
+    metadata: dict[str, Any],
+    next_fire: datetime | None,
+    account_id: str,
+) -> ScheduledTaskEcho:
+    """Insert a scheduled task. Exactly one of ``schedule`` / ``fire_at``
+    must be set (enforced by DB CHECK constraint). Maps unique-name
+    violations to :class:`ConflictError` and missing-session FK
+    violations to :class:`NotFoundError`."""
+    task_id = make_id(SCHEDULED_TASK)
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO session_scheduled_tasks
+                (id, session_id, account_id, name, schedule, fire_at, command,
+                 enabled, timeout_seconds, max_output_bytes, next_fire, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            RETURNING *
+            """,
+            task_id,
+            session_id,
+            account_id,
+            name,
+            schedule,
+            fire_at,
+            command,
+            enabled,
+            timeout_seconds,
+            max_output_bytes,
+            next_fire,
+            json.dumps(metadata),
+        )
+    except asyncpg.UniqueViolationError as exc:
+        raise ConflictError(
+            f"scheduled task name {name!r} already exists in this session",
+            detail={"name": name, "session_id": session_id},
+        ) from exc
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise NotFoundError(
+            f"session {session_id!r} not found",
+            detail={"session_id": session_id},
+        ) from exc
+    assert row is not None
+    return _row_to_scheduled_task_echo(row)
+
+
+async def remove_scheduled_task(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    name: str,
+    *,
+    account_id: str,
+) -> None:
+    """Delete a scheduled task by name. Raises :class:`NotFoundError` if absent."""
+    result = await conn.execute(
+        "DELETE FROM session_scheduled_tasks "
+        "WHERE session_id = $1 AND name = $2 AND account_id = $3",
+        session_id,
+        name,
+        account_id,
+    )
+    if result == "DELETE 0":
+        raise NotFoundError(
+            f"scheduled task {name!r} not found",
+            detail={"name": name, "session_id": session_id},
+        )
+
+
+async def get_scheduled_task_by_name(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    name: str,
+    *,
+    account_id: str,
+) -> ScheduledTaskEcho:
+    row = await conn.fetchrow(
+        "SELECT * FROM session_scheduled_tasks "
+        "WHERE session_id = $1 AND name = $2 AND account_id = $3",
+        session_id,
+        name,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"scheduled task {name!r} not found",
+            detail={"name": name, "session_id": session_id},
+        )
+    return _row_to_scheduled_task_echo(row)
+
+
+async def list_scheduled_tasks(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> list[ScheduledTaskEcho]:
+    rows = await conn.fetch(
+        "SELECT * FROM session_scheduled_tasks "
+        "WHERE session_id = $1 AND account_id = $2 "
+        "ORDER BY created_at",
+        session_id,
+        account_id,
+    )
+    return [_row_to_scheduled_task_echo(r) for r in rows]
+
+
+async def batch_list_session_scheduled_tasks(
+    conn: asyncpg.Connection[Any],
+    session_ids: list[str],
+    *,
+    account_id: str,
+) -> dict[str, list[ScheduledTaskEcho]]:
+    """Batch-fetch scheduled_tasks echoes for multiple sessions.
+
+    Returns a dict keyed by session_id; sessions with no tasks map to
+    an empty list. Mirrors the batch pattern used by
+    :func:`batch_list_session_memory_store_echoes`.
+    """
+    if not session_ids:
+        return {}
+    rows = await conn.fetch(
+        "SELECT * FROM session_scheduled_tasks "
+        "WHERE session_id = ANY($1) AND account_id = $2 "
+        "ORDER BY session_id, created_at",
+        session_ids,
+        account_id,
+    )
+    result: dict[str, list[ScheduledTaskEcho]] = {sid: [] for sid in session_ids}
+    for r in rows:
+        result[str(r["session_id"])].append(_row_to_scheduled_task_echo(r))
+    return result
+
+
+async def update_scheduled_task(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    name: str,
+    *,
+    schedule: str | None | EllipsisType = ...,
+    fire_at: datetime | None | EllipsisType = ...,
+    command: str | None = None,
+    enabled: bool | None = None,
+    timeout_seconds: int | None = None,
+    max_output_bytes: int | None = None,
+    metadata: dict[str, Any] | None = None,
+    next_fire: datetime | None | EllipsisType = ...,
+    account_id: str,
+) -> ScheduledTaskEcho:
+    """Update fields by name. Raises :class:`NotFoundError` if absent.
+
+    For most fields, ``None`` means 'leave alone.' For trigger fields
+    (``schedule``, ``fire_at``) and ``next_fire``, ``...`` (Ellipsis)
+    is the leave-alone sentinel because ``None`` is a meaningful
+    clear-to-null value (used when converting cron↔one-shot or disabling).
+    The DB CHECK constraint enforces that exactly one of (schedule,
+    fire_at) ends up non-null after the merged write; a violation raises
+    :class:`ValidationError` (not the raw asyncpg error).
+    """
+    set_clauses: list[str] = []
+    args: list[Any] = []
+
+    def add(col: str, value: Any) -> None:
+        args.append(value)
+        set_clauses.append(f"{col} = ${len(args)}")
+
+    if not isinstance(schedule, EllipsisType):
+        add("schedule", schedule)
+    if not isinstance(fire_at, EllipsisType):
+        add("fire_at", fire_at)
+    if command is not None:
+        add("command", command)
+    if enabled is not None:
+        add("enabled", enabled)
+    if timeout_seconds is not None:
+        add("timeout_seconds", timeout_seconds)
+    if max_output_bytes is not None:
+        add("max_output_bytes", max_output_bytes)
+    if metadata is not None:
+        add("metadata", json.dumps(metadata))
+    if not isinstance(next_fire, EllipsisType):
+        add("next_fire", next_fire)
+
+    # Always bump ``updated_at`` so a no-op PATCH still records a write —
+    # external pollers using ``updated_at > <since>`` mustn't miss it.
+    set_clauses.append("updated_at = now()")
+    args.extend([session_id, name, account_id])
+    sql = f"""
+        UPDATE session_scheduled_tasks
+        SET {", ".join(set_clauses)}
+        WHERE session_id = ${len(args) - 2}
+          AND name = ${len(args) - 1}
+          AND account_id = ${len(args)}
+        RETURNING *
+    """
+    try:
+        row = await conn.fetchrow(sql, *args)
+    except asyncpg.CheckViolationError as exc:
+        raise ValidationError(
+            "scheduled task update would violate substrate invariants — "
+            "after merging, exactly one of `schedule` (cron) or `fire_at` "
+            "(one-shot) must be set",
+            detail={"name": name, "session_id": session_id},
+        ) from exc
+    if row is None:
+        raise NotFoundError(
+            f"scheduled task {name!r} not found",
+            detail={"name": name, "session_id": session_id},
+        )
+    return _row_to_scheduled_task_echo(row)
+
+
+async def unscoped_get_scheduled_task_row(
+    conn: asyncpg.Connection[Any],
+    task_id: str,
+) -> ScheduledTaskRow:
+    """Fetch a scheduled task by id without account_id scope.
+
+    Used by the fire-job handler which runs cross-tenant in the worker;
+    each row carries its ``account_id`` denormalized. JOINs ``sessions``
+    so the handler can re-check the owning session's archive state and
+    skip a fire whose session was archived between claim and execute.
+    """
+    row = await conn.fetchrow(
+        "SELECT st.id, st.session_id, st.account_id, st.name, st.schedule, "
+        "st.fire_at, st.command, st.enabled, st.timeout_seconds, "
+        "st.max_output_bytes, st.next_fire, st.running_since, st.last_fire_at, "
+        "st.last_fire_status, st.consecutive_failures, "
+        "s.archived_at AS session_archived_at "
+        "FROM session_scheduled_tasks AS st "
+        "JOIN sessions AS s ON s.id = st.session_id "
+        "WHERE st.id = $1",
+        task_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"scheduled task {task_id!r} not found",
+            detail={"id": task_id},
+        )
+    return ScheduledTaskRow(
+        id=row["id"],
+        session_id=row["session_id"],
+        account_id=row["account_id"],
+        name=row["name"],
+        schedule=row["schedule"],
+        fire_at=row["fire_at"],
+        command=row["command"],
+        enabled=row["enabled"],
+        timeout_seconds=row["timeout_seconds"],
+        max_output_bytes=row["max_output_bytes"],
+        next_fire=row["next_fire"],
+        running_since=row["running_since"],
+        last_fire_at=row["last_fire_at"],
+        last_fire_status=row["last_fire_status"],
+        consecutive_failures=row["consecutive_failures"],
+        session_archived_at=row["session_archived_at"],
+    )
+
+
+async def fetch_and_claim_due_scheduled_tasks(
+    conn: asyncpg.Connection[Any],
+    *,
+    now_utc: datetime,
+    limit: int = 100,
+    stale_threshold_seconds: int = 7200,
+) -> list[ScheduledTaskRow]:
+    """Atomically claim due tasks for the scheduler tick.
+
+    In a single transaction: SELECT enabled tasks whose owning session is
+    not archived, whose ``next_fire <= now``, and which are either not
+    running (``running_since IS NULL``) or stuck-running for more than
+    ``stale_threshold_seconds`` (recovers from worker crashes mid-fire).
+    For each claimed row, sets ``running_since`` to now and advances
+    ``next_fire`` to the next scheduled instant so subsequent ticks skip
+    the row. Returns the claimed rows.
+
+    Archive is the lifecycle boundary — once ``sessions.archived_at`` is
+    set, none of the session's scheduled tasks fire again, regardless of
+    their own ``enabled`` flag. Unarchiving (if supported) restores
+    firing. The rows themselves are preserved.
+
+    Must be called inside an outer transaction so the SELECT FOR UPDATE
+    SKIP LOCKED + UPDATE chain executes atomically against concurrent
+    workers.
+    """
+    from datetime import timedelta
+
+    stale_cutoff = now_utc - timedelta(seconds=stale_threshold_seconds)
+    rows = await conn.fetch(
+        """
+        SELECT st.id, st.session_id, st.account_id, st.name, st.schedule,
+               st.fire_at, st.command, st.enabled, st.timeout_seconds,
+               st.max_output_bytes, st.next_fire, st.running_since,
+               st.last_fire_at, st.last_fire_status, st.consecutive_failures,
+               s.archived_at AS session_archived_at
+        FROM session_scheduled_tasks AS st
+        JOIN sessions AS s ON s.id = st.session_id
+        WHERE st.enabled
+          AND s.archived_at IS NULL
+          AND st.next_fire IS NOT NULL
+          AND st.next_fire <= $1
+          AND (st.running_since IS NULL OR st.running_since <= $2)
+        ORDER BY st.next_fire
+        FOR UPDATE OF st SKIP LOCKED
+        LIMIT $3
+        """,
+        now_utc,
+        stale_cutoff,
+        limit,
+    )
+    claimed: list[ScheduledTaskRow] = []
+    for r in rows:
+        if r["schedule"] is not None:
+            # Cron row — advance next_fire so subsequent ticks skip until
+            # the next scheduled slot.
+            new_next_fire = compute_next_fire(r["schedule"], now_utc)
+            await conn.execute(
+                """
+                UPDATE session_scheduled_tasks
+                SET running_since = $1, next_fire = $2, updated_at = $1
+                WHERE id = $3
+                """,
+                now_utc,
+                new_next_fire,
+                r["id"],
+            )
+        else:
+            # One-shot row (fire_at set) — leave next_fire alone; the
+            # runner deletes the row after the fire completes, so we
+            # never need to skip-by-next_fire.
+            new_next_fire = r["next_fire"]
+            await conn.execute(
+                """
+                UPDATE session_scheduled_tasks
+                SET running_since = $1, updated_at = $1
+                WHERE id = $2
+                """,
+                now_utc,
+                r["id"],
+            )
+        claimed.append(
+            ScheduledTaskRow(
+                id=r["id"],
+                session_id=r["session_id"],
+                account_id=r["account_id"],
+                name=r["name"],
+                schedule=r["schedule"],
+                fire_at=r["fire_at"],
+                command=r["command"],
+                enabled=r["enabled"],
+                timeout_seconds=r["timeout_seconds"],
+                max_output_bytes=r["max_output_bytes"],
+                # next_fire on the returned row reflects the *advanced* value
+                # for cron, or the unchanged value for one-shot.
+                next_fire=new_next_fire,
+                running_since=now_utc,
+                last_fire_at=r["last_fire_at"],
+                last_fire_status=r["last_fire_status"],
+                consecutive_failures=r["consecutive_failures"],
+                session_archived_at=r["session_archived_at"],
+            )
+        )
+    return claimed
+
+
+async def record_scheduled_task_fire(
+    conn: asyncpg.Connection[Any],
+    task_id: str,
+    *,
+    status: ScheduledTaskStatus,
+    consecutive_failures: int,
+    fired_at: datetime,
+) -> None:
+    """Record the outcome of a fire and clear ``running_since``.
+
+    Does NOT touch ``next_fire`` — that was advanced by the tick when the
+    row was claimed.
+    """
+    await conn.execute(
+        """
+        UPDATE session_scheduled_tasks
+        SET running_since = NULL,
+            last_fire_at = $1,
+            last_fire_status = $2,
+            consecutive_failures = $3,
+            updated_at = $1
+        WHERE id = $4
+        """,
+        fired_at,
+        status,
+        consecutive_failures,
+        task_id,
+    )
+
+
+async def disable_scheduled_task(
+    conn: asyncpg.Connection[Any],
+    task_id: str,
+) -> None:
+    """Disable a scheduled task by id.
+
+    Sets ``enabled = false``, clears ``next_fire``, and leaves
+    ``running_since`` untouched (in case a fire is still in flight; the
+    handler will clear it on completion).
+    """
+    await conn.execute(
+        """
+        UPDATE session_scheduled_tasks
+        SET enabled = false, next_fire = NULL, updated_at = now()
+        WHERE id = $1
+        """,
+        task_id,
+    )
+
+
+async def delete_scheduled_task_by_id(
+    conn: asyncpg.Connection[Any],
+    task_id: str,
+) -> None:
+    """Delete a scheduled task by id, unscoped.
+
+    Used by the runner for one-shot rows after the fire completes — the
+    marker event the bash command delivered is the receipt; the row's
+    job is done and keeping it would let it fire again on the next tick
+    (next_fire is still in the past for one-shot rows). No-op if the
+    row doesn't exist (e.g. raced with an API DELETE).
+    """
+    await conn.execute(
+        "DELETE FROM session_scheduled_tasks WHERE id = $1",
+        task_id,
+    )
+
+
+async def release_scheduled_task_claim(
+    conn: asyncpg.Connection[Any],
+    task_id: str,
+) -> None:
+    """Compensating reset for a claim whose downstream defer/enqueue failed.
+
+    Clears ``running_since`` so the next scheduler cycle can re-claim the
+    row. For cron rows, ``next_fire`` was already advanced by
+    :func:`fetch_and_claim_due_scheduled_tasks` — the released row will
+    fire at the next scheduled slot, effectively skipping the current
+    slot whose defer failed (acceptable churn for a transient broker
+    error). For one-shot rows, ``next_fire = fire_at`` is still in the
+    past, so the row is re-claimed immediately.
+    """
+    await conn.execute(
+        "UPDATE session_scheduled_tasks SET running_since = NULL, updated_at = now() WHERE id = $1",
+        task_id,
+    )
+
+
+async def count_account_scheduled_tasks(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    enabled_only: bool = True,
+) -> int:
+    """Count scheduled_tasks rows owned by ``account_id``.
+
+    Backs the per-account cap enforced in ``services.scheduled_tasks.add_task``.
+    Defaults to counting only enabled rows on non-archived sessions —
+    paused/disabled entries don't consume a "slot" against the cap, and
+    rows attached to archived sessions are permanently unable to fire
+    (the scheduler's claim and MIN queries both filter
+    ``s.archived_at IS NULL``), so they shouldn't count either. Pass
+    ``enabled_only=False`` for an operator-visible total that ignores
+    both filters.
+    """
+    if not enabled_only:
+        result: int | None = await conn.fetchval(
+            "SELECT COUNT(*) FROM session_scheduled_tasks WHERE account_id = $1",
+            account_id,
+        )
+        return result or 0
+    result = await conn.fetchval(
+        """
+        SELECT COUNT(*)
+        FROM session_scheduled_tasks AS st
+        JOIN sessions AS s ON s.id = st.session_id
+        WHERE st.account_id = $1
+          AND st.enabled
+          AND s.archived_at IS NULL
+        """,
+        account_id,
+    )
+    return result or 0
+
+
+async def count_session_scheduled_tasks(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    account_id: str,
+) -> int:
+    """Count scheduled_tasks rows attached to one session.
+
+    Backs the per-session cap (``MAX_SCHEDULED_TASKS_PER_SESSION``)
+    enforced in ``services.scheduled_tasks.add_task``. Counts all rows
+    (enabled or disabled) because the per-session cap is about the
+    session's resource footprint, not just its active-timer load.
+    """
+    result: int | None = await conn.fetchval(
+        """
+        SELECT COUNT(*)
+        FROM session_scheduled_tasks
+        WHERE session_id = $1 AND account_id = $2
+        """,
+        session_id,
+        account_id,
+    )
+    return result or 0
+
+
+async def acquire_account_scheduled_tasks_lock(
+    conn: asyncpg.Connection[Any],
+    account_id: str,
+) -> None:
+    """Per-account transaction-scoped advisory lock for cap enforcement.
+
+    Held for the duration of the surrounding transaction; serializes
+    concurrent ``count_account_scheduled_tasks`` + INSERT pairs across
+    workers so the cap is contractual instead of approximate. The lock
+    key is derived from ``hashtextextended('aios_st_cap:' || account_id,
+    0)`` — a 64-bit hash that won't collide with other modules' advisory
+    locks (the worker-singleton lock uses a different key text).
+    """
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        f"aios_st_cap:{account_id}",
+    )
+
+
+async def fetch_next_scheduled_task_event(
+    conn: asyncpg.Connection[Any],
+    *,
+    stale_threshold_seconds: int = 7200,
+) -> datetime | None:
+    """Return when the event-driven scheduler should next wake.
+
+    Computed as ``MIN(GREATEST(next_fire, running_since + stale_threshold))``
+    across enabled rows on non-archived sessions:
+
+    - Idle rows (``running_since IS NULL``) contribute ``next_fire`` — the
+      earliest of these is the next genuine fire.
+    - Running rows contribute ``running_since + stale_threshold`` — they're
+      either in-flight (and the handler will clear ``running_since`` long
+      before the threshold elapses) or stuck (in which case the threshold
+      is when we'll re-claim them).
+
+    Returns ``None`` when no enabled rows exist — the scheduler then
+    sleeps until either a NOTIFY or the cold-path heartbeat.
+
+    Cheap: the ``sched_tasks_due`` partial index covers the WHERE clause.
+    """
+    from datetime import timedelta
+
+    stale_threshold = timedelta(seconds=stale_threshold_seconds)
+    result: datetime | None = await conn.fetchval(
+        """
+        SELECT MIN(
+            CASE
+                WHEN st.running_since IS NULL THEN st.next_fire
+                ELSE GREATEST(st.next_fire, st.running_since + $1)
+            END
+        )
+        FROM session_scheduled_tasks AS st
+        JOIN sessions AS s ON s.id = st.session_id
+        WHERE st.enabled
+          AND s.archived_at IS NULL
+          AND st.next_fire IS NOT NULL
+        """,
+        stale_threshold,
+    )
+    return result

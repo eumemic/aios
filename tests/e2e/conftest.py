@@ -203,7 +203,6 @@ async def _noop_defer_wake(
     account_id: str,
     cause: str = "message",
     delay_seconds: float | None = None,
-    wake_reason: str | None = None,
 ) -> None:
     pass
 

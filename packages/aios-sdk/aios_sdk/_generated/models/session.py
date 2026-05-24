@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from ..models.awaiting_tool_call import AwaitingToolCall
     from ..models.github_repository_resource_echo import GithubRepositoryResourceEcho
     from ..models.memory_store_resource_echo import MemoryStoreResourceEcho
+    from ..models.scheduled_task_echo import ScheduledTaskEcho
     from ..models.session_metadata import SessionMetadata
     from ..models.session_stop_reason_type_0 import SessionStopReasonType0
     from ..models.session_usage import SessionUsage
@@ -48,6 +49,7 @@ class Session:
             vault_ids (list[str] | Unset):
             usage (SessionUsage | Unset): Cumulative token usage across all model calls in a session.
             resources (list[GithubRepositoryResourceEcho | MemoryStoreResourceEcho] | Unset):
+            scheduled_tasks (list[ScheduledTaskEcho] | Unset):
             archived_at (datetime.datetime | None | Unset):
             focal_channel (None | str | Unset):
             focal_locked (bool | Unset):  Default: False.
@@ -72,6 +74,7 @@ class Session:
     resources: list[GithubRepositoryResourceEcho | MemoryStoreResourceEcho] | Unset = (
         UNSET
     )
+    scheduled_tasks: list[ScheduledTaskEcho] | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     focal_channel: None | str | Unset = UNSET
     focal_locked: bool | Unset = False
@@ -138,6 +141,13 @@ class Session:
 
                 resources.append(resources_item)
 
+        scheduled_tasks: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.scheduled_tasks, Unset):
+            scheduled_tasks = []
+            for scheduled_tasks_item_data in self.scheduled_tasks:
+                scheduled_tasks_item = scheduled_tasks_item_data.to_dict()
+                scheduled_tasks.append(scheduled_tasks_item)
+
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
             archived_at = UNSET
@@ -189,6 +199,8 @@ class Session:
             field_dict["usage"] = usage
         if resources is not UNSET:
             field_dict["resources"] = resources
+        if scheduled_tasks is not UNSET:
+            field_dict["scheduled_tasks"] = scheduled_tasks
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
         if focal_channel is not UNSET:
@@ -209,6 +221,7 @@ class Session:
             GithubRepositoryResourceEcho,
         )
         from ..models.memory_store_resource_echo import MemoryStoreResourceEcho
+        from ..models.scheduled_task_echo import ScheduledTaskEcho
         from ..models.session_metadata import SessionMetadata
         from ..models.session_stop_reason_type_0 import SessionStopReasonType0
         from ..models.session_usage import SessionUsage
@@ -306,6 +319,17 @@ class Session:
 
                 resources.append(resources_item)
 
+        _scheduled_tasks = d.pop("scheduled_tasks", UNSET)
+        scheduled_tasks: list[ScheduledTaskEcho] | Unset = UNSET
+        if _scheduled_tasks is not UNSET:
+            scheduled_tasks = []
+            for scheduled_tasks_item_data in _scheduled_tasks:
+                scheduled_tasks_item = ScheduledTaskEcho.from_dict(
+                    scheduled_tasks_item_data
+                )
+
+                scheduled_tasks.append(scheduled_tasks_item)
+
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -369,6 +393,7 @@ class Session:
             vault_ids=vault_ids,
             usage=usage,
             resources=resources,
+            scheduled_tasks=scheduled_tasks,
             archived_at=archived_at,
             focal_channel=focal_channel,
             focal_locked=focal_locked,

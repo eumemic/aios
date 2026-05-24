@@ -23,6 +23,7 @@ backend, or anything else is decided by the worker's selected backend.
 
 from __future__ import annotations
 
+import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +65,35 @@ log = get_logger("aios.sandbox.spec")
 # location for ephemeral host runtime sockets so it doesn't collide
 # with any sandbox workspace path.
 TOOL_BROKER_SOCKET_SANDBOX_PATH = "/var/run/aios/tool-broker.sock"
+
+# Path inside the sandbox container where the per-session
+# TOOL_BROKER_SECRET is written and bind-mounted (read-only) when UDS
+# transport is in use. The in-sandbox ``bin/tool`` CLI reads this file
+# as a fallback when ``TOOL_BROKER_SECRET`` isn't in the environment.
+TOOL_BROKER_SECRET_SANDBOX_PATH = "/var/run/aios/tool-broker-secret"
+
+
+def cleanup_session_secret_file(session_id: str, tool_socket_host_path: Path | None) -> None:
+    """Best-effort removal of the per-session secret file written by
+    ``_assemble_plan`` when UDS transport is enabled. Idempotent — safe
+    to call when no file exists or when UDS was never configured. Logs
+    but does not raise on permission / IO errors so a single failing
+    session can't abort cleanup for the rest (e.g. inside
+    ``SandboxRegistry.release_all``)."""
+    if tool_socket_host_path is None:
+        return
+    secret_path = tool_socket_host_path.parent / f"{session_id}.secret"
+    try:
+        secret_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning(
+            "sandbox.tool_broker_secret_cleanup_failed",
+            session_id=session_id,
+            path=str(secret_path),
+            error=str(exc),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +202,8 @@ async def _materialize_github_clones(
     Per-repo clone failures are non-fatal — they log + append a
     lifecycle event and drop the repo from the materialized list (its
     working tree won't be bind-mounted). The proxy stays alive for
-    sibling repos.
+    sibling repos. Per-clone wall-clock is bounded by
+    ``Settings.github_clone_session_timeout_seconds`` (issue #697).
     """
     from aios.sandbox.git_proxy import repo_key
     from aios.services import github_repositories as github_repo_service
@@ -344,6 +375,7 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
         # hand back a plan must clean up both on the way out, otherwise
         # state leaks for the worker's lifetime.
         tool_broker.unregister_session(session_id)
+        cleanup_session_secret_file(session_id, tool_socket_host_path)
         if git_proxy is not None:
             try:
                 await git_proxy.stop()
@@ -391,6 +423,11 @@ def _assemble_plan(
         **session_env,
         "TOOL_BROKER_URL": tool_broker_url,
         "TOOL_BROKER_SECRET": tool_broker_secret,
+        # Scheduled-tasks escalation (#636): bash inside a cron sandbox
+        # POSTs to ``$TOOL_BROKER_URL/v1/$TOOL_BROKER_SECRET/sessions/messages``
+        # to wake the session. AIOS_SESSION_ID is also exposed so the
+        # bash can name its own session in logs / messages.
+        "AIOS_SESSION_ID": session_id,
     }
 
     # Bind the per-session attachments and uploads dirs at every provision
@@ -441,6 +478,31 @@ def _assemble_plan(
                 host_path=tool_socket_host_path,
                 sandbox_path=TOOL_BROKER_SOCKET_SANDBOX_PATH,
                 read_only=False,
+            )
+        )
+        # Write the per-session secret to a sibling file and bind-mount it
+        # read-only. The in-sandbox ``bin/tool`` CLI reads this file as a
+        # fallback when ``TOOL_BROKER_SECRET`` isn't in the environment
+        # (stale container reuse, bash scripts that strip env, etc. — see
+        # issue #698).
+        #
+        # Use ``os.open`` with explicit 0o600 mode so the create + perms
+        # are applied in one syscall — a separate ``write_text`` +
+        # ``chmod`` would leave a brief umask-derived window where, under
+        # ``umask 0``, the file would be world-writable. 0o600 is tighter
+        # than the prior 0o644 since the bind-mounted file is read by
+        # root inside the sandbox; no need for group/world read on host.
+        secret_host_path = tool_socket_host_path.parent / f"{session_id}.secret"
+        fd = os.open(secret_host_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, tool_broker_secret.encode("utf-8"))
+        finally:
+            os.close(fd)
+        extra_mounts.append(
+            Mount(
+                host_path=secret_host_path,
+                sandbox_path=TOOL_BROKER_SECRET_SANDBOX_PATH,
+                read_only=True,
             )
         )
 

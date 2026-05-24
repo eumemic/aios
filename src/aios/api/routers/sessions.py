@@ -41,6 +41,11 @@ from aios.models.github_repositories import (
     GithubRepositoryResourceEcho,
     GithubRepositoryUpdate,
 )
+from aios.models.scheduled_tasks import (
+    ScheduledTaskCreate,
+    ScheduledTaskEcho,
+    ScheduledTaskUpdate,
+)
 from aios.models.sessions import (
     ContextResponse,
     Session,
@@ -57,6 +62,7 @@ from aios.models.sessions import (
 )
 from aios.services import files as files_service
 from aios.services import github_repositories as github_repo_service
+from aios.services import scheduled_tasks as scheduled_tasks_service
 from aios.services import sessions as service
 from aios.services.wake import defer_wake
 
@@ -82,6 +88,7 @@ async def create(
         metadata=body.metadata,
         vault_ids=body.vault_ids or None,
         resources=body.resources or None,
+        scheduled_tasks=body.scheduled_tasks or None,
         crypto_box=crypto_box,
         workspace_path=body.workspace_path,
         env=body.env or None,
@@ -241,6 +248,71 @@ def _require_github_resource_id(resource_id: str) -> None:
             "supported on the per-resource sub-collection endpoints",
             detail={"resource_id": resource_id, "prefix": prefix},
         )
+
+
+# ─── scheduled tasks ────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/{session_id}/scheduled-tasks",
+    operation_id="list_scheduled_tasks",
+)
+async def list_scheduled_tasks(
+    session_id: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> ListResponse[ScheduledTaskEcho]:
+    """List scheduled tasks attached to ``session_id``."""
+    tasks = await scheduled_tasks_service.list_tasks(pool, session_id, account_id=account_id)
+    return ListResponse[ScheduledTaskEcho](data=tasks)
+
+
+@router.post(
+    "/{session_id}/scheduled-tasks",
+    operation_id="create_scheduled_task",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_scheduled_task(
+    session_id: str,
+    body: ScheduledTaskCreate,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> ScheduledTaskEcho:
+    """Add a scheduled task. Granular operation per #270 — there is no
+    whole-list ``set`` surface on ``SessionUpdate``."""
+    return await scheduled_tasks_service.add_task(pool, session_id, body, account_id=account_id)
+
+
+@router.delete(
+    "/{session_id}/scheduled-tasks/{name}",
+    operation_id="delete_scheduled_task",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_scheduled_task(
+    session_id: str,
+    name: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> None:
+    """Remove a scheduled task by name."""
+    await scheduled_tasks_service.remove_task(pool, session_id, name, account_id=account_id)
+
+
+@router.put(
+    "/{session_id}/scheduled-tasks/{name}",
+    operation_id="update_scheduled_task",
+)
+async def update_scheduled_task(
+    session_id: str,
+    name: str,
+    body: ScheduledTaskUpdate,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> ScheduledTaskEcho:
+    """Patch fields of a scheduled task by name. Omitted fields unchanged."""
+    return await scheduled_tasks_service.update_task(
+        pool, session_id, name, body, account_id=account_id
+    )
 
 
 @router.post(
