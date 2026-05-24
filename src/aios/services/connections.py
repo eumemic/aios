@@ -540,7 +540,12 @@ async def reparent_connection(
         # constraint near-miss). Symmetric with how attach_connection
         # validates the session FK.
         destination = await queries.get_account(conn, destination_account_id)
-        if destination is None:
+        # ``get_account`` returns archived rows too; an archived destination
+        # is effectively non-existent from the reparent caller's perspective
+        # (no bearer can auth as an archived account, so the moved
+        # connection would be permanently inaccessible). Reject as 404 — the
+        # destination is not a valid target.
+        if destination is None or destination.archived_at is not None:
             raise NotFoundError(
                 f"destination account {destination_account_id} not found",
                 detail={"destination_account_id": destination_account_id},

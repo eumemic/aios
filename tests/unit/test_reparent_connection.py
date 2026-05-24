@@ -162,6 +162,45 @@ class TestReparentConnection:
                 crypto_box=_CRYPTO_BOX,
             )
 
+    async def test_reparent_archived_destination_account_raises_not_found(self) -> None:
+        """Archived destination → :class:`NotFoundError`.
+
+        ``queries.get_account`` returns archived rows too, so a bare
+        ``is None`` check would let an operator reparent into a
+        soft-archived account. No bearer can auth as an archived
+        account, so the connection would be permanently inaccessible.
+        From the reparent caller's perspective an archived account
+        is effectively non-existent; surface the same 404.
+        """
+        conn = _conn_with_transaction()
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(conn))
+
+        archived_dest = Account(
+            id="acc_dest_archived",
+            parent_account_id="acc_root",
+            can_mint_children=False,
+            display_name="archived-dest",
+            metadata={},
+            created_at=_NOW,
+            archived_at=_NOW,
+        )
+        # First call (requester) is root; second call (destination) is archived.
+        with (
+            patch(
+                "aios.services.connections.queries.get_account",
+                AsyncMock(side_effect=[_root_account("acc_root"), archived_dest]),
+            ),
+            pytest.raises(NotFoundError) as excinfo,
+        ):
+            await reparent_connection(
+                pool,
+                "conn_x",
+                destination_account_id="acc_dest_archived",
+                requester_account_id="acc_root",
+                crypto_box=_CRYPTO_BOX,
+            )
+        assert excinfo.value.detail == {"destination_account_id": "acc_dest_archived"}
+
     async def test_reparent_missing_connection_raises_not_found(self) -> None:
         """The pre-update SELECT FOR UPDATE returning no row → :class:`NotFoundError`."""
         conn = _conn_with_transaction()
