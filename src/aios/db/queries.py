@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections.abc import Callable
 from datetime import datetime
 from types import EllipsisType
 from typing import Any, NamedTuple, NoReturn, cast
@@ -84,6 +85,118 @@ def parse_jsonb(raw: Any) -> Any:
     return json.loads(raw) if isinstance(raw, str) else raw
 
 
+# ─── shared scoping helpers ──────────────────────────────────────────────────
+#
+# These helpers extract the per-resource CRUD/pagination/tenant-scoping
+# boilerplate that was previously repeated across ~10 resource blocks.
+# ``table``/``column``/``noun`` args are always static literals from this
+# module — never user input — so f-string interpolation carries no injection
+# risk.
+
+
+async def _get_scoped[T](
+    conn: asyncpg.Connection[Any],
+    *,
+    table: str,
+    id_: str,
+    account_id: str,
+    row: Callable[[asyncpg.Record], T],
+    noun: str,
+) -> T:
+    """``SELECT * FROM <table> WHERE id=$1 AND account_id=$2`` — raise NotFound on miss."""
+    rec = await conn.fetchrow(
+        f"SELECT * FROM {table} WHERE id = $1 AND account_id = $2",
+        id_,
+        account_id,
+    )
+    if rec is None:
+        raise NotFoundError(f"{noun} {id_} not found", detail={"id": id_})
+    return row(rec)
+
+
+async def _list_scoped[T](
+    conn: asyncpg.Connection[Any],
+    *,
+    table: str,
+    account_id: str,
+    row: Callable[[asyncpg.Record], T],
+    limit: int = 50,
+    after: str | None = None,
+    filters: list[tuple[str, Any]] | None = None,
+) -> list[T]:
+    """Keyset-paginated SELECT scoped by ``account_id`` + ``archived_at IS NULL``.
+
+    ``filters`` is a list of ``(column, value)`` equality predicates;
+    entries whose ``value`` is ``None`` are skipped (mirrors the per-arg
+    ``if x is not None`` guards in the originals).  ``column`` names are
+    static literals from this module — never user input."""
+    args: list[Any] = [account_id]
+    where = ["archived_at IS NULL", "account_id = $1"]
+    for column, value in filters or []:
+        if value is None:
+            continue
+        args.append(value)
+        where.append(f"{column} = ${len(args)}")
+    if after is not None:
+        args.append(after)
+        where.append(f"id < ${len(args)}")
+    args.append(limit)
+    sql = f"SELECT * FROM {table} WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
+    return [row(r) for r in await conn.fetch(sql, *args)]
+
+
+async def _archive_scoped(
+    conn: asyncpg.Connection[Any],
+    *,
+    table: str,
+    id_: str,
+    account_id: str,
+    noun: str,
+    bump_updated_at: bool = True,
+) -> asyncpg.Record:
+    """Soft-archive: ``SET archived_at = now()`` (and ``updated_at = now()``
+    unless ``bump_updated_at=False`` — the ``environments`` table has no
+    ``updated_at`` column, so its archive must skip the bump) scoped by
+    id + account_id + ``archived_at IS NULL``.  Raises NotFound on miss or
+    already-archived row.  Callers that need the model map the returned
+    Record themselves; callers that return ``None`` simply discard it."""
+    extra = ", updated_at = now()" if bump_updated_at else ""
+    rec = await conn.fetchrow(
+        f"UPDATE {table} SET archived_at = now(){extra} "
+        f"WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
+        id_,
+        account_id,
+    )
+    if rec is None:
+        raise NotFoundError(
+            f"{noun} {id_} not found or already archived",
+            detail={"id": id_},
+        )
+    return rec
+
+
+def _build_set_assignments(
+    fields: list[tuple[str, Any, str | None]],
+    args: list[Any],
+) -> list[str]:
+    """Build ``col = $N[::cast]`` SET fragments for the given fields, appending
+    each value to ``args`` (mutated in order).
+
+    ``cast`` is one of: ``None`` (no cast); ``"jsonb"`` (value gets
+    ``json.dumps`` + ``::jsonb`` suffix); or any other Postgres cast string
+    like ``"text[]"`` (value passed through, ``::cast`` suffix appended).
+
+    Caller is responsible for pre-filtering omitted fields (its own
+    ``None``-vs-``Ellipsis`` convention) and for any out-of-band SET
+    fragments (e.g. ``updated_at = now()``, which not every table has)."""
+    sets: list[str] = []
+    for column, value, pg_cast in fields:
+        args.append(json.dumps(value) if pg_cast == "jsonb" else value)
+        suffix = f"::{pg_cast}" if pg_cast is not None else ""
+        sets.append(f"{column} = ${len(args)}{suffix}")
+    return sets
+
+
 # ─── environments ─────────────────────────────────────────────────────────────
 
 
@@ -128,44 +241,40 @@ async def insert_environment(
 async def get_environment(
     conn: asyncpg.Connection[Any], env_id: str, *, account_id: str
 ) -> Environment:
-    row = await conn.fetchrow(
-        "SELECT * FROM environments WHERE id = $1 AND account_id = $2",
-        env_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="environments",
+        id_=env_id,
+        account_id=account_id,
+        row=_row_to_environment,
+        noun="environment",
     )
-    if row is None:
-        raise NotFoundError(f"environment {env_id} not found", detail={"id": env_id})
-    return _row_to_environment(row)
 
 
 async def list_environments(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Environment]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = (
-        f"SELECT * FROM environments WHERE {' AND '.join(where)} "
-        f"ORDER BY id DESC LIMIT ${len(args)}"
+    return await _list_scoped(
+        conn,
+        table="environments",
+        account_id=account_id,
+        row=_row_to_environment,
+        limit=limit,
+        after=after,
     )
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_environment(r) for r in rows]
 
 
 async def archive_environment(
     conn: asyncpg.Connection[Any], env_id: str, *, account_id: str
 ) -> None:
-    result = await conn.execute(
-        "UPDATE environments SET archived_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
-        env_id,
-        account_id,
+    await _archive_scoped(
+        conn,
+        table="environments",
+        id_=env_id,
+        account_id=account_id,
+        noun="environment",
+        bump_updated_at=False,
     )
-    if result == "UPDATE 0":
-        raise NotFoundError(f"environment {env_id} not found or already archived")
 
 
 async def update_environment(
@@ -183,15 +292,13 @@ async def update_environment(
     if current.archived_at is not None:
         raise ConflictError(f"environment {env_id} is archived", detail={"id": env_id})
 
-    sets: list[str] = []
     args: list[Any] = [env_id]
+    fields: list[tuple[str, Any, str | None]] = []
     if name is not None:
-        args.append(name)
-        sets.append(f"name = ${len(args)}")
+        fields.append(("name", name, None))
     if config is not None:
-        args.append(json.dumps(config.model_dump(exclude_none=True)))
-        sets.append(f"config = ${len(args)}::jsonb")
-
+        fields.append(("config", config.model_dump(exclude_none=True), "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return current
 
@@ -397,14 +504,14 @@ async def insert_agent(
 
 
 async def get_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str) -> Agent:
-    row = await conn.fetchrow(
-        "SELECT * FROM agents WHERE id = $1 AND account_id = $2",
-        agent_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="agents",
+        id_=agent_id,
+        account_id=account_id,
+        row=_row_to_agent,
+        noun="agent",
     )
-    if row is None:
-        raise NotFoundError(f"agent {agent_id} not found", detail={"id": agent_id})
-    return _row_to_agent(row)
 
 
 async def list_agents(
@@ -415,29 +522,25 @@ async def list_agents(
     after: str | None = None,
     name: str | None = None,
 ) -> list[Agent]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if name is not None:
-        args.append(name)
-        where.append(f"name = ${len(args)}")
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = f"SELECT * FROM agents WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_agent(r) for r in rows]
+    return await _list_scoped(
+        conn,
+        table="agents",
+        account_id=account_id,
+        row=_row_to_agent,
+        limit=limit,
+        after=after,
+        filters=[("name", name)],
+    )
 
 
 async def archive_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str) -> None:
-    result = await conn.execute(
-        "UPDATE agents SET archived_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
-        agent_id,
-        account_id,
+    await _archive_scoped(
+        conn,
+        table="agents",
+        id_=agent_id,
+        account_id=account_id,
+        noun="agent",
     )
-    if result == "UPDATE 0":
-        raise NotFoundError(f"agent {agent_id} not found or already archived")
 
 
 async def update_agent(
@@ -769,14 +872,14 @@ async def insert_session(
 async def get_session(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> Session:
-    row = await conn.fetchrow(
-        "SELECT * FROM sessions WHERE id = $1 AND account_id = $2",
-        session_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="sessions",
+        id_=session_id,
+        account_id=account_id,
+        row=_row_to_session,
+        noun="session",
     )
-    if row is None:
-        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
-    return _row_to_session(row)
 
 
 async def get_session_workspace_path(
@@ -875,23 +978,15 @@ async def list_sessions(
     limit: int = 50,
     after: str | None = None,
 ) -> list[Session]:
-    args: list[Any] = [account_id]
-    clauses: list[str] = ["archived_at IS NULL", "account_id = $1"]
-    if agent_id is not None:
-        args.append(agent_id)
-        clauses.append(f"agent_id = ${len(args)}")
-    if status is not None:
-        args.append(status)
-        clauses.append(f"status = ${len(args)}")
-    if after is not None:
-        args.append(after)
-        clauses.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = (
-        f"SELECT * FROM sessions WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ${len(args)}"
+    return await _list_scoped(
+        conn,
+        table="sessions",
+        account_id=account_id,
+        row=_row_to_session,
+        limit=limit,
+        after=after,
+        filters=[("agent_id", agent_id), ("status", status)],
     )
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_session(r) for r in rows]
 
 
 async def lock_active_session_for_update(
@@ -1096,22 +1191,17 @@ async def update_session(
             detail={"id": session_id},
         )
 
-    sets: list[str] = []
     args: list[Any] = [session_id]  # $1 = session_id
-
+    fields: list[tuple[str, Any, str | None]] = []
     if agent_id is not None:
-        args.append(agent_id)
-        sets.append(f"agent_id = ${len(args)}")
+        fields.append(("agent_id", agent_id, None))
     if agent_version is not ...:
-        args.append(agent_version)
-        sets.append(f"agent_version = ${len(args)}")
+        fields.append(("agent_version", agent_version, None))
     if title is not ...:
-        args.append(title)
-        sets.append(f"title = ${len(args)}")
+        fields.append(("title", title, None))
     if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
-
+        fields.append(("metadata", metadata, "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return current
 
@@ -1132,17 +1222,13 @@ async def update_session(
 async def archive_session(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> Session:
-    row = await conn.fetchrow(
-        "UPDATE sessions SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
-        session_id,
-        account_id,
+    row = await _archive_scoped(
+        conn,
+        table="sessions",
+        id_=session_id,
+        account_id=account_id,
+        noun="session",
     )
-    if row is None:
-        raise NotFoundError(
-            f"session {session_id} not found or already archived",
-            detail={"id": session_id},
-        )
     return _row_to_session(row)
 
 
@@ -2552,28 +2638,27 @@ async def insert_vault(
 
 
 async def get_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_id: str) -> Vault:
-    row = await conn.fetchrow(
-        "SELECT * FROM vaults WHERE id = $1 AND account_id = $2",
-        vault_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="vaults",
+        id_=vault_id,
+        account_id=account_id,
+        row=_row_to_vault,
+        noun="vault",
     )
-    if row is None:
-        raise NotFoundError(f"vault {vault_id} not found", detail={"id": vault_id})
-    return _row_to_vault(row)
 
 
 async def list_vaults(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Vault]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = f"SELECT * FROM vaults WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_vault(r) for r in rows]
+    return await _list_scoped(
+        conn,
+        table="vaults",
+        account_id=account_id,
+        row=_row_to_vault,
+        limit=limit,
+        after=after,
+    )
 
 
 async def update_vault(
@@ -2599,14 +2684,13 @@ async def update_vault(
             detail={"id": vault_id},
         )
 
-    sets: list[str] = []
     args: list[Any] = [vault_id]
+    fields: list[tuple[str, Any, str | None]] = []
     if display_name is not None:
-        args.append(display_name)
-        sets.append(f"display_name = ${len(args)}")
+        fields.append(("display_name", display_name, None))
     if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
+        fields.append(("metadata", metadata, "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return current
     sets.append("updated_at = now()")
@@ -3172,39 +3256,37 @@ async def insert_skill(
 
 
 async def get_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id: str) -> Skill:
-    row = await conn.fetchrow(
-        "SELECT * FROM skills WHERE id = $1 AND account_id = $2",
-        skill_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="skills",
+        id_=skill_id,
+        account_id=account_id,
+        row=_row_to_skill,
+        noun="skill",
     )
-    if row is None:
-        raise NotFoundError(f"skill {skill_id} not found", detail={"id": skill_id})
-    return _row_to_skill(row)
 
 
 async def list_skills(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[Skill]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = f"SELECT * FROM skills WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_skill(r) for r in rows]
+    return await _list_scoped(
+        conn,
+        table="skills",
+        account_id=account_id,
+        row=_row_to_skill,
+        limit=limit,
+        after=after,
+    )
 
 
 async def archive_skill(conn: asyncpg.Connection[Any], skill_id: str, *, account_id: str) -> None:
-    result = await conn.execute(
-        "UPDATE skills SET archived_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2",
-        skill_id,
-        account_id,
+    await _archive_scoped(
+        conn,
+        table="skills",
+        id_=skill_id,
+        account_id=account_id,
+        noun="skill",
     )
-    if result == "UPDATE 0":
-        raise NotFoundError(f"skill {skill_id} not found or already archived")
 
 
 async def insert_skill_version(
@@ -4336,34 +4418,27 @@ async def insert_session_template(
 async def get_session_template(
     conn: asyncpg.Connection[Any], template_id: str, *, account_id: str
 ) -> SessionTemplate:
-    row = await conn.fetchrow(
-        "SELECT * FROM session_templates WHERE id = $1 AND account_id = $2",
-        template_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="session_templates",
+        id_=template_id,
+        account_id=account_id,
+        row=_row_to_session_template,
+        noun="session template",
     )
-    if row is None:
-        raise NotFoundError(
-            f"session template {template_id} not found",
-            detail={"id": template_id},
-        )
-    return _row_to_session_template(row)
 
 
 async def list_session_templates(
     conn: asyncpg.Connection[Any], *, account_id: str, limit: int = 50, after: str | None = None
 ) -> list[SessionTemplate]:
-    args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = (
-        f"SELECT * FROM session_templates WHERE {' AND '.join(where)} "
-        f"ORDER BY id DESC LIMIT ${len(args)}"
+    return await _list_scoped(
+        conn,
+        table="session_templates",
+        account_id=account_id,
+        row=_row_to_session_template,
+        limit=limit,
+        after=after,
     )
-    rows = await conn.fetch(sql, *args)
-    return [_row_to_session_template(r) for r in rows]
 
 
 async def update_session_template(
@@ -4394,29 +4469,23 @@ async def update_session_template(
             detail={"id": template_id},
         )
 
-    sets: list[str] = []
     args: list[Any] = [template_id]
+    fields: list[tuple[str, Any, str | None]] = []
     if name is not None:
-        args.append(name)
-        sets.append(f"name = ${len(args)}")
+        fields.append(("name", name, None))
     if agent_id is not None:
-        args.append(agent_id)
-        sets.append(f"agent_id = ${len(args)}")
+        fields.append(("agent_id", agent_id, None))
     if agent_version is not ...:
-        args.append(agent_version)
-        sets.append(f"agent_version = ${len(args)}")
+        fields.append(("agent_version", agent_version, None))
     if environment_id is not None:
-        args.append(environment_id)
-        sets.append(f"environment_id = ${len(args)}")
+        fields.append(("environment_id", environment_id, None))
     if vault_ids is not None:
-        args.append(vault_ids)
-        sets.append(f"vault_ids = ${len(args)}::text[]")
+        fields.append(("vault_ids", vault_ids, "text[]"))
     if memory_store_ids is not None:
-        args.append(memory_store_ids)
-        sets.append(f"memory_store_ids = ${len(args)}::text[]")
+        fields.append(("memory_store_ids", memory_store_ids, "text[]"))
     if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
+        fields.append(("metadata", metadata, "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return await get_session_template(conn, template_id, account_id=account_id)
     sets.append("updated_at = now()")
@@ -4455,17 +4524,13 @@ async def archive_session_template(
     working; new chat sessions on connections referencing this template
     will fail at the inbound handler.
     """
-    row = await conn.fetchrow(
-        "UPDATE session_templates SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
-        template_id,
-        account_id,
+    row = await _archive_scoped(
+        conn,
+        table="session_templates",
+        id_=template_id,
+        account_id=account_id,
+        noun="session template",
     )
-    if row is None:
-        raise NotFoundError(
-            f"session template {template_id} not found or already archived",
-            detail={"id": template_id},
-        )
     return _row_to_session_template(row)
 
 
@@ -4619,17 +4684,15 @@ async def update_memory_store(
     # shape).
     current = await get_memory_store(conn, store_id, allow_archived=False, account_id=account_id)
 
-    sets: list[str] = []
     args: list[Any] = [store_id]
+    fields: list[tuple[str, Any, str | None]] = []
     if name is not None:
-        args.append(name)
-        sets.append(f"name = ${len(args)}")
+        fields.append(("name", name, None))
     if description is not None:
-        args.append(description)
-        sets.append(f"description = ${len(args)}")
+        fields.append(("description", description, None))
     if metadata is not None:
-        args.append(json.dumps(metadata))
-        sets.append(f"metadata = ${len(args)}::jsonb")
+        fields.append(("metadata", metadata, "jsonb"))
+    sets = _build_set_assignments(fields, args)
     if not sets:
         return current
     sets.append("updated_at = now()")
@@ -4647,17 +4710,13 @@ async def update_memory_store(
 async def archive_memory_store(
     conn: asyncpg.Connection[Any], store_id: str, *, account_id: str
 ) -> MemoryStore:
-    row = await conn.fetchrow(
-        "UPDATE memory_stores SET archived_at = now(), updated_at = now() "
-        "WHERE id = $1 AND archived_at IS NULL AND account_id = $2 RETURNING *",
-        store_id,
-        account_id,
+    row = await _archive_scoped(
+        conn,
+        table="memory_stores",
+        id_=store_id,
+        account_id=account_id,
+        noun="memory store",
     )
-    if row is None:
-        raise NotFoundError(
-            f"memory store {store_id} not found or already archived",
-            detail={"id": store_id},
-        )
     return _row_to_memory_store(row)
 
 
