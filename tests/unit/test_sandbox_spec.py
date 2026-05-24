@@ -49,6 +49,78 @@ def _make_pool_with_conn() -> MagicMock:
     return pool
 
 
+async def test_session_clone_timeout_does_not_abort_sibling_clones() -> None:
+    """A per-session ``git clone --reference`` timeout (now bounded by
+    ``Settings.github_clone_session_timeout_seconds`` — issue #697)
+    surfaces as a ``GithubCloneError``. The per-repo ``except
+    GithubCloneError`` branch must drop the failed echo and continue
+    cloning siblings, logging one ``github_clone_failed`` lifecycle
+    event. Without this branch, a single timed-out clone would skip
+    every later attached repo on the session.
+    """
+    mock_proxy = MagicMock()
+    mock_proxy.start = AsyncMock()
+    mock_proxy.stop = AsyncMock()
+    mock_proxy.proxy_url = MagicMock(return_value="http://stub/proxy")
+
+    from aios.sandbox.github_clone import GithubCloneError
+
+    failed_echo = _make_echo("ghr_failed")
+    ok_echo = _make_echo("ghr_ok")
+
+    append_event_mock = AsyncMock()
+
+    with (
+        patch("aios.sandbox.spec.GitProxy", return_value=mock_proxy),
+        patch(
+            "aios.sandbox.spec.queries.list_session_github_repo_echoes",
+            AsyncMock(return_value=[failed_echo, ok_echo]),
+        ),
+        patch(
+            "aios.services.github_repositories.get_session_token",
+            AsyncMock(return_value="ghp_TEST"),
+        ),
+        patch(
+            "aios.sandbox.spec.ensure_cache_clone",
+            AsyncMock(return_value=Path("/tmp/cache")),
+        ),
+        patch(
+            "aios.sandbox.spec.ensure_session_working_tree",
+            AsyncMock(
+                side_effect=[
+                    GithubCloneError("git clone --reference timed out after 30s"),
+                    None,
+                ]
+            ),
+        ),
+        patch(
+            "aios.sandbox.spec.runtime.require_pool",
+            return_value=_make_pool_with_conn(),
+        ),
+        patch(
+            "aios.sandbox.spec.runtime.require_crypto_box",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "aios.sandbox.spec.sessions_service.append_event",
+            append_event_mock,
+        ),
+    ):
+        materialized, returned_proxy = await _materialize_github_clones(
+            "sess_x", account_id="acct_x"
+        )
+
+    assert [e.id for e in materialized] == [ok_echo.id]
+    assert returned_proxy is mock_proxy
+    append_event_mock.assert_awaited_once()
+    call_args = append_event_mock.await_args
+    payload = call_args.args[3] if len(call_args.args) >= 4 else call_args.kwargs["payload"]
+    assert payload["event"] == "github_clone_failed"
+    assert payload["resource_id"] == failed_echo.id
+    # Sibling clone still ran and succeeded; proxy stays alive for the caller.
+    mock_proxy.stop.assert_not_called()
+
+
 async def test_materialize_github_clones_stops_proxy_on_non_clone_error() -> None:
     """If ``ensure_session_working_tree`` raises a non-``GithubCloneError``
     (``OSError`` from a full disk during mkdir/rmtree;
