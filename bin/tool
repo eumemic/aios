@@ -71,16 +71,47 @@ Options:
 
 _REQUEST_TIMEOUT_S = 30.0
 
+# Well-known in-sandbox defaults so the CLI works even when
+# TOOL_BROKER_URL / TOOL_BROKER_SECRET aren't in the environment
+# (stale container reuse, bash scripts that strip env, etc.).
+# These match TOOL_BROKER_SOCKET_SANDBOX_PATH and TOOL_BROKER_SECRET_SANDBOX_PATH
+# in src/aios/sandbox/spec.py.
+_DEFAULT_BROKER_URL = "unix:///var/run/aios/tool-broker.sock"
+_DEFAULT_SECRET_PATH = "/var/run/aios/tool-broker-secret"
+
 
 # ── transport ─────────────────────────────────────────────────────────────────
 
 
-def _env(name: str) -> str:
-    val = os.environ.get(name)
-    if not val:
-        sys.stderr.write(f"tool: {name} is not set in the environment\n")
+def _resolve_broker_url() -> str:
+    val = os.environ.get("TOOL_BROKER_URL")
+    if val:
+        return val
+    return _DEFAULT_BROKER_URL
+
+
+def _resolve_broker_secret() -> str:
+    val = os.environ.get("TOOL_BROKER_SECRET")
+    if val:
+        return val
+    try:
+        with open(_DEFAULT_SECRET_PATH, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if content:
+            return content
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        sys.stderr.write(
+            f"tool: TOOL_BROKER_SECRET unset and could not read "
+            f"{_DEFAULT_SECRET_PATH}: {exc}\n"
+        )
         sys.exit(2)
-    return val
+    sys.stderr.write(
+        f"tool: TOOL_BROKER_SECRET is not set and no fallback at "
+        f"{_DEFAULT_SECRET_PATH}\n"
+    )
+    sys.exit(2)
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
@@ -134,8 +165,8 @@ def _request(method: str, path: str, body: dict | None = None) -> dict:
     Transports: ``http://...`` uses urllib over TCP; ``unix://...`` uses
     the ``_UnixHTTPConnection`` adapter. The secret is path-encoded.
     """
-    base = _env("TOOL_BROKER_URL").rstrip("/")
-    secret = _env("TOOL_BROKER_SECRET")
+    base = _resolve_broker_url().rstrip("/")
+    secret = _resolve_broker_secret()
     full_path = f"/v1/{urllib.parse.quote(secret)}{path}"
 
     parsed = urllib.parse.urlsplit(base)

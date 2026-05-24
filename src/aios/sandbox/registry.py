@@ -43,6 +43,7 @@ from aios.sandbox.setup import (
 from aios.sandbox.spec import (
     ProvisioningPlan,
     build_spec_from_session,
+    cleanup_session_secret_file,
     mount_snapshot_from_echoes,
 )
 
@@ -228,10 +229,18 @@ class SandboxRegistry:
         Idempotent: a missing entry is silently ignored. Called at every
         sandbox teardown site so the broker doesn't accumulate dangling
         secrets for sessions whose sandboxes are gone.
+
+        Also removes the per-session secret file written by the spec
+        builder when UDS transport is in use (issue #698). Reads the
+        socket path from settings; if no UDS is configured the cleanup
+        is a no-op.
         """
+        from aios.config import get_settings
         from aios.harness import runtime
 
         runtime.require_tool_broker().unregister_session(session_id)
+        settings = get_settings()
+        cleanup_session_secret_file(session_id, settings.tool_broker_socket_path)
 
     async def _destroy_quietly(self, handle: SandboxHandle, session_id: str) -> None:
         """Tear down the handle's sandbox and stop the session's proxy.

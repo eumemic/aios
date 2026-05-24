@@ -23,6 +23,7 @@ backend, or anything else is decided by the worker's selected backend.
 
 from __future__ import annotations
 
+import contextlib
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +65,23 @@ log = get_logger("aios.sandbox.spec")
 # location for ephemeral host runtime sockets so it doesn't collide
 # with any sandbox workspace path.
 TOOL_BROKER_SOCKET_SANDBOX_PATH = "/var/run/aios/tool-broker.sock"
+
+# Path inside the sandbox container where the per-session
+# TOOL_BROKER_SECRET is written and bind-mounted (read-only) when UDS
+# transport is in use. The in-sandbox ``bin/tool`` CLI reads this file
+# as a fallback when ``TOOL_BROKER_SECRET`` isn't in the environment.
+TOOL_BROKER_SECRET_SANDBOX_PATH = "/var/run/aios/tool-broker-secret"
+
+
+def cleanup_session_secret_file(session_id: str, tool_socket_host_path: Path | None) -> None:
+    """Best-effort removal of the per-session secret file written by
+    ``_assemble_plan`` when UDS transport is enabled. Idempotent — safe
+    to call when no file exists or when UDS was never configured."""
+    if tool_socket_host_path is None:
+        return
+    secret_path = tool_socket_host_path.parent / f"{session_id}.secret"
+    with contextlib.suppress(FileNotFoundError):
+        secret_path.unlink()
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +362,7 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
         # hand back a plan must clean up both on the way out, otherwise
         # state leaks for the worker's lifetime.
         tool_broker.unregister_session(session_id)
+        cleanup_session_secret_file(session_id, tool_socket_host_path)
         if git_proxy is not None:
             try:
                 await git_proxy.stop()
@@ -446,6 +465,23 @@ def _assemble_plan(
                 host_path=tool_socket_host_path,
                 sandbox_path=TOOL_BROKER_SOCKET_SANDBOX_PATH,
                 read_only=False,
+            )
+        )
+        # Write the per-session secret to a sibling file and bind-mount it
+        # read-only. The in-sandbox ``bin/tool`` CLI reads this file as a
+        # fallback when ``TOOL_BROKER_SECRET`` isn't in the environment
+        # (stale container reuse, bash scripts that strip env, etc. — see
+        # issue #698). 0o644 keeps the file world-readable inside the
+        # container while the host directory itself is typically only
+        # accessible to the worker user.
+        secret_host_path = tool_socket_host_path.parent / f"{session_id}.secret"
+        secret_host_path.write_text(tool_broker_secret)
+        secret_host_path.chmod(0o644)
+        extra_mounts.append(
+            Mount(
+                host_path=secret_host_path,
+                sandbox_path=TOOL_BROKER_SECRET_SANDBOX_PATH,
+                read_only=True,
             )
         )
 
