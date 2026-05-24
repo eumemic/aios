@@ -450,6 +450,58 @@ class HttpConnector:
             return None
         return dict(response.json())
 
+    async def emit_lifecycle(
+        self,
+        *,
+        connection_id: str,
+        event: str,
+        reason: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Append a ``kind=lifecycle`` event onto each session bound to
+        ``connection_id``.
+
+        Use for connection-broken signals the model needs to see in its
+        context (e.g. "whatsapp.connection.lost" with reason
+        "daemon_crashed" or "peer_logout") so it doesn't silently send
+        into the void.  Returns the appended-session-ids payload, or
+        ``None`` when the API returned a non-fatal 4xx (matching
+        :meth:`emit_inbound`'s drop-don't-raise stance).
+        """
+        client = self._require_client()
+        log.info(
+            "connector.lifecycle",
+            connector=self.connector,
+            connection_id=connection_id,
+            lifecycle_event=event,
+            reason=reason,
+        )
+        body: dict[str, Any] = {
+            "connection_id": connection_id,
+            "event": event,
+        }
+        if reason is not None:
+            body["reason"] = reason
+        if data is not None:
+            body["data"] = data
+        response = await client.get_async_httpx_client().post(
+            "/v1/connectors/runtime/lifecycle",
+            json=body,
+        )
+        if response.is_error:
+            sc = response.status_code
+            log.warning(
+                "connector.lifecycle.failed",
+                status_code=sc,
+                connection_id=connection_id,
+                lifecycle_event=event,
+                body=response.text[:2000],
+            )
+            if _is_fatal_inbound_status(sc):
+                response.raise_for_status()
+            return None
+        return dict(response.json())
+
     # ─── runner ──────────────────────────────────────────────────────
 
     async def run_until_stopped(self, *, install_signal_handlers: bool = True) -> None:

@@ -470,3 +470,41 @@ async def listen_for_session_interrupts(
         yield queue
     finally:
         conn.terminate()
+
+
+SCHEDULED_TASKS_DUE_CHANNEL = "aios_scheduled_tasks_due"
+
+
+@asynccontextmanager
+async def listen_for_scheduled_tasks_due(
+    db_url: str,
+) -> AsyncIterator[asyncio.Event]:
+    """Yield an :class:`asyncio.Event` that fires whenever the
+    ``session_scheduled_tasks`` NOTIFY trigger emits.
+
+    The scheduler doesn't care which row changed — it always recomputes
+    ``MIN(next_fire)`` on wake — so this listener collapses all incoming
+    notifications onto a single :class:`asyncio.Event`. The scheduler's
+    loop ``await``s ``asyncio.wait_for(event.wait(), timeout=...)``; the
+    timeout is the cold-path heartbeat for connection resilience.
+
+    The event is cleared inside this context manager before yielding, so
+    callers see a clean edge for each wake.
+    """
+    conn = await asyncpg.connect(normalize_dsn(db_url))
+    try:
+        event = asyncio.Event()
+
+        def _callback(
+            _conn: asyncpg.Connection[object],
+            _pid: int,
+            _channel: str,
+            _payload: str,
+        ) -> None:
+            # See ``listen_for_events`` for why this MUST be synchronous.
+            event.set()
+
+        await conn.add_listener(SCHEDULED_TASKS_DUE_CHANNEL, _callback)
+        yield event
+    finally:
+        conn.terminate()

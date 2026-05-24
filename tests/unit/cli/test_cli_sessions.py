@@ -15,6 +15,59 @@ from aios.cli.app import app
 runner = CliRunner()
 
 
+class TestTriggerSummary:
+    """The ``_trigger_summary`` helper that synthesizes the ``trigger`` cell
+    on ``aios scheduled-tasks list``."""
+
+    def test_wake_metadata_shapes_to_wake_reason(self) -> None:
+        from aios.cli.commands.sessions import _trigger_summary
+
+        row = {
+            "schedule": None,
+            "fire_at": "2026-05-23T15:00:00Z",
+            "metadata": {"kind": "wake", "reason": "check tesla"},
+        }
+        assert _trigger_summary(row) == "wake: check tesla"
+
+    def test_wake_metadata_without_reason(self) -> None:
+        from aios.cli.commands.sessions import _trigger_summary
+
+        row = {
+            "schedule": None,
+            "fire_at": "2026-05-23T15:00:00Z",
+            "metadata": {"kind": "wake"},
+        }
+        assert _trigger_summary(row) == "wake"
+
+    def test_cron_row(self) -> None:
+        from aios.cli.commands.sessions import _trigger_summary
+
+        row = {
+            "schedule": "*/5 * * * *",
+            "fire_at": None,
+            "metadata": {},
+        }
+        assert _trigger_summary(row) == "cron: */5 * * * *"
+
+    def test_raw_one_shot(self) -> None:
+        from aios.cli.commands.sessions import _trigger_summary
+
+        row = {
+            "schedule": None,
+            "fire_at": "2026-05-23T15:00:00Z",
+            "metadata": {},
+        }
+        assert _trigger_summary(row) == "once @ 2026-05-23T15:00:00Z"
+
+    def test_missing_metadata_dict(self) -> None:
+        from aios.cli.commands.sessions import _trigger_summary
+
+        # ``metadata`` may be ``None`` or absent on legacy rows; handle without
+        # raising.
+        row = {"schedule": "0 9 * * *", "fire_at": None}
+        assert _trigger_summary(row) == "cron: 0 9 * * *"
+
+
 def test_delete_refuses_without_yes_and_makes_no_request(mocked_cli):
     result = runner.invoke(app, ["sessions", "delete", "sess_1"])
     assert result.exit_code == 2

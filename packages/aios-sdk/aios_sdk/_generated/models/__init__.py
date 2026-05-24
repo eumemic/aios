@@ -33,6 +33,7 @@ from .connection_create import ConnectionCreate
 from .connection_create_metadata import ConnectionCreateMetadata
 from .connection_create_secrets_type_0 import ConnectionCreateSecretsType0
 from .connection_metadata import ConnectionMetadata
+from .connection_reparent import ConnectionReparent
 from .connection_set_secrets import ConnectionSetSecrets
 from .connection_set_secrets_secrets import ConnectionSetSecretsSecrets
 from .connector_inbound_response import ConnectorInboundResponse
@@ -75,6 +76,7 @@ from .list_response_memory_store import ListResponseMemoryStore
 from .list_response_memory_version import ListResponseMemoryVersion
 from .list_response_recent_chat import ListResponseRecentChat
 from .list_response_runtime_token import ListResponseRuntimeToken
+from .list_response_scheduled_task_echo import ListResponseScheduledTaskEcho
 from .list_response_session import ListResponseSession
 from .list_response_session_template import ListResponseSessionTemplate
 from .list_response_skill import ListResponseSkill
@@ -114,7 +116,12 @@ from .mint_account_request import MintAccountRequest
 from .mint_account_response import MintAccountResponse
 from .mint_key_request import MintKeyRequest
 from .mint_key_response import MintKeyResponse
+from .post_connector_runtime_lifecycle_response_post_connector_runtime_lifecycle import (
+    PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle,
+)
 from .recent_chat import RecentChat
+from .runtime_lifecycle_request import RuntimeLifecycleRequest
+from .runtime_lifecycle_request_data_type_0 import RuntimeLifecycleRequestDataType0
 from .runtime_management_call_result_request import RuntimeManagementCallResultRequest
 from .runtime_token import RuntimeToken
 from .runtime_token_issue import RuntimeTokenIssue
@@ -123,6 +130,15 @@ from .runtime_tool_result_request import RuntimeToolResultRequest
 from .runtime_tool_result_request_content_type_1_item import (
     RuntimeToolResultRequestContentType1Item,
 )
+from .scheduled_task_create import ScheduledTaskCreate
+from .scheduled_task_create_metadata import ScheduledTaskCreateMetadata
+from .scheduled_task_echo import ScheduledTaskEcho
+from .scheduled_task_echo_last_fire_status_type_0 import (
+    ScheduledTaskEchoLastFireStatusType0,
+)
+from .scheduled_task_echo_metadata import ScheduledTaskEchoMetadata
+from .scheduled_task_update import ScheduledTaskUpdate
+from .scheduled_task_update_metadata_type_0 import ScheduledTaskUpdateMetadataType0
 from .session import Session
 from .session_clone_request import SessionCloneRequest
 from .session_create import SessionCreate
@@ -192,6 +208,14 @@ from .vault_update_metadata_type_0 import VaultUpdateMetadataType0
 from .wait_response import WaitResponse
 from .wait_response_session_status import WaitResponseSessionStatus
 from .wait_response_session_stop_reason_type_0 import WaitResponseSessionStopReasonType0
+from .whatsapp_confirm_pairing_request import WhatsappConfirmPairingRequest
+from .whatsapp_confirm_pairing_response import WhatsappConfirmPairingResponse
+from .whatsapp_confirm_pairing_response_status import (
+    WhatsappConfirmPairingResponseStatus,
+)
+from .whatsapp_start_pairing_request import WhatsappStartPairingRequest
+from .whatsapp_start_pairing_response import WhatsappStartPairingResponse
+from .whatsapp_unpair_request import WhatsappUnpairRequest
 
 __all__ = (
     "Account",
@@ -227,6 +251,7 @@ __all__ = (
     "ConnectionCreateMetadata",
     "ConnectionCreateSecretsType0",
     "ConnectionMetadata",
+    "ConnectionReparent",
     "ConnectionSetSecrets",
     "ConnectionSetSecretsSecrets",
     "ConnectorInboundResponse",
@@ -267,6 +292,7 @@ __all__ = (
     "ListResponseMemoryVersion",
     "ListResponseRecentChat",
     "ListResponseRuntimeToken",
+    "ListResponseScheduledTaskEcho",
     "ListResponseSession",
     "ListResponseSessionTemplate",
     "ListResponseSkill",
@@ -304,13 +330,23 @@ __all__ = (
     "MintAccountResponse",
     "MintKeyRequest",
     "MintKeyResponse",
+    "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "RecentChat",
+    "RuntimeLifecycleRequest",
+    "RuntimeLifecycleRequestDataType0",
     "RuntimeManagementCallResultRequest",
     "RuntimeToken",
     "RuntimeTokenIssue",
     "RuntimeTokenIssued",
     "RuntimeToolResultRequest",
     "RuntimeToolResultRequestContentType1Item",
+    "ScheduledTaskCreate",
+    "ScheduledTaskCreateMetadata",
+    "ScheduledTaskEcho",
+    "ScheduledTaskEchoLastFireStatusType0",
+    "ScheduledTaskEchoMetadata",
+    "ScheduledTaskUpdate",
+    "ScheduledTaskUpdateMetadataType0",
     "Session",
     "SessionCloneRequest",
     "SessionCreate",
@@ -380,4 +416,10 @@ __all__ = (
     "WaitResponse",
     "WaitResponseSessionStatus",
     "WaitResponseSessionStopReasonType0",
+    "WhatsappConfirmPairingRequest",
+    "WhatsappConfirmPairingResponse",
+    "WhatsappConfirmPairingResponseStatus",
+    "WhatsappStartPairingRequest",
+    "WhatsappStartPairingResponse",
+    "WhatsappUnpairRequest",
 )

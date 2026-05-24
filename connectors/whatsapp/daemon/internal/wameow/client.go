@@ -1,0 +1,205 @@
+// Package wameow wraps the whatsmeow client + sqlstore lifecycle and
+// translates whatsmeow events into wire-protocol notifications via the
+// daemon's RPC broadcast surface.  The handler-facing API is
+// SendMessage (matches handler.SendMessageFn); event delivery flows
+// the other way via Notifier.Broadcast.
+package wameow
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
+
+	// modernc.org/sqlite is a pure-Go SQLite driver so the daemon
+	// compiles without CGo.  Registered under the driver name "sqlite".
+	_ "modernc.org/sqlite"
+)
+
+// Client wraps a whatsmeow.Client + its persistent sqlstore.  One per
+// paired phone; created in NewClient, owns its lifecycle until Close.
+//
+// wa is held behind an atomic.Pointer so Unpair can swap in a fresh
+// whatsmeow.Client (built from a new Device) after a successful Logout
+// without racing concurrent reads from RPC handlers.  whatsmeow marks
+// the Device as permanently Deleted on Logout and every subsequent
+// operation on it errors with ErrDeviceDeleted ("invalid use of
+// deleted device") — the swap is what lets a re-pair work in the same
+// daemon process.
+type Client struct {
+	wa       atomic.Pointer[whatsmeow.Client]
+	store    *sqlstore.Container
+	msgs     *MessageStore
+	mediaDir string
+	notify   Notifier
+	log      *slog.Logger
+	pair     pairing
+	// lifetimeCtx is the daemon-lifetime context (set by NewClient
+	// from main's signal-notify ctx).  Used as the background
+	// context for in-event-handler ops like media download and
+	// inbound msgstore writes, so they cancel on daemon shutdown
+	// instead of running against a torn-down store.
+	lifetimeCtx context.Context
+	// unread tracks per-chat inbound message ids the peer is waiting
+	// on a read receipt for.  Populated in recordInbound; drained
+	// in sendOne after a successful send so the bot's reply
+	// implicitly marks the prior context as read (Signal-shape
+	// receipts-after-emit).  Each entry stores (msg_id, sender_jid)
+	// since whatsmeow's MarkRead needs both.
+	unreadMu sync.Mutex
+	unread   map[string][]unreadKey
+}
+
+type unreadKey struct {
+	id     string
+	sender string
+}
+
+// NewClient opens the sqlstore at <storeDir>/store.db, picks the first
+// device (or creates one), and wires the event handler to Notifier.
+// Does NOT initiate a WhatsApp connection — call Connect() for that.
+func NewClient(
+	ctx context.Context,
+	storeDir string,
+	notify Notifier,
+	log *slog.Logger,
+) (*Client, error) {
+	dbPath := filepath.Join(storeDir, "store.db")
+	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)", dbPath)
+	container, err := sqlstore.New(ctx, "sqlite", dsn, newWaLogger(log, "db"))
+	if err != nil {
+		return nil, fmt.Errorf("open sqlstore at %q: %w", dbPath, err)
+	}
+	device, err := container.GetFirstDevice(ctx)
+	if err != nil {
+		_ = container.Close()
+		return nil, fmt.Errorf("get first device: %w", err)
+	}
+	msgs, err := openMessageStore(storeDir)
+	if err != nil {
+		_ = container.Close()
+		return nil, err
+	}
+	wa := whatsmeow.NewClient(device, newWaLogger(log, "client"))
+	c := &Client{
+		store:       container,
+		msgs:        msgs,
+		mediaDir:    filepath.Join(storeDir, "media"),
+		notify:      notify,
+		log:         log,
+		lifetimeCtx: ctx,
+		unread:      make(map[string][]unreadKey),
+	}
+	c.wa.Store(wa)
+	wa.AddEventHandler(c.handleEvent)
+	return c, nil
+}
+
+func (c *Client) hasPairedDevice() bool {
+	return c.wa.Load().Store.ID != nil
+}
+
+// Connect attaches to WhatsApp if the device is paired.  Unpaired is
+// a no-op so the daemon keeps serving RPC until the pairing flow
+// provisions a device.
+func (c *Client) Connect(ctx context.Context) error {
+	if !c.hasPairedDevice() {
+		c.log.Warn("wameow.no_paired_device")
+		return nil
+	}
+	if err := c.wa.Load().Connect(); err != nil {
+		return fmt.Errorf("whatsmeow connect: %w", err)
+	}
+	return nil
+}
+
+// markInboundUnread appends a peer-sent message to the per-chat
+// unread queue so the next bot reply to that chat drains it via
+// MarkRead.  Called from recordInbound for any *events.Message with
+// is_self=false on a user-visible chat.  Lazy-inits the map for
+// callers that construct Client directly (tests).
+func (c *Client) markInboundUnread(chatJID, msgID, senderJID string) {
+	c.unreadMu.Lock()
+	defer c.unreadMu.Unlock()
+	if c.unread == nil {
+		c.unread = make(map[string][]unreadKey)
+	}
+	c.unread[chatJID] = append(c.unread[chatJID], unreadKey{id: msgID, sender: senderJID})
+}
+
+// drainUnread atomically pulls + clears the per-chat unread queue.
+// Returns nil when the chat has no pending receipts.  Caller is
+// responsible for the actual MarkRead RPC; drainUnread just hands
+// over ownership of the slice.
+func (c *Client) drainUnread(chatJID string) []unreadKey {
+	c.unreadMu.Lock()
+	defer c.unreadMu.Unlock()
+	if c.unread == nil {
+		return nil
+	}
+	keys, ok := c.unread[chatJID]
+	if !ok {
+		return nil
+	}
+	delete(c.unread, chatJID)
+	return keys
+}
+
+// recordOutbound stamps an outbound message into the message store
+// so the model can later react to / edit / revoke its own sends by
+// id.  Best-effort: a store failure here is logged but doesn't fail
+// the send (the send already went through on the wire; failing the
+// RPC would push the model toward a retry that produces a duplicate
+// peer-visible message).  A later react/edit/delete on this id
+// returns ErrMessageNotFound — operators see the put_failed warning
+// and can diagnose; the model retries with the user's help if
+// needed.
+//
+// ``sentAtMs`` is the server-acknowledged send timestamp (from
+// ``SendResponse.Timestamp``), used by the Edit window guard at
+// :func:`Client.Edit` to refuse out-of-window edit attempts before
+// the protocol-level rejection.  ``text`` is the message body the
+// peer received, used to build the QuotedMessage stub when the model
+// later issues a reply with ``quoted_message_id``.
+//
+// Takes the `wa` that performed the send rather than re-loading
+// c.wa.  A concurrent unpair could otherwise swap c.wa between
+// sendOne returning and recordOutbound reading Store.ID, stamping
+// the row with the NEW identity instead of the one that actually
+// sent — breaking subsequent edit/revoke routing.
+func (c *Client) recordOutbound(
+	ctx context.Context,
+	wa *whatsmeow.Client,
+	msgID string,
+	chatJID types.JID,
+	sentAtMs int64,
+	text string,
+) {
+	ourID := wa.Store.ID
+	if ourID == nil {
+		// Shouldn't happen: wa is the client that just successfully
+		// sent, so its Store.ID was populated.  Defensive: skip the
+		// record rather than panic.
+		return
+	}
+	if err := c.msgs.Put(ctx, msgID, chatJID.String(), ourID.String(), true, sentAtMs, text); err != nil {
+		c.log.Warn("wameow.msgstore_put_failed", "id", msgID, "err", err)
+	}
+}
+
+// Close disconnects from WhatsApp and closes the sqlstore.
+func (c *Client) Close() {
+	c.wa.Load().Disconnect()
+	if err := c.msgs.Close(); err != nil {
+		c.log.Warn("wameow.msgstore_close_error", "err", err)
+	}
+	if err := c.store.Close(); err != nil {
+		c.log.Warn("wameow.store_close_error", "err", err)
+	}
+}

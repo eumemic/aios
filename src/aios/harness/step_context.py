@@ -52,19 +52,21 @@ if TYPE_CHECKING:
     from aios.models.skills import SkillVersion
 
 
-# Generic affordance prose explaining the in-sandbox ``mcp`` CLI. Rendered
+# Generic affordance prose explaining the in-sandbox ``tool`` CLI. Rendered
 # into the system prompt whenever the agent has at least one
 # ``always_allow`` MCP toolset entry. Worded in stable runtime terms — no
 # dev-world references — so it remains agent-actionable across releases.
+# ``<method>`` is used as the placeholder for the MCP method name so the
+# binary name (``tool``) and the meta-variable don't collide visually.
 _MCP_CLI_HINT = (
-    "## Sandbox MCP CLI\n\n"
+    "## Sandbox tool CLI\n\n"
     "Permitted MCP tools are also callable from inside the sandbox via the "
-    "`mcp` binary, so you can invoke them programmatically from `bash` "
+    "`tool` binary, so you can invoke them programmatically from `bash` "
     "without paying an inference cycle per call:\n\n"
-    "    mcp                          list available MCP servers\n"
-    "    mcp <server>                 list tools on a server\n"
-    "    mcp <server> <tool> --help   show description + JSON schema\n"
-    "    mcp <server> <tool> '{...}'  invoke with JSON arguments\n\n"
+    "    tool                              list reachable tools (built-ins + MCP servers)\n"
+    "    tool <server>                     list methods on a server\n"
+    "    tool <server> <method> --help     show description + JSON schema\n"
+    "    tool <server> <method> '{...}'    invoke with JSON arguments\n\n"
     "Use the CLI when you want scriptable invocation (composition with `jq`, "
     "`xargs`, redirection, scheduled wakes). The model-tool invocation path "
     "remains available for the same tools."

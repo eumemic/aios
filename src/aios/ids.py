@@ -46,6 +46,7 @@ FILE: Final = "file"
 MANAGEMENT_CALL: Final = "mgmt"
 ACCOUNT: Final = "acc"
 ACCOUNT_KEY: Final = "acckey"
+SCHEDULED_TASK: Final = "sched"
 
 _PREFIXES: Final = frozenset(
     {
@@ -69,6 +70,7 @@ _PREFIXES: Final = frozenset(
         MANAGEMENT_CALL,
         ACCOUNT,
         ACCOUNT_KEY,
+        SCHEDULED_TASK,
     }
 )
 

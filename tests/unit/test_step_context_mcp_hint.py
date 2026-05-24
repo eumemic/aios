@@ -1,15 +1,19 @@
-"""Tests for the ``mcp`` CLI system-prompt hint predicate.
+"""Tests for the ``tool`` CLI system-prompt hint.
 
 The hint is rendered into the system prompt whenever the agent has at
 least one ``always_allow`` MCP toolset entry. Emitting it for an agent
 whose toolset has only ``always_ask`` policies would lie to the model
 (every CLI call would 403), so the predicate has to walk both
 ``default_config`` and per-tool ``configs`` overrides.
+
+Wording assertions (issue #675) pin the binary name and INVOKE form so
+the prose can't drift from the parser again — the original bug was a
+``--json`` flag mentioned in the help text that the CLI never accepted.
 """
 
 from __future__ import annotations
 
-from aios.harness.step_context import _has_always_allow_mcp_tool
+from aios.harness.step_context import _MCP_CLI_HINT, _has_always_allow_mcp_tool
 from aios.models.agents import (
     McpPermissionPolicy,
     McpToolConfig,
@@ -77,3 +81,37 @@ class TestHasAlwaysAllowMcpTool:
             ],
         )
         assert _has_always_allow_mcp_tool([spec]) is False
+
+
+class TestMcpCliHintWording:
+    """Pinned wording for the in-sandbox CLI hint (issue #675).
+
+    The hint went stale twice already: ``--json`` was dropped from the
+    binary in commit f8aefa3 and the binary was renamed ``mcp`` →
+    ``tool`` in commit 57a0747, but this prose wasn't updated either
+    time. These assertions lock the binary name and INVOKE form so the
+    same drift can't recur silently.
+    """
+
+    def test_hint_names_tool_binary_not_legacy_mcp(self) -> None:
+        # The binary is invoked as ``tool`` post-rename.
+        assert "`tool`" in _MCP_CLI_HINT
+        # And the legacy ``mcp`` binary name must not reappear as a
+        # callable. Match the backticked form to avoid false positives
+        # on prose like "MCP tools" / "MCP server".
+        assert "`mcp`" not in _MCP_CLI_HINT
+
+    def test_hint_shows_positional_invoke_form_without_json_flag(self) -> None:
+        # The original #675 symptom: prose advertising ``--json`` for a
+        # flag the parser never accepted. The positional form is the
+        # only thing the binary supports.
+        assert "tool <server> <method> '{...}'" in _MCP_CLI_HINT
+        assert "--json" not in _MCP_CLI_HINT
+
+    def test_listing_line_acknowledges_both_builtins_and_mcp_servers(self) -> None:
+        # ``bin/tool`` with no args prints both a ``Built-ins:`` and an
+        # ``MCP servers:`` section (see ``_list_surface``). Narrowing
+        # the hint's description back to MCP-only would surprise an
+        # agent that sees built-ins listed and has no anchor for them.
+        assert "built-ins" in _MCP_CLI_HINT
+        assert "MCP servers" in _MCP_CLI_HINT

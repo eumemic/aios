@@ -21,6 +21,8 @@ dependencies = [
     "sqlalchemy>=2.0",          # required by alembic even when used without the ORM
     "procrastinate==3.8.1",     # exact pin so the task/connector API stays stable
     "psycopg[binary]>=3.2",     # required by procrastinate; aios uses asyncpg directly
+    "croniter>=3.0",            # cron expression validation + next-fire computation (scheduled_tasks)
+    "dateparser>=1.2",          # natural-language time parsing for schedule_wake's `at` argument
     # Sandbox
     "aiodocker>=0.23",
     # Crypto + ids
@@ -65,6 +67,7 @@ dev = [
     "aios-echo-http",
     "aios-signal",
     "aios-telegram",
+    "aios-whatsapp",
 ]
 
 [project.scripts]
@@ -83,6 +86,7 @@ members = [
     "connectors/echo-http",
     "connectors/signal",
     "connectors/telegram",
+    "connectors/whatsapp",
     "packages/aios-connector-http",
     "packages/aios-sdk",
 ]
@@ -96,6 +100,7 @@ aios-echo-http = { workspace = true }
 aios-sdk = { workspace = true }
 aios-signal = { workspace = true }
 aios-telegram = { workspace = true }
+aios-whatsapp = { workspace = true }
 
 # ─── ruff ────────────────────────────────────────────────────────────────────
 [tool.ruff]
@@ -160,6 +165,10 @@ module = [
     "testcontainers.*",
     "asyncpg",
     "asyncpg.*",
+    "croniter",
+    "croniter.*",
+    "dateparser",
+    "dateparser.*",
 ]
 ignore_missing_imports = true
 

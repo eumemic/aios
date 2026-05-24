@@ -78,3 +78,102 @@ def test_workspace_root_default_is_absolute(
 
     s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
     assert s.workspace_root.is_absolute()
+
+
+def test_github_clone_session_timeout_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-session ``git clone --reference --dissociate`` budget defaults to 30s.
+
+    Must be small enough that the harness step timeout (300s) is never the
+    instrument that fires on a hung clone — see issue #697.
+    """
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.delenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", raising=False)
+
+    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    assert s.github_clone_session_timeout_seconds == 30.0
+
+
+def test_github_clone_cache_timeout_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bare-cache clone/fetch budget defaults to 300s — cold-case clones
+    of large repos can legitimately take minutes, and the cache lives
+    off the per-session critical path."""
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.delenv("AIOS_GITHUB_CLONE_CACHE_TIMEOUT_SECONDS", raising=False)
+
+    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    assert s.github_clone_cache_timeout_seconds == 300.0
+
+
+def test_github_clone_session_timeout_below_step_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of issue #697: the per-session clone budget must
+    fit strictly inside the harness step budget so a hung clone doesn't
+    burn the full 5-minute turn.
+    """
+    from aios.config import Settings
+    from aios.harness.loop import _JOB_TIMEOUT_S
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.delenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", raising=False)
+
+    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    assert s.github_clone_session_timeout_seconds < _JOB_TIMEOUT_S
+
+
+def test_github_clone_session_timeout_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS`` overrides the default."""
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.setenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", "7")
+
+    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    assert s.github_clone_session_timeout_seconds == 7.0
+
+
+def test_github_clone_session_timeout_rejects_above_step_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-session clone budget >= the harness step budget would silently
+    defeat issue #697's fix (a hung clone would still burn a whole user
+    turn before the step-level cap fires). Settings construction must
+    reject the misconfiguration loudly at startup.
+    """
+    from pydantic import ValidationError
+
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.setenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", "400")
+
+    with pytest.raises(ValidationError, match="must be strictly less than"):
+        Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+
+
+def test_github_clone_session_timeout_mirror_matches_harness_constant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The config-module mirror of ``_JOB_TIMEOUT_S`` must stay in sync with
+    the harness's own constant — otherwise the validator above starts
+    rejecting (or admitting) misconfigurations using a stale bound.
+    """
+    from aios.config import _HARNESS_STEP_TIMEOUT_S
+    from aios.harness.loop import _JOB_TIMEOUT_S
+
+    assert _HARNESS_STEP_TIMEOUT_S == _JOB_TIMEOUT_S

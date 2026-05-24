@@ -52,13 +52,65 @@ The filter at `scripts/chat_filter.py` formats one line per message-kind event (
 ```
 Monitor(
   description="worker errors",
-  command="tail -f <worktree>/.logs/worker.log | grep --line-buffered -E 'error|ERROR|exception|Exception|traceback|Traceback|RuntimeError|KeyError|FAILED'",
+  command="tail -f <worktree>/.logs/worker.log | grep --line-buffered -E 'error|ERROR|exception|Exception|traceback|Traceback|RuntimeError|KeyError|FAILED|step\\.\\w+_failed|HTTPStatusError|BadRequestError|raise|provider_error|mark_read_failed|msgstore_put_failed' | grep --line-buffered -v heartbeat",
   timeout_ms=3600000,
   persistent=True,
 )
 ```
 
 `--line-buffered` is essential — without it `grep` batches and event timing is lost.
+
+### Broad alternation: silence is not success
+
+The alternation above looks redundant on purpose.  A narrow filter that
+only matches `error|exception|Traceback` will MISS real failures whose log
+line uses none of those tokens — observed during the WhatsApp PR-5 smoke
+where a model-side LiteLLM 400 surfaced as `step.litellm_failed` and the
+narrow grep never fired, so the session sat silent and the operator
+correctly asked: *"hmm, no response... are you monitoring error
+channels?"*  Lesson: if the user reports nothing happening, the bug is
+probably in the filter, not the system.  Broaden the alternation and
+re-arm.  Specific signatures to include:
+
+* `step\.\w+_failed` — harness-level failures (litellm_failed,
+  tool_dispatch_failed, etc.)
+* `HTTPStatusError`, `BadRequestError`, `ProviderException` — LLM /
+  external-API rejections
+* `RuntimeError`, `KeyError`, `AttributeError`, `TypeError` — Python
+  internal failures the harness re-raises
+* connector-specific `*_failed` events (`mark_read_failed`,
+  `msgstore_put_failed`, `media_download_failed`)
+
+The `grep -v heartbeat` tail filter cuts noise from periodic
+`heartbeat.touch_failed` warnings on macOS (the worker can't `touch
+/var/run/aios-worker-alive` without root — benign).
+
+## CLI snapshots vs. SSE stream
+
+Use the SSE monitor for *live* narration; use the CLI for *static*
+look-back at past events.  The CLI's `--after-seq N` is an **exclusive
+lower bound** — events with `seq > N` only.
+
+```bash
+# Everything: --after-seq 0 (default) returns all events
+uv run aios sessions events <session_id>
+
+# Just messages (user / assistant / tool / tool_result)
+uv run aios sessions events <session_id> --kind message --all
+
+# Events created since N (exclusive); pass N-1 to include event N
+uv run aios sessions events <session_id> --after-seq <N-1>
+
+# JSON for programmatic inspection
+uv run aios -f json sessions events <session_id> --kind message --all
+```
+
+**Footgun:** if `aios sessions get` shows `last_event_seq=230` AND
+`aios sessions events --after-seq 230` returns nothing, it means seq=230
+is the actual tail and the session is quiet — *not* that the events
+weren't persisted.  Don't drop to `docker exec psql` to "investigate" —
+adjust the `--after-seq` argument.  (Observed during WhatsApp PR-5
+smoke.)
 
 ## Restart cadence
 
