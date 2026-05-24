@@ -1,6 +1,6 @@
 ---
 name: aios-smoke-setup
-description: This skill should be used when the user asks to "smoke test the connector", "DM the bot in this worktree", "set up a fresh aios runtime", "spin up aios", "prep a smoke session", "bring up aios on this branch", or otherwise wants to point a real Telegram, Signal, or WhatsApp bot at the code in the current worktree.  Bundles the pre-flight checks (bot getUpdates conflict, sibling worktree non-interference, free port), the isolated `.env` overrides (separate DB + port + ``AIOS_DEFAULT_MCP_PERMISSION_POLICY=always_allow``), the right migration command (``aios migrate``, not ``alembic upgrade head``), and the env/agent/connection/session/attach resource chain in one ``setup.sh`` so the first DM round-trips in seconds instead of forty-five minutes.  For WhatsApp specifically the pair flow differs (QR scan, no bot-token) — once this skill brings up the runtime, hand off to ``aios-whatsapp-pair`` to actually link the account, then ``aios-live-monitor`` for narration.
+description: This skill should be used when the user asks to "smoke test the connector", "DM the bot in this worktree", "set up a fresh aios runtime", "spin up aios", "prep a smoke session", "bring up aios on this branch", "bring up aios headless", "spin up aios without a bot", "no-connector runtime", or needs a running aios runtime to "verify a harness change" / repro a sweep/loop/context/tool_dispatch issue — whether pointed at a real Telegram/Signal/WhatsApp bot OR headless (api+worker only, driven via the CLI).  Bundles the pre-flight checks (bot getUpdates conflict, sibling worktree non-interference, free port), the isolated `.env` overrides (separate DB + port + ``AIOS_URL`` + absolute ``AIOS_WORKSPACE_ROOT`` + ``AIOS_DEFAULT_MCP_PERMISSION_POLICY=always_allow``), the right migration command (``aios migrate``, not ``alembic upgrade head``), the fresh-DB ``bootstrap_root`` step (a new DB 401s every call until an account key is minted), and the env/agent/(connection)/session resource chain in one ``setup.sh`` so the first DM (or first CLI round-trip) works in seconds instead of forty-five minutes.  Use ``--no-connector`` for harness verification; for WhatsApp the pair flow differs (QR scan, no bot-token) — hand off to ``aios-whatsapp-pair`` then ``aios-live-monitor``.
 ---
 
 # aios smoke session setup
@@ -24,7 +24,29 @@ Skip this skill if you're just running unit / e2e tests — `uv run pytest` is t
   [--system-prompt-file <path>]
 ```
 
-Reads source `.env` from `~/code/aios/.env`, writes a worktree-scoped `.env` with overrides, creates a fresh `aios_smoke_<branch_short>` Postgres database, runs migrations, starts api + worker, builds the env/agent/connection/session resource chain, and prints `session_id` + the focal-channel address on stdout.
+Reads source `.env` from `~/code/aios/.env`, writes a worktree-scoped `.env` with overrides, creates a fresh `aios_smoke_<branch_short>` Postgres database, runs migrations, bootstraps the root account, starts api + worker, builds the env/agent/connection/session resource chain, and prints `session_id` + the focal-channel address on stdout.
+
+## Headless bring-up (no connector — for `/verify` of harness changes)
+
+When verifying a change to the harness core (sweep / loop / context / tool_dispatch / completion), a connector is dead weight — you just need a running runtime you can drive via the CLI. Use `--no-connector`: it skips the bot-token requirement and the connector-readiness wait, and builds env+agent+session **without** the connection/attach steps.
+
+```bash
+.claude/skills/aios-smoke-setup/scripts/setup.sh --no-connector [--port <num>]
+# → prints a session_id; drive it with:
+uv run aios sessions send <sess_id> "run sleep 30"
+uv run aios sessions events <sess_id> --kind message
+```
+
+### When Claude is driving (not a human terminal)
+
+`setup.sh`'s api/worker are spawned with `nohup … &`. That survives a **human** running the script in a terminal, but **not** Claude running it via the Bash tool — the harness reaps the call's process group on completion (`nohup` only ignores SIGHUP). The runtime dies before you can drive it. Use the three-step `--phase` split so the processes are owned by `run_in_background` calls that persist across tool calls:
+
+1. `setup.sh --no-connector --phase prep` — writes `.env`, creates+migrates the DB, bootstraps the root account. No long-lived processes.
+2. Start **api and worker as two separate `run_in_background` Bash calls**:
+   `( set -a; source .env; set +a; uv run python -m aios api )` and `… -m aios worker`.
+3. `setup.sh --no-connector --phase fixtures` — builds env+agent+session once the runtime is up.
+
+Then SIGKILL/restart the worker (`kill -9 <pid>` → restart via `run_in_background`) to exercise crash-recovery paths, and read the event log with `aios sessions events` or `docker exec <pg> psql`. See `references/gotchas.md` #9–13 for the cold-start failure modes this sequence avoids.
 
 ## Pre-flight rules (every smoke run)
 
