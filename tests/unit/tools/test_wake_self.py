@@ -122,3 +122,24 @@ class TestWakeSelfRegistration:
         assert tool.transport == "both"
         assert tool.parameters_schema == WAKE_SELF_PARAMETERS_SCHEMA
         assert tool.description
+
+
+class TestWakeSelfToolSpec:
+    """Regression: ``wake_self`` must be declarable on an agent.
+
+    Without ``"wake_self"`` in ``BuiltinToolType``, Pydantic rejects
+    ``ToolSpec(type="wake_self")``, agents cannot list the tool, and
+    the broker's ``_find_builtin_spec`` 404s every CLI invocation —
+    defeating the entire purpose of the tool.
+    """
+
+    def test_toolspec_accepts_wake_self(self) -> None:
+        from aios.models.agents import ToolSpec
+
+        spec = ToolSpec(type="wake_self")
+        assert spec.type == "wake_self"
+
+    def test_wake_self_in_builtin_names(self) -> None:
+        from aios.models.agents import _BUILTIN_NAMES
+
+        assert "wake_self" in _BUILTIN_NAMES
