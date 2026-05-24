@@ -84,15 +84,28 @@ _DEFAULT_SECRET_PATH = "/var/run/aios/tool-broker-secret"
 
 
 def _resolve_broker_url() -> str:
-    val = os.environ.get("TOOL_BROKER_URL")
-    if val:
+    # Distinguish "unset" (fall back to UDS default) from "set but empty"
+    # (operator typo like ``--env TOOL_BROKER_URL=``). The latter would
+    # otherwise silently fall back and surface downstream as a confusing
+    # "broker unreachable" error.
+    if "TOOL_BROKER_URL" in os.environ:
+        val = os.environ["TOOL_BROKER_URL"]
+        if not val:
+            sys.stderr.write("tool: TOOL_BROKER_URL is set but empty\n")
+            sys.exit(2)
         return val
     return _DEFAULT_BROKER_URL
 
 
 def _resolve_broker_secret() -> str:
-    val = os.environ.get("TOOL_BROKER_SECRET")
-    if val:
+    # Same unset-vs-empty distinction as ``_resolve_broker_url``: an
+    # explicit empty value is an operator error, not a request to fall
+    # back to the on-disk secret file.
+    if "TOOL_BROKER_SECRET" in os.environ:
+        val = os.environ["TOOL_BROKER_SECRET"]
+        if not val:
+            sys.stderr.write("tool: TOOL_BROKER_SECRET is set but empty\n")
+            sys.exit(2)
         return val
     try:
         with open(_DEFAULT_SECRET_PATH, "r", encoding="utf-8") as f:

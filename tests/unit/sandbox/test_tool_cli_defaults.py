@@ -58,6 +58,23 @@ class TestResolveBrokerUrl:
         monkeypatch.delenv("TOOL_BROKER_URL", raising=False)
         assert tool_module._resolve_broker_url() == "unix:///var/run/aios/tool-broker.sock"
 
+    def test_url_errors_when_env_set_empty(
+        self,
+        tool_module: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Explicit-empty (e.g. ``--env TOOL_BROKER_URL=``) is an operator
+        # error, not a request to use the default — surface it clearly
+        # instead of producing a confusing "broker unreachable" downstream.
+        monkeypatch.setenv("TOOL_BROKER_URL", "")
+        with pytest.raises(SystemExit) as excinfo:
+            tool_module._resolve_broker_url()
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "TOOL_BROKER_URL" in err
+        assert "empty" in err
+
 
 class TestResolveBrokerSecret:
     def test_secret_uses_env_when_set(
@@ -106,6 +123,27 @@ class TestResolveBrokerSecret:
         with pytest.raises(SystemExit) as excinfo:
             tool_module._resolve_broker_secret()
         assert excinfo.value.code == 2
+
+    def test_secret_errors_when_env_set_empty(
+        self,
+        tool_module: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Explicit-empty is an operator error — don't silently fall back
+        # to the on-disk secret file (which might exist with stale data).
+        monkeypatch.setenv("TOOL_BROKER_SECRET", "")
+        # Even with a fallback file present, the empty env must error.
+        secret_file = tmp_path / "secret"
+        secret_file.write_text("fileSecret")
+        monkeypatch.setattr(tool_module, "_DEFAULT_SECRET_PATH", str(secret_file))
+        with pytest.raises(SystemExit) as excinfo:
+            tool_module._resolve_broker_secret()
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "TOOL_BROKER_SECRET" in err
+        assert "empty" in err
 
     def test_secret_env_wins_over_file(
         self,

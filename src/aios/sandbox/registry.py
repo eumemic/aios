@@ -426,6 +426,13 @@ class SandboxRegistry:
         """Tear down every sandbox + proxy. Called at worker shutdown."""
         handles = list(self._handles.values())
         proxies = list(self._git_proxies.values())
+        # Drop the per-session tool broker secret (and its on-disk
+        # ``.secret`` file when UDS transport is in use) for every active
+        # session, matching the cleanup path in ``release()``/``evict()``.
+        # Without this, ``.secret`` files leak on every clean worker
+        # shutdown.
+        for h in handles:
+            self._release_tool_broker_secret(h.session_id)
         self._handles.clear()
         self._last_used.clear()
         self._locks.clear()

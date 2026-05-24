@@ -109,7 +109,11 @@ class TestSpecToolBrokerSecretBindMount:
         secret_file = tmp_path / "sess_01TEST.secret"
         assert secret_file.exists()
         assert secret_file.read_text() == "thePerSessionSecret"
-        assert (secret_file.stat().st_mode & 0o777) == 0o644
+        # 0o600 (not 0o644): the bind-mounted secret file is read by root
+        # inside the container; no need to grant group/world read on host.
+        # Set via ``os.open`` mode bits so create + perms are one syscall
+        # (no umask-derived window where the file is briefly more open).
+        assert (secret_file.stat().st_mode & 0o777) == 0o600
 
     def test_bind_mounts_secret_file_when_uds_set(self, tmp_path: Path) -> None:
         sock_path = tmp_path / "broker.sock"

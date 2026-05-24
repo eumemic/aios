@@ -24,6 +24,7 @@ backend, or anything else is decided by the worker's selected backend.
 from __future__ import annotations
 
 import contextlib
+import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -471,12 +472,20 @@ def _assemble_plan(
         # read-only. The in-sandbox ``bin/tool`` CLI reads this file as a
         # fallback when ``TOOL_BROKER_SECRET`` isn't in the environment
         # (stale container reuse, bash scripts that strip env, etc. — see
-        # issue #698). 0o644 keeps the file world-readable inside the
-        # container while the host directory itself is typically only
-        # accessible to the worker user.
+        # issue #698).
+        #
+        # Use ``os.open`` with explicit 0o600 mode so the create + perms
+        # are applied in one syscall — a separate ``write_text`` +
+        # ``chmod`` would leave a brief umask-derived window where, under
+        # ``umask 0``, the file would be world-writable. 0o600 is tighter
+        # than the prior 0o644 since the bind-mounted file is read by
+        # root inside the sandbox; no need for group/world read on host.
         secret_host_path = tool_socket_host_path.parent / f"{session_id}.secret"
-        secret_host_path.write_text(tool_broker_secret)
-        secret_host_path.chmod(0o644)
+        fd = os.open(secret_host_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, tool_broker_secret.encode("utf-8"))
+        finally:
+            os.close(fd)
         extra_mounts.append(
             Mount(
                 host_path=secret_host_path,
