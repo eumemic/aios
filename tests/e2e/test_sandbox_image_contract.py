@@ -170,6 +170,14 @@ class TestRuntimeBehaviour:
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == "0", f"expected uid 0, got {r.stdout.strip()!r}"
 
+    def test_tool_broker_url_default_in_image_env(self, pulled_image: str) -> None:
+        """Dockerfile sets a UDS default so bash scripts reading
+        $TOOL_BROKER_URL directly don't fail when env injection lapses
+        (issue #698)."""
+        r = _docker_run(pulled_image, "bash", "-c", "echo $TOOL_BROKER_URL")
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "unix:///var/run/aios/tool-broker.sock"
+
 
 # -- workspace mount -----------------------------------------------------------
 
