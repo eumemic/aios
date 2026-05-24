@@ -34,6 +34,7 @@ from aios_sdk._generated.api.connections import (
     list_bound_chats,
     list_connections,
     list_recent_chats,
+    reparent_connection,
     set_connection_secrets,
     unbind_chat,
     unconfigure_connection,
@@ -42,6 +43,7 @@ from aios_sdk._generated.models.bind_chat_request import BindChatRequest
 from aios_sdk._generated.models.connection_attach import ConnectionAttach
 from aios_sdk._generated.models.connection_configure_per_chat import ConnectionConfigurePerChat
 from aios_sdk._generated.models.connection_create import ConnectionCreate
+from aios_sdk._generated.models.connection_reparent import ConnectionReparent
 from aios_sdk._generated.models.connection_set_secrets import ConnectionSetSecrets
 from aios_sdk._generated.models.connection_set_secrets_secrets import ConnectionSetSecretsSecrets
 from aios_sdk._generated.models.list_connections_mode_type_0 import ListConnectionsModeType0
@@ -342,6 +344,41 @@ def recent_chats(
             columns=("chat_id", "last_seen_at"),
             max_widths={"chat_id": 40},
         )
+
+    run_or_die(_run)
+
+
+@app.command(
+    "reparent",
+    help="Transfer a connection to a different account (root operator only).",
+)
+@covers("reparent_connection")
+def reparent(
+    ctx: typer.Context,
+    connection_id: str,
+    destination_account: Annotated[
+        str,
+        typer.Option(
+            "--destination-account",
+            help="Account id to move the connection to (e.g. acc_<ULID>).",
+        ),
+    ],
+) -> None:
+    """Move ``connection.account_id`` to ``--destination-account`` atomically.
+
+    Preserves ``connection.id`` so connector-daemon state keyed by it
+    (signal-cli's ``account.dat``, whatsmeow's ``sqlstore.db``, telegram
+    webhook config) carries over. Root operator only — non-root callers
+    get 403.
+
+    **Daemon-cache caveat (v1)**: this is a database-only reparent.
+    Connector daemons cache ``account_id`` in memory at attach time and
+    are NOT notified — restart the connector container after reparent.
+    """
+
+    def _run() -> None:
+        body = ConnectionReparent(destination_account_id=destination_account)
+        call_single(ctx, reparent_connection.sync_detailed, connection_id=connection_id, body=body)
 
     run_or_die(_run)
 
