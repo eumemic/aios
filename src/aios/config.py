@@ -130,6 +130,25 @@ class Settings(BaseSettings):
         "after the multipart body is drained so the client sees a clean "
         "response rather than a transport reset.",
     )
+    github_clone_session_timeout_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        description="Wall-clock bound on each per-session "
+        "``git clone --reference --dissociate`` (and the short admin ops "
+        "around it: ``remote set-url``, ``config user.*``). Must stay "
+        "well below the 300s harness step timeout — otherwise a hung "
+        "clone burns a whole user turn before the step-level cap fires. "
+        "See issue #697.",
+    )
+    github_clone_cache_timeout_seconds: float = Field(
+        default=300.0,
+        ge=1.0,
+        description="Wall-clock bound on the bare-cache clone/fetch "
+        "(``<workspace_root>/_github_repos/<sha256(url)>``). Cold-case "
+        "clones of large repos can legitimately take minutes; failures "
+        "here only delay the cache, they don't block the per-session "
+        "working tree past the per-session budget. See issue #697.",
+    )
 
     # ── worker ─────────────────────────────────────────────────────────────
     worker_concurrency: int = Field(

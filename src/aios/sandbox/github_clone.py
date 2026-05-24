@@ -34,6 +34,7 @@ import hashlib
 import shutil
 from pathlib import Path
 
+from aios.config import get_settings
 from aios.logging import get_logger
 from aios.sandbox._subprocess import run_subprocess_with_timeout
 from aios.sandbox.volumes import (
@@ -45,11 +46,6 @@ from aios.sandbox.volumes import (
 )
 
 log = get_logger("aios.sandbox.github_clone")
-
-# Bound on each ``git`` invocation. Generous because clone over a slow
-# link can legitimately take a while; tighter values cause spurious
-# failures on CI runners.
-_GIT_TIMEOUT_S = 300.0
 
 
 class GithubCloneError(Exception):
@@ -85,22 +81,32 @@ def _build_auth_url(repo_url: str, token: str) -> str:
 
 
 async def _run_git(
-    argv: list[str], *, cwd: Path | None = None, op: str = "git"
+    argv: list[str],
+    *,
+    timeout_s: float,
+    cwd: Path | None = None,
+    op: str = "git",
 ) -> tuple[int, bytes, bytes]:
     """Launch ``git`` with the timeout and error semantics we rely on.
 
     ``op`` is a short label used in the timeout error message — never
     the raw argv, which carries the auth-embedded URL on clone/fetch
     paths and would leak the token into logs and the session event log.
+
+    ``timeout_s`` is required — it's the per-call wall-clock bound this
+    helper threads into :func:`run_subprocess_with_timeout`. Callers
+    resolve it from ``Settings.github_clone_session_timeout_seconds`` or
+    ``Settings.github_clone_cache_timeout_seconds`` depending on which
+    budget the call sits inside (issue #697).
     """
     full_argv = ["git", *argv]
     if cwd is not None:
         full_argv = ["git", "-C", str(cwd), *argv]
     rc, stdout, stderr, timed_out = await run_subprocess_with_timeout(
-        full_argv, timeout_s=_GIT_TIMEOUT_S
+        full_argv, timeout_s=timeout_s
     )
     if timed_out:
-        raise GithubCloneError(f"git {op} timed out after {_GIT_TIMEOUT_S}s")
+        raise GithubCloneError(f"git {op} timed out after {timeout_s}s")
     return rc, stdout, stderr
 
 
@@ -127,6 +133,7 @@ async def ensure_cache_clone(repo_url: str, token: str) -> Path:
     initial clone fails — the caller (provisioner) logs a session.error
     and continues.
     """
+    settings = get_settings()
     github_repos_cache_root().mkdir(parents=True, exist_ok=True)
     url_key = url_hash(repo_url)
     cache_dir = github_repo_cache_dir(url_key)
@@ -159,6 +166,7 @@ async def ensure_cache_clone(repo_url: str, token: str) -> Path:
             rc, _stdout, stderr = await _run_git(
                 ["clone", "--bare", auth_url, str(cache_dir)],
                 op="clone --bare",
+                timeout_s=settings.github_clone_cache_timeout_seconds,
             )
             if rc != 0:
                 # Drop any partial dir so the next attempt re-clones from scratch.
@@ -168,8 +176,14 @@ async def ensure_cache_clone(repo_url: str, token: str) -> Path:
                     stderr, message=f"git clone --bare failed for {repo_url!r}", token=token
                 )
             # Disable gc on the bare cache so it can't reap objects that
-            # per-session working trees alternate against.
-            await _run_git(["config", "gc.auto", "0"], cwd=cache_dir, op="config gc.auto")
+            # per-session working trees alternate against. Short admin op —
+            # bounded by the session budget, not the cache one.
+            await _run_git(
+                ["config", "gc.auto", "0"],
+                cwd=cache_dir,
+                op="config gc.auto",
+                timeout_s=settings.github_clone_session_timeout_seconds,
+            )
             log.info(
                 "github_clone.cache_created",
                 repo_url=repo_url,
@@ -187,6 +201,7 @@ async def _fetch_cache(cache_dir: Path, auth_url: str, repo_url: str) -> None:
     swallowed — a stale cache still works for read; the cost of a fresh
     push from the per-session clone is the same either way.
     """
+    settings = get_settings()
     # Use --quiet and a one-shot URL override (-c remote.origin.url=...)
     # so we don't have to mutate the cache's stored config.
     rc, _stdout, stderr = await _run_git(
@@ -200,6 +215,7 @@ async def _fetch_cache(cache_dir: Path, auth_url: str, repo_url: str) -> None:
         ],
         cwd=cache_dir,
         op="fetch",
+        timeout_s=settings.github_clone_cache_timeout_seconds,
     )
     if rc != 0:
         log.warning(
@@ -238,6 +254,9 @@ async def ensure_session_working_tree(
     you are" error (#207).  Both ``None`` means "no identity
     configured" — pre-#207 v1 behavior, preserved.
     """
+    settings = get_settings()
+    session_timeout_s = settings.github_clone_session_timeout_seconds
+
     work_dir = session_repo_working_tree_dir(session_id, resource_id)
     session_repos_root(session_id).mkdir(parents=True, exist_ok=True)
 
@@ -246,7 +265,9 @@ async def ensure_session_working_tree(
 
     auth_url = _build_auth_url(repo_url, token)
     # `--dissociate` copies needed objects into the working clone so cache
-    # GC can't break it later. We trade disk for safety.
+    # GC can't break it later. We trade disk for safety. This is the
+    # load-bearing per-session budget call (#697): tight enough that a
+    # hung clone can't burn a whole user turn.
     rc, _stdout, stderr = await _run_git(
         [
             "clone",
@@ -257,6 +278,7 @@ async def ensure_session_working_tree(
             str(work_dir),
         ],
         op="clone --reference",
+        timeout_s=session_timeout_s,
     )
     if rc != 0:
         if work_dir.exists():
@@ -270,11 +292,12 @@ async def ensure_session_working_tree(
     # Replace the auth-embedded origin URL with the proxy URL. The bind
     # mount is about to expose this .git/config inside the sandbox; if we
     # left the auth URL in place, the agent could read the PAT via
-    # `cat .git/config` or `git remote -v`.
+    # `cat .git/config` or `git remote -v`. Short local op.
     rc, _stdout, stderr = await _run_git(
         ["remote", "set-url", "origin", proxy_url],
         cwd=work_dir,
         op="remote set-url",
+        timeout_s=session_timeout_s,
     )
     if rc != 0:
         if work_dir.exists():
@@ -289,7 +312,10 @@ async def ensure_session_working_tree(
         if value is None:
             continue
         rc, _stdout, stderr = await _run_git(
-            ["config", key, value], cwd=work_dir, op=f"config {key}"
+            ["config", key, value],
+            cwd=work_dir,
+            op=f"config {key}",
+            timeout_s=session_timeout_s,
         )
         if rc != 0:
             raise GithubCloneError(
