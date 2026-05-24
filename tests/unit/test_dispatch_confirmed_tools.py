@@ -99,9 +99,10 @@ class TestDispatchConfirmedTools:
         broke at the first assistant with non-empty tool_calls — A2's
         ``[Z]``.  The dispatch filter checked ``confirmed={X}`` against
         ``[Z]`` and returned ``[]``.  X is silently dropped; ghost-repair
-        eventually papers over with ``"No result was received"`` — a
-        misleading synthetic error, because the operator DID allow X;
-        only the dispatch was lost."""
+        eventually papers over with a synthetic "did not run" error (per
+        the two-branch recovery in ``sweep.find_and_repair_ghosts`` — see
+        #685), because the operator DID allow X; only the dispatch was
+        lost."""
         msg_events = [
             _assistant_with_tool_calls(["tc_X"]),  # older A1 with the confirmed tool
             SimpleNamespace(

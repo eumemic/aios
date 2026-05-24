@@ -84,6 +84,24 @@ GHOST_LIFECYCLE_SQL = """
        AND e.data->>'result' = 'allow'
 """
 
+# Dispatch-marker spans: pre-invoke ``tool_execute_start`` events keyed by
+# tool_call_id.  Scope by both session set and tcid set so the seq-scan
+# stays bounded without a new index — the candidate counts are typically
+# single-digit per sweep.  Drives the two-branch recovery synthesis in
+# :func:`find_and_repair_ghosts` (#685).  If profiling under load shows
+# this as a hot spot, add a partial expression index following migration
+# 0024's pattern:
+#   CREATE INDEX events_tool_execute_start_idx ON events ((data->>'tool_call_id'))
+#       WHERE kind = 'span' AND data->>'event' = 'tool_execute_start';
+GHOST_SPAN_START_SQL = """
+    SELECT DISTINCT e.session_id, e.data->>'tool_call_id' AS tool_call_id
+      FROM events e
+     WHERE e.session_id = ANY($1::text[])
+       AND e.kind = 'span'
+       AND e.data->>'event' = 'tool_execute_start'
+       AND e.data->>'tool_call_id' = ANY($2::text[])
+"""
+
 CANDIDATE_ROWS_SQL = """
     WITH session_max_reacting AS (
         SELECT session_id,
@@ -262,14 +280,54 @@ async def find_and_repair_ghosts(
         if _was_dispatched(name, tcid, confirmed, agent_tools):
             ghosts.append((sid, tcid, name))
 
+    # ``tool_execute_start`` span presence per (session, tcid) — drives the
+    # two-branch recovery message below (#685).  Tcids missing from this set
+    # never reached the lifecycle body, so the tool definitely did not run;
+    # tcids present may have executed and committed side effects.  Scope to
+    # the post-``_was_dispatched`` ghost set (not the wider candidate set) so
+    # the seq-scan touches only the tcids the per-ghost loop will actually
+    # consult.
+    started: set[tuple[str, str]] = set()
+    if ghosts:
+        ghost_sids = list({sid for sid, _, _ in ghosts})
+        ghost_tcids = list({tcid for _, tcid, _ in ghosts})
+        async with pool.acquire() as conn:
+            span_rows = await conn.fetch(GHOST_SPAN_START_SQL, ghost_sids, ghost_tcids)
+        started = {(r["session_id"], r["tool_call_id"]) for r in span_rows}
+
     # Per-ghost isolation; see ``wake_sessions_needing_inference`` below
     # for the rationale.
     repaired: list[tuple[str, str]] = []
     for sid, tcid, name in ghosts:
-        content = json.dumps(
-            {"error": "No result was received for this tool call."},
-            ensure_ascii=False,
-        )
+        # Don't lie: distinguish "never dispatched" (safe to retry) from
+        # "may have executed" (verify before retrying).  The previous
+        # single fabricated "No result was received" message double-fired
+        # non-idempotent tools (bash mutations, http_request POST,
+        # connector send) on the model's retry — see #685.
+        #
+        # The "may have completed" branch is conservatively over-pessimistic:
+        # it also fires for crashes/cancels in the window between the span
+        # commit and the actual side-effectful invoke (MCP auth resolve,
+        # parameter validation, ``asyncio.CancelledError`` arriving inside
+        # the span ``await``).  Those produce false "verify the outcome"
+        # advice but never the dangerous false "safe to retry" that this
+        # design eliminates.  Tighter classification would require a second
+        # marker written immediately before each tool's side-effectful call
+        # — deferred until the over-pessimism is shown to matter.
+        if (sid, tcid) in started:
+            branch = "may_have_completed"
+            error_text = (
+                "Tool dispatch was interrupted after execution began. "
+                "The tool may have completed and side effects may have "
+                "committed. Verify the outcome before retrying."
+            )
+        else:
+            branch = "did_not_run"
+            error_text = (
+                "Tool dispatch was lost before execution began; "
+                "the tool did not run. You may retry."
+            )
+        content = json.dumps({"error": error_text}, ensure_ascii=False)
         # Load each ghost's session account_id individually so the
         # cross-session sweeper (session_id=None) doesn't stamp empty
         # account_id onto repair events for real tenants.
@@ -301,7 +359,16 @@ async def find_and_repair_ghosts(
             )
             continue
         repaired.append((sid, tcid))
-        log.info("sweep.ghost_repaired", session_id=sid, tool_call_id=tcid, tool_name=name)
+        # ``branch`` is the operational signal of #685: ops can grep this
+        # log for ``branch=may_have_completed`` after a crash to triage
+        # which recoveries carry side-effect risk vs which are safe-retry.
+        log.info(
+            "sweep.ghost_repaired",
+            session_id=sid,
+            tool_call_id=tcid,
+            tool_name=name,
+            branch=branch,
+        )
 
     return repaired
 
