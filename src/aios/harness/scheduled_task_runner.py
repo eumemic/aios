@@ -5,9 +5,16 @@ the task by id, acquires the owning session's sandbox, runs the bash
 command, records the outcome, and auto-disables after consecutive
 failures cross the threshold.
 
-Does NOT append to the session's event log — the model is woken only by
-the bash script's explicit escalation (a separate code path, added in
-Phase 4: bash POSTs to the broker's ``sessions/messages`` endpoint).
+For one-shot rows (``fire_at IS NOT NULL``), the row is DELETED BEFORE
+the bash command runs — this gives at-most-once semantics: a worker
+crash between the delete and the curl loses the wake silently rather
+than risking a duplicate marker via stuck-recovery re-claim. Curl
+failures (broker unreachable, exit_code != 0) append a synthetic
+``[Scheduled wake failed: <reason>]`` user message and defer a wake so
+the agent has something to react to instead of an unexplained silence.
+
+For cron rows, the post-fire path records the outcome and auto-disables
+on consecutive failures (same as #636).
 """
 
 from __future__ import annotations
@@ -19,6 +26,8 @@ from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.scheduled_tasks import ScheduledTaskStatus
+from aios.services import sessions as sessions_service
+from aios.services.wake import defer_wake
 
 log = get_logger("aios.harness.scheduled_task_runner")
 
@@ -29,14 +38,18 @@ async def run_scheduled_task_step(task_id: str) -> None:
     """Run one fire of a scheduled task.
 
     Steps:
-      1. Load the task; exit silently if it was removed, disabled, or
-         had its owning session archived between claim and execute.
-      2. Acquire the session's sandbox (lazy provisioning via the
-         registry; reused across fires of the same session).
-      3. Run the command via the sandbox handle; classify outcome as
-         ``ok`` / ``error`` / ``timeout``.
-      4. Record the fire; auto-disable on the consecutive-failure
-         threshold.
+      1. Load the task; exit silently if it was removed, or had its
+         owning session archived between claim and execute. Disabled
+         rows for one-shot are DELETED (the skip path leaves no row
+         behind).
+      2. For one-shot rows: DELETE the row in its own transaction
+         BEFORE the bash runs. This gives at-most-once semantics — a
+         worker crash between delete and curl loses the wake instead
+         of risking duplicate fires via stuck recovery.
+      3. Acquire the session's sandbox and run the command.
+      4. For cron: record the fire; auto-disable on threshold.
+         For one-shot: on failure, append a synthetic wake-failure
+         message so the agent isn't left with unexplained silence.
     """
     pool = runtime.require_pool()
 
@@ -52,8 +65,11 @@ async def run_scheduled_task_step(task_id: str) -> None:
 
     if task.session_archived_at is not None:
         # Session was archived between tick-claim and fire-handler-execute.
-        # Archive is the lifecycle boundary: stop firing. Clear
-        # ``running_since`` so a future unarchive doesn't see a stuck row.
+        # Archive is the lifecycle boundary: stop firing. For one-shot
+        # rows we DELETE rather than record a skip — otherwise the row
+        # sits forever and would re-fire on unarchive with a semantically
+        # stale wake reason. For cron rows we record a skip so
+        # ``last_fire_status`` is observable; running_since gets cleared.
         log.info(
             "scheduled_task.skip_archived",
             task_id=task_id,
@@ -61,28 +77,53 @@ async def run_scheduled_task_step(task_id: str) -> None:
             name=task.name,
         )
         async with pool.acquire() as conn:
-            await queries.record_scheduled_task_fire(
-                conn,
-                task_id,
-                status="skipped",
-                consecutive_failures=task.consecutive_failures,
-                fired_at=datetime.now(UTC),
-            )
+            if task.fire_at is not None:
+                await queries.delete_scheduled_task_by_id(conn, task_id)
+            else:
+                await queries.record_scheduled_task_fire(
+                    conn,
+                    task_id,
+                    status="skipped",
+                    consecutive_failures=task.consecutive_failures,
+                    fired_at=datetime.now(UTC),
+                )
         return
 
     if not task.enabled:
-        # Disabled between claim and execute — exit silently. ``running_since``
-        # is cleared regardless so the row doesn't stay stuck.
+        # Disabled between claim and execute. One-shot: delete (the
+        # disabled-while-claimed row would otherwise sit forever — the
+        # claim filter would never re-claim it, but per-account cap and
+        # listing UX still see it). Cron: record skip so the disabled
+        # transition is observable in last_fire_status.
         log.debug("scheduled_task.skip_disabled", task_id=task_id)
         async with pool.acquire() as conn:
-            await queries.record_scheduled_task_fire(
-                conn,
-                task_id,
-                status="skipped",
-                consecutive_failures=task.consecutive_failures,
-                fired_at=datetime.now(UTC),
-            )
+            if task.fire_at is not None:
+                await queries.delete_scheduled_task_by_id(conn, task_id)
+            else:
+                await queries.record_scheduled_task_fire(
+                    conn,
+                    task_id,
+                    status="skipped",
+                    consecutive_failures=task.consecutive_failures,
+                    fired_at=datetime.now(UTC),
+                )
         return
+
+    # For one-shot rows, DELETE the row in its own transaction BEFORE the
+    # sandbox exec runs. This gives at-most-once: if the worker dies
+    # between this commit and the curl call, the wake is lost — but
+    # there's no chance of a duplicate marker landing via stuck-recovery
+    # re-claim 2h later. Loss is preferable to phantom duplicate user
+    # messages whose semantic intent is hours stale.
+    if task.fire_at is not None:
+        async with pool.acquire() as conn:
+            await queries.delete_scheduled_task_by_id(conn, task_id)
+        log.info(
+            "scheduled_task.one_shot_deleted",
+            task_id=task_id,
+            session_id=task.session_id,
+            name=task.name,
+        )
 
     # Only the actual-fire path needs the sandbox registry; the early-skip
     # paths above don't, so we resolve it here to keep the skip-only paths
@@ -91,6 +132,7 @@ async def run_scheduled_task_step(task_id: str) -> None:
 
     started_at = datetime.now(UTC)
     status: ScheduledTaskStatus
+    error_summary: str | None = None
     try:
         handle = await sandbox_registry.get_or_provision(task.session_id, pool=pool)
         # Alias the registry's run method to a local; calling the method
@@ -105,8 +147,16 @@ async def run_scheduled_task_step(task_id: str) -> None:
         )
         if result.timed_out:
             status = "timeout"
+            error_summary = f"command timed out after {task.timeout_seconds}s"
         elif result.exit_code != 0:
             status = "error"
+            # Surface a short stderr tail so the failure event in the
+            # session log carries actionable context.
+            tail = (result.stderr or "").strip().splitlines()
+            tail_text = " | ".join(tail[-3:])[:500] if tail else ""
+            error_summary = f"command exited {result.exit_code}" + (
+                f": {tail_text}" if tail_text else ""
+            )
         else:
             status = "ok"
         log.info(
@@ -117,7 +167,7 @@ async def run_scheduled_task_step(task_id: str) -> None:
             status=status,
             exit_code=result.exit_code,
         )
-    except Exception:
+    except Exception as e:
         log.exception(
             "scheduled_task.run_error",
             task_id=task_id,
@@ -125,25 +175,25 @@ async def run_scheduled_task_step(task_id: str) -> None:
             name=task.name,
         )
         status = "error"
+        error_summary = f"sandbox error: {type(e).__name__}: {e!s:.200}"
 
     new_failures = 0 if status == "ok" else task.consecutive_failures + 1
 
-    async with pool.acquire() as conn, conn.transaction():
-        if task.fire_at is not None:
-            # One-shot row — the marker event (delivered by the bash command,
-            # if it chose to escalate) is the receipt. The row's job is done;
-            # keeping it would let it fire again on the next tick because its
-            # ``next_fire`` (= ``fire_at``) stays in the past. Delete it. No
-            # ``record_scheduled_task_fire`` because the row is gone.
-            await queries.delete_scheduled_task_by_id(conn, task_id)
-            log.info(
-                "scheduled_task.one_shot_deleted",
-                task_id=task_id,
-                session_id=task.session_id,
-                name=task.name,
+    if task.fire_at is not None:
+        # One-shot row: the row was already deleted pre-fire. On failure,
+        # surface a synthetic user message so the agent isn't left with
+        # unexplained silence — the curl never delivered its marker, so
+        # nothing else explains why the scheduled wake didn't fire.
+        if status != "ok":
+            await _surface_one_shot_failure(
+                task.session_id,
+                task.account_id,
+                task.name,
                 status=status,
+                error_summary=error_summary,
             )
-        else:
+    else:
+        async with pool.acquire() as conn, conn.transaction():
             await queries.record_scheduled_task_fire(
                 conn,
                 task_id,
@@ -160,3 +210,39 @@ async def run_scheduled_task_step(task_id: str) -> None:
                     name=task.name,
                     consecutive_failures=new_failures,
                 )
+
+
+async def _surface_one_shot_failure(
+    session_id: str,
+    account_id: str,
+    name: str,
+    *,
+    status: ScheduledTaskStatus,
+    error_summary: str | None,
+) -> None:
+    """Append a session message + defer wake when a one-shot fire fails.
+
+    The bash command's job for a ``schedule_wake``-style one-shot is to
+    POST a user-role message to the broker. When that fails (broker
+    unreachable, sandbox error, command timeout), no marker reaches the
+    session log via the normal path and the agent has no way to know
+    what happened. Synthesizing a user message here closes the loop:
+    the model sees a deterministic failure event and can decide what to
+    do next.
+    """
+    pool = runtime.require_pool()
+    detail = error_summary or status
+    content = f"[Scheduled wake '{name}' failed to deliver: {detail}]"
+    try:
+        await sessions_service.append_user_message(pool, session_id, content, account_id=account_id)
+        await defer_wake(pool, session_id, cause="message", account_id=account_id)
+    except Exception:
+        # Best-effort: if we can't even append the failure event, log
+        # loudly so the operator notices. The agent will not see this
+        # particular wake's outcome.
+        log.exception(
+            "scheduled_task.surface_failure_failed",
+            session_id=session_id,
+            name=name,
+            status=status,
+        )

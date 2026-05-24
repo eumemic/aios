@@ -7028,6 +7028,26 @@ async def delete_scheduled_task_by_id(
     )
 
 
+async def release_scheduled_task_claim(
+    conn: asyncpg.Connection[Any],
+    task_id: str,
+) -> None:
+    """Compensating reset for a claim whose downstream defer/enqueue failed.
+
+    Clears ``running_since`` so the next scheduler cycle can re-claim the
+    row. For cron rows, ``next_fire`` was already advanced by
+    :func:`fetch_and_claim_due_scheduled_tasks` — the released row will
+    fire at the next scheduled slot, effectively skipping the current
+    slot whose defer failed (acceptable churn for a transient broker
+    error). For one-shot rows, ``next_fire = fire_at`` is still in the
+    past, so the row is re-claimed immediately.
+    """
+    await conn.execute(
+        "UPDATE session_scheduled_tasks SET running_since = NULL, updated_at = now() WHERE id = $1",
+        task_id,
+    )
+
+
 async def count_account_scheduled_tasks(
     conn: asyncpg.Connection[Any],
     *,

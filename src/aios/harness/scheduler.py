@@ -50,6 +50,13 @@ log = get_logger("aios.harness.scheduler")
 #     within this cap without needing trigger logic on that table.
 _HEARTBEAT_SECONDS = 3600.0
 
+# Backoff between LISTEN-connection reconnect attempts when
+# ``listen_for_scheduled_tasks_due`` raises (network blip, Postgres
+# failover, etc.). Capped low so a transient outage doesn't strand
+# scheduled fires for long; cron rows still fire within
+# `_HEARTBEAT_SECONDS` via the heartbeat path.
+_LISTEN_RECONNECT_BACKOFF_SECONDS = 5.0
+
 
 async def event_driven_scheduler(
     pool: asyncpg.Pool[Any],
@@ -57,32 +64,69 @@ async def event_driven_scheduler(
 ) -> None:
     """Sleep-until-next-fire loop, woken on NOTIFY or timeout.
 
-    Spawned once per worker. Cancelled by the worker's shutdown sequence
-    via task cancellation, which propagates ``CancelledError`` out of the
-    awaits and ends the loop.
+    Spawned once per worker. Wraps the LISTEN connection acquisition
+    in an outer retry loop so a transient asyncpg failure (failover,
+    network partition) doesn't permanently disable scheduled task firing
+    on this worker — the inner loop's structured `try/except` covers
+    transient SQL errors; this outer loop covers the LISTEN connection
+    itself.
+
+    Cancelled by the worker's shutdown sequence via task cancellation,
+    which propagates ``CancelledError`` out of the awaits and ends the
+    loop.
     """
-    async with listen_for_scheduled_tasks_due(db_url) as notify_event:
-        while True:
-            try:
-                sleep_seconds = await _compute_sleep_seconds(pool)
-            except Exception:
-                # Defensive: if the MIN query fails (transient pool issue,
-                # etc.), sleep on the heartbeat cadence and retry. We
-                # don't want to hot-loop on a broken pool.
-                log.exception("scheduler.compute_sleep_failed")
-                sleep_seconds = _HEARTBEAT_SECONDS
+    while True:
+        try:
+            async with listen_for_scheduled_tasks_due(db_url) as notify_event:
+                await _scheduler_loop(pool, notify_event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # LISTEN connection or its acquisition failed. Sleep briefly
+            # and retry — without this guard, a transient Postgres blip at
+            # worker startup would silently disable all scheduled tasks
+            # for the worker's lifetime while the heartbeat-touch keeps
+            # the healthcheck green.
+            log.exception("scheduler.listen_failed_will_retry")
+            await asyncio.sleep(_LISTEN_RECONNECT_BACKOFF_SECONDS)
 
-            notify_event.clear()
-            # Either NOTIFY arrives, the next fire's due-time elapses, or
-            # the heartbeat caps the sleep — all three converge on the
-            # same next action (recompute MIN, claim due, repeat).
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(notify_event.wait(), timeout=sleep_seconds)
 
-            try:
-                await _claim_and_enqueue_due_tasks(pool)
-            except Exception:
-                log.exception("scheduler.claim_error")
+async def _scheduler_loop(
+    pool: asyncpg.Pool[Any],
+    notify_event: asyncio.Event,
+) -> None:
+    """Inner loop: compute next sleep, await NOTIFY-or-timeout, claim, repeat.
+
+    The ``notify_event.clear()`` runs BEFORE ``_compute_sleep_seconds`` so
+    a NOTIFY that arrives during the MIN-query window is preserved on the
+    event and immediately wakes ``asyncio.wait_for``. Mirrors the
+    LISTEN-before-backfill pattern documented in :mod:`aios.db.listen`.
+    """
+    while True:
+        # Clear FIRST so any NOTIFY arriving after this line — including
+        # during the SELECT MIN query below — remains on the event and
+        # interrupts the subsequent wait_for.
+        notify_event.clear()
+
+        try:
+            sleep_seconds = await _compute_sleep_seconds(pool)
+        except Exception:
+            # Defensive: if the MIN query fails (transient pool issue,
+            # etc.), sleep on the heartbeat cadence and retry. We don't
+            # want to hot-loop on a broken pool.
+            log.exception("scheduler.compute_sleep_failed")
+            sleep_seconds = _HEARTBEAT_SECONDS
+
+        # Either NOTIFY arrives, the next fire's due-time elapses, or
+        # the heartbeat caps the sleep — all three converge on the
+        # same next action (recompute MIN, claim due, repeat).
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(notify_event.wait(), timeout=sleep_seconds)
+
+        try:
+            await _claim_and_enqueue_due_tasks(pool)
+        except Exception:
+            log.exception("scheduler.claim_error")
 
 
 async def _compute_sleep_seconds(pool: asyncpg.Pool[Any]) -> float:
@@ -102,6 +146,16 @@ async def _compute_sleep_seconds(pool: asyncpg.Pool[Any]) -> float:
 
 
 async def _claim_and_enqueue_due_tasks(pool: asyncpg.Pool[Any]) -> None:
+    """Claim due rows in one transaction; defer a procrastinate job per row.
+
+    If ``defer_async`` fails for a claimed row, the claim transaction has
+    already committed (``running_since`` set, cron ``next_fire`` advanced).
+    The compensating ``release_scheduled_task_claim`` clears
+    ``running_since`` so the next iteration re-claims the row instead of
+    leaving it stuck for ``stale_threshold_seconds`` (2h). For cron the
+    next_fire advance is not reverted — one slot is effectively skipped,
+    which is acceptable churn for a transient broker error.
+    """
     now = datetime.now(UTC)
     async with pool.acquire() as conn, conn.transaction():
         claimed = await queries.fetch_and_claim_due_scheduled_tasks(conn, now_utc=now)
@@ -115,3 +169,14 @@ async def _claim_and_enqueue_due_tasks(pool: asyncpg.Pool[Any]) -> None:
             log.debug("scheduler.already_enqueued", task_id=task.id, name=task.name)
         except Exception:
             log.exception("scheduler.defer_error", task_id=task.id, name=task.name)
+            try:
+                async with pool.acquire() as conn:
+                    await queries.release_scheduled_task_claim(conn, task.id)
+            except Exception:
+                # Best-effort: if compensation itself fails, the row will
+                # be picked up by stuck-recovery after the stale threshold.
+                log.exception(
+                    "scheduler.release_claim_failed",
+                    task_id=task.id,
+                    name=task.name,
+                )
