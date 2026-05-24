@@ -107,3 +107,11 @@ class TestMcpCliHintWording:
         # only thing the binary supports.
         assert "tool <server> <method> '{...}'" in _MCP_CLI_HINT
         assert "--json" not in _MCP_CLI_HINT
+
+    def test_listing_line_acknowledges_both_builtins_and_mcp_servers(self) -> None:
+        # ``bin/tool`` with no args prints both a ``Built-ins:`` and an
+        # ``MCP servers:`` section (see ``_list_surface``). Narrowing
+        # the hint's description back to MCP-only would surprise an
+        # agent that sees built-ins listed and has no anchor for them.
+        assert "built-ins" in _MCP_CLI_HINT
+        assert "MCP servers" in _MCP_CLI_HINT

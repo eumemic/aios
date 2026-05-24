@@ -63,7 +63,7 @@ _MCP_CLI_HINT = (
     "Permitted MCP tools are also callable from inside the sandbox via the "
     "`tool` binary, so you can invoke them programmatically from `bash` "
     "without paying an inference cycle per call:\n\n"
-    "    tool                              list available MCP servers\n"
+    "    tool                              list reachable tools (built-ins + MCP servers)\n"
     "    tool <server>                     list methods on a server\n"
     "    tool <server> <method> --help     show description + JSON schema\n"
     "    tool <server> <method> '{...}'    invoke with JSON arguments\n\n"
