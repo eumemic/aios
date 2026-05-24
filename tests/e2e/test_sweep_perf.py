@@ -28,7 +28,7 @@ from typing import Any
 import asyncpg
 import pytest
 
-from aios.harness.sweep import CANDIDATE_ROWS_SQL, UNREACTED_ROWS_SQL
+from aios.harness.sweep import CANDIDATE_ROWS_SQL, GHOST_SPAN_START_SQL, UNREACTED_ROWS_SQL
 from tests.conftest import needs_docker
 from tests.support import find_subplans_over_events
 
@@ -189,6 +189,23 @@ class TestNoCorrelatedSubplanOverEvents:
         assert not found, (
             f"N+1 regression in _filter_incomplete_batches unreacted query: "
             f"{len(found)} correlated subplan(s) over events. Same CTE fix applies."
+        )
+
+    async def test_span_start_rows_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
+        """``GHOST_SPAN_START_SQL`` drives the two-branch ghost-recovery
+        synthesis (#685).  Lock its single-pass shape so a future
+        refactor that adds a correlated subquery (e.g., excluding
+        already-confirmed-but-redispatched tcids) fails here instead
+        of regressing sweep latency."""
+        session_ids = [f"sess_perf_{i:03d}" for i in range(_N_SESSIONS)]
+        # Arbitrary tcid set — the planner cares about the predicate shape,
+        # not the actual values.
+        tcids = [f"tc_{i}" for i in range(10)]
+        plan = await _explain(seeded_pool, GHOST_SPAN_START_SQL, session_ids, tcids)
+        found = find_subplans_over_events(plan)
+        assert not found, (
+            f"N+1 regression in find_and_repair_ghosts span-marker query: "
+            f"{len(found)} correlated subplan(s) over events. See #685."
         )
 
 

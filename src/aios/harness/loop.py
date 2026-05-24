@@ -817,10 +817,11 @@ async def _dispatch_confirmed_tools(
     # impatient user message that lifts the session out of
     # ``requires_action``).  Stopping at A2 would silently drop A1's
     # operator-confirmed dispatch — ghost-repair then papers over
-    # with the misleading ``"No result was received"`` synthetic
-    # error, even though the operator did allow the tool; the
-    # dispatch was lost.  Filtering by ``completed`` / ``in_flight``
-    # below correctly excludes anything already handled.
+    # with a synthetic "did not run" error (per the two-branch recovery
+    # in ``sweep.find_and_repair_ghosts``, see #685), even though the
+    # operator did allow the tool; the dispatch was lost.  Filtering by
+    # ``completed`` / ``in_flight`` below correctly excludes anything
+    # already handled.
     asst_tool_calls: list[dict[str, Any]] = []
     for e in message_events:
         if e.kind == "message" and e.data.get("role") == "assistant":

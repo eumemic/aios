@@ -84,7 +84,10 @@ class TestGhostRecovery:
         assert len(tool_results) == 2
         for tr in tool_results:
             assert tr.data.get("is_error") is True
-            assert "No result was received" in tr.data.get("content", "")
+            # ``tool_execute_start`` spans committed inside ``_tool_lifecycle``
+            # before the handlers reached ``started.set()``, so this hits the
+            # "may have completed" branch of the recovery synthesis (#685).
+            assert "may have completed" in tr.data.get("content", "")
 
         # Session should now need inference.
         needs = await harness.sessions_needing_inference(session.id)
@@ -101,6 +104,116 @@ class TestGhostRecovery:
             and not e.data.get("tool_calls")
         )
         assert "failed" in last_asst.data.get("content", "").lower()
+
+    async def test_started_then_killed_single_tool(self, harness: Harness) -> None:
+        """SIGKILL after a single tool's lifecycle began — recovery surfaces
+        the "may have completed" branch (#685).
+
+        Distinct from ``test_all_tools_lost_after_sigkill`` (dual-tool batch
+        case): this isolates the marker logic on a single dispatched tool so
+        a regression that only flipped one of two messages still fails here.
+        """
+        tool_started = asyncio.Event()
+        tool_proceed = asyncio.Event()
+
+        async def handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            tool_started.set()
+            await tool_proceed.wait()
+            return {"result": "done"}
+
+        harness.register_tool("slow_tool", handler)
+
+        harness.script_model(
+            [
+                assistant(tool_calls=[tool_call("slow_tool", {}, call_id="call_slow")]),
+                assistant("Tool dispatch interrupted — moving on."),
+            ]
+        )
+
+        session = await harness.start("run the slow tool", tools=[])
+
+        await harness.run_step(session.id)
+        await asyncio.wait_for(tool_started.wait(), timeout=5.0)
+
+        await harness.simulate_sigkill(session.id)
+
+        repaired = await harness.run_ghost_repair(session.id)
+        assert len(repaired) == 1
+        assert repaired[0] == (session.id, "call_slow")
+
+        events = await harness.events(session.id)
+        tool_results = [e for e in events if e.kind == "message" and e.data.get("role") == "tool"]
+        assert len(tool_results) == 1
+        assert tool_results[0].data.get("is_error") is True
+        assert "may have completed" in tool_results[0].data.get("content", "")
+
+        needs = await harness.sessions_needing_inference(session.id)
+        assert session.id in needs
+
+        # Model must actually react to the synthetic error.  Without this
+        # assertion, a regression where ghost-repair fails to bump
+        # reacting_to (or where the session status sticks in a state that
+        # short-circuits the next step) would still pop the scripted
+        # response without ever calling the model.
+        await harness.run_step(session.id)
+        events = await harness.events(session.id)
+        last_asst = next(
+            e
+            for e in reversed(events)
+            if e.kind == "message"
+            and e.data.get("role") == "assistant"
+            and not e.data.get("tool_calls")
+        )
+        assert "interrupted" in last_asst.data.get("content", "").lower()
+
+    async def test_cross_session_sweep_may_have_completed(self, harness: Harness) -> None:
+        """Cross-session ghost repair (``session_id=None`` — the
+        production startup-sweep + 30s periodic-sweep shape) correctly
+        classifies a span-present ghost as 'may have completed' (#685).
+
+        Production callers: ``worker_main`` startup sweep and
+        ``_periodic_sweep`` both call ``wake_sessions_needing_inference(
+        pool, registry)`` without a session_id.  The per-session e2e
+        tests cover the scoped query path; this one closes the gap on
+        the unscoped path so a refactor that mis-scopes
+        ``GHOST_SPAN_START_SQL`` only for cross-session sweeps would
+        surface here.
+        """
+        tool_started = asyncio.Event()
+        tool_proceed = asyncio.Event()
+
+        async def handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            tool_started.set()
+            await tool_proceed.wait()
+            return {"result": "done"}
+
+        harness.register_tool("xs_tool", handler)
+
+        harness.script_model(
+            [
+                assistant(tool_calls=[tool_call("xs_tool", {}, call_id="call_xs")]),
+                assistant("Tool dispatch interrupted."),
+            ]
+        )
+
+        session = await harness.start("run xs_tool", tools=[])
+
+        await harness.run_step(session.id)
+        await asyncio.wait_for(tool_started.wait(), timeout=5.0)
+
+        await harness.simulate_sigkill(session.id)
+
+        # Cross-session sweep: no session_id arg — exercises the production
+        # startup-sweep code path that scoped tests never hit.
+        repaired = await harness.run_ghost_repair()
+        repaired_pairs = {(sid, tcid) for sid, tcid in repaired}
+        assert (session.id, "call_xs") in repaired_pairs
+
+        events = await harness.events(session.id)
+        tool_results = [e for e in events if e.kind == "message" and e.data.get("role") == "tool"]
+        assert len(tool_results) == 1
+        assert tool_results[0].data.get("is_error") is True
+        assert "may have completed" in tool_results[0].data.get("content", "")
 
     async def test_crash_before_tool_launch(self, harness: Harness) -> None:
         """Assistant message with tool_calls exists, but tools never dispatched.
@@ -138,6 +251,14 @@ class TestGhostRecovery:
         repaired = await harness.run_ghost_repair(session.id)
         assert len(repaired) == 1
         assert repaired[0] == (session.id, "call_x")
+
+        # ``launch_tool_calls`` never ran, so no ``tool_execute_start`` span
+        # exists — recovery hits the "never started" branch (#685).
+        events = await harness.events(session.id)
+        tool_results = [e for e in events if e.kind == "message" and e.data.get("role") == "tool"]
+        assert len(tool_results) == 1
+        assert tool_results[0].data.get("is_error") is True
+        assert "did not run" in tool_results[0].data.get("content", "")
 
         # Session should need inference.
         needs = await harness.sessions_needing_inference(session.id)
@@ -197,9 +318,10 @@ class TestGhostRecovery:
         # Two concurrent repairs. asyncio.gather starts both immediately;
         # they interleave at every ``await`` inside find_and_repair_ghosts
         # (pool.acquire, fetch result_rows, fetch lifecycle_rows, fetch
-        # agent_rows, load_session_account_id, append_event), so at least
-        # one scheduling order will leave both sweeps believing the ghost
-        # is unresolved when they reach the append.
+        # agent_rows, fetch span_rows, load_session_account_id,
+        # append_event), so at least one scheduling order will leave both
+        # sweeps believing the ghost is unresolved when they reach the
+        # append.
         await asyncio.gather(
             harness.run_ghost_repair(session.id),
             harness.run_ghost_repair(session.id),
@@ -219,6 +341,12 @@ class TestGhostRecovery:
             f"symptom: the unlocked read-then-append in find_and_repair_ghosts "
             f"admits both concurrent sweeps to write."
         )
+        # Branch assertion (#685): the assistant message was appended manually
+        # without ``launch_tool_calls``, so no ``tool_execute_start`` span
+        # exists — the surviving sweep MUST hit "did not run".  Locks the
+        # branch decision under concurrency so a race that flipped one
+        # sweep's classification would surface here.
+        assert "did not run" in tool_results_for_call_x[0].data.get("content", "")
 
     async def test_ghost_in_earlier_batch(self, harness: Harness) -> None:
         """Multi-batch conversation. Tool lost from first batch.
@@ -290,6 +418,20 @@ class TestGhostRecovery:
         assert len(repaired) == 1
         assert repaired[0] == (session.id, "call_slow")
 
+        # Branch assertion (#685): slow_tool's ``tool_execute_start`` span
+        # committed before simulate_sigkill (handler_a's await on the proceed
+        # event only fires inside ``_tool_lifecycle``'s yielded body), so the
+        # multi-batch ghost MUST hit "may have completed".
+        events = await harness.events(session.id)
+        slow_tool_result = next(
+            e
+            for e in events
+            if e.kind == "message"
+            and e.data.get("role") == "tool"
+            and e.data.get("tool_call_id") == "call_slow"
+        )
+        assert "may have completed" in slow_tool_result.data.get("content", "")
+
         # Session should need inference (ghost error is unreacted).
         needs = await harness.sessions_needing_inference(session.id)
         assert session.id in needs
@@ -347,6 +489,22 @@ class TestGhostRecovery:
         repaired = await harness.run_ghost_repair(session.id)
         assert len(repaired) == 1
         assert repaired[0] == (session.id, "call_g")
+
+        # Branch assertion (#685): the assistant message was appended via
+        # ``append_event`` directly without ``_tool_lifecycle`` ever running,
+        # so no ``tool_execute_start`` span exists for ``call_g`` — recovery
+        # MUST hit "did not run".  A regression that interpreted the
+        # ``tool_confirmed allow`` lifecycle event as a started-marker (in
+        # place of, or alongside, the span) would flip this assertion.
+        events = await harness.events(session.id)
+        glob_result = next(
+            e
+            for e in events
+            if e.kind == "message"
+            and e.data.get("role") == "tool"
+            and e.data.get("tool_call_id") == "call_g"
+        )
+        assert "did not run" in glob_result.data.get("content", "")
 
         # Session should need inference after ghost repair.
         needs = await harness.sessions_needing_inference(session.id)

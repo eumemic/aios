@@ -95,8 +95,22 @@ async def _tool_lifecycle(
     function = call.get("function") or {}
     name = function.get("name") or ""
     raw_args = function.get("arguments", "{}")
-    bound_log = log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name)
-
+    # Load-bearing for ghost recovery (#685): the commit of this span is what
+    # ``sweep.find_and_repair_ghosts`` reads to distinguish "tool never
+    # dispatched" from "tool may have executed (outcome unknown)". Any
+    # side-effectful work added ABOVE this append could commit and then be
+    # lost to a crash before the span lands, surfacing as "never started"
+    # and double-firing on the model's retry. Keep the span as the very
+    # first action in this lifecycle — only pure-Python preamble (arg
+    # extraction, no I/O) is permitted above.
+    #
+    # The span is intentionally OUTSIDE the try/except below: an
+    # ``asyncio.CancelledError`` arriving mid-await leaves the span possibly
+    # committed and the body never entered, surfacing as "may have completed"
+    # — an over-pessimistic outcome that the recovery message acknowledges
+    # (see the branch comment in ``sweep.find_and_repair_ghosts``).  This is
+    # the conservatively-safe direction; the alternative (suppress the span
+    # on cancellation) would risk under-pessimism on real side effects.
     span_start = await sessions_service.append_event(
         pool,
         session_id,
@@ -108,6 +122,7 @@ async def _tool_lifecycle(
         },
         account_id=account_id,
     )
+    bound_log = log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name)
     tc = _ToolCall(call_id=call_id, name=name, raw_args=raw_args, bound_log=bound_log)
     try:
         yield tc
