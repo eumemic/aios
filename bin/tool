@@ -110,21 +110,29 @@ def _resolve_broker_secret() -> str:
     try:
         with open(_DEFAULT_SECRET_PATH, "r", encoding="utf-8") as f:
             content = f.read().strip()
-        if content:
-            return content
     except FileNotFoundError:
-        pass
+        sys.stderr.write(
+            f"tool: TOOL_BROKER_SECRET is not set and no fallback at "
+            f"{_DEFAULT_SECRET_PATH}\n"
+        )
+        sys.exit(2)
     except OSError as exc:
         sys.stderr.write(
             f"tool: TOOL_BROKER_SECRET unset and could not read "
             f"{_DEFAULT_SECRET_PATH}: {exc}\n"
         )
         sys.exit(2)
-    sys.stderr.write(
-        f"tool: TOOL_BROKER_SECRET is not set and no fallback at "
-        f"{_DEFAULT_SECRET_PATH}\n"
-    )
-    sys.exit(2)
+    if not content:
+        # File exists but is empty / whitespace-only (truncated write,
+        # stub file from a half-finished provisioning). Distinguish from
+        # "no fallback" so operators don't chase a missing-file red
+        # herring when the file is right there.
+        sys.stderr.write(
+            f"tool: TOOL_BROKER_SECRET unset and fallback file "
+            f"{_DEFAULT_SECRET_PATH} is empty\n"
+        )
+        sys.exit(2)
+    return content
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):

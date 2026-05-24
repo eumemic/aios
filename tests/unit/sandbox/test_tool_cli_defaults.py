@@ -124,6 +124,27 @@ class TestResolveBrokerSecret:
             tool_module._resolve_broker_secret()
         assert excinfo.value.code == 2
 
+    def test_secret_errors_when_fallback_file_empty(
+        self,
+        tool_module: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # File exists but holds only whitespace — the legacy code printed
+        # "no fallback at <path>" which is factually wrong (the file IS
+        # there). The error must name the file and call out emptiness.
+        monkeypatch.delenv("TOOL_BROKER_SECRET", raising=False)
+        secret_file = tmp_path / "secret"
+        secret_file.write_text("\n\n  \n")
+        monkeypatch.setattr(tool_module, "_DEFAULT_SECRET_PATH", str(secret_file))
+        with pytest.raises(SystemExit) as excinfo:
+            tool_module._resolve_broker_secret()
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "empty" in err
+        assert str(secret_file) in err
+
     def test_secret_errors_when_env_set_empty(
         self,
         tool_module: ModuleType,

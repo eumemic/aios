@@ -23,7 +23,6 @@ backend, or anything else is decided by the worker's selected backend.
 
 from __future__ import annotations
 
-import contextlib
 import os
 import secrets
 from dataclasses import dataclass
@@ -77,12 +76,24 @@ TOOL_BROKER_SECRET_SANDBOX_PATH = "/var/run/aios/tool-broker-secret"
 def cleanup_session_secret_file(session_id: str, tool_socket_host_path: Path | None) -> None:
     """Best-effort removal of the per-session secret file written by
     ``_assemble_plan`` when UDS transport is enabled. Idempotent — safe
-    to call when no file exists or when UDS was never configured."""
+    to call when no file exists or when UDS was never configured. Logs
+    but does not raise on permission / IO errors so a single failing
+    session can't abort cleanup for the rest (e.g. inside
+    ``SandboxRegistry.release_all``)."""
     if tool_socket_host_path is None:
         return
     secret_path = tool_socket_host_path.parent / f"{session_id}.secret"
-    with contextlib.suppress(FileNotFoundError):
+    try:
         secret_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning(
+            "sandbox.tool_broker_secret_cleanup_failed",
+            session_id=session_id,
+            path=str(secret_path),
+            error=str(exc),
+        )
 
 
 @dataclass(frozen=True, slots=True)
