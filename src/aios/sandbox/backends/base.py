@@ -233,6 +233,23 @@ class SandboxBackend(Protocol):
         """
         ...
 
+    async def is_alive(self, handle: SandboxHandle) -> bool:
+        """Return True iff ``handle``'s sandbox is still running.
+
+        Used by the registry's warm path (issue #691) to detect
+        sandboxes that the underlying execution layer removed without
+        the registry's knowledge. For Docker that is the ``--rm`` path
+        after any entrypoint exit (OOM kill, internal crash, signal) —
+        the container is gone but the registry's cached handle survives
+        until the next command-run fails with "No such container".
+
+        Implementations should be cheap (single round-trip) and total:
+        a transient probe failure (daemon hiccup, timeout) should
+        return False so the caller re-provisions rather than risk
+        returning a possibly-dead handle.
+        """
+        ...
+
 
 # ── Standard labels every backend SHOULD set on managed sandboxes ───────────
 #

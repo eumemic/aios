@@ -263,6 +263,50 @@ class DockerBackend:
                 stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
             )
 
+    async def is_alive(self, handle: SandboxHandle) -> bool:
+        """``docker inspect`` the container; True iff State.Running is true.
+
+        Probe failures (daemon hiccup, launch error, timeout) return
+        False — better to take the cost of a re-provision than hand
+        back a possibly-dead handle. Per #691, ``--rm`` containers that
+        die between provision and the next call appear here as a
+        nonzero ``rc`` (Docker's "No such container").
+        """
+        argv = [
+            "docker",
+            "inspect",
+            "--format",
+            "{{.State.Running}}",
+            handle.sandbox_id,
+        ]
+        try:
+            rc, stdout_bytes, _ = await run_docker_cli(argv)
+        except Exception as err:
+            # Total by contract (see Protocol docstring): ANY probe failure
+            # — daemon hiccup, CLI launch error, 30s timeout — means we
+            # couldn't confirm liveness, so report dead and let the caller
+            # re-provision rather than hand back a possibly-dead handle.
+            # ``CancelledError`` (BaseException, not Exception) is NOT caught,
+            # so worker shutdown / job-timeout cancellation still propagates.
+            log.warning(
+                "sandbox.is_alive_probe_failed",
+                session_id=handle.session_id,
+                container_id=handle.sandbox_id[:12],
+                error=str(err),
+            )
+            return False
+        if rc != 0:
+            # Most common case: container was removed (--rm after exit), which
+            # Docker reports as a nonzero exit + "No such container" on stderr.
+            log.info(
+                "sandbox.is_alive_inspect_nonzero",
+                session_id=handle.session_id,
+                container_id=handle.sandbox_id[:12],
+                exit_code=rc,
+            )
+            return False
+        return stdout_bytes.decode("utf-8", errors="replace").strip() == "true"
+
 
 def _is_registry_image(image: str) -> bool:
     """Return True if *image* refers to a remote registry (not a bare local tag).

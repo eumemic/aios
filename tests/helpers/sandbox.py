@@ -61,6 +61,10 @@ class FakeBackend:
     next_result: CommandResult | None = None
     managed: list[ManagedSandboxRef] = field(default_factory=list)
     calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    # Sandbox ids the backend should report as dead via ``is_alive``.
+    # Default-empty so existing tests behave as before; tests covering
+    # the stale-handle path (#691) populate this.
+    dead_sandbox_ids: set[str] = field(default_factory=set)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         self.calls.append(("create", {"session_id": spec.session_id}))
@@ -70,6 +74,12 @@ class FakeBackend:
             workspace_path=spec.workspace.host_path,
             mount_snapshot=spec.mount_snapshot,
         )
+
+    async def is_alive(self, handle: SandboxHandle) -> bool:
+        self.calls.append(
+            ("is_alive", {"session_id": handle.session_id, "sandbox_id": handle.sandbox_id})
+        )
+        return handle.sandbox_id not in self.dead_sandbox_ids
 
     async def exec(
         self,
