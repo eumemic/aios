@@ -13,6 +13,21 @@ The eight failure modes that cost ~5–15 min each during the openclaw-parity PR
 | 7 | `connections attach` returns `connector 'X' is None; snapshot unavailable` even though `aios connectors list` shows status=running | Pre-existing bug in `_assert_account_in_snapshot` reading the wrong envelope key (singular `connector` instead of plural `connectors`). | Fixed in #242.  If you hit this on a branch off pre-`bff6660` master, cherry-pick the fix or use `--phase post-attach` to skip the validation. |
 | 8 | `aios sessions create` rejects with "either provide --agent and --environment-id" | Subcommand needs **both** flags; `--agent` alone isn't enough. | `aios sessions create --agent <agent_id> --environment-id <env_id>`.  See also: `envs` (plural) not `environments`; `--session-id` not `--session` on connections attach.  See `references/missing-affordances.md` for the wishlist of CLI naming consistency. |
 
+## Fresh-DB & headless bring-up (added after the #685 verify session)
+
+These bite a **cold start** — a brand-new per-branch DB and/or a
+no-connector runtime for `/verify`-ing a harness change.  `setup.sh` now
+handles all five, but they're documented here because a manual bring-up
+(or a future refactor of the script) will re-hit them.
+
+| # | Symptom | Root cause | Fix |
+|---|---------|------------|-----|
+| 9 | `aios migrate` dies with `pydantic … AIOS_WORKSPACE_ROOT must be an absolute path; got 'workspaces'` | Source `.env` ships `AIOS_WORKSPACE_ROOT=./workspaces` (relative).  Pydantic rejects it regardless of CWD; api and worker would also resolve a relative path against diverging CWDs. | `setup.sh` `write_env` now overrides it to `$WORKTREE/workspaces` (absolute).  Manual: set an absolute path. |
+| 10 | Every CLI/API call returns `401 invalid api key` on a fresh DB, even with the `.env` `AIOS_API_KEY` | Auth is **DB-backed** (`account_keys` table via `lookup_account_by_key_hash`); the `.env` `AIOS_API_KEY` is *not* what the server validates.  A fresh DB has zero keys. | `setup.sh` now runs `bootstrap_root` after migrate and writes the minted plaintext key back into `.env`.  Manual: `uv run python -c "...bootstrap_root(pool, display_name='x')..."` then use the returned key.  (The HTTP `/v1/accounts/bootstrap` route also works but is gated on `AIOS_BOOTSTRAP_TOKEN`.) |
+| 11 | Fixtures land on the wrong runtime / `connection refused` from the CLI during `build_fixtures` | `write_env` overrode `AIOS_API_PORT` but not `AIOS_URL`; the CLI targets `AIOS_URL`, so it hit whatever the source `.env` pointed at (often `:8090` — a sibling worktree's runtime). | `setup.sh` now also pins `AIOS_URL=http://127.0.0.1:$PORT`.  Manual: export `AIOS_URL` to match the chosen port. |
+| 12 | `docker exec aios-pg …: No such container` | `ensure_db` hardcoded `aios-pg`; compose now names it `aios-postgres-1`. | `setup.sh` `pg_container()` auto-detects the container publishing `:5433`, falling back to `aios-postgres-1`. |
+| 13 | api/worker spawned by `setup.sh` (or by `nohup … &` in a Bash tool call) die the moment the call returns — runtime gone before you can drive it | When **Claude** runs a command via the Bash tool, the harness reaps the call's process group on completion; `nohup` only ignores SIGHUP, not the SIGTERM/SIGKILL that reaping sends.  (A human running `setup.sh` in a real terminal is fine — children reparent to init.) | For Claude-driven sessions: `setup.sh --phase prep`, then start **api and worker as two separate `run_in_background` Bash calls**, then `setup.sh --phase fixtures`.  See SKILL.md "Headless bring-up when Claude is driving". |
+
 ## Less-frequent pitfalls
 
 - **Pre-commit hook gates on the whole working tree**, not just staged files.  Splitting two logical changes into separate commits requires `git stash` of the file you don't want gated.
