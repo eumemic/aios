@@ -492,8 +492,22 @@ async def reparent_connection(
     ``connection`` row's ``account_id`` in place, preserving
     ``connection.id`` so dependent connector-daemon state (signal-cli's
     ``account.dat``, whatsmeow's ``sqlstore.db``, telegram webhook
-    config, per-chat routing rules) — all keyed by ``connection.id`` —
-    carries over without churn.
+    config) — all keyed by ``connection.id`` — carries over without
+    churn.
+
+    Carries every account-scoped child row whose routing fate is tied
+    to this connection across in the same transaction:
+    :class:`bindings` (the active curation row), :class:`chat_sessions`
+    (the per-chat ledger), and :class:`routing_rules` (per-binding
+    prefix demux). All three resolver tiers
+    (:mod:`aios_connectors.resolver`) filter on ``account_id``, so
+    leaving any child on the source account would make the destination's
+    next inbound DETACH-drop at resolve time. The atomicity is what
+    makes the reparent observable as a clean "connection now belongs to
+    destination" — there is no intermediate state where some children
+    point at the source and others at the destination. The underlying
+    :func:`queries.reparent_connection` does all four UPDATEs in one
+    Postgres statement (data-modifying CTEs).
 
     Encrypted secrets are re-encrypted under the destination account's
     derived subkey inside the same transaction. ``_encrypt_secrets``

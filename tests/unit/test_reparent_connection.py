@@ -292,6 +292,61 @@ class TestReparentConnection:
         # No secrets configured → no re-key, blob is None.
         assert kwargs["secrets_blob"] is None
 
+    async def test_reparent_query_sql_updates_account_scoped_children(self) -> None:
+        """The query layer's SQL must rewrite ``account_id`` on every
+        account-scoped child of the connection: ``bindings``,
+        ``chat_sessions``, ``routing_rules``. Without this, the
+        resolver tiers (every filter on ``account_id``) would silently
+        DETACH-drop the destination's next inbound. Pin the SQL shape
+        directly — an integration test covers the runtime effect, but
+        only a SQL-shape pin catches a refactor that removes the CTEs.
+        """
+        from aios.db.queries import reparent_connection as query_reparent
+
+        captured: dict[str, str] = {}
+
+        async def fake_fetchrow(sql: str, *args: Any, **kwargs: Any) -> Any:
+            captured["sql"] = sql
+            # Return a row that ``_row_to_connection`` can parse — enough
+            # fields for the projection.
+            return {
+                "id": "conn_x",
+                "connector": "signal",
+                "external_account_id": "+15551234",
+                "binding_session_id": None,
+                "binding_session_template_id": None,
+                "binding_created_at": None,
+                "metadata": "{}",
+                "secrets_ciphertext": None,
+                "created_at": _NOW,
+                "updated_at": _NOW,
+                "archived_at": None,
+            }
+
+        conn = MagicMock()
+        conn.fetchrow = fake_fetchrow
+        await query_reparent(
+            conn,
+            "conn_x",
+            destination_account_id="acc_dest",
+            secrets_blob=None,
+        )
+        sql = captured["sql"]
+        assert "UPDATE connections" in sql
+        assert "UPDATE bindings" in sql, (
+            "bindings.account_id must be rewritten alongside connections.account_id "
+            "or the resolver's account-scoped get_active_binding returns None "
+            "under the destination scope and inbounds silently DETACH-drop"
+        )
+        assert "UPDATE chat_sessions" in sql, (
+            "chat_sessions.account_id must be rewritten — lookup_chat_session "
+            "filters on account_id and would otherwise miss"
+        )
+        assert "UPDATE routing_rules" in sql, (
+            "routing_rules.account_id must be rewritten — "
+            "list_routing_rules_for_connection joins bindings on account_id"
+        )
+
     async def test_reparent_rekeys_secrets_when_present(self) -> None:
         """When the source row has encrypted secrets, the service decrypts
         with the source subkey and re-encrypts with the destination

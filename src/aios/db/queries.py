@@ -4056,8 +4056,24 @@ async def reparent_connection(
     whatsmeow's ``sqlstore.db``, telegram webhook config, etc. — all
     keyed by ``connection.id``) carries over without churn.
 
-    Refuses on archived rows (the WHERE clause filters them out, so a
-    zero-row UPDATE → :class:`NotFoundError`).
+    Also rewrites ``account_id`` on every account-scoped child row whose
+    routing fate is tied to this connection: the active ``bindings`` row,
+    every ``chat_sessions`` row, and every ``routing_rules`` row reachable
+    through ``bindings.id``. All three resolver tiers
+    (:mod:`aios_connectors.resolver`) filter on ``account_id``: leaving
+    these children on the source account would make
+    ``get_active_binding`` / ``list_routing_rules_for_connection`` /
+    ``lookup_chat_session`` return ``None`` under the destination's scope,
+    silently DETACH-dropping every inbound until an operator manually
+    re-bound the connection. Doing all four UPDATEs in one statement
+    keeps the carry-over atomic — there is no observable mid-reparent
+    state where some children point at the source and others at the
+    destination.
+
+    Refuses on archived connection rows (the WHERE clause filters them
+    out, so a zero-row UPDATE → :class:`NotFoundError`). Archived
+    ``bindings`` are still moved (they're inert but stay tenant-coherent
+    in case an operator un-archives one).
 
     Catches the per-account partial-unique index violation
     (``connections_active_account_external_uniq``) and surfaces it as
@@ -4082,6 +4098,18 @@ async def reparent_connection(
     ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
     nonce = secrets_blob.nonce if secrets_blob is not None else None
     try:
+        # Single CTE: move the connection row, then carry every
+        # account-scoped child (bindings, chat_sessions, routing_rules)
+        # across in the same statement. The child UPDATEs gate on
+        # ``EXISTS (SELECT 1 FROM updated)`` so an archived/missing
+        # source connection (the ``updated`` CTE returns zero rows)
+        # leaves the children alone — the service layer's SELECT FOR
+        # UPDATE already rejects archived before calling this query,
+        # but the EXISTS gate keeps the query correct in isolation too.
+        # routing_rules joins through bindings on connection_id (the
+        # binding's account_id was just rewritten; we still match on
+        # ``b.connection_id`` because that column is connection-keyed
+        # and tenant-neutral).
         row = await conn.fetchrow(
             f"""
             WITH updated AS (
@@ -4092,6 +4120,29 @@ async def reparent_connection(
                        updated_at         = now()
                  WHERE id = $1 AND archived_at IS NULL
                 RETURNING *
+            ),
+            b_updated AS (
+                UPDATE bindings
+                   SET account_id = $2
+                 WHERE connection_id = $1
+                   AND EXISTS (SELECT 1 FROM updated)
+                RETURNING id
+            ),
+            c_updated AS (
+                UPDATE chat_sessions
+                   SET account_id = $2
+                 WHERE connection_id = $1
+                   AND EXISTS (SELECT 1 FROM updated)
+                RETURNING connection_id
+            ),
+            r_updated AS (
+                UPDATE routing_rules
+                   SET account_id = $2
+                  FROM bindings b
+                 WHERE routing_rules.binding_id = b.id
+                   AND b.connection_id = $1
+                   AND EXISTS (SELECT 1 FROM updated)
+                RETURNING routing_rules.id
             )
             {_CONNECTION_UPDATE_CTE_TAIL}
             """,

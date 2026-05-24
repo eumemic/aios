@@ -39,6 +39,7 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import ConflictError, NotFoundError
 from aios.services import connections as connections_service
+from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
 
@@ -344,3 +345,213 @@ class TestReparentArchivedRows:
                 crypto_box=crypto_box,
             )
         assert excinfo.value.detail == {"destination_account_id": "acc_b"}
+
+
+class TestReparentCarriesAccountScopedChildren:
+    """Reparent must move every account-scoped child of the connection
+    across the same transaction.
+
+    The resolver tiers (:mod:`aios_connectors.resolver`) all filter by
+    ``account_id``: ``get_active_binding``,
+    ``list_routing_rules_for_connection``, and ``lookup_chat_session``
+    every key on ``(connection_id, account_id)``. If reparent moves the
+    connection row but leaves ``bindings.account_id`` /
+    ``chat_sessions.account_id`` / ``routing_rules.account_id`` on the
+    source account, the destination's next inbound DETACH-drops at the
+    resolver — silently, because no error surfaces until a real user
+    sends a message and the resolver returns ``DETACHED``.
+
+    These tests pin the carry-over invariant against a real Postgres so
+    the multi-statement CTE in ``queries.reparent_connection`` can't
+    silently regress to "only the connection row moves."
+    """
+
+    async def test_reparent_moves_active_binding_to_destination(
+        self, pool_two_accounts: tuple[asyncpg.Pool[Any], CryptoBox]
+    ) -> None:
+        """Active single_session binding's ``account_id`` flips with the
+        connection: ``get_active_binding`` under the destination scope
+        returns the binding; under the source scope it's gone."""
+        pool, crypto_box = pool_two_accounts
+        # Seed a session on acc_a, create a connection on acc_a, attach.
+        _agent, _env, session = await seed_agent_env_session(
+            pool, account_id="acc_a", prefix="reparent-binding"
+        )
+        connection = await connections_service.create_connection(
+            pool,
+            account_id="acc_a",
+            connector="signal",
+            external_account_id="+15550100",
+            metadata={},
+            crypto_box=crypto_box,
+        )
+        await connections_service.attach_connection(
+            pool, connection.id, account_id="acc_a", session_id=session.id
+        )
+        # Sanity: binding visible under acc_a.
+        async with pool.acquire() as conn:
+            pre = await queries.get_active_binding(conn, connection.id, account_id="acc_a")
+        assert pre is not None and pre.session_id == session.id
+
+        # Reparent. Sessions are also account-scoped, but the reparent
+        # primitive does not move sessions — we leave the session on
+        # acc_a, and after reparent the binding still references it.
+        # The DB-level FK accepts cross-account session_id; the
+        # resolver re-checks tenancy at read time. The carry-over we
+        # verify here is bindings.account_id, not the session itself.
+        await connections_service.reparent_connection(
+            pool,
+            connection.id,
+            destination_account_id="acc_b",
+            requester_account_id="acc_root",
+            crypto_box=crypto_box,
+        )
+        async with pool.acquire() as conn:
+            on_dest = await queries.get_active_binding(conn, connection.id, account_id="acc_b")
+            on_src = await queries.get_active_binding(conn, connection.id, account_id="acc_a")
+            row = await conn.fetchrow(
+                "SELECT account_id FROM bindings WHERE connection_id = $1 AND archived_at IS NULL",
+                connection.id,
+            )
+        assert on_dest is not None, "binding must be visible under destination scope"
+        assert on_src is None, "binding must NOT be visible under source scope"
+        assert row is not None and row["account_id"] == "acc_b"
+
+    async def test_reparent_moves_chat_sessions_to_destination(
+        self, pool_two_accounts: tuple[asyncpg.Pool[Any], CryptoBox]
+    ) -> None:
+        """``chat_sessions`` rows for the connection follow the move:
+        ``lookup_chat_session`` under destination resolves; under source
+        is ``None``."""
+        pool, crypto_box = pool_two_accounts
+        _agent, _env, session = await seed_agent_env_session(
+            pool, account_id="acc_a", prefix="reparent-chat"
+        )
+        connection = await connections_service.create_connection(
+            pool,
+            account_id="acc_a",
+            connector="signal",
+            external_account_id="+15550101",
+            metadata={},
+            crypto_box=crypto_box,
+        )
+        # Insert a chat_sessions row directly — no service helper that
+        # writes without a binding (operator bind-chat requires the
+        # session FK to validate, which doesn't matter for the
+        # account_id carry-over assertion).
+        async with pool.acquire() as conn:
+            await queries.insert_chat_session(
+                conn,
+                connection_id=connection.id,
+                chat_id="chat-xyz",
+                session_id=session.id,
+                account_id="acc_a",
+            )
+        await connections_service.reparent_connection(
+            pool,
+            connection.id,
+            destination_account_id="acc_b",
+            requester_account_id="acc_root",
+            crypto_box=crypto_box,
+        )
+        async with pool.acquire() as conn:
+            on_dest = await queries.lookup_chat_session(
+                conn, connection.id, "chat-xyz", account_id="acc_b"
+            )
+            on_src = await queries.lookup_chat_session(
+                conn, connection.id, "chat-xyz", account_id="acc_a"
+            )
+        assert on_dest == session.id, "chat_session row must be visible under destination"
+        assert on_src is None, "chat_session row must NOT be visible under source"
+
+    async def test_reparent_moves_routing_rules_to_destination(
+        self, pool_two_accounts: tuple[asyncpg.Pool[Any], CryptoBox]
+    ) -> None:
+        """``routing_rules`` rows reachable through ``bindings.id`` follow
+        the move: ``list_routing_rules_for_connection`` under destination
+        returns them; under source returns empty."""
+        pool, crypto_box = pool_two_accounts
+        _agent, _env, session = await seed_agent_env_session(
+            pool, account_id="acc_a", prefix="reparent-rule"
+        )
+        connection = await connections_service.create_connection(
+            pool,
+            account_id="acc_a",
+            connector="signal",
+            external_account_id="+15550102",
+            metadata={},
+            crypto_box=crypto_box,
+        )
+        # Attach to get an active binding to hang the routing rule off.
+        await connections_service.attach_connection(
+            pool, connection.id, account_id="acc_a", session_id=session.id
+        )
+        # No insert_routing_rule helper exists yet; insert directly.
+        # The binding's id was just minted; look it up and insert a
+        # rule keyed on it.
+        async with pool.acquire() as conn:
+            binding = await queries.get_active_binding(conn, connection.id, account_id="acc_a")
+            assert binding is not None
+            await conn.execute(
+                """
+                INSERT INTO routing_rules
+                    (id, binding_id, prefix, target_type, target_id, account_id)
+                VALUES ($1, $2, $3, 'session', $4, $5)
+                """,
+                "rr_test_carry_over",
+                binding.id,
+                "abc",
+                session.id,
+                "acc_a",
+            )
+        await connections_service.reparent_connection(
+            pool,
+            connection.id,
+            destination_account_id="acc_b",
+            requester_account_id="acc_root",
+            crypto_box=crypto_box,
+        )
+        async with pool.acquire() as conn:
+            on_dest = await queries.list_routing_rules_for_connection(
+                conn, connection.id, account_id="acc_b"
+            )
+            on_src = await queries.list_routing_rules_for_connection(
+                conn, connection.id, account_id="acc_a"
+            )
+            row = await conn.fetchrow(
+                "SELECT account_id FROM routing_rules WHERE id = $1",
+                "rr_test_carry_over",
+            )
+        assert len(on_dest) == 1, "routing_rule must be visible under destination"
+        assert on_dest[0] == ("abc", "session", session.id)
+        assert on_src == [], "routing_rule must NOT be visible under source"
+        assert row is not None and row["account_id"] == "acc_b"
+
+    async def test_reparent_with_no_children_succeeds(
+        self, pool_two_accounts: tuple[asyncpg.Pool[Any], CryptoBox]
+    ) -> None:
+        """A detached connection (no binding, no chat_sessions, no
+        routing_rules) reparents cleanly — the children-carry CTE is
+        a no-op when there's nothing to move."""
+        pool, crypto_box = pool_two_accounts
+        connection = await connections_service.create_connection(
+            pool,
+            account_id="acc_a",
+            connector="signal",
+            external_account_id="+15550103",
+            metadata={},
+            crypto_box=crypto_box,
+        )
+        moved = await connections_service.reparent_connection(
+            pool,
+            connection.id,
+            destination_account_id="acc_b",
+            requester_account_id="acc_root",
+            crypto_box=crypto_box,
+        )
+        assert moved.id == connection.id
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT account_id FROM connections WHERE id = $1", connection.id
+            )
+        assert row is not None and row["account_id"] == "acc_b"
