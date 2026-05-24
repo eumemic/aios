@@ -210,7 +210,7 @@ async def schedule_wake_handler(session_id: str, arguments: dict[str, Any]) -> d
         name=_make_task_name(),
         fire_at=fire_at,
         command=_build_wake_bash(reason),
-        # Curl finishes in seconds; tight bound keeps stuck fires from
+        # `tool wake_self` finishes in seconds; tight bound keeps stuck fires from
         # tying up worker slots.
         timeout_seconds=30,
         # Tag for human-friendly rendering in the CLI's

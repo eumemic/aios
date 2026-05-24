@@ -23,7 +23,7 @@ class WakeSelfArgumentError(AiosError):
 
 
 WAKE_SELF_DESCRIPTION = (
-    "Append CONTENT as a user-role message to your own session and "
+    "Append content as a user-role message to your own session and "
     "schedule the next step. This is the canonical self-wake primitive "
     "from inside scheduled-task cron commands or any sandbox bash "
     "command — it replaces the older "
