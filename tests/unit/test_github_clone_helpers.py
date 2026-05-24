@@ -167,7 +167,15 @@ async def test_cache_clone_uses_cache_timeout_not_session_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``ensure_cache_clone`` cold-path runs ``git clone --bare`` against
-    the upstream — that's the cache budget, not the per-session one."""
+    the upstream — that's the cache budget, not the per-session one.
+
+    Asserts EVERY ``_run_git`` invocation inside ``ensure_cache_clone``
+    uses the cache budget. A regression that swaps either call's
+    constant (e.g. the post-clone ``config gc.auto`` admin op) would
+    otherwise pass undetected — and silently leave the cache with
+    ``gc.auto`` enabled, where it can reap objects still referenced
+    by per-session ``--reference --dissociate`` working trees.
+    """
     from aios.config import get_settings
     from aios.sandbox import github_clone
 
@@ -184,8 +192,14 @@ async def test_cache_clone_uses_cache_timeout_not_session_timeout(
 
     await github_clone.ensure_cache_clone("https://github.com/acme/foo", "ghp_TOKEN")
 
-    # First call is the bare clone — cache budget, not session.
-    bare_clone_call = fake_run.await_args_list[0]
-    argv = bare_clone_call.args[0]
-    assert "clone" in argv and "--bare" in argv
-    assert bare_clone_call.kwargs["timeout_s"] == 99.0
+    # Cold-path issues two git invocations: ``clone --bare`` then
+    # ``config gc.auto 0``. Both are cache initialization; both must
+    # use the cache budget.
+    assert fake_run.await_count == 2
+    argvs = [call.args[0] for call in fake_run.await_args_list]
+    assert any("clone" in argv and "--bare" in argv for argv in argvs)
+    assert any("config" in argv and "gc.auto" in argv for argv in argvs)
+    for call in fake_run.await_args_list:
+        assert call.kwargs["timeout_s"] == 99.0, (
+            f"expected cache budget (99.0) for {call.args[0]!r}, got {call.kwargs['timeout_s']}"
+        )

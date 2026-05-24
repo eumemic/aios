@@ -176,13 +176,18 @@ async def ensure_cache_clone(repo_url: str, token: str) -> Path:
                     stderr, message=f"git clone --bare failed for {repo_url!r}", token=token
                 )
             # Disable gc on the bare cache so it can't reap objects that
-            # per-session working trees alternate against. Short admin op —
-            # bounded by the session budget, not the cache one.
+            # per-session working trees alternate against. Part of cache
+            # initialization — must share the cache budget so a timeout
+            # here doesn't leave a bare-clone dir behind with gc.auto
+            # still enabled (the next call's _exists() fast path would
+            # skip re-running this and the cache would silently reap
+            # objects referenced by --reference --dissociate working
+            # trees).
             await _run_git(
                 ["config", "gc.auto", "0"],
                 cwd=cache_dir,
                 op="config gc.auto",
-                timeout_s=settings.github_clone_session_timeout_seconds,
+                timeout_s=settings.github_clone_cache_timeout_seconds,
             )
             log.info(
                 "github_clone.cache_created",

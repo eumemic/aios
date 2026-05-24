@@ -14,6 +14,16 @@ from typing import Literal
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Hardcoded mirror of ``aios.harness.loop._JOB_TIMEOUT_S`` (300.0). We
+# don't import it because ``aios.harness.loop`` itself imports config
+# at module load — a top-level import here would risk a cycle, and a
+# lazy one inside the validator is more noise than the constant is
+# worth. If ``_JOB_TIMEOUT_S`` ever moves, update this too; the failure
+# mode is a config validator that no longer matches reality, not a
+# crash. ``test_github_clone_session_timeout_below_step_budget``
+# cross-checks the two values stay aligned.
+_HARNESS_STEP_TIMEOUT_S: float = 300.0
+
 
 class Settings(BaseSettings):
     """All env-driven aios configuration.
@@ -255,6 +265,24 @@ class Settings(BaseSettings):
                 "API and worker processes resolve relative paths against their own CWD, "
                 "producing diverging session workspace_path values and ForbiddenError "
                 "on tool calls."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _github_clone_session_timeout_under_step_budget(self) -> Settings:
+        # The whole point of #697: per-session clone budget must fit
+        # strictly inside the harness step budget so a hung clone can't
+        # burn a whole user turn before the step-level cap fires. Reject
+        # misconfiguration loudly at startup rather than letting an
+        # operator silently defeat the fix.
+        if self.github_clone_session_timeout_seconds >= _HARNESS_STEP_TIMEOUT_S:
+            raise ValueError(
+                f"AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS="
+                f"{self.github_clone_session_timeout_seconds} must be strictly less than "
+                f"the harness step budget ({_HARNESS_STEP_TIMEOUT_S}s, "
+                f"aios.harness.loop._JOB_TIMEOUT_S); otherwise a hung clone "
+                f"burns a whole user turn before the step-level cap fires. "
+                f"See issue #697."
             )
         return self
 
