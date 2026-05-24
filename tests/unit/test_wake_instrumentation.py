@@ -51,7 +51,10 @@ class TestWakeDeferredEvent:
             pool, "sess_x", "span", {"event": "wake_deferred", "cause": "message"}, account_id=ANY
         )
 
-    async def test_defer_wake_span_carries_delay_when_scheduled(self, in_memory_app: App) -> None:
+    async def test_defer_wake_span_carries_delay_when_delayed(self, in_memory_app: App) -> None:
+        """When defer_wake is called with a delay_seconds (the harness
+        retry-backoff path), the span event records the delay so the
+        profiler can observe queue latency on the retry path."""
         account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services.wake import defer_wake
 
@@ -61,9 +64,8 @@ class TestWakeDeferredEvent:
             await defer_wake(
                 pool,
                 "sess_x",
-                cause="scheduled",
+                cause="reschedule",
                 delay_seconds=30,
-                wake_reason="r",
                 account_id=account_id,
             )
 
@@ -71,7 +73,7 @@ class TestWakeDeferredEvent:
             pool,
             "sess_x",
             "span",
-            {"event": "wake_deferred", "cause": "scheduled", "delay_seconds": 30},
+            {"event": "wake_deferred", "cause": "reschedule", "delay_seconds": 30},
             account_id=ANY,
         )
 

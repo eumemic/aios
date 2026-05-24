@@ -16,9 +16,10 @@ from typing import Any
 
 import asyncpg
 
+from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.errors import ConflictError, NotFoundError, PayloadTooLargeError
+from aios.errors import ConflictError, NotFoundError, PayloadTooLargeError, RateLimitedError
 from aios.models.agents import (
     Agent,
     AgentVersion,
@@ -28,7 +29,7 @@ from aios.models.agents import (
 from aios.models.events import Event, EventKind
 from aios.models.scheduled_tasks import (
     ScheduledTaskCreate,
-    compute_next_fire,
+    compute_initial_next_fire,
 )
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -182,13 +183,36 @@ async def create_session(
             session = session.model_copy(update={"resources": echoes})
         if scheduled_tasks:
             now = datetime.now(UTC)
+            enabled_new = sum(1 for spec in scheduled_tasks if spec.enabled)
+            # Take the per-account advisory lock for the duration of the
+            # count + batch INSERT so concurrent session creates against
+            # the same account can't race past the cap. The lock is
+            # transaction-scoped, released on COMMIT/ROLLBACK.
+            await queries.acquire_account_scheduled_tasks_lock(conn, account_id)
+            if enabled_new:
+                cap = get_settings().scheduled_tasks_per_account_max
+                existing = await queries.count_account_scheduled_tasks(
+                    conn, account_id=account_id, enabled_only=True
+                )
+                if existing + enabled_new > cap:
+                    raise RateLimitedError(
+                        f"account at active-timer cap ({existing}/{cap}); the "
+                        f"{enabled_new} enabled scheduled task(s) in this session "
+                        "would exceed the cap — disable some entries or remove an "
+                        "older session's tasks first"
+                    )
             for spec in scheduled_tasks:
-                next_fire = compute_next_fire(spec.schedule, now) if spec.enabled else None
+                next_fire = (
+                    compute_initial_next_fire(spec.schedule, spec.fire_at, now)
+                    if spec.enabled
+                    else None
+                )
                 await queries.add_scheduled_task(
                     conn,
                     session.id,
                     name=spec.name,
                     schedule=spec.schedule,
+                    fire_at=spec.fire_at,
                     command=spec.command,
                     enabled=spec.enabled,
                     timeout_seconds=spec.timeout_seconds,

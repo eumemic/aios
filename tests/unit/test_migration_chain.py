@@ -26,27 +26,29 @@ def _script_directory() -> ScriptDirectory:
 
 
 def test_single_head() -> None:
-    """The migration ladder has exactly one head: ``0058``."""
+    """The migration ladder has exactly one head: ``0059``."""
     script = _script_directory()
-    assert script.get_heads() == ["0058"]
+    assert script.get_heads() == ["0059"]
 
 
-def test_chain_is_linear_0054_to_0058() -> None:
-    """``0054 -> 0055 -> 0056 -> 0057 -> 0058`` is a plain linear chain."""
+def test_chain_is_linear_0054_to_0059() -> None:
+    """``0054 -> 0055 -> 0056 -> 0057 -> 0058 -> 0059`` is a plain linear chain."""
     script = _script_directory()
 
+    rev_0059 = script.get_revision("0059")
     rev_0058 = script.get_revision("0058")
     rev_0057 = script.get_revision("0057")
     rev_0056 = script.get_revision("0056")
     rev_0055 = script.get_revision("0055")
 
+    assert rev_0059.down_revision == "0058"
     assert rev_0058.down_revision == "0057"
     assert rev_0057.down_revision == "0056"
     assert rev_0056.down_revision == "0055"
     assert rev_0055.down_revision == "0054"
 
     # A tuple/list down_revision would mean a merge/branch point.
-    for rev in (rev_0058, rev_0057, rev_0056, rev_0055):
+    for rev in (rev_0059, rev_0058, rev_0057, rev_0056, rev_0055):
         assert isinstance(rev.down_revision, str)
 
 

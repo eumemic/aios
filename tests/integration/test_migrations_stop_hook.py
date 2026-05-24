@@ -89,8 +89,8 @@ def test_forward_from_stamped_0055_drops_stop_hook(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_downgrade_0056_to_0054_runs_clean(postgres: object) -> None:
-    """Downgrading 0056 -> 0055 -> 0054 restores and then drops ``stop_hook``."""
+def test_downgrade_head_to_0054_runs_clean(postgres: object) -> None:
+    """Downgrading head -> 0055 -> 0054 restores and then drops ``stop_hook``."""
     db_url = _alembic_url(postgres)
 
     result = _run_alembic(["upgrade", "head"], db_url)

@@ -23,6 +23,7 @@ T = TypeVar("T", bound="ScheduledTaskEcho")
 class ScheduledTaskEcho:
     """Read view of a scheduled task as echoed on ``Session.scheduled_tasks``.
 
+    Exactly one of ``schedule`` (cron) or ``fire_at`` (one-shot) is set.
     Runtime fields (``last_fire_at`` / ``last_fire_status`` /
     ``consecutive_failures``) reflect the most recent fire outcome.
     ``running_since`` is internal scheduler bookkeeping and is not
@@ -31,7 +32,8 @@ class ScheduledTaskEcho:
         Attributes:
             id (str):
             name (str):
-            schedule (str):
+            schedule (None | str):
+            fire_at (datetime.datetime | None):
             command (str):
             enabled (bool):
             timeout_seconds (int):
@@ -47,7 +49,8 @@ class ScheduledTaskEcho:
 
     id: str
     name: str
-    schedule: str
+    schedule: None | str
+    fire_at: datetime.datetime | None
     command: str
     enabled: bool
     timeout_seconds: int
@@ -66,7 +69,14 @@ class ScheduledTaskEcho:
 
         name = self.name
 
+        schedule: None | str
         schedule = self.schedule
+
+        fire_at: None | str
+        if isinstance(self.fire_at, datetime.datetime):
+            fire_at = self.fire_at.isoformat()
+        else:
+            fire_at = self.fire_at
 
         command = self.command
 
@@ -109,6 +119,7 @@ class ScheduledTaskEcho:
                 "id": id,
                 "name": name,
                 "schedule": schedule,
+                "fire_at": fire_at,
                 "command": command,
                 "enabled": enabled,
                 "timeout_seconds": timeout_seconds,
@@ -134,7 +145,27 @@ class ScheduledTaskEcho:
 
         name = d.pop("name")
 
-        schedule = d.pop("schedule")
+        def _parse_schedule(data: object) -> None | str:
+            if data is None:
+                return data
+            return cast(None | str, data)
+
+        schedule = _parse_schedule(d.pop("schedule"))
+
+        def _parse_fire_at(data: object) -> datetime.datetime | None:
+            if data is None:
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                fire_at_type_0 = isoparse(data)
+
+                return fire_at_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(datetime.datetime | None, data)
+
+        fire_at = _parse_fire_at(d.pop("fire_at"))
 
         command = d.pop("command")
 
@@ -203,6 +234,7 @@ class ScheduledTaskEcho:
             id=id,
             name=name,
             schedule=schedule,
+            fire_at=fire_at,
             command=command,
             enabled=enabled,
             timeout_seconds=timeout_seconds,

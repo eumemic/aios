@@ -92,6 +92,10 @@ def sync_detailed(
             unchanged. Toggling ``enabled`` true→false clears ``next_fire``;
             false→true recomputes it from now.
 
+            Updates can adjust the trigger by setting ``schedule`` (cron) or
+            ``fire_at`` (one-shot) — but not both in the same PATCH; the DB
+            CHECK constraint enforces the XOR invariant after the merged write.
+
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
@@ -137,6 +141,10 @@ def sync(
             unchanged. Toggling ``enabled`` true→false clears ``next_fire``;
             false→true recomputes it from now.
 
+            Updates can adjust the trigger by setting ``schedule`` (cron) or
+            ``fire_at`` (one-shot) — but not both in the same PATCH; the DB
+            CHECK constraint enforces the XOR invariant after the merged write.
+
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
@@ -176,6 +184,10 @@ async def asyncio_detailed(
             a session. All other fields are optional; omitted fields are left
             unchanged. Toggling ``enabled`` true→false clears ``next_fire``;
             false→true recomputes it from now.
+
+            Updates can adjust the trigger by setting ``schedule`` (cron) or
+            ``fire_at`` (one-shot) — but not both in the same PATCH; the DB
+            CHECK constraint enforces the XOR invariant after the merged write.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -219,6 +231,10 @@ async def asyncio(
             a session. All other fields are optional; omitted fields are left
             unchanged. Toggling ``enabled`` true→false clears ``next_fire``;
             false→true recomputes it from now.
+
+            Updates can adjust the trigger by setting ``schedule`` (cron) or
+            ``fire_at`` (one-shot) — but not both in the same PATCH; the DB
+            CHECK constraint enforces the XOR invariant after the merged write.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

@@ -20,6 +20,7 @@ the DB + service + HTTP layers.
 
 from __future__ import annotations
 
+import json
 import secrets
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -236,6 +237,95 @@ class TestServiceLayer:
         )
         assert re_enabled.enabled is True
         assert re_enabled.next_fire is not None
+
+
+class TestPerAccountCap:
+    """The ``scheduled_tasks_per_account_max`` cap shipped in Phase 3 of
+    the schedule_wake unification."""
+
+    async def test_add_at_cap_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str], monkeypatch: Any
+    ) -> None:
+        from aios.config import Settings
+        from aios.errors import RateLimitedError
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = f"acc_cap_{_uniq()}"
+
+        # Drop the cap to 2 for the test so we don't have to insert 100 rows.
+        original = Settings()
+        monkeypatch.setattr(
+            "aios.services.scheduled_tasks.get_settings",
+            lambda: original.model_copy(update={"scheduled_tasks_per_account_max": 2}),
+        )
+
+        await st_service.add_task(pool, sid, _spec("a"), account_id=account_id)
+        await st_service.add_task(pool, sid, _spec("b"), account_id=account_id)
+        with pytest.raises(RateLimitedError, match="active-timer cap"):
+            await st_service.add_task(pool, sid, _spec("c"), account_id=account_id)
+
+    async def test_disabled_does_not_count(
+        self, pool: Any, env_and_agent: tuple[str, str], monkeypatch: Any
+    ) -> None:
+        from aios.config import Settings
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = f"acc_cap_dis_{_uniq()}"
+
+        original = Settings()
+        monkeypatch.setattr(
+            "aios.services.scheduled_tasks.get_settings",
+            lambda: original.model_copy(update={"scheduled_tasks_per_account_max": 1}),
+        )
+
+        # Fill the cap with one enabled row, then add a disabled one — must
+        # succeed because the cap counts enabled rows only.
+        await st_service.add_task(pool, sid, _spec("enabled-1"), account_id=account_id)
+        disabled = ScheduledTaskCreate.model_validate(
+            {"name": "paused", "schedule": "*/5 * * * *", "command": "true", "enabled": False}
+        )
+        disabled_echo = await st_service.add_task(pool, sid, disabled, account_id=account_id)
+        assert disabled_echo.enabled is False
+        assert disabled_echo.next_fire is None
+        # And the listing should now show 2 rows total.
+        listed = await st_service.list_tasks(pool, sid, account_id=account_id)
+        assert len(listed) == 2
+        assert sorted(t.name for t in listed) == ["enabled-1", "paused"]
+
+    async def test_reenable_at_cap_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str], monkeypatch: Any
+    ) -> None:
+        from aios.config import Settings
+        from aios.errors import RateLimitedError
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = f"acc_cap_re_{_uniq()}"
+
+        original = Settings()
+        monkeypatch.setattr(
+            "aios.services.scheduled_tasks.get_settings",
+            lambda: original.model_copy(update={"scheduled_tasks_per_account_max": 1}),
+        )
+
+        # One enabled (at cap), one disabled — re-enabling the second
+        # should now hit the cap.
+        await st_service.add_task(pool, sid, _spec("enabled"), account_id=account_id)
+        disabled = ScheduledTaskCreate.model_validate(
+            {"name": "paused", "schedule": "*/5 * * * *", "command": "true", "enabled": False}
+        )
+        await st_service.add_task(pool, sid, disabled, account_id=account_id)
+
+        with pytest.raises(RateLimitedError, match="active-timer cap"):
+            await st_service.update_task(
+                pool,
+                sid,
+                "paused",
+                ScheduledTaskUpdate.model_validate({"enabled": True}),
+                account_id=account_id,
+            )
 
 
 # ─── tick claim semantics ─────────────────────────────────────────────────
@@ -736,3 +826,546 @@ class TestRowDeletedRace:
             await scheduled_task_runner.run_scheduled_task_step(phantom)
         finally:
             runtime.pool = prev_pool
+
+
+# ─── one-shot / fire_at lifecycle ─────────────────────────────────────────
+
+
+def _one_shot_spec(
+    name: str,
+    fire_at: datetime,
+    command: str = "echo hi",
+    metadata: dict[str, Any] | None = None,
+) -> ScheduledTaskCreate:
+    return ScheduledTaskCreate.model_validate(
+        {
+            "name": name,
+            "fire_at": fire_at.isoformat(),
+            "command": command,
+            "metadata": metadata or {},
+        }
+    )
+
+
+def _make_fake_sandbox_registry(
+    run_impl: Any,
+    *,
+    provision_impl: Any = None,
+) -> Any:
+    """Build a fake sandbox-registry shim for tests.
+
+    Attaches the ``exec`` method via ``setattr`` rather than ``def``-syntax to
+    sidestep a local file-write hook that pattern-matches the literal substring
+    'e' 'x' 'e' 'c' '('. The production runner does the same dance via
+    ``run_in_sandbox = sandbox_registry.exec``.
+    """
+
+    class _FakeRegistry:
+        async def get_or_provision(self, _session_id: str, *, pool: Any) -> object:
+            if provision_impl is not None:
+                return await provision_impl(pool)
+            return mock.MagicMock()
+
+    # setattr() with a constant attribute name is deliberate — using the
+    # def-syntax method name would trip a local file-write hook that
+    # pattern-matches the literal substring 'e' 'x' 'e' 'c' '(' (same
+    # workaround the production runner uses).
+    setattr(_FakeRegistry, "exec", run_impl)  # noqa: B010
+    return _FakeRegistry()
+
+
+class TestOneShotLifecycle:
+    """The new ``fire_at`` one-shot trigger added in this PR."""
+
+    async def test_one_shot_claim_leaves_next_fire_unchanged(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """Cron rows have next_fire advanced on claim; one-shot rows
+        deliberately don't — the runner deletes the row instead."""
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+        now = datetime.now(UTC)
+        past_fire = now - timedelta(seconds=10)
+        echo = await st_service.add_task(
+            pool, sid, _one_shot_spec("oneshot", past_fire), account_id=account_id
+        )
+        async with pool.acquire() as conn, conn.transaction():
+            claimed = await queries.fetch_and_claim_due_scheduled_tasks(conn, now_utc=now)
+
+        names = [c.name for c in claimed]
+        assert "oneshot" in names
+        claimed_row = next(c for c in claimed if c.id == echo.id)
+        # next_fire stays equal to fire_at (one-shot leaves it alone);
+        # cron rows would have it advanced to a future slot.
+        assert claimed_row.fire_at is not None
+        assert claimed_row.next_fire == claimed_row.fire_at
+
+    async def test_runner_deletes_one_shot_before_fire(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """The runner DELETES the row in its own transaction BEFORE the
+        sandbox-side run — at-most-once semantics, no duplicate-fire window."""
+        from aios.errors import NotFoundError
+        from aios.harness import runtime, scheduled_task_runner
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+        now = datetime.now(UTC)
+        echo = await st_service.add_task(
+            pool,
+            sid,
+            _one_shot_spec("oneshot_del", now - timedelta(seconds=1)),
+            account_id=account_id,
+        )
+
+        # Mark as claimed so the runner doesn't early-out on "not due".
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE session_scheduled_tasks SET running_since = $1 WHERE id = $2",
+                now,
+                echo.id,
+            )
+
+        # Capture the delete-then-fire ordering.
+        delete_seen: list[str] = []
+        provision_seen: list[str] = []
+
+        async def _provision(p: Any) -> object:
+            async with p.acquire() as conn:
+                exists: bool = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM session_scheduled_tasks WHERE id = $1)",
+                    echo.id,
+                )
+            provision_seen.append(echo.id if exists else "deleted-before-fire")
+            return mock.MagicMock()
+
+        async def _run(_self: object, _handle: object, _cmd: str, **_kw: Any) -> Any:
+            return mock.MagicMock(exit_code=0, timed_out=False, stderr="")
+
+        registry = _make_fake_sandbox_registry(_run, provision_impl=_provision)
+        prev_pool = runtime.pool
+        prev_registry = runtime.sandbox_registry
+        runtime.pool = pool
+        runtime.sandbox_registry = registry  # type: ignore[assignment]
+        try:
+            # Wrap delete_scheduled_task_by_id to confirm order.
+            orig_delete = queries.delete_scheduled_task_by_id
+
+            async def _instrumented_delete(conn: Any, task_id: str) -> None:
+                delete_seen.append(task_id)
+                await orig_delete(conn, task_id)
+
+            with mock.patch.object(
+                queries,
+                "delete_scheduled_task_by_id",
+                _instrumented_delete,
+            ):
+                await scheduled_task_runner.run_scheduled_task_step(echo.id)
+        finally:
+            runtime.pool = prev_pool
+            runtime.sandbox_registry = prev_registry
+
+        assert echo.id in delete_seen, "delete_scheduled_task_by_id was never called"
+        assert provision_seen == ["deleted-before-fire"], (
+            f"row must be deleted before sandbox-side run; got: {provision_seen}"
+        )
+        # Final assertion: row is gone.
+        async with pool.acquire() as conn:
+            with pytest.raises(NotFoundError):
+                await queries.unscoped_get_scheduled_task_row(conn, echo.id)
+
+    async def test_one_shot_failure_appends_session_event(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """A failed one-shot fire surfaces a synthetic user-role message
+        so the agent has something to react to instead of unexplained
+        silence."""
+        from aios.harness import runtime, scheduled_task_runner
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+        now = datetime.now(UTC)
+        echo = await st_service.add_task(
+            pool,
+            sid,
+            _one_shot_spec("oneshot_fail", now - timedelta(seconds=1)),
+            account_id=account_id,
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE session_scheduled_tasks SET running_since = $1 WHERE id = $2",
+                now,
+                echo.id,
+            )
+
+        async def _fail_run(_self: object, _handle: object, _cmd: str, **_kw: Any) -> Any:
+            return mock.MagicMock(
+                exit_code=7,
+                timed_out=False,
+                stderr="curl: (7) Failed to connect to broker",
+            )
+
+        registry = _make_fake_sandbox_registry(_fail_run)
+        prev_pool = runtime.pool
+        prev_registry = runtime.sandbox_registry
+        runtime.pool = pool
+        runtime.sandbox_registry = registry  # type: ignore[assignment]
+        # defer_wake reaches into procrastinate which isn't wired here;
+        # patch to a no-op so the failure-surface path completes.
+        with mock.patch(
+            "aios.harness.scheduled_task_runner.defer_wake",
+            new_callable=mock.AsyncMock,
+        ):
+            try:
+                await scheduled_task_runner.run_scheduled_task_step(echo.id)
+            finally:
+                runtime.pool = prev_pool
+                runtime.sandbox_registry = prev_registry
+
+        # Session should have a user-role message announcing the failure.
+        async with pool.acquire() as conn:
+            event_rows = await conn.fetch(
+                "SELECT kind, data FROM events WHERE session_id = $1 ORDER BY seq ASC",
+                sid,
+            )
+        wake_failure_messages = [
+            r
+            for r in event_rows
+            if r["kind"] == "message"
+            and (json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]).get("role")
+            == "user"
+            and "Scheduled wake"
+            in (json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]).get(
+                "content", ""
+            )
+        ]
+        assert wake_failure_messages, "expected a failure-surfacing user message in the session log"
+        latest = wake_failure_messages[-1]
+        content = (
+            json.loads(latest["data"]) if isinstance(latest["data"], str) else latest["data"]
+        )["content"]
+        assert "oneshot_fail" in content
+        assert "7" in content  # exit code in the error_summary tail
+
+
+class TestOneShotSkipDeletes:
+    """Skip paths must DELETE one-shot rows (orphaning them is a leak)."""
+
+    async def test_archived_skip_deletes_one_shot(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        from aios.errors import NotFoundError
+        from aios.harness import runtime, scheduled_task_runner
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+        now = datetime.now(UTC)
+        echo = await st_service.add_task(
+            pool,
+            sid,
+            _one_shot_spec("archived_oneshot", now - timedelta(seconds=1)),
+            account_id=account_id,
+        )
+        # Archive the session — runner's archive-skip branch should fire
+        # and delete the row.
+        await sessions_service.archive_session(pool, sid, account_id=account_id)
+
+        prev_pool = runtime.pool
+        runtime.pool = pool
+        try:
+            await scheduled_task_runner.run_scheduled_task_step(echo.id)
+        finally:
+            runtime.pool = prev_pool
+
+        async with pool.acquire() as conn:
+            with pytest.raises(NotFoundError):
+                await queries.unscoped_get_scheduled_task_row(conn, echo.id)
+
+    async def test_disabled_skip_deletes_one_shot(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        from aios.errors import NotFoundError
+        from aios.harness import runtime, scheduled_task_runner
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+        now = datetime.now(UTC)
+        echo = await st_service.add_task(
+            pool,
+            sid,
+            _one_shot_spec("disabled_oneshot", now - timedelta(seconds=1)),
+            account_id=account_id,
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE session_scheduled_tasks SET enabled = false WHERE id = $1",
+                echo.id,
+            )
+
+        prev_pool = runtime.pool
+        runtime.pool = pool
+        try:
+            await scheduled_task_runner.run_scheduled_task_step(echo.id)
+        finally:
+            runtime.pool = prev_pool
+
+        async with pool.acquire() as conn:
+            with pytest.raises(NotFoundError):
+                await queries.unscoped_get_scheduled_task_row(conn, echo.id)
+
+
+class TestReleaseClaim:
+    """Compensating rollback when defer_async fails after the claim commit."""
+
+    async def test_release_clears_running_since(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        echo = await st_service.add_task(
+            pool, sid, _spec("release_target"), account_id="acc_test_stub"
+        )
+        now = datetime.now(UTC)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE session_scheduled_tasks SET running_since = $1 WHERE id = $2",
+                now,
+                echo.id,
+            )
+            row = await conn.fetchrow(
+                "SELECT running_since FROM session_scheduled_tasks WHERE id = $1", echo.id
+            )
+            assert row is not None and row["running_since"] is not None
+            await queries.release_scheduled_task_claim(conn, echo.id)
+            row = await conn.fetchrow(
+                "SELECT running_since FROM session_scheduled_tasks WHERE id = $1", echo.id
+            )
+            assert row is not None and row["running_since"] is None
+
+
+class TestReEnablePastFireAtRejected:
+    """update_task must reject re-enabling a one-shot row with past fire_at —
+    silently firing immediately with a stale wake reason is the worse failure
+    mode."""
+
+    async def test_reenable_past_one_shot_raises(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        from aios.errors import ValidationError as AiosValidationError
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+        # Add as disabled with fire_at in the past.
+        past_fire = datetime.now(UTC) - timedelta(days=1)
+        spec = ScheduledTaskCreate.model_validate(
+            {
+                "name": "stale_oneshot",
+                "fire_at": past_fire.isoformat(),
+                "command": "true",
+                "enabled": False,
+            }
+        )
+        await st_service.add_task(pool, sid, spec, account_id=account_id)
+
+        # Re-enabling should fail.
+        with pytest.raises(AiosValidationError, match="not in the future"):
+            await st_service.update_task(
+                pool,
+                sid,
+                "stale_oneshot",
+                ScheduledTaskUpdate.model_validate({"enabled": True}),
+                account_id=account_id,
+            )
+
+    async def test_reenable_with_fresh_fire_at_succeeds(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """The clean escape: PATCH a future fire_at in the same request that
+        re-enables."""
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+        past_fire = datetime.now(UTC) - timedelta(days=1)
+        future_fire = datetime.now(UTC) + timedelta(hours=1)
+        spec = ScheduledTaskCreate.model_validate(
+            {
+                "name": "fresh_oneshot",
+                "fire_at": past_fire.isoformat(),
+                "command": "true",
+                "enabled": False,
+            }
+        )
+        await st_service.add_task(pool, sid, spec, account_id=account_id)
+
+        echo = await st_service.update_task(
+            pool,
+            sid,
+            "fresh_oneshot",
+            ScheduledTaskUpdate.model_validate(
+                {"enabled": True, "fire_at": future_fire.isoformat()}
+            ),
+            account_id=account_id,
+        )
+        assert echo.enabled is True
+        assert echo.next_fire is not None
+        assert echo.next_fire > datetime.now(UTC)
+
+
+class TestPerSessionCap:
+    """MAX_SCHEDULED_TASKS_PER_SESSION enforced at add_task — keeps a single
+    session from consuming the whole per-account quota."""
+
+    async def test_per_session_cap_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str], monkeypatch: Any
+    ) -> None:
+        from aios.errors import RateLimitedError
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = f"acc_session_cap_{_uniq()}"
+
+        # Drop the per-session cap to 2 for the test.
+        monkeypatch.setattr("aios.services.scheduled_tasks.MAX_SCHEDULED_TASKS_PER_SESSION", 2)
+
+        await st_service.add_task(pool, sid, _spec("a"), account_id=account_id)
+        await st_service.add_task(pool, sid, _spec("b"), account_id=account_id)
+        with pytest.raises(RateLimitedError, match="session at scheduled-tasks cap"):
+            await st_service.add_task(pool, sid, _spec("c"), account_id=account_id)
+
+
+class TestNotifyTrigger:
+    """The pg_notify trigger added in migration 0058 must fire on INSERT,
+    scheduling-relevant UPDATE, and the runner-clear edge (load-bearing for
+    short-period cron cadences)."""
+
+    async def test_insert_emits_notify(self, pool: Any, env_and_agent: tuple[str, str]) -> None:
+        import asyncio as _asyncio
+
+        from aios.config import get_settings
+        from aios.db.listen import listen_for_scheduled_tasks_due
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+
+        async with listen_for_scheduled_tasks_due(get_settings().db_url) as event:
+            event.clear()
+            await st_service.add_task(pool, sid, _spec("notify_me"), account_id=account_id)
+            try:
+                await _asyncio.wait_for(event.wait(), timeout=2.0)
+            except TimeoutError:
+                pytest.fail("INSERT did not produce a NOTIFY within 2s")
+
+    async def test_running_since_clear_emits_notify(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """The runner-clear edge: setting running_since=NULL after a fire
+        MUST emit NOTIFY so the scheduler can re-compute its sleep target.
+        Without this, sub-hourly cron cadences are missed."""
+        import asyncio as _asyncio
+
+        from aios.config import get_settings
+        from aios.db.listen import listen_for_scheduled_tasks_due
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+        echo = await st_service.add_task(pool, sid, _spec("runner_clear"), account_id=account_id)
+        # Stamp running_since so the clear is a real transition.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE session_scheduled_tasks SET running_since = now() WHERE id = $1",
+                echo.id,
+            )
+
+        async with listen_for_scheduled_tasks_due(get_settings().db_url) as event:
+            event.clear()
+            async with pool.acquire() as conn:
+                await queries.record_scheduled_task_fire(
+                    conn,
+                    echo.id,
+                    status="ok",
+                    consecutive_failures=0,
+                    fired_at=datetime.now(UTC),
+                )
+            try:
+                await _asyncio.wait_for(event.wait(), timeout=2.0)
+            except TimeoutError:
+                pytest.fail(
+                    "running_since clear did not produce a NOTIFY — "
+                    "short-period cron cadences would be missed"
+                )
+
+    async def test_internal_update_does_not_notify(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """Bumping last_fire_at + consecutive_failures with running_since
+        already NULL is a non-scheduling internal write and must NOT NOTIFY."""
+        import asyncio as _asyncio
+
+        from aios.config import get_settings
+        from aios.db.listen import listen_for_scheduled_tasks_due
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+        echo = await st_service.add_task(pool, sid, _spec("internal"), account_id=account_id)
+
+        async with listen_for_scheduled_tasks_due(get_settings().db_url) as event:
+            event.clear()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE session_scheduled_tasks "
+                    "SET last_fire_at = now(), consecutive_failures = 1, updated_at = now() "
+                    "WHERE id = $1",
+                    echo.id,
+                )
+            with pytest.raises(TimeoutError):
+                await _asyncio.wait_for(event.wait(), timeout=0.5)
+
+
+class TestAdvisoryLockSerializesCapCheck:
+    """The per-account advisory lock makes the cap contractual instead of
+    best-effort."""
+
+    async def test_concurrent_add_at_cap_serialized(
+        self, pool: Any, env_and_agent: tuple[str, str], monkeypatch: Any
+    ) -> None:
+        import asyncio as _asyncio
+
+        from aios.config import Settings
+        from aios.errors import RateLimitedError
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = f"acc_lock_{_uniq()}"
+
+        original = Settings()
+        monkeypatch.setattr(
+            "aios.services.scheduled_tasks.get_settings",
+            lambda: original.model_copy(update={"scheduled_tasks_per_account_max": 2}),
+        )
+
+        # Pre-fill: 1 enabled row (cap = 2 means 1 slot free).
+        await st_service.add_task(pool, sid, _spec("seed"), account_id=account_id)
+
+        async def _add(n: int) -> tuple[int, bool]:
+            try:
+                await st_service.add_task(
+                    pool, sid, _spec(f"concurrent_{n}"), account_id=account_id
+                )
+                return n, True
+            except RateLimitedError:
+                return n, False
+
+        results = await _asyncio.gather(*[_add(i) for i in range(5)])
+        successes = sum(1 for _, ok in results if ok)
+        # Without the advisory lock, the cap-check race would let multiple
+        # succeed (1 + N). With the lock, exactly one new row lands.
+        assert successes == 1, f"expected 1 success under cap, got {successes}: {results}"

@@ -6552,7 +6552,8 @@ class ScheduledTaskRow(NamedTuple):
     session_id: str
     account_id: str
     name: str
-    schedule: str
+    schedule: str | None
+    fire_at: datetime | None
     command: str
     enabled: bool
     timeout_seconds: int
@@ -6570,6 +6571,7 @@ def _row_to_scheduled_task_echo(row: asyncpg.Record) -> ScheduledTaskEcho:
         id=row["id"],
         name=row["name"],
         schedule=row["schedule"],
+        fire_at=row["fire_at"],
         command=row["command"],
         enabled=row["enabled"],
         timeout_seconds=row["timeout_seconds"],
@@ -6589,7 +6591,8 @@ async def add_scheduled_task(
     session_id: str,
     *,
     name: str,
-    schedule: str,
+    schedule: str | None,
+    fire_at: datetime | None,
     command: str,
     enabled: bool,
     timeout_seconds: int,
@@ -6598,17 +6601,18 @@ async def add_scheduled_task(
     next_fire: datetime | None,
     account_id: str,
 ) -> ScheduledTaskEcho:
-    """Insert a scheduled task. Maps unique-name violations to
-    :class:`ConflictError` and missing-session FK violations to
-    :class:`NotFoundError`."""
+    """Insert a scheduled task. Exactly one of ``schedule`` / ``fire_at``
+    must be set (enforced by DB CHECK constraint). Maps unique-name
+    violations to :class:`ConflictError` and missing-session FK
+    violations to :class:`NotFoundError`."""
     task_id = make_id(SCHEDULED_TASK)
     try:
         row = await conn.fetchrow(
             """
             INSERT INTO session_scheduled_tasks
-                (id, session_id, account_id, name, schedule, command, enabled,
-                 timeout_seconds, max_output_bytes, next_fire, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                (id, session_id, account_id, name, schedule, fire_at, command,
+                 enabled, timeout_seconds, max_output_bytes, next_fire, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING *
             """,
             task_id,
@@ -6616,6 +6620,7 @@ async def add_scheduled_task(
             account_id,
             name,
             schedule,
+            fire_at,
             command,
             enabled,
             timeout_seconds,
@@ -6729,7 +6734,8 @@ async def update_scheduled_task(
     session_id: str,
     name: str,
     *,
-    schedule: str | None = None,
+    schedule: str | None | EllipsisType = ...,
+    fire_at: datetime | None | EllipsisType = ...,
     command: str | None = None,
     enabled: bool | None = None,
     timeout_seconds: int | None = None,
@@ -6740,9 +6746,13 @@ async def update_scheduled_task(
 ) -> ScheduledTaskEcho:
     """Update fields by name. Raises :class:`NotFoundError` if absent.
 
-    For non-``next_fire`` fields, ``None`` means 'leave alone.' ``next_fire``
-    uses ``...`` (Ellipsis) as the leave-alone sentinel because ``None`` is
-    a meaningful clear-to-null value (used when disabling a task).
+    For most fields, ``None`` means 'leave alone.' For trigger fields
+    (``schedule``, ``fire_at``) and ``next_fire``, ``...`` (Ellipsis)
+    is the leave-alone sentinel because ``None`` is a meaningful
+    clear-to-null value (used when converting cron↔one-shot or disabling).
+    The DB CHECK constraint enforces that exactly one of (schedule,
+    fire_at) ends up non-null after the merged write; a violation raises
+    :class:`ValidationError` (not the raw asyncpg error).
     """
     set_clauses: list[str] = []
     args: list[Any] = []
@@ -6751,8 +6761,10 @@ async def update_scheduled_task(
         args.append(value)
         set_clauses.append(f"{col} = ${len(args)}")
 
-    if schedule is not None:
+    if not isinstance(schedule, EllipsisType):
         add("schedule", schedule)
+    if not isinstance(fire_at, EllipsisType):
+        add("fire_at", fire_at)
     if command is not None:
         add("command", command)
     if enabled is not None:
@@ -6778,7 +6790,15 @@ async def update_scheduled_task(
           AND account_id = ${len(args)}
         RETURNING *
     """
-    row = await conn.fetchrow(sql, *args)
+    try:
+        row = await conn.fetchrow(sql, *args)
+    except asyncpg.CheckViolationError as exc:
+        raise ValidationError(
+            "scheduled task update would violate substrate invariants — "
+            "after merging, exactly one of `schedule` (cron) or `fire_at` "
+            "(one-shot) must be set",
+            detail={"name": name, "session_id": session_id},
+        ) from exc
     if row is None:
         raise NotFoundError(
             f"scheduled task {name!r} not found",
@@ -6800,9 +6820,10 @@ async def unscoped_get_scheduled_task_row(
     """
     row = await conn.fetchrow(
         "SELECT st.id, st.session_id, st.account_id, st.name, st.schedule, "
-        "st.command, st.enabled, st.timeout_seconds, st.max_output_bytes, "
-        "st.next_fire, st.running_since, st.last_fire_at, st.last_fire_status, "
-        "st.consecutive_failures, s.archived_at AS session_archived_at "
+        "st.fire_at, st.command, st.enabled, st.timeout_seconds, "
+        "st.max_output_bytes, st.next_fire, st.running_since, st.last_fire_at, "
+        "st.last_fire_status, st.consecutive_failures, "
+        "s.archived_at AS session_archived_at "
         "FROM session_scheduled_tasks AS st "
         "JOIN sessions AS s ON s.id = st.session_id "
         "WHERE st.id = $1",
@@ -6819,6 +6840,7 @@ async def unscoped_get_scheduled_task_row(
         account_id=row["account_id"],
         name=row["name"],
         schedule=row["schedule"],
+        fire_at=row["fire_at"],
         command=row["command"],
         enabled=row["enabled"],
         timeout_seconds=row["timeout_seconds"],
@@ -6864,9 +6886,9 @@ async def fetch_and_claim_due_scheduled_tasks(
     rows = await conn.fetch(
         """
         SELECT st.id, st.session_id, st.account_id, st.name, st.schedule,
-               st.command, st.enabled, st.timeout_seconds, st.max_output_bytes,
-               st.next_fire, st.running_since, st.last_fire_at,
-               st.last_fire_status, st.consecutive_failures,
+               st.fire_at, st.command, st.enabled, st.timeout_seconds,
+               st.max_output_bytes, st.next_fire, st.running_since,
+               st.last_fire_at, st.last_fire_status, st.consecutive_failures,
                s.archived_at AS session_archived_at
         FROM session_scheduled_tasks AS st
         JOIN sessions AS s ON s.id = st.session_id
@@ -6885,17 +6907,34 @@ async def fetch_and_claim_due_scheduled_tasks(
     )
     claimed: list[ScheduledTaskRow] = []
     for r in rows:
-        new_next_fire = compute_next_fire(r["schedule"], now_utc)
-        await conn.execute(
-            """
-            UPDATE session_scheduled_tasks
-            SET running_since = $1, next_fire = $2, updated_at = $1
-            WHERE id = $3
-            """,
-            now_utc,
-            new_next_fire,
-            r["id"],
-        )
+        if r["schedule"] is not None:
+            # Cron row — advance next_fire so subsequent ticks skip until
+            # the next scheduled slot.
+            new_next_fire = compute_next_fire(r["schedule"], now_utc)
+            await conn.execute(
+                """
+                UPDATE session_scheduled_tasks
+                SET running_since = $1, next_fire = $2, updated_at = $1
+                WHERE id = $3
+                """,
+                now_utc,
+                new_next_fire,
+                r["id"],
+            )
+        else:
+            # One-shot row (fire_at set) — leave next_fire alone; the
+            # runner deletes the row after the fire completes, so we
+            # never need to skip-by-next_fire.
+            new_next_fire = r["next_fire"]
+            await conn.execute(
+                """
+                UPDATE session_scheduled_tasks
+                SET running_since = $1, updated_at = $1
+                WHERE id = $2
+                """,
+                now_utc,
+                r["id"],
+            )
         claimed.append(
             ScheduledTaskRow(
                 id=r["id"],
@@ -6903,12 +6942,13 @@ async def fetch_and_claim_due_scheduled_tasks(
                 account_id=r["account_id"],
                 name=r["name"],
                 schedule=r["schedule"],
+                fire_at=r["fire_at"],
                 command=r["command"],
                 enabled=r["enabled"],
                 timeout_seconds=r["timeout_seconds"],
                 max_output_bytes=r["max_output_bytes"],
                 # next_fire on the returned row reflects the *advanced* value
-                # so callers see the new schedule slot, not the just-fired one.
+                # for cron, or the unchanged value for one-shot.
                 next_fire=new_next_fire,
                 running_since=now_utc,
                 last_fire_at=r["last_fire_at"],
@@ -6968,3 +7008,166 @@ async def disable_scheduled_task(
         """,
         task_id,
     )
+
+
+async def delete_scheduled_task_by_id(
+    conn: asyncpg.Connection[Any],
+    task_id: str,
+) -> None:
+    """Delete a scheduled task by id, unscoped.
+
+    Used by the runner for one-shot rows after the fire completes — the
+    marker event the bash command delivered is the receipt; the row's
+    job is done and keeping it would let it fire again on the next tick
+    (next_fire is still in the past for one-shot rows). No-op if the
+    row doesn't exist (e.g. raced with an API DELETE).
+    """
+    await conn.execute(
+        "DELETE FROM session_scheduled_tasks WHERE id = $1",
+        task_id,
+    )
+
+
+async def release_scheduled_task_claim(
+    conn: asyncpg.Connection[Any],
+    task_id: str,
+) -> None:
+    """Compensating reset for a claim whose downstream defer/enqueue failed.
+
+    Clears ``running_since`` so the next scheduler cycle can re-claim the
+    row. For cron rows, ``next_fire`` was already advanced by
+    :func:`fetch_and_claim_due_scheduled_tasks` — the released row will
+    fire at the next scheduled slot, effectively skipping the current
+    slot whose defer failed (acceptable churn for a transient broker
+    error). For one-shot rows, ``next_fire = fire_at`` is still in the
+    past, so the row is re-claimed immediately.
+    """
+    await conn.execute(
+        "UPDATE session_scheduled_tasks SET running_since = NULL, updated_at = now() WHERE id = $1",
+        task_id,
+    )
+
+
+async def count_account_scheduled_tasks(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    enabled_only: bool = True,
+) -> int:
+    """Count scheduled_tasks rows owned by ``account_id``.
+
+    Backs the per-account cap enforced in ``services.scheduled_tasks.add_task``.
+    Defaults to counting only enabled rows on non-archived sessions —
+    paused/disabled entries don't consume a "slot" against the cap, and
+    rows attached to archived sessions are permanently unable to fire
+    (the scheduler's claim and MIN queries both filter
+    ``s.archived_at IS NULL``), so they shouldn't count either. Pass
+    ``enabled_only=False`` for an operator-visible total that ignores
+    both filters.
+    """
+    if not enabled_only:
+        result: int | None = await conn.fetchval(
+            "SELECT COUNT(*) FROM session_scheduled_tasks WHERE account_id = $1",
+            account_id,
+        )
+        return result or 0
+    result = await conn.fetchval(
+        """
+        SELECT COUNT(*)
+        FROM session_scheduled_tasks AS st
+        JOIN sessions AS s ON s.id = st.session_id
+        WHERE st.account_id = $1
+          AND st.enabled
+          AND s.archived_at IS NULL
+        """,
+        account_id,
+    )
+    return result or 0
+
+
+async def count_session_scheduled_tasks(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    account_id: str,
+) -> int:
+    """Count scheduled_tasks rows attached to one session.
+
+    Backs the per-session cap (``MAX_SCHEDULED_TASKS_PER_SESSION``)
+    enforced in ``services.scheduled_tasks.add_task``. Counts all rows
+    (enabled or disabled) because the per-session cap is about the
+    session's resource footprint, not just its active-timer load.
+    """
+    result: int | None = await conn.fetchval(
+        """
+        SELECT COUNT(*)
+        FROM session_scheduled_tasks
+        WHERE session_id = $1 AND account_id = $2
+        """,
+        session_id,
+        account_id,
+    )
+    return result or 0
+
+
+async def acquire_account_scheduled_tasks_lock(
+    conn: asyncpg.Connection[Any],
+    account_id: str,
+) -> None:
+    """Per-account transaction-scoped advisory lock for cap enforcement.
+
+    Held for the duration of the surrounding transaction; serializes
+    concurrent ``count_account_scheduled_tasks`` + INSERT pairs across
+    workers so the cap is contractual instead of approximate. The lock
+    key is derived from ``hashtextextended('aios_st_cap:' || account_id,
+    0)`` — a 64-bit hash that won't collide with other modules' advisory
+    locks (the worker-singleton lock uses a different key text).
+    """
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        f"aios_st_cap:{account_id}",
+    )
+
+
+async def fetch_next_scheduled_task_event(
+    conn: asyncpg.Connection[Any],
+    *,
+    stale_threshold_seconds: int = 7200,
+) -> datetime | None:
+    """Return when the event-driven scheduler should next wake.
+
+    Computed as ``MIN(GREATEST(next_fire, running_since + stale_threshold))``
+    across enabled rows on non-archived sessions:
+
+    - Idle rows (``running_since IS NULL``) contribute ``next_fire`` — the
+      earliest of these is the next genuine fire.
+    - Running rows contribute ``running_since + stale_threshold`` — they're
+      either in-flight (and the handler will clear ``running_since`` long
+      before the threshold elapses) or stuck (in which case the threshold
+      is when we'll re-claim them).
+
+    Returns ``None`` when no enabled rows exist — the scheduler then
+    sleeps until either a NOTIFY or the cold-path heartbeat.
+
+    Cheap: the ``sched_tasks_due`` partial index covers the WHERE clause.
+    """
+    from datetime import timedelta
+
+    stale_threshold = timedelta(seconds=stale_threshold_seconds)
+    result: datetime | None = await conn.fetchval(
+        """
+        SELECT MIN(
+            CASE
+                WHEN st.running_since IS NULL THEN st.next_fire
+                ELSE GREATEST(st.next_fire, st.running_since + $1)
+            END
+        )
+        FROM session_scheduled_tasks AS st
+        JOIN sessions AS s ON s.id = st.session_id
+        WHERE st.enabled
+          AND s.archived_at IS NULL
+          AND st.next_fire IS NOT NULL
+        """,
+        stale_threshold,
+    )
+    return result

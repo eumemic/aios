@@ -198,6 +198,32 @@ class Settings(BaseSettings):
         "for unmounted servers.",
     )
 
+    # ── scheduled tasks ────────────────────────────────────────────────────
+    scheduled_tasks_per_account_max: int = Field(
+        default=100,
+        ge=1,
+        description="Per-account ceiling on enabled scheduled_tasks rows "
+        "across all sessions. Enforced at ``add_task`` time; on exceed, "
+        "the call raises ``RateLimitedError``. Bounds the worst-case work "
+        "the event-driven scheduler has to enumerate on each tick, and "
+        "the curl-storm a misbehaving agent could deflect at the broker. "
+        "Includes one-shot ``schedule_wake`` rows; bump if your workload "
+        "legitimately needs more standing timers per tenant.",
+    )
+    schedule_wake_max_delay_seconds: int = Field(
+        default=60 * 60 * 24 * 30,  # 30 days
+        ge=60,
+        description="Upper bound on the agent-requested wake delay (via "
+        "``schedule_wake``'s ``delay_seconds`` or the resolved offset of "
+        "its ``at`` argument). Bounds (a) unbounded scheduler MIN-query "
+        "enumeration over agent-set-and-forget rows that may never fire "
+        "within a worker's lifetime, and (b) catches obvious mistakes "
+        "(``delay_seconds=86400000`` instead of ``86400``) at the tool "
+        "boundary with a clear typed error instead of letting them sit "
+        "in the DB for years. Set high for legitimate long-horizon "
+        "reminders.",
+    )
+
     # ── observability ──────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")
 

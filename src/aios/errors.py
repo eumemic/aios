@@ -80,6 +80,20 @@ class ForbiddenError(AiosError):
     status_code = 403
 
 
+class RateLimitedError(AiosError):
+    """Per-account resource cap exceeded.
+
+    Raised when a tenant has reached a per-account ceiling — currently
+    only the scheduled_tasks-per-account cap (see
+    ``Settings.scheduled_tasks_per_account_max``), but the type is
+    intentionally general so future caps (active sessions, MCP
+    connections, etc.) can reuse it.
+    """
+
+    error_type = "rate_limited"
+    status_code = 429
+
+
 class CryptoDecryptError(AiosError):
     """Raised when the CryptoBox cannot decrypt a stored ciphertext.
 
