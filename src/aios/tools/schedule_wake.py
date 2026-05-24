@@ -170,24 +170,17 @@ def _resolve_fire_at(arguments: dict[str, Any]) -> datetime:
 def _build_wake_bash(reason: str) -> str:
     """Generate the bash one-liner the scheduled fire will execute.
 
-    The command POSTs ``{"content": "<wake marker>"}`` to the broker's
-    ``sessions/messages`` endpoint via the canonical idiom (works under
-    both TCP and Unix-socket broker transports). The reason is embedded
-    as a JSON-encoded payload, then shell-escaped into the curl
-    invocation so arbitrary characters in the reason can't break out of
-    the body argument.
+    Invokes the in-sandbox ``tool wake_self`` CLI with a JSON-encoded
+    ``content`` argument. This keeps the broker secret out of the
+    command string and uses the canonical self-wake primitive (#703).
+    The JSON payload is shell-escaped so arbitrary characters in the
+    reason can't break out of the argument.
     """
     payload = json.dumps(
         {"content": f"[Your scheduled wake fired. Reason: {reason}]"},
         ensure_ascii=False,
     )
-    quoted_payload = shlex.quote(payload)
-    return (
-        'curl -fsS ${AIOS_BROKER_SOCKET:+--unix-socket "$AIOS_BROKER_SOCKET"} '
-        '"$AIOS_BROKER_URL/v1/$MCP_BROKER_SECRET/sessions/messages" '
-        "-X POST -H 'Content-Type: application/json' "
-        f"-d {quoted_payload}"
-    )
+    return f"tool wake_self {shlex.quote(payload)}"
 
 
 def _make_task_name() -> str:
