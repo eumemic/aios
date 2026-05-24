@@ -279,10 +279,18 @@ class SandboxRegistry:
         from aios.harness import runtime
 
         # Skip broker-side unregistration when worker_main never ran (e.g.
-        # in unit tests that wire the registry directly). The cleanup of
-        # the on-disk .secret file is independent and still runs.
-        if runtime.tool_broker is not None:
-            runtime.tool_broker.unregister_session(session_id)
+        # e2e tests that wire the registry directly). The cleanup of the
+        # on-disk .secret file is independent and still runs. Going through
+        # ``require_tool_broker()`` (rather than reading the attribute
+        # directly) keeps the function-level indirection that unit tests
+        # patch — ``runtime.tool_broker`` itself is a module global that
+        # can't be cleanly mocked per-test.
+        try:
+            broker = runtime.require_tool_broker()
+        except RuntimeError:
+            broker = None
+        if broker is not None:
+            broker.unregister_session(session_id)
         settings = get_settings()
         cleanup_session_secret_file(session_id, settings.tool_broker_socket_path)
 
