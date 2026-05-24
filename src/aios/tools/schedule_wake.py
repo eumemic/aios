@@ -28,6 +28,7 @@ from typing import Any
 
 import dateparser
 
+from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
 from aios.models.scheduled_tasks import ScheduledTaskCreate
@@ -95,12 +96,16 @@ def _resolve_fire_at(arguments: dict[str, Any]) -> datetime:
 
     Validates the XOR between ``delay_seconds`` and ``at``, parses ``at``
     via :mod:`dateparser` (which handles ISO 8601 natively too, so we
-    don't need a separate ISO branch), and clamps the result to be
-    strictly in the future.
+    don't need a separate ISO branch), clamps the result to be strictly
+    in the future, and rejects fire times beyond
+    ``Settings.schedule_wake_max_delay_seconds`` to bound the agent's
+    set-and-forget surface.
     """
     delay_seconds = arguments.get("delay_seconds")
     at = arguments.get("at")
     tz = arguments.get("tz")
+    now = datetime.now(UTC)
+    max_delay = get_settings().schedule_wake_max_delay_seconds
 
     have_delay = delay_seconds is not None
     have_at = at is not None
@@ -110,9 +115,22 @@ def _resolve_fire_at(arguments: dict[str, Any]) -> datetime:
     if have_delay:
         if not isinstance(delay_seconds, int) or delay_seconds < 1:
             raise ScheduleWakeArgumentError("delay_seconds must be a positive integer")
+        if delay_seconds > max_delay:
+            raise ScheduleWakeArgumentError(
+                f"delay_seconds={delay_seconds} exceeds the max allowed ({max_delay}s "
+                f"≈ {max_delay // 86400} days). Use a shorter delay or split the "
+                "schedule into a recurring cron task if you need a long horizon."
+            )
         if tz is not None:
             raise ScheduleWakeArgumentError("`tz` is not valid with `delay_seconds`")
-        return datetime.now(UTC) + timedelta(seconds=delay_seconds)
+        try:
+            return now + timedelta(seconds=delay_seconds)
+        except OverflowError:
+            # `int` accepts arbitrarily large values; timedelta does not.
+            # Caught here to surface a typed error rather than a 500.
+            raise ScheduleWakeArgumentError(
+                f"delay_seconds={delay_seconds} overflows the datetime range"
+            ) from None
 
     assert have_at
     if not isinstance(at, str) or not at:
@@ -135,9 +153,16 @@ def _resolve_fire_at(arguments: dict[str, Any]) -> datetime:
             "Pass `tz` for natural-language times in a specific timezone."
         )
     parsed_utc = parsed.astimezone(UTC)
-    if parsed_utc <= datetime.now(UTC):
+    if parsed_utc <= now:
         raise ScheduleWakeArgumentError(
             f"resolved fire time {parsed_utc.isoformat()} is not in the future"
+        )
+    if (parsed_utc - now).total_seconds() > max_delay:
+        raise ScheduleWakeArgumentError(
+            f"resolved fire time {parsed_utc.isoformat()} is more than "
+            f"{max_delay}s ({max_delay // 86400} days) in the future, which "
+            "exceeds the max allowed. Use a shorter offset or split into a "
+            "recurring cron task if you need a long horizon."
         )
     return parsed_utc
 

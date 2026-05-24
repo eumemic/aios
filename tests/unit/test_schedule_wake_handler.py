@@ -31,8 +31,14 @@ def mock_runtime_pool(monkeypatch: Any) -> None:
 def mock_add_task(monkeypatch: Any) -> AsyncMock:
     """Replace the service add_task with an AsyncMock returning a stub echo
     so the handler can complete without touching Postgres.
+
+    ``MagicMock(name=...)`` is a foot-gun — ``name`` is a reserved kwarg
+    that names the mock object itself rather than binding ``.name`` to
+    the value. We set ``.name`` as a regular attribute instead so the
+    handler's ``echo.name`` resolves to a real string.
     """
-    echo = MagicMock(id="st_01STUB", name="wake-stub")
+    echo = MagicMock(id="st_01STUB")
+    echo.name = "wake-stub"
     mock = AsyncMock(return_value=echo)
     monkeypatch.setattr("aios.tools.schedule_wake.scheduled_tasks_service.add_task", mock)
     monkeypatch.setattr(
@@ -99,6 +105,25 @@ class TestResolveFireAt:
     def test_empty_at_rejected(self) -> None:
         with pytest.raises(ScheduleWakeArgumentError, match="non-empty"):
             _resolve_fire_at({"at": ""})
+
+    def test_delay_above_max_rejected(self) -> None:
+        # Default max is 30 days; one year is well above that.
+        one_year_seconds = 60 * 60 * 24 * 365
+        with pytest.raises(ScheduleWakeArgumentError, match="exceeds the max allowed"):
+            _resolve_fire_at({"delay_seconds": one_year_seconds})
+
+    def test_delay_overflow_rejected(self) -> None:
+        # An int large enough to overflow `timedelta(seconds=...)` is
+        # caught at the cap check first (cap rejects long before
+        # OverflowError); pass a value below the cap but still ridiculous
+        # to ensure the cap check triggers without exceptions.
+        with pytest.raises(ScheduleWakeArgumentError, match="exceeds"):
+            _resolve_fire_at({"delay_seconds": 10**18})
+
+    def test_at_far_future_rejected(self) -> None:
+        far_future = (datetime.now(UTC) + timedelta(days=365)).isoformat()
+        with pytest.raises(ScheduleWakeArgumentError, match="exceeds the max allowed"):
+            _resolve_fire_at({"at": far_future})
 
 
 class TestBuildWakeBash:
