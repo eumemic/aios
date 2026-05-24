@@ -1,16 +1,20 @@
-"""Integration test: ``insert_connection`` surfaces cross-tenant collisions as ``ConflictError``.
+"""Integration test: ``insert_connection`` semantics under the per-account unique index.
 
-The ``connections`` table carries a globally-unique partial index on
-``(connector, external_account_id) WHERE archived_at IS NULL``. Real
-messaging identities (Signal phone numbers, Telegram bot tokens, Matrix
-accounts, etc.) are universally exclusive, so the constraint mirrors
-physical reality — and a cross-tenant collision on the active row is a
-caller-visible error, not contention to swallow.
+Pre-#694 (migration 0060) the active-row partial unique on connections
+was ``(connector, external_account_id) WHERE archived_at IS NULL`` —
+globally exclusive across tenants. The jarbot v2 transfer primitive
+(:func:`aios.services.connections.reparent_connection`) cannot move a
+connection between accounts under that constraint without a brief
+violation in transit, so 0060 relaxes it to
+``(account_id, connector, external_account_id) WHERE archived_at IS
+NULL``.
 
-Pins the contract: a tenant inserting on another tenant's active
-identity raises :class:`aios.errors.ConflictError` carrying
-``connector`` + ``external_account_id`` in ``detail``. No silent
-retry, no existence-leak via failure shape.
+This file pins the post-migration contract: two accounts may
+simultaneously hold the same external identity, but a single account
+still can't double-bind. The cross-tenant uniqueness that the global
+index used to enforce is now the job of the connector daemon (one
+process per identity) and the operator (don't claim someone else's
+phone number) — the database no longer encodes universal exclusivity.
 """
 
 from __future__ import annotations
@@ -21,35 +25,36 @@ import asyncpg
 import pytest
 
 from aios.db import queries
-from aios.errors import ConflictError
 
 pytestmark = pytest.mark.integration
 
 
 class TestInsertConnectionCrossTenant:
-    async def test_cross_tenant_collision_raises_conflict_error(
+    async def test_cross_tenant_same_identity_is_allowed(
         self, conn_two_accounts: asyncpg.Connection[Any]
     ) -> None:
-        """Tenant B inserting on tenant A's active identity → ``ConflictError``."""
-        await queries.insert_connection(
+        """Tenant B inserting on tenant A's active identity now succeeds.
+
+        The per-account unique index lets two accounts hold the same
+        external identity simultaneously — the global-exclusivity
+        invariant was given up by migration 0060 (#694) to make the
+        reparent primitive expressible.
+        """
+        a_row = await queries.insert_connection(
             conn_two_accounts,
             account_id="acc_a",
             connector="signal",
             external_account_id="+15550001",
             metadata={},
         )
-        with pytest.raises(ConflictError) as excinfo:
-            await queries.insert_connection(
-                conn_two_accounts,
-                account_id="acc_b",
-                connector="signal",
-                external_account_id="+15550001",
-                metadata={},
-            )
-        assert excinfo.value.detail == {
-            "connector": "signal",
-            "external_account_id": "+15550001",
-        }
+        b_row = await queries.insert_connection(
+            conn_two_accounts,
+            account_id="acc_b",
+            connector="signal",
+            external_account_id="+15550001",
+            metadata={},
+        )
+        assert a_row.id != b_row.id
 
     async def test_same_tenant_repeat_returns_existing(
         self, conn_two_accounts: asyncpg.Connection[Any]
@@ -92,28 +97,3 @@ class TestInsertConnectionCrossTenant:
         )
         assert second.id != first.id
         assert second.archived_at is None
-
-    async def test_archived_other_tenant_lets_new_tenant_take_identity(
-        self, conn_two_accounts: asyncpg.Connection[Any]
-    ) -> None:
-        """When A's row is archived, B may claim the same external identity.
-
-        The partial index excludes archived rows, so the constraint
-        doesn't fire — and B is the sole tenant on the active row.
-        """
-        a_first = await queries.insert_connection(
-            conn_two_accounts,
-            account_id="acc_a",
-            connector="signal",
-            external_account_id="+15550001",
-            metadata={},
-        )
-        await queries.archive_connection(conn_two_accounts, a_first.id, account_id="acc_a")
-        b_takes = await queries.insert_connection(
-            conn_two_accounts,
-            account_id="acc_b",
-            connector="signal",
-            external_account_id="+15550001",
-            metadata={},
-        )
-        assert b_takes.id != a_first.id

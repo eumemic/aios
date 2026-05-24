@@ -3757,12 +3757,12 @@ async def insert_connection(
     the supervisor's auto-create-on-first-inbound path race-safely
     converge on a single row via ``INSERT ... ON CONFLICT DO NOTHING
     RETURNING``. The unique index
-    ``(connector, external_account_id) WHERE archived_at IS NULL`` is
-    globally exclusive across tenants, mirroring real-world identities
-    (Signal phone numbers, Telegram bot tokens, etc. are universally
-    unique by construction). On conflict, re-read within the tenant; a
-    same-tenant miss is either an archive race (loop once) or a
-    cross-tenant collision (raise :class:`ConflictError`).
+    ``(account_id, connector, external_account_id) WHERE archived_at IS
+    NULL`` is per-account (relaxed from global by migration 0060 to
+    support the reparent primitive #694): two accounts may hold the
+    same external identity simultaneously, but a single account may
+    not. On same-tenant conflict, re-read; a miss after re-read is an
+    archive race (loop once).
 
     ``secrets_blob`` carries the encrypted credential dict.  ``None``
     leaves both secret columns NULL; the schema's
@@ -3794,7 +3794,7 @@ async def insert_connection(
                     secrets_ciphertext, secrets_nonce, account_id
                 )
                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
-                ON CONFLICT (connector, external_account_id)
+                ON CONFLICT (account_id, connector, external_account_id)
                     WHERE archived_at IS NULL DO NOTHING
                 RETURNING *
             )
@@ -3822,17 +3822,6 @@ async def insert_connection(
         )
         if existing is not None:
             return existing
-        other_row = await conn.fetchrow(
-            "SELECT 1 FROM connections "
-            "WHERE connector = $1 AND external_account_id = $2 AND archived_at IS NULL",
-            connector,
-            external_account_id,
-        )
-        if other_row is not None:
-            raise ConflictError(
-                "connector external_account_id already registered",
-                detail={"connector": connector, "external_account_id": external_account_id},
-            )
     # The archive race converges within two iterations under any realistic
     # contention pattern; if a third attempt would still be needed, the
     # system is in a hot insert/archive cycle that no retry resolves.
@@ -4051,6 +4040,64 @@ _MODE_PREDICATES: dict[ConnectionMode, str] = {
     "single_session": "b.mode = 'single_session'",
     "per_chat": "b.mode = 'per_chat'",
 }
+
+
+async def reparent_connection(
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    destination_account_id: str,
+) -> Connection:
+    """Transfer an active connection to a different account.
+
+    Updates ``account_id`` in place, preserving the ``connection.id`` so
+    any dependent connector-daemon state (signal-cli's ``account.dat``,
+    whatsmeow's ``sqlstore.db``, telegram webhook config, etc. — all
+    keyed by ``connection.id``) carries over without churn.
+
+    Refuses on archived rows (the WHERE clause filters them out, so a
+    zero-row UPDATE → :class:`NotFoundError`).
+
+    Catches the per-account partial-unique index violation
+    (``connections_active_account_external_uniq``) and surfaces it as
+    :class:`ConflictError` — that's the destination-collision case
+    documented in the operator-facing 409 response.
+
+    The caller is responsible for the root-operator gate; this query
+    deliberately doesn't scope by source ``account_id`` because the
+    semantic of reparent is "cross-account move," and the service
+    layer is what decides whether the caller is allowed to do that.
+    """
+    try:
+        row = await conn.fetchrow(
+            f"""
+            WITH updated AS (
+                UPDATE connections
+                   SET account_id = $2,
+                       updated_at = now()
+                 WHERE id = $1 AND archived_at IS NULL
+                RETURNING *
+            )
+            {_CONNECTION_UPDATE_CTE_TAIL}
+            """,
+            connection_id,
+            destination_account_id,
+        )
+    except asyncpg.UniqueViolationError as exc:
+        # The destination account already has an active connection for
+        # the same ``(connector, external_account_id)`` — operator must
+        # archive the existing destination row before reparenting.
+        raise ConflictError(
+            f"destination account {destination_account_id} already has an active "
+            "connection for this (connector, external_account_id)",
+            detail={"destination_account_id": destination_account_id},
+        ) from exc
+    if row is None:
+        raise NotFoundError(
+            f"connection {connection_id} not found or archived",
+            detail={"id": connection_id},
+        )
+    return _row_to_connection(row)
 
 
 async def archive_connection(

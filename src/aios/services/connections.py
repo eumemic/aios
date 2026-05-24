@@ -21,7 +21,7 @@ import asyncpg
 
 from aios.crypto.vault import CryptoBox, EncryptedBlob
 from aios.db import queries
-from aios.errors import ConflictError, NotFoundError
+from aios.errors import ConflictError, ForbiddenError, NotFoundError
 from aios.models.connections import (
     BindingMode,
     BoundChat,
@@ -476,6 +476,88 @@ async def list_recent_chats(
     return [
         RecentChat(chat_id=chat_id, last_seen_at=last_seen_at) for chat_id, last_seen_at in rows
     ]
+
+
+async def reparent_connection(
+    pool: asyncpg.Pool[Any],
+    connection_id: str,
+    *,
+    destination_account_id: str,
+    requester_account_id: str,
+) -> Connection:
+    """Transfer a connection's ``account_id`` to a different account.
+
+    Implements the v1 reparent primitive (issue #694): moves the
+    ``connection`` row's ``account_id`` in place, preserving
+    ``connection.id`` so dependent connector-daemon state (signal-cli's
+    ``account.dat``, whatsmeow's ``sqlstore.db``, telegram webhook
+    config, per-chat routing rules) — all keyed by ``connection.id`` —
+    carries over without churn.
+
+    Authorization (v1): root operator only. The requester's
+    ``parent_account_id`` must be ``None``. Multi-tenant consent
+    semantics ("both source and destination owners must approve") are
+    deferred to v2; v1 collapses to "the root key on this aios instance
+    can move connections between any pair of accounts it operates."
+
+    **Daemon-cache caveat (v1)**: this is a database-only reparent.
+    Connector daemons cache ``account_id`` in memory at attach time and
+    are NOT notified of reparent. Operators must restart the connector
+    container (or accept that the in-memory ``account_id`` is stale
+    until the next restart) as part of any reparent operation. A
+    lifecycle-event-driven rebind broadcast is deferred to a follow-up.
+
+    Errors:
+    * :class:`ForbiddenError` — requester is not the root operator.
+    * :class:`NotFoundError` — destination account or source connection
+      doesn't exist.
+    * :class:`ConflictError` — source is archived, OR destination already
+      has an active connection for the same
+      ``(connector, external_account_id)`` (the per-account partial
+      UNIQUE rejects the move).
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        # Root-operator gate. The auth dep hands us a real account_id;
+        # treat "no row" the same as "not root" so we never crash on a
+        # mismatched bearer.
+        requester = await queries.get_account(conn, requester_account_id)
+        if requester is None or requester.parent_account_id is not None:
+            raise ForbiddenError(
+                "only the root operator account may reparent connections",
+                detail={"requester_account_id": requester_account_id},
+            )
+        # Validate destination at the service boundary so the API returns
+        # 404 (not the 409 the UNIQUE would yield for a missing-row
+        # constraint near-miss). Symmetric with how attach_connection
+        # validates the session FK.
+        destination = await queries.get_account(conn, destination_account_id)
+        if destination is None:
+            raise NotFoundError(
+                f"destination account {destination_account_id} not found",
+                detail={"destination_account_id": destination_account_id},
+            )
+        # SELECT FOR UPDATE on the connection row: serializes against
+        # concurrent archive_connection / attach_connection (both also
+        # take this lock), so the archived-check and the UPDATE land
+        # in the same critical section. Without it, an archive could
+        # commit between our read and the UPDATE.
+        locked = await conn.fetchrow(
+            "SELECT archived_at FROM connections WHERE id = $1 FOR UPDATE",
+            connection_id,
+        )
+        if locked is None:
+            raise NotFoundError(
+                f"connection {connection_id} not found",
+                detail={"id": connection_id},
+            )
+        if locked["archived_at"] is not None:
+            raise ConflictError(
+                f"connection {connection_id} is archived; cannot reparent",
+                detail={"id": connection_id},
+            )
+        return await queries.reparent_connection(
+            conn, connection_id=connection_id, destination_account_id=destination_account_id
+        )
 
 
 async def archive_connection(

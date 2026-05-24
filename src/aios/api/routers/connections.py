@@ -27,6 +27,7 @@ from aios.models.connections import (
     ConnectionConfigurePerChat,
     ConnectionCreate,
     ConnectionMode,
+    ConnectionReparent,
     ConnectionSetSecrets,
     RecentChat,
 )
@@ -125,6 +126,44 @@ async def list_(
 async def get(connection_id: str, pool: PoolDep, account_id: AccountIdDep) -> Connection:
     """Fetch one connection by id."""
     return await service.get_connection(pool, connection_id, account_id=account_id)
+
+
+@router.post("/{connection_id}/reparent", operation_id="reparent_connection")
+async def reparent(
+    connection_id: str,
+    body: ConnectionReparent,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> Connection:
+    """Transfer a connection to a different account. Root operator only.
+
+    Moves ``connection.account_id`` to ``destination_account_id``
+    atomically, preserving ``connection.id`` so dependent connector
+    daemon state (signal-cli's ``account.dat``, whatsmeow's
+    ``sqlstore.db``, telegram webhook config) carries over without
+    recreation. The per-account partial unique index on
+    ``(account_id, connector, external_account_id) WHERE archived_at
+    IS NULL`` enforces no-collision at the destination automatically;
+    a colliding destination returns 409.
+
+    Authorization (v1): root operator only — the caller's account must
+    have ``parent_account_id IS NULL``. Multi-tenant consent semantics
+    ("both source and destination owners must approve") are deferred
+    to v2; v1 is the operator-only escape hatch that unblocks the
+    jarbot v2 ``ExternalIdentity`` transfer flow.
+
+    **Daemon-cache caveat (v1)**: this is a database-only reparent.
+    Connector daemons cache ``account_id`` in memory at attach time
+    and do NOT receive a rebind event. Restart the connector container
+    after reparent — the in-memory cache is otherwise stale until the
+    next restart.
+    """
+    return await service.reparent_connection(
+        pool,
+        connection_id,
+        destination_account_id=body.destination_account_id,
+        requester_account_id=account_id,
+    )
 
 
 @router.delete(

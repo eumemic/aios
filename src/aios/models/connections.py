@@ -80,6 +80,24 @@ class ConnectionAttach(BaseModel):
     session_id: str
 
 
+class ConnectionReparent(BaseModel):
+    """Request body for ``POST /v1/connections/{id}/reparent``.
+
+    Moves the connection's ``account_id`` to ``destination_account_id``
+    atomically, preserving ``connection.id`` so dependent connector
+    state (signal-cli's ``account.dat``, whatsmeow's ``sqlstore.db``,
+    telegram webhook config) carries over without recreation. v1
+    auth: root operator only.
+
+    Length bounds match the ULID-shaped ``account_id`` format used
+    elsewhere on the wire (1..64 chars covers ``acc_<ULID>``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    destination_account_id: str = Field(min_length=1, max_length=64)
+
+
 class ConnectionConfigurePerChat(BaseModel):
     """Request body for ``POST /v1/connections/{id}/configure-per-chat``."""
 

@@ -33,6 +33,7 @@ from .connection_create import ConnectionCreate
 from .connection_create_metadata import ConnectionCreateMetadata
 from .connection_create_secrets_type_0 import ConnectionCreateSecretsType0
 from .connection_metadata import ConnectionMetadata
+from .connection_reparent import ConnectionReparent
 from .connection_set_secrets import ConnectionSetSecrets
 from .connection_set_secrets_secrets import ConnectionSetSecretsSecrets
 from .connector_inbound_response import ConnectorInboundResponse
@@ -250,6 +251,7 @@ __all__ = (
     "ConnectionCreateMetadata",
     "ConnectionCreateSecretsType0",
     "ConnectionMetadata",
+    "ConnectionReparent",
     "ConnectionSetSecrets",
     "ConnectionSetSecretsSecrets",
     "ConnectorInboundResponse",
