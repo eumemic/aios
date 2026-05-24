@@ -14,6 +14,7 @@ class ToolSpecTypeType0(str, Enum):
     SCHEDULE_TASK_UPDATE = "schedule_task_update"
     SCHEDULE_WAKE = "schedule_wake"
     SEARCH_EVENTS = "search_events"
+    WAKE_SELF = "wake_self"
     WAKE_SESSION = "wake_session"
     WEB_FETCH = "web_fetch"
     WEB_SEARCH = "web_search"

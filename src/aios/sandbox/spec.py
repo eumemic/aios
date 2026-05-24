@@ -202,7 +202,8 @@ async def _materialize_github_clones(
     Per-repo clone failures are non-fatal — they log + append a
     lifecycle event and drop the repo from the materialized list (its
     working tree won't be bind-mounted). The proxy stays alive for
-    sibling repos.
+    sibling repos. Per-clone wall-clock is bounded by
+    ``Settings.github_clone_session_timeout_seconds`` (issue #697).
     """
     from aios.sandbox.git_proxy import repo_key
     from aios.services import github_repositories as github_repo_service

@@ -29,6 +29,7 @@ BuiltinToolType = Literal[
     "cancel",
     "schedule_wake",
     "wake_session",
+    "wake_self",
     "http_request",
     "schedule_task_add",
     "schedule_task_remove",

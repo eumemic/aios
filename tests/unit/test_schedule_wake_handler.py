@@ -128,21 +128,24 @@ class TestResolveFireAt:
 
 class TestBuildWakeBash:
     def test_contains_canonical_idiom(self) -> None:
+        # The bash command invokes the in-sandbox ``tool wake_self`` CLI
+        # so the broker secret never has to be interpolated and the env
+        # vars in the sandbox (TOOL_BROKER_URL / TOOL_BROKER_SECRET) are
+        # used implicitly by the CLI (#703).
         bash = _build_wake_bash("hello")
-        assert "AIOS_BROKER_URL" in bash
-        assert "MCP_BROKER_SECRET" in bash
-        assert "AIOS_BROKER_SOCKET" in bash
-        assert "/sessions/messages" in bash
+        assert bash.startswith("tool wake_self ")
+        # The legacy broker idiom must be gone — the prior implementation
+        # referenced env vars that the sandbox never sets, so the curl
+        # would have silently failed.
+        assert "AIOS_BROKER_URL" not in bash
+        assert "MCP_BROKER_SECRET" not in bash
+        assert "AIOS_BROKER_SOCKET" not in bash
+        assert "curl" not in bash
 
     def test_embeds_reason_safely(self) -> None:
         # Embedded single quotes + dollar signs in the reason must not
         # break out of the shell-escaped argument.
         bash = _build_wake_bash("it's $weird")
-        # The JSON-encoded payload appears inside a shlex-quoted block,
-        # so single quotes are escaped via shell's '"'"' or "'\''" form
-        # (or the whole arg is wrapped in single quotes with escapes).
-        # We don't pin the exact escape style, just that the reason text
-        # is recoverable.
         assert "it" in bash
         assert "weird" in bash
 
@@ -151,6 +154,23 @@ class TestBuildWakeBash:
         bash = _build_wake_bash("line1\nline2")
         assert "line1" in bash
         assert "line2" in bash
+
+    def test_payload_is_recoverable_json(self) -> None:
+        # The reason should arrive at wake_self as the ``content`` field
+        # of a JSON object. Verify by stripping the leading ``tool
+        # wake_self `` prefix and shlex-splitting the rest to recover
+        # the exact JSON argument the CLI will see.
+        import json
+        import shlex as _shlex
+
+        reason = 'it\'s $weird with "quotes" and a\nnewline'
+        bash = _build_wake_bash(reason)
+        prefix = "tool wake_self "
+        assert bash.startswith(prefix)
+        args = _shlex.split(bash[len(prefix) :])
+        assert len(args) == 1
+        payload = json.loads(args[0])
+        assert reason in payload["content"]
 
 
 class TestScheduleWakeHandler:
@@ -168,7 +188,7 @@ class TestScheduleWakeHandler:
         assert spec.metadata == {"kind": "wake", "reason": "check back later"}
         assert spec.timeout_seconds == 30
         assert spec.name.startswith("wake-")
-        assert "MCP_BROKER_SECRET" in spec.command
+        assert spec.command.startswith("tool wake_self ")
         assert result["scheduled"] is True
         assert result["reason"] == "check back later"
         assert "fire_at" in result

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from aios.models.environments import (
 from aios.sandbox.backends.base import (
     Limited,
     Mount,
+    SandboxBackendError,
     SandboxSpec,
     Unrestricted,
 )
@@ -182,6 +184,80 @@ class TestDockerBackendArgs:
     async def test_unrestricted_no_cap_net_admin(self) -> None:
         argv = await _capture_docker_argv(_make_spec(Unrestricted()))
         assert "--cap-add" not in argv
+
+
+class TestDockerBackendIsAlive:
+    """DockerBackend.is_alive maps ``docker inspect`` outcomes to a bool (#691).
+
+    The registry's warm path depends on this method being total: any
+    failure mode must resolve to ``True`` (running) or ``False`` (re-
+    provision), never an exception that escapes into the tool call.
+    These tests patch ``run_docker_cli`` so no real daemon is needed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_running_true_returns_alive(self) -> None:
+        async def fake(argv: list[str]) -> tuple[int, bytes, bytes]:
+            # Sanity: we inspect the right container with the State.Running format.
+            assert argv[:3] == ["docker", "inspect", "--format"]
+            assert make_handle().sandbox_id in argv
+            return 0, b"true\n", b""
+
+        with patch("aios.sandbox.backends.docker.run_docker_cli", fake):
+            assert await DockerBackend().is_alive(make_handle()) is True
+
+    @pytest.mark.asyncio
+    async def test_running_false_string_returns_dead(self) -> None:
+        """A stopped (but not yet removed) container inspects as 'false'."""
+
+        async def fake(argv: list[str]) -> tuple[int, bytes, bytes]:
+            return 0, b"false\n", b""
+
+        with patch("aios.sandbox.backends.docker.run_docker_cli", fake):
+            assert await DockerBackend().is_alive(make_handle()) is False
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_returns_dead(self) -> None:
+        """`--rm` removed the container → inspect exits nonzero ('No such container')."""
+
+        async def fake(argv: list[str]) -> tuple[int, bytes, bytes]:
+            return 1, b"", b"Error: No such container: abc123\n"
+
+        with patch("aios.sandbox.backends.docker.run_docker_cli", fake):
+            assert await DockerBackend().is_alive(make_handle()) is False
+
+    @pytest.mark.asyncio
+    async def test_probe_launch_failure_returns_dead_not_raises(self) -> None:
+        """A daemon hiccup / timeout (SandboxBackendError) must not escape."""
+
+        async def fake(argv: list[str]) -> tuple[int, bytes, bytes]:
+            raise SandboxBackendError("docker cli timed out after 30.0s")
+
+        with patch("aios.sandbox.backends.docker.run_docker_cli", fake):
+            assert await DockerBackend().is_alive(make_handle()) is False
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_returns_dead_not_raises(self) -> None:
+        """Totality contract: ANY non-cancellation error resolves to dead."""
+
+        async def fake(argv: list[str]) -> tuple[int, bytes, bytes]:
+            raise RuntimeError("unexpected boom")
+
+        with patch("aios.sandbox.backends.docker.run_docker_cli", fake):
+            assert await DockerBackend().is_alive(make_handle()) is False
+
+    @pytest.mark.asyncio
+    async def test_cancellation_propagates(self) -> None:
+        """CancelledError (worker shutdown) must NOT be swallowed as 'dead'."""
+
+        async def fake(argv: list[str]) -> tuple[int, bytes, bytes]:
+            raise asyncio.CancelledError
+
+        with (
+            patch("aios.sandbox.backends.docker.run_docker_cli", fake),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await DockerBackend().is_alive(make_handle())
 
 
 # ── network lockdown helper applies the right script via the backend ──────────

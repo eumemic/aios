@@ -5,19 +5,27 @@ recycles a cached sandbox when the session's attached memory stores
 have changed since provisioning (issue #198). ``TestEvictReclamation``
 covers the ``evict`` fast path used by ``tool_dispatch`` when a
 sandbox-side failure suggests the sandbox itself is unhealthy.
+``TestStaleHandleDetection`` covers the liveness probe inserted into
+``get_or_provision`` so a container that Docker auto-removed (``--rm``
+after entrypoint exit / OOM / daemon-side cleanup) doesn't poison the
+next exec with "No such container" (issue #691).
 """
 
 from __future__ import annotations
 
 import asyncio
 import gc
+from pathlib import Path
 from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aios.harness import runtime
 from aios.models.memory_stores import Access, MemoryStoreResourceEcho
-from aios.sandbox.backends.base import SandboxHandle
+from aios.sandbox.backends.base import Mount, SandboxHandle, SandboxSpec, Unrestricted
 from aios.sandbox.registry import SandboxRegistry
+from aios.sandbox.spec import ProvisioningPlan
 from tests.helpers.sandbox import FakeBackend, make_handle
 
 
@@ -116,10 +124,6 @@ class TestReleaseIfMountsChanged:
         """The per-session lock must serialize release_if_mounts_changed against
         a concurrent get_or_provision so the registry never returns a handle
         that's about to be torn down."""
-        from unittest.mock import AsyncMock
-
-        from aios.sandbox.spec import ProvisioningPlan
-
         backend = FakeBackend()
         registry = SandboxRegistry(backend=backend)
         old_snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
@@ -132,8 +136,6 @@ class TestReleaseIfMountsChanged:
         async def slow_build_spec(_session_id: str) -> ProvisioningPlan:
             provision_started.set()
             await let_provision_continue.wait()
-            from aios.sandbox.backends.base import Mount, SandboxSpec, Unrestricted
-
             spec = SandboxSpec(
                 session_id="sess_X",
                 instance_id="inst_T",
@@ -156,8 +158,6 @@ class TestReleaseIfMountsChanged:
 
         # Force a cache miss so get_or_provision contends for the lock.
         registry._handles.pop("sess_X")
-
-        from unittest.mock import patch
 
         with (
             patch("aios.sandbox.registry.build_spec_from_session", slow_build_spec),
@@ -325,3 +325,253 @@ class TestEvictReclamation:
         gc.collect()
 
         await asyncio.wait_for(proxy_stopped.wait(), timeout=1.0)
+
+
+def _provisioning_plan(session_id: str) -> ProvisioningPlan:
+    """Build a minimal :class:`ProvisioningPlan` for stale-handle tests.
+
+    The plan is returned by a patched ``build_spec_from_session`` so the
+    registry's cold path runs without touching the DB. The fresh handle's
+    sandbox_id is controlled by the caller via ``FakeBackend.next_handle_id``;
+    the spec itself doesn't carry one.
+    """
+    spec = SandboxSpec(
+        session_id=session_id,
+        instance_id="inst_TEST",
+        workspace=Mount(host_path=Path("/tmp/w"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={},
+        network_policy=Unrestricted(),
+        host_gateway_alias=None,
+        image="aios-sandbox:test",
+    )
+    return ProvisioningPlan(
+        spec=spec,
+        env_config=None,
+        memory_echoes=[],
+        github_echoes=[],
+        git_proxy=None,
+    )
+
+
+class TestStaleHandleDetection:
+    """``get_or_provision`` validates handle liveness on every warm hit.
+
+    Issue #691: containers spawned with ``--rm`` auto-remove on any exit
+    (entrypoint exit, OOM, daemon-side cleanup). The registry's cached
+    handle outlives the dead container, so the next ``exec`` against the
+    cached handle fails with Docker's "No such container". The fix is to
+    probe the backend (``is_alive``) on the warm path and treat a
+    not-alive answer the same as a cache miss — evict the dead cache
+    entry and re-provision under the per-session lock.
+
+    All tests patch the registry's provisioning helpers so the cold
+    path runs without DB or Docker; they assert behavior via the
+    :class:`FakeBackend` call log.
+    """
+
+    async def test_live_handle_returned_without_reprovision(self) -> None:
+        """Default warm path: ``is_alive`` returns True ⇒ cached handle returned."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        cached = _seed(registry, "sess_X")
+
+        result = await registry.get_or_provision("sess_X")
+
+        assert result is cached
+        assert any(c[0] == "is_alive" for c in backend.calls)
+        assert not any(c[0] == "create" for c in backend.calls), (
+            "live handle must not trigger re-provision"
+        )
+
+    async def test_dead_handle_triggers_reprovision(self) -> None:
+        """Stale cached handle ⇒ evict + provision; caller gets the new handle."""
+        backend = FakeBackend(next_handle_id="fresh_sandbox_id")
+        registry = SandboxRegistry(backend=backend)
+        stale = _seed(registry, "sess_X")
+        backend.dead_sandbox_ids.add(stale.sandbox_id)
+
+        with (
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=_provisioning_plan("sess_X")),
+            ),
+            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
+        ):
+            result = await registry.get_or_provision("sess_X")
+
+        assert result is not stale
+        assert result.sandbox_id == "fresh_sandbox_id"
+        assert registry.peek("sess_X") is result
+        create_calls = [c for c in backend.calls if c[0] == "create"]
+        assert len(create_calls) == 1, (
+            "stale-handle path must re-provision exactly once via backend.create"
+        )
+
+    async def test_cold_start_skips_liveness_check(self) -> None:
+        """Empty cache ⇒ no ``is_alive`` (nothing to check)."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        with (
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=_provisioning_plan("sess_X")),
+            ),
+            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
+        ):
+            await registry.get_or_provision("sess_X")
+
+        assert not any(c[0] == "is_alive" for c in backend.calls), (
+            "cold start has no cached handle to probe — is_alive must not fire"
+        )
+
+    async def test_dead_handle_eviction_clears_proxy_and_broker_secret(self) -> None:
+        """The evict-before-reprovision must release the proxy and broker secret.
+
+        Without this, the new sandbox would inherit the dead handle's proxy
+        (its uvicorn server and TCP port) and the broker would still serve
+        the dead session's secret to the new container. ``evict()`` is the
+        method that bundles these; verify the stale-handle path delegates
+        through it.
+        """
+        backend = FakeBackend(next_handle_id="fresh_sandbox_id")
+        registry = SandboxRegistry(backend=backend)
+        stale = _seed(registry, "sess_X")
+        backend.dead_sandbox_ids.add(stale.sandbox_id)
+
+        proxy_stopped = asyncio.Event()
+
+        class _StubProxy:
+            async def stop(self) -> None:
+                proxy_stopped.set()
+
+        registry._git_proxies["sess_X"] = cast(Any, _StubProxy())
+
+        broker = MagicMock()
+        broker.port = 0
+
+        with (
+            patch(
+                "aios.harness.runtime.require_tool_broker",
+                lambda: broker,
+            ),
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=_provisioning_plan("sess_X")),
+            ),
+            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
+        ):
+            await registry.get_or_provision("sess_X")
+
+        # Proxy stop is fire-and-forget — give the loop a chance to run it.
+        await asyncio.wait_for(proxy_stopped.wait(), timeout=1.0)
+        # Broker secret is unregistered immediately (synchronous part of evict).
+        broker.unregister_session.assert_called_with("sess_X")
+
+    async def test_recycle_preserves_session_runtime_caches(self) -> None:
+        """The mid-step recycle must NOT clear ``_session_memory_mounts``/
+        ``_session_read_shas`` (issue #691 follow-up — data-loss guard).
+
+        Ordering that makes this load-bearing: ``bash_handler`` calls
+        ``get_or_provision`` and only THEN snapshots the memory mounts for
+        its post-exec reconcile. The mounts cache is populated once at step
+        start (``loop.py``) and is NOT repopulated by provisioning. If the
+        stale-handle recycle cleared it, the bash reconcile's before/after
+        diff would see no mounts and silently drop every memory-store write
+        the command made. So a recycle inside get_or_provision must leave
+        the session caches intact (the fresh sandbox re-mounts the same
+        host dirs).
+        """
+        runtime._session_memory_mounts.clear()
+        runtime._session_read_shas.clear()
+        try:
+            backend = FakeBackend(next_handle_id="fresh_sandbox_id")
+            registry = SandboxRegistry(backend=backend)
+            stale = _seed(registry, "sess_X")
+            backend.dead_sandbox_ids.add(stale.sandbox_id)
+
+            echo = _echo("memstore_a", "a")
+            runtime.set_session_memory_mounts("sess_X", [echo])
+            runtime.set_read_sha("sess_X", "memstore_a", "/notes.md", "sha_before")
+
+            broker = MagicMock()
+            broker.port = 0
+            with (
+                patch("aios.harness.runtime.require_tool_broker", lambda: broker),
+                patch(
+                    "aios.sandbox.registry.build_spec_from_session",
+                    AsyncMock(return_value=_provisioning_plan("sess_X")),
+                ),
+                patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+                patch("aios.sandbox.registry.install_packages", AsyncMock()),
+                patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
+            ):
+                await registry.get_or_provision("sess_X")
+
+            assert runtime.get_session_memory_mounts("sess_X") == [echo], (
+                "recycle cleared the memory-mounts cache mid-step → bash reconcile "
+                "would see no mounts and lose the step's memory writes"
+            )
+            assert runtime.get_read_sha("sess_X", "memstore_a", "/notes.md") == "sha_before", (
+                "recycle cleared the read-sha cache mid-step → spurious precondition misses"
+            )
+        finally:
+            runtime._session_memory_mounts.clear()
+            runtime._session_read_shas.clear()
+
+    async def test_concurrent_stale_handle_reprovisions_once(self) -> None:
+        """Two concurrent ``get_or_provision`` calls both seeing the same
+        stale handle must re-provision exactly once.
+
+        This exercises both arms of the under-lock identity check: the
+        winner (task_a) finds its captured stale handle still cached and
+        recycles it; the loser (task_b) acquires the lock after task_a
+        installed a *different* fresh handle and trusts it via identity
+        rather than recycling+reprovisioning a third container. Without
+        the identity guard the loser would churn another container.
+        """
+        backend = FakeBackend(next_handle_id="fresh_sandbox_id")
+        registry = SandboxRegistry(backend=backend)
+        stale = _seed(registry, "sess_X")
+        backend.dead_sandbox_ids.add(stale.sandbox_id)
+
+        # Gate the cold-path provision so the second task piles up on the lock.
+        let_provision_continue = asyncio.Event()
+        first_provision_started = asyncio.Event()
+
+        async def slow_build_spec(_session_id: str) -> ProvisioningPlan:
+            first_provision_started.set()
+            await let_provision_continue.wait()
+            return _provisioning_plan("sess_X")
+
+        with (
+            patch("aios.sandbox.registry.build_spec_from_session", slow_build_spec),
+            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
+        ):
+            task_a = asyncio.create_task(registry.get_or_provision("sess_X"))
+            # Wait until task_a is inside _provision (lock held).
+            await first_provision_started.wait()
+            task_b = asyncio.create_task(registry.get_or_provision("sess_X"))
+            # task_b is now contending for the lock. Let task_a finish.
+            await asyncio.sleep(0)
+            let_provision_continue.set()
+            result_a, result_b = await asyncio.gather(task_a, task_b)
+
+        # Both callers see the fresh handle.
+        assert result_a.sandbox_id == "fresh_sandbox_id"
+        assert result_b.sandbox_id == "fresh_sandbox_id"
+        # Exactly one create call across the two callers.
+        create_calls = [c for c in backend.calls if c[0] == "create"]
+        assert len(create_calls) == 1, (
+            f"expected exactly one re-provision; got {len(create_calls)} (calls={backend.calls})"
+        )

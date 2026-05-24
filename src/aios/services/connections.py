@@ -21,7 +21,7 @@ import asyncpg
 
 from aios.crypto.vault import CryptoBox, EncryptedBlob
 from aios.db import queries
-from aios.errors import ConflictError, NotFoundError
+from aios.errors import ConflictError, ForbiddenError, NotFoundError
 from aios.models.connections import (
     BindingMode,
     BoundChat,
@@ -476,6 +476,136 @@ async def list_recent_chats(
     return [
         RecentChat(chat_id=chat_id, last_seen_at=last_seen_at) for chat_id, last_seen_at in rows
     ]
+
+
+async def reparent_connection(
+    pool: asyncpg.Pool[Any],
+    connection_id: str,
+    *,
+    destination_account_id: str,
+    requester_account_id: str,
+    crypto_box: CryptoBox,
+) -> Connection:
+    """Transfer a connection's ``account_id`` to a different account.
+
+    Implements the v1 reparent primitive (issue #694): moves the
+    ``connection`` row's ``account_id`` in place, preserving
+    ``connection.id`` so dependent connector-daemon state (signal-cli's
+    ``account.dat``, whatsmeow's ``sqlstore.db``, telegram webhook
+    config) — all keyed by ``connection.id`` — carries over without
+    churn.
+
+    Carries every account-scoped child row whose routing fate is tied
+    to this connection across in the same transaction:
+    :class:`bindings` (the active curation row), :class:`chat_sessions`
+    (the per-chat ledger), and :class:`routing_rules` (per-binding
+    prefix demux). All three resolver tiers
+    (:mod:`aios_connectors.resolver`) filter on ``account_id``, so
+    leaving any child on the source account would make the destination's
+    next inbound DETACH-drop at resolve time. The atomicity is what
+    makes the reparent observable as a clean "connection now belongs to
+    destination" — there is no intermediate state where some children
+    point at the source and others at the destination. The underlying
+    :func:`queries.reparent_connection` does all four UPDATEs in one
+    Postgres statement (data-modifying CTEs).
+
+    Encrypted secrets are re-encrypted under the destination account's
+    derived subkey inside the same transaction. ``_encrypt_secrets``
+    keys the ciphertext on the owning ``account_id`` via
+    :meth:`CryptoBox.derive_account_subkey`, so without this step the
+    very next ``get_connection_secrets`` (now scoped to the destination)
+    would attempt to decrypt with the wrong subkey and raise
+    :class:`CryptoDecryptError`, silently bricking the connection.
+
+    Authorization (v1): root operator only. The requester's
+    ``parent_account_id`` must be ``None``. Multi-tenant consent
+    semantics ("both source and destination owners must approve") are
+    deferred to v2; v1 collapses to "the root key on this aios instance
+    can move connections between any pair of accounts it operates."
+
+    **Daemon-cache caveat (v1)**: this is a database-only reparent.
+    Connector daemons cache ``account_id`` in memory at attach time and
+    are NOT notified of reparent. Operators must restart the connector
+    container (or accept that the in-memory ``account_id`` is stale
+    until the next restart) as part of any reparent operation. A
+    lifecycle-event-driven rebind broadcast is deferred to a follow-up.
+
+    Errors:
+    * :class:`ForbiddenError` — requester is not the root operator.
+    * :class:`NotFoundError` — destination account or source connection
+      doesn't exist.
+    * :class:`ConflictError` — source is archived, OR destination already
+      has an active connection for the same
+      ``(connector, external_account_id)`` (the per-account partial
+      UNIQUE rejects the move).
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        # Root-operator gate. The auth dep hands us a real account_id;
+        # treat "no row" the same as "not root" so we never crash on a
+        # mismatched bearer.
+        requester = await queries.get_account(conn, requester_account_id)
+        if requester is None or requester.parent_account_id is not None:
+            raise ForbiddenError(
+                "only the root operator account may reparent connections",
+                detail={"requester_account_id": requester_account_id},
+            )
+        # Validate destination at the service boundary so the API returns
+        # 404 (not the 409 the UNIQUE would yield for a missing-row
+        # constraint near-miss). Symmetric with how attach_connection
+        # validates the session FK.
+        destination = await queries.get_account(conn, destination_account_id)
+        # ``get_account`` returns archived rows too; an archived destination
+        # is effectively non-existent from the reparent caller's perspective
+        # (no bearer can auth as an archived account, so the moved
+        # connection would be permanently inaccessible). Reject as 404 — the
+        # destination is not a valid target.
+        if destination is None or destination.archived_at is not None:
+            raise NotFoundError(
+                f"destination account {destination_account_id} not found",
+                detail={"destination_account_id": destination_account_id},
+            )
+        # SELECT FOR UPDATE on the connection row: serializes against
+        # concurrent archive_connection / attach_connection (both also
+        # take this lock), so the archived-check and the UPDATE land
+        # in the same critical section. Without it, an archive could
+        # commit between our read and the UPDATE.
+        locked = await conn.fetchrow(
+            "SELECT archived_at, account_id, secrets_ciphertext, secrets_nonce "
+            "FROM connections WHERE id = $1 FOR UPDATE",
+            connection_id,
+        )
+        if locked is None:
+            raise NotFoundError(
+                f"connection {connection_id} not found",
+                detail={"id": connection_id},
+            )
+        if locked["archived_at"] is not None:
+            raise ConflictError(
+                f"connection {connection_id} is archived; cannot reparent",
+                detail={"id": connection_id},
+            )
+        # Re-key the secrets blob inside the same transaction: decrypt
+        # under the source account's subkey, re-encrypt under the
+        # destination's. Skip when no secrets are configured — leaving
+        # both columns NULL satisfies ``connections_secrets_pair_ck``.
+        source_account_id = locked["account_id"]
+        source_ciphertext = locked["secrets_ciphertext"]
+        source_nonce = locked["secrets_nonce"]
+        rekeyed_blob: EncryptedBlob | None = None
+        if source_ciphertext is not None and source_nonce is not None:
+            source_blob = EncryptedBlob(ciphertext=source_ciphertext, nonce=source_nonce)
+            plaintext = crypto_box.derive_account_subkey(source_account_id).decrypt_dict(
+                source_blob
+            )
+            rekeyed_blob = crypto_box.derive_account_subkey(destination_account_id).encrypt_dict(
+                plaintext
+            )
+        return await queries.reparent_connection(
+            conn,
+            connection_id=connection_id,
+            destination_account_id=destination_account_id,
+            secrets_blob=rekeyed_blob,
+        )
 
 
 async def archive_connection(

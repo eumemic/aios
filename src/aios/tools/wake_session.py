@@ -186,11 +186,12 @@ async def wake_session_handler(session_id: str, arguments: dict[str, Any]) -> di
         )
 
     if target_session_id == session_id:
-        # Self-wake has a dedicated tool (schedule_wake) — reject so an
-        # agent can't accidentally bypass that surface and the depth
-        # tracking doesn't conflate self-reentry with cross-session loops.
+        # Self-wake has dedicated tools — reject so an agent can't
+        # accidentally bypass those surfaces and the depth tracking
+        # doesn't conflate self-reentry with cross-session loops.
         raise WakeSessionArgumentError(
-            "cannot wake your own session; use schedule_wake for self-reentry"
+            "cannot wake your own session; use wake_self for immediate "
+            "self-delivery, or schedule_wake for a delayed self-wake"
         )
 
     pool = runtime.require_pool()

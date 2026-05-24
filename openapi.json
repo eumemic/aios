@@ -5569,7 +5569,7 @@
           "connections"
         ],
         "summary": "Create",
-        "description": "Create a detached connection, **idempotent on ``(connector, external_account_id)``**.\n\nPer plan decision #5, this endpoint and the supervisor's\nauto-create-on-first-inbound path race-safely converge on a single\nrow: posting twice with the same ``(connector, external_account_id)``\nreturns 201 with the existing row rather than 409. The ``id`` may\ndiffer from a freshly-allocated one if a concurrent writer landed\nfirst; the response always reflects the canonical active row.\n\nThe active-row partial-unique index is global, not tenant-scoped \u2014\nreal-world messaging identities (Signal phone numbers, Telegram\nbot tokens, etc.) are universally exclusive. If another tenant\nalready holds the active row for this identity, the call returns\n409 ``conflict`` rather than silently masking the collision.\n\nOptional ``secrets`` carry platform credentials (e.g. Telegram\n``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``\nand only ever read back through the runtime-scoped\n``GET /v1/connectors/runtime/secrets`` route \u2014 operator-facing\nreads return ``secrets_set: bool`` instead of values.",
+        "description": "Create a detached connection, **idempotent on ``(connector, external_account_id)``**.\n\nPer plan decision #5, this endpoint and the supervisor's\nauto-create-on-first-inbound path race-safely converge on a single\nrow: posting twice with the same ``(connector, external_account_id)``\nreturns 201 with the existing row rather than 409. The ``id`` may\ndiffer from a freshly-allocated one if a concurrent writer landed\nfirst; the response always reflects the canonical active row.\n\nThe active-row partial-unique index is **per-account**, not global\n(migration 0060, in support of the reparent primitive #694): the\nsame ``(connector, external_account_id)`` may live in multiple\naccounts simultaneously. The 409 ``conflict`` only fires within\nthe caller's own account \u2014 cross-account collisions are no longer\nrejected here.\n\nOptional ``secrets`` carry platform credentials (e.g. Telegram\n``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``\nand only ever read back through the runtime-scoped\n``GET /v1/connectors/runtime/secrets`` route \u2014 operator-facing\nreads return ``secrets_set: bool`` instead of values.",
         "operationId": "create_connection",
         "parameters": [
           {
@@ -5916,6 +5916,75 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connections/{connection_id}/reparent": {
+      "post": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Reparent",
+        "description": "Transfer a connection to a different account. Root operator only.\n\nMoves ``connection.account_id`` to ``destination_account_id``\natomically, preserving ``connection.id`` so dependent connector\ndaemon state (signal-cli's ``account.dat``, whatsmeow's\n``sqlstore.db``, telegram webhook config) carries over without\nrecreation. Encrypted secrets are re-keyed from the source\naccount's derived subkey to the destination's inside the same\ntransaction, so the post-reparent connection decrypts correctly\nunder the destination context. The per-account partial unique\nindex on ``(account_id, connector, external_account_id) WHERE\narchived_at IS NULL`` enforces no-collision at the destination\nautomatically; a colliding destination returns 409.\n\nAuthorization (v1): root operator only \u2014 the caller's account must\nhave ``parent_account_id IS NULL``. Multi-tenant consent semantics\n(\"both source and destination owners must approve\") are deferred\nto v2; v1 is the operator-only escape hatch that unblocks the\njarbot v2 ``ExternalIdentity`` transfer flow.\n\n**Daemon-cache caveat (v1)**: this is a database-only reparent.\nConnector daemons cache ``account_id`` in memory at attach time\nand do NOT receive a rebind event. Restart the connector container\nafter reparent \u2014 the in-memory cache is otherwise stale until the\nnext restart.",
+        "operationId": "reparent_connection",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionReparent"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -8861,6 +8930,23 @@
         ],
         "title": "ConnectionCreate",
         "description": "Request body for ``POST /v1/connections``.\n\nCreated in detached mode \u2014 neither ``session_id`` nor\n``session_template_id`` is set.  Use ``POST .../attach`` or\n``POST .../configure-per-chat`` afterward to bind a routing mode.\n\n``connector`` and ``external_account_id`` may not contain ``/`` \u2014\nthey're used in the focal-channel address scheme\n``{connector}/{external_account_id}/{chat_id}`` and a ``/`` would\ncreate ambiguous segment boundaries."
+      },
+      "ConnectionReparent": {
+        "properties": {
+          "destination_account_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Destination Account Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "destination_account_id"
+        ],
+        "title": "ConnectionReparent",
+        "description": "Request body for ``POST /v1/connections/{id}/reparent``.\n\nMoves the connection's ``account_id`` to ``destination_account_id``\natomically, preserving ``connection.id`` so dependent connector\nstate (signal-cli's ``account.dat``, whatsmeow's ``sqlstore.db``,\ntelegram webhook config) carries over without recreation. v1\nauth: root operator only.\n\nLength bounds match the ULID-shaped ``account_id`` format used\nelsewhere on the wire (1..64 chars covers ``acc_<ULID>``)."
       },
       "ConnectionSetSecrets": {
         "properties": {
@@ -12718,6 +12804,7 @@
                   "cancel",
                   "schedule_wake",
                   "wake_session",
+                  "wake_self",
                   "http_request",
                   "schedule_task_add",
                   "schedule_task_remove",
