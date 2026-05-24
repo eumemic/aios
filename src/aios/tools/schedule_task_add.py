@@ -4,9 +4,9 @@ Hand-written precursor to the autogen'd self-state tools envisaged in
 #652. Per #270 we deliberately expose granular ops only — no whole-list
 ``set``. Each entry is identified by ``name`` (unique per session).
 
-Fires run in the session's sandbox without waking the model; bash must
-explicitly escalate via the broker's ``sessions/messages`` endpoint to
-deliver a user-role event back to the session.
+Fires run in the session's sandbox without waking the model; to deliver
+a user-role event back to the session, bash invokes the ``wake_self``
+tool (or, for scripted/advanced callers, POSTs to the broker directly).
 """
 
 from __future__ import annotations
@@ -30,13 +30,14 @@ SCHEDULE_TASK_ADD_DESCRIPTION = (
     "Add a cron-fired bash task to this session. The task runs at the "
     "specified schedule in the session's sandbox WITHOUT waking the "
     "model. To escalate (wake the model with a user-role message), the "
-    "bash command must POST to the broker. The canonical invocation, "
-    "which works in both TCP and Unix-socket broker transports (the "
-    "broker exposes ``unix://`` or ``http://`` via TOOL_BROKER_URL), is:\n"
+    "canonical bash invocation is:\n"
     "\n"
-    '  curl -fsS "$TOOL_BROKER_URL/v1/$TOOL_BROKER_SECRET/sessions/messages" \\\n'
-    "       -X POST -H 'Content-Type: application/json' \\\n"
-    '       -d \'{"content":"<message to deliver to yourself>"}\'\n'
+    '  tool wake_self \'{"content":"<message to deliver to yourself>"}\'\n'
+    "\n"
+    "This keeps the broker secret out of the command string. Advanced "
+    "or scripted callers may still POST to "
+    "``$TOOL_BROKER_URL/v1/$TOOL_BROKER_SECRET/sessions/messages`` "
+    "directly.\n"
     "\n"
     "Use this primitive for deterministic polling (file watchers, API "
     "checks, periodic state syncs) without burning model tokens per "
