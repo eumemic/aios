@@ -82,10 +82,13 @@ def sync_detailed(
     atomically, preserving ``connection.id`` so dependent connector
     daemon state (signal-cli's ``account.dat``, whatsmeow's
     ``sqlstore.db``, telegram webhook config) carries over without
-    recreation. The per-account partial unique index on
-    ``(account_id, connector, external_account_id) WHERE archived_at
-    IS NULL`` enforces no-collision at the destination automatically;
-    a colliding destination returns 409.
+    recreation. Encrypted secrets are re-keyed from the source
+    account's derived subkey to the destination's inside the same
+    transaction, so the post-reparent connection decrypts correctly
+    under the destination context. The per-account partial unique
+    index on ``(account_id, connector, external_account_id) WHERE
+    archived_at IS NULL`` enforces no-collision at the destination
+    automatically; a colliding destination returns 409.
 
     Authorization (v1): root operator only — the caller's account must
     have ``parent_account_id IS NULL``. Multi-tenant consent semantics
@@ -149,10 +152,13 @@ def sync(
     atomically, preserving ``connection.id`` so dependent connector
     daemon state (signal-cli's ``account.dat``, whatsmeow's
     ``sqlstore.db``, telegram webhook config) carries over without
-    recreation. The per-account partial unique index on
-    ``(account_id, connector, external_account_id) WHERE archived_at
-    IS NULL`` enforces no-collision at the destination automatically;
-    a colliding destination returns 409.
+    recreation. Encrypted secrets are re-keyed from the source
+    account's derived subkey to the destination's inside the same
+    transaction, so the post-reparent connection decrypts correctly
+    under the destination context. The per-account partial unique
+    index on ``(account_id, connector, external_account_id) WHERE
+    archived_at IS NULL`` enforces no-collision at the destination
+    automatically; a colliding destination returns 409.
 
     Authorization (v1): root operator only — the caller's account must
     have ``parent_account_id IS NULL``. Multi-tenant consent semantics
@@ -211,10 +217,13 @@ async def asyncio_detailed(
     atomically, preserving ``connection.id`` so dependent connector
     daemon state (signal-cli's ``account.dat``, whatsmeow's
     ``sqlstore.db``, telegram webhook config) carries over without
-    recreation. The per-account partial unique index on
-    ``(account_id, connector, external_account_id) WHERE archived_at
-    IS NULL`` enforces no-collision at the destination automatically;
-    a colliding destination returns 409.
+    recreation. Encrypted secrets are re-keyed from the source
+    account's derived subkey to the destination's inside the same
+    transaction, so the post-reparent connection decrypts correctly
+    under the destination context. The per-account partial unique
+    index on ``(account_id, connector, external_account_id) WHERE
+    archived_at IS NULL`` enforces no-collision at the destination
+    automatically; a colliding destination returns 409.
 
     Authorization (v1): root operator only — the caller's account must
     have ``parent_account_id IS NULL``. Multi-tenant consent semantics
@@ -276,10 +285,13 @@ async def asyncio(
     atomically, preserving ``connection.id`` so dependent connector
     daemon state (signal-cli's ``account.dat``, whatsmeow's
     ``sqlstore.db``, telegram webhook config) carries over without
-    recreation. The per-account partial unique index on
-    ``(account_id, connector, external_account_id) WHERE archived_at
-    IS NULL`` enforces no-collision at the destination automatically;
-    a colliding destination returns 409.
+    recreation. Encrypted secrets are re-keyed from the source
+    account's derived subkey to the destination's inside the same
+    transaction, so the post-reparent connection decrypts correctly
+    under the destination context. The per-account partial unique
+    index on ``(account_id, connector, external_account_id) WHERE
+    archived_at IS NULL`` enforces no-collision at the destination
+    automatically; a colliding destination returns 409.
 
     Authorization (v1): root operator only — the caller's account must
     have ``parent_account_id IS NULL``. Multi-tenant consent semantics

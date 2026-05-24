@@ -4047,6 +4047,7 @@ async def reparent_connection(
     connection_id: str,
     *,
     destination_account_id: str,
+    secrets_blob: EncryptedBlob | None = None,
 ) -> Connection:
     """Transfer an active connection to a different account.
 
@@ -4063,18 +4064,32 @@ async def reparent_connection(
     :class:`ConflictError` — that's the destination-collision case
     documented in the operator-facing 409 response.
 
+    ``secrets_blob`` rewrites the encrypted secret columns inside the
+    same UPDATE. Secrets are keyed to the owning ``account_id`` via
+    :meth:`CryptoBox.derive_account_subkey`, so the source-keyed
+    ciphertext is unreadable under the destination's derived key.
+    Service-layer callers decrypt with the source subkey and re-encrypt
+    with the destination subkey before passing the new blob; passing
+    ``None`` is reserved for connections that had no secrets to begin
+    with (the schema's ``connections_secrets_pair_ck`` keeps the
+    pair-or-neither invariant intact when both columns flip to NULL).
+
     The caller is responsible for the root-operator gate; this query
     deliberately doesn't scope by source ``account_id`` because the
     semantic of reparent is "cross-account move," and the service
     layer is what decides whether the caller is allowed to do that.
     """
+    ciphertext = secrets_blob.ciphertext if secrets_blob is not None else None
+    nonce = secrets_blob.nonce if secrets_blob is not None else None
     try:
         row = await conn.fetchrow(
             f"""
             WITH updated AS (
                 UPDATE connections
-                   SET account_id = $2,
-                       updated_at = now()
+                   SET account_id         = $2,
+                       secrets_ciphertext = $3,
+                       secrets_nonce      = $4,
+                       updated_at         = now()
                  WHERE id = $1 AND archived_at IS NULL
                 RETURNING *
             )
@@ -4082,6 +4097,8 @@ async def reparent_connection(
             """,
             connection_id,
             destination_account_id,
+            ciphertext,
+            nonce,
         )
     except asyncpg.UniqueViolationError as exc:
         # The destination account already has an active connection for

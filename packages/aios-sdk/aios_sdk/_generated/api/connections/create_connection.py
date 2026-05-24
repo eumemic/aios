@@ -80,11 +80,12 @@ def sync_detailed(
     differ from a freshly-allocated one if a concurrent writer landed
     first; the response always reflects the canonical active row.
 
-    The active-row partial-unique index is global, not tenant-scoped —
-    real-world messaging identities (Signal phone numbers, Telegram
-    bot tokens, etc.) are universally exclusive. If another tenant
-    already holds the active row for this identity, the call returns
-    409 ``conflict`` rather than silently masking the collision.
+    The active-row partial-unique index is **per-account**, not global
+    (migration 0060, in support of the reparent primitive #694): the
+    same ``(connector, external_account_id)`` may live in multiple
+    accounts simultaneously. The 409 ``conflict`` only fires within
+    the caller's own account — cross-account collisions are no longer
+    rejected here.
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
@@ -142,11 +143,12 @@ def sync(
     differ from a freshly-allocated one if a concurrent writer landed
     first; the response always reflects the canonical active row.
 
-    The active-row partial-unique index is global, not tenant-scoped —
-    real-world messaging identities (Signal phone numbers, Telegram
-    bot tokens, etc.) are universally exclusive. If another tenant
-    already holds the active row for this identity, the call returns
-    409 ``conflict`` rather than silently masking the collision.
+    The active-row partial-unique index is **per-account**, not global
+    (migration 0060, in support of the reparent primitive #694): the
+    same ``(connector, external_account_id)`` may live in multiple
+    accounts simultaneously. The 409 ``conflict`` only fires within
+    the caller's own account — cross-account collisions are no longer
+    rejected here.
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
@@ -199,11 +201,12 @@ async def asyncio_detailed(
     differ from a freshly-allocated one if a concurrent writer landed
     first; the response always reflects the canonical active row.
 
-    The active-row partial-unique index is global, not tenant-scoped —
-    real-world messaging identities (Signal phone numbers, Telegram
-    bot tokens, etc.) are universally exclusive. If another tenant
-    already holds the active row for this identity, the call returns
-    409 ``conflict`` rather than silently masking the collision.
+    The active-row partial-unique index is **per-account**, not global
+    (migration 0060, in support of the reparent primitive #694): the
+    same ``(connector, external_account_id)`` may live in multiple
+    accounts simultaneously. The 409 ``conflict`` only fires within
+    the caller's own account — cross-account collisions are no longer
+    rejected here.
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
@@ -259,11 +262,12 @@ async def asyncio(
     differ from a freshly-allocated one if a concurrent writer landed
     first; the response always reflects the canonical active row.
 
-    The active-row partial-unique index is global, not tenant-scoped —
-    real-world messaging identities (Signal phone numbers, Telegram
-    bot tokens, etc.) are universally exclusive. If another tenant
-    already holds the active row for this identity, the call returns
-    409 ``conflict`` rather than silently masking the collision.
+    The active-row partial-unique index is **per-account**, not global
+    (migration 0060, in support of the reparent primitive #694): the
+    same ``(connector, external_account_id)`` may live in multiple
+    accounts simultaneously. The 409 ``conflict`` only fires within
+    the caller's own account — cross-account collisions are no longer
+    rejected here.
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``

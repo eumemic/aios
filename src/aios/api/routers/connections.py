@@ -49,11 +49,12 @@ async def create(
     differ from a freshly-allocated one if a concurrent writer landed
     first; the response always reflects the canonical active row.
 
-    The active-row partial-unique index is global, not tenant-scoped —
-    real-world messaging identities (Signal phone numbers, Telegram
-    bot tokens, etc.) are universally exclusive. If another tenant
-    already holds the active row for this identity, the call returns
-    409 ``conflict`` rather than silently masking the collision.
+    The active-row partial-unique index is **per-account**, not global
+    (migration 0060, in support of the reparent primitive #694): the
+    same ``(connector, external_account_id)`` may live in multiple
+    accounts simultaneously. The 409 ``conflict`` only fires within
+    the caller's own account — cross-account collisions are no longer
+    rejected here.
 
     Optional ``secrets`` carry platform credentials (e.g. Telegram
     ``bot_token``).  They are encrypted at rest via ``AIOS_VAULT_KEY``
@@ -133,6 +134,7 @@ async def reparent(
     connection_id: str,
     body: ConnectionReparent,
     pool: PoolDep,
+    crypto_box: CryptoBoxDep,
     account_id: AccountIdDep,
 ) -> Connection:
     """Transfer a connection to a different account. Root operator only.
@@ -141,10 +143,13 @@ async def reparent(
     atomically, preserving ``connection.id`` so dependent connector
     daemon state (signal-cli's ``account.dat``, whatsmeow's
     ``sqlstore.db``, telegram webhook config) carries over without
-    recreation. The per-account partial unique index on
-    ``(account_id, connector, external_account_id) WHERE archived_at
-    IS NULL`` enforces no-collision at the destination automatically;
-    a colliding destination returns 409.
+    recreation. Encrypted secrets are re-keyed from the source
+    account's derived subkey to the destination's inside the same
+    transaction, so the post-reparent connection decrypts correctly
+    under the destination context. The per-account partial unique
+    index on ``(account_id, connector, external_account_id) WHERE
+    archived_at IS NULL`` enforces no-collision at the destination
+    automatically; a colliding destination returns 409.
 
     Authorization (v1): root operator only — the caller's account must
     have ``parent_account_id IS NULL``. Multi-tenant consent semantics
@@ -163,6 +168,7 @@ async def reparent(
         connection_id,
         destination_account_id=body.destination_account_id,
         requester_account_id=account_id,
+        crypto_box=crypto_box,
     )
 
 

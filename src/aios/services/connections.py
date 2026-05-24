@@ -484,6 +484,7 @@ async def reparent_connection(
     *,
     destination_account_id: str,
     requester_account_id: str,
+    crypto_box: CryptoBox,
 ) -> Connection:
     """Transfer a connection's ``account_id`` to a different account.
 
@@ -493,6 +494,14 @@ async def reparent_connection(
     ``account.dat``, whatsmeow's ``sqlstore.db``, telegram webhook
     config, per-chat routing rules) — all keyed by ``connection.id`` —
     carries over without churn.
+
+    Encrypted secrets are re-encrypted under the destination account's
+    derived subkey inside the same transaction. ``_encrypt_secrets``
+    keys the ciphertext on the owning ``account_id`` via
+    :meth:`CryptoBox.derive_account_subkey`, so without this step the
+    very next ``get_connection_secrets`` (now scoped to the destination)
+    would attempt to decrypt with the wrong subkey and raise
+    :class:`CryptoDecryptError`, silently bricking the connection.
 
     Authorization (v1): root operator only. The requester's
     ``parent_account_id`` must be ``None``. Multi-tenant consent
@@ -542,7 +551,8 @@ async def reparent_connection(
         # in the same critical section. Without it, an archive could
         # commit between our read and the UPDATE.
         locked = await conn.fetchrow(
-            "SELECT archived_at FROM connections WHERE id = $1 FOR UPDATE",
+            "SELECT archived_at, account_id, secrets_ciphertext, secrets_nonce "
+            "FROM connections WHERE id = $1 FOR UPDATE",
             connection_id,
         )
         if locked is None:
@@ -555,8 +565,27 @@ async def reparent_connection(
                 f"connection {connection_id} is archived; cannot reparent",
                 detail={"id": connection_id},
             )
+        # Re-key the secrets blob inside the same transaction: decrypt
+        # under the source account's subkey, re-encrypt under the
+        # destination's. Skip when no secrets are configured — leaving
+        # both columns NULL satisfies ``connections_secrets_pair_ck``.
+        source_account_id = locked["account_id"]
+        source_ciphertext = locked["secrets_ciphertext"]
+        source_nonce = locked["secrets_nonce"]
+        rekeyed_blob: EncryptedBlob | None = None
+        if source_ciphertext is not None and source_nonce is not None:
+            source_blob = EncryptedBlob(ciphertext=source_ciphertext, nonce=source_nonce)
+            plaintext = crypto_box.derive_account_subkey(source_account_id).decrypt_dict(
+                source_blob
+            )
+            rekeyed_blob = crypto_box.derive_account_subkey(destination_account_id).encrypt_dict(
+                plaintext
+            )
         return await queries.reparent_connection(
-            conn, connection_id=connection_id, destination_account_id=destination_account_id
+            conn,
+            connection_id=connection_id,
+            destination_account_id=destination_account_id,
+            secrets_blob=rekeyed_blob,
         )
 
 

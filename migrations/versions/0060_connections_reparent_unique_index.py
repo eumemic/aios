@@ -52,6 +52,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Restore the pre-0060 global UNIQUE.
+
+    **Hazard**: post-upgrade the system permits two accounts to hold
+    the same active ``(connector, external_account_id)`` triple — that
+    is the whole point of the migration. If any operator has exercised
+    that capability (via reparent, or independent creates across
+    accounts), the ``CREATE UNIQUE INDEX`` below will fail with a
+    unique violation, leaving the database with **no active-row index
+    at all** (the per-account one is already dropped). The operator
+    must resolve duplicate active triples first — archive one row, or
+    reparent it back so a single account owns the identity — before
+    re-running ``alembic downgrade``.
+    """
     op.execute("DROP INDEX IF EXISTS connections_active_account_external_uniq")
     op.execute(
         "CREATE UNIQUE INDEX connections_active_external_account_uniq "

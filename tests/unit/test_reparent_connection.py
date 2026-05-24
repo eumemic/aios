@@ -21,6 +21,7 @@ they're the database's job — surfacing the right error class from
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -28,6 +29,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import asyncpg
 import pytest
 
+from aios.crypto.vault import CryptoBox
 from aios.errors import ConflictError, ForbiddenError, NotFoundError
 from aios.models.accounts import Account
 from aios.models.connections import Connection
@@ -35,6 +37,7 @@ from aios.services.connections import reparent_connection
 from tests.unit.conftest import fake_pool_yielding_conn
 
 _NOW = datetime.now(UTC)
+_CRYPTO_BOX = CryptoBox(os.urandom(32))
 
 
 def _root_account(account_id: str = "acc_root") -> Account:
@@ -110,6 +113,7 @@ class TestReparentConnection:
                 "conn_x",
                 destination_account_id="acc_dest",
                 requester_account_id="acc_caller",
+                crypto_box=_CRYPTO_BOX,
             )
 
     async def test_reparent_rejects_unknown_caller(self) -> None:
@@ -134,6 +138,7 @@ class TestReparentConnection:
                 "conn_x",
                 destination_account_id="acc_dest",
                 requester_account_id="acc_ghost",
+                crypto_box=_CRYPTO_BOX,
             )
 
     async def test_reparent_missing_destination_account_raises_not_found(self) -> None:
@@ -154,6 +159,7 @@ class TestReparentConnection:
                 "conn_x",
                 destination_account_id="acc_dest_missing",
                 requester_account_id="acc_root",
+                crypto_box=_CRYPTO_BOX,
             )
 
     async def test_reparent_missing_connection_raises_not_found(self) -> None:
@@ -175,6 +181,7 @@ class TestReparentConnection:
                 "conn_missing",
                 destination_account_id="acc_dest",
                 requester_account_id="acc_root",
+                crypto_box=_CRYPTO_BOX,
             )
 
     async def test_reparent_archived_connection_raises_conflict(self) -> None:
@@ -196,14 +203,28 @@ class TestReparentConnection:
                 "conn_archived",
                 destination_account_id="acc_dest",
                 requester_account_id="acc_root",
+                crypto_box=_CRYPTO_BOX,
             )
 
     async def test_reparent_happy_path_updates_account_id(self) -> None:
-        """Calls the query with the destination account id and returns its result."""
+        """Calls the query with the destination account id and returns its result.
+
+        No secrets configured → ``secrets_blob`` arg is ``None`` (the
+        UPDATE still rewrites both secret columns, both to NULL, which
+        satisfies ``connections_secrets_pair_ck``).
+        """
         conn = _conn_with_transaction()
         pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(conn))
-        # SELECT FOR UPDATE returns a live (non-archived) row.
-        conn.fetchrow = AsyncMock(return_value={"archived_at": None})
+        # SELECT FOR UPDATE returns a live (non-archived) row, with no
+        # secrets configured — re-encryption path is skipped.
+        conn.fetchrow = AsyncMock(
+            return_value={
+                "archived_at": None,
+                "account_id": "acc_src",
+                "secrets_ciphertext": None,
+                "secrets_nonce": None,
+            }
+        )
 
         updated = _connection(connection_id="conn_x", account_id="acc_dest")
         with (
@@ -221,6 +242,7 @@ class TestReparentConnection:
                 "conn_x",
                 destination_account_id="acc_dest",
                 requester_account_id="acc_root",
+                crypto_box=_CRYPTO_BOX,
             )
 
         assert result is updated
@@ -228,3 +250,70 @@ class TestReparentConnection:
         kwargs = reparent_query.await_args.kwargs
         assert kwargs["destination_account_id"] == "acc_dest"
         assert kwargs["connection_id"] == "conn_x"
+        # No secrets configured → no re-key, blob is None.
+        assert kwargs["secrets_blob"] is None
+
+    async def test_reparent_rekeys_secrets_when_present(self) -> None:
+        """When the source row has encrypted secrets, the service decrypts
+        with the source subkey and re-encrypts with the destination
+        subkey before handing the blob to the query. Without this, the
+        next ``get_connection_secrets`` (scoped to the destination)
+        would attempt to decrypt with the wrong subkey and raise
+        :class:`CryptoDecryptError`.
+        """
+        conn = _conn_with_transaction()
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(conn))
+
+        # Encrypt a known secrets dict with the source account's subkey
+        # so the SELECT FOR UPDATE returns a plausible at-rest blob.
+        source_account_id = "acc_src"
+        destination_account_id = "acc_dest"
+        original_plaintext = {"bot_token": "tg-secret-abc123"}
+        source_blob = _CRYPTO_BOX.derive_account_subkey(source_account_id).encrypt_dict(
+            original_plaintext
+        )
+        conn.fetchrow = AsyncMock(
+            return_value={
+                "archived_at": None,
+                "account_id": source_account_id,
+                "secrets_ciphertext": source_blob.ciphertext,
+                "secrets_nonce": source_blob.nonce,
+            }
+        )
+
+        updated = _connection(connection_id="conn_x", account_id=destination_account_id)
+        with (
+            patch(
+                "aios.services.connections.queries.get_account",
+                AsyncMock(
+                    side_effect=[
+                        _root_account("acc_root"),
+                        _child_account(destination_account_id),
+                    ]
+                ),
+            ),
+            patch(
+                "aios.services.connections.queries.reparent_connection",
+                AsyncMock(return_value=updated),
+            ) as reparent_query,
+        ):
+            await reparent_connection(
+                pool,
+                "conn_x",
+                destination_account_id=destination_account_id,
+                requester_account_id="acc_root",
+                crypto_box=_CRYPTO_BOX,
+            )
+
+        reparent_query.assert_awaited_once()
+        kwargs = reparent_query.await_args.kwargs
+        rekeyed = kwargs["secrets_blob"]
+        assert rekeyed is not None
+        # Ciphertext must differ from the source blob (re-encryption
+        # rolls a fresh nonce; even on the wildly unlikely nonce
+        # collision the ciphertexts under different keys differ).
+        assert rekeyed.ciphertext != source_blob.ciphertext
+        # Decrypting the rekeyed blob with the DESTINATION subkey must
+        # recover the original plaintext.
+        recovered = _CRYPTO_BOX.derive_account_subkey(destination_account_id).decrypt_dict(rekeyed)
+        assert recovered == original_plaintext

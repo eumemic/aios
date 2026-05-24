@@ -27,15 +27,47 @@ This file pins the post-migration contract against a real Postgres:
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import AsyncIterator
 from typing import Any
 
 import asyncpg
 import pytest
 
+from aios.crypto.vault import CryptoBox
 from aios.db import queries
+from aios.db.pool import create_pool
 from aios.errors import ConflictError
+from aios.services import connections as connections_service
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture
+async def pool_two_accounts(
+    migrated_db_url: str, _reset_db_state: None
+) -> AsyncIterator[tuple[asyncpg.Pool[Any], CryptoBox]]:
+    """Asyncpg pool with the same root + two-child layout as
+    ``conn_two_accounts``, plus a fresh ``CryptoBox`` for the secrets
+    re-encryption path. Pool (not a single conn) because the secrets
+    roundtrip exercises ``service.reparent_connection`` →
+    ``service.get_connection_secrets``, both of which take a pool.
+    """
+    pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
+    crypto_box = CryptoBox(os.urandom(32))
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
+                VALUES ('acc_root', NULL,      TRUE,  'tenant-root'),
+                       ('acc_a',    'acc_root', FALSE, 'tenant-a'),
+                       ('acc_b',    'acc_root', FALSE, 'tenant-b')
+                """
+            )
+        yield pool, crypto_box
+    finally:
+        await pool.close()
 
 
 class TestReparentUniqueIndex:
@@ -155,3 +187,83 @@ class TestReparentUniqueIndex:
         )
         assert row is not None
         assert row["account_id"] == "acc_a"
+
+
+class TestReparentSecretsRoundtrip:
+    """End-to-end through the service layer: secrets configured on the
+    source must decrypt correctly under the destination after reparent.
+
+    Secrets are keyed to the owning ``account_id`` via
+    :meth:`CryptoBox.derive_account_subkey`. Without the service-layer
+    re-encryption inside the reparent transaction, the post-reparent
+    ``get_connection_secrets`` call would attempt to decrypt the
+    source-keyed ciphertext under the destination subkey and raise
+    :class:`CryptoDecryptError`, silently bricking the connection.
+    """
+
+    async def test_secrets_decrypt_under_destination_after_reparent(
+        self, pool_two_accounts: tuple[asyncpg.Pool[Any], CryptoBox]
+    ) -> None:
+        pool, crypto_box = pool_two_accounts
+        # Create on acc_a, set secrets, reparent to acc_b, read back
+        # from acc_b — the plaintext must round-trip intact.
+        connection = await connections_service.create_connection(
+            pool,
+            account_id="acc_a",
+            connector="telegram",
+            external_account_id="bot:1234",
+            metadata={},
+            crypto_box=crypto_box,
+        )
+        original_secrets = {"bot_token": "tg-secret-XYZ987"}
+        await connections_service.set_connection_secrets(
+            pool,
+            connection.id,
+            account_id="acc_a",
+            secrets=original_secrets,
+            crypto_box=crypto_box,
+        )
+        await connections_service.reparent_connection(
+            pool,
+            connection.id,
+            destination_account_id="acc_b",
+            requester_account_id="acc_root",
+            crypto_box=crypto_box,
+        )
+        recovered = await connections_service.get_connection_secrets(
+            pool,
+            connection.id,
+            account_id="acc_b",
+            crypto_box=crypto_box,
+        )
+        assert recovered == original_secrets
+
+    async def test_no_secrets_reparent_is_a_noop_on_blob(
+        self, pool_two_accounts: tuple[asyncpg.Pool[Any], CryptoBox]
+    ) -> None:
+        """A connection with no secrets reparents cleanly and still reads
+        back as empty under the destination — guards against a regression
+        that always tried to decrypt even when the columns are NULL."""
+        pool, crypto_box = pool_two_accounts
+        connection = await connections_service.create_connection(
+            pool,
+            account_id="acc_a",
+            connector="telegram",
+            external_account_id="bot:5678",
+            metadata={},
+            crypto_box=crypto_box,
+        )
+        await connections_service.reparent_connection(
+            pool,
+            connection.id,
+            destination_account_id="acc_b",
+            requester_account_id="acc_root",
+            crypto_box=crypto_box,
+        )
+        recovered = await connections_service.get_connection_secrets(
+            pool,
+            connection.id,
+            account_id="acc_b",
+            crypto_box=crypto_box,
+        )
+        assert recovered == {}
