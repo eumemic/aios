@@ -123,6 +123,67 @@ Per saved project feedback, every commit on the smoke branch auto-triggers a sto
 5. Re-run `preflight.sh` to get the new tail seq
 6. Re-arm with the new `--after-seq`
 
+## Daemon-side mysteries: the instrument-rebuild-restart-repro loop
+
+When smoke surfaces an inbound that the model never perceives (or a
+similar mystery that lives inside the Go connector daemon rather than
+the harness), static reading hits a wall fast — the WhatsApp protocol,
+whatsmeow's event types, and the daemon's translator have too many
+shapes to enumerate.  The reliable pattern is to add a one-shot
+diagnostic log, rebuild, restart, drive a controlled repro, read the
+log, then remove the log.
+
+For the WhatsApp daemon specifically:
+
+```go
+// In connectors/whatsapp/daemon/internal/wameow/inbound.go, at the
+// point where you suspect data is being dropped:
+c.log.Info("wameow.<mystery_name>",
+    "id", string(e.Info.ID),
+    "msg_struct", fmt.Sprintf("%+v", e.Message),
+)
+```
+
+Then rebuild via the standard cross-compile:
+
+```bash
+docker run --rm \
+  -v "$PWD/connectors/whatsapp/daemon:/src" \
+  -v aios-whatsapp-gocache:/go \
+  -v /tmp/whatsapp-build:/out \
+  -w /src -e GOPATH=/go -e GOCACHE=/go/build-cache \
+  -e GOOS=darwin -e GOARCH=arm64 -e CGO_ENABLED=0 \
+  golang:1.25 go build -o /out/whatsapp-daemon ./cmd/whatsapp-daemon
+```
+
+Restart just the connector (api/worker stay up — they don't hold the
+diagnostic):
+
+```bash
+pkill -f "uv run python -m aios_whatsapp" && sleep 3 && \
+  AIOS_URL=http://127.0.0.1:$AIOS_API_PORT \
+  AIOS_RUNTIME_TOKEN=$RUNTIME_TOKEN \
+  AIOS_WHATSAPP_DAEMON_BIN=/tmp/whatsapp-build/whatsapp-daemon \
+  AIOS_WHATSAPP_DATA_DIR=/tmp/aios-whatsapp-smoke-data \
+  nohup uv run python -m aios_whatsapp >> .logs/connector.log 2>&1 &
+```
+
+Drive the repro on the user's phone.  The diagnostic line shows up in
+`.logs/connector.log` as a `whatsapp.daemon.stream` entry containing
+the JSON the daemon emitted.  Use `%+v` formatting in `fmt.Sprintf` for
+protobuf structs — the field names print verbatim so you can spot
+which sub-field actually holds the payload.
+
+Remove the log after fixing.  Don't leave info-level diagnostics in the
+production hot path; they're discoverable in git history if needed.
+
+**Use this loop for**: inbound message types the parser drops as
+"no_signal", reactions / edits / revokes that don't reach the model,
+attachment paths that fail to materialise, any "is whatsmeow sending
+something I'm not handling?" question.  This loop produced #111's root
+cause (SecretEncryptedMessage_MESSAGE_EDIT) in ~30 minutes of total
+turnaround vs. open-ended reading of whatsmeow source.
+
 ## Narration etiquette during AFK monitoring
 
 When the user is AFK (e.g., gave a "Dev, ..." instruction via Signal), per saved feedback:
