@@ -45,6 +45,7 @@ from aios.ids import (
     MEMORY_STORE,
     MEMORY_VERSION,
     RUNTIME_TOKEN,
+    SCHEDULED_TASK,
     SESSION,
     SESSION_TEMPLATE,
     SKILL,
@@ -69,6 +70,11 @@ from aios.models.memory_stores import (
     MemoryVersion,
 )
 from aios.models.runtime_tokens import RuntimeToken
+from aios.models.scheduled_tasks import (
+    ScheduledTaskEcho,
+    ScheduledTaskStatus,
+    compute_next_fire,
+)
 from aios.models.session_templates import SessionTemplate
 from aios.models.sessions import Session, SessionStatus, SessionUsage
 from aios.models.skills import AgentSkillRef, Skill, SkillVersion
@@ -1421,6 +1427,38 @@ async def clone_session(
             parent_session_id,
             new_id,
             new_gh_ids,
+        )
+
+        # session_scheduled_tasks.id is a global PK — mint fresh per clone.
+        # Runtime state (running_since / last_fire_* / consecutive_failures)
+        # is RESET on the clone: it inherits the schedule + next_fire so it
+        # continues firing on the parent's cadence, but starts with fresh
+        # failure counters and no in-flight claim. Cumulative-token reset
+        # below uses the same principle — clone is a fresh runtime instance
+        # of the parent's logical configuration.
+        sched_count: int = await conn.fetchval(
+            "SELECT COUNT(*) FROM session_scheduled_tasks WHERE session_id = $1",
+            parent_session_id,
+        )
+        new_sched_ids = [make_id(SCHEDULED_TASK) for _ in range(sched_count)]
+        await conn.execute(
+            """
+            INSERT INTO session_scheduled_tasks (
+                id, session_id, account_id, name, schedule, command, enabled,
+                timeout_seconds, max_output_bytes, next_fire, metadata
+            )
+            SELECT i.id, $2, s.account_id, s.name, s.schedule, s.command,
+                   s.enabled, s.timeout_seconds, s.max_output_bytes,
+                   s.next_fire, s.metadata
+              FROM (
+                SELECT *, row_number() OVER (ORDER BY created_at) AS rn
+                  FROM session_scheduled_tasks WHERE session_id = $1
+              ) s
+              JOIN unnest($3::text[]) WITH ORDINALITY AS i(id, rn) USING (rn)
+            """,
+            parent_session_id,
+            new_id,
+            new_sched_ids,
         )
 
         # Events are gapless 1..last_event_seq per session, so we pre-generate
@@ -6495,3 +6533,438 @@ async def count_active_child_accounts(conn: asyncpg.Connection[Any], parent_acco
     )
     assert row is not None
     return cast("int", row["cnt"])
+
+
+# ─── session scheduled tasks ────────────────────────────────────────────────
+
+
+class ScheduledTaskRow(NamedTuple):
+    """Internal record for scheduled-task fire-handler lookups.
+
+    Carries ``session_id``, ``account_id``, and the owning session's
+    ``session_archived_at`` alongside the user-visible fields so the
+    unscoped fire-job handler (which only has the task id) can resolve
+    the owning session and verify it hasn't been archived between claim
+    and fire — without an extra round-trip.
+    """
+
+    id: str
+    session_id: str
+    account_id: str
+    name: str
+    schedule: str
+    command: str
+    enabled: bool
+    timeout_seconds: int
+    max_output_bytes: int
+    next_fire: datetime | None
+    running_since: datetime | None
+    last_fire_at: datetime | None
+    last_fire_status: ScheduledTaskStatus | None
+    consecutive_failures: int
+    session_archived_at: datetime | None
+
+
+def _row_to_scheduled_task_echo(row: asyncpg.Record) -> ScheduledTaskEcho:
+    return ScheduledTaskEcho(
+        id=row["id"],
+        name=row["name"],
+        schedule=row["schedule"],
+        command=row["command"],
+        enabled=row["enabled"],
+        timeout_seconds=row["timeout_seconds"],
+        max_output_bytes=row["max_output_bytes"],
+        next_fire=row["next_fire"],
+        last_fire_at=row["last_fire_at"],
+        last_fire_status=row["last_fire_status"],
+        consecutive_failures=row["consecutive_failures"],
+        metadata=parse_jsonb(row["metadata"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+async def add_scheduled_task(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    name: str,
+    schedule: str,
+    command: str,
+    enabled: bool,
+    timeout_seconds: int,
+    max_output_bytes: int,
+    metadata: dict[str, Any],
+    next_fire: datetime | None,
+    account_id: str,
+) -> ScheduledTaskEcho:
+    """Insert a scheduled task. Maps unique-name violations to
+    :class:`ConflictError` and missing-session FK violations to
+    :class:`NotFoundError`."""
+    task_id = make_id(SCHEDULED_TASK)
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO session_scheduled_tasks
+                (id, session_id, account_id, name, schedule, command, enabled,
+                 timeout_seconds, max_output_bytes, next_fire, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            RETURNING *
+            """,
+            task_id,
+            session_id,
+            account_id,
+            name,
+            schedule,
+            command,
+            enabled,
+            timeout_seconds,
+            max_output_bytes,
+            next_fire,
+            json.dumps(metadata),
+        )
+    except asyncpg.UniqueViolationError as exc:
+        raise ConflictError(
+            f"scheduled task name {name!r} already exists in this session",
+            detail={"name": name, "session_id": session_id},
+        ) from exc
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise NotFoundError(
+            f"session {session_id!r} not found",
+            detail={"session_id": session_id},
+        ) from exc
+    assert row is not None
+    return _row_to_scheduled_task_echo(row)
+
+
+async def remove_scheduled_task(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    name: str,
+    *,
+    account_id: str,
+) -> None:
+    """Delete a scheduled task by name. Raises :class:`NotFoundError` if absent."""
+    result = await conn.execute(
+        "DELETE FROM session_scheduled_tasks "
+        "WHERE session_id = $1 AND name = $2 AND account_id = $3",
+        session_id,
+        name,
+        account_id,
+    )
+    if result == "DELETE 0":
+        raise NotFoundError(
+            f"scheduled task {name!r} not found",
+            detail={"name": name, "session_id": session_id},
+        )
+
+
+async def get_scheduled_task_by_name(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    name: str,
+    *,
+    account_id: str,
+) -> ScheduledTaskEcho:
+    row = await conn.fetchrow(
+        "SELECT * FROM session_scheduled_tasks "
+        "WHERE session_id = $1 AND name = $2 AND account_id = $3",
+        session_id,
+        name,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"scheduled task {name!r} not found",
+            detail={"name": name, "session_id": session_id},
+        )
+    return _row_to_scheduled_task_echo(row)
+
+
+async def list_scheduled_tasks(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> list[ScheduledTaskEcho]:
+    rows = await conn.fetch(
+        "SELECT * FROM session_scheduled_tasks "
+        "WHERE session_id = $1 AND account_id = $2 "
+        "ORDER BY created_at",
+        session_id,
+        account_id,
+    )
+    return [_row_to_scheduled_task_echo(r) for r in rows]
+
+
+async def batch_list_session_scheduled_tasks(
+    conn: asyncpg.Connection[Any],
+    session_ids: list[str],
+    *,
+    account_id: str,
+) -> dict[str, list[ScheduledTaskEcho]]:
+    """Batch-fetch scheduled_tasks echoes for multiple sessions.
+
+    Returns a dict keyed by session_id; sessions with no tasks map to
+    an empty list. Mirrors the batch pattern used by
+    :func:`batch_list_session_memory_store_echoes`.
+    """
+    if not session_ids:
+        return {}
+    rows = await conn.fetch(
+        "SELECT * FROM session_scheduled_tasks "
+        "WHERE session_id = ANY($1) AND account_id = $2 "
+        "ORDER BY session_id, created_at",
+        session_ids,
+        account_id,
+    )
+    result: dict[str, list[ScheduledTaskEcho]] = {sid: [] for sid in session_ids}
+    for r in rows:
+        result[str(r["session_id"])].append(_row_to_scheduled_task_echo(r))
+    return result
+
+
+async def update_scheduled_task(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    name: str,
+    *,
+    schedule: str | None = None,
+    command: str | None = None,
+    enabled: bool | None = None,
+    timeout_seconds: int | None = None,
+    max_output_bytes: int | None = None,
+    metadata: dict[str, Any] | None = None,
+    next_fire: datetime | None | EllipsisType = ...,
+    account_id: str,
+) -> ScheduledTaskEcho:
+    """Update fields by name. Raises :class:`NotFoundError` if absent.
+
+    For non-``next_fire`` fields, ``None`` means 'leave alone.' ``next_fire``
+    uses ``...`` (Ellipsis) as the leave-alone sentinel because ``None`` is
+    a meaningful clear-to-null value (used when disabling a task).
+    """
+    set_clauses: list[str] = []
+    args: list[Any] = []
+
+    def add(col: str, value: Any) -> None:
+        args.append(value)
+        set_clauses.append(f"{col} = ${len(args)}")
+
+    if schedule is not None:
+        add("schedule", schedule)
+    if command is not None:
+        add("command", command)
+    if enabled is not None:
+        add("enabled", enabled)
+    if timeout_seconds is not None:
+        add("timeout_seconds", timeout_seconds)
+    if max_output_bytes is not None:
+        add("max_output_bytes", max_output_bytes)
+    if metadata is not None:
+        add("metadata", json.dumps(metadata))
+    if not isinstance(next_fire, EllipsisType):
+        add("next_fire", next_fire)
+
+    # Always bump ``updated_at`` so a no-op PATCH still records a write —
+    # external pollers using ``updated_at > <since>`` mustn't miss it.
+    set_clauses.append("updated_at = now()")
+    args.extend([session_id, name, account_id])
+    sql = f"""
+        UPDATE session_scheduled_tasks
+        SET {", ".join(set_clauses)}
+        WHERE session_id = ${len(args) - 2}
+          AND name = ${len(args) - 1}
+          AND account_id = ${len(args)}
+        RETURNING *
+    """
+    row = await conn.fetchrow(sql, *args)
+    if row is None:
+        raise NotFoundError(
+            f"scheduled task {name!r} not found",
+            detail={"name": name, "session_id": session_id},
+        )
+    return _row_to_scheduled_task_echo(row)
+
+
+async def unscoped_get_scheduled_task_row(
+    conn: asyncpg.Connection[Any],
+    task_id: str,
+) -> ScheduledTaskRow:
+    """Fetch a scheduled task by id without account_id scope.
+
+    Used by the fire-job handler which runs cross-tenant in the worker;
+    each row carries its ``account_id`` denormalized. JOINs ``sessions``
+    so the handler can re-check the owning session's archive state and
+    skip a fire whose session was archived between claim and execute.
+    """
+    row = await conn.fetchrow(
+        "SELECT st.id, st.session_id, st.account_id, st.name, st.schedule, "
+        "st.command, st.enabled, st.timeout_seconds, st.max_output_bytes, "
+        "st.next_fire, st.running_since, st.last_fire_at, st.last_fire_status, "
+        "st.consecutive_failures, s.archived_at AS session_archived_at "
+        "FROM session_scheduled_tasks AS st "
+        "JOIN sessions AS s ON s.id = st.session_id "
+        "WHERE st.id = $1",
+        task_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"scheduled task {task_id!r} not found",
+            detail={"id": task_id},
+        )
+    return ScheduledTaskRow(
+        id=row["id"],
+        session_id=row["session_id"],
+        account_id=row["account_id"],
+        name=row["name"],
+        schedule=row["schedule"],
+        command=row["command"],
+        enabled=row["enabled"],
+        timeout_seconds=row["timeout_seconds"],
+        max_output_bytes=row["max_output_bytes"],
+        next_fire=row["next_fire"],
+        running_since=row["running_since"],
+        last_fire_at=row["last_fire_at"],
+        last_fire_status=row["last_fire_status"],
+        consecutive_failures=row["consecutive_failures"],
+        session_archived_at=row["session_archived_at"],
+    )
+
+
+async def fetch_and_claim_due_scheduled_tasks(
+    conn: asyncpg.Connection[Any],
+    *,
+    now_utc: datetime,
+    limit: int = 100,
+    stale_threshold_seconds: int = 7200,
+) -> list[ScheduledTaskRow]:
+    """Atomically claim due tasks for the scheduler tick.
+
+    In a single transaction: SELECT enabled tasks whose owning session is
+    not archived, whose ``next_fire <= now``, and which are either not
+    running (``running_since IS NULL``) or stuck-running for more than
+    ``stale_threshold_seconds`` (recovers from worker crashes mid-fire).
+    For each claimed row, sets ``running_since`` to now and advances
+    ``next_fire`` to the next scheduled instant so subsequent ticks skip
+    the row. Returns the claimed rows.
+
+    Archive is the lifecycle boundary — once ``sessions.archived_at`` is
+    set, none of the session's scheduled tasks fire again, regardless of
+    their own ``enabled`` flag. Unarchiving (if supported) restores
+    firing. The rows themselves are preserved.
+
+    Must be called inside an outer transaction so the SELECT FOR UPDATE
+    SKIP LOCKED + UPDATE chain executes atomically against concurrent
+    workers.
+    """
+    from datetime import timedelta
+
+    stale_cutoff = now_utc - timedelta(seconds=stale_threshold_seconds)
+    rows = await conn.fetch(
+        """
+        SELECT st.id, st.session_id, st.account_id, st.name, st.schedule,
+               st.command, st.enabled, st.timeout_seconds, st.max_output_bytes,
+               st.next_fire, st.running_since, st.last_fire_at,
+               st.last_fire_status, st.consecutive_failures,
+               s.archived_at AS session_archived_at
+        FROM session_scheduled_tasks AS st
+        JOIN sessions AS s ON s.id = st.session_id
+        WHERE st.enabled
+          AND s.archived_at IS NULL
+          AND st.next_fire IS NOT NULL
+          AND st.next_fire <= $1
+          AND (st.running_since IS NULL OR st.running_since <= $2)
+        ORDER BY st.next_fire
+        FOR UPDATE OF st SKIP LOCKED
+        LIMIT $3
+        """,
+        now_utc,
+        stale_cutoff,
+        limit,
+    )
+    claimed: list[ScheduledTaskRow] = []
+    for r in rows:
+        new_next_fire = compute_next_fire(r["schedule"], now_utc)
+        await conn.execute(
+            """
+            UPDATE session_scheduled_tasks
+            SET running_since = $1, next_fire = $2, updated_at = $1
+            WHERE id = $3
+            """,
+            now_utc,
+            new_next_fire,
+            r["id"],
+        )
+        claimed.append(
+            ScheduledTaskRow(
+                id=r["id"],
+                session_id=r["session_id"],
+                account_id=r["account_id"],
+                name=r["name"],
+                schedule=r["schedule"],
+                command=r["command"],
+                enabled=r["enabled"],
+                timeout_seconds=r["timeout_seconds"],
+                max_output_bytes=r["max_output_bytes"],
+                # next_fire on the returned row reflects the *advanced* value
+                # so callers see the new schedule slot, not the just-fired one.
+                next_fire=new_next_fire,
+                running_since=now_utc,
+                last_fire_at=r["last_fire_at"],
+                last_fire_status=r["last_fire_status"],
+                consecutive_failures=r["consecutive_failures"],
+                session_archived_at=r["session_archived_at"],
+            )
+        )
+    return claimed
+
+
+async def record_scheduled_task_fire(
+    conn: asyncpg.Connection[Any],
+    task_id: str,
+    *,
+    status: ScheduledTaskStatus,
+    consecutive_failures: int,
+    fired_at: datetime,
+) -> None:
+    """Record the outcome of a fire and clear ``running_since``.
+
+    Does NOT touch ``next_fire`` — that was advanced by the tick when the
+    row was claimed.
+    """
+    await conn.execute(
+        """
+        UPDATE session_scheduled_tasks
+        SET running_since = NULL,
+            last_fire_at = $1,
+            last_fire_status = $2,
+            consecutive_failures = $3,
+            updated_at = $1
+        WHERE id = $4
+        """,
+        fired_at,
+        status,
+        consecutive_failures,
+        task_id,
+    )
+
+
+async def disable_scheduled_task(
+    conn: asyncpg.Connection[Any],
+    task_id: str,
+) -> None:
+    """Disable a scheduled task by id.
+
+    Sets ``enabled = false``, clears ``next_fire``, and leaves
+    ``running_since`` untouched (in case a fire is still in flight; the
+    handler will clear it on completion).
+    """
+    await conn.execute(
+        """
+        UPDATE session_scheduled_tasks
+        SET enabled = false, next_fire = NULL, updated_at = now()
+        WHERE id = $1
+        """,
+        task_id,
+    )

@@ -2144,6 +2144,269 @@
         }
       }
     },
+    "/v1/sessions/{session_id}/scheduled-tasks": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "List Scheduled Tasks",
+        "description": "List scheduled tasks attached to ``session_id``.",
+        "operationId": "list_scheduled_tasks",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_ScheduledTaskEcho_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Create Scheduled Task",
+        "description": "Add a scheduled task. Granular operation per #270 \u2014 there is no\nwhole-list ``set`` surface on ``SessionUpdate``.",
+        "operationId": "create_scheduled_task",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduledTaskCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledTaskEcho"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{session_id}/scheduled-tasks/{name}": {
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Delete Scheduled Task",
+        "description": "Remove a scheduled task by name.",
+        "operationId": "delete_scheduled_task",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Update Scheduled Task",
+        "description": "Patch fields of a scheduled task by name. Omitted fields unchanged.",
+        "operationId": "update_scheduled_task",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduledTaskUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledTaskEcho"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/sessions/{session_id}/archive": {
       "post": {
         "tags": [
@@ -9667,6 +9930,38 @@
         ],
         "title": "ListResponse[RuntimeToken]"
       },
+      "ListResponse_ScheduledTaskEcho_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduledTaskEcho"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          },
+          "next_after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next After"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ListResponse[ScheduledTaskEcho]"
+      },
       "ListResponse_SessionTemplate_": {
         "properties": {
           "data": {
@@ -10933,6 +11228,259 @@
         "title": "RuntimeToolResultRequest",
         "description": "Body for ``POST /v1/connectors/runtime/tool-results``.\n\nCarries ``connection_id`` explicitly \u2014 the bearer scopes the\ncaller to a connector *type*, not to one connection, so the body\nhas to name the target connection."
       },
+      "ScheduledTaskCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+            "title": "Name",
+            "description": "Stable user-chosen identifier; unique per session."
+          },
+          "schedule": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Schedule",
+            "description": "Standard 5-field cron expression in UTC."
+          },
+          "command": {
+            "type": "string",
+            "maxLength": 16384,
+            "minLength": 1,
+            "title": "Command",
+            "description": "Bash command run in the session's sandbox at each fire."
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "maximum": 3600.0,
+            "minimum": 1.0,
+            "title": "Timeout Seconds",
+            "default": 300
+          },
+          "max_output_bytes": {
+            "type": "integer",
+            "maximum": 1048576.0,
+            "minimum": 1024.0,
+            "title": "Max Output Bytes",
+            "default": 65536
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "schedule",
+          "command"
+        ],
+        "title": "ScheduledTaskCreate",
+        "description": "Request body for adding a scheduled task to a session.\n\nAlso accepted in :class:`SessionCreate.scheduled_tasks` for initial\nattachment at session creation."
+      },
+      "ScheduledTaskEcho": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "schedule": {
+            "type": "string",
+            "title": "Schedule"
+          },
+          "command": {
+            "type": "string",
+            "title": "Command"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "title": "Timeout Seconds"
+          },
+          "max_output_bytes": {
+            "type": "integer",
+            "title": "Max Output Bytes"
+          },
+          "next_fire": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Fire"
+          },
+          "last_fire_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Fire At"
+          },
+          "last_fire_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "error",
+                  "timeout",
+                  "skipped"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Fire Status"
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "title": "Consecutive Failures"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "schedule",
+          "command",
+          "enabled",
+          "timeout_seconds",
+          "max_output_bytes",
+          "next_fire",
+          "last_fire_at",
+          "last_fire_status",
+          "consecutive_failures",
+          "metadata",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ScheduledTaskEcho",
+        "description": "Read view of a scheduled task as echoed on ``Session.scheduled_tasks``.\n\nRuntime fields (``last_fire_at`` / ``last_fire_status`` /\n``consecutive_failures``) reflect the most recent fire outcome.\n``running_since`` is internal scheduler bookkeeping and is not\nexposed here."
+      },
+      "ScheduledTaskUpdate": {
+        "properties": {
+          "schedule": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule"
+          },
+          "command": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 16384,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "timeout_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 3600.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout Seconds"
+          },
+          "max_output_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1048576.0,
+                "minimum": 1024.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Output Bytes"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ScheduledTaskUpdate",
+        "description": "PATCH body for updating a scheduled task.\n\n``name`` cannot be changed \u2014 it is the addressable identifier within\na session. All other fields are optional; omitted fields are left\nunchanged. Toggling ``enabled`` true\u2192false clears ``next_fire``;\nfalse\u2192true recomputes it from now."
+      },
       "Session": {
         "properties": {
           "id": {
@@ -11038,6 +11586,13 @@
             },
             "type": "array",
             "title": "Resources"
+          },
+          "scheduled_tasks": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduledTaskEcho"
+            },
+            "type": "array",
+            "title": "Scheduled Tasks"
           },
           "created_at": {
             "type": "string",
@@ -11233,6 +11788,15 @@
             "maxItems": 16,
             "title": "Resources",
             "description": "Resources to attach. Mix of memory stores (mounted under /mnt/memory/<name>/) and github repositories (cloned to a user-specified mount_path). Each type has its own per-session cap; duplicates within a type are rejected. Use ``PUT /v1/sessions/{id}`` with ``resources`` to detach or replace the set after creation."
+          },
+          "scheduled_tasks": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduledTaskCreate"
+            },
+            "type": "array",
+            "maxItems": 32,
+            "title": "Scheduled Tasks",
+            "description": "Cron-fired bash tasks attached at session creation. Each task fires its command in the session's sandbox at its schedule without waking the model \u2014 bash must explicitly POST a user-role event back to escalate. Manage after creation via ``POST/DELETE/PUT /v1/sessions/{id}/scheduled-tasks``; ``SessionUpdate`` deliberately does not accept this field (granular ops only)."
           }
         },
         "additionalProperties": false,
@@ -12102,7 +12666,10 @@
                   "cancel",
                   "schedule_wake",
                   "wake_session",
-                  "http_request"
+                  "http_request",
+                  "schedule_task_add",
+                  "schedule_task_remove",
+                  "schedule_task_update"
                 ]
               },
               {

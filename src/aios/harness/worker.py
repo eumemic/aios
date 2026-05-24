@@ -39,6 +39,7 @@ from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
 from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.procrastinate_app import app as procrastinate_app
+from aios.harness.scheduler import periodic_scheduler_tick
 from aios.harness.sweep import (
     reap_stalled_jobs,
     wake_sessions_needing_inference,
@@ -103,6 +104,7 @@ async def worker_main() -> None:
     sweep_task: asyncio.Task[None] | None = None
     interrupt_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
+    scheduler_task: asyncio.Task[None] | None = None
 
     try:
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
@@ -184,6 +186,13 @@ async def worker_main() -> None:
             name="interrupt_listener",
         )
 
+        # Start scheduled_tasks tick (every 30s). Each tick claims due
+        # session_scheduled_tasks rows and defers run_scheduled_task jobs.
+        scheduler_task = asyncio.create_task(
+            periodic_scheduler_tick(pool, interval=30),
+            name="scheduler_tick",
+        )
+
         # Start liveness heartbeat AFTER all critical resources are up,
         # so the healthcheck can't go green until the worker is fully
         # operational. Touch once now for an immediate green signal,
@@ -221,6 +230,10 @@ async def worker_main() -> None:
             interrupt_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await interrupt_task
+        if scheduler_task is not None:
+            scheduler_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await scheduler_task
         if sandbox_registry is not None:
             sandbox_registry.stop_reaper()
         if task_registry is not None:

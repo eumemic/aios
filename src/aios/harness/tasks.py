@@ -53,3 +53,22 @@ async def wake_session(
     from aios.harness.loop import run_session_step
 
     await run_session_step(session_id, cause=cause, wake_reason=wake_reason)
+
+
+@app.task(
+    name="harness.run_scheduled_task",
+    queue="sessions",
+    retry=False,
+    pass_context=False,
+)
+async def run_scheduled_task(task_id: str) -> None:
+    """Fire one scheduled-task entry — runs bash in the session's sandbox.
+
+    Per-task ``queueing_lock`` (set by the scheduler tick at defer time)
+    deduplicates pending fires. No decorator-level ``lock`` — cron fires
+    must not block concurrent session inference; overlap-prevention is
+    enforced upstream via the ``running_since`` column on the row.
+    """
+    from aios.harness.scheduled_task_runner import run_scheduled_task_step
+
+    await run_scheduled_task_step(task_id)

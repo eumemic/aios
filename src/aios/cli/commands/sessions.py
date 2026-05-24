@@ -518,3 +518,128 @@ def tool_confirm(
         return None
 
     run_or_die(_run)
+
+
+# ─── scheduled tasks sub-app ───────────────────────────────────────────────
+
+
+scheduled_tasks_app = typer.Typer(
+    name="scheduled-tasks",
+    help="Manage a session's cron-fired scheduled tasks (#636).",
+    no_args_is_help=True,
+)
+app.add_typer(scheduled_tasks_app)
+
+_SCHED_COLS = ("id", "name", "schedule", "enabled", "next_fire", "last_fire_status")
+
+
+@scheduled_tasks_app.command("list", help="List scheduled tasks for a session.")
+@covers("list_scheduled_tasks")
+def scheduled_tasks_list(ctx: typer.Context, session_id: str) -> None:
+    def _run() -> None:
+        state, client = with_client(ctx)
+        with client:
+            envelope = client.request("GET", f"/v1/sessions/{session_id}/scheduled-tasks")
+        render_list(state.output_format, envelope, columns=_SCHED_COLS)
+
+    run_or_die(_run)
+
+
+@scheduled_tasks_app.command("add", help="Add a scheduled task to a session.")
+@covers("create_scheduled_task")
+def scheduled_tasks_add(
+    ctx: typer.Context,
+    session_id: str,
+    name: Annotated[str | None, typer.Option("--name")] = None,
+    schedule: Annotated[str | None, typer.Option("--schedule", help="Cron expression.")] = None,
+    command: Annotated[str | None, typer.Option("--command", help="Bash command.")] = None,
+    enabled: Annotated[bool, typer.Option("--enabled/--disabled")] = True,
+    timeout_seconds: Annotated[int | None, typer.Option("--timeout-seconds")] = None,
+    file: Annotated[Path | None, typer.Option("--file")] = None,
+    stdin: Annotated[bool, typer.Option("--stdin")] = False,
+    data: Annotated[str | None, typer.Option("--data")] = None,
+) -> None:
+    def _run() -> int | None:
+        if any([file, stdin, data]):
+            payload = load_payload(file, stdin, data)
+        else:
+            if not (name and schedule and command):
+                print_error(
+                    "either provide --name + --schedule + --command, or supply a full "
+                    "payload via --file/--stdin/--data."
+                )
+                return 64
+            payload = {
+                "name": name,
+                "schedule": schedule,
+                "command": command,
+                "enabled": enabled,
+            }
+            if timeout_seconds is not None:
+                payload["timeout_seconds"] = timeout_seconds
+        client = just_client(ctx)
+        with client:
+            obj = client.request(
+                "POST", f"/v1/sessions/{session_id}/scheduled-tasks", json_body=payload
+            )
+        render_single(obj)
+        return None
+
+    run_or_die(_run)
+
+
+@scheduled_tasks_app.command("remove", help="Remove a scheduled task by name.")
+@covers("delete_scheduled_task")
+def scheduled_tasks_remove(ctx: typer.Context, session_id: str, name: str) -> None:
+    def _run() -> None:
+        client = just_client(ctx)
+        with client:
+            client.request("DELETE", f"/v1/sessions/{session_id}/scheduled-tasks/{name}")
+        print_success("removed", name)
+
+    run_or_die(_run)
+
+
+@scheduled_tasks_app.command("update", help="Update a scheduled task by name.")
+@covers("update_scheduled_task")
+def scheduled_tasks_update(
+    ctx: typer.Context,
+    session_id: str,
+    name: str,
+    schedule: Annotated[str | None, typer.Option("--schedule")] = None,
+    command: Annotated[str | None, typer.Option("--command")] = None,
+    enabled: Annotated[
+        bool | None, typer.Option("--enabled/--disabled", show_default=False)
+    ] = None,
+    timeout_seconds: Annotated[int | None, typer.Option("--timeout-seconds")] = None,
+    file: Annotated[Path | None, typer.Option("--file")] = None,
+    stdin: Annotated[bool, typer.Option("--stdin")] = False,
+    data: Annotated[str | None, typer.Option("--data")] = None,
+) -> None:
+    def _run() -> int | None:
+        if any([file, stdin, data]):
+            payload = load_payload(file, stdin, data)
+        else:
+            payload = {}
+            if schedule is not None:
+                payload["schedule"] = schedule
+            if command is not None:
+                payload["command"] = command
+            if enabled is not None:
+                payload["enabled"] = enabled
+            if timeout_seconds is not None:
+                payload["timeout_seconds"] = timeout_seconds
+            if not payload:
+                print_error("provide at least one field to update")
+                return 64
+        client = just_client(ctx)
+        with client:
+            obj = client.request(
+                "PUT",
+                f"/v1/sessions/{session_id}/scheduled-tasks/{name}",
+                json_body=payload,
+            )
+        render_single(obj)
+        return None
+
+    run_or_die(_run)
