@@ -7057,20 +7057,76 @@ async def count_account_scheduled_tasks(
     """Count scheduled_tasks rows owned by ``account_id``.
 
     Backs the per-account cap enforced in ``services.scheduled_tasks.add_task``.
-    Defaults to counting only enabled rows — paused/disabled entries don't
-    consume a "slot" against the cap. Pass ``enabled_only=False`` for an
-    operator-visible total.
+    Defaults to counting only enabled rows on non-archived sessions —
+    paused/disabled entries don't consume a "slot" against the cap, and
+    rows attached to archived sessions are permanently unable to fire
+    (the scheduler's claim and MIN queries both filter
+    ``s.archived_at IS NULL``), so they shouldn't count either. Pass
+    ``enabled_only=False`` for an operator-visible total that ignores
+    both filters.
     """
-    where_enabled = " AND enabled" if enabled_only else ""
-    result: int | None = await conn.fetchval(
-        f"""
+    if not enabled_only:
+        result: int | None = await conn.fetchval(
+            "SELECT COUNT(*) FROM session_scheduled_tasks WHERE account_id = $1",
+            account_id,
+        )
+        return result or 0
+    result = await conn.fetchval(
+        """
         SELECT COUNT(*)
-        FROM session_scheduled_tasks
-        WHERE account_id = $1{where_enabled}
+        FROM session_scheduled_tasks AS st
+        JOIN sessions AS s ON s.id = st.session_id
+        WHERE st.account_id = $1
+          AND st.enabled
+          AND s.archived_at IS NULL
         """,
         account_id,
     )
     return result or 0
+
+
+async def count_session_scheduled_tasks(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    account_id: str,
+) -> int:
+    """Count scheduled_tasks rows attached to one session.
+
+    Backs the per-session cap (``MAX_SCHEDULED_TASKS_PER_SESSION``)
+    enforced in ``services.scheduled_tasks.add_task``. Counts all rows
+    (enabled or disabled) because the per-session cap is about the
+    session's resource footprint, not just its active-timer load.
+    """
+    result: int | None = await conn.fetchval(
+        """
+        SELECT COUNT(*)
+        FROM session_scheduled_tasks
+        WHERE session_id = $1 AND account_id = $2
+        """,
+        session_id,
+        account_id,
+    )
+    return result or 0
+
+
+async def acquire_account_scheduled_tasks_lock(
+    conn: asyncpg.Connection[Any],
+    account_id: str,
+) -> None:
+    """Per-account transaction-scoped advisory lock for cap enforcement.
+
+    Held for the duration of the surrounding transaction; serializes
+    concurrent ``count_account_scheduled_tasks`` + INSERT pairs across
+    workers so the cap is contractual instead of approximate. The lock
+    key is derived from ``hashtextextended('aios_st_cap:' || account_id,
+    0)`` — a 64-bit hash that won't collide with other modules' advisory
+    locks (the worker-singleton lock uses a different key text).
+    """
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        f"aios_st_cap:{account_id}",
+    )
 
 
 async def fetch_next_scheduled_task_event(

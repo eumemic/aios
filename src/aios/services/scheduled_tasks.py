@@ -21,6 +21,7 @@ from aios.config import get_settings
 from aios.db import queries
 from aios.errors import RateLimitedError, ValidationError
 from aios.models.scheduled_tasks import (
+    MAX_SCHEDULED_TASKS_PER_SESSION,
     ScheduledTaskCreate,
     ScheduledTaskEcho,
     ScheduledTaskUpdate,
@@ -42,13 +43,19 @@ async def add_task(
     from ``fire_at`` (one-shot), unless the task is disabled — in which
     case ``next_fire`` stays ``NULL``.
 
-    Enforces ``Settings.scheduled_tasks_per_account_max`` against the
-    account's count of enabled rows. Disabled rows don't consume a slot
-    (paused entries don't load the scheduler). Single COUNT + INSERT
-    aren't transactionally tied — a race could overshoot the cap by one
-    or two; bumping the limit by the worker concurrency would cover the
-    worst case, but the cap is approximate by design (it's a quota, not
-    a contractual ceiling).
+    Enforces two caps:
+
+    - ``Settings.scheduled_tasks_per_account_max`` against the account's
+      count of enabled rows on non-archived sessions. Disabled rows
+      don't consume a slot (paused entries don't load the scheduler);
+      rows on archived sessions don't either (the claim query filters
+      them out). The COUNT+INSERT are serialized by a per-account
+      transaction-scoped advisory lock so the cap is contractual
+      against concurrent adds, not merely best-effort.
+    - ``MAX_SCHEDULED_TASKS_PER_SESSION`` against the session's total
+      row count (enabled + disabled). Without this, the granular
+      ``add_task`` surface (now reachable per-schedule_wake-call) would
+      allow a single session to consume the full per-account quota.
     """
     cap = get_settings().scheduled_tasks_per_account_max
     next_fire = (
@@ -56,15 +63,28 @@ async def add_task(
         if spec.enabled
         else None
     )
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        # Per-account advisory lock: serializes the COUNT+INSERT across
+        # concurrent add_task calls so the cap can't be raced past by
+        # a fan-out of N parallel schedule_wake requests.
+        await queries.acquire_account_scheduled_tasks_lock(conn, account_id)
+        existing_session = await queries.count_session_scheduled_tasks(
+            conn, session_id=session_id, account_id=account_id
+        )
+        if existing_session >= MAX_SCHEDULED_TASKS_PER_SESSION:
+            raise RateLimitedError(
+                f"session at scheduled-tasks cap "
+                f"({existing_session}/{MAX_SCHEDULED_TASKS_PER_SESSION}); "
+                "remove an existing scheduled task in this session to free a slot"
+            )
         if spec.enabled:
-            existing = await queries.count_account_scheduled_tasks(
+            existing_account = await queries.count_account_scheduled_tasks(
                 conn, account_id=account_id, enabled_only=True
             )
-            if existing >= cap:
+            if existing_account >= cap:
                 raise RateLimitedError(
-                    f"account at active-timer cap ({existing}/{cap}); remove or "
-                    "disable an existing scheduled task to free a slot"
+                    f"account at active-timer cap ({existing_account}/{cap}); "
+                    "remove or disable an existing scheduled task to free a slot"
                 )
         return await queries.add_scheduled_task(
             conn,
@@ -113,6 +133,11 @@ async def update_task(
     Recomputes ``next_fire`` when either trigger changes, when the task is
     re-enabled, or clears it when the task is being disabled. Other
     updates (timeout, command, metadata) leave ``next_fire`` alone.
+
+    Rejects re-enabling a one-shot row whose ``fire_at`` is already in
+    the past — silently letting it fire immediately with a semantically
+    stale reason is a worse failure mode than asking the caller to set
+    a fresh ``fire_at``.
     """
     fields_set = update.model_fields_set
     schedule_explicit = "schedule" in fields_set
@@ -144,9 +169,11 @@ async def update_task(
             next_fire = None
         elif new_enabled and (trigger_changed or not current.enabled):
             # Trigger changed, or task re-enabled: recompute from merged state.
-            # Re-enable also has to honor the per-account active-timer cap,
-            # since a disabled row didn't consume a slot.
+            # Re-enable has to honor the per-account active-timer cap,
+            # since a disabled row didn't consume a slot. Take the per-account
+            # advisory lock so this can't race against concurrent add_tasks.
             if not current.enabled:
+                await queries.acquire_account_scheduled_tasks_lock(conn, account_id)
                 cap = get_settings().scheduled_tasks_per_account_max
                 existing = await queries.count_account_scheduled_tasks(
                     conn, account_id=account_id, enabled_only=True
@@ -157,6 +184,16 @@ async def update_task(
                         "or disable another scheduled task before re-enabling this one"
                     )
             if new_fire_at is not None:
+                # Re-enabling (or trigger-changing to) a one-shot row whose
+                # fire_at is already in the past would fire immediately with
+                # a wake reason that may be days/weeks stale. Reject so the
+                # caller has to provide a fresh future fire_at.
+                if new_fire_at <= datetime.now(UTC):
+                    raise ValidationError(
+                        f"one-shot fire_at {new_fire_at.isoformat()} is not in the "
+                        "future; set a fresh fire_at before enabling (or PATCH a "
+                        "new fire_at in this same request)"
+                    )
                 next_fire = new_fire_at
             else:
                 assert new_schedule is not None  # XOR check above guarantees

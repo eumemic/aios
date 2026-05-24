@@ -184,6 +184,11 @@ async def create_session(
         if scheduled_tasks:
             now = datetime.now(UTC)
             enabled_new = sum(1 for spec in scheduled_tasks if spec.enabled)
+            # Take the per-account advisory lock for the duration of the
+            # count + batch INSERT so concurrent session creates against
+            # the same account can't race past the cap. The lock is
+            # transaction-scoped, released on COMMIT/ROLLBACK.
+            await queries.acquire_account_scheduled_tasks_lock(conn, account_id)
             if enabled_new:
                 cap = get_settings().scheduled_tasks_per_account_max
                 existing = await queries.count_account_scheduled_tasks(
