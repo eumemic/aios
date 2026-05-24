@@ -1,10 +1,12 @@
 """The schedule_wake tool — ask the harness to wake this session at a future time.
 
 Thin wrapper over :mod:`aios.services.scheduled_tasks`: creates a one-shot
-``scheduled_tasks`` row whose bash command POSTs a user-role marker back
-to the session via the broker's ``sessions/messages`` endpoint. At the
-configured time, the scheduler claims the row, the runner fires the bash,
-the broker appends the marker, and the model wakes naturally.
+``scheduled_tasks`` row whose bash command invokes the ``tool wake_self``
+CLI, which delivers a user-role message to the session via the broker
+(authenticating through the sandbox's ``TOOL_BROKER_URL`` /
+``TOOL_BROKER_SECRET`` env vars, so no secret lands in the command string).
+At the configured time, the scheduler claims the row, the runner fires the
+bash, the broker appends the marker, and the model wakes naturally.
 
 Accepts either ``delay_seconds`` (relative) or ``at`` (absolute, ISO 8601
 or natural language via ``dateparser``). Hard-fails unparseable strings —
@@ -180,6 +182,8 @@ def _build_wake_bash(reason: str) -> str:
         {"content": f"[Your scheduled wake fired. Reason: {reason}]"},
         ensure_ascii=False,
     )
+    # Requires `wake_self` to be declared on the agent; an undeclared tool
+    # yields a fire-time 404 surfaced through the scheduled-task runner.
     return f"tool wake_self {shlex.quote(payload)}"
 
 
