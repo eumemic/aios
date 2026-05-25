@@ -7,18 +7,26 @@ name: Release aios-sdk
 #   uv add "https://github.com/eumemic/aios/releases/download/aios-sdk-v0.1.0/aios_sdk-0.1.0-py3-none-any.whl"
 #   uv add "aios-sdk @ git+https://github.com/eumemic/aios.git@aios-sdk-v0.1.0#subdirectory=packages/aios-sdk"
 #
-# The release workflow is deliberately stateless: given a tag, build and
-# publish. The drift contract (FastAPI app ↔ openapi.json ↔
-# aios_sdk/_generated/) is already gated upstream by
-# ``code-validation.yml`` on every PR via the snapshot tests in
-# ``tests/unit/`` (openapi + SDK trees). Tags cut from master HEAD
-# therefore inherit drift coverage from master branch protection — no
-# re-gate inside this workflow.
+# The release workflow assumes the tagged commit has already passed the
+# CI checks that gate master.  An explicit ``git merge-base --is-ancestor``
+# step enforces that: tags pointing at non-master commits (feature branches,
+# force-pushes that bypass branch protection) fail the workflow before any
+# artifact is built.  The drift contract (FastAPI app ↔ openapi.json ↔
+# aios_sdk/_generated/) and the hand-written SDK surface
+# (``aios_sdk/{__init__,config,factory,streaming}.py``) are both covered
+# by ``code-validation.yml`` (lint + mypy + unit) on every PR.  Together
+# the two gates mean every released wheel was built from validated code.
 #
 # Coupling to runtime promotion is operator discipline, not workflow
 # enforcement: only cut SDK tags from commits that have been promoted to
 # ``:stable`` via ``promote-api.yml`` / ``promote-worker.yml``. See
 # ``packages/aios-sdk/README.md::Releasing`` for the procedure.
+#
+# Re-runs against an existing tag are idempotent: if a release with that
+# tag already exists, we update its notes and overwrite its assets via
+# ``gh release upload --clobber`` instead of failing.  Operators recover
+# from a flaky run by re-running the workflow from the Actions UI; no
+# UI-side delete dance is required.
 #
 # Security note: this workflow does not interpolate any ``${{ }}``
 # expression from untrusted sources (issue/PR titles, head_ref, commit
@@ -36,14 +44,45 @@ on:
   push:
     tags: ['aios-sdk-v*']
 
+# Serialize per-tag runs so that re-pushing a tag (or two rapid tag pushes)
+# can't race on the same release.  ``cancel-in-progress: false`` is load-
+# bearing: cancelling a release mid-upload would leave the release row in
+# a partial state on GitHub, defeating the idempotency the Create step
+# below provides.
+concurrency:
+  group: release-aios-sdk-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # for ``gh release create``
+      contents: write  # for ``gh release create`` / ``gh release upload``
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so ``git merge-base --is-ancestor`` below can see
+          # ``origin/master`` and so any future flow that consults annotated-
+          # tag bodies (e.g. ``gh release create --generate-notes``) has the
+          # refs it needs.  The aios tree is small enough that fetch-depth: 0
+          # is cheap.
+          fetch-depth: 0
+
+      - name: Verify tag points at a master-reachable commit
+        # The header comment claims tags inherit CI gating from master
+        # branch protection.  That claim is only true if the tagged commit
+        # is actually reachable from ``origin/master``.  Without this check
+        # an operator (or compromised collaborator) could ``git tag
+        # aios-sdk-vX.Y.Z <feature-branch-sha>`` and publish a wheel from
+        # un-reviewed code under the official release URL.
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "::error::Tag $GITHUB_REF points at $GITHUB_SHA which is not an ancestor of origin/master. Tags must be cut from a master-reachable commit; delete the tag and re-cut from master."
+            exit 1
+          fi
+          echo "Verified: $GITHUB_SHA is reachable from origin/master."
 
       - uses: astral-sh/setup-uv@v4
         with:
@@ -57,12 +96,20 @@ jobs:
         # compare against ``project.version`` in
         # ``packages/aios-sdk/pyproject.toml``. Fails hard on mismatch so
         # a forgotten version bump can't ship a wheel whose Metadata-Version
-        # disagrees with its release name.
+        # disagrees with its release name.  Also fails if the awk pattern
+        # finds no match (e.g. pyproject reformatted such that the
+        # ``version = "..."`` line no longer starts at column 0) — empty
+        # PROJECT_VERSION would otherwise produce a misleading error blaming
+        # the tag instead of the parser.
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
           VERSION="${TAG#aios-sdk-v}"
           PROJECT_VERSION=$(awk -F'"' '/^version = "/{print $2; exit}' packages/aios-sdk/pyproject.toml)
+          if [[ -z "$PROJECT_VERSION" ]]; then
+            echo "::error::Could not extract project.version from packages/aios-sdk/pyproject.toml. Is the [project] table present and well-formed?"
+            exit 1
+          fi
           if [[ "$VERSION" != "$PROJECT_VERSION" ]]; then
             echo "::error::Tag version ($VERSION) does not match packages/aios-sdk/pyproject.toml::project.version ($PROJECT_VERSION). Bump the pyproject version to match the tag and re-tag, or delete the tag."
             exit 1
@@ -94,48 +141,60 @@ jobs:
       - name: Extract release notes from CHANGELOG
         # Pull just the ``## $VERSION — DATE`` block out of
         # ``packages/aios-sdk/CHANGELOG.md`` so the release page shows the
-        # curated changelog entry instead of the whole file. If no matching
-        # entry exists (forgotten changelog update), fall back to a static
-        # install snippet so the release page still tells consumers how to
-        # install the artifact.
+        # curated changelog entry instead of the whole file.  Hard-fail if
+        # the entry is missing — the README's documented Releasing
+        # procedure requires a CHANGELOG entry before tagging, and shipping
+        # a release with empty notes silently is the wrong default.
         #
-        # The literal-prefix match (``$0 == target`` or
+        # The literal-prefix start match (``$0 == target`` or
         # ``index($0, target " ") == 1``) avoids the regex-metachar trap
         # where ``^## 0.1.0`` would also match ``## 0X1X0`` or
         # ``## 0.10.0``.
+        #
+        # The exit predicate ``/^## [vV]?[0-9]/`` matches only
+        # *version-shaped* H2 headings, so markdown subsections inside an
+        # entry body (e.g. ``## Breaking changes``, ``## Migration``) do
+        # not prematurely truncate the notes.
         run: |
           set -euo pipefail
           awk -v target="## $VERSION" '
             $0 == target || index($0, target " ") == 1 {
               inblock = 1; print; next
             }
-            inblock && /^## / { exit }
+            inblock && /^## [vV]?[0-9]/ { exit }
             inblock { print }
           ' packages/aios-sdk/CHANGELOG.md > release-notes.md
 
           if [[ ! -s release-notes.md ]]; then
-            echo "::warning::No CHANGELOG.md entry for $VERSION — using fallback install snippet."
-            cat > release-notes.md <<EOF
-          \`\`\`bash
-          uv add "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/aios_sdk-${VERSION}-py3-none-any.whl"
-          \`\`\`
-
-          No CHANGELOG entry was present for this version at release time. See
-          [packages/aios-sdk/CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/packages/aios-sdk/CHANGELOG.md)
-          at this tag for the full history.
-          EOF
+            echo "::error::No CHANGELOG.md entry for $VERSION. Add a '## $VERSION — YYYY-MM-DD' section to packages/aios-sdk/CHANGELOG.md before tagging."
+            exit 1
           fi
 
           echo "--- release notes ---"
           cat release-notes.md
           echo "---"
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
+        # Idempotent: if a release at this tag already exists (re-pushed
+        # tag, prior workflow flake, manual rerun via the Actions UI),
+        # overwrite its assets with ``--clobber`` and update its title +
+        # notes via ``gh release edit`` instead of failing.  Operators
+        # recover from a flaky run by re-running the workflow; no UI-side
+        # release-delete dance is required.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" \
-            --title "aios-sdk v$VERSION" \
-            --notes-file release-notes.md \
-            packages/aios-sdk/dist/*
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — updating assets and notes."
+            gh release upload "$TAG" --clobber packages/aios-sdk/dist/*
+            gh release edit "$TAG" \
+              --title "aios-sdk v$VERSION" \
+              --notes-file release-notes.md
+          else
+            echo "Creating release $TAG."
+            gh release create "$TAG" \
+              --title "aios-sdk v$VERSION" \
+              --notes-file release-notes.md \
+              packages/aios-sdk/dist/*
+          fi

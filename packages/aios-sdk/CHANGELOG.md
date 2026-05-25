@@ -12,9 +12,12 @@ Initial public release.
 
 - Typed Python SDK for the aios management plane, generated from
   `openapi.json` by `openapi-python-client`.
-- Curated public surface: `Client`, `client_from_env`, SSE streaming
-  helpers (`stream_session`, `stream_connector_calls`,
-  `stream_management_calls`, `stream_connection_discovery`),
-  `parse_sse_lines`, `UnexpectedStatus`.
-- Drift-guarded against the live FastAPI app via snapshot tests in the
-  aios repo's `tests/unit/`.
+- Curated public surface: `Client`, `client_from_env`, `SseMessage`,
+  `parse_sse_lines`, SSE streaming helpers (`stream_session`,
+  `stream_connector_calls`, `stream_management_calls`,
+  `stream_connection_discovery`), `UnexpectedStatus`. The full set is
+  enumerated in `aios_sdk.__all__`.
+- The bundled types match the FastAPI app at the commit this tag was
+  cut from. Consumers should pin a deployment-compatible version; the
+  SDK does not negotiate schema differences against an older runtime
+  at install or call time.

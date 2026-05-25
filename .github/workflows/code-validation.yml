@@ -64,7 +64,7 @@ jobs:
           # ``bin/tool`` is a sandbox-image input (COPY-d by the Dockerfile)
           # and must invalidate the cheap-skip path alongside the source
           # tree even though it lives outside ``src/``.
-          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^connectors/[^/]+/Dockerfile$|^bin/tool$|^\.github/workflows/'; then
+          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^connectors/[^/]+/Dockerfile$|^bin/tool$|^\.github/workflows/|^packages/[^/]+/(pyproject\.toml|CHANGELOG\.md)$'; then
             echo "Build-affecting changes detected — running checks."
             echo "run_checks=true" >> "$GITHUB_OUTPUT"
           else
@@ -121,12 +121,19 @@ jobs:
         run: uv sync --dev
 
       - name: Lint (ruff)
+        # ``packages/aios-sdk/aios_sdk`` carries hand-written modules
+        # (``__init__.py``, ``config.py``, ``factory.py``, ``streaming.py``)
+        # alongside the generated ``_generated/`` tree.  Root
+        # ``pyproject.toml`` already excludes ``_generated/`` via
+        # ``extend-exclude`` and ``mypy.overrides``; including the package
+        # here lets ruff and mypy cover the hand-written surface so the
+        # release workflow's ``no re-gate'' assumption is honored.
         run: |
-          uv run ruff check src tests
-          uv run ruff format --check src tests
+          uv run ruff check src tests packages/aios-sdk/aios_sdk
+          uv run ruff format --check src tests packages/aios-sdk/aios_sdk
 
       - name: Type check (mypy)
-        run: uv run mypy src
+        run: uv run mypy src packages/aios-sdk/aios_sdk
 
   unit:
     needs: detect

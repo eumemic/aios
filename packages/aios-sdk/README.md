@@ -11,15 +11,15 @@ helpers (SSE streaming, env-resolved client factory).
 ## Install
 
 Releases are attached to [GitHub Releases](https://github.com/eumemic/aios/releases?q=aios-sdk)
-as built wheels. There is no PyPI package; pin to a tagged version:
+as built wheels — there is no PyPI package. Find the current version
+on the releases page above and substitute it into one of the install
+commands below. The examples use `v0.1.0`; replace with the latest tag.
 
 ```bash
+# Wheel asset (the recommended form):
 uv add "https://github.com/eumemic/aios/releases/download/aios-sdk-v0.1.0/aios_sdk-0.1.0-py3-none-any.whl"
-```
 
-The git-tag form is available as a source-pin fallback:
-
-```bash
+# Git tag + subdirectory (source-pin fallback):
 uv add "aios-sdk @ git+https://github.com/eumemic/aios.git@aios-sdk-v0.1.0#subdirectory=packages/aios-sdk"
 ```
 
