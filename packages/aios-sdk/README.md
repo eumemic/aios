@@ -8,6 +8,26 @@ generated client lives at `aios_sdk._generated`; this package's
 top-level re-exports the curated public surface plus hand-written
 helpers (SSE streaming, env-resolved client factory).
 
+## Install
+
+Releases are attached to [GitHub Releases](https://github.com/eumemic/aios/releases?q=aios-sdk)
+as built wheels — there is no PyPI package. Find the current version
+on the releases page above and substitute it into one of the install
+commands below. The examples use `v0.1.0`; replace with the latest tag.
+
+```bash
+# Wheel asset (the recommended form):
+uv add "https://github.com/eumemic/aios/releases/download/aios-sdk-v0.1.0/aios_sdk-0.1.0-py3-none-any.whl"
+
+# Git tag + subdirectory (source-pin fallback):
+uv add "aios-sdk @ git+https://github.com/eumemic/aios.git@aios-sdk-v0.1.0#subdirectory=packages/aios-sdk"
+```
+
+The SDK encodes whatever `openapi.json` said when its tag was cut, so the
+deployed aios runtime must be at least as recent as the SDK version on the
+caller side. In practice: tag SDK releases from commits that have already
+been promoted to `:stable` (see [Releasing](#releasing) below).
+
 ## Quick start
 
 ```python
@@ -33,3 +53,24 @@ Two snapshots guard the spec → client pipeline:
   `_generated/` tree matches what `openapi-python-client` produces
   from `openapi.json`. If the spec changes, re-run
   `scripts/regen-client.sh`.
+
+## Releasing
+
+1. After the aios runtime has been promoted to `:stable` via
+   `promote-api.yml` / `promote-worker.yml`, pick a new SDK version in
+   `packages/aios-sdk/pyproject.toml` (`project.version`). 0.x semver:
+   breaking changes are allowed at minor bumps.
+2. Add an entry to `packages/aios-sdk/CHANGELOG.md` under
+   `## X.Y.Z — YYYY-MM-DD`.
+3. Open a PR with both changes; merge to master.
+4. Tag the merge commit on master as `aios-sdk-vX.Y.Z` and push the tag:
+   ```bash
+   git tag aios-sdk-vX.Y.Z
+   git push origin aios-sdk-vX.Y.Z
+   ```
+5. The release workflow (`.github/workflows/release-aios-sdk.yml`)
+   builds the wheel + sdist and attaches them to a GitHub Release of
+   the same name.
+
+The version in `pyproject.toml` must match the tag suffix; the workflow
+asserts this and fails the release on mismatch.
