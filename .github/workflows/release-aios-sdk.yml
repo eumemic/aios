@@ -1,0 +1,141 @@
+name: Release aios-sdk
+
+# Build and publish ``packages/aios-sdk/`` as a versioned GitHub Release
+# artifact whenever a tag matching ``aios-sdk-v*`` is pushed.
+#
+# Consumers install via the wheel asset URL or a git-tag source pin:
+#   uv add "https://github.com/eumemic/aios/releases/download/aios-sdk-v0.1.0/aios_sdk-0.1.0-py3-none-any.whl"
+#   uv add "aios-sdk @ git+https://github.com/eumemic/aios.git@aios-sdk-v0.1.0#subdirectory=packages/aios-sdk"
+#
+# The release workflow is deliberately stateless: given a tag, build and
+# publish. The drift contract (FastAPI app ↔ openapi.json ↔
+# aios_sdk/_generated/) is already gated upstream by
+# ``code-validation.yml`` on every PR via the snapshot tests in
+# ``tests/unit/`` (openapi + SDK trees). Tags cut from master HEAD
+# therefore inherit drift coverage from master branch protection — no
+# re-gate inside this workflow.
+#
+# Coupling to runtime promotion is operator discipline, not workflow
+# enforcement: only cut SDK tags from commits that have been promoted to
+# ``:stable`` via ``promote-api.yml`` / ``promote-worker.yml``. See
+# ``packages/aios-sdk/README.md::Releasing`` for the procedure.
+#
+# Security note: this workflow does not interpolate any ``${{ }}``
+# expression from untrusted sources (issue/PR titles, head_ref, commit
+# messages, etc.) into ``run:`` commands. Only trusted contexts —
+# ``secrets.GITHUB_TOKEN`` inside an ``env:`` block, plus shell-side
+# ``$GITHUB_REF`` / ``$GITHUB_REPOSITORY`` env vars — are referenced.
+# The tag name (``GITHUB_REF``) is operator-controlled (only repo
+# collaborators can push tags) and is used solely for string compare
+# against the pyproject version + as a ``gh release create`` argument
+# (quoted, not eval'd).
+#
+# Issue: eumemic/aios#707. Companion: eumemic/jarbot#42.
+
+on:
+  push:
+    tags: ['aios-sdk-v*']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # for ``gh release create``
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Validate tag matches pyproject version
+        # Extract ``0.1.0`` from a tag like ``aios-sdk-v0.1.0`` and
+        # compare against ``project.version`` in
+        # ``packages/aios-sdk/pyproject.toml``. Fails hard on mismatch so
+        # a forgotten version bump can't ship a wheel whose Metadata-Version
+        # disagrees with its release name.
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#aios-sdk-v}"
+          PROJECT_VERSION=$(awk -F'"' '/^version = "/{print $2; exit}' packages/aios-sdk/pyproject.toml)
+          if [[ "$VERSION" != "$PROJECT_VERSION" ]]; then
+            echo "::error::Tag version ($VERSION) does not match packages/aios-sdk/pyproject.toml::project.version ($PROJECT_VERSION). Bump the pyproject version to match the tag and re-tag, or delete the tag."
+            exit 1
+          fi
+          {
+            echo "TAG=$TAG"
+            echo "VERSION=$VERSION"
+          } >> "$GITHUB_ENV"
+          echo "Validated: tag $TAG → version $VERSION matches pyproject."
+
+      - name: Build wheel + sdist
+        # ``uv build PATH`` builds the project at PATH as a standalone
+        # distribution. The SDK's pyproject lists only external PyPI
+        # deps (httpx, attrs, python-dateutil) — workspace
+        # ``tool.uv.sources`` overrides at the repo root affect
+        # ``uv sync`` / ``uv lock`` only and do not leak into wheel
+        # metadata.
+        #
+        # ``--out-dir`` is explicit because ``uv build PATH``'s default
+        # output directory is ``$PWD/dist/`` (the caller's cwd), not
+        # ``PATH/dist/``. Pin output to the package-local ``dist/`` so
+        # the ``gh release create`` glob below picks up exactly the SDK
+        # artifacts and nothing else.
+        run: |
+          set -euo pipefail
+          uv build --out-dir packages/aios-sdk/dist packages/aios-sdk/
+          ls -la packages/aios-sdk/dist/
+
+      - name: Extract release notes from CHANGELOG
+        # Pull just the ``## $VERSION — DATE`` block out of
+        # ``packages/aios-sdk/CHANGELOG.md`` so the release page shows the
+        # curated changelog entry instead of the whole file. If no matching
+        # entry exists (forgotten changelog update), fall back to a static
+        # install snippet so the release page still tells consumers how to
+        # install the artifact.
+        #
+        # The literal-prefix match (``$0 == target`` or
+        # ``index($0, target " ") == 1``) avoids the regex-metachar trap
+        # where ``^## 0.1.0`` would also match ``## 0X1X0`` or
+        # ``## 0.10.0``.
+        run: |
+          set -euo pipefail
+          awk -v target="## $VERSION" '
+            $0 == target || index($0, target " ") == 1 {
+              inblock = 1; print; next
+            }
+            inblock && /^## / { exit }
+            inblock { print }
+          ' packages/aios-sdk/CHANGELOG.md > release-notes.md
+
+          if [[ ! -s release-notes.md ]]; then
+            echo "::warning::No CHANGELOG.md entry for $VERSION — using fallback install snippet."
+            cat > release-notes.md <<EOF
+          \`\`\`bash
+          uv add "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/aios_sdk-${VERSION}-py3-none-any.whl"
+          \`\`\`
+
+          No CHANGELOG entry was present for this version at release time. See
+          [packages/aios-sdk/CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/packages/aios-sdk/CHANGELOG.md)
+          at this tag for the full history.
+          EOF
+          fi
+
+          echo "--- release notes ---"
+          cat release-notes.md
+          echo "---"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "aios-sdk v$VERSION" \
+            --notes-file release-notes.md \
+            packages/aios-sdk/dist/*
