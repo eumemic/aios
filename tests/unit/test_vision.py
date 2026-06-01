@@ -73,6 +73,40 @@ class TestSupportsVision:
         vision._VISION_OVERRIDES["foo/vision"] = False
         assert vision.supports_vision("foo/vision") is False
 
+    @pytest.mark.parametrize(
+        "model",
+        [
+            # The predicate is a bare substring, so family/tier/version add no
+            # coverage; the cases that matter are the distinct provider-route
+            # shapes (a regression to an ``anthropic/`` prefix breaks these).
+            "anthropic/claude-opus-4-8",  # current primary, plain anthropic route
+            "anthropic/claude-opus-5",  # unreleased shape: must not need a code edit
+            "openrouter/anthropic/claude-opus-4-8",  # provider-prefixed route
+            "bedrock/anthropic.claude-3-5-sonnet",  # bedrock dot-SKU
+            "vertex_ai/claude-opus-4-8",  # vertex bare-claude SKU
+        ],
+    )
+    def test_claude_assumed_vision_capable_despite_stale_litellm(
+        self, monkeypatch: pytest.MonkeyPatch, model: str
+    ) -> None:
+        """A long-running worker pins litellm's catalog at startup, so a Claude
+        model released afterwards makes ``get_model_info`` raise "isn't mapped
+        yet" and ``supports_vision`` would collapse to False — silently
+        degrading image reads to a text marker.  All Claude families support
+        vision, so we assert it by name and never consult litellm for them,
+        across every provider route aios uses.  Returning True under a *raising*
+        patch proves litellm is never reached (so no lookup-failed warning).
+        """
+        _patch_get_model_info(monkeypatch, {})  # stale catalog: every lookup raises
+        assert vision.supports_vision(model) is True
+
+    def test_explicit_override_can_force_claude_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The override dict is consulted before the Claude-family rule, so an
+        explicit ``False`` still forces a Claude model off."""
+        _patch_get_model_info(monkeypatch, {})
+        vision._VISION_OVERRIDES["anthropic/claude-opus-4-8"] = False
+        assert vision.supports_vision("anthropic/claude-opus-4-8") is False
+
 
 class TestCanInlineImage:
     def test_image_under_cap_with_vision_mind(self, monkeypatch: pytest.MonkeyPatch) -> None:

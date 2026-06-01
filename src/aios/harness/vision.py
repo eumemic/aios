@@ -49,21 +49,38 @@ INLINE_MAX_DIMENSION = 2000
 # (uploaded TIFFs, multi-100MP camera RAWs, etc.).
 PRE_RESIZE_CEILING_BYTES = 50 * 1024 * 1024
 
+# Explicit per-model vision escape hatch (force True/False).  Empty in
+# production — Claude is matched by name in ``supports_vision`` and everything
+# else defers to litellm — but kept as the stub point for tests.
 _VISION_OVERRIDES: dict[str, bool] = {}
 
 
 def supports_vision(model: str) -> bool:
     """True when ``model`` accepts ``image_url`` content parts.
 
-    Consults :data:`_VISION_OVERRIDES` first for cases LiteLLM is wrong
-    or behind on (empty initially; populated as we hit them), then
-    falls back to ``litellm.get_model_info``.
+    Resolution order:
+
+    1. :data:`_VISION_OVERRIDES` — explicit per-model escape hatch (force
+       ``True`` or ``False``).
+    2. Any Claude family is assumed vision-capable (3.x onward; aios targets
+       4.x).  A long-running worker fetches litellm's catalog once at startup,
+       so a Claude model released afterwards makes ``litellm.get_model_info``
+       raise "isn't mapped yet" and we would otherwise collapse to "no vision"
+       — silently degrading image reads to a text marker.  Asserting the family
+       by name needs no edit when the next Claude lands.  The match is a
+       substring rather than an ``anthropic/`` prefix because aios routes Claude
+       through several providers whose strings all still contain ``claude`` (the
+       routes ``_supports_anthropic_cache_control`` enumerates in
+       :mod:`aios.harness.completion`).
+    3. ``litellm.get_model_info`` for every other provider/model.
     """
     if model in _VISION_OVERRIDES:
         return _VISION_OVERRIDES[model]
+    if "claude" in model.lower():
+        return True
     # Defer the heavy ``litellm`` import: every harness consumer of this
     # module pays ~1.18s of bootstrap otherwise, and most call sites never
-    # reach this branch.
+    # reach this branch (Claude short-circuits above).
     import litellm
 
     try:
