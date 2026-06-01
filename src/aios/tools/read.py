@@ -152,8 +152,41 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     return {"path": path, "content": content}
 
 
+
+# Common image magic bytes (first 12 bytes of each format)
+_IMAGE_MAGIC = {
+    b"\x89PNG\r\n\x1a\n": ".png",
+    b"\xff\xd8\xff": ".jpg",
+    b"GIF87a": ".gif",
+    b"GIF89a": ".gif",
+    b"RIFF": ".webp",
+}
+
+def _sniff_image_mime(path: str) -> str | None:
+    """Detect image MIME type from magic bytes. Returns None if not an image."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(12)
+        for magic, ext in _IMAGE_MAGIC.items():
+            if header.startswith(magic):
+                if ext == ".webp":
+                    # WebP specific: RIFF....WEBP
+                    if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+                        return "image/webp"
+                    return None
+                return f"image/{ext[1:]}"  # .png -> image/png, etc.
+    except (OSError, IOError):
+        pass
+    return None
+
+
 def _looks_like_image(path: str) -> bool:
-    return os.path.splitext(path)[1].lower() in _EXT_TO_MIME
+    # Primary check: extension-based
+    if os.path.splitext(path)[1].lower() in _EXT_TO_MIME:
+        return True
+    # Fallback: magic byte detection for extension-less files
+    mime = _sniff_image_mime(path)
+    return mime is not None
 
 
 async def _read_image(
