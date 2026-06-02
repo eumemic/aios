@@ -407,3 +407,164 @@ class TestImagePathTraversalAttack:
         elif isinstance(result, dict):
             assert b64_secret not in str(result)
         assert stub_runtime.exec.call_count == 1  # type: ignore[attr-defined]
+
+
+class TestExtensionlessImageDetection:
+    """Issue #715 + the follow-up redesign: a file is routed to the image
+    path when its extension names a known image type OR — for any other
+    extension (none, or a non-image one like ``.dat``) — when a magic-byte
+    sniff of its leading bytes matches.  Connector-staged chat attachments
+    arrive at ``/mnt/attachments/<connector>/<filename>`` with arbitrary or
+    no extension, so an image among them still inlines as an ``image_url``
+    instead of being dumped down the text path as raw mojibake.
+
+    For bind-mounted paths (``/workspace``, ``/mnt/attachments``) the 16-byte
+    probe is read locally from the host bind-mount source — the same fast path
+    ``_read_image`` uses for the full read — so detection is free (``exec``
+    count 0).  Only paths outside any mount fall back to a docker-exec probe.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "payload", "mime"),
+        [
+            ("unnamed", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRrest-of-png-bytes", "image/png"),
+            (
+                "signal-abc-unnamed",
+                b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00rest",
+                "image/jpeg",
+            ),
+            ("img", b"GIF89a\x01\x00\x01\x00\x80\x00\x00rest-of-gif-bytes", "image/gif"),
+        ],
+    )
+    async def test_extensionless_image_inlines_via_magic_byte_sniff(
+        self,
+        name: str,
+        payload: bytes,
+        mime: str,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+    ) -> None:
+        """An extension-less PNG/JPEG/GIF is detected by a local magic-byte probe
+        (no docker-exec) and inlined as an ``image_url``."""
+        stub_get_session_model.value = "model/vision"
+        _stage_workspace_image("sess_01TEST", name, payload)
+        result = await read_handler("sess_01TEST", {"path": f"/workspace/{name}"})
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, list)
+        assert result.content[1] == {
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{base64.b64encode(payload).decode()}"},
+        }
+        assert result.is_error is False
+        assert stub_runtime.exec.call_count == 0  # bind-mounted: probe + full read are both local
+
+    async def test_wrong_extension_image_inlines_via_magic_byte_sniff(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+    ) -> None:
+        """Finding 1: a NON-image extension whose bytes are a real image is detected by the sniff and inlined."""
+        stub_get_session_model.value = "model/vision"
+        payload = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00jpeg-mislabeled-as-dat"
+        _stage_workspace_image("sess_01TEST", "scan.dat", payload)
+        result = await read_handler("sess_01TEST", {"path": "/workspace/scan.dat"})
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, list)
+        assert result.content[1]["image_url"]["url"] == (
+            f"data:image/jpeg;base64,{base64.b64encode(payload).decode()}"
+        )
+        assert stub_runtime.exec.call_count == 0
+
+    async def test_text_with_extension_does_not_sniff_as_image(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+    ) -> None:
+        """A non-image-extension TEXT file reads as text: the local probe sniffs to None and the read falls through to the one-exec text path."""
+        stub_get_session_model.value = "model/vision"
+        _stage_workspace_image("sess_01TEST", "notes.dat", b"plain text, no magic header")
+        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
+            return_value=CommandResult(
+                exit_code=0, stdout="     1\thello\n", stderr="", timed_out=False, truncated=False
+            )
+        )
+        result = await read_handler("sess_01TEST", {"path": "/workspace/notes.dat"})
+        assert result == {"path": "/workspace/notes.dat", "content": "     1\thello\n"}
+        assert stub_runtime.exec.call_count == 1  # only the cat-n; the probe was a local read
+
+    async def test_extensionless_text_falls_through_to_text_path(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+    ) -> None:
+        """An extension-less non-image file must not false-positive into the image path."""
+        stub_get_session_model.value = "model/vision"
+        _stage_workspace_image(
+            "sess_01TEST", "random_name", b"just some text, definitely not an image"
+        )
+        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
+            return_value=CommandResult(
+                exit_code=0, stdout="     1\thello\n", stderr="", timed_out=False, truncated=False
+            )
+        )
+        result = await read_handler("sess_01TEST", {"path": "/workspace/random_name"})
+        assert result == {"path": "/workspace/random_name", "content": "     1\thello\n"}
+        assert stub_runtime.exec.call_count == 1
+
+    async def test_extension_path_skips_probe(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+    ) -> None:
+        """An image extension resolves the mime from the extension alone — no probe read."""
+        stub_get_session_model.value = "model/vision"
+        _stage_workspace_image("sess_01TEST", "screenshot.png", b"PNGbytes")
+        result = await read_handler("sess_01TEST", {"path": "/workspace/screenshot.png"})
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, list)
+        assert result.content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+        assert stub_runtime.exec.call_count == 0
+
+    async def test_non_bind_mount_extensionless_image_sniffs_via_exec(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+    ) -> None:
+        """Outside any bind mount the probe falls back to one docker-exec (with set -o pipefail), then the full read is a second exec."""
+        stub_get_session_model.value = "model/vision"
+        png_head = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        full = png_head + b"-more-png-bytes"
+        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                CommandResult(
+                    exit_code=0,
+                    stdout=base64.b64encode(png_head).decode(),
+                    stderr="",
+                    timed_out=False,
+                    truncated=False,
+                ),
+                CommandResult(
+                    exit_code=0,
+                    stdout=f"{len(full)}\n{base64.b64encode(full).decode()}",
+                    stderr="",
+                    timed_out=False,
+                    truncated=False,
+                ),
+            ]
+        )
+        result = await read_handler("sess_01TEST", {"path": "/etc/unnamed"})
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, list)
+        assert result.content[1]["image_url"]["url"] == (
+            f"data:image/png;base64,{base64.b64encode(full).decode()}"
+        )
+        assert stub_runtime.exec.call_count == 2
+        probe_cmd = stub_runtime.exec.call_args_list[0].args[1]
+        assert "head -c 16" in probe_cmd
+        assert "set -o pipefail" in probe_cmd
