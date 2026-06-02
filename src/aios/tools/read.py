@@ -1,10 +1,13 @@
 """The read tool — read a file inside the session's sandbox.
 
 Text files return ``LINE_NUM<TAB>CONTENT`` windowed by ``offset`` /
-``limit`` via ``cat -n | sed``.  Image files (extensions in
-:data:`_EXT_TO_MIME`) return a content-parts list with an
-``image_url`` block when the bound model supports vision and the file
-fits the inline cap; otherwise an explanatory ``ToolResult``.
+``limit`` via ``cat -n | sed``.  Image files — detected by extension
+(:data:`_EXT_TO_MIME`) or, for paths whose extension is not a known
+image type (no extension, or a non-image extension such as a
+connector-staged chat attachment), by a magic-byte sniff of the leading
+bytes — return a content-parts list with an ``image_url`` block when the
+bound model supports vision and the file fits the inline cap; otherwise
+an explanatory ``ToolResult``.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from aios.sandbox.volumes import resolve_to_host_path
 from aios.services import sessions as sessions_service
 from aios.tools.memory_intercept import resolve_memory_target
 from aios.tools.registry import ToolResult, registry
+from aios_connector_http.mime import sniff_image_mime
 
 _EXT_TO_MIME = {
     ".png": "image/png",
@@ -99,8 +103,11 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     sandbox = runtime.require_sandbox_registry()
     handle = await sandbox.get_or_provision(session_id, pool=pool)
 
-    if _looks_like_image(path):
-        return await _read_image(session_id=session_id, path=path, handle=handle, pool=pool)
+    image_mime = await _detect_image_mime(session_id, path, handle=handle)
+    if image_mime is not None:
+        return await _read_image(
+            session_id=session_id, path=path, mime=image_mime, handle=handle, pool=pool
+        )
 
     target = resolve_memory_target(session_id, path)
 
@@ -152,19 +159,38 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     return {"path": path, "content": content}
 
 
-def _looks_like_image(path: str) -> bool:
-    return os.path.splitext(path)[1].lower() in _EXT_TO_MIME
+async def _detect_image_mime(session_id: str, path: str, *, handle: SandboxHandle) -> str | None:
+    """Return the image mime for ``path``, or ``None`` to read it as text.
+
+    The extension decides when it names a known image type — the common,
+    zero-IO case.  Otherwise (no extension, or a non-image extension:
+    connector-staged chat attachments arrive with arbitrary or no
+    extension) sniff the leading bytes.  The probe is read locally from the
+    bind mount when ``path`` resolves into one and falls back to one
+    docker-exec only for paths outside any mount.  The sniff decides routing
+    only — the final declared mime is reconciled against the bytes actually
+    inlined by :func:`make_image_url_part`, so a sniff/read race cannot ship
+    a PNG/JPEG/GIF mime that disagrees with the inlined bytes.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    mime = _EXT_TO_MIME.get(ext)
+    if mime is not None:
+        return mime
+    head = await _read_probe_bytes(session_id, path, handle=handle, n=16)
+    if head is None:
+        return None
+    return sniff_image_mime(head)
 
 
 async def _read_image(
     *,
     session_id: str,
     path: str,
+    mime: str,
     handle: SandboxHandle,
     pool: Any,
 ) -> ToolResult:
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    mime = _EXT_TO_MIME[os.path.splitext(path)[1].lower()]
     model = await sessions_service.get_session_model(pool, session_id, account_id=account_id)
 
     host_path = resolve_to_host_path(session_id, path, workspace_path=handle.workspace_path)
@@ -239,6 +265,55 @@ async def _stat_and_read_via_exec(handle: SandboxHandle, path: str) -> tuple[byt
     except (ValueError, TypeError):
         return None
     return data, size
+
+
+async def _read_probe_bytes(
+    session_id: str, path: str, *, handle: SandboxHandle, n: int
+) -> bytes | None:
+    """First ``n`` bytes of ``path`` for magic-byte image detection.
+
+    Reads locally from the bind-mount source when ``path`` resolves into one
+    (no docker-exec — the full read in :func:`_read_image` uses the same host
+    fast path, so detection is free for the common ``/workspace`` and
+    ``/mnt/attachments`` cases).  Falls back to one docker-exec for paths
+    outside any mount.  Returns ``None`` when the file is unreadable — the
+    caller treats that as "not an image" and the text path surfaces the real
+    error.
+    """
+    host_path = resolve_to_host_path(session_id, path, workspace_path=handle.workspace_path)
+    if host_path is not None:
+        try:
+            with host_path.open("rb") as fh:
+                return fh.read(n)
+        except OSError:
+            return None
+    return await _read_head_bytes(handle, path, n=n)
+
+
+async def _read_head_bytes(handle: SandboxHandle, path: str, *, n: int) -> bytes | None:
+    """Read the first ``n`` bytes of ``path`` via one docker-exec, base64-framed
+    so binary survives the str stdout boundary.  Used as the out-of-mount
+    fallback for magic-byte image detection.  ``set -o pipefail`` makes a
+    failing ``head`` propagate (without it ``base64`` masks it with exit 0);
+    returns ``None`` on any failure — the caller treats that as "not an image"
+    and falls through to the text path.
+    """
+    settings = get_settings()
+    sandbox = runtime.require_sandbox_registry()
+    quoted = shlex.quote(path)
+    cmd = f"set -o pipefail; head -c {n} -- {quoted} | base64 -w0"
+    result = await sandbox.exec(
+        handle,
+        cmd,
+        timeout_seconds=settings.bash_default_timeout_seconds,
+        max_output_bytes=settings.bash_max_output_bytes,
+    )
+    if result.exit_code != 0:
+        return None
+    try:
+        return base64.b64decode(result.stdout.strip())
+    except (ValueError, TypeError):
+        return None
 
 
 def _register() -> None:
