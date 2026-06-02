@@ -424,56 +424,40 @@ class TestExtensionlessImageDetection:
     count 0).  Only paths outside any mount fall back to a docker-exec probe.
     """
 
-    async def test_extensionless_png_inlines_via_magic_byte_sniff(
+    @pytest.mark.parametrize(
+        ("name", "payload", "mime"),
+        [
+            ("unnamed", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRrest-of-png-bytes", "image/png"),
+            (
+                "signal-abc-unnamed",
+                b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00rest",
+                "image/jpeg",
+            ),
+            ("img", b"GIF89a\x01\x00\x01\x00\x80\x00\x00rest-of-gif-bytes", "image/gif"),
+        ],
+    )
+    async def test_extensionless_image_inlines_via_magic_byte_sniff(
         self,
+        name: str,
+        payload: bytes,
+        mime: str,
         temp_workspace_root: Path,
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
+        """An extension-less PNG/JPEG/GIF is detected by a local magic-byte probe
+        (no docker-exec) and inlined as an ``image_url``."""
         stub_get_session_model.value = "model/vision"
-        payload = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRrest-of-png-bytes"
-        _stage_workspace_image("sess_01TEST", "unnamed", payload)
-        result = await read_handler("sess_01TEST", {"path": "/workspace/unnamed"})
+        _stage_workspace_image("sess_01TEST", name, payload)
+        result = await read_handler("sess_01TEST", {"path": f"/workspace/{name}"})
         assert isinstance(result, ToolResult)
         assert isinstance(result.content, list)
         assert result.content[1] == {
             "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{base64.b64encode(payload).decode()}"},
+            "image_url": {"url": f"data:{mime};base64,{base64.b64encode(payload).decode()}"},
         }
         assert result.is_error is False
         assert stub_runtime.exec.call_count == 0  # bind-mounted: probe + full read are both local
-
-    async def test_extensionless_jpeg_inlines_via_magic_byte_sniff(
-        self,
-        temp_workspace_root: Path,
-        stub_runtime: Any,
-        stub_get_session_model: Any,
-    ) -> None:
-        stub_get_session_model.value = "model/vision"
-        payload = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00rest-of-jpeg"
-        _stage_workspace_image("sess_01TEST", "signal-abc-unnamed", payload)
-        result = await read_handler("sess_01TEST", {"path": "/workspace/signal-abc-unnamed"})
-        assert isinstance(result, ToolResult)
-        assert isinstance(result.content, list)
-        assert result.content[1]["image_url"]["url"] == (
-            f"data:image/jpeg;base64,{base64.b64encode(payload).decode()}"
-        )
-        assert stub_runtime.exec.call_count == 0
-
-    async def test_extensionless_gif_inlines_via_magic_byte_sniff(
-        self,
-        temp_workspace_root: Path,
-        stub_runtime: Any,
-        stub_get_session_model: Any,
-    ) -> None:
-        stub_get_session_model.value = "model/vision"
-        payload = b"GIF89a\x01\x00\x01\x00\x80\x00\x00rest-of-gif-bytes"
-        _stage_workspace_image("sess_01TEST", "img", payload)
-        result = await read_handler("sess_01TEST", {"path": "/workspace/img"})
-        assert isinstance(result, ToolResult)
-        assert isinstance(result.content, list)
-        assert result.content[1]["image_url"]["url"].startswith("data:image/gif;base64,")
-        assert stub_runtime.exec.call_count == 0
 
     async def test_wrong_extension_image_inlines_via_magic_byte_sniff(
         self,
