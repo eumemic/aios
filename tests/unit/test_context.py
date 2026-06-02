@@ -9,6 +9,8 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from aios.harness.channels import build_channels_tail_block
 from aios.harness.context import (
     build_messages,
@@ -832,6 +834,49 @@ class TestThinkingBlockPreservation:
         assert "reasoning" not in msgs[1]
         assert "reasoning_details" not in msgs[1]
         assert "reacting_to" not in msgs[1]
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "anthropic/claude-opus-4-8",  # stale catalog on a long-running worker
+            "openrouter/anthropic/claude-opus-4-8",  # litellm under-reports proxy routes
+        ],
+    )
+    def test_thinking_blocks_preserved_for_claude_despite_stale_catalog(
+        self, monkeypatch: pytest.MonkeyPatch, model: str
+    ) -> None:
+        """``litellm.supports_reasoning`` returns False for Claude models a
+        long-running worker's catalog predates — and for proxy-routed Claude
+        even when fresh.  Stripping ``thinking_blocks`` then violates
+        Anthropic's cross-turn preservation contract; the Claude short-circuit
+        keeps them regardless of the catalog.
+        """
+        monkeypatch.setattr("litellm.supports_reasoning", lambda *a, **k: False)
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        events[1].data["thinking_blocks"] = [
+            {"type": "thinking", "thinking": "user said hi", "signature": "abc"}
+        ]
+        msgs = build_messages(events, system_prompt=None, model=model).messages
+        assert msgs[1]["thinking_blocks"] == [
+            {"type": "thinking", "thinking": "user said hi", "signature": "abc"}
+        ]
+
+    def test_thinking_blocks_stripped_for_non_claude_when_catalog_says_no(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-Claude models still defer to litellm: a False there strips,
+        confirming the Claude rule didn't over-broaden to every model."""
+        monkeypatch.setattr("litellm.supports_reasoning", lambda *a, **k: False)
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        events[1].data["thinking_blocks"] = [{"type": "thinking", "thinking": "x"}]
+        msgs = build_messages(events, system_prompt=None, model="deepseek/deepseek-chat").messages
+        assert "thinking_blocks" not in msgs[1]
 
 
 class TestToolCallSanitization:

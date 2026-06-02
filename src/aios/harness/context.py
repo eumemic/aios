@@ -784,7 +784,15 @@ def build_messages(
     # exit before this point or run under tests that never reach it.
     import litellm
 
-    target_supports_thinking = bool(model) and litellm.supports_reasoning(model)
+    # Same stale-catalog short-circuit as ``supports_vision`` (see its docstring
+    # for the full rationale): a Claude newer than this worker's catalog
+    # snapshot — or a proxy-routed one litellm under-reports even when fresh —
+    # must keep its ``thinking_blocks``, or stripping them across turns violates
+    # Anthropic's preservation contract.  Extended thinking is Claude 4.x+;
+    # over-broad for <= 3.5 (no thinking), which aios doesn't run.
+    target_supports_thinking = bool(
+        model and ("claude" in model.lower() or litellm.supports_reasoning(model))
+    )
     return ContextResult(
         messages=[
             _strip_to_spec(m, target_supports_thinking=target_supports_thinking) for m in messages
