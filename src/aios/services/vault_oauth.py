@@ -30,6 +30,7 @@ from urllib.parse import urlencode, urlparse
 
 import asyncpg
 import httpx
+from mcp.client.auth import OAuthTokenError
 from mcp.client.auth.oauth2 import PKCEParameters
 from mcp.client.auth.utils import (
     build_oauth_authorization_server_metadata_discovery_urls,
@@ -40,19 +41,37 @@ from mcp.client.auth.utils import (
     handle_auth_metadata_response,
     handle_protected_resource_response,
     handle_registration_response,
+    handle_token_response_scopes,
 )
 from mcp.shared.auth import (
     OAuthClientMetadata,
     OAuthMetadata,
+    OAuthToken,
     ProtectedResourceMetadata,
 )
-from pydantic import AnyUrl
+from pydantic import AnyUrl, SecretStr
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.errors import OAuthFlowError
+from aios.errors import ConflictError, OAuthFlowError, ValidationError
 from aios.logging import get_logger
-from aios.models.vaults import OAuthStartRequest, OAuthStartResponse
+from aios.models.vaults import (
+    OAuthCompleteRequest,
+    OAuthStartRequest,
+    OAuthStartResponse,
+    TokenEndpointAuth,
+    TokenEndpointAuthBasic,
+    TokenEndpointAuthNone,
+    TokenEndpointAuthPost,
+    VaultCredential,
+    VaultCredentialCreate,
+    VaultCredentialUpdate,
+)
+from aios.services.vaults import (
+    build_token_endpoint_post,
+    create_vault_credential,
+    update_vault_credential,
+)
 
 log = get_logger("aios.services.vault_oauth")
 
@@ -290,3 +309,175 @@ async def start_oauth_flow(
         registered=bool(not body.client_id),
     )
     return OAuthStartResponse(flow_id=flow_id, state=state, authorization_url=authorization_url)
+
+
+# ── complete ─────────────────────────────────────────────────────────────────
+
+
+def _token_endpoint_auth_model(method: str, client_secret: str | None) -> TokenEndpointAuth:
+    """Reconstruct the typed token_endpoint_auth from the stored flow fields."""
+    if method == "client_secret_basic" and client_secret:
+        return TokenEndpointAuthBasic(
+            method="client_secret_basic", client_secret=SecretStr(client_secret)
+        )
+    if method == "client_secret_post" and client_secret:
+        return TokenEndpointAuthPost(
+            method="client_secret_post", client_secret=SecretStr(client_secret)
+        )
+    return TokenEndpointAuthNone(method="none")
+
+
+async def _exchange_code(
+    flow_payload: dict[str, Any], *, redirect_uri: str, code: str
+) -> OAuthToken:
+    """Exchange the authorization code for tokens at the stored token endpoint.
+
+    Reuses the same client-auth handling as the refresh path. The
+    ``redirect_uri`` is the one persisted at start (byte-identical to the one
+    registered and sent to /authorize).
+    """
+    token_endpoint = str(flow_payload["token_endpoint"])
+    client_id = str(flow_payload["client_id"])
+    body: dict[str, str] = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "code_verifier": str(flow_payload["code_verifier"]),
+    }
+    resource = flow_payload.get("resource")
+    if resource:
+        body["resource"] = str(resource)
+    endpoint_auth: dict[str, str] = {
+        "method": str(flow_payload.get("token_endpoint_auth_method", "none"))
+    }
+    secret = flow_payload.get("client_secret")
+    if secret:
+        endpoint_auth["client_secret"] = str(secret)
+    post_kwargs = build_token_endpoint_post(body, client_id=client_id, endpoint_auth=endpoint_auth)
+
+    async with httpx.AsyncClient(timeout=_OAUTH_HTTP_TIMEOUT_SECONDS) as client:
+        try:
+            resp = await client.post(token_endpoint, **post_kwargs)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            log.warning("vault.oauth_exchange_http_error", token_endpoint=token_endpoint)
+            raise OAuthFlowError(
+                "OAuth token exchange failed",
+                detail={"token_endpoint": token_endpoint},
+            ) from exc
+        try:
+            return await handle_token_response_scopes(resp)
+        except OAuthTokenError as exc:
+            raise OAuthFlowError(
+                "OAuth token endpoint returned an invalid response",
+                detail={"token_endpoint": token_endpoint},
+            ) from exc
+
+
+async def complete_oauth_flow(
+    pool: asyncpg.Pool[Any],
+    crypto_box: CryptoBox,
+    *,
+    account_id: str,
+    vault_id: str,
+    body: OAuthCompleteRequest,
+) -> VaultCredential:
+    """Finish an interactive flow: exchange the code and store the credential.
+
+    Claims the flow (lock + decrypt + delete — single-use, anti-replay),
+    exchanges the code for tokens, then stores them as an ``oauth2_refresh``
+    credential — creating a new one or **rotating** an existing credential for
+    the same ``(vault_id, target_url)`` (the active-row unique index allows only
+    one), so re-connecting an already-connected server doesn't 409 after the
+    user already consented at the provider.
+    """
+    # Phase 1: claim the flow under a row lock; single-use.
+    async with pool.acquire() as conn, conn.transaction():
+        flow = await queries.get_oauth_flow_for_complete(
+            conn, account_id=account_id, vault_id=vault_id, state=body.state
+        )
+        if flow is None:
+            raise ValidationError(
+                "unknown or expired OAuth flow",
+                detail={"state": body.state},
+            )
+        flow_id, target_url, redirect_uri, blob = flow
+        flow_payload = crypto_box.derive_account_subkey(account_id).decrypt_dict(blob)
+        await queries.delete_oauth_flow(conn, flow_id)
+
+    # Phase 2: token exchange (network; no locks held).
+    token = await _exchange_code(flow_payload, redirect_uri=redirect_uri, code=body.code)
+
+    # Phase 3: persist as an oauth2_refresh credential (create or rotate).
+    expires_at = (
+        datetime.now(UTC) + timedelta(seconds=token.expires_in) if token.expires_in else None
+    )
+    client_secret = flow_payload.get("client_secret")
+    endpoint_auth = _token_endpoint_auth_model(
+        str(flow_payload.get("token_endpoint_auth_method", "none")),
+        str(client_secret) if client_secret else None,
+    )
+    display_name = flow_payload.get("display_name")
+
+    secret_fields: dict[str, Any] = {
+        "access_token": SecretStr(token.access_token),
+        "token_endpoint": str(flow_payload["token_endpoint"]),
+        "client_id": str(flow_payload["client_id"]),
+        "token_endpoint_auth": endpoint_auth,
+        "scope": token.scope or flow_payload.get("scope"),
+        "resource": flow_payload.get("resource"),
+        "expires_at": expires_at,
+    }
+    if token.refresh_token:
+        secret_fields["refresh_token"] = SecretStr(token.refresh_token)
+
+    async with pool.acquire() as conn:
+        existing = await queries.get_active_credential_by_target_url(
+            conn, account_id=account_id, vault_id=vault_id, target_url=target_url
+        )
+
+    if existing is None:
+        create_body = VaultCredentialCreate(
+            target_url=target_url,
+            auth_type="oauth2_refresh",
+            display_name=display_name,
+            **secret_fields,
+        )
+        cred = await create_vault_credential(
+            pool, crypto_box, account_id=account_id, vault_id=vault_id, body=create_body
+        )
+    elif existing.auth_type != "oauth2_refresh":
+        # A different auth_type already occupies this target_url; auth_type is
+        # immutable, so refuse rather than silently producing a broken hybrid.
+        raise ConflictError(
+            f"an active {existing.auth_type} credential already exists for {target_url}; "
+            "archive it before connecting via OAuth",
+            detail={
+                "vault_id": vault_id,
+                "target_url": target_url,
+                "auth_type": existing.auth_type,
+            },
+        )
+    else:
+        # Rotate the existing credential. Omit fields the exchange didn't return
+        # (e.g. no new refresh_token) so they're preserved, not unset.
+        update_fields = {k: v for k, v in secret_fields.items() if v is not None}
+        if display_name:
+            update_fields["display_name"] = display_name
+        cred = await update_vault_credential(
+            pool,
+            crypto_box,
+            account_id=account_id,
+            vault_id=vault_id,
+            credential_id=existing.id,
+            body=VaultCredentialUpdate(**update_fields),
+        )
+
+    log.info(
+        "vault.oauth_flow_completed",
+        vault_id=vault_id,
+        target_url=target_url,
+        credential_id=cred.id,
+        rotated=bool(existing is not None),
+    )
+    return cred

@@ -2853,6 +2853,31 @@ async def insert_vault_credential(
     return _row_to_vault_credential(row)
 
 
+async def get_active_credential_by_target_url(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    vault_id: str,
+    target_url: str,
+) -> VaultCredential | None:
+    """The active (non-archived) credential for ``(vault_id, target_url)``, if any.
+
+    Used by the interactive OAuth completion to decide between creating a new
+    credential and rotating the existing one (the ``(vault_id, target_url)``
+    active-row unique index allows only one). Returns metadata only.
+    """
+    row = await conn.fetchrow(
+        "SELECT * FROM vault_credentials "
+        "WHERE vault_id = $1 AND target_url = $2 AND account_id = $3 AND archived_at IS NULL",
+        vault_id,
+        target_url,
+        account_id,
+    )
+    if row is None:
+        return None
+    return _row_to_vault_credential(row)
+
+
 async def get_vault_credential(
     conn: asyncpg.Connection[Any],
     vault_id: str,
