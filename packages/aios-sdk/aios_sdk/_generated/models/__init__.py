@@ -116,6 +116,12 @@ from .mint_account_request import MintAccountRequest
 from .mint_account_response import MintAccountResponse
 from .mint_key_request import MintKeyRequest
 from .mint_key_response import MintKeyResponse
+from .o_auth_complete_request import OAuthCompleteRequest
+from .o_auth_start_request import OAuthStartRequest
+from .o_auth_start_request_token_endpoint_auth_method_type_0 import (
+    OAuthStartRequestTokenEndpointAuthMethodType0,
+)
+from .o_auth_start_response import OAuthStartResponse
 from .post_connector_runtime_lifecycle_response_post_connector_runtime_lifecycle import (
     PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle,
 )
@@ -330,6 +336,10 @@ __all__ = (
     "MintAccountResponse",
     "MintKeyRequest",
     "MintKeyResponse",
+    "OAuthCompleteRequest",
+    "OAuthStartRequest",
+    "OAuthStartRequestTokenEndpointAuthMethodType0",
+    "OAuthStartResponse",
     "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "RecentChat",
     "RuntimeLifecycleRequest",

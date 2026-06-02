@@ -9,6 +9,9 @@ from fastapi import APIRouter, Query, status
 from aios.api.deps import AccountIdDep, CryptoBoxDep, PoolDep
 from aios.models.common import ListResponse
 from aios.models.vaults import (
+    OAuthCompleteRequest,
+    OAuthStartRequest,
+    OAuthStartResponse,
     Vault,
     VaultCreate,
     VaultCredential,
@@ -16,6 +19,7 @@ from aios.models.vaults import (
     VaultCredentialUpdate,
     VaultUpdate,
 )
+from aios.services import vault_oauth as oauth_service
 from aios.services import vaults as service
 
 router = APIRouter(prefix="/v1/vaults", tags=["vaults"])
@@ -129,6 +133,56 @@ async def create_credential(
     archive the existing one and create a new credential at the new URL.
     """
     return await service.create_vault_credential(
+        pool, crypto_box, vault_id=vault_id, body=body, account_id=account_id
+    )
+
+
+@router.post(
+    "/{vault_id}/credentials/oauth/start",
+    operation_id="start_vault_credential_oauth",
+)
+async def start_credential_oauth(
+    vault_id: str,
+    body: OAuthStartRequest,
+    pool: PoolDep,
+    crypto_box: CryptoBoxDep,
+    account_id: AccountIdDep,
+) -> OAuthStartResponse:
+    """Begin an interactive OAuth "Connect" flow for an MCP server.
+
+    Discovers the target's OAuth metadata, registers a client (RFC 7591
+    Dynamic Client Registration) or uses a caller-supplied ``client_id`` /
+    ``client_secret`` for servers without DCR, generates PKCE + a CSRF
+    ``state``, and returns the provider ``authorization_url`` to redirect the
+    user to. The token fields are obtained from the provider — the caller does
+    not supply them. Complete the flow with the returned ``state`` + the
+    authorization ``code`` via ``complete_vault_credential_oauth``.
+    """
+    return await oauth_service.start_oauth_flow(
+        pool, crypto_box, vault_id=vault_id, body=body, account_id=account_id
+    )
+
+
+@router.post(
+    "/{vault_id}/credentials/oauth/complete",
+    operation_id="complete_vault_credential_oauth",
+    status_code=status.HTTP_201_CREATED,
+)
+async def complete_credential_oauth(
+    vault_id: str,
+    body: OAuthCompleteRequest,
+    pool: PoolDep,
+    crypto_box: CryptoBoxDep,
+    account_id: AccountIdDep,
+) -> VaultCredential:
+    """Finish an interactive OAuth flow: exchange the code and store the credential.
+
+    Validates the ``state`` against the in-progress flow, exchanges the
+    authorization ``code`` for tokens, and stores them as an ``oauth2_refresh``
+    credential (creating a new one, or rotating an existing credential for the
+    same ``target_url``). Secrets are encrypted at rest and never returned.
+    """
+    return await oauth_service.complete_oauth_flow(
         pool, crypto_box, vault_id=vault_id, body=body, account_id=account_id
     )
 
