@@ -24,6 +24,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import secrets
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode, urlparse
@@ -51,12 +52,14 @@ from mcp.shared.auth import (
 )
 from pydantic import AnyUrl, SecretStr
 
+from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.errors import ConflictError, OAuthFlowError, ValidationError
 from aios.logging import get_logger
 from aios.models.vaults import (
     OAuthCompleteRequest,
+    OAuthProviderApp,
     OAuthStartRequest,
     OAuthStartResponse,
     TokenEndpointAuth,
@@ -129,6 +132,34 @@ def _origin(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _host(url: str | None) -> str:
+    return (urlparse(url).hostname or "").lower() if url else ""
+
+
+def _match_provider_app(
+    apps: Sequence[OAuthProviderApp], metadata: OAuthMetadata, target_url: str
+) -> OAuthProviderApp | None:
+    """The operator-configured app whose ``match`` host covers this server.
+
+    Matches against the discovered OAuth issuer, authorization endpoint, or the
+    target URL host — so e.g. ``accounts.google.com`` covers every Google MCP
+    server. Exact host or dotted-suffix match.
+    """
+    hosts = {
+        _host(str(metadata.issuer)),
+        _host(str(metadata.authorization_endpoint)),
+        _host(target_url),
+    }
+    hosts.discard("")
+    for app in apps:
+        m = app.match.strip().lower().lstrip(".")
+        if not m:
+            continue
+        if any(h == m or h.endswith("." + m) for h in hosts):
+            return app
+    return None
+
+
 # ── metadata discovery ───────────────────────────────────────────────────────
 
 
@@ -176,13 +207,20 @@ async def start_oauth_flow(
     account_id: str,
     vault_id: str,
     body: OAuthStartRequest,
+    provider_apps: Sequence[OAuthProviderApp] | None = None,
 ) -> OAuthStartResponse:
     """Begin an interactive authorization-code flow and return the authorize URL.
 
     Verifies vault ownership, discovers the target's OAuth metadata, obtains a
-    client (caller-supplied or via DCR), generates PKCE + state, persists the
-    encrypted flow (TTL ~10 min), and returns the provider authorization URL.
+    client, generates PKCE + state, persists the encrypted flow (TTL ~10 min),
+    and returns the provider authorization URL.
+
+    The client is resolved in priority order: a caller-supplied ``client_id`` →
+    an operator-configured provider app (``provider_apps``, default
+    ``Settings.oauth_provider_apps``) for servers without DCR → Dynamic Client
+    Registration → otherwise an error asking for client credentials.
     """
+    apps = provider_apps if provider_apps is not None else get_settings().oauth_provider_apps
     _guard_target_url(body.target_url)
 
     # Ownership check (raises NotFoundError if the vault isn't this account's)
@@ -215,6 +253,7 @@ async def start_oauth_flow(
         client_id: str
         client_secret: str | None
         method: str
+        provider_app = _match_provider_app(apps, metadata, body.target_url)
         if body.client_id:
             # Caller supplied a pre-registered client (server without DCR).
             client_id = body.client_id
@@ -222,6 +261,18 @@ async def start_oauth_flow(
             method = body.token_endpoint_auth_method or (
                 "client_secret_post" if client_secret else "none"
             )
+        elif provider_app:
+            # Operator-registered app for this provider — the user supplies
+            # nothing (the CMA model for non-DCR providers like Google).
+            client_id = provider_app.client_id
+            client_secret = (
+                provider_app.client_secret.get_secret_value()
+                if provider_app.client_secret
+                else None
+            )
+            method = provider_app.token_endpoint_auth_method
+            if provider_app.scope:
+                scope = provider_app.scope
         elif metadata.registration_endpoint:
             # Dynamic Client Registration (RFC 7591) — public client + PKCE.
             client_metadata = OAuthClientMetadata(

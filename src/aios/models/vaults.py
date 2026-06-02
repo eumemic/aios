@@ -207,3 +207,33 @@ class OAuthCompleteRequest(BaseModel):
 
     state: str = Field(min_length=1)
     code: str = Field(min_length=1)
+
+
+class OAuthProviderApp(BaseModel):
+    """An operator-registered OAuth client app for a provider that does NOT
+    support Dynamic Client Registration (Google, Microsoft, Slack, …).
+
+    When the interactive Connect flow discovers a server whose OAuth issuer /
+    authorization host / target URL host matches ``match``, it uses this app's
+    ``client_id`` / ``client_secret`` instead of registering a client — so end
+    users sign in without supplying any credentials (the CMA model). Configured
+    by the operator via the ``AIOS_OAUTH_PROVIDER_APPS`` JSON env var.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    match: str = Field(
+        min_length=1,
+        description="Host (or host suffix) to match against the discovered OAuth "
+        "issuer, authorization endpoint, or target URL — e.g. 'accounts.google.com'.",
+    )
+    client_id: str = Field(min_length=1)
+    client_secret: SecretStr | None = None
+    token_endpoint_auth_method: Literal["none", "client_secret_basic", "client_secret_post"] = (
+        "client_secret_post"
+    )
+    scope: str | None = Field(
+        default=None,
+        description="Override the discovered scope (some providers, e.g. Google, "
+        "require specific scopes the MCP server may not advertise).",
+    )

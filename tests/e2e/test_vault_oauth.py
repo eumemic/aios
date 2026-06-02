@@ -21,7 +21,12 @@ from pydantic import SecretStr
 
 from aios.crypto.vault import EncryptedBlob
 from aios.errors import ConflictError, OAuthFlowError, ValidationError
-from aios.models.vaults import OAuthCompleteRequest, OAuthStartRequest, VaultCredentialCreate
+from aios.models.vaults import (
+    OAuthCompleteRequest,
+    OAuthProviderApp,
+    OAuthStartRequest,
+    VaultCredentialCreate,
+)
 from aios.services import vault_oauth as svc
 from aios.services import vaults as vaults_svc
 
@@ -197,7 +202,59 @@ class TestStart:
                 account_id=ACCOUNT_ID,
                 vault_id=vault_id,
                 body=OAuthStartRequest(target_url=TARGET_URL, redirect_uri=REDIRECT_URI),
+                provider_apps=[],
             )
+
+    async def test_uses_configured_provider_app_when_no_dcr(
+        self, pool: Any, crypto_box: Any
+    ) -> None:
+        """An operator-registered app lets a non-DCR server connect with no user
+        credentials — the CMA model for Google/Microsoft/etc."""
+        vault_id = await _vault(pool, "oauth-provider-app")
+        app = OAuthProviderApp(
+            match="auth.example.com",
+            client_id="operator-client",
+            client_secret=SecretStr("operator-secret"),
+            token_endpoint_auth_method="client_secret_post",
+            scope="calendar.read",
+        )
+        with _patched_provider(registration=False):
+            res = await svc.start_oauth_flow(
+                pool,
+                crypto_box,
+                account_id=ACCOUNT_ID,
+                vault_id=vault_id,
+                body=OAuthStartRequest(target_url=TARGET_URL, redirect_uri=REDIRECT_URI),
+                provider_apps=[app],
+            )
+        q = parse_qs(urlparse(res.authorization_url).query)
+        assert q["client_id"] == ["operator-client"]
+        assert q["scope"] == ["calendar.read"]  # provider-app scope override
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT ciphertext, nonce FROM oauth_flows WHERE state = $1", res.state
+            )
+        payload = _decrypt_flow(
+            crypto_box,
+            EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"])),
+        )
+        assert payload["client_id"] == "operator-client"
+        assert payload["client_secret"] == "operator-secret"
+
+        # Complete exchanges the code using the operator app (client_secret_post).
+        token_calls: list[dict[str, Any]] = []
+        with _patched_provider(registration=False, token_calls=token_calls):
+            cred = await svc.complete_oauth_flow(
+                pool,
+                crypto_box,
+                account_id=ACCOUNT_ID,
+                vault_id=vault_id,
+                body=OAuthCompleteRequest(state=res.state, code="code-app"),
+            )
+        assert cred.auth_type == "oauth2_refresh"
+        assert token_calls[0]["client_id"] == "operator-client"
+        assert token_calls[0]["client_secret"] == "operator-secret"
 
 
 class TestComplete:
