@@ -170,7 +170,7 @@ async def _detect_image_mime(session_id: str, path: str, *, handle: SandboxHandl
     docker-exec only for paths outside any mount.  The sniff decides routing
     only — the final declared mime is reconciled against the bytes actually
     inlined by :func:`make_image_url_part`, so a sniff/read race cannot ship
-    a PNG/JPEG/GIF mime that disagrees with the inlined bytes.
+    a PNG/JPEG/GIF/WebP mime that disagrees with the inlined bytes.
     """
     ext = os.path.splitext(path)[1].lower()
     mime = _EXT_TO_MIME.get(ext)

@@ -21,4 +21,9 @@ def sniff_image_mime(data: bytes) -> str | None:
     for sig, mime in _IMAGE_MAGIC:
         if data.startswith(sig):
             return mime
+    # WebP is a RIFF container — ``RIFF<4-byte size>WEBP`` — so its form-type tag
+    # sits at offset 8 and can't join the prefix table above.  A truncated or
+    # non-WebP RIFF payload (WAV, AVI) fails the offset-8 check and falls through.
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
     return None

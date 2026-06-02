@@ -124,11 +124,11 @@ def make_image_url_part(*, content_type: str, data_b64: str) -> dict[str, Any]:
 
     Also strips RFC-7231 parameters (anything after ``;``) from the mime
     before building the data URI. A connector posting an attachment with
-    ``Content-Type: image/webp; charset=utf-8`` would otherwise produce
-    ``data:image/webp; charset=utf-8;base64,...``, which Anthropic and
+    ``Content-Type: image/svg+xml; charset=utf-8`` would otherwise produce
+    ``data:image/svg+xml; charset=utf-8;base64,...``, which Anthropic and
     most providers reject as malformed — bricking every wake of any
     session whose context now includes that part. ``correct_image_mime_b64``
-    only rewrites for PNG/JPEG/GIF magic, so WEBP/SVG/HEIC/AVIF/BMP
+    only rewrites for PNG/JPEG/GIF/WebP magic, so SVG/HEIC/AVIF/BMP
     declared values flow through unchanged unless stripped here.
     """
     content_type = correct_image_mime_b64(content_type, data_b64)
