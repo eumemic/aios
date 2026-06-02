@@ -158,3 +158,52 @@ class VaultCredential(BaseModel):
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
+
+
+# ── Interactive OAuth "Connect" flow ────────────────────────────────────────
+
+
+class OAuthStartRequest(BaseModel):
+    """Begin an interactive OAuth authorization-code flow for an MCP server.
+
+    With the token fields left blank, the server discovers the target's OAuth
+    metadata, registers a client (RFC 7591 Dynamic Client Registration) or uses
+    the supplied ``client_id``/``client_secret``, and returns an
+    ``authorization_url`` to redirect the user to. The ``redirect_uri`` is the
+    console's callback and is reused verbatim on completion.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_url: str = Field(min_length=1)
+    redirect_uri: str = Field(min_length=1)
+    display_name: str | None = Field(default=None, max_length=128)
+    scope: str | None = None
+    # For MCP servers that do NOT support Dynamic Client Registration: a
+    # pre-registered OAuth client. Omit for DCR-capable servers.
+    client_id: str | None = None
+    client_secret: SecretStr | None = None
+    token_endpoint_auth_method: (
+        Literal["none", "client_secret_basic", "client_secret_post"] | None
+    ) = None
+
+
+class OAuthStartResponse(BaseModel):
+    """The authorization URL to redirect the user to, plus the flow's CSRF state."""
+
+    flow_id: str
+    state: str
+    authorization_url: str
+
+
+class OAuthCompleteRequest(BaseModel):
+    """Finish an interactive OAuth flow: exchange the returned code for tokens.
+
+    The ``state`` correlates back to the in-progress flow (and guards CSRF);
+    ``code`` is the authorization code the provider returned to the callback.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: str = Field(min_length=1)
+    code: str = Field(min_length=1)

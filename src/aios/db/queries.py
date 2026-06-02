@@ -44,6 +44,7 @@ from aios.ids import (
     MEMORY,
     MEMORY_STORE,
     MEMORY_VERSION,
+    OAUTH_FLOW,
     RUNTIME_TOKEN,
     SCHEDULED_TASK,
     SESSION,
@@ -2898,6 +2899,84 @@ async def lock_oauth_credential_for_refresh(
         return None
     blob = EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"]))
     return str(row["id"]), blob
+
+
+# ── interactive OAuth flow state (vault credential "Connect") ────────────────
+
+
+async def insert_oauth_flow(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    vault_id: str,
+    target_url: str,
+    state: str,
+    redirect_uri: str,
+    blob: EncryptedBlob,
+    expires_at: datetime,
+) -> str:
+    """Persist an in-progress OAuth flow; returns the new flow id.
+
+    The encrypted ``blob`` carries the PKCE code_verifier, resolved endpoints,
+    and any client_id/secret — see :func:`get_oauth_flow_for_complete`.
+    """
+    new_id = make_id(OAUTH_FLOW)
+    await conn.execute(
+        """
+        INSERT INTO oauth_flows (
+            id, account_id, vault_id, target_url, state, redirect_uri,
+            ciphertext, nonce, expires_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        """,
+        new_id,
+        account_id,
+        vault_id,
+        target_url,
+        state,
+        redirect_uri,
+        blob.ciphertext,
+        blob.nonce,
+        expires_at,
+    )
+    return new_id
+
+
+async def get_oauth_flow_for_complete(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    vault_id: str,
+    state: str,
+) -> tuple[str, str, str, EncryptedBlob] | None:
+    """``SELECT FOR UPDATE`` the live (not-expired) flow for this state.
+
+    Returns ``(flow_id, target_url, redirect_uri, EncryptedBlob)`` or ``None``
+    if no matching non-expired flow exists. Caller owns the transaction and
+    deletes the row via :func:`delete_oauth_flow` after a successful exchange.
+    """
+    row = await conn.fetchrow(
+        "SELECT id, target_url, redirect_uri, ciphertext, nonce FROM oauth_flows "
+        "WHERE account_id = $1 AND vault_id = $2 AND state = $3 AND expires_at > now() "
+        "FOR UPDATE",
+        account_id,
+        vault_id,
+        state,
+    )
+    if row is None:
+        return None
+    blob = EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"]))
+    return str(row["id"]), str(row["target_url"]), str(row["redirect_uri"]), blob
+
+
+async def delete_oauth_flow(conn: asyncpg.Connection[Any], flow_id: str) -> None:
+    """Delete a (single-use) OAuth flow row after the token exchange."""
+    await conn.execute("DELETE FROM oauth_flows WHERE id = $1", flow_id)
+
+
+async def delete_expired_oauth_flows(conn: asyncpg.Connection[Any]) -> None:
+    """Prune expired flow rows. Called opportunistically on ``start``."""
+    await conn.execute("DELETE FROM oauth_flows WHERE expires_at < now()")
 
 
 async def get_vault_credential_with_blob(

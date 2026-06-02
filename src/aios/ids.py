@@ -47,6 +47,10 @@ MANAGEMENT_CALL: Final = "mgmt"
 ACCOUNT: Final = "acc"
 ACCOUNT_KEY: Final = "acckey"
 SCHEDULED_TASK: Final = "sched"
+# Short-lived server-side state for an in-progress interactive OAuth
+# authorization-code flow (vault credential "Connect"). Rows are pruned on
+# expiry — see ``oauth_flows`` (migration 0061).
+OAUTH_FLOW: Final = "oaf"
 
 _PREFIXES: Final = frozenset(
     {
@@ -71,6 +75,7 @@ _PREFIXES: Final = frozenset(
         ACCOUNT,
         ACCOUNT_KEY,
         SCHEDULED_TASK,
+        OAUTH_FLOW,
     }
 )
 
