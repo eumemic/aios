@@ -1387,6 +1387,40 @@ class TestFocalRendering:
         assert "from=Bob" in content
         assert "hey there" in content
 
+    def test_notification_with_attachment_appends_marker(self) -> None:
+        """#718: an attachment arriving on a non-focal channel surfaces a
+        ``read``-able marker appended to the notification — not silently
+        dropped.  Exercised through the real ``build_messages`` path with no
+        model threaded (how the append-time token counter calls it);
+        ``text_marker`` needs none, so the breadcrumb appears regardless."""
+        md = {
+            "channel": self._CHAN_B,
+            "sender_name": "Bob",
+            "attachments": [
+                {
+                    "filename": "shot.png",
+                    "content_type": "image/png",
+                    "size": 200_000,
+                    "in_sandbox_path": "/mnt/attachments/signal/evt-1-shot.png",
+                }
+            ],
+        }
+        events = [
+            _evt(
+                1,
+                "user",
+                content="eyeball this",
+                metadata=md,
+                focal_channel_at_arrival=self._CHAN_A,
+            )
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert isinstance(content, str)
+        assert content.startswith(f"🔔 channel_id={self._CHAN_B}")
+        assert "from=Bob" in content
+        assert "[image: shot.png" in content
+        assert "/mnt/attachments/signal/evt-1-shot.png" in content
+
     def test_notification_when_focal_null(self) -> None:
         """Phone-down state: all inbound renders as notifications."""
         md = {"channel": self._CHAN_B, "sender_name": "Bob"}

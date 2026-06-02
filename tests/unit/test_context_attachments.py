@@ -536,3 +536,96 @@ class TestVisionAwareRendering:
         assert "[attachment: b.pdf" in content[0]["text"]
         assert content[1]["type"] == "image_url"
         assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+class TestNonFocalAttachmentRendering:
+    """Issue #718: attachments on a NON-focal channel must surface a
+    ``read``-able ``text_marker`` — never inlined off-channel, never
+    silently dropped (the pre-#718 behavior).
+
+    Pixel recovery across a ``switch_channel`` is handled separately by
+    the reorient recap (#226); these pin the arrival-time breadcrumb.
+    The only contrast with :class:`TestVisionAwareRendering` is that
+    ``focal_channel_at_arrival`` differs from ``orig_channel``.
+    """
+
+    def test_nonfocal_attachment_emits_marker_not_dropped(self, temp_workspace_root: Path) -> None:
+        """A vision model + a present, inlinable image still renders as a
+        text marker off-channel: the non-focal branch never inlines, and
+        pre-#718 dropped the attachment entirely (no marker, no pixels)."""
+        sandbox_path = _stage_image(
+            temp_workspace_root, "sess-1", "echo", "evt-1-photo.jpg", b"jpegbytes"
+        )
+        event = _user_event(
+            content="check this",
+            attachments=[
+                {
+                    "filename": "photo.jpg",
+                    "content_type": "image/jpeg",
+                    "size": len(b"jpegbytes"),
+                    "in_sandbox_path": sandbox_path,
+                }
+            ],
+        )
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",  # orig_channel
+            "other/acct/chat-9",  # focal_channel_at_arrival differs → non-focal
+            model="model/vision",
+            session_id="sess-1",
+        )
+        content = msg["content"]
+        assert isinstance(content, str)
+        assert content.startswith("🔔 channel_id=echo/acct/chat-1")
+        assert "[image: photo.jpg" in content
+        assert "/mnt/attachments/echo/evt-1-photo.jpg" in content
+        # Off-channel is markers-only — no inlined pixels.
+        assert "image_url" not in content
+        assert "data:image" not in content
+
+    def test_nonfocal_non_image_attachment_emits_attachment_marker(self) -> None:
+        """Non-image attachments get the ``[attachment: …]`` marker
+        off-channel too.  No staging needed — ``text_marker`` reads only
+        the record dict, never the bytes."""
+        event = _user_event(
+            content="doc",
+            attachments=[
+                {
+                    "filename": "report.pdf",
+                    "content_type": "application/pdf",
+                    "size": 4,
+                    "in_sandbox_path": "/mnt/attachments/echo/evt-1-report.pdf",
+                }
+            ],
+        )
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",
+            "other/acct/chat-9",
+            model="model/vision",
+            session_id="sess-1",
+        )
+        content = msg["content"]
+        assert isinstance(content, str)
+        assert content.startswith("🔔 channel_id=echo/acct/chat-1")
+        assert "[attachment: report.pdf" in content
+
+    def test_nonfocal_non_dict_attachment_skipped(self) -> None:
+        """A malformed (non-dict) record on the non-focal path is skipped,
+        not crashed on — the same brick-the-session guard as the focal
+        path's ``test_non_dict_attachment_record_is_skipped``."""
+        malformed: list[Any] = ["oops", None, 42]
+        event = _user_event(content="hi", attachments=malformed)
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",
+            "other/acct/chat-9",
+            model="model/vision",
+            session_id="sess-1",
+        )
+        content = msg["content"]
+        assert isinstance(content, str)
+        assert content.startswith("🔔 channel_id=echo/acct/chat-1")
+        # No attachment markers emitted for malformed records.
+        assert "[image:" not in content
+        assert "[attachment:" not in content

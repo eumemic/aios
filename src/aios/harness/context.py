@@ -323,6 +323,11 @@ def render_user_event(
     * Otherwise (focal is NULL, or focal differs from orig) →
       notification marker: a short, emoji-prefixed one-liner surfacing
       the origin channel, sender, and a truncated content preview.
+      Any attachments are appended as ``text_marker`` lines (images →
+      ``[image: … at <path>]``, others → ``[attachment: …]``) — never
+      inlined off-channel — so the model can ``read`` the in-sandbox
+      path now, or ``switch_channel`` to recover pixels via the
+      reorient recap.  Before #718 they were silently dropped here.
     """
     msg = {k: v for k, v in event_data.items() if k != "metadata"}
     metadata = event_data.get("metadata")
@@ -352,6 +357,10 @@ def render_user_event(
     if not isinstance(content, str):
         content = ""
     marker = _format_notification_marker(orig_channel, metadata, content)
+    attachments = metadata.get("attachments") if metadata else None
+    if isinstance(attachments, list) and attachments:
+        lines = [text_marker(r) for r in attachments if isinstance(r, dict)]
+        marker = "\n".join([marker, *lines])
     return {"role": "user", "content": marker}
 
 
