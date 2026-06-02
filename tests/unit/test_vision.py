@@ -169,6 +169,17 @@ class TestMakeImageUrlPart:
         part = vision.make_image_url_part(content_type="image/png", data_b64=jpeg_b64)
         assert part["image_url"]["url"] == f"data:image/jpeg;base64,{jpeg_b64}"
 
+    def test_self_corrects_to_webp(self) -> None:
+        """WebP joined the sniffer's magic table (``RIFF<size>WEBP``), so a WebP
+        body mislabeled as another image type now reconciles to ``image/webp``
+        instead of surviving as a wrong declared mime that triggers a provider 400.
+        """
+        import base64 as _b64
+
+        webp_b64 = _b64.b64encode(b"RIFF\x24\x58\x00\x00WEBPVP8 " + b"\x00" * 16).decode("ascii")
+        part = vision.make_image_url_part(content_type="image/png", data_b64=webp_b64)
+        assert part["image_url"]["url"] == f"data:image/webp;base64,{webp_b64}"
+
     def test_keeps_declared_mime_when_unrecognized(self) -> None:
         """Sniff returns None on random/unknown bytes — declared mime wins."""
         part = vision.make_image_url_part(content_type="image/png", data_b64="ZmFrZQ==")
@@ -180,10 +191,11 @@ class TestMakeImageUrlPart:
         connector POSTs an inbound attachment whose multipart
         ``Content-Type`` header includes parameters, the staging layer
         persists the value verbatim into ``metadata.attachments[i]
-        .content_type``. The renderer then calls ``make_image_url_part``
-        which only sniff-corrects for PNG/JPEG/GIF magic bytes — for
-        WEBP/SVG/HEIC/AVIF/BMP (and ANY other non-sniffable image type)
-        the declared value flows through unchanged into
+        .content_type``. The renderer then calls ``make_image_url_part``,
+        which sniff-corrects only when the bytes carry a recognized magic
+        (PNG/JPEG/GIF/WebP); when they don't — a declared image type whose
+        bytes match no magic (here), or a non-sniffable format like
+        SVG/HEIC/AVIF/BMP — the declared value flows through unchanged into
         ``data:image/webp; charset=utf-8;base64,...``.
 
         Anthropic's ``/v1/messages`` and most other providers reject
@@ -196,12 +208,14 @@ class TestMakeImageUrlPart:
         (after sniff correction). Cheapest correct-by-construction
         guard at the renderer boundary.
         """
+        # Non-magic bytes so the sniff returns ``None`` and the declared
+        # parametered mime survives to the strip — the path this test guards.
         part = vision.make_image_url_part(
             content_type="image/webp; charset=utf-8",
-            data_b64="UklGRg==",
+            data_b64="ZmFrZQ==",
         )
         url = part["image_url"]["url"]
-        assert url == "data:image/webp;base64,UklGRg==", (
+        assert url == "data:image/webp;base64,ZmFrZQ==", (
             f"data URI must carry only the bare mime (no RFC-7231 parameters); "
             f"got {url!r}. Pre-fix the renderer would build "
             f"``data:image/webp; charset=utf-8;base64,...`` which Anthropic "

@@ -196,7 +196,7 @@ class TestAttachmentParams:
         assert att.as_params()["content_type"] == "image/png"
 
     def test_mime_unchanged_for_unsniffable_bytes(self, tmp_path: Path) -> None:
-        """Sniffer recognises PNG/JPEG/GIF only; non-image attachments
+        """Sniffer recognises PNG/JPEG/GIF/WebP only; non-image attachments
         (PDFs, audio, etc.) keep their declared content_type."""
         path = tmp_path / "doc.pdf"
         path.write_bytes(b"%PDF-1.4\n%trailer")

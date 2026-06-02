@@ -434,6 +434,9 @@ class TestExtensionlessImageDetection:
                 "image/jpeg",
             ),
             ("img", b"GIF89a\x01\x00\x01\x00\x80\x00\x00rest-of-gif-bytes", "image/gif"),
+            # WebP is a RIFF container — ``RIFF<4-byte size>WEBP`` — so the
+            # discriminating tag sits at offset 8.  The 16-byte probe covers it.
+            ("photo", b"RIFF\x24\x58\x00\x00WEBPVP8 \x18\x00\x00\x00webp-body", "image/webp"),
         ],
     )
     async def test_extensionless_image_inlines_via_magic_byte_sniff(
@@ -445,8 +448,8 @@ class TestExtensionlessImageDetection:
         stub_runtime: Any,
         stub_get_session_model: Any,
     ) -> None:
-        """An extension-less PNG/JPEG/GIF is detected by a local magic-byte probe
-        (no docker-exec) and inlined as an ``image_url``."""
+        """An extension-less PNG/JPEG/GIF/WebP is detected by a local magic-byte
+        probe (no docker-exec) and inlined as an ``image_url``."""
         stub_get_session_model.value = "model/vision"
         _stage_workspace_image("sess_01TEST", name, payload)
         result = await read_handler("sess_01TEST", {"path": f"/workspace/{name}"})
