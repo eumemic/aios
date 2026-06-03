@@ -237,3 +237,9 @@ class OAuthProviderApp(BaseModel):
         description="Override the discovered scope (some providers, e.g. Google, "
         "require specific scopes the MCP server may not advertise).",
     )
+    authorize_params: dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra query params to add to the authorization URL. Provider "
+        "quirks live here — e.g. Google needs {'access_type': 'offline', 'prompt': "
+        "'consent'} to return a refresh token (standard providers issue one without).",
+    )

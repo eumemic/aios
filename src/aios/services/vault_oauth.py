@@ -318,6 +318,11 @@ async def start_oauth_flow(
         auth_params["scope"] = scope
     if resource:
         auth_params["resource"] = resource
+    # Provider-specific extras (e.g. Google needs access_type=offline +
+    # prompt=consent to return a refresh token). Standard params win on conflict.
+    if provider_app and provider_app.authorize_params:
+        for k, v in provider_app.authorize_params.items():
+            auth_params.setdefault(k, v)
     authorization_url = f"{metadata.authorization_endpoint}?{urlencode(auth_params)}"
 
     # Persist the flow state, encrypted under the per-account subkey (it carries

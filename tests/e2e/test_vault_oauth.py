@@ -217,6 +217,7 @@ class TestStart:
             client_secret=SecretStr("operator-secret"),
             token_endpoint_auth_method="client_secret_post",
             scope="calendar.read",
+            authorize_params={"access_type": "offline", "prompt": "consent"},
         )
         with _patched_provider(registration=False):
             res = await svc.start_oauth_flow(
@@ -230,6 +231,8 @@ class TestStart:
         q = parse_qs(urlparse(res.authorization_url).query)
         assert q["client_id"] == ["operator-client"]
         assert q["scope"] == ["calendar.read"]  # provider-app scope override
+        assert q["access_type"] == ["offline"]  # provider-app authorize_params
+        assert q["prompt"] == ["consent"]
 
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
