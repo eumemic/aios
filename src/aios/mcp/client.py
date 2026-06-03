@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 from contextlib import AsyncExitStack
 from typing import Any, assert_never
@@ -29,11 +30,71 @@ from mcp.types import InitializeResult
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.logging import get_logger
+from aios.mcp.pool import HttpErrorSink
 from aios.mcp.schema import make_function_tool
 from aios.models.vaults import AuthType
 from aios.services.vaults import is_expiring, refresh_credential
 
 log = get_logger("aios.mcp.client")
+
+
+class _McpHttpError(Exception):
+    """A tool call hit an HTTP error response (e.g. 403) on the MCP transport.
+
+    Carries the server's status + body so the caller can surface the real,
+    actionable message instead of a generic timeout.
+    """
+
+    def __init__(self, status: int | None, body: str) -> None:
+        self.status = status
+        self.body = body
+        super().__init__(f"HTTP {status}")
+
+
+async def _call_tool_fast(
+    session: ClientSession,
+    tool_name: str,
+    arguments: dict[str, Any],
+    meta: dict[str, Any] | None,
+    sink: HttpErrorSink | None,
+    timeout_s: float,
+) -> Any:
+    """Invoke a tool, but fail fast with the server's message if its transport
+    reports an HTTP error.
+
+    The streamable-http client traps an error response (e.g. a 403) inside a
+    suspended task group, so ``call_tool`` would otherwise hang until
+    ``timeout`` and surface a bare ``TimeoutError``. We race the call against
+    the transport's :class:`HttpErrorSink` so a captured 4xx/5xx aborts the
+    wait immediately and is re-raised as :class:`_McpHttpError`.
+    """
+    if sink is not None:
+        sink.reset()
+    call_task: asyncio.Task[Any] = asyncio.ensure_future(
+        session.call_tool(tool_name, arguments, meta=meta)
+    )
+    waiters: set[asyncio.Future[Any]] = {call_task}
+    err_task: asyncio.Task[bool] | None = None
+    if sink is not None:
+        err_task = asyncio.ensure_future(sink.event.wait())
+        waiters.add(err_task)
+    try:
+        done, _pending = await asyncio.wait(
+            waiters, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        if err_task is not None and not err_task.done():
+            err_task.cancel()
+    if call_task in done:
+        return call_task.result()  # re-raises the underlying call error, if any
+    # The call didn't finish: an HTTP error was captured, or we timed out.
+    call_task.cancel()
+    with contextlib.suppress(BaseException):
+        await call_task
+    if sink is not None and sink.event.is_set():
+        raise _McpHttpError(sink.status, sink.body)
+    raise TimeoutError(f"tool call exceeded {timeout_s:.0f}s")
+
 
 MAX_TOOLS_PER_SERVER = 128
 
@@ -268,9 +329,13 @@ async def call_mcp_tool(
         if _pool is not None:
             try:
                 session, _ = await _pool.get_or_connect(url, vault_id, headers)
-                result = await asyncio.wait_for(
-                    session.call_tool(tool_name, arguments, meta=meta),
-                    timeout=_TOOL_CALL_TIMEOUT_S,
+                result = await _call_tool_fast(
+                    session,
+                    tool_name,
+                    arguments,
+                    meta,
+                    _pool.error_sink(url, vault_id),
+                    _TOOL_CALL_TIMEOUT_S,
                 )
             except Exception:
                 # Don't retry any call_tool failure: by the time the
@@ -289,13 +354,22 @@ async def call_mcp_tool(
         else:
             async with AsyncExitStack() as stack:
                 session, _ = await _open_session(url, headers, stack)
-                result = await asyncio.wait_for(
-                    session.call_tool(tool_name, arguments, meta=meta),
-                    timeout=_TOOL_CALL_TIMEOUT_S,
+                result = await _call_tool_fast(
+                    session, tool_name, arguments, meta, None, _TOOL_CALL_TIMEOUT_S
                 )
 
         return shape_call_result(result)
 
+    except _McpHttpError as err:
+        # The MCP server returned an HTTP error (e.g. 403 "API not enabled").
+        # Surface its actual message so the model/operator can act on it,
+        # rather than a generic timeout.
+        log.warning("mcp.call_http_error", url=url, tool_name=tool_name, status=err.status)
+        detail = err.body.strip() or f"HTTP {err.status}"
+        return {
+            "error": f"MCP server returned HTTP {err.status}: {detail}",
+            "code": "transport_error",
+        }
     except Exception as err:
         log.warning(
             "mcp.call_failed",

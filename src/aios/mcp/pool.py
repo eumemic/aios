@@ -32,7 +32,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -52,6 +54,54 @@ _MCP_HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10
 type _PoolKey = tuple[str, str | None]
 
 
+@dataclass
+class HttpErrorSink:
+    """Captures the most recent 4xx/5xx HTTP response seen on a pooled MCP
+    transport.
+
+    The streamable-http client raises the HTTP error inside a long-lived anyio
+    task group that stays suspended while the pooled session is parked, so a
+    failed ``call_tool`` would otherwise hang until the tool-call timeout and
+    surface a bare ``TimeoutError`` — losing the server's actual message. This
+    sink lets the caller observe the error response immediately (via ``event``)
+    and report it (``status`` + ``body``).
+    """
+
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    status: int | None = None
+    body: str = ""
+
+    def reset(self) -> None:
+        self.event.clear()
+        self.status = None
+        self.body = ""
+
+    def record(self, status: int, body: str) -> None:
+        self.status = status
+        self.body = body
+        self.event.set()
+
+
+def _make_error_hook(sink: HttpErrorSink) -> Callable[[httpx.Response], Awaitable[None]]:
+    """httpx response hook that records error responses into ``sink``.
+
+    Only reads the body for 4xx/5xx (error JSON, never an SSE stream), so
+    success-path streaming responses are untouched.
+    """
+
+    async def _hook(response: httpx.Response) -> None:
+        if response.status_code < 400 or sink.event.is_set():
+            return
+        try:
+            await response.aread()
+            body = response.text[:800]
+        except Exception:
+            body = ""
+        sink.record(response.status_code, body)
+
+    return _hook
+
+
 class _Entry:
     """A single pooled MCP session with its associated owner task.
 
@@ -69,11 +119,15 @@ class _Entry:
         shutdown: asyncio.Event,
         owner_task: asyncio.Task[None],
         last_used: float,
+        error_sink: HttpErrorSink,
     ) -> None:
         self.session = session
         self.init_result = init_result
         self._shutdown = shutdown
         self._owner_task = owner_task
+        # Records error responses on this session's transport so a failed
+        # call_tool can fail fast with the server's message (see HttpErrorSink).
+        self.error_sink = error_sink
         # monotonic() of the last get_or_connect that returned this
         # entry. Reaper keys off this, NOT owner-task liveness: the
         # task parks on `await shutdown.wait()` for the entry's whole
@@ -135,13 +189,18 @@ class McpSessionPool:
         """
         ready = asyncio.Event()
         shutdown = asyncio.Event()
+        sink = HttpErrorSink()
         result: dict[str, Any] = {}
 
         async def _own() -> None:
             try:
                 async with AsyncExitStack() as stack:
                     http_client: Any = await stack.enter_async_context(
-                        httpx.AsyncClient(headers=headers, timeout=_MCP_HTTPX_TIMEOUT)
+                        httpx.AsyncClient(
+                            headers=headers,
+                            timeout=_MCP_HTTPX_TIMEOUT,
+                            event_hooks={"response": [_make_error_hook(sink)]},
+                        )
                     )
                     read_stream, write_stream, _ = await stack.enter_async_context(
                         streamable_http_client(url, http_client=http_client)
@@ -168,7 +227,7 @@ class McpSessionPool:
             await task
             # Defensive — unreachable in practice.
             raise RuntimeError("mcp pool owner task signalled ready but produced no session")
-        return _Entry(result["session"], result["init"], shutdown, task, time.monotonic())
+        return _Entry(result["session"], result["init"], shutdown, task, time.monotonic(), sink)
 
     async def get_or_connect(
         self, url: str, vault_id: str | None, headers: dict[str, str]
@@ -207,6 +266,15 @@ class McpSessionPool:
             log.info("mcp_pool.connected", url=url)
 
         return entry.session, entry.init_result
+
+    def error_sink(self, url: str, vault_id: str | None) -> HttpErrorSink | None:
+        """The error sink for a connected entry (or ``None`` if not connected).
+
+        Lets the caller observe an error response on the pooled transport and
+        fail fast instead of hanging to the tool-call timeout.
+        """
+        entry = self._entries.get((url, vault_id))
+        return entry.error_sink if entry is not None else None
 
     def evict(self, url: str, vault_id: str | None) -> None:
         """Drop a cache entry and close it in the background.
