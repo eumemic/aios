@@ -2889,7 +2889,7 @@
           "sessions"
         ],
         "summary": "List Events",
-        "description": "List events for a session, paginated by sequence number.\n\nPass the response's ``next_after`` field as ``?after=`` on the next call\nto walk forward through the stream. (The query param was previously\nnamed ``after_seq``, which didn't match the ``next_after`` response\nfield \u2014 clients following the natural roundtrip pattern sent\n``?after=`` and got it silently ignored, causing pagination to loop on\nthe first page. See issue #389.)\n\n``?after_seq=N`` is accepted as an alias for ``?after=N`` for\nbackwards compatibility with older clients (issue #596).",
+        "description": "List events for a session, paginated by sequence number.\n\n**Forward (default).** Pass the response's ``next_after`` field as\n``?after=`` on the next call to walk forward through the stream. (The\nquery param was previously named ``after_seq``, which didn't match the\n``next_after`` response field \u2014 clients following the natural roundtrip\npattern sent ``?after=`` and got it silently ignored, causing pagination\nto loop on the first page. See issue #389.) ``?after_seq=N`` is accepted\nas an alias for ``?after=N`` for backwards compatibility (issue #596).\n\n**Backward (tail-anchored).** Pass ``?before=N`` to fetch the newest\n``limit`` events with ``seq < N``, returned **newest-first** (DESC). The\nresponse ``next_after`` is then the *smallest* seq in the page; pass it\nback as ``?before=`` to walk further into the past. A chat UI loads the\ntail with ``?before=<last_event_seq + 1>`` and pages older on scroll-up.\nSupplying ``before`` together with ``after``/``after_seq`` is a 422.",
         "operationId": "list_session_events",
         "parameters": [
           {
@@ -2925,6 +2925,22 @@
                 }
               ],
               "title": "After Seq"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
             }
           },
           {

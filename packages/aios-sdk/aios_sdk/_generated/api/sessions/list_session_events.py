@@ -17,6 +17,7 @@ def _get_kwargs(
     *,
     after: int | Unset = 0,
     after_seq: int | None | Unset = UNSET,
+    before: int | None | Unset = UNSET,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
     error_only: bool | Unset = False,
@@ -36,6 +37,13 @@ def _get_kwargs(
     else:
         json_after_seq = after_seq
     params["after_seq"] = json_after_seq
+
+    json_before: int | None | Unset
+    if isinstance(before, Unset):
+        json_before = UNSET
+    else:
+        json_before = before
+    params["before"] = json_before
 
     json_kind: None | str | Unset
     if isinstance(kind, Unset):
@@ -100,6 +108,7 @@ def sync_detailed(
     client: AuthenticatedClient | Client,
     after: int | Unset = 0,
     after_seq: int | None | Unset = UNSET,
+    before: int | None | Unset = UNSET,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
     error_only: bool | Unset = False,
@@ -109,20 +118,26 @@ def sync_detailed(
 
      List events for a session, paginated by sequence number.
 
-    Pass the response's ``next_after`` field as ``?after=`` on the next call
-    to walk forward through the stream. (The query param was previously
-    named ``after_seq``, which didn't match the ``next_after`` response
-    field — clients following the natural roundtrip pattern sent
-    ``?after=`` and got it silently ignored, causing pagination to loop on
-    the first page. See issue #389.)
+    **Forward (default).** Pass the response's ``next_after`` field as
+    ``?after=`` on the next call to walk forward through the stream. (The
+    query param was previously named ``after_seq``, which didn't match the
+    ``next_after`` response field — clients following the natural roundtrip
+    pattern sent ``?after=`` and got it silently ignored, causing pagination
+    to loop on the first page. See issue #389.) ``?after_seq=N`` is accepted
+    as an alias for ``?after=N`` for backwards compatibility (issue #596).
 
-    ``?after_seq=N`` is accepted as an alias for ``?after=N`` for
-    backwards compatibility with older clients (issue #596).
+    **Backward (tail-anchored).** Pass ``?before=N`` to fetch the newest
+    ``limit`` events with ``seq < N``, returned **newest-first** (DESC). The
+    response ``next_after`` is then the *smallest* seq in the page; pass it
+    back as ``?before=`` to walk further into the past. A chat UI loads the
+    tail with ``?before=<last_event_seq + 1>`` and pages older on scroll-up.
+    Supplying ``before`` together with ``after``/``after_seq`` is a 422.
 
     Args:
         session_id (str):
         after (int | Unset):  Default: 0.
         after_seq (int | None | Unset):
+        before (int | None | Unset):
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
         error_only (bool | Unset):  Default: False.
@@ -140,6 +155,7 @@ def sync_detailed(
         session_id=session_id,
         after=after,
         after_seq=after_seq,
+        before=before,
         kind=kind,
         limit=limit,
         error_only=error_only,
@@ -159,6 +175,7 @@ def sync(
     client: AuthenticatedClient | Client,
     after: int | Unset = 0,
     after_seq: int | None | Unset = UNSET,
+    before: int | None | Unset = UNSET,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
     error_only: bool | Unset = False,
@@ -168,20 +185,26 @@ def sync(
 
      List events for a session, paginated by sequence number.
 
-    Pass the response's ``next_after`` field as ``?after=`` on the next call
-    to walk forward through the stream. (The query param was previously
-    named ``after_seq``, which didn't match the ``next_after`` response
-    field — clients following the natural roundtrip pattern sent
-    ``?after=`` and got it silently ignored, causing pagination to loop on
-    the first page. See issue #389.)
+    **Forward (default).** Pass the response's ``next_after`` field as
+    ``?after=`` on the next call to walk forward through the stream. (The
+    query param was previously named ``after_seq``, which didn't match the
+    ``next_after`` response field — clients following the natural roundtrip
+    pattern sent ``?after=`` and got it silently ignored, causing pagination
+    to loop on the first page. See issue #389.) ``?after_seq=N`` is accepted
+    as an alias for ``?after=N`` for backwards compatibility (issue #596).
 
-    ``?after_seq=N`` is accepted as an alias for ``?after=N`` for
-    backwards compatibility with older clients (issue #596).
+    **Backward (tail-anchored).** Pass ``?before=N`` to fetch the newest
+    ``limit`` events with ``seq < N``, returned **newest-first** (DESC). The
+    response ``next_after`` is then the *smallest* seq in the page; pass it
+    back as ``?before=`` to walk further into the past. A chat UI loads the
+    tail with ``?before=<last_event_seq + 1>`` and pages older on scroll-up.
+    Supplying ``before`` together with ``after``/``after_seq`` is a 422.
 
     Args:
         session_id (str):
         after (int | Unset):  Default: 0.
         after_seq (int | None | Unset):
+        before (int | None | Unset):
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
         error_only (bool | Unset):  Default: False.
@@ -200,6 +223,7 @@ def sync(
         client=client,
         after=after,
         after_seq=after_seq,
+        before=before,
         kind=kind,
         limit=limit,
         error_only=error_only,
@@ -213,6 +237,7 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
     after: int | Unset = 0,
     after_seq: int | None | Unset = UNSET,
+    before: int | None | Unset = UNSET,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
     error_only: bool | Unset = False,
@@ -222,20 +247,26 @@ async def asyncio_detailed(
 
      List events for a session, paginated by sequence number.
 
-    Pass the response's ``next_after`` field as ``?after=`` on the next call
-    to walk forward through the stream. (The query param was previously
-    named ``after_seq``, which didn't match the ``next_after`` response
-    field — clients following the natural roundtrip pattern sent
-    ``?after=`` and got it silently ignored, causing pagination to loop on
-    the first page. See issue #389.)
+    **Forward (default).** Pass the response's ``next_after`` field as
+    ``?after=`` on the next call to walk forward through the stream. (The
+    query param was previously named ``after_seq``, which didn't match the
+    ``next_after`` response field — clients following the natural roundtrip
+    pattern sent ``?after=`` and got it silently ignored, causing pagination
+    to loop on the first page. See issue #389.) ``?after_seq=N`` is accepted
+    as an alias for ``?after=N`` for backwards compatibility (issue #596).
 
-    ``?after_seq=N`` is accepted as an alias for ``?after=N`` for
-    backwards compatibility with older clients (issue #596).
+    **Backward (tail-anchored).** Pass ``?before=N`` to fetch the newest
+    ``limit`` events with ``seq < N``, returned **newest-first** (DESC). The
+    response ``next_after`` is then the *smallest* seq in the page; pass it
+    back as ``?before=`` to walk further into the past. A chat UI loads the
+    tail with ``?before=<last_event_seq + 1>`` and pages older on scroll-up.
+    Supplying ``before`` together with ``after``/``after_seq`` is a 422.
 
     Args:
         session_id (str):
         after (int | Unset):  Default: 0.
         after_seq (int | None | Unset):
+        before (int | None | Unset):
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
         error_only (bool | Unset):  Default: False.
@@ -253,6 +284,7 @@ async def asyncio_detailed(
         session_id=session_id,
         after=after,
         after_seq=after_seq,
+        before=before,
         kind=kind,
         limit=limit,
         error_only=error_only,
@@ -270,6 +302,7 @@ async def asyncio(
     client: AuthenticatedClient | Client,
     after: int | Unset = 0,
     after_seq: int | None | Unset = UNSET,
+    before: int | None | Unset = UNSET,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     limit: int | Unset = 200,
     error_only: bool | Unset = False,
@@ -279,20 +312,26 @@ async def asyncio(
 
      List events for a session, paginated by sequence number.
 
-    Pass the response's ``next_after`` field as ``?after=`` on the next call
-    to walk forward through the stream. (The query param was previously
-    named ``after_seq``, which didn't match the ``next_after`` response
-    field — clients following the natural roundtrip pattern sent
-    ``?after=`` and got it silently ignored, causing pagination to loop on
-    the first page. See issue #389.)
+    **Forward (default).** Pass the response's ``next_after`` field as
+    ``?after=`` on the next call to walk forward through the stream. (The
+    query param was previously named ``after_seq``, which didn't match the
+    ``next_after`` response field — clients following the natural roundtrip
+    pattern sent ``?after=`` and got it silently ignored, causing pagination
+    to loop on the first page. See issue #389.) ``?after_seq=N`` is accepted
+    as an alias for ``?after=N`` for backwards compatibility (issue #596).
 
-    ``?after_seq=N`` is accepted as an alias for ``?after=N`` for
-    backwards compatibility with older clients (issue #596).
+    **Backward (tail-anchored).** Pass ``?before=N`` to fetch the newest
+    ``limit`` events with ``seq < N``, returned **newest-first** (DESC). The
+    response ``next_after`` is then the *smallest* seq in the page; pass it
+    back as ``?before=`` to walk further into the past. A chat UI loads the
+    tail with ``?before=<last_event_seq + 1>`` and pages older on scroll-up.
+    Supplying ``before`` together with ``after``/``after_seq`` is a 422.
 
     Args:
         session_id (str):
         after (int | Unset):  Default: 0.
         after_seq (int | None | Unset):
+        before (int | None | Unset):
         kind (ListSessionEventsKindType0 | None | Unset):
         limit (int | Unset):  Default: 200.
         error_only (bool | Unset):  Default: False.
@@ -312,6 +351,7 @@ async def asyncio(
             client=client,
             after=after,
             after_seq=after_seq,
+            before=before,
             kind=kind,
             limit=limit,
             error_only=error_only,

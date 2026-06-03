@@ -28,6 +28,11 @@ class ListResponse[T](BaseModel):
         Callers must fetch ``limit + 1`` rows and pass them here.  The extra
         row is used to detect whether more pages exist without a separate COUNT
         query; it is stripped before the response is built.
+
+        Order-agnostic: the sentinel is always the last row and the cursor is
+        taken from the last *kept* row, so the same logic serves forward pages
+        (ASC — cursor is the largest seq → next ``?after=``) and backward pages
+        (DESC — cursor is the smallest seq → next ``?before=``) alike.
         """
         has_more = len(items) > limit
         data = items[:limit]

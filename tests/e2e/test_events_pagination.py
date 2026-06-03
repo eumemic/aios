@@ -96,6 +96,21 @@ async def _make_session_with_events(pool: Any, n_events: int = 5) -> str:
     return session.id
 
 
+async def _append_event(pool: Any, session_id: str, kind: str, data: dict[str, Any]) -> int:
+    """Append one raw event of an arbitrary ``kind``; returns its seq."""
+    from aios.db import queries
+
+    async with pool.acquire() as conn:
+        event = await queries.append_event(
+            conn,
+            account_id=_ACCOUNT_ID,
+            session_id=session_id,
+            kind=kind,  # type: ignore[arg-type]
+            data=data,
+        )
+    return event.seq
+
+
 @pytest.fixture
 async def session_with_events(pool: Any) -> str:
     return await _make_session_with_events(pool, n_events=5)
@@ -334,3 +349,122 @@ class TestGetSingleEvent:
         other_session_id = await _make_session_with_events(pool, n_events=0)
         r = await http_client.get(f"/v1/sessions/{other_session_id}/events/{event_id}")
         assert r.status_code == 404, r.text
+
+
+class TestBackwardPagination:
+    """Tail-anchored ``?before=N`` paging: newest-first pages that walk into the
+    past, with ``next_after`` chaining as the next ``?before=`` cursor.
+    """
+
+    async def test_before_returns_newest_first_page(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        # 5 events (seq 1..5). before=6 (last_event_seq + 1), limit=2 → [5, 4].
+        r = await http_client.get(
+            f"/v1/sessions/{session_with_events}/events",
+            params={"before": 6, "limit": 2},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        seqs = [e["seq"] for e in body["data"]]
+        assert seqs == [5, 4], f"expected newest-first [5, 4], got {seqs}"
+        assert body["has_more"] is True
+        # next_after is the SMALLEST seq in the page → the next ?before= cursor.
+        assert body["next_after"] == "4"
+
+    async def test_before_walks_into_the_past_without_repeats(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        seen: list[int] = []
+        cursor = 6  # last_event_seq + 1 for a 5-event session
+        for _ in range(20):  # guardrail; should terminate in ~3 iterations
+            r = await http_client.get(
+                f"/v1/sessions/{session_with_events}/events",
+                params={"before": cursor, "limit": 2},
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            page_seqs = [e["seq"] for e in body["data"]]
+            assert page_seqs == sorted(page_seqs, reverse=True), (
+                f"backward page not newest-first: {page_seqs}"
+            )
+            seen.extend(page_seqs)
+            if not body["has_more"]:
+                break
+            cursor = int(body["next_after"])
+        else:
+            pytest.fail("backward pagination did not terminate within 20 iterations")
+        assert seen == [5, 4, 3, 2, 1], f"expected full descending walk, got {seen}"
+        assert len(seen) == len(set(seen)), "backward walk repeated a seq"
+
+    async def test_before_includes_newest_event(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        # Off-by-one guard: before=last_event_seq+1 must include the newest event.
+        r_session = await http_client.get(f"/v1/sessions/{session_with_events}")
+        last_seq = r_session.json()["last_event_seq"]
+        r = await http_client.get(
+            f"/v1/sessions/{session_with_events}/events",
+            params={"before": last_seq + 1, "limit": 1},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["data"][0]["seq"] == last_seq
+
+    async def test_before_and_after_together_is_422(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        r = await http_client.get(
+            f"/v1/sessions/{session_with_events}/events",
+            params={"before": 6, "after": 1},
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_before_and_after_seq_together_is_422(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        r = await http_client.get(
+            f"/v1/sessions/{session_with_events}/events",
+            params={"before": 6, "after_seq": 1},
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_before_chains_across_non_contiguous_filtered_seq(
+        self, http_client: httpx.AsyncClient, pool: Any
+    ) -> None:
+        # Interleave message and lifecycle events so message seqs are
+        # non-contiguous (1, 3, 5). Backward paging with kind=message must chain
+        # via next_after across the gaps — proving the cursor is the real
+        # returned seq, not lastSeq-limit arithmetic.
+        from aios.services import sessions as sessions_svc
+
+        session_id = await _make_session_with_events(pool, n_events=0)
+        await sessions_svc.append_user_message(
+            pool, session_id, "m1", account_id=_ACCOUNT_ID
+        )  # seq 1 (message)
+        await _append_event(pool, session_id, "lifecycle", {"phase": "x"})  # seq 2
+        await sessions_svc.append_user_message(
+            pool, session_id, "m3", account_id=_ACCOUNT_ID
+        )  # seq 3 (message)
+        await _append_event(pool, session_id, "lifecycle", {"phase": "y"})  # seq 4
+        await sessions_svc.append_user_message(
+            pool, session_id, "m5", account_id=_ACCOUNT_ID
+        )  # seq 5 (message)
+
+        seen: list[int] = []
+        cursor = 6
+        for _ in range(20):
+            r = await http_client.get(
+                f"/v1/sessions/{session_id}/events",
+                params={"before": cursor, "kind": "message", "limit": 1},
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            for e in body["data"]:
+                assert e["kind"] == "message"
+                seen.append(e["seq"])
+            if not body["has_more"]:
+                break
+            cursor = int(body["next_after"])
+        else:
+            pytest.fail("filtered backward pagination did not terminate")
+        assert seen == [5, 3, 1], f"expected message seqs newest-first, got {seen}"

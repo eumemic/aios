@@ -513,6 +513,9 @@ async def list_events(
     after: int = 0,
     # after_seq is the legacy name; prefer after. Both are accepted.
     after_seq: int | None = None,
+    # Backward (tail-anchored) cursor: ``?before=N`` returns the newest events
+    # with ``seq < N``, newest-first. Mutually exclusive with after/after_seq.
+    before: int | None = None,
     kind: EventKind | None = None,
     # Higher cap than the standard 200: operators paginate through full
     # session event logs via ``aios sessions events`` (one page per
@@ -523,16 +526,25 @@ async def list_events(
 ) -> ListResponse[Event]:
     """List events for a session, paginated by sequence number.
 
-    Pass the response's ``next_after`` field as ``?after=`` on the next call
-    to walk forward through the stream. (The query param was previously
-    named ``after_seq``, which didn't match the ``next_after`` response
-    field — clients following the natural roundtrip pattern sent
-    ``?after=`` and got it silently ignored, causing pagination to loop on
-    the first page. See issue #389.)
+    **Forward (default).** Pass the response's ``next_after`` field as
+    ``?after=`` on the next call to walk forward through the stream. (The
+    query param was previously named ``after_seq``, which didn't match the
+    ``next_after`` response field — clients following the natural roundtrip
+    pattern sent ``?after=`` and got it silently ignored, causing pagination
+    to loop on the first page. See issue #389.) ``?after_seq=N`` is accepted
+    as an alias for ``?after=N`` for backwards compatibility (issue #596).
 
-    ``?after_seq=N`` is accepted as an alias for ``?after=N`` for
-    backwards compatibility with older clients (issue #596).
+    **Backward (tail-anchored).** Pass ``?before=N`` to fetch the newest
+    ``limit`` events with ``seq < N``, returned **newest-first** (DESC). The
+    response ``next_after`` is then the *smallest* seq in the page; pass it
+    back as ``?before=`` to walk further into the past. A chat UI loads the
+    tail with ``?before=<last_event_seq + 1>`` and pages older on scroll-up.
+    Supplying ``before`` together with ``after``/``after_seq`` is a 422.
     """
+    if before is not None and (after_seq is not None or after):
+        raise ValidationError(
+            "Pass either 'before' (backward) or 'after'/'after_seq' (forward) — not both."
+        )
     # Resolve after_seq alias: explicit after_seq overrides after.
     effective_after = after_seq if after_seq is not None else after
     # Scope check: 404 cross-tenant probes before reading events. The
@@ -547,11 +559,16 @@ async def list_events(
         pool,
         session_id,
         after_seq=effective_after,
+        before=before,
         kind=kind,
         limit=limit + 1,
         error_only=error_only,
         account_id=account_id,
     )
+    # ``paginate`` is order-agnostic: the cursor is always the last kept row, so
+    # forward pages (ASC) chain via the largest seq as ``next_after`` and
+    # backward pages (DESC) via the smallest seq — which the client passes back
+    # as the next ``?before=``.
     return ListResponse[Event].paginate(rows, limit, cursor=lambda x: str(x.seq))
 
 
