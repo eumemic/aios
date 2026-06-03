@@ -14,6 +14,8 @@ from typing import Literal
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from aios.models.vaults import OAuthProviderApp
+
 # Hardcoded mirror of ``aios.harness.loop._JOB_TIMEOUT_S`` (300.0). We
 # don't import it because ``aios.harness.loop`` itself imports config
 # at module load — a top-level import here would risk a cycle, and a
@@ -70,6 +72,30 @@ class Settings(BaseSettings):
         description="Unlocks ``POST /v1/accounts/bootstrap`` while the ``accounts`` table "
         "has no root row; the endpoint is 404 once a root exists. Generate with "
         "``openssl rand -base64 32``.",
+    )
+
+    # ── interactive OAuth (vault credential "Connect") ─────────────────────
+    oauth_provider_apps: list[OAuthProviderApp] = Field(
+        default_factory=list,
+        description="Operator-registered OAuth client apps for MCP providers that don't "
+        "support Dynamic Client Registration (Google, Microsoft, Slack, …). When a "
+        "server's discovered OAuth issuer/host matches an app's ``match``, the interactive "
+        "Connect flow uses that app so end users sign in without supplying any credentials. "
+        "Set ``AIOS_OAUTH_PROVIDER_APPS`` to a JSON list of "
+        "{match, client_id, client_secret?, token_endpoint_auth_method?, "
+        "token_endpoint_hosts?, scope?, authorize_params?}. Register "
+        "each app with the provider using the console callback "
+        "``<console_url>/api/auth/mcp-oauth/callback`` as the redirect URI.",
+    )
+    oauth_allow_insecure_hosts: str = Field(
+        default="",
+        description="DEV-ONLY comma-separated host[:port] allowlist that bypasses the "
+        "interactive-Connect SSRF guard (https requirement + private-range block) for "
+        "the listed hosts. Lets a self-hosted MCP fleet reachable only over plain http "
+        "on an internal host (e.g. ``workspace-mcp:8000``) be connected from dev. Leave "
+        "empty in production (prod MCP servers are https), where any value would re-open "
+        "SSRF to internal hosts. Plain comma string (not JSON) so the natural ``.env`` "
+        "format ``host-a,host-b:8000`` parses without brackets.",
     )
 
     # ── database (required) ────────────────────────────────────────────────
@@ -255,6 +281,11 @@ class Settings(BaseSettings):
 
     # ── observability ──────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")
+
+    @property
+    def oauth_allow_insecure_host_set(self) -> frozenset[str]:
+        """Parsed ``oauth_allow_insecure_hosts`` as a set of host[:port] entries."""
+        return frozenset(h.strip() for h in self.oauth_allow_insecure_hosts.split(",") if h.strip())
 
     @model_validator(mode="after")
     def _require_absolute_workspace_root(self) -> Settings:

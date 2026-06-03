@@ -30,5 +30,10 @@ OUT="packages/aios-sdk/aios_sdk/_generated"
 mkdir -p "$OUT"
 rsync -a --delete --exclude=".ruff_cache" "$WORK/" "$OUT/"
 
+# ``rsync -a`` propagates the mktemp source dir's 0700 perms onto $OUT, which
+# makes the tree unreadable by the non-root user in the runtime image (Docker
+# COPY preserves perms). Normalize to world-readable (dirs 755, files 644).
+chmod -R u=rwX,go=rX "$OUT"
+
 py_count=$(find "$OUT" -name '*.py' | wc -l | awk '{print $1}')
 echo "regenerated $OUT/ ($py_count py files)"

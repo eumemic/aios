@@ -151,6 +151,21 @@ class OAuthRefreshError(AiosError):
     status_code = 502
 
 
+class OAuthFlowError(AiosError):
+    """Raised when an interactive OAuth "Connect" flow fails.
+
+    Covers the start phase (OAuth metadata discovery found nothing, the server
+    requires a pre-registered client but none was supplied, dynamic client
+    registration was rejected) and the complete phase (unknown/expired
+    ``state``, the token endpoint returned a non-2xx response, or the response
+    was missing ``access_token``). Distinct from :class:`OAuthRefreshError`,
+    which covers refreshing an already-stored credential.
+    """
+
+    error_type = "oauth_flow_error"
+    status_code = 502
+
+
 class ManagementCallTimeoutError(AiosError):
     """Management call exceeded its per-method timeout.
 

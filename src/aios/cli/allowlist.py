@@ -68,6 +68,19 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
         "and only callable while the accounts table is empty. Operator runs "
         "this via curl during initial install, not via day-to-day CLI."
     ),
+    # ── Interactive (browser-redirect) OAuth ─────────────────────────
+    # The vault-credential "Connect" flow returns an authorization URL for the
+    # user to sign in at the provider, then exchanges the returned code. It is
+    # inherently browser-interactive (driven by the console), not a CLI flow —
+    # operators use `aios vaults credentials create` for the paste-tokens path.
+    "start_vault_credential_oauth": (
+        "Interactive OAuth: returns a provider authorization URL for a browser "
+        "redirect; driven by the console, not the CLI."
+    ),
+    "complete_vault_credential_oauth": (
+        "Interactive OAuth: exchanges a browser-redirect authorization code; "
+        "driven by the console, not the CLI."
+    ),
 }
 
 NEEDS_CLI_TRACKED: dict[str, str] = {

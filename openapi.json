@@ -4290,6 +4290,144 @@
         }
       }
     },
+    "/v1/vaults/{vault_id}/credentials/oauth/start": {
+      "post": {
+        "tags": [
+          "vaults"
+        ],
+        "summary": "Start Credential Oauth",
+        "description": "Begin an interactive OAuth \"Connect\" flow for an MCP server.\n\nDiscovers the target's OAuth metadata, registers a client (RFC 7591\nDynamic Client Registration) or uses a caller-supplied ``client_id`` /\n``client_secret`` for servers without DCR, generates PKCE + a CSRF\n``state``, and returns the provider ``authorization_url`` to redirect the\nuser to. The token fields are obtained from the provider \u2014 the caller does\nnot supply them. Complete the flow with the returned ``state`` + the\nauthorization ``code`` via ``complete_vault_credential_oauth``.",
+        "operationId": "start_vault_credential_oauth",
+        "parameters": [
+          {
+            "name": "vault_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Vault Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthStartRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthStartResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/vaults/{vault_id}/credentials/oauth/complete": {
+      "post": {
+        "tags": [
+          "vaults"
+        ],
+        "summary": "Complete Credential Oauth",
+        "description": "Finish an interactive OAuth flow: exchange the code and store the credential.\n\nValidates the ``state`` against the in-progress flow, exchanges the\nauthorization ``code`` for tokens, and stores them as an ``oauth2_refresh``\ncredential (creating a new one, or rotating an existing credential for the\nsame ``target_url``). Secrets are encrypted at rest and never returned.",
+        "operationId": "complete_vault_credential_oauth",
+        "parameters": [
+          {
+            "name": "vault_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Vault Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthCompleteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaultCredential"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/vaults/{vault_id}/credentials/{credential_id}": {
       "get": {
         "tags": [
@@ -11008,6 +11146,137 @@
           "plaintext_key"
         ],
         "title": "MintKeyResponse"
+      },
+      "OAuthCompleteRequest": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "minLength": 1,
+            "title": "State"
+          },
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Code"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "state",
+          "code"
+        ],
+        "title": "OAuthCompleteRequest",
+        "description": "Finish an interactive OAuth flow: exchange the returned code for tokens.\n\nThe ``state`` correlates back to the in-progress flow (and guards CSRF);\n``code`` is the authorization code the provider returned to the callback."
+      },
+      "OAuthStartRequest": {
+        "properties": {
+          "target_url": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Target Url"
+          },
+          "redirect_uri": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Redirect Uri"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          },
+          "client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Id"
+          },
+          "client_secret": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Secret"
+          },
+          "token_endpoint_auth_method": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "client_secret_basic",
+                  "client_secret_post"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Endpoint Auth Method"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target_url",
+          "redirect_uri"
+        ],
+        "title": "OAuthStartRequest",
+        "description": "Begin an interactive OAuth authorization-code flow for an MCP server.\n\nWith the token fields left blank, the server discovers the target's OAuth\nmetadata, registers a client (RFC 7591 Dynamic Client Registration) or uses\nthe supplied ``client_id``/``client_secret``, and returns an\n``authorization_url`` to redirect the user to. The ``redirect_uri`` is the\nconsole's callback and is reused verbatim on completion."
+      },
+      "OAuthStartResponse": {
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "title": "Flow Id"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "authorization_url": {
+            "type": "string",
+            "title": "Authorization Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "flow_id",
+          "state",
+          "authorization_url"
+        ],
+        "title": "OAuthStartResponse",
+        "description": "The authorization URL to redirect the user to, plus the flow's CSRF state."
       },
       "RecentChat": {
         "properties": {

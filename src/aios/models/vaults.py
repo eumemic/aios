@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 AuthType = Literal["bearer_header", "oauth2_refresh", "basic", "custom_header"]
 
@@ -158,3 +158,115 @@ class VaultCredential(BaseModel):
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
+
+
+# ── Interactive OAuth "Connect" flow ────────────────────────────────────────
+
+
+class OAuthStartRequest(BaseModel):
+    """Begin an interactive OAuth authorization-code flow for an MCP server.
+
+    With the token fields left blank, the server discovers the target's OAuth
+    metadata, registers a client (RFC 7591 Dynamic Client Registration) or uses
+    the supplied ``client_id``/``client_secret``, and returns an
+    ``authorization_url`` to redirect the user to. The ``redirect_uri`` is the
+    console's callback and is reused verbatim on completion.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_url: str = Field(min_length=1)
+    redirect_uri: str = Field(min_length=1)
+    display_name: str | None = Field(default=None, max_length=128)
+    scope: str | None = None
+    # For MCP servers that do NOT support Dynamic Client Registration: a
+    # pre-registered OAuth client. Omit for DCR-capable servers.
+    client_id: str | None = None
+    client_secret: SecretStr | None = None
+    token_endpoint_auth_method: (
+        Literal["none", "client_secret_basic", "client_secret_post"] | None
+    ) = None
+
+
+class OAuthStartResponse(BaseModel):
+    """The authorization URL to redirect the user to, plus the flow's CSRF state."""
+
+    flow_id: str
+    state: str
+    authorization_url: str
+
+
+class OAuthCompleteRequest(BaseModel):
+    """Finish an interactive OAuth flow: exchange the returned code for tokens.
+
+    The ``state`` correlates back to the in-progress flow (and guards CSRF);
+    ``code`` is the authorization code the provider returned to the callback.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: str = Field(min_length=1)
+    code: str = Field(min_length=1)
+
+
+class OAuthProviderApp(BaseModel):
+    """An operator-registered OAuth client app for a provider that does NOT
+    support Dynamic Client Registration (Google, Microsoft, Slack, …).
+
+    When the interactive Connect flow discovers a server whose OAuth issuer /
+    authorization host / target URL host matches ``match``, it uses this app's
+    ``client_id`` / ``client_secret`` instead of registering a client — so end
+    users sign in without supplying any credentials (the CMA model). Configured
+    by the operator via the ``AIOS_OAUTH_PROVIDER_APPS`` JSON env var.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    match: str = Field(
+        min_length=1,
+        description="Host (or host suffix) to match against the discovered OAuth "
+        "issuer, authorization endpoint, or target URL — e.g. 'accounts.google.com'.",
+    )
+    client_id: str = Field(min_length=1)
+    client_secret: SecretStr | None = None
+    token_endpoint_auth_method: Literal["none", "client_secret_basic", "client_secret_post"] = (
+        "client_secret_post"
+    )
+    token_endpoint_hosts: list[str] = Field(
+        default_factory=list,
+        description="Token-endpoint hostnames trusted for this app, beyond ``match``. "
+        "Required when the provider issues tokens from a different host than it "
+        "authorizes at — e.g. Google authorizes at accounts.google.com but issues "
+        "tokens at oauth2.googleapis.com, so set "
+        "token_endpoint_hosts=['oauth2.googleapis.com']. The operator's client_secret "
+        "is sent to the discovered token endpoint only if its host is ``match`` (or a "
+        "sub-host) or appears here — closing the exfiltration where attacker metadata "
+        "selects this app via a spoofed issuer/authorization host but points the token "
+        "endpoint elsewhere.",
+    )
+    scope: str | None = Field(
+        default=None,
+        description="Override the discovered scope (some providers, e.g. Google, "
+        "require specific scopes the MCP server may not advertise).",
+    )
+    authorize_params: dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra query params to add to the authorization URL. Provider "
+        "quirks live here — e.g. Google needs {'access_type': 'offline', 'prompt': "
+        "'consent'} to return a refresh token (standard providers issue one without).",
+    )
+
+    @model_validator(mode="after")
+    def _require_secret_for_confidential_method(self) -> OAuthProviderApp:
+        """A confidential client-auth method needs a secret — fail fast at config
+        load rather than silently POSTing an empty secret (and storing the
+        credential as a public ``none`` client) at the user's first Connect."""
+        if (
+            self.token_endpoint_auth_method in ("client_secret_basic", "client_secret_post")
+            and not self.client_secret
+        ):
+            raise ValueError(
+                f"token_endpoint_auth_method={self.token_endpoint_auth_method!r} "
+                "requires client_secret"
+            )
+        return self

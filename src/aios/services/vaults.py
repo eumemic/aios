@@ -88,6 +88,33 @@ def _serialize_token_endpoint_auth(v: TokenEndpointAuth) -> dict[str, str]:
     return {"method": v.method, "client_secret": v.client_secret.get_secret_value()}
 
 
+def build_token_endpoint_post(
+    body: dict[str, str],
+    *,
+    client_id: str,
+    endpoint_auth: dict[str, str] | None,
+) -> dict[str, Any]:
+    """Apply the configured token-endpoint client-auth method to an OAuth POST.
+
+    Mutates ``body`` in place (``client_id`` is always added — it identifies the
+    public client; ``client_secret`` is added for the ``client_secret_post``
+    method) and returns the kwargs for ``httpx.AsyncClient.post`` (``data``,
+    plus ``auth`` for ``client_secret_basic``). Shared by the refresh path
+    (:func:`refresh_credential`) and the authorization-code exchange
+    (:mod:`aios.services.vault_oauth`) so the two never drift.
+    """
+    auth = endpoint_auth or {"method": "none"}
+    method = auth.get("method", "none")
+    body["client_id"] = client_id
+    post_kwargs: dict[str, Any] = {"data": body}
+    if method == "client_secret_basic":
+        post_kwargs["auth"] = httpx.BasicAuth(client_id, auth.get("client_secret", ""))
+    elif method == "client_secret_post":
+        body["client_secret"] = auth.get("client_secret", "")
+    # method == "none" → nothing extra; client_id alone identifies the public client.
+    return post_kwargs
+
+
 def is_expiring(payload: dict[str, Any], skew: int = REFRESH_SKEW_SECONDS) -> bool:
     """Return True if the token's ``expires_at`` is within ``skew`` seconds of now.
 
@@ -168,24 +195,24 @@ async def refresh_credential(
                 },
             )
 
-        # Build the POST per the configured token_endpoint_auth method.
-        endpoint_auth = payload.get("token_endpoint_auth") or {"method": "none"}
-        method = endpoint_auth.get("method", "none")
+        # Build the refresh POST. Client-auth handling (none/basic/post) is
+        # shared with the authorization-code exchange via
+        # ``build_token_endpoint_post`` so the two paths can't drift.
         body: dict[str, str] = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-            "client_id": client_id,
         }
-        post_kwargs: dict[str, Any] = {"data": body}
-        if method == "client_secret_basic":
-            post_kwargs["auth"] = httpx.BasicAuth(client_id, endpoint_auth.get("client_secret", ""))
-        elif method == "client_secret_post":
-            body["client_secret"] = endpoint_auth.get("client_secret", "")
-        # method == "none" → nothing extra; client_id alone identifies the public client.
-
         scope = payload.get("scope")
         if scope:
             body["scope"] = scope
+        # RFC 8707: some providers bind the refresh to the same resource the
+        # tokens were minted for; include it when the credential stored one.
+        resource = payload.get("resource")
+        if resource:
+            body["resource"] = resource
+        post_kwargs = build_token_endpoint_post(
+            body, client_id=client_id, endpoint_auth=payload.get("token_endpoint_auth")
+        )
 
         try:
             async with httpx.AsyncClient(timeout=_REFRESH_HTTP_TIMEOUT_SECONDS) as client:
