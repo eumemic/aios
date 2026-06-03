@@ -21,8 +21,7 @@ via :func:`aios.services.vaults.build_token_endpoint_post`.
 
 from __future__ import annotations
 
-import ipaddress
-import os
+import asyncio
 import secrets
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -75,6 +74,7 @@ from aios.services.vaults import (
     create_vault_credential,
     update_vault_credential,
 )
+from aios.tools.url_safety import is_safe_url
 
 log = get_logger("aios.services.vault_oauth")
 
@@ -85,45 +85,53 @@ OAUTH_FLOW_TTL_SECONDS = 600
 # Generous per-call HTTP timeout — OAuth providers vary widely.
 _OAUTH_HTTP_TIMEOUT_SECONDS = 30
 
-# Comma-separated host[:port] allowlist that bypasses the https/private-range
-# SSRF guard. Test-only: the local mock provider runs on 127.0.0.1:<port>.
-_ALLOW_INSECURE_ENV = "AIOS_OAUTH_ALLOW_INSECURE_HOSTS"
-
 
 # ── SSRF guard ───────────────────────────────────────────────────────────────
 
 
-def _guard_target_url(url: str) -> None:
-    """Reject target URLs that could drive server-side requests at internal hosts.
+async def _guard_url(url: str, *, allow_insecure: frozenset[str], label: str) -> None:
+    """Reject a server-side-fetched URL that could reach an internal host.
 
-    Requires https and blocks loopback/private/link-local/reserved IP literals
-    and ``localhost``. A test-only env allowlist (``AIOS_OAUTH_ALLOW_INSECURE_HOSTS``)
-    permits the local mock provider.
+    Operator-allowlisted hosts (dev only — ``Settings.oauth_allow_insecure_hosts``)
+    bypass the check so a self-hosted MCP fleet on plain http can be connected
+    in dev. Otherwise requires https and delegates to the shared
+    :func:`aios.tools.url_safety.is_safe_url`, which resolves DNS and blocks
+    private/CGNAT/loopback/link-local/cloud-metadata addresses — the same guard
+    ``web_fetch``/``http_request`` use, so the policy can't drift. ``is_safe_url``
+    is blocking (``getaddrinfo``), so it runs in a worker thread.
     """
     parsed = urlparse(url)
-    host = parsed.hostname or ""
-    allow = {h.strip() for h in os.environ.get(_ALLOW_INSECURE_ENV, "").split(",") if h.strip()}
-    if host in allow or parsed.netloc in allow:
+    host = (parsed.hostname or "").lower()
+    if host in allow_insecure or parsed.netloc.lower() in allow_insecure:
         return
     if parsed.scheme != "https":
+        raise OAuthFlowError(f"{label} must use https", detail={label: url})
+    if not await asyncio.to_thread(is_safe_url, url):
+        raise OAuthFlowError(f"{label} host is not allowed", detail={label: url})
+
+
+def _assert_token_endpoint_bound(app: OAuthProviderApp, metadata: OAuthMetadata) -> None:
+    """Refuse to use the operator client unless the discovered token endpoint
+    belongs to ``app``.
+
+    The operator's confidential ``client_secret`` is POSTed to the discovered
+    ``token_endpoint`` at completion. ``_match_provider_app`` selects the app on
+    the issuer / authorization-endpoint / target host, all of which come from
+    the (untrusted) target's discovery metadata. Without this check an attacker
+    could serve metadata advertising ``accounts.google.com`` as the issuer (to
+    select the operator's Google app) while pointing ``token_endpoint`` at a host
+    they control, exfiltrating the secret. Bind it: the token host must be
+    ``match`` (or a sub-host) or one of ``token_endpoint_hosts`` (e.g. Google
+    issues at ``oauth2.googleapis.com``, a different apex than the authorize
+    host).
+    """
+    allowed = {_norm_host(app.match)}
+    allowed.update(_norm_host(h) for h in app.token_endpoint_hosts if h.strip())
+    token_host = _host(str(metadata.token_endpoint))
+    if not token_host or not _host_covered_by(token_host, allowed):
         raise OAuthFlowError(
-            "target_url must use https",
-            detail={"target_url": url},
-        )
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        # A hostname, not an IP literal — block obvious loopback names.
-        if host == "localhost" or host.endswith(".localhost"):
-            raise OAuthFlowError(
-                "target_url host is not allowed",
-                detail={"target_url": url},
-            ) from None
-        return
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-        raise OAuthFlowError(
-            "target_url host is not allowed",
-            detail={"target_url": url},
+            "discovered token endpoint is not trusted for this operator app",
+            detail={"token_endpoint": str(metadata.token_endpoint), "match": app.match},
         )
 
 
@@ -134,6 +142,23 @@ def _origin(url: str) -> str:
 
 def _host(url: str | None) -> str:
     return (urlparse(url).hostname or "").lower() if url else ""
+
+
+def _norm_host(value: str) -> str:
+    """Normalize a host / ``match`` pattern for comparison (lowercase, no leading dot)."""
+    return value.strip().lower().lstrip(".")
+
+
+def _host_covered_by(host: str, patterns: set[str]) -> bool:
+    """True if ``host`` equals or is a dotted sub-host of any pattern.
+
+    Single source of the provider-app host-match rule, shared by the app
+    *selection* path (:func:`_match_provider_app`) and the secret-binding path
+    (:func:`_assert_token_endpoint_bound`) so a future tightening can't make the
+    two security checks drift. ``patterns`` must be pre-normalized via
+    :func:`_norm_host`.
+    """
+    return any(host == p or host.endswith("." + p) for p in patterns)
 
 
 def _match_provider_app(
@@ -152,10 +177,10 @@ def _match_provider_app(
     }
     hosts.discard("")
     for app in apps:
-        m = app.match.strip().lower().lstrip(".")
+        m = _norm_host(app.match)
         if not m:
             continue
-        if any(h == m or h.endswith("." + m) for h in hosts):
+        if any(_host_covered_by(h, {m}) for h in hosts):
             return app
     return None
 
@@ -220,8 +245,10 @@ async def start_oauth_flow(
     ``Settings.oauth_provider_apps``) for servers without DCR → Dynamic Client
     Registration → otherwise an error asking for client credentials.
     """
-    apps = provider_apps if provider_apps is not None else get_settings().oauth_provider_apps
-    _guard_target_url(body.target_url)
+    settings = get_settings()
+    apps = provider_apps if provider_apps is not None else settings.oauth_provider_apps
+    allow_insecure = settings.oauth_allow_insecure_host_set
+    await _guard_url(body.target_url, allow_insecure=allow_insecure, label="target_url")
 
     # Ownership check (raises NotFoundError if the vault isn't this account's)
     # and opportunistic prune of expired flows.
@@ -229,19 +256,35 @@ async def start_oauth_flow(
         await queries.get_vault(conn, vault_id, account_id=account_id)
         await queries.delete_expired_oauth_flows(conn)
 
+    # follow_redirects is OFF: is_safe_url validates the literal host, but a 3xx
+    # to an internal host would bypass it (the redirect target is never guarded).
+    # RFC 9728/8414 discovery hits well-known paths directly, so no redirect is
+    # needed for a spec-compliant provider.
     async with httpx.AsyncClient(
-        timeout=_OAUTH_HTTP_TIMEOUT_SECONDS, follow_redirects=True
+        timeout=_OAUTH_HTTP_TIMEOUT_SECONDS, follow_redirects=False
     ) as client:
         prm = await _discover_protected_resource(client, body.target_url)
         auth_server_url = (
             str(prm.authorization_servers[0]) if prm and prm.authorization_servers else None
         )
+        # The authorization server is discovered from the target's (untrusted)
+        # metadata, then fetched server-side — guard it before the fetch.
+        if auth_server_url:
+            await _guard_url(
+                auth_server_url, allow_insecure=allow_insecure, label="authorization_server"
+            )
         metadata = await _discover_auth_server(client, auth_server_url, body.target_url)
         if metadata is None:
             raise OAuthFlowError(
                 "could not discover OAuth metadata for this server",
                 detail={"target_url": body.target_url},
             )
+
+        # The token endpoint is persisted verbatim and POSTed at completion —
+        # guard the discovered value now so the SSRF check covers that use.
+        await _guard_url(
+            str(metadata.token_endpoint), allow_insecure=allow_insecure, label="token_endpoint"
+        )
 
         scope = body.scope or get_client_metadata_scopes(None, prm, metadata)
         # RFC 8707 resource indicator: the MCP server's canonical URI.
@@ -263,7 +306,10 @@ async def start_oauth_flow(
             )
         elif provider_app:
             # Operator-registered app for this provider — the user supplies
-            # nothing (the CMA model for non-DCR providers like Google).
+            # nothing (the CMA model for non-DCR providers like Google). Bind
+            # the secret to the discovered token endpoint before using it, so
+            # spoofed issuer/authz metadata can't redirect it to an attacker.
+            _assert_token_endpoint_bound(provider_app, metadata)
             client_id = provider_app.client_id
             client_secret = (
                 provider_app.client_secret.get_secret_value()
@@ -275,6 +321,12 @@ async def start_oauth_flow(
                 scope = provider_app.scope
         elif metadata.registration_endpoint:
             # Dynamic Client Registration (RFC 7591) — public client + PKCE.
+            # The registration endpoint is fetched server-side; guard it.
+            await _guard_url(
+                str(metadata.registration_endpoint),
+                allow_insecure=allow_insecure,
+                label="registration_endpoint",
+            )
             client_metadata = OAuthClientMetadata(
                 redirect_uris=[AnyUrl(body.redirect_uri)],
                 grant_types=["authorization_code", "refresh_token"],
@@ -411,7 +463,12 @@ async def _exchange_code(
         endpoint_auth["client_secret"] = str(secret)
     post_kwargs = build_token_endpoint_post(body, client_id=client_id, endpoint_auth=endpoint_auth)
 
-    async with httpx.AsyncClient(timeout=_OAUTH_HTTP_TIMEOUT_SECONDS) as client:
+    # follow_redirects OFF: the token_endpoint was SSRF-guarded at start and is
+    # stored encrypted, but a token-exchange POST should never be redirected
+    # anyway — a 3xx here can only point somewhere we didn't validate.
+    async with httpx.AsyncClient(
+        timeout=_OAUTH_HTTP_TIMEOUT_SECONDS, follow_redirects=False
+    ) as client:
         try:
             resp = await client.post(token_endpoint, **post_kwargs)
             resp.raise_for_status()
@@ -430,41 +487,25 @@ async def _exchange_code(
             ) from exc
 
 
-async def complete_oauth_flow(
+async def _store_oauth_credential(
     pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
     *,
     account_id: str,
     vault_id: str,
-    body: OAuthCompleteRequest,
+    target_url: str,
+    token: OAuthToken,
+    flow_payload: dict[str, Any],
+    existing: VaultCredential | None,
 ) -> VaultCredential:
-    """Finish an interactive flow: exchange the code and store the credential.
+    """Create or rotate the ``oauth2_refresh`` credential for ``target_url``.
 
-    Claims the flow (lock + decrypt + delete — single-use, anti-replay),
-    exchanges the code for tokens, then stores them as an ``oauth2_refresh``
-    credential — creating a new one or **rotating** an existing credential for
-    the same ``(vault_id, target_url)`` (the active-row unique index allows only
-    one), so re-connecting an already-connected server doesn't 409 after the
-    user already consented at the provider.
+    ``existing`` is the active credential observed before the exchange (already
+    confirmed by the caller to be ``oauth2_refresh`` or ``None``). On a create
+    that loses a race with a concurrent completion, the active-row unique index
+    is the serialization point: catch the conflict, re-read, and rotate — so a
+    double-submit doesn't 409 the user after they consented.
     """
-    # Phase 1: claim the flow under a row lock; single-use.
-    async with pool.acquire() as conn, conn.transaction():
-        flow = await queries.get_oauth_flow_for_complete(
-            conn, account_id=account_id, vault_id=vault_id, state=body.state
-        )
-        if flow is None:
-            raise ValidationError(
-                "unknown or expired OAuth flow",
-                detail={"state": body.state},
-            )
-        flow_id, target_url, redirect_uri, blob = flow
-        flow_payload = crypto_box.derive_account_subkey(account_id).decrypt_dict(blob)
-        await queries.delete_oauth_flow(conn, flow_id)
-
-    # Phase 2: token exchange (network; no locks held).
-    token = await _exchange_code(flow_payload, redirect_uri=redirect_uri, code=body.code)
-
-    # Phase 3: persist as an oauth2_refresh credential (create or rotate).
     expires_at = (
         datetime.now(UTC) + timedelta(seconds=token.expires_in) if token.expires_in else None
     )
@@ -487,11 +528,6 @@ async def complete_oauth_flow(
     if token.refresh_token:
         secret_fields["refresh_token"] = SecretStr(token.refresh_token)
 
-    async with pool.acquire() as conn:
-        existing = await queries.get_active_credential_by_target_url(
-            conn, account_id=account_id, vault_id=vault_id, target_url=target_url
-        )
-
     if existing is None:
         create_body = VaultCredentialCreate(
             target_url=target_url,
@@ -499,12 +535,81 @@ async def complete_oauth_flow(
             display_name=display_name,
             **secret_fields,
         )
-        cred = await create_vault_credential(
-            pool, crypto_box, account_id=account_id, vault_id=vault_id, body=create_body
+        try:
+            return await create_vault_credential(
+                pool, crypto_box, account_id=account_id, vault_id=vault_id, body=create_body
+            )
+        except ConflictError:
+            # Lost a race with a concurrent completion for the same target_url —
+            # the active-row unique index serialized us. Re-read and rotate.
+            async with pool.acquire() as conn:
+                raced = await queries.get_active_credential_by_target_url(
+                    conn, account_id=account_id, vault_id=vault_id, target_url=target_url
+                )
+            if raced is None or raced.auth_type != "oauth2_refresh":
+                raise
+            existing = raced
+
+    # Rotate. Omit fields the exchange didn't return (e.g. no new refresh_token)
+    # so they're preserved — EXCEPT expires_at, which is written even when None
+    # so a token that came back without expires_in clears the prior (now-stale,
+    # possibly-past) value instead of inheriting it. Inheriting a past expires_at
+    # would make is_expiring() perpetually true and force a refresh before every
+    # call (a hard failure when the provider issued no refresh_token).
+    update_fields = {k: v for k, v in secret_fields.items() if v is not None or k == "expires_at"}
+    if display_name:
+        update_fields["display_name"] = display_name
+    return await update_vault_credential(
+        pool,
+        crypto_box,
+        account_id=account_id,
+        vault_id=vault_id,
+        credential_id=existing.id,
+        body=VaultCredentialUpdate(**update_fields),
+    )
+
+
+async def complete_oauth_flow(
+    pool: asyncpg.Pool[Any],
+    crypto_box: CryptoBox,
+    *,
+    account_id: str,
+    vault_id: str,
+    body: OAuthCompleteRequest,
+) -> VaultCredential:
+    """Finish an interactive flow: exchange the code and store the credential.
+
+    Reads the flow under a row lock and decrypts it, rejects a conflicting
+    ``auth_type`` at the target URL *before* burning the single-use code,
+    exchanges the code for tokens, then stores them as an ``oauth2_refresh``
+    credential — creating one or **rotating** the existing credential for the
+    same ``(vault_id, target_url)`` — and finally deletes the flow row. The flow
+    is consumed only on success: a transient exchange failure leaves it reusable
+    within its TTL instead of forcing the user to re-consent from scratch.
+    """
+    # Read + decrypt the flow under a row lock. NOT deleted yet — single-use is
+    # enforced by deleting on success (below), so a transient exchange failure
+    # doesn't burn the flow + auth code.
+    async with pool.acquire() as conn, conn.transaction():
+        flow = await queries.get_oauth_flow_for_complete(
+            conn, account_id=account_id, vault_id=vault_id, state=body.state
         )
-    elif existing.auth_type != "oauth2_refresh":
-        # A different auth_type already occupies this target_url; auth_type is
-        # immutable, so refuse rather than silently producing a broken hybrid.
+        if flow is None:
+            raise ValidationError(
+                "unknown or expired OAuth flow",
+                detail={"state": body.state},
+            )
+        flow_id, target_url, redirect_uri, blob = flow
+        flow_payload = crypto_box.derive_account_subkey(account_id).decrypt_dict(blob)
+
+    # Reject a different auth_type at this target_url BEFORE the exchange burns
+    # the single-use code (auth_type is immutable — an OAuth connect can't
+    # overwrite e.g. a bearer credential, so don't waste the user's consent).
+    async with pool.acquire() as conn:
+        existing = await queries.get_active_credential_by_target_url(
+            conn, account_id=account_id, vault_id=vault_id, target_url=target_url
+        )
+    if existing is not None and existing.auth_type != "oauth2_refresh":
         raise ConflictError(
             f"an active {existing.auth_type} credential already exists for {target_url}; "
             "archive it before connecting via OAuth",
@@ -514,26 +619,32 @@ async def complete_oauth_flow(
                 "auth_type": existing.auth_type,
             },
         )
-    else:
-        # Rotate the existing credential. Omit fields the exchange didn't return
-        # (e.g. no new refresh_token) so they're preserved, not unset.
-        update_fields = {k: v for k, v in secret_fields.items() if v is not None}
-        if display_name:
-            update_fields["display_name"] = display_name
-        cred = await update_vault_credential(
-            pool,
-            crypto_box,
-            account_id=account_id,
-            vault_id=vault_id,
-            credential_id=existing.id,
-            body=VaultCredentialUpdate(**update_fields),
-        )
+
+    # Token exchange (network; no locks held; flow row intact for retry on a
+    # transient failure).
+    token = await _exchange_code(flow_payload, redirect_uri=redirect_uri, code=body.code)
+
+    # Store as an oauth2_refresh credential (create or rotate), then consume the
+    # flow — single-use is enforced on success.
+    cred = await _store_oauth_credential(
+        pool,
+        crypto_box,
+        account_id=account_id,
+        vault_id=vault_id,
+        target_url=target_url,
+        token=token,
+        flow_payload=flow_payload,
+        existing=existing,
+    )
+
+    async with pool.acquire() as conn:
+        await queries.delete_oauth_flow(conn, flow_id)
 
     log.info(
         "vault.oauth_flow_completed",
         vault_id=vault_id,
         target_url=target_url,
         credential_id=cred.id,
-        rotated=bool(existing is not None),
+        rotated=existing is not None,
     )
     return cred

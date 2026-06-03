@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 AuthType = Literal["bearer_header", "oauth2_refresh", "basic", "custom_header"]
 
@@ -232,6 +232,18 @@ class OAuthProviderApp(BaseModel):
     token_endpoint_auth_method: Literal["none", "client_secret_basic", "client_secret_post"] = (
         "client_secret_post"
     )
+    token_endpoint_hosts: list[str] = Field(
+        default_factory=list,
+        description="Token-endpoint hostnames trusted for this app, beyond ``match``. "
+        "Required when the provider issues tokens from a different host than it "
+        "authorizes at — e.g. Google authorizes at accounts.google.com but issues "
+        "tokens at oauth2.googleapis.com, so set "
+        "token_endpoint_hosts=['oauth2.googleapis.com']. The operator's client_secret "
+        "is sent to the discovered token endpoint only if its host is ``match`` (or a "
+        "sub-host) or appears here — closing the exfiltration where attacker metadata "
+        "selects this app via a spoofed issuer/authorization host but points the token "
+        "endpoint elsewhere.",
+    )
     scope: str | None = Field(
         default=None,
         description="Override the discovered scope (some providers, e.g. Google, "
@@ -243,3 +255,18 @@ class OAuthProviderApp(BaseModel):
         "quirks live here — e.g. Google needs {'access_type': 'offline', 'prompt': "
         "'consent'} to return a refresh token (standard providers issue one without).",
     )
+
+    @model_validator(mode="after")
+    def _require_secret_for_confidential_method(self) -> OAuthProviderApp:
+        """A confidential client-auth method needs a secret — fail fast at config
+        load rather than silently POSTing an empty secret (and storing the
+        credential as a public ``none`` client) at the user's first Connect."""
+        if (
+            self.token_endpoint_auth_method in ("client_secret_basic", "client_secret_post")
+            and not self.client_secret
+        ):
+            raise ValueError(
+                f"token_endpoint_auth_method={self.token_endpoint_auth_method!r} "
+                "requires client_secret"
+            )
+        return self

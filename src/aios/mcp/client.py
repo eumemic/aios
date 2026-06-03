@@ -254,14 +254,31 @@ async def discover_mcp_tools(
     _pool = runtime.mcp_session_pool
 
     if _pool is not None:
-        # Pool path: reuse cached session; on failure evict + retry once.
+        # Pool path: check out a session; on a transport/protocol error discard
+        # it and retry once with a fresh one. Always release-or-discard so the
+        # per-key cap slot is freed.
+        entry = await _pool.acquire(url, vault_id, headers)
         try:
-            session, init_result = await _pool.get_or_connect(url, vault_id, headers)
-            result = await session.list_tools()
+            result = await entry.session.list_tools()
         except Exception:
-            _pool.evict(url, vault_id)
-            session, init_result = await _pool.get_or_connect(url, vault_id, headers)
-            result = await session.list_tools()
+            await asyncio.shield(_pool.discard(url, vault_id, entry))
+            entry = await _pool.acquire(url, vault_id, headers)
+            try:
+                result = await entry.session.list_tools()
+            except BaseException:
+                await asyncio.shield(_pool.discard(url, vault_id, entry))
+                raise
+            else:
+                await asyncio.shield(_pool.release(url, vault_id, entry))
+        except BaseException:
+            # CancelledError etc. — don't retry (a re-acquire mid-cancellation
+            # would spawn an owner task that's never tracked, leaking it); just
+            # discard the checked-out entry and propagate.
+            await asyncio.shield(_pool.discard(url, vault_id, entry))
+            raise
+        else:
+            await asyncio.shield(_pool.release(url, vault_id, entry))
+        init_result = entry.init_result
     else:
         # Fallback: fresh connection per call (API process, tests).
         async with AsyncExitStack() as stack:
@@ -327,30 +344,36 @@ async def call_mcp_tool(
         _pool = runtime.mcp_session_pool
 
         if _pool is not None:
+            entry = await _pool.acquire(url, vault_id, headers)
             try:
-                session, _ = await _pool.get_or_connect(url, vault_id, headers)
                 result = await _call_tool_fast(
-                    session,
+                    entry.session,
                     tool_name,
                     arguments,
                     meta,
-                    _pool.error_sink(url, vault_id),
+                    entry.error_sink,
                     _TOOL_CALL_TIMEOUT_S,
                 )
-            except Exception:
-                # Don't retry any call_tool failure: by the time the
-                # exception surfaces here, the request may already
-                # have reached the server and been processed —
-                # whether it was a timeout firing mid-response-read,
-                # a broken pipe, a TCP reset, or an HTTP/2 GOAWAY.
-                # A retry would duplicate the side effect — e.g.
-                # ``signal_send`` / ``telegram_send`` delivering the
-                # same message twice.  Evict so the next caller
-                # doesn't reuse the same session; surface the error
-                # so the model can decide whether to retry through
-                # the session log.
-                _pool.evict(url, vault_id)
+            except _McpHttpError:
+                # Benign application-level HTTP error (e.g. 403 "API not
+                # enabled") — the transport/session is healthy, so return it to
+                # idle for reuse rather than tearing it down and re-handshaking.
+                # shield so a second cancellation can't strand the entry checked
+                # out (leaking a per-key cap slot).
+                await asyncio.shield(_pool.release(url, vault_id, entry))
                 raise
+            except BaseException:
+                # Transport failure or cancellation — the session may be broken.
+                # Discard so the next caller doesn't reuse it. Don't retry: by
+                # the time the error surfaces the request may already have
+                # reached the server (timeout mid-response-read, broken pipe, TCP
+                # reset, HTTP/2 GOAWAY), so a retry could duplicate a side effect
+                # — e.g. ``signal_send`` delivering the same message twice.
+                # Surface the error so the model can retry through the session log.
+                await asyncio.shield(_pool.discard(url, vault_id, entry))
+                raise
+            else:
+                await asyncio.shield(_pool.release(url, vault_id, entry))
         else:
             async with AsyncExitStack() as stack:
                 session, _ = await _open_session(url, headers, stack)
