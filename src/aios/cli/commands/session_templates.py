@@ -37,7 +37,6 @@ _MAXW = {"name": 30, "agent_id": 24, "environment_id": 24}
 def list_(
     ctx: typer.Context,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
-    after: Annotated[str | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
@@ -48,7 +47,6 @@ def list_(
             max_widths=_MAXW,
             all_=all_,
             limit=limit,
-            after=after,
         )
 
     run_or_die(_run)

@@ -18,6 +18,7 @@ from aios.models.memory_stores import (
     MemoryUpdate,
     MemoryVersion,
 )
+from aios.models.pagination import page_cursor
 from aios.services import memory_stores as service
 
 router = APIRouter(prefix="/v1/memory-stores", tags=["memory-stores"])
@@ -49,25 +50,33 @@ async def create_store(
 async def list_stores(
     pool: PoolDep,
     account_id: AccountIdDep,
-    include_archived: bool = False,
-    limit: Annotated[int, Query(ge=1, le=200)] = 100,
-    after: str | None = None,
+    cursor: str | None = None,
+    include_archived: bool | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[MemoryStore]:
     """List memory stores, newest first.
 
     Unlike most resources, archived stores can be included via
-    ``include_archived=true`` (default false). Cursor pagination: pass
-    ``after`` from a previous response's ``next_after`` to get the next
-    page. The default limit is 100 since stores are typically few.
+    ``include_archived=true`` (default false). First page: optional
+    ``include_archived`` + ``?limit=``. Subsequent pages:
+    ``?cursor=<next_cursor>``. The default limit is 100 since stores are few.
     """
+    st = page_cursor(cursor, {"include_archived": include_archived, "limit": limit})
+    after = str(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 100)
+    archived = (
+        bool(st.filters.get("include_archived")) if st is not None else bool(include_archived)
+    )
     items = await service.list_stores(
         pool,
-        include_archived=include_archived,
-        limit=limit + 1,
+        include_archived=archived,
+        limit=page_limit + 1,
         after=after,
         account_id=account_id,
     )
-    return ListResponse[MemoryStore].paginate(items, limit, cursor=lambda x: x.id)
+    return ListResponse[MemoryStore].paginate(
+        items, page_limit, cursor=lambda x: x.id, filters={"include_archived": archived}
+    )
 
 
 @router.get("/{store_id}", operation_id="get_memory_store")

@@ -41,7 +41,6 @@ def list_(
         typer.Option("--status", help="Filter by status: running, idle, terminated."),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
-    after: Annotated[str | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
@@ -54,7 +53,7 @@ def list_(
                 envelope = client.request(
                     "GET",
                     "/v1/sessions",
-                    params={**params, "limit": limit, "after": after},
+                    params={**params, "limit": limit},
                 )
         render_list(state.output_format, envelope, columns=_SESSION_COLS, max_widths=_SESSION_MAXW)
 
@@ -180,7 +179,7 @@ def clone(
         if count == 1:
             render_single(results[0])
         else:
-            envelope = {"data": results, "has_more": False, "next_after": None}
+            envelope = {"data": results, "has_more": False, "next_cursor": None}
             state = get_state(ctx)
             render_list(
                 state.output_format, envelope, columns=_SESSION_COLS, max_widths=_SESSION_MAXW
@@ -266,29 +265,32 @@ def interrupt(
 def events(
     ctx: typer.Context,
     session_id: str,
-    after_seq: Annotated[int, typer.Option("--after-seq", min=0)] = 0,
+    direction: Annotated[
+        str,
+        typer.Option("--dir", help="forward (oldest first) or backward (newest-first tail)."),
+    ] = "forward",
     kind: Annotated[
         str | None,
         typer.Option("--kind", help="Filter by kind: message, lifecycle, span, interrupt."),
     ] = None,
-    limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 200,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 200,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
         state, client = with_client(ctx)
         with client:
             if all_:
-                data = fetch_all_events(client, session_id, kind=kind, after_seq=after_seq)
+                data = fetch_all_events(client, session_id, kind=kind, direction=direction)
                 envelope: dict[str, Any] = {
                     "data": data,
                     "has_more": False,
-                    "next_after": None,
+                    "next_cursor": None,
                 }
             else:
                 envelope = client.request(
                     "GET",
                     f"/v1/sessions/{session_id}/events",
-                    params={"after": after_seq, "kind": kind, "limit": limit},
+                    params={"dir": direction, "kind": kind, "limit": limit},
                 )
         render_list(
             state.output_format,

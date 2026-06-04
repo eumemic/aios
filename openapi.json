@@ -864,23 +864,11 @@
           "environments"
         ],
         "summary": "List ",
-        "description": "List environments, newest first, excluding archived.\n\nCursor pagination via ``after``.",
+        "description": "List environments, newest first, excluding archived.\n\nFirst page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>`` (the\ntoken is self-contained; no other params are accepted alongside it).",
         "operationId": "list_environments",
         "parameters": [
           {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "after",
+            "name": "cursor",
             "in": "query",
             "required": false,
             "schema": {
@@ -892,7 +880,25 @@
                   "type": "null"
                 }
               ],
-              "title": "After"
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
             }
           },
           {
@@ -1176,23 +1182,11 @@
           "agents"
         ],
         "summary": "List ",
-        "description": "List agents (latest version of each), newest first, excluding archived.\n\nCursor pagination: pass ``after`` from a previous response's\n``next_after`` to get the next page. Optional ``name`` filter matches\nexactly.",
+        "description": "List agents (latest version of each), newest first, excluding archived.\n\nFirst page: optional ``name`` filter (exact match) + ``?limit=``.\nSubsequent pages: ``?cursor=<next_cursor>`` (carries the filter; no other\nparams accepted alongside it).",
         "operationId": "list_agents",
         "parameters": [
           {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "after",
+            "name": "cursor",
             "in": "query",
             "required": false,
             "schema": {
@@ -1204,7 +1198,7 @@
                   "type": "null"
                 }
               ],
-              "title": "After"
+              "title": "Cursor"
             }
           },
           {
@@ -1221,6 +1215,24 @@
                 }
               ],
               "title": "Name"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
             }
           },
           {
@@ -1446,7 +1458,7 @@
           "agents"
         ],
         "summary": "List Versions",
-        "description": "List historical versions of an agent, newest first.\n\nCursor pagination by version number: pass ``after`` from a previous\nresponse's ``next_after`` to get the next page. Each version is a\ncomplete snapshot of the agent's config at the time it was created.",
+        "description": "List historical versions of an agent, newest first.\n\nFirst page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Each\nversion is a complete snapshot of the agent's config at creation time.",
         "operationId": "list_agent_versions",
         "parameters": [
           {
@@ -1459,31 +1471,37 @@
             }
           },
           {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "after",
+            "name": "cursor",
             "in": "query",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "type": "integer"
+                  "type": "string"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "title": "After"
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
             }
           },
           {
@@ -1661,6 +1679,22 @@
         "operationId": "list_sessions",
         "parameters": [
           {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
             "name": "agent_id",
             "in": "query",
             "required": false,
@@ -1704,27 +1738,17 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "after",
-            "in": "query",
-            "required": false,
-            "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
                 },
                 {
                   "type": "null"
                 }
               ],
-              "title": "After"
+              "title": "Limit"
             }
           },
           {
@@ -2889,7 +2913,7 @@
           "sessions"
         ],
         "summary": "List Events",
-        "description": "List events for a session, paginated by sequence number.\n\n**Forward (default).** Pass the response's ``next_after`` field as\n``?after=`` on the next call to walk forward through the stream. (The\nquery param was previously named ``after_seq``, which didn't match the\n``next_after`` response field \u2014 clients following the natural roundtrip\npattern sent ``?after=`` and got it silently ignored, causing pagination\nto loop on the first page. See issue #389.) ``?after_seq=N`` is accepted\nas an alias for ``?after=N`` for backwards compatibility (issue #596).\n\n**Backward (tail-anchored).** Pass ``?before=N`` to fetch the newest\n``limit`` events with ``seq < N``, returned **newest-first** (DESC). The\nresponse ``next_after`` is then the *smallest* seq in the page; pass it\nback as ``?before=`` to walk further into the past. A chat UI loads the\ntail with ``?before=<last_event_seq + 1>`` and pages older on scroll-up.\nSupplying ``before`` together with ``after``/``after_seq`` is a 422.",
+        "description": "List a session's events by sequence number.\n\nFirst page: ``?dir=forward|backward`` (default forward) + optional\n``?kind=`` / ``?error_only=`` + ``?limit=``. Subsequent pages:\n``?cursor=<next_cursor>`` \u2014 the token carries direction and filters, so no\nother params are accepted alongside it. ``forward`` walks oldest\u2192newest;\n``backward`` loads the newest-first tail and pages into the past.",
         "operationId": "list_session_events",
         "parameters": [
           {
@@ -2902,45 +2926,33 @@
             }
           },
           {
-            "name": "after",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 0,
-              "title": "After"
-            }
-          },
-          {
-            "name": "after_seq",
+            "name": "cursor",
             "in": "query",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "type": "integer"
+                  "type": "string"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "title": "After Seq"
+              "title": "Cursor"
             }
           },
           {
-            "name": "before",
+            "name": "dir",
             "in": "query",
             "required": false,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
+              "enum": [
+                "forward",
+                "backward"
               ],
-              "title": "Before"
+              "type": "string",
+              "default": "forward",
+              "title": "Dir"
             }
           },
           {
@@ -2966,25 +2978,37 @@
             }
           },
           {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 500,
-              "minimum": 1,
-              "default": 200,
-              "title": "Limit"
-            }
-          },
-          {
             "name": "error_only",
             "in": "query",
             "required": false,
             "schema": {
-              "type": "boolean",
-              "default": false,
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "title": "Error Only"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 500,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
             }
           },
           {
@@ -3373,23 +3397,11 @@
           "skills"
         ],
         "summary": "List ",
-        "description": "List skills (latest version of each), newest first, excluding archived.\n\nCursor pagination via ``after``.",
+        "description": "List skills (latest version of each), newest first, excluding archived.\n\nFirst page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``.",
         "operationId": "list_skills",
         "parameters": [
           {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "after",
+            "name": "cursor",
             "in": "query",
             "required": false,
             "schema": {
@@ -3401,7 +3413,25 @@
                   "type": "null"
                 }
               ],
-              "title": "After"
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
             }
           },
           {
@@ -3627,7 +3657,7 @@
           "skills"
         ],
         "summary": "List Versions",
-        "description": "List historical versions of a skill, newest first.\n\nCursor pagination by version number: pass ``after`` from a previous\nresponse's ``next_after`` to get the next page. Each version is a\ncomplete file-bundle snapshot at the time it was created.",
+        "description": "List historical versions of a skill, newest first.\n\nFirst page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Each\nversion is a complete file-bundle snapshot at the time it was created.",
         "operationId": "list_skill_versions",
         "parameters": [
           {
@@ -3640,31 +3670,37 @@
             }
           },
           {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "after",
+            "name": "cursor",
             "in": "query",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "type": "integer"
+                  "type": "string"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "title": "After"
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
             }
           },
           {
@@ -3840,23 +3876,11 @@
           "vaults"
         ],
         "summary": "List ",
-        "description": "List vaults, newest first, excluding archived.\n\nCursor pagination: pass ``after`` from a previous response's\n``next_after`` to get the next page.",
+        "description": "List vaults, newest first, excluding archived.\n\nFirst page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``.",
         "operationId": "list_vaults",
         "parameters": [
           {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "after",
+            "name": "cursor",
             "in": "query",
             "required": false,
             "schema": {
@@ -3868,7 +3892,25 @@
                   "type": "null"
                 }
               ],
-              "title": "After"
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
             }
           },
           {
@@ -4225,7 +4267,7 @@
           "vaults"
         ],
         "summary": "List Credentials",
-        "description": "List credentials in a vault, newest first, excluding archived.\n\nCursor pagination via ``after``. Secret material is never returned \u2014\nonly metadata (display name, target_url, auth_type, timestamps).",
+        "description": "List credentials in a vault, newest first, excluding archived.\n\nFirst page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Secret\nmaterial is never returned \u2014 only metadata (display name, target_url,\nauth_type, timestamps).",
         "operationId": "list_vault_credentials",
         "parameters": [
           {
@@ -4238,19 +4280,7 @@
             }
           },
           {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "after",
+            "name": "cursor",
             "in": "query",
             "required": false,
             "schema": {
@@ -4262,7 +4292,25 @@
                   "type": "null"
                 }
               ],
-              "title": "After"
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
             }
           },
           {
@@ -4784,33 +4832,11 @@
           "memory-stores"
         ],
         "summary": "List Stores",
-        "description": "List memory stores, newest first.\n\nUnlike most resources, archived stores can be included via\n``include_archived=true`` (default false). Cursor pagination: pass\n``after`` from a previous response's ``next_after`` to get the next\npage. The default limit is 100 since stores are typically few.",
+        "description": "List memory stores, newest first.\n\nUnlike most resources, archived stores can be included via\n``include_archived=true`` (default false). First page: optional\n``include_archived`` + ``?limit=``. Subsequent pages:\n``?cursor=<next_cursor>``. The default limit is 100 since stores are few.",
         "operationId": "list_memory_stores",
         "parameters": [
           {
-            "name": "include_archived",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false,
-              "title": "Include Archived"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 1,
-              "default": 100,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "after",
+            "name": "cursor",
             "in": "query",
             "required": false,
             "schema": {
@@ -4822,7 +4848,41 @@
                   "type": "null"
                 }
               ],
-              "title": "After"
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "include_archived",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Include Archived"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
             }
           },
           {
@@ -5781,9 +5841,25 @@
           "connections"
         ],
         "summary": "List ",
-        "description": "List connections, newest first, excluding archived. Cursor pagination via ``after``.\n\nFilters: ``connector`` (e.g. ``\"telegram\"``), ``session_id`` (only\nconnections in single_session mode bound to that session), ``mode``\n(``detached`` / ``single_session`` / ``per_chat``). Filters compose.",
+        "description": "List connections, newest first, excluding archived.\n\nFirst page: optional filters ``connector`` (e.g. ``\"telegram\"``),\n``session_id`` (single_session connections bound to that session), ``mode``\n(``detached`` / ``single_session`` / ``per_chat``) + ``?limit=``; filters\ncompose. Subsequent pages: ``?cursor=<next_cursor>`` (carries the filters).",
         "operationId": "list_connections",
         "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
           {
             "name": "connector",
             "in": "query",
@@ -5842,27 +5918,17 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "after",
-            "in": "query",
-            "required": false,
-            "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
                 },
                 {
                   "type": "null"
                 }
               ],
-              "title": "After"
+              "title": "Limit"
             }
           },
           {
@@ -7783,23 +7849,11 @@
           "session-templates"
         ],
         "summary": "List ",
-        "description": "List session templates, newest first, excluding archived.\n\nCursor pagination via ``after``.",
+        "description": "List session templates, newest first, excluding archived.\n\nFirst page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``.",
         "operationId": "list_session_templates",
         "parameters": [
           {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "after",
+            "name": "cursor",
             "in": "query",
             "required": false,
             "schema": {
@@ -7811,7 +7865,25 @@
                   "type": "null"
                 }
               ],
-              "title": "After"
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
             }
           },
           {
@@ -9818,7 +9890,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -9827,7 +9899,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -9850,7 +9922,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -9859,7 +9931,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -9896,7 +9968,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -9905,7 +9977,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -9928,7 +10000,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -9937,7 +10009,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -9960,7 +10032,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -9969,7 +10041,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -9992,7 +10064,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10001,7 +10073,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10024,7 +10096,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10033,7 +10105,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10056,7 +10128,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10065,7 +10137,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10088,7 +10160,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10097,7 +10169,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10120,7 +10192,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10129,7 +10201,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10152,7 +10224,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10161,7 +10233,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10184,7 +10256,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10193,7 +10265,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10216,7 +10288,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10225,7 +10297,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10248,7 +10320,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10257,7 +10329,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10280,7 +10352,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10289,7 +10361,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10312,7 +10384,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10321,7 +10393,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10351,7 +10423,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10360,7 +10432,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10383,7 +10455,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10392,7 +10464,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",
@@ -10415,7 +10487,7 @@
             "title": "Has More",
             "default": false
           },
-          "next_after": {
+          "next_cursor": {
             "anyOf": [
               {
                 "type": "string"
@@ -10424,7 +10496,7 @@
                 "type": "null"
               }
             ],
-            "title": "Next After"
+            "title": "Next Cursor"
           }
         },
         "type": "object",

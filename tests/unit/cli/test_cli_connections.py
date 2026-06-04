@@ -16,21 +16,23 @@ from tests.unit.cli.conftest import resource_response
 runner = CliRunner()
 
 
-def test_list_with_pagination(mocked_cli):
+def test_list_first_page_sends_limit_no_cursor(mocked_cli):
     mocked_cli.queue_response(
-        httpx.Response(200, json={"data": [], "has_more": False, "next_after": None})
+        httpx.Response(200, json={"data": [], "has_more": False, "next_cursor": None})
     )
-    result = runner.invoke(app, ["connections", "list", "--limit", "25", "--after", "conn_x"])
+    result = runner.invoke(app, ["connections", "list", "--limit", "25"])
     assert result.exit_code == 0, result.output
     assert mocked_cli.captured.method == "GET"
     assert mocked_cli.captured.path == "/v1/connections"
     assert mocked_cli.captured.query.get("limit") == ["25"]
-    assert mocked_cli.captured.query.get("after") == ["conn_x"]
+    # Opaque cursors replaced the raw --after keyset param entirely.
+    assert "after" not in mocked_cli.captured.query
+    assert "cursor" not in mocked_cli.captured.query
 
 
 def test_list_filters_pass_through(mocked_cli):
     mocked_cli.queue_response(
-        httpx.Response(200, json={"data": [], "has_more": False, "next_after": None})
+        httpx.Response(200, json={"data": [], "has_more": False, "next_cursor": None})
     )
     runner.invoke(
         app,

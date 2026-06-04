@@ -34,7 +34,6 @@ _COLS = ("id", "display_title", "latest_version", "updated_at")
 def list_(
     ctx: typer.Context,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
-    after: Annotated[str | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
@@ -44,7 +43,6 @@ def list_(
             columns=_COLS,
             all_=all_,
             limit=limit,
-            after=after,
         )
 
     run_or_die(_run)
@@ -105,7 +103,6 @@ def versions(
     ctx: typer.Context,
     skill_id: str,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
-    after: Annotated[int | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
@@ -116,7 +113,6 @@ def versions(
             max_widths={"description": 60, "name": 32},
             all_=all_,
             limit=limit,
-            after=after,
             skill_id=skill_id,
         )
 

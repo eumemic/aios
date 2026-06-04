@@ -1,9 +1,10 @@
-"""E2E tests for ``GET /v1/sessions/{id}/events`` pagination round-trip.
+"""E2E tests for ``GET /v1/sessions/{id}/events`` opaque-cursor pagination.
 
-Regression coverage for issue #389: the query param was named ``after_seq``
-while the response field was ``next_after``, so a naive client following the
-documented pattern (use ``next_after`` as the next call's ``?after=``) saw
-the value silently ignored and got the first page repeated forever.
+The first page selects a direction (``?dir=forward|backward``, default forward)
+plus optional ``?kind=``/``?error_only=`` and ``?limit=``; every subsequent page
+is just ``?cursor=<next_cursor>``, the opaque token from the previous response.
+Forward walks oldest→newest; backward loads the newest-first tail and pages into
+the past.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from unittest import mock
 import httpx
 import pytest
 
+from aios.models.events import EventKind
 from tests.helpers.connections import authed_client
 
 
@@ -57,6 +59,7 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
 
 
 _ACCOUNT_ID = "acc_test_stub"
+_EVENTS = "/v1/sessions/{sid}/events"
 
 
 async def _make_session_with_events(pool: Any, n_events: int = 5) -> str:
@@ -96,7 +99,7 @@ async def _make_session_with_events(pool: Any, n_events: int = 5) -> str:
     return session.id
 
 
-async def _append_event(pool: Any, session_id: str, kind: str, data: dict[str, Any]) -> int:
+async def _append_event(pool: Any, session_id: str, kind: EventKind, data: dict[str, Any]) -> int:
     """Append one raw event of an arbitrary ``kind``; returns its seq."""
     from aios.db import queries
 
@@ -105,7 +108,7 @@ async def _append_event(pool: Any, session_id: str, kind: str, data: dict[str, A
             conn,
             account_id=_ACCOUNT_ID,
             session_id=session_id,
-            kind=kind,  # type: ignore[arg-type]
+            kind=kind,
             data=data,
         )
     return event.seq
@@ -116,208 +119,223 @@ async def session_with_events(pool: Any) -> str:
     return await _make_session_with_events(pool, n_events=5)
 
 
-class TestEventsPaginationRoundTrip:
-    """The ``next_after`` cursor returned by one call must be acceptable as
-    ``?after=`` on the next call. Forward-paginating walks all events without
-    repeats. This was issue #389.
+async def _walk(
+    http_client: httpx.AsyncClient, session_id: str, first_params: dict[str, Any]
+) -> list[int]:
+    """Walk every page of the events endpoint, returning seqs in page order.
+
+    The first request carries ``first_params``; each subsequent request sends
+    only ``?cursor=<next_cursor>`` — proving the token is self-contained.
     """
+    seqs: list[int] = []
+    params = dict(first_params)
+    for _ in range(20):  # guardrail; the test sessions terminate in ~3 pages
+        r = await http_client.get(_EVENTS.format(sid=session_id), params=params)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        seqs.extend(e["seq"] for e in body["data"])
+        if not body["has_more"]:
+            assert body["next_cursor"] is None
+            break
+        assert body["next_cursor"] is not None
+        params = {"cursor": body["next_cursor"]}
+    else:
+        pytest.fail("pagination did not terminate within 20 iterations")
+    return seqs
 
-    async def test_after_advances_pagination(
+
+class TestForwardPagination:
+    """Default ``?dir=forward`` walks oldest→newest; ``next_cursor`` chains as the
+    next ``?cursor=`` with no repeats."""
+
+    async def test_first_page_is_oldest_first(
         self, http_client: httpx.AsyncClient, session_with_events: str
     ) -> None:
-        # First page, limit=2 → seqs 1..2 with has_more=True
-        r1 = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"limit": 2},
-        )
-        assert r1.status_code == 200, r1.text
-        page1 = r1.json()
-        assert len(page1["data"]) == 2
-        assert page1["has_more"] is True
-        assert page1["next_after"] is not None
-        page1_last_seq = page1["data"][-1]["seq"]
-        assert str(page1_last_seq) == page1["next_after"]
+        r = await http_client.get(_EVENTS.format(sid=session_with_events), params={"limit": 2})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert [e["seq"] for e in body["data"]] == [1, 2]
+        assert body["has_more"] is True
+        assert body["next_cursor"]  # opaque, non-empty
 
-        # Second page, ?after=<page1.next_after> → seqs MUST be > page1_last_seq.
-        # Pre-fix this returned seqs 1..2 again because `after_seq` defaulted to 0.
-        r2 = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"limit": 2, "after": page1["next_after"]},
-        )
-        assert r2.status_code == 200, r2.text
-        page2 = r2.json()
-        assert len(page2["data"]) == 2
-        for event in page2["data"]:
-            assert event["seq"] > page1_last_seq, (
-                f"page 2 returned seq {event['seq']}; expected > {page1_last_seq}. "
-                f"Pre-fix symptom: `?after=` was ignored and the same page came back."
-            )
-
-    async def test_full_walk_terminates_without_repeats(
+    async def test_full_forward_walk_no_repeats(
         self, http_client: httpx.AsyncClient, session_with_events: str
     ) -> None:
-        # Walk the full event stream paginated; assert no seq appears twice and
-        # the loop terminates (has_more eventually False or empty data).
-        seen: set[int] = set()
-        cursor: str | None = None
-        for iteration in range(20):  # guardrail; should terminate in ~3 iterations
-            params: dict[str, Any] = {"limit": 2}
-            if cursor is not None:
-                params["after"] = cursor
-            r = await http_client.get(
-                f"/v1/sessions/{session_with_events}/events",
-                params=params,
-            )
-            assert r.status_code == 200, r.text
-            body = r.json()
-            for event in body["data"]:
-                assert event["seq"] not in seen, (
-                    f"seq {event['seq']} returned twice during forward walk "
-                    f"(iteration {iteration}). Symptom of issue #389."
-                )
-                seen.add(event["seq"])
-            if not body["has_more"]:
-                break
-            cursor = body["next_after"]
-            assert cursor is not None
-        else:
-            pytest.fail("Pagination did not terminate within 20 iterations")
+        seqs = await _walk(http_client, session_with_events, {"dir": "forward", "limit": 2})
+        assert seqs == [1, 2, 3, 4, 5]
+        assert len(seqs) == len(set(seqs))
 
 
 class TestLimitValidation:
-    """Gap 1: limit > 500 must return 422; limit = 500 must be accepted."""
+    """limit > 500 must return 422; limit = 500 must be accepted."""
 
     async def test_limit_over_500_returns_422(
         self, http_client: httpx.AsyncClient, session_with_events: str
     ) -> None:
-        r = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"limit": 501},
-        )
+        r = await http_client.get(_EVENTS.format(sid=session_with_events), params={"limit": 501})
         assert r.status_code == 422, r.text
 
     async def test_limit_500_accepted(
         self, http_client: httpx.AsyncClient, session_with_events: str
     ) -> None:
-        r = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"limit": 500},
-        )
+        r = await http_client.get(_EVENTS.format(sid=session_with_events), params={"limit": 500})
         assert r.status_code == 200, r.text
 
 
 class TestHasMoreAccuracy:
-    """Gap 2: has_more must be a true off-by-one-free signal."""
+    """has_more must be an off-by-one-free signal; next_cursor is null on the last page."""
 
-    async def test_has_more_false_when_at_exact_boundary(
+    async def test_has_more_false_at_exact_boundary(
         self, http_client: httpx.AsyncClient, session_with_events: str
     ) -> None:
-        # session_with_events has exactly 5 events; requesting limit=5
-        # must return has_more=False (not True as the paginate() helper
-        # previously signalled when len==limit).
-        r = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"limit": 5},
-        )
+        # 5 events, limit=5 → one full page, no next page.
+        r = await http_client.get(_EVENTS.format(sid=session_with_events), params={"limit": 5})
         assert r.status_code == 200, r.text
         body = r.json()
         assert len(body["data"]) == 5
-        assert body["has_more"] is False, (
-            "has_more should be False when all events fit in exactly one page"
-        )
+        assert body["has_more"] is False
+        assert body["next_cursor"] is None
 
-    async def test_has_more_true_with_valid_next_after(
+    async def test_has_more_true_mints_cursor(
         self, http_client: httpx.AsyncClient, session_with_events: str
     ) -> None:
-        # 5 events, request limit=3 → has_more=True and next_after is set
-        r = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"limit": 3},
-        )
+        r = await http_client.get(_EVENTS.format(sid=session_with_events), params={"limit": 3})
         assert r.status_code == 200, r.text
         body = r.json()
         assert len(body["data"]) == 3
         assert body["has_more"] is True
-        assert body["next_after"] is not None
+        assert body["next_cursor"]
 
 
-class TestAfterSeqAlias:
-    """Gap 3: ?after_seq=N must work as an alias for ?after=N."""
+class TestBackwardPagination:
+    """``?dir=backward`` loads the newest-first tail; ``next_cursor`` walks into the past."""
 
-    async def test_after_seq_filters_events(
+    async def test_first_page_is_newest_first(
         self, http_client: httpx.AsyncClient, session_with_events: str
     ) -> None:
-        # Fetch first page to get a real seq value
-        r1 = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"limit": 2},
+        r = await http_client.get(
+            _EVENTS.format(sid=session_with_events),
+            params={"dir": "backward", "limit": 2},
         )
-        assert r1.status_code == 200, r1.text
-        page1 = r1.json()
-        boundary_seq = page1["data"][-1]["seq"]
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert [e["seq"] for e in body["data"]] == [5, 4]
+        assert body["has_more"] is True
+        assert body["next_cursor"]
 
-        # Use after_seq alias; all returned events must have seq > boundary_seq
-        r2 = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"after_seq": boundary_seq},
+    async def test_full_backward_walk_no_repeats(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        seqs = await _walk(http_client, session_with_events, {"dir": "backward", "limit": 2})
+        assert seqs == [5, 4, 3, 2, 1]
+        assert len(seqs) == len(set(seqs))
+
+    async def test_backward_chains_across_non_contiguous_filtered_seq(
+        self, http_client: httpx.AsyncClient, pool: Any
+    ) -> None:
+        # Interleave message and lifecycle events so message seqs are
+        # non-contiguous (1, 3, 5). A kind=message backward walk must chain via
+        # the opaque cursor across the gaps — proving the token, not lastSeq-limit
+        # arithmetic, drives the walk and that filters survive in the token.
+        from aios.services import sessions as sessions_svc
+
+        session_id = await _make_session_with_events(pool, n_events=0)
+        await sessions_svc.append_user_message(pool, session_id, "m1", account_id=_ACCOUNT_ID)
+        await _append_event(pool, session_id, "lifecycle", {"phase": "x"})
+        await sessions_svc.append_user_message(pool, session_id, "m3", account_id=_ACCOUNT_ID)
+        await _append_event(pool, session_id, "lifecycle", {"phase": "y"})
+        await sessions_svc.append_user_message(pool, session_id, "m5", account_id=_ACCOUNT_ID)
+
+        seqs = await _walk(
+            http_client, session_id, {"dir": "backward", "kind": "message", "limit": 1}
         )
-        assert r2.status_code == 200, r2.text
-        page2 = r2.json()
-        assert len(page2["data"]) > 0, "Expected events after the boundary seq"
-        for event in page2["data"]:
-            assert event["seq"] > boundary_seq, (
-                f"after_seq={boundary_seq} was ignored; got seq {event['seq']}"
-            )
+        assert seqs == [5, 3, 1]
+
+
+class TestCursorValidation:
+    """A ``?cursor=`` request is self-contained: any other param is a 422, and a
+    garbage token is a 422."""
+
+    async def _first_cursor(self, http_client: httpx.AsyncClient, session_id: str) -> str:
+        r = await http_client.get(_EVENTS.format(sid=session_id), params={"limit": 2})
+        assert r.status_code == 200, r.text
+        cursor = r.json()["next_cursor"]
+        assert cursor
+        return str(cursor)
+
+    async def test_cursor_with_limit_is_422(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        cursor = await self._first_cursor(http_client, session_with_events)
+        r = await http_client.get(
+            _EVENTS.format(sid=session_with_events), params={"cursor": cursor, "limit": 2}
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_cursor_with_kind_is_422(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        cursor = await self._first_cursor(http_client, session_with_events)
+        r = await http_client.get(
+            _EVENTS.format(sid=session_with_events),
+            params={"cursor": cursor, "kind": "message"},
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_cursor_alone_continues(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        cursor = await self._first_cursor(http_client, session_with_events)
+        r = await http_client.get(
+            _EVENTS.format(sid=session_with_events), params={"cursor": cursor}
+        )
+        assert r.status_code == 200, r.text
+        assert [e["seq"] for e in r.json()["data"]] == [3, 4]
+
+    async def test_malformed_cursor_is_422(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        r = await http_client.get(
+            _EVENTS.format(sid=session_with_events), params={"cursor": "not-a-real-token!!!"}
+        )
+        assert r.status_code == 422, r.text
 
 
 class TestSessionEventStats:
-    """Gaps 4/5: last_event_at and total_events on the Session resource."""
+    """last_event_at and total_events on the Session resource."""
 
     async def test_last_event_at_populated(
         self, http_client: httpx.AsyncClient, session_with_events: str
     ) -> None:
         r = await http_client.get(f"/v1/sessions/{session_with_events}")
         assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["last_event_at"] is not None, (
-            "last_event_at should be non-null after events are appended"
-        )
+        assert r.json()["last_event_at"] is not None
 
     async def test_total_events_count(
         self, http_client: httpx.AsyncClient, session_with_events: str
     ) -> None:
         r = await http_client.get(f"/v1/sessions/{session_with_events}")
         assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["total_events"] == 5, f"Expected total_events=5, got {body['total_events']}"
+        assert r.json()["total_events"] == 5
 
     async def test_fresh_session_has_zero_total_events(
         self, http_client: httpx.AsyncClient, pool: Any
     ) -> None:
-        # Create a session with no messages
         session_id = await _make_session_with_events(pool, n_events=0)
         r = await http_client.get(f"/v1/sessions/{session_id}")
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["total_events"] == 0, (
-            f"Expected total_events=0 for fresh session, got {body['total_events']}"
-        )
-        assert body["last_event_at"] is None, (
-            "last_event_at should be None for session with no events"
-        )
+        assert body["total_events"] == 0
+        assert body["last_event_at"] is None
 
 
 class TestGetSingleEvent:
-    """Gap 6: GET /v1/sessions/{id}/events/{event_id} must be a real endpoint."""
+    """GET /v1/sessions/{id}/events/{event_id} fetches one event."""
 
     async def test_get_event_by_id(
         self, http_client: httpx.AsyncClient, session_with_events: str
     ) -> None:
-        # List events to get a real event id
-        r_list = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"limit": 1},
-        )
+        r_list = await http_client.get(_EVENTS.format(sid=session_with_events), params={"limit": 1})
         assert r_list.status_code == 200, r_list.text
         first_event = r_list.json()["data"][0]
         event_id = first_event["id"]
@@ -337,134 +355,10 @@ class TestGetSingleEvent:
     async def test_get_event_wrong_session_returns_404(
         self, http_client: httpx.AsyncClient, pool: Any, session_with_events: str
     ) -> None:
-        # Get a real event id from session_with_events
-        r_list = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"limit": 1},
-        )
+        r_list = await http_client.get(_EVENTS.format(sid=session_with_events), params={"limit": 1})
         assert r_list.status_code == 200, r_list.text
         event_id = r_list.json()["data"][0]["id"]
 
-        # Create a different session; use its id with the real event id
         other_session_id = await _make_session_with_events(pool, n_events=0)
         r = await http_client.get(f"/v1/sessions/{other_session_id}/events/{event_id}")
         assert r.status_code == 404, r.text
-
-
-class TestBackwardPagination:
-    """Tail-anchored ``?before=N`` paging: newest-first pages that walk into the
-    past, with ``next_after`` chaining as the next ``?before=`` cursor.
-    """
-
-    async def test_before_returns_newest_first_page(
-        self, http_client: httpx.AsyncClient, session_with_events: str
-    ) -> None:
-        # 5 events (seq 1..5). before=6 (last_event_seq + 1), limit=2 → [5, 4].
-        r = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"before": 6, "limit": 2},
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        seqs = [e["seq"] for e in body["data"]]
-        assert seqs == [5, 4], f"expected newest-first [5, 4], got {seqs}"
-        assert body["has_more"] is True
-        # next_after is the SMALLEST seq in the page → the next ?before= cursor.
-        assert body["next_after"] == "4"
-
-    async def test_before_walks_into_the_past_without_repeats(
-        self, http_client: httpx.AsyncClient, session_with_events: str
-    ) -> None:
-        seen: list[int] = []
-        cursor = 6  # last_event_seq + 1 for a 5-event session
-        for _ in range(20):  # guardrail; should terminate in ~3 iterations
-            r = await http_client.get(
-                f"/v1/sessions/{session_with_events}/events",
-                params={"before": cursor, "limit": 2},
-            )
-            assert r.status_code == 200, r.text
-            body = r.json()
-            page_seqs = [e["seq"] for e in body["data"]]
-            assert page_seqs == sorted(page_seqs, reverse=True), (
-                f"backward page not newest-first: {page_seqs}"
-            )
-            seen.extend(page_seqs)
-            if not body["has_more"]:
-                break
-            cursor = int(body["next_after"])
-        else:
-            pytest.fail("backward pagination did not terminate within 20 iterations")
-        assert seen == [5, 4, 3, 2, 1], f"expected full descending walk, got {seen}"
-        assert len(seen) == len(set(seen)), "backward walk repeated a seq"
-
-    async def test_before_includes_newest_event(
-        self, http_client: httpx.AsyncClient, session_with_events: str
-    ) -> None:
-        # Off-by-one guard: before=last_event_seq+1 must include the newest event.
-        r_session = await http_client.get(f"/v1/sessions/{session_with_events}")
-        last_seq = r_session.json()["last_event_seq"]
-        r = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"before": last_seq + 1, "limit": 1},
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["data"][0]["seq"] == last_seq
-
-    async def test_before_and_after_together_is_422(
-        self, http_client: httpx.AsyncClient, session_with_events: str
-    ) -> None:
-        r = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"before": 6, "after": 1},
-        )
-        assert r.status_code == 422, r.text
-
-    async def test_before_and_after_seq_together_is_422(
-        self, http_client: httpx.AsyncClient, session_with_events: str
-    ) -> None:
-        r = await http_client.get(
-            f"/v1/sessions/{session_with_events}/events",
-            params={"before": 6, "after_seq": 1},
-        )
-        assert r.status_code == 422, r.text
-
-    async def test_before_chains_across_non_contiguous_filtered_seq(
-        self, http_client: httpx.AsyncClient, pool: Any
-    ) -> None:
-        # Interleave message and lifecycle events so message seqs are
-        # non-contiguous (1, 3, 5). Backward paging with kind=message must chain
-        # via next_after across the gaps — proving the cursor is the real
-        # returned seq, not lastSeq-limit arithmetic.
-        from aios.services import sessions as sessions_svc
-
-        session_id = await _make_session_with_events(pool, n_events=0)
-        await sessions_svc.append_user_message(
-            pool, session_id, "m1", account_id=_ACCOUNT_ID
-        )  # seq 1 (message)
-        await _append_event(pool, session_id, "lifecycle", {"phase": "x"})  # seq 2
-        await sessions_svc.append_user_message(
-            pool, session_id, "m3", account_id=_ACCOUNT_ID
-        )  # seq 3 (message)
-        await _append_event(pool, session_id, "lifecycle", {"phase": "y"})  # seq 4
-        await sessions_svc.append_user_message(
-            pool, session_id, "m5", account_id=_ACCOUNT_ID
-        )  # seq 5 (message)
-
-        seen: list[int] = []
-        cursor = 6
-        for _ in range(20):
-            r = await http_client.get(
-                f"/v1/sessions/{session_id}/events",
-                params={"before": cursor, "kind": "message", "limit": 1},
-            )
-            assert r.status_code == 200, r.text
-            body = r.json()
-            for e in body["data"]:
-                assert e["kind"] == "message"
-                seen.append(e["seq"])
-            if not body["has_more"]:
-                break
-            cursor = int(body["next_after"])
-        else:
-            pytest.fail("filtered backward pagination did not terminate")
-        assert seen == [5, 3, 1], f"expected message seqs newest-first, got {seen}"

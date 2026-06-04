@@ -8,6 +8,7 @@ from fastapi import APIRouter, Query, status
 
 from aios.api.deps import AccountIdDep, PoolDep
 from aios.models.common import ListResponse
+from aios.models.pagination import page_cursor
 from aios.models.skills import Skill, SkillCreate, SkillVersion, SkillVersionCreate
 from aios.services import skills as service
 
@@ -36,15 +37,20 @@ async def create(body: SkillCreate, pool: PoolDep, account_id: AccountIdDep) -> 
 async def list_(
     pool: PoolDep,
     account_id: AccountIdDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    after: str | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[Skill]:
     """List skills (latest version of each), newest first, excluding archived.
 
-    Cursor pagination via ``after``.
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``.
     """
-    items = await service.list_skills(pool, limit=limit + 1, after=after, account_id=account_id)
-    return ListResponse[Skill].paginate(items, limit, cursor=lambda x: x.id)
+    st = page_cursor(cursor, {"limit": limit})
+    after = str(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    items = await service.list_skills(
+        pool, limit=page_limit + 1, after=after, account_id=account_id
+    )
+    return ListResponse[Skill].paginate(items, page_limit, cursor=lambda x: x.id)
 
 
 @router.get("/{skill_id}", operation_id="get_skill")
@@ -92,19 +98,21 @@ async def list_versions(
     skill_id: str,
     pool: PoolDep,
     account_id: AccountIdDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    after: int | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[SkillVersion]:
     """List historical versions of a skill, newest first.
 
-    Cursor pagination by version number: pass ``after`` from a previous
-    response's ``next_after`` to get the next page. Each version is a
-    complete file-bundle snapshot at the time it was created.
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Each
+    version is a complete file-bundle snapshot at the time it was created.
     """
+    st = page_cursor(cursor, {"limit": limit})
+    after = int(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
     items = await service.list_skill_versions(
-        pool, skill_id, limit=limit + 1, after=after, account_id=account_id
+        pool, skill_id, limit=page_limit + 1, after=after, account_id=account_id
     )
-    return ListResponse[SkillVersion].paginate(items, limit, cursor=lambda x: str(x.version))
+    return ListResponse[SkillVersion].paginate(items, page_limit, cursor=lambda x: x.version)
 
 
 @router.get("/{skill_id}/versions/{version}", operation_id="get_skill_version")

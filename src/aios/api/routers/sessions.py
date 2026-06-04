@@ -41,6 +41,7 @@ from aios.models.github_repositories import (
     GithubRepositoryResourceEcho,
     GithubRepositoryUpdate,
 )
+from aios.models.pagination import Direction, page_cursor
 from aios.models.scheduled_tasks import (
     ScheduledTaskCreate,
     ScheduledTaskEcho,
@@ -107,23 +108,34 @@ async def create(
 async def list_(
     pool: PoolDep,
     account_id: AccountIdDep,
+    cursor: str | None = None,
     agent_id: str | None = None,
     status_filter: Annotated[
         SessionStatus | None,
         Query(alias="status"),
     ] = None,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    after: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[Session]:
+    st = page_cursor(cursor, {"agent_id": agent_id, "status": status_filter, "limit": limit})
+    after = str(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    if st is not None:
+        agent_id = st.filters.get("agent_id")
+        status_filter = st.filters.get("status")
     items = await service.list_sessions(
         pool,
         agent_id=agent_id,
         status=status_filter,
-        limit=limit + 1,
+        limit=page_limit + 1,
         after=after,
         account_id=account_id,
     )
-    return ListResponse[Session].paginate(items, limit, cursor=lambda x: x.id)
+    return ListResponse[Session].paginate(
+        items,
+        page_limit,
+        cursor=lambda x: x.id,
+        filters={"agent_id": agent_id, "status": status_filter},
+    )
 
 
 @router.get("/{session_id}", operation_id="get_session")
@@ -510,66 +522,68 @@ async def list_events(
     session_id: str,
     pool: PoolDep,
     account_id: AccountIdDep,
-    after: int = 0,
-    # after_seq is the legacy name; prefer after. Both are accepted.
-    after_seq: int | None = None,
-    # Backward (tail-anchored) cursor: ``?before=N`` returns the newest events
-    # with ``seq < N``, newest-first. Mutually exclusive with after/after_seq.
-    before: int | None = None,
+    cursor: str | None = None,
+    # First-page direction (this endpoint only): ``forward`` reads
+    # chronologically (ASC); ``backward`` loads the newest-first tail (DESC) for
+    # chat UIs paging into the past on scroll-up. Ignored on ``?cursor=`` pages.
+    direction: Annotated[Direction, Query(alias="dir")] = "forward",
     kind: EventKind | None = None,
-    # Higher cap than the standard 200: operators paginate through full
-    # session event logs via ``aios sessions events`` (one page per
-    # request), and a 200-row cap would multiply round-trip count by 2.5x
-    # for any meaningful session. 500 is the audit-recommended ceiling.
-    limit: Annotated[int, Query(ge=1, le=500)] = 200,
-    error_only: bool = False,
+    error_only: bool | None = None,
+    # Higher cap than the standard 200: operators page full event logs via
+    # ``aios sessions events``; 500 is the audit-recommended ceiling.
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
 ) -> ListResponse[Event]:
-    """List events for a session, paginated by sequence number.
+    """List a session's events by sequence number.
 
-    **Forward (default).** Pass the response's ``next_after`` field as
-    ``?after=`` on the next call to walk forward through the stream. (The
-    query param was previously named ``after_seq``, which didn't match the
-    ``next_after`` response field — clients following the natural roundtrip
-    pattern sent ``?after=`` and got it silently ignored, causing pagination
-    to loop on the first page. See issue #389.) ``?after_seq=N`` is accepted
-    as an alias for ``?after=N`` for backwards compatibility (issue #596).
-
-    **Backward (tail-anchored).** Pass ``?before=N`` to fetch the newest
-    ``limit`` events with ``seq < N``, returned **newest-first** (DESC). The
-    response ``next_after`` is then the *smallest* seq in the page; pass it
-    back as ``?before=`` to walk further into the past. A chat UI loads the
-    tail with ``?before=<last_event_seq + 1>`` and pages older on scroll-up.
-    Supplying ``before`` together with ``after``/``after_seq`` is a 422.
+    First page: ``?dir=forward|backward`` (default forward) + optional
+    ``?kind=`` / ``?error_only=`` + ``?limit=``. Subsequent pages:
+    ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
+    other params are accepted alongside it. ``forward`` walks oldest→newest;
+    ``backward`` loads the newest-first tail and pages into the past.
     """
-    if before is not None and (after_seq is not None or after):
-        raise ValidationError(
-            "Pass either 'before' (backward) or 'after'/'after_seq' (forward) — not both."
-        )
-    # Resolve after_seq alias: explicit after_seq overrides after.
-    effective_after = after_seq if after_seq is not None else after
-    # Scope check: 404 cross-tenant probes before reading events. The
-    # ``read_events`` query also filters by account_id, so this is
-    # belt-and-suspenders against a future query that forgets the
-    # filter — but the lookup is what gives the caller a clean 404
-    # rather than an empty list for a cross-tenant session id.
+    # Scope check: 404 cross-tenant probes before reading events. read_events
+    # also filters by account_id, so the lookup yields a clean 404 rather than
+    # an empty list for a cross-tenant session id.
     await service.get_session_basic(pool, session_id, account_id=account_id)
-    # Fetch one extra row so we can tell whether more exist without a
-    # separate COUNT query — accurate has_more with no off-by-one.
+    st = page_cursor(
+        cursor,
+        {
+            "kind": kind,
+            "error_only": error_only,
+            "limit": limit,
+            "dir": direction if direction != "forward" else None,
+        },
+    )
+    if st is not None:
+        direction = st.direction
+        kind = st.filters.get("kind")
+        error_only = bool(st.filters.get("error_only"))
+        page_limit = st.limit
+        seq = int(st.cursor)
+        after_seq, before = (seq, None) if direction == "forward" else (0, seq)
+    else:
+        error_only = bool(error_only)
+        page_limit = limit if limit is not None else 200
+        after_seq, before = 0, None
+    # Fetch one extra row to derive has_more without a separate COUNT query.
     rows = await service.read_events(
         pool,
         session_id,
-        after_seq=effective_after,
+        after_seq=after_seq,
         before=before,
         kind=kind,
-        limit=limit + 1,
+        limit=page_limit + 1,
+        newest_first=direction == "backward",
         error_only=error_only,
         account_id=account_id,
     )
-    # ``paginate`` is order-agnostic: the cursor is always the last kept row, so
-    # forward pages (ASC) chain via the largest seq as ``next_after`` and
-    # backward pages (DESC) via the smallest seq — which the client passes back
-    # as the next ``?before=``.
-    return ListResponse[Event].paginate(rows, limit, cursor=lambda x: str(x.seq))
+    return ListResponse[Event].paginate(
+        rows,
+        page_limit,
+        cursor=lambda x: x.seq,
+        direction=direction,
+        filters={"kind": kind, "error_only": error_only},
+    )
 
 
 @router.get("/{session_id}/events/{event_id}", operation_id="get_session_event")

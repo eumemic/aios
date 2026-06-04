@@ -2446,18 +2446,18 @@ async def read_events(
     newest_first: bool = False,
     error_only: bool = False,
 ) -> list[Event]:
-    # Backward (tail-anchored) paging: ``before`` returns the newest events with
-    # ``seq < before`` in DESC order, for chat-style reverse scroll. The default
-    # forward path returns ``seq > after_seq``.
-    params: list[Any]
+    # ``after_seq`` is a lower bound (forward, ASC by default); ``before`` is an
+    # upper bound for tail-anchored backward paging (chat-style reverse scroll),
+    # which is always newest-first. Both compose with ``kind``/``error_only``.
+    order = "DESC" if newest_first or before is not None else "ASC"
+    params: list[Any] = [session_id, account_id]
+    where = "session_id = $1 AND account_id = $2"
+    if after_seq:
+        params.append(after_seq)
+        where += f" AND seq > ${len(params)}"
     if before is not None:
-        order = "DESC"
-        params = [session_id, before, account_id]
-        where = "session_id = $1 AND seq < $2 AND account_id = $3"
-    else:
-        order = "DESC" if newest_first else "ASC"
-        params = [session_id, after_seq, account_id]
-        where = "session_id = $1 AND seq > $2 AND account_id = $3"
+        params.append(before)
+        where += f" AND seq < ${len(params)}"
     if kind is not None:
         params.append(kind)
         where += f" AND kind = ${len(params)}"

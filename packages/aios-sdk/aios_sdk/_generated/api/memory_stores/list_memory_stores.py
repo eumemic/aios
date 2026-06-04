@@ -12,9 +12,9 @@ from ...types import UNSET, Response, Unset
 
 def _get_kwargs(
     *,
-    include_archived: bool | Unset = False,
-    limit: int | Unset = 100,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    include_archived: bool | None | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -23,16 +23,26 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
-    params["include_archived"] = include_archived
-
-    params["limit"] = limit
-
-    json_after: None | str | Unset
-    if isinstance(after, Unset):
-        json_after = UNSET
+    json_cursor: None | str | Unset
+    if isinstance(cursor, Unset):
+        json_cursor = UNSET
     else:
-        json_after = after
-    params["after"] = json_after
+        json_cursor = cursor
+    params["cursor"] = json_cursor
+
+    json_include_archived: bool | None | Unset
+    if isinstance(include_archived, Unset):
+        json_include_archived = UNSET
+    else:
+        json_include_archived = include_archived
+    params["include_archived"] = json_include_archived
+
+    json_limit: int | None | Unset
+    if isinstance(limit, Unset):
+        json_limit = UNSET
+    else:
+        json_limit = limit
+    params["limit"] = json_limit
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -79,9 +89,9 @@ def _build_response(
 def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
-    include_archived: bool | Unset = False,
-    limit: int | Unset = 100,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    include_archived: bool | None | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseMemoryStore]:
     """List Stores
@@ -89,14 +99,14 @@ def sync_detailed(
      List memory stores, newest first.
 
     Unlike most resources, archived stores can be included via
-    ``include_archived=true`` (default false). Cursor pagination: pass
-    ``after`` from a previous response's ``next_after`` to get the next
-    page. The default limit is 100 since stores are typically few.
+    ``include_archived=true`` (default false). First page: optional
+    ``include_archived`` + ``?limit=``. Subsequent pages:
+    ``?cursor=<next_cursor>``. The default limit is 100 since stores are few.
 
     Args:
-        include_archived (bool | Unset):  Default: False.
-        limit (int | Unset):  Default: 100.
-        after (None | str | Unset):
+        cursor (None | str | Unset):
+        include_archived (bool | None | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -108,9 +118,9 @@ def sync_detailed(
     """
 
     kwargs = _get_kwargs(
+        cursor=cursor,
         include_archived=include_archived,
         limit=limit,
-        after=after,
         authorization=authorization,
     )
 
@@ -124,9 +134,9 @@ def sync_detailed(
 def sync(
     *,
     client: AuthenticatedClient | Client,
-    include_archived: bool | Unset = False,
-    limit: int | Unset = 100,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    include_archived: bool | None | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseMemoryStore | None:
     """List Stores
@@ -134,14 +144,14 @@ def sync(
      List memory stores, newest first.
 
     Unlike most resources, archived stores can be included via
-    ``include_archived=true`` (default false). Cursor pagination: pass
-    ``after`` from a previous response's ``next_after`` to get the next
-    page. The default limit is 100 since stores are typically few.
+    ``include_archived=true`` (default false). First page: optional
+    ``include_archived`` + ``?limit=``. Subsequent pages:
+    ``?cursor=<next_cursor>``. The default limit is 100 since stores are few.
 
     Args:
-        include_archived (bool | Unset):  Default: False.
-        limit (int | Unset):  Default: 100.
-        after (None | str | Unset):
+        cursor (None | str | Unset):
+        include_archived (bool | None | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -154,9 +164,9 @@ def sync(
 
     return sync_detailed(
         client=client,
+        cursor=cursor,
         include_archived=include_archived,
         limit=limit,
-        after=after,
         authorization=authorization,
     ).parsed
 
@@ -164,9 +174,9 @@ def sync(
 async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
-    include_archived: bool | Unset = False,
-    limit: int | Unset = 100,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    include_archived: bool | None | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseMemoryStore]:
     """List Stores
@@ -174,14 +184,14 @@ async def asyncio_detailed(
      List memory stores, newest first.
 
     Unlike most resources, archived stores can be included via
-    ``include_archived=true`` (default false). Cursor pagination: pass
-    ``after`` from a previous response's ``next_after`` to get the next
-    page. The default limit is 100 since stores are typically few.
+    ``include_archived=true`` (default false). First page: optional
+    ``include_archived`` + ``?limit=``. Subsequent pages:
+    ``?cursor=<next_cursor>``. The default limit is 100 since stores are few.
 
     Args:
-        include_archived (bool | Unset):  Default: False.
-        limit (int | Unset):  Default: 100.
-        after (None | str | Unset):
+        cursor (None | str | Unset):
+        include_archived (bool | None | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -193,9 +203,9 @@ async def asyncio_detailed(
     """
 
     kwargs = _get_kwargs(
+        cursor=cursor,
         include_archived=include_archived,
         limit=limit,
-        after=after,
         authorization=authorization,
     )
 
@@ -207,9 +217,9 @@ async def asyncio_detailed(
 async def asyncio(
     *,
     client: AuthenticatedClient | Client,
-    include_archived: bool | Unset = False,
-    limit: int | Unset = 100,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    include_archived: bool | None | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseMemoryStore | None:
     """List Stores
@@ -217,14 +227,14 @@ async def asyncio(
      List memory stores, newest first.
 
     Unlike most resources, archived stores can be included via
-    ``include_archived=true`` (default false). Cursor pagination: pass
-    ``after`` from a previous response's ``next_after`` to get the next
-    page. The default limit is 100 since stores are typically few.
+    ``include_archived=true`` (default false). First page: optional
+    ``include_archived`` + ``?limit=``. Subsequent pages:
+    ``?cursor=<next_cursor>``. The default limit is 100 since stores are few.
 
     Args:
-        include_archived (bool | Unset):  Default: False.
-        limit (int | Unset):  Default: 100.
-        after (None | str | Unset):
+        cursor (None | str | Unset):
+        include_archived (bool | None | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -238,9 +248,9 @@ async def asyncio(
     return (
         await asyncio_detailed(
             client=client,
+            cursor=cursor,
             include_archived=include_archived,
             limit=limit,
-            after=after,
             authorization=authorization,
         )
     ).parsed

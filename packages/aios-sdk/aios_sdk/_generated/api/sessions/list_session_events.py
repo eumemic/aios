@@ -8,6 +8,7 @@ from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
 from ...models.list_response_event import ListResponseEvent
+from ...models.list_session_events_dir import ListSessionEventsDir
 from ...models.list_session_events_kind_type_0 import ListSessionEventsKindType0
 from ...types import UNSET, Response, Unset
 
@@ -15,12 +16,11 @@ from ...types import UNSET, Response, Unset
 def _get_kwargs(
     session_id: str,
     *,
-    after: int | Unset = 0,
-    after_seq: int | None | Unset = UNSET,
-    before: int | None | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
-    limit: int | Unset = 200,
-    error_only: bool | Unset = False,
+    error_only: bool | None | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -29,21 +29,18 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
-    params["after"] = after
-
-    json_after_seq: int | None | Unset
-    if isinstance(after_seq, Unset):
-        json_after_seq = UNSET
+    json_cursor: None | str | Unset
+    if isinstance(cursor, Unset):
+        json_cursor = UNSET
     else:
-        json_after_seq = after_seq
-    params["after_seq"] = json_after_seq
+        json_cursor = cursor
+    params["cursor"] = json_cursor
 
-    json_before: int | None | Unset
-    if isinstance(before, Unset):
-        json_before = UNSET
-    else:
-        json_before = before
-    params["before"] = json_before
+    json_dir_: str | Unset = UNSET
+    if not isinstance(dir_, Unset):
+        json_dir_ = dir_.value
+
+    params["dir"] = json_dir_
 
     json_kind: None | str | Unset
     if isinstance(kind, Unset):
@@ -54,9 +51,19 @@ def _get_kwargs(
         json_kind = kind
     params["kind"] = json_kind
 
-    params["limit"] = limit
+    json_error_only: bool | None | Unset
+    if isinstance(error_only, Unset):
+        json_error_only = UNSET
+    else:
+        json_error_only = error_only
+    params["error_only"] = json_error_only
 
-    params["error_only"] = error_only
+    json_limit: int | None | Unset
+    if isinstance(limit, Unset):
+        json_limit = UNSET
+    else:
+        json_limit = limit
+    params["limit"] = json_limit
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -106,41 +113,30 @@ def sync_detailed(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after: int | Unset = 0,
-    after_seq: int | None | Unset = UNSET,
-    before: int | None | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
-    limit: int | Unset = 200,
-    error_only: bool | Unset = False,
+    error_only: bool | None | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseEvent]:
     """List Events
 
-     List events for a session, paginated by sequence number.
+     List a session's events by sequence number.
 
-    **Forward (default).** Pass the response's ``next_after`` field as
-    ``?after=`` on the next call to walk forward through the stream. (The
-    query param was previously named ``after_seq``, which didn't match the
-    ``next_after`` response field — clients following the natural roundtrip
-    pattern sent ``?after=`` and got it silently ignored, causing pagination
-    to loop on the first page. See issue #389.) ``?after_seq=N`` is accepted
-    as an alias for ``?after=N`` for backwards compatibility (issue #596).
-
-    **Backward (tail-anchored).** Pass ``?before=N`` to fetch the newest
-    ``limit`` events with ``seq < N``, returned **newest-first** (DESC). The
-    response ``next_after`` is then the *smallest* seq in the page; pass it
-    back as ``?before=`` to walk further into the past. A chat UI loads the
-    tail with ``?before=<last_event_seq + 1>`` and pages older on scroll-up.
-    Supplying ``before`` together with ``after``/``after_seq`` is a 422.
+    First page: ``?dir=forward|backward`` (default forward) + optional
+    ``?kind=`` / ``?error_only=`` + ``?limit=``. Subsequent pages:
+    ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
+    other params are accepted alongside it. ``forward`` walks oldest→newest;
+    ``backward`` loads the newest-first tail and pages into the past.
 
     Args:
         session_id (str):
-        after (int | Unset):  Default: 0.
-        after_seq (int | None | Unset):
-        before (int | None | Unset):
+        cursor (None | str | Unset):
+        dir_ (ListSessionEventsDir | Unset):  Default: ListSessionEventsDir.FORWARD.
         kind (ListSessionEventsKindType0 | None | Unset):
-        limit (int | Unset):  Default: 200.
-        error_only (bool | Unset):  Default: False.
+        error_only (bool | None | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -153,12 +149,11 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         session_id=session_id,
-        after=after,
-        after_seq=after_seq,
-        before=before,
+        cursor=cursor,
+        dir_=dir_,
         kind=kind,
-        limit=limit,
         error_only=error_only,
+        limit=limit,
         authorization=authorization,
     )
 
@@ -173,41 +168,30 @@ def sync(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after: int | Unset = 0,
-    after_seq: int | None | Unset = UNSET,
-    before: int | None | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
-    limit: int | Unset = 200,
-    error_only: bool | Unset = False,
+    error_only: bool | None | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseEvent | None:
     """List Events
 
-     List events for a session, paginated by sequence number.
+     List a session's events by sequence number.
 
-    **Forward (default).** Pass the response's ``next_after`` field as
-    ``?after=`` on the next call to walk forward through the stream. (The
-    query param was previously named ``after_seq``, which didn't match the
-    ``next_after`` response field — clients following the natural roundtrip
-    pattern sent ``?after=`` and got it silently ignored, causing pagination
-    to loop on the first page. See issue #389.) ``?after_seq=N`` is accepted
-    as an alias for ``?after=N`` for backwards compatibility (issue #596).
-
-    **Backward (tail-anchored).** Pass ``?before=N`` to fetch the newest
-    ``limit`` events with ``seq < N``, returned **newest-first** (DESC). The
-    response ``next_after`` is then the *smallest* seq in the page; pass it
-    back as ``?before=`` to walk further into the past. A chat UI loads the
-    tail with ``?before=<last_event_seq + 1>`` and pages older on scroll-up.
-    Supplying ``before`` together with ``after``/``after_seq`` is a 422.
+    First page: ``?dir=forward|backward`` (default forward) + optional
+    ``?kind=`` / ``?error_only=`` + ``?limit=``. Subsequent pages:
+    ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
+    other params are accepted alongside it. ``forward`` walks oldest→newest;
+    ``backward`` loads the newest-first tail and pages into the past.
 
     Args:
         session_id (str):
-        after (int | Unset):  Default: 0.
-        after_seq (int | None | Unset):
-        before (int | None | Unset):
+        cursor (None | str | Unset):
+        dir_ (ListSessionEventsDir | Unset):  Default: ListSessionEventsDir.FORWARD.
         kind (ListSessionEventsKindType0 | None | Unset):
-        limit (int | Unset):  Default: 200.
-        error_only (bool | Unset):  Default: False.
+        error_only (bool | None | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -221,12 +205,11 @@ def sync(
     return sync_detailed(
         session_id=session_id,
         client=client,
-        after=after,
-        after_seq=after_seq,
-        before=before,
+        cursor=cursor,
+        dir_=dir_,
         kind=kind,
-        limit=limit,
         error_only=error_only,
+        limit=limit,
         authorization=authorization,
     ).parsed
 
@@ -235,41 +218,30 @@ async def asyncio_detailed(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after: int | Unset = 0,
-    after_seq: int | None | Unset = UNSET,
-    before: int | None | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
-    limit: int | Unset = 200,
-    error_only: bool | Unset = False,
+    error_only: bool | None | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseEvent]:
     """List Events
 
-     List events for a session, paginated by sequence number.
+     List a session's events by sequence number.
 
-    **Forward (default).** Pass the response's ``next_after`` field as
-    ``?after=`` on the next call to walk forward through the stream. (The
-    query param was previously named ``after_seq``, which didn't match the
-    ``next_after`` response field — clients following the natural roundtrip
-    pattern sent ``?after=`` and got it silently ignored, causing pagination
-    to loop on the first page. See issue #389.) ``?after_seq=N`` is accepted
-    as an alias for ``?after=N`` for backwards compatibility (issue #596).
-
-    **Backward (tail-anchored).** Pass ``?before=N`` to fetch the newest
-    ``limit`` events with ``seq < N``, returned **newest-first** (DESC). The
-    response ``next_after`` is then the *smallest* seq in the page; pass it
-    back as ``?before=`` to walk further into the past. A chat UI loads the
-    tail with ``?before=<last_event_seq + 1>`` and pages older on scroll-up.
-    Supplying ``before`` together with ``after``/``after_seq`` is a 422.
+    First page: ``?dir=forward|backward`` (default forward) + optional
+    ``?kind=`` / ``?error_only=`` + ``?limit=``. Subsequent pages:
+    ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
+    other params are accepted alongside it. ``forward`` walks oldest→newest;
+    ``backward`` loads the newest-first tail and pages into the past.
 
     Args:
         session_id (str):
-        after (int | Unset):  Default: 0.
-        after_seq (int | None | Unset):
-        before (int | None | Unset):
+        cursor (None | str | Unset):
+        dir_ (ListSessionEventsDir | Unset):  Default: ListSessionEventsDir.FORWARD.
         kind (ListSessionEventsKindType0 | None | Unset):
-        limit (int | Unset):  Default: 200.
-        error_only (bool | Unset):  Default: False.
+        error_only (bool | None | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -282,12 +254,11 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         session_id=session_id,
-        after=after,
-        after_seq=after_seq,
-        before=before,
+        cursor=cursor,
+        dir_=dir_,
         kind=kind,
-        limit=limit,
         error_only=error_only,
+        limit=limit,
         authorization=authorization,
     )
 
@@ -300,41 +271,30 @@ async def asyncio(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    after: int | Unset = 0,
-    after_seq: int | None | Unset = UNSET,
-    before: int | None | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
-    limit: int | Unset = 200,
-    error_only: bool | Unset = False,
+    error_only: bool | None | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseEvent | None:
     """List Events
 
-     List events for a session, paginated by sequence number.
+     List a session's events by sequence number.
 
-    **Forward (default).** Pass the response's ``next_after`` field as
-    ``?after=`` on the next call to walk forward through the stream. (The
-    query param was previously named ``after_seq``, which didn't match the
-    ``next_after`` response field — clients following the natural roundtrip
-    pattern sent ``?after=`` and got it silently ignored, causing pagination
-    to loop on the first page. See issue #389.) ``?after_seq=N`` is accepted
-    as an alias for ``?after=N`` for backwards compatibility (issue #596).
-
-    **Backward (tail-anchored).** Pass ``?before=N`` to fetch the newest
-    ``limit`` events with ``seq < N``, returned **newest-first** (DESC). The
-    response ``next_after`` is then the *smallest* seq in the page; pass it
-    back as ``?before=`` to walk further into the past. A chat UI loads the
-    tail with ``?before=<last_event_seq + 1>`` and pages older on scroll-up.
-    Supplying ``before`` together with ``after``/``after_seq`` is a 422.
+    First page: ``?dir=forward|backward`` (default forward) + optional
+    ``?kind=`` / ``?error_only=`` + ``?limit=``. Subsequent pages:
+    ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
+    other params are accepted alongside it. ``forward`` walks oldest→newest;
+    ``backward`` loads the newest-first tail and pages into the past.
 
     Args:
         session_id (str):
-        after (int | Unset):  Default: 0.
-        after_seq (int | None | Unset):
-        before (int | None | Unset):
+        cursor (None | str | Unset):
+        dir_ (ListSessionEventsDir | Unset):  Default: ListSessionEventsDir.FORWARD.
         kind (ListSessionEventsKindType0 | None | Unset):
-        limit (int | Unset):  Default: 200.
-        error_only (bool | Unset):  Default: False.
+        error_only (bool | None | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -349,12 +309,11 @@ async def asyncio(
         await asyncio_detailed(
             session_id=session_id,
             client=client,
-            after=after,
-            after_seq=after_seq,
-            before=before,
+            cursor=cursor,
+            dir_=dir_,
             kind=kind,
-            limit=limit,
             error_only=error_only,
+            limit=limit,
             authorization=authorization,
         )
     ).parsed
