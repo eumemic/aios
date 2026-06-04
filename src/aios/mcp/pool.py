@@ -1,7 +1,8 @@
 """Worker-scoped MCP session pool — per-call session checkout.
 
-Holds initialized ``ClientSession`` instances per ``(url, vault_id)`` key
-(stable across OAuth token rotation — see :meth:`acquire` and #459) so tool
+Holds initialized ``ClientSession`` instances per ``(url, vault_id, headers_key)``
+key (``headers_key`` hashes only the static spec headers, so the key is stable
+across OAuth token rotation — see :meth:`acquire` and #459) so tool
 discovery and invocation can reuse an already-initialized MCP connection
 instead of opening a fresh one on every call.
 
@@ -63,7 +64,7 @@ log = get_logger("aios.mcp.pool")
 # can't keep the worker on a dead socket indefinitely.
 _MCP_HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
 
-# Cap on live sessions per ``(url, vault_id)``. Bounds session/connection growth
+# Cap on live sessions per ``(url, vault_id, headers_key)``. Bounds session/connection growth
 # under a model that fires many concurrent calls at one server; at the cap an
 # ``acquire`` waits for a release rather than opening unboundedly. A session is
 # created only when in-use < cap and none are idle, so the total live count never
@@ -154,8 +155,9 @@ class _Entry:
         # entry is by definition active), so last_used is the time the entry
         # last finished a checkout.
         #
-        # Post-#459 the pool keys on (url, vault_id), stable across
-        # OAuth refresh. The reaper's remaining job is the cold-entry
+        # Post-#459 the pool keys on (url, vault_id, headers_key), stable
+        # across OAuth refresh (headers_key hashes only the static spec
+        # headers). The reaper's remaining job is the cold-entry
         # vector (a vault whose tenant never returns) — defense-in-depth
         # signed off in #459's planning round, not silent accretion.
         self.last_used = last_used
