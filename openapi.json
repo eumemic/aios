@@ -9233,6 +9233,20 @@
       },
       "EnvironmentConfig": {
         "properties": {
+          "image": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image",
+            "description": "Container image for sessions bound to this environment. When unset, sessions provision from the worker's global ``settings.docker_image``. Lets a purpose-built environment (e.g. an autodev dev image with toolchains baked in) pin its own image without changing the image every other session on the shared worker uses (issue #724). Accepts any reference the worker's Docker daemon can resolve: a registry image (``ghcr.io/eumemic/aios-sandbox:pinned``) or a bare local tag for development."
+          },
           "packages": {
             "anyOf": [
               {
@@ -9284,6 +9298,32 @@
             ],
             "title": "Env",
             "description": "Environment variables injected into every session container using this environment.  Per-session env overrides these."
+          },
+          "disk_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 10485760.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disk Bytes",
+            "description": "Maximum writable-layer size, in bytes, for sandbox containers bound to this environment. When unset, falls back to the worker's global ``settings.sandbox_disk_bytes`` (itself unbounded by default). Translates to ``docker run --storage-opt size=`` so a heavy dev build can't fill the host disk and take down the worker. Only honored by storage drivers that support per-container quotas; on an unsupported driver Docker rejects the flag at create time. Minimum 10 MiB (issue #725)."
+          },
+          "bash_timeout_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bash Timeout Seconds",
+            "description": "Ceiling, in seconds, for a single bash tool call in sessions bound to this environment. When unset, falls back to the worker's global ``settings.bash_default_timeout_seconds`` (120s). Lets heavy dev workloads run >120s commands without raising the global default for every session on the worker. The agent can still request a shorter per-call timeout; this is the maximum it is capped to (issue #725)."
           }
         },
         "additionalProperties": false,

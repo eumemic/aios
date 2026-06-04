@@ -102,6 +102,12 @@ class SandboxSpec:
     cpu_quota: float | None = None
     memory_bytes: int | None = None
     pids_limit: int | None = None
+    # Writable-layer disk cap (issue #725). ``None`` leaves the host's
+    # default (unbounded) in place. The spec builder resolves this from
+    # the environment's ``disk_bytes`` override, falling back to the
+    # global ``settings.sandbox_disk_bytes``; the backend injects
+    # ``--storage-opt size=`` when set.
+    disk_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

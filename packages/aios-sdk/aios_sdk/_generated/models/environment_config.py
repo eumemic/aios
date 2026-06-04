@@ -24,17 +24,35 @@ class EnvironmentConfig:
     """Container configuration for an environment.
 
     Attributes:
+        image (None | str | Unset): Container image for sessions bound to this environment. When unset, sessions
+            provision from the worker's global ``settings.docker_image``. Lets a purpose-built environment (e.g. an autodev
+            dev image with toolchains baked in) pin its own image without changing the image every other session on the
+            shared worker uses (issue #724). Accepts any reference the worker's Docker daemon can resolve: a registry image
+            (``ghcr.io/eumemic/aios-sandbox:pinned``) or a bare local tag for development.
         packages (EnvironmentConfigPackagesType0 | None | Unset): Package manager → package list, e.g. {"pip":
             ["pandas"], "npm": ["express"]}.
         networking (LimitedNetworking | None | UnrestrictedNetworking | Unset): Network access rules.  None or {"type":
             "unrestricted"} for full access; {"type": "limited", "allowed_hosts": [...]} to restrict.
         env (EnvironmentConfigEnvType0 | None | Unset): Environment variables injected into every session container
             using this environment.  Per-session env overrides these.
+        disk_bytes (int | None | Unset): Maximum writable-layer size, in bytes, for sandbox containers bound to this
+            environment. When unset, falls back to the worker's global ``settings.sandbox_disk_bytes`` (itself unbounded by
+            default). Translates to ``docker run --storage-opt size=`` so a heavy dev build can't fill the host disk and
+            take down the worker. Only honored by storage drivers that support per-container quotas; on an unsupported
+            driver Docker rejects the flag at create time. Minimum 10 MiB (issue #725).
+        bash_timeout_seconds (int | None | Unset): Ceiling, in seconds, for a single bash tool call in sessions bound to
+            this environment. When unset, falls back to the worker's global ``settings.bash_default_timeout_seconds``
+            (120s). Lets heavy dev workloads run >120s commands without raising the global default for every session on the
+            worker. The agent can still request a shorter per-call timeout; this is the maximum it is capped to (issue
+            #725).
     """
 
+    image: None | str | Unset = UNSET
     packages: EnvironmentConfigPackagesType0 | None | Unset = UNSET
     networking: LimitedNetworking | None | UnrestrictedNetworking | Unset = UNSET
     env: EnvironmentConfigEnvType0 | None | Unset = UNSET
+    disk_bytes: int | None | Unset = UNSET
+    bash_timeout_seconds: int | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.environment_config_env_type_0 import EnvironmentConfigEnvType0
@@ -43,6 +61,12 @@ class EnvironmentConfig:
         )
         from ..models.limited_networking import LimitedNetworking
         from ..models.unrestricted_networking import UnrestrictedNetworking
+
+        image: None | str | Unset
+        if isinstance(self.image, Unset):
+            image = UNSET
+        else:
+            image = self.image
 
         packages: dict[str, Any] | None | Unset
         if isinstance(self.packages, Unset):
@@ -70,15 +94,33 @@ class EnvironmentConfig:
         else:
             env = self.env
 
+        disk_bytes: int | None | Unset
+        if isinstance(self.disk_bytes, Unset):
+            disk_bytes = UNSET
+        else:
+            disk_bytes = self.disk_bytes
+
+        bash_timeout_seconds: int | None | Unset
+        if isinstance(self.bash_timeout_seconds, Unset):
+            bash_timeout_seconds = UNSET
+        else:
+            bash_timeout_seconds = self.bash_timeout_seconds
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
+        if image is not UNSET:
+            field_dict["image"] = image
         if packages is not UNSET:
             field_dict["packages"] = packages
         if networking is not UNSET:
             field_dict["networking"] = networking
         if env is not UNSET:
             field_dict["env"] = env
+        if disk_bytes is not UNSET:
+            field_dict["disk_bytes"] = disk_bytes
+        if bash_timeout_seconds is not UNSET:
+            field_dict["bash_timeout_seconds"] = bash_timeout_seconds
 
         return field_dict
 
@@ -92,6 +134,15 @@ class EnvironmentConfig:
         from ..models.unrestricted_networking import UnrestrictedNetworking
 
         d = dict(src_dict)
+
+        def _parse_image(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        image = _parse_image(d.pop("image", UNSET))
 
         def _parse_packages(
             data: object,
@@ -156,10 +207,33 @@ class EnvironmentConfig:
 
         env = _parse_env(d.pop("env", UNSET))
 
+        def _parse_disk_bytes(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        disk_bytes = _parse_disk_bytes(d.pop("disk_bytes", UNSET))
+
+        def _parse_bash_timeout_seconds(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        bash_timeout_seconds = _parse_bash_timeout_seconds(
+            d.pop("bash_timeout_seconds", UNSET)
+        )
+
         environment_config = cls(
+            image=image,
             packages=packages,
             networking=networking,
             env=env,
+            disk_bytes=disk_bytes,
+            bash_timeout_seconds=bash_timeout_seconds,
         )
 
         return environment_config

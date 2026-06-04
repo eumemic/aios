@@ -102,22 +102,41 @@ class TestResourceCapFlags:
         assert argv[i + 1] == "512"
 
     @pytest.mark.asyncio
+    async def test_disk_bytes_emits_storage_opt_size(self) -> None:
+        """A disk cap flips ``--storage-opt size=<bytes>`` (issue #725) so a
+        heavy build can't grow the container's writable layer past the cap."""
+        argv = await _capture_argv(_spec(disk_bytes=2 * 1024 * 1024 * 1024))
+        assert "--storage-opt" in argv
+        i = argv.index("--storage-opt")
+        assert argv[i + 1] == f"size={2 * 1024 * 1024 * 1024}"
+
+    @pytest.mark.asyncio
     async def test_no_caps_emits_no_resource_flags(self) -> None:
         """An all-defaults spec leaves the host's default behaviour intact:
-        no ``--cpus``, no ``--memory*``, no ``--pids-limit``.
+        no ``--cpus``, no ``--memory*``, no ``--pids-limit``, no
+        ``--storage-opt``.
         """
         argv = await _capture_argv(_spec())
         assert "--cpus" not in argv
         assert "--memory" not in argv
         assert "--memory-swap" not in argv
         assert "--pids-limit" not in argv
+        assert "--storage-opt" not in argv
 
     @pytest.mark.asyncio
     async def test_all_caps_set_together(self) -> None:
         argv = await _capture_argv(
-            _spec(cpu_quota=2.0, memory_bytes=128 * 1024 * 1024, pids_limit=64)
+            _spec(
+                cpu_quota=2.0,
+                memory_bytes=128 * 1024 * 1024,
+                pids_limit=64,
+                disk_bytes=512 * 1024 * 1024,
+            )
         )
         assert "--cpus" in argv
         assert "--memory" in argv
         assert "--memory-swap" in argv
         assert "--pids-limit" in argv
+        assert "--storage-opt" in argv
+        i = argv.index("--storage-opt")
+        assert argv[i + 1] == f"size={512 * 1024 * 1024}"

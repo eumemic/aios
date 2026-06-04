@@ -53,6 +53,7 @@ from typing import Any
 from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
+from aios.sandbox.spec import resolve_bash_timeout_ceiling
 from aios.tools.bash_memory_reconcile import reconcile_memory_mounts, snapshot_memory_mounts
 from aios.tools.registry import registry
 
@@ -71,9 +72,9 @@ BASH_DESCRIPTION = (
     "directory is /workspace, which is a persistent per-session volume "
     "— files written there survive between calls. Shell state (cd, "
     "export, functions) does NOT persist between calls; chain commands "
-    "with && or use absolute paths. The default timeout is 120 seconds. "
-    "A nonzero exit code is reported in the result — not every nonzero "
-    "exit is a failure."
+    "with && or use absolute paths. The default timeout is 120 seconds "
+    "unless this session's environment raises it. A nonzero exit code is "
+    "reported in the result — not every nonzero exit is a failure."
 )
 
 BASH_PARAMETERS_SCHEMA: dict[str, Any] = {
@@ -116,7 +117,13 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
         raise BashArgumentError("bash tool requires a non-empty 'command' string")
 
     settings = get_settings()
-    max_timeout = settings.bash_default_timeout_seconds
+    # The ceiling is the environment's ``bash_timeout_seconds`` when the
+    # session is bound to one that sets it, else the worker-global
+    # ``bash_default_timeout_seconds`` (issue #725). Resolved per-call
+    # (one cheap DB read, dwarfed by the container exec it gates) so an
+    # environment-config change takes effect on the session's next bash
+    # call without a worker restart.
+    max_timeout = await resolve_bash_timeout_ceiling(session_id)
     raw_timeout = arguments.get("timeout_seconds", max_timeout)
     if not isinstance(raw_timeout, int) or raw_timeout <= 0:
         raise BashArgumentError("timeout_seconds must be a positive integer")
