@@ -720,9 +720,12 @@ class TestSpecVersionDrift:
         assert result.sandbox_id == "fresh_sandbox_id"
         create_calls = [c for c in backend.calls if c[0] == "create"]
         assert len(create_calls) == 1, "spec-version drift must re-provision exactly once"
-        # The dead-but-alive handle's host resources were recycled via evict.
+        # The alive-but-drifted container must be destroyed (not just evicted):
+        # evict() skips backend.destroy (designed for dead containers), but a
+        # spec-version drift recycles a LIVE container — not destroying it would
+        # leave it running until the next worker restart (#713 fix).
         destroys = [c for c in backend.calls if c[0] == "destroy"]
-        assert destroys == [], "evict() drops the cache entry without backend.destroy"
+        assert len(destroys) == 1, "spec-version drift must backend.destroy the live old container"
 
     async def test_warm_hit_returns_handle_when_spec_version_matches(self) -> None:
         """Live handle, current spec_version == snapshot ⇒ cached returned."""
