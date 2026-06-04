@@ -35,6 +35,7 @@ import asyncpg
 
 from aios.harness import runtime
 from aios.logging import get_logger
+from aios.models.agents import McpServerSpec
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments
 from aios.tools.registry import ToolResult
@@ -375,7 +376,7 @@ def launch_mcp_tool_calls(
     pool: asyncpg.Pool[Any],
     session_id: str,
     tool_calls: list[dict[str, Any]],
-    mcp_server_map: dict[str, str],
+    mcp_server_map: dict[str, McpServerSpec],
     *,
     account_id: str,
     focal_channel: str | None = None,
@@ -418,7 +419,7 @@ async def _execute_mcp_tool_async(
     pool: asyncpg.Pool[Any],
     session_id: str,
     call: dict[str, Any],
-    mcp_server_map: dict[str, str],
+    mcp_server_map: dict[str, McpServerSpec],
     *,
     account_id: str,
     focal_channel: str | None = None,
@@ -459,9 +460,10 @@ async def _execute_mcp_tool_async(
         if suffix is not None:
             meta[FOCAL_CHANNEL_META_KEY] = suffix
 
-        url = mcp_server_map.get(server_name)
-        if url is None:
+        spec = mcp_server_map.get(server_name)
+        if spec is None:
             raise ToolBail(f"MCP server {server_name!r} not found")
+        url = spec.url
 
         from aios.mcp.client import call_mcp_tool, resolve_auth_for_target_url
 
@@ -469,7 +471,9 @@ async def _execute_mcp_tool_async(
         vault_id, headers = await resolve_auth_for_target_url(
             pool, crypto_box, session_id, url, account_id=account_id
         )
-        result = await call_mcp_tool(url, vault_id, headers, tool_name, arguments, meta=meta)
+        result = await call_mcp_tool(
+            url, vault_id, headers, tool_name, arguments, meta=meta, spec_headers=spec.headers
+        )
 
         mcp_is_error = "error" in result
         event_data: dict[str, Any] = {

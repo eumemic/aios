@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import (
+    TYPE_CHECKING,
     Any,
     Literal,
     TypeVar,
@@ -11,6 +12,10 @@ from typing import (
 from attrs import define as _attrs_define
 
 from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.mcp_server_spec_headers_type_0 import McpServerSpecHeadersType0
+
 
 T = TypeVar("T", bound="McpServerSpec")
 
@@ -30,19 +35,31 @@ class McpServerSpec:
     automatically.  Set false to opt out per agent (unfamiliar prose,
     noisy servers).
 
+    ``headers`` are extra NON-SECRET HTTP headers sent on every request to
+    this server — toolset selectors (e.g. GitHub's
+    ``X-MCP-Toolsets: discussions,issues``), format hints, API-version
+    pins.  Do NOT put secrets here: this dict is stored in plaintext agent
+    JSON.  Real credentials belong in the vault path; a vault-derived auth
+    header overrides a same-named entry here (auth headers win on
+    collision).
+
         Attributes:
             name (str):
             url (str):
             type_ (Literal['url'] | Unset):  Default: 'url'.
             include_instructions (bool | Unset):  Default: True.
+            headers (McpServerSpecHeadersType0 | None | Unset):
     """
 
     name: str
     url: str
     type_: Literal["url"] | Unset = "url"
     include_instructions: bool | Unset = True
+    headers: McpServerSpecHeadersType0 | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.mcp_server_spec_headers_type_0 import McpServerSpecHeadersType0
+
         name = self.name
 
         url = self.url
@@ -50,6 +67,14 @@ class McpServerSpec:
         type_ = self.type_
 
         include_instructions = self.include_instructions
+
+        headers: dict[str, Any] | None | Unset
+        if isinstance(self.headers, Unset):
+            headers = UNSET
+        elif isinstance(self.headers, McpServerSpecHeadersType0):
+            headers = self.headers.to_dict()
+        else:
+            headers = self.headers
 
         field_dict: dict[str, Any] = {}
 
@@ -63,11 +88,15 @@ class McpServerSpec:
             field_dict["type"] = type_
         if include_instructions is not UNSET:
             field_dict["include_instructions"] = include_instructions
+        if headers is not UNSET:
+            field_dict["headers"] = headers
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.mcp_server_spec_headers_type_0 import McpServerSpecHeadersType0
+
         d = dict(src_dict)
         name = d.pop("name")
 
@@ -79,11 +108,29 @@ class McpServerSpec:
 
         include_instructions = d.pop("include_instructions", UNSET)
 
+        def _parse_headers(data: object) -> McpServerSpecHeadersType0 | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                headers_type_0 = McpServerSpecHeadersType0.from_dict(data)
+
+                return headers_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(McpServerSpecHeadersType0 | None | Unset, data)
+
+        headers = _parse_headers(d.pop("headers", UNSET))
+
         mcp_server_spec = cls(
             name=name,
             url=url,
             type_=type_,
             include_instructions=include_instructions,
+            headers=headers,
         )
 
         return mcp_server_spec

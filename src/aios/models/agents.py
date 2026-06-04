@@ -70,6 +70,14 @@ class McpServerSpec(BaseModel):
     third-party server that ships useful affordance prose — light up
     automatically.  Set false to opt out per agent (unfamiliar prose,
     noisy servers).
+
+    ``headers`` are extra NON-SECRET HTTP headers sent on every request to
+    this server — toolset selectors (e.g. GitHub's
+    ``X-MCP-Toolsets: discussions,issues``), format hints, API-version
+    pins.  Do NOT put secrets here: this dict is stored in plaintext agent
+    JSON.  Real credentials belong in the vault path; a vault-derived auth
+    header overrides a same-named entry here (auth headers win on
+    collision).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -78,6 +86,7 @@ class McpServerSpec(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     url: str = Field(min_length=1)
     include_instructions: bool = True
+    headers: dict[str, str] | None = Field(default=None)
 
     @field_validator("name")
     @classmethod

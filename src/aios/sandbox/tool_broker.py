@@ -616,7 +616,7 @@ class ToolBroker:
         vault_id, headers = await self._load_auth_for(session_id, server.url)
         try:
             tool_dicts, _instructions = await discover_mcp_tools(
-                server.url, vault_id, headers, server.name
+                server.url, vault_id, headers, server.name, spec_headers=server.headers
             )
         except Exception as exc:
             log.warning(
@@ -659,7 +659,9 @@ class ToolBroker:
 
         vault_id, headers = await self._load_auth_for(session_id, server.url)
         try:
-            tool_dicts, _ = await discover_mcp_tools(server.url, vault_id, headers, server.name)
+            tool_dicts, _ = await discover_mcp_tools(
+                server.url, vault_id, headers, server.name, spec_headers=server.headers
+            )
         except Exception as exc:
             log.warning(
                 "tool_broker.mcp_discovery_failed",
@@ -703,7 +705,9 @@ class ToolBroker:
             server=server.name,
             tool=tool_name,
         )
-        envelope = await call_mcp_tool(server.url, vault_id, headers, tool_name, arguments)
+        envelope = await call_mcp_tool(
+            server.url, vault_id, headers, tool_name, arguments, spec_headers=server.headers
+        )
         return JSONResponse(envelope)
 
 

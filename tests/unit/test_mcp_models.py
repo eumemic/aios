@@ -62,6 +62,38 @@ class TestMcpServerSpec:
         spec = McpServerSpec(name="noisy", url="https://m", include_instructions=False)
         assert spec.include_instructions is False
 
+    def test_headers_default_none(self) -> None:
+        """``headers`` defaults to ``None`` — the no-extra-headers case."""
+        spec = McpServerSpec(name="github", url="https://m")
+        assert spec.headers is None
+
+    def test_headers_accepted(self) -> None:
+        """A custom non-secret headers dict is preserved verbatim."""
+        spec = McpServerSpec(
+            name="github",
+            url="https://m",
+            headers={"X-MCP-Toolsets": "discussions,issues"},
+        )
+        assert spec.headers == {"X-MCP-Toolsets": "discussions,issues"}
+
+    def test_headers_json_round_trip(self) -> None:
+        """headers survives a JSONB-style serialize/deserialize round trip."""
+        spec = McpServerSpec(
+            name="github",
+            url="https://m",
+            headers={"X-MCP-Toolsets": "issues", "X-Api-Version": "2024-01"},
+        )
+        j = json.dumps(spec.model_dump())
+        restored = McpServerSpec.model_validate_json(j)
+        assert restored.headers == {"X-MCP-Toolsets": "issues", "X-Api-Version": "2024-01"}
+
+    def test_extra_fields_rejected_with_headers_present(self) -> None:
+        """``extra="forbid"`` still rejects unknown fields even when the new
+        ``headers`` field is supplied — the field addition didn't loosen
+        the schema."""
+        with pytest.raises(ValueError):
+            McpServerSpec(name="t", url="https://m", headers={}, bogus=1)  # type: ignore[call-arg]
+
 
 class TestMcpToolsetConfig:
     def test_defaults(self) -> None:
