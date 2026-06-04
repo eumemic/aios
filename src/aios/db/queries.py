@@ -130,13 +130,18 @@ async def _list_scoped[T](
     limit: int = 50,
     after: str | None = None,
     filters: list[tuple[str, Any]] | None = None,
+    extra_select: str | None = None,
 ) -> list[T]:
     """Keyset-paginated SELECT scoped by ``account_id`` + ``archived_at IS NULL``.
 
     ``filters`` is a list of ``(column, value)`` equality predicates;
     entries whose ``value`` is ``None`` are skipped (mirrors the per-arg
     ``if x is not None`` guards in the originals).  ``column`` names are
-    static literals from this module — never user input."""
+    static literals from this module — never user input.
+
+    ``extra_select`` is an optional SQL expression (a static literal from
+    this module, never user input) appended to the projection — e.g. a
+    correlated subquery that derives a column the base table doesn't store."""
     args: list[Any] = [account_id]
     where = ["archived_at IS NULL", "account_id = $1"]
     for column, value in filters or []:
@@ -148,7 +153,8 @@ async def _list_scoped[T](
         args.append(after)
         where.append(f"id < ${len(args)}")
     args.append(limit)
-    sql = f"SELECT * FROM {table} WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
+    select = f"{table}.*" + (f", {extra_select}" if extra_select else "")
+    sql = f"SELECT {select} FROM {table} WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
     return [row(r) for r in await conn.fetch(sql, *args)]
 
 
@@ -801,6 +807,9 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         archived_at=row["archived_at"],
         focal_channel=row["focal_channel"],
         focal_locked=row["focal_locked"],
+        # Present only when the query derives it (list_sessions); other callers
+        # (single read, INSERT ... RETURNING) leave it None.
+        last_event_at=row.get("last_event_at"),
     )
 
 
@@ -993,6 +1002,14 @@ async def list_sessions(
         limit=limit,
         after=after,
         filters=[("agent_id", agent_id), ("status", status)],
+        # Derive last-activity = timestamp of the session's newest event.
+        # ``ORDER BY seq DESC LIMIT 1`` rides the (session_id, seq) index, so
+        # it's O(log n) even for huge sessions (unlike MAX(created_at), which
+        # has no supporting index).
+        extra_select=(
+            "(SELECT e.created_at FROM events e WHERE e.session_id = sessions.id "
+            "ORDER BY e.seq DESC LIMIT 1) AS last_event_at"
+        ),
     )
 
 
