@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -205,6 +205,31 @@ class TestStrictMatching:
         write_cmd: str = stub_registry.exec.await_args_list[1].args[1]  # type: ignore[attr-defined]
         expected_b64 = base64.b64encode(b"FOO\nbar\nFOO\nFOO\n").decode("ascii")
         assert expected_b64 in write_cmd
+
+
+class TestPerEnvTimeoutCeiling:
+    """edit routes BOTH its read-back and write-back sandbox execs through
+    the per-environment bash-timeout ceiling (#725), not the hardcoded
+    global default."""
+
+    async def test_both_execs_use_resolved_ceiling(
+        self, stub_registry: Any, stub_handle: SandboxHandle
+    ) -> None:
+        stub_registry.exec = _script_responses(  # type: ignore[method-assign]
+            _ok("alpha beta gamma\n"),
+            _ok(""),
+        )
+        with patch(
+            "aios.tools.edit.resolve_bash_timeout_ceiling",
+            new_callable=AsyncMock,
+            return_value=600,
+        ):
+            await edit_handler(
+                "sess_01TEST",
+                {"path": "/workspace/a.txt", "old_string": "beta", "new_string": "BETA"},
+            )
+        for call in stub_registry.exec.await_args_list:  # type: ignore[attr-defined]
+            assert call.kwargs["timeout_seconds"] == 600
 
 
 class TestErrorPaths:

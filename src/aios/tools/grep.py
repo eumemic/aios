@@ -23,6 +23,7 @@ from typing import Any
 from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
+from aios.sandbox.spec import resolve_bash_timeout_ceiling
 from aios.tools.registry import registry
 
 
@@ -163,7 +164,11 @@ async def grep_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     result = await sandbox.exec(
         handle,
         cmd,
-        timeout_seconds=settings.bash_default_timeout_seconds,
+        # Honor the session's per-environment bash-timeout ceiling (#725)
+        # so an env that raised the limit applies to every sandbox-exec
+        # tool, not just bash. Falls back to the global default when no
+        # env override is set.
+        timeout_seconds=await resolve_bash_timeout_ceiling(session_id),
         max_output_bytes=settings.bash_max_output_bytes,
     )
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -138,6 +138,23 @@ class TestHappyPath:
         # No literal quotes or dollar signs leaked into the command.
         assert "'quotes'" not in cmd
         assert "$vars" not in cmd
+
+
+class TestPerEnvTimeoutCeiling:
+    """write routes its sandbox exec through the per-environment bash-timeout
+    ceiling (#725), not the hardcoded global default."""
+
+    async def test_exec_uses_resolved_ceiling(
+        self, stub_registry: Any, stub_handle: SandboxHandle
+    ) -> None:
+        with patch(
+            "aios.tools.write.resolve_bash_timeout_ceiling",
+            new_callable=AsyncMock,
+            return_value=600,
+        ):
+            await write_handler("sess_01TEST", {"path": "/workspace/a.txt", "content": "hello"})
+        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        assert kwargs["timeout_seconds"] == 600
 
 
 class TestErrorPath:

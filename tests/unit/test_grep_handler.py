@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -229,3 +229,21 @@ class TestErrorPath:
             f"the overall pipe exit code; without it, rg errors silently "
             f"return empty matches. Got: {cmd!r}"
         )
+
+
+class TestPerEnvTimeoutCeiling:
+    """grep routes its sandbox exec through the per-environment bash-timeout
+    ceiling (#725), not the hardcoded global default — so an env that raised
+    the limit applies to grep too, not just the bash tool."""
+
+    async def test_exec_uses_resolved_ceiling(
+        self, stub_registry: Any, stub_handle: SandboxHandle
+    ) -> None:
+        with patch(
+            "aios.tools.grep.resolve_bash_timeout_ceiling",
+            new_callable=AsyncMock,
+            return_value=600,
+        ):
+            await grep_handler("sess_01TEST", {"pattern": "hello"})
+        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        assert kwargs["timeout_seconds"] == 600

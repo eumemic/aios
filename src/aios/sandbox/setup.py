@@ -14,9 +14,22 @@ bring it to a usable state:
    :class:`Limited`.
 
 Each step calls ``await backend.exec(handle, ...)`` rather than touching
-Docker directly, so they work uniformly across backends. Failures are
-logged but never raised — these are best-effort enrichments, not
-correctness gates. The model can retry or work around missing tooling.
+Docker directly, so they work uniformly across backends.
+
+The first two steps are best-effort enrichments — failures are logged
+but never raised; the model can retry or work around missing tooling.
+:func:`apply_network_lockdown` is different: when the policy is
+:class:`Limited` it is a **security gate**, not an enrichment. A
+:class:`Limited` sandbox whose iptables lockdown didn't apply is wide
+open to the network, which silently violates the operator's intent (and
+is especially dangerous combined with the per-environment image override
+in #724 — a tenant-supplied image with a stripped-down ``iptables``/
+``getent`` would otherwise downgrade to unrestricted networking without
+anyone noticing). So that step **fails closed**: if the lockdown command
+exits nonzero, or the backend exec itself errors, it raises
+:class:`SandboxBackendError`, which the registry turns into a
+sandbox teardown + aborted provision rather than handing back a sandbox
+that can reach the whole internet.
 
 This module is the second seam (alongside ``backends.base``) that keeps
 the registry and the orchestrator backend-agnostic.
@@ -29,7 +42,7 @@ from collections.abc import Sequence
 from aios.config import get_settings
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
-from aios.sandbox.backends.base import SandboxBackend, SandboxHandle
+from aios.sandbox.backends.base import SandboxBackend, SandboxBackendError, SandboxHandle
 
 log = get_logger("aios.sandbox.setup")
 
@@ -228,9 +241,18 @@ async def apply_network_lockdown(
     """Apply iptables rules to restrict outbound traffic.
 
     Called after package installation so that ``pip install`` etc. can
-    reach registries before the lockdown takes effect.  Failures are
-    logged as warnings — the sandbox is still usable, but the model
-    will see connection errors if it tries to reach blocked hosts.
+    reach registries before the lockdown takes effect.
+
+    **Fails closed.** For a :class:`Limited` policy the lockdown *is* the
+    network boundary, not a best-effort enrichment. If the iptables
+    script exits nonzero — missing ``iptables``/``getent`` (e.g. a
+    pared-down per-env image, #724), no ``NET_ADMIN``, a partial flush —
+    the sandbox would otherwise stay up with *unrestricted* outbound
+    traffic, silently bypassing the operator's :class:`Limited` intent.
+    So a nonzero exit (or a backend exec that itself errors) raises
+    :class:`SandboxBackendError`; the caller
+    (:meth:`SandboxRegistry._provision`) tears the sandbox down and
+    aborts the provision rather than handing back an open box.
     """
     allowed: set[str] = set(networking.allowed_hosts)
     if networking.allow_package_managers:
@@ -238,9 +260,19 @@ async def apply_network_lockdown(
 
     script = build_iptables_script(allowed, extra_host_ports=extra_host_ports)
     settings = get_settings()
-    result = await backend.exec(
-        handle, script, timeout_seconds=30, max_output_bytes=settings.bash_max_output_bytes
-    )
+    try:
+        result = await backend.exec(
+            handle, script, timeout_seconds=30, max_output_bytes=settings.bash_max_output_bytes
+        )
+    except SandboxBackendError:
+        # Don't swallow an infra failure into a wide-open sandbox: a
+        # Limited policy whose lockdown couldn't even run must fail the
+        # provision. Re-raise so the registry tears the box down.
+        log.warning(
+            "sandbox.network_lockdown_exec_error",
+            session_id=handle.session_id,
+        )
+        raise
 
     if result.exit_code != 0:
         log.warning(
@@ -249,10 +281,18 @@ async def apply_network_lockdown(
             exit_code=result.exit_code,
             stderr=result.stderr[:500],
         )
-    else:
-        log.info(
-            "sandbox.network_lockdown_applied",
-            session_id=handle.session_id,
-            allowed_host_count=len(allowed),
-            extra_host_port_count=len(extra_host_ports),
+        # Fail closed: a Limited sandbox without a successful lockdown is
+        # a silent unrestricted-networking bypass. Aborting the provision
+        # (sandbox torn down by the caller) is the safe outcome.
+        raise SandboxBackendError(
+            f"network lockdown failed (exit {result.exit_code}) for session "
+            f"{handle.session_id}; refusing to run a Limited sandbox with "
+            f"unrestricted networking"
         )
+
+    log.info(
+        "sandbox.network_lockdown_applied",
+        session_id=handle.session_id,
+        allowed_host_count=len(allowed),
+        extra_host_port_count=len(extra_host_ports),
+    )
