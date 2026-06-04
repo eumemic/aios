@@ -86,6 +86,7 @@ from .list_response_union_memory_memory_prefix import (
 )
 from .list_response_vault import ListResponseVault
 from .list_response_vault_credential import ListResponseVaultCredential
+from .list_session_events_dir import ListSessionEventsDir
 from .list_session_events_kind_type_0 import ListSessionEventsKindType0
 from .list_sessions_status_type_0 import ListSessionsStatusType0
 from .mcp_permission_policy import McpPermissionPolicy
@@ -306,6 +307,7 @@ __all__ = (
     "ListResponseUnionMemoryMemoryPrefix",
     "ListResponseVault",
     "ListResponseVaultCredential",
+    "ListSessionEventsDir",
     "ListSessionEventsKindType0",
     "ListSessionsStatusType0",
     "McpPermissionPolicy",

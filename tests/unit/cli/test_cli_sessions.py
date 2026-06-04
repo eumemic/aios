@@ -156,7 +156,7 @@ def _profile_events_page() -> dict:
             },
         ],
         "has_more": False,
-        "next_after": None,
+        "next_cursor": None,
     }
 
 
@@ -186,23 +186,26 @@ def test_profile_json_output_is_machine_readable(mocked_cli):
 
 def test_profile_empty_session_gracefully(mocked_cli):
     mocked_cli.queue_response(
-        httpx.Response(200, json={"data": [], "has_more": False, "next_after": None})
+        httpx.Response(200, json={"data": [], "has_more": False, "next_cursor": None})
     )
     result = runner.invoke(app, ["sessions", "profile", "sess_empty"])
     assert result.exit_code == 0, result.output
     assert "no steps" in result.output
 
 
-def test_events_sends_after_param_not_after_seq(mocked_cli):
-    """The server renamed the events-pagination query param to ``after``
-    so it matches the ``next_after`` response field; ``?after_seq=`` is
-    silently ignored, which makes pagination loop from seq 0. The CLI
-    must send ``after``, not the pre-rename ``after_seq``."""
+def test_events_first_page_sends_dir_and_kind(mocked_cli):
+    """Events pagination is opaque-cursor: the first page carries ``dir`` +
+    filters (no raw ``after``/``after_seq`` keyset param), and later pages send
+    only ``?cursor=``."""
     mocked_cli.queue_response(
-        httpx.Response(200, json={"data": [], "has_more": False, "next_after": None})
+        httpx.Response(200, json={"data": [], "has_more": False, "next_cursor": None})
     )
-    result = runner.invoke(app, ["sessions", "events", "sess_1", "--after-seq", "42"])
+    result = runner.invoke(
+        app, ["sessions", "events", "sess_1", "--dir", "backward", "--kind", "message"]
+    )
     assert result.exit_code == 0, result.output
     assert mocked_cli.captured.path == "/v1/sessions/sess_1/events"
-    assert mocked_cli.captured.query.get("after") == ["42"]
+    assert mocked_cli.captured.query.get("dir") == ["backward"]
+    assert mocked_cli.captured.query.get("kind") == ["message"]
+    assert "after" not in mocked_cli.captured.query
     assert "after_seq" not in mocked_cli.captured.query

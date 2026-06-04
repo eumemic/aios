@@ -9,6 +9,7 @@ from fastapi import APIRouter, Query, status
 from aios.api.deps import AccountIdDep, PoolDep
 from aios.models.common import ListResponse
 from aios.models.environments import Environment, EnvironmentCreate, EnvironmentUpdate
+from aios.models.pagination import page_cursor
 from aios.services import environments as service
 
 router = APIRouter(prefix="/v1/environments", tags=["environments"])
@@ -32,17 +33,21 @@ async def create(body: EnvironmentCreate, pool: PoolDep, account_id: AccountIdDe
 async def list_(
     pool: PoolDep,
     account_id: AccountIdDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    after: str | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[Environment]:
     """List environments, newest first, excluding archived.
 
-    Cursor pagination via ``after``.
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>`` (the
+    token is self-contained; no other params are accepted alongside it).
     """
+    st = page_cursor(cursor, {"limit": limit})
+    after = str(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
     items = await service.list_environments(
-        pool, limit=limit + 1, after=after, account_id=account_id
+        pool, limit=page_limit + 1, after=after, account_id=account_id
     )
-    return ListResponse[Environment].paginate(items, limit, cursor=lambda x: x.id)
+    return ListResponse[Environment].paginate(items, page_limit, cursor=lambda x: x.id)
 
 
 @router.get("/{env_id}", operation_id="get_environment")

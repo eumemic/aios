@@ -14,8 +14,8 @@ from ...types import UNSET, Response, Unset
 def _get_kwargs(
     skill_id: str,
     *,
-    limit: int | Unset = 50,
-    after: int | None | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -24,14 +24,19 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
-    params["limit"] = limit
-
-    json_after: int | None | Unset
-    if isinstance(after, Unset):
-        json_after = UNSET
+    json_cursor: None | str | Unset
+    if isinstance(cursor, Unset):
+        json_cursor = UNSET
     else:
-        json_after = after
-    params["after"] = json_after
+        json_cursor = cursor
+    params["cursor"] = json_cursor
+
+    json_limit: int | None | Unset
+    if isinstance(limit, Unset):
+        json_limit = UNSET
+    else:
+        json_limit = limit
+    params["limit"] = json_limit
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -81,22 +86,21 @@ def sync_detailed(
     skill_id: str,
     *,
     client: AuthenticatedClient | Client,
-    limit: int | Unset = 50,
-    after: int | None | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSkillVersion]:
     """List Versions
 
      List historical versions of a skill, newest first.
 
-    Cursor pagination by version number: pass ``after`` from a previous
-    response's ``next_after`` to get the next page. Each version is a
-    complete file-bundle snapshot at the time it was created.
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Each
+    version is a complete file-bundle snapshot at the time it was created.
 
     Args:
         skill_id (str):
-        limit (int | Unset):  Default: 50.
-        after (int | None | Unset):
+        cursor (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -109,8 +113,8 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         skill_id=skill_id,
+        cursor=cursor,
         limit=limit,
-        after=after,
         authorization=authorization,
     )
 
@@ -125,22 +129,21 @@ def sync(
     skill_id: str,
     *,
     client: AuthenticatedClient | Client,
-    limit: int | Unset = 50,
-    after: int | None | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSkillVersion | None:
     """List Versions
 
      List historical versions of a skill, newest first.
 
-    Cursor pagination by version number: pass ``after`` from a previous
-    response's ``next_after`` to get the next page. Each version is a
-    complete file-bundle snapshot at the time it was created.
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Each
+    version is a complete file-bundle snapshot at the time it was created.
 
     Args:
         skill_id (str):
-        limit (int | Unset):  Default: 50.
-        after (int | None | Unset):
+        cursor (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -154,8 +157,8 @@ def sync(
     return sync_detailed(
         skill_id=skill_id,
         client=client,
+        cursor=cursor,
         limit=limit,
-        after=after,
         authorization=authorization,
     ).parsed
 
@@ -164,22 +167,21 @@ async def asyncio_detailed(
     skill_id: str,
     *,
     client: AuthenticatedClient | Client,
-    limit: int | Unset = 50,
-    after: int | None | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSkillVersion]:
     """List Versions
 
      List historical versions of a skill, newest first.
 
-    Cursor pagination by version number: pass ``after`` from a previous
-    response's ``next_after`` to get the next page. Each version is a
-    complete file-bundle snapshot at the time it was created.
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Each
+    version is a complete file-bundle snapshot at the time it was created.
 
     Args:
         skill_id (str):
-        limit (int | Unset):  Default: 50.
-        after (int | None | Unset):
+        cursor (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -192,8 +194,8 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         skill_id=skill_id,
+        cursor=cursor,
         limit=limit,
-        after=after,
         authorization=authorization,
     )
 
@@ -206,22 +208,21 @@ async def asyncio(
     skill_id: str,
     *,
     client: AuthenticatedClient | Client,
-    limit: int | Unset = 50,
-    after: int | None | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSkillVersion | None:
     """List Versions
 
      List historical versions of a skill, newest first.
 
-    Cursor pagination by version number: pass ``after`` from a previous
-    response's ``next_after`` to get the next page. Each version is a
-    complete file-bundle snapshot at the time it was created.
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Each
+    version is a complete file-bundle snapshot at the time it was created.
 
     Args:
         skill_id (str):
-        limit (int | Unset):  Default: 50.
-        after (int | None | Unset):
+        cursor (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -236,8 +237,8 @@ async def asyncio(
         await asyncio_detailed(
             skill_id=skill_id,
             client=client,
+            cursor=cursor,
             limit=limit,
-            after=after,
             authorization=authorization,
         )
     ).parsed

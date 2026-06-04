@@ -8,6 +8,7 @@ from fastapi import APIRouter, Query, status
 
 from aios.api.deps import AccountIdDep, CryptoBoxDep, PoolDep
 from aios.models.common import ListResponse
+from aios.models.pagination import page_cursor
 from aios.models.vaults import (
     OAuthCompleteRequest,
     OAuthStartRequest,
@@ -43,16 +44,20 @@ async def create(body: VaultCreate, pool: PoolDep, account_id: AccountIdDep) -> 
 async def list_(
     pool: PoolDep,
     account_id: AccountIdDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    after: str | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[Vault]:
     """List vaults, newest first, excluding archived.
 
-    Cursor pagination: pass ``after`` from a previous response's
-    ``next_after`` to get the next page.
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``.
     """
-    items = await service.list_vaults(pool, limit=limit + 1, after=after, account_id=account_id)
-    return ListResponse[Vault].paginate(items, limit, cursor=lambda x: x.id)
+    st = page_cursor(cursor, {"limit": limit})
+    after = str(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    items = await service.list_vaults(
+        pool, limit=page_limit + 1, after=after, account_id=account_id
+    )
+    return ListResponse[Vault].paginate(items, page_limit, cursor=lambda x: x.id)
 
 
 @router.get("/{vault_id}", operation_id="get_vault")
@@ -192,18 +197,22 @@ async def list_credentials(
     vault_id: str,
     pool: PoolDep,
     account_id: AccountIdDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    after: str | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[VaultCredential]:
     """List credentials in a vault, newest first, excluding archived.
 
-    Cursor pagination via ``after``. Secret material is never returned —
-    only metadata (display name, target_url, auth_type, timestamps).
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Secret
+    material is never returned — only metadata (display name, target_url,
+    auth_type, timestamps).
     """
+    st = page_cursor(cursor, {"limit": limit})
+    after = str(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
     items = await service.list_vault_credentials(
-        pool, vault_id, limit=limit + 1, after=after, account_id=account_id
+        pool, vault_id, limit=page_limit + 1, after=after, account_id=account_id
     )
-    return ListResponse[VaultCredential].paginate(items, limit, cursor=lambda x: x.id)
+    return ListResponse[VaultCredential].paginate(items, page_limit, cursor=lambda x: x.id)
 
 
 @router.get("/{vault_id}/credentials/{credential_id}", operation_id="get_vault_credential")

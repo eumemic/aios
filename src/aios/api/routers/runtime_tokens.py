@@ -62,7 +62,7 @@ async def list_(
 ) -> ListResponse[RuntimeToken]:
     """All tokens (revoked included) for ``connector``, newest first."""
     items = await service.list_tokens(pool, connector=connector, account_id=account_id)
-    return ListResponse[RuntimeToken](data=items, has_more=False, next_after=None)
+    return ListResponse[RuntimeToken](data=items, has_more=False)
 
 
 @router.post("/{token_id}/revoke", operation_id="revoke_runtime_token")

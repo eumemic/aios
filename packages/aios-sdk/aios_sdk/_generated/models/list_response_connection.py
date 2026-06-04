@@ -21,12 +21,12 @@ class ListResponseConnection:
     Attributes:
         data (list[Connection]):
         has_more (bool | Unset):  Default: False.
-        next_after (None | str | Unset):
+        next_cursor (None | str | Unset):
     """
 
     data: list[Connection]
     has_more: bool | Unset = False
-    next_after: None | str | Unset = UNSET
+    next_cursor: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -37,11 +37,11 @@ class ListResponseConnection:
 
         has_more = self.has_more
 
-        next_after: None | str | Unset
-        if isinstance(self.next_after, Unset):
-            next_after = UNSET
+        next_cursor: None | str | Unset
+        if isinstance(self.next_cursor, Unset):
+            next_cursor = UNSET
         else:
-            next_after = self.next_after
+            next_cursor = self.next_cursor
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -52,8 +52,8 @@ class ListResponseConnection:
         )
         if has_more is not UNSET:
             field_dict["has_more"] = has_more
-        if next_after is not UNSET:
-            field_dict["next_after"] = next_after
+        if next_cursor is not UNSET:
+            field_dict["next_cursor"] = next_cursor
 
         return field_dict
 
@@ -71,19 +71,19 @@ class ListResponseConnection:
 
         has_more = d.pop("has_more", UNSET)
 
-        def _parse_next_after(data: object) -> None | str | Unset:
+        def _parse_next_cursor(data: object) -> None | str | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
             return cast(None | str | Unset, data)
 
-        next_after = _parse_next_after(d.pop("next_after", UNSET))
+        next_cursor = _parse_next_cursor(d.pop("next_cursor", UNSET))
 
         list_response_connection = cls(
             data=data,
             has_more=has_more,
-            next_after=next_after,
+            next_cursor=next_cursor,
         )
 
         list_response_connection.additional_properties = d

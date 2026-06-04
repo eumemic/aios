@@ -194,3 +194,54 @@ class TestReadEventsErrorOnlyFilter:
         query = conn.fetch.call_args[0][0]
         assert "kind" in query
         assert "is_error IS TRUE" in query
+
+
+class TestReadEventsCursorPlaceholders:
+    """Pin the ``$N`` placeholder/param alignment in ``read_events``.
+
+    The WHERE clause is built by appending to ``params`` and numbering each
+    placeholder from ``len(params)``, so a future reorder that desynced them
+    would silently bind the wrong value to the wrong column. The e2e suite
+    proves this against real Postgres; these are the fast unit-tier guards.
+    """
+
+    async def test_forward_after_seq_with_kind_aligns_placeholders(self) -> None:
+        from aios.db.queries import read_events
+
+        conn = MagicMock()
+        conn.fetch = AsyncMock(return_value=[])
+
+        await read_events(conn, "sess_x", after_seq=10, kind="message", limit=50, account_id="acc")
+
+        query, *params = conn.fetch.call_args[0]
+        assert params == ["sess_x", "acc", 10, "message", 50]
+        assert "seq > $3" in query and "kind = $4" in query
+        assert "ORDER BY seq ASC" in query and "LIMIT $5" in query
+
+    async def test_backward_before_with_kind_aligns_placeholders(self) -> None:
+        from aios.db.queries import read_events
+
+        conn = MagicMock()
+        conn.fetch = AsyncMock(return_value=[])
+
+        await read_events(conn, "sess_x", before=20, kind="message", limit=50, account_id="acc")
+
+        query, *params = conn.fetch.call_args[0]
+        assert params == ["sess_x", "acc", 20, "message", 50]
+        assert "seq < $3" in query and "kind = $4" in query
+        assert "ORDER BY seq DESC" in query and "LIMIT $5" in query
+
+    async def test_after_seq_zero_omits_lower_bound_clause(self) -> None:
+        # after_seq=0 is the "no lower bound" default: the seq clause is skipped
+        # entirely (equivalent to ``seq > 0`` since seq is gapless from 1).
+        from aios.db.queries import read_events
+
+        conn = MagicMock()
+        conn.fetch = AsyncMock(return_value=[])
+
+        await read_events(conn, "sess_x", after_seq=0, limit=50, account_id="acc")
+
+        query, *params = conn.fetch.call_args[0]
+        assert params == ["sess_x", "acc", 50]
+        assert "seq >" not in query
+        assert "LIMIT $3" in query

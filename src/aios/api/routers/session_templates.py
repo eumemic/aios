@@ -16,6 +16,7 @@ from fastapi import APIRouter, Query, status
 
 from aios.api.deps import AccountIdDep, PoolDep
 from aios.models.common import ListResponse
+from aios.models.pagination import page_cursor
 from aios.models.session_templates import (
     SessionTemplate,
     SessionTemplateCreate,
@@ -54,17 +55,20 @@ async def create(
 async def list_(
     pool: PoolDep,
     account_id: AccountIdDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    after: str | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[SessionTemplate]:
     """List session templates, newest first, excluding archived.
 
-    Cursor pagination via ``after``.
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``.
     """
+    st = page_cursor(cursor, {"limit": limit})
+    after = str(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
     items = await service.list_session_templates(
-        pool, limit=limit + 1, after=after, account_id=account_id
+        pool, limit=page_limit + 1, after=after, account_id=account_id
     )
-    return ListResponse[SessionTemplate].paginate(items, limit, cursor=lambda x: x.id)
+    return ListResponse[SessionTemplate].paginate(items, page_limit, cursor=lambda x: x.id)
 
 
 @router.get("/{template_id}", operation_id="get_session_template")

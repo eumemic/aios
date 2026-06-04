@@ -9,6 +9,7 @@ from fastapi import APIRouter, Query, status
 from aios.api.deps import AccountIdDep, PoolDep
 from aios.models.agents import Agent, AgentCreate, AgentUpdate, AgentVersion
 from aios.models.common import ListResponse
+from aios.models.pagination import page_cursor
 from aios.services import agents as service
 
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
@@ -43,20 +44,27 @@ async def create(body: AgentCreate, pool: PoolDep, account_id: AccountIdDep) -> 
 async def list_(
     pool: PoolDep,
     account_id: AccountIdDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    after: str | None = None,
+    cursor: str | None = None,
     name: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[Agent]:
     """List agents (latest version of each), newest first, excluding archived.
 
-    Cursor pagination: pass ``after`` from a previous response's
-    ``next_after`` to get the next page. Optional ``name`` filter matches
-    exactly.
+    First page: optional ``name`` filter (exact match) + ``?limit=``.
+    Subsequent pages: ``?cursor=<next_cursor>`` (carries the filter; no other
+    params accepted alongside it).
     """
+    st = page_cursor(cursor, {"name": name, "limit": limit})
+    after = str(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    if st is not None:
+        name = st.filters.get("name")
     items = await service.list_agents(
-        pool, limit=limit + 1, after=after, name=name, account_id=account_id
+        pool, limit=page_limit + 1, after=after, name=name, account_id=account_id
     )
-    return ListResponse[Agent].paginate(items, limit, cursor=lambda x: x.id)
+    return ListResponse[Agent].paginate(
+        items, page_limit, cursor=lambda x: x.id, filters={"name": name}
+    )
 
 
 @router.get("/{agent_id}", operation_id="get_agent")
@@ -112,19 +120,21 @@ async def list_versions(
     agent_id: str,
     pool: PoolDep,
     account_id: AccountIdDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    after: int | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[AgentVersion]:
     """List historical versions of an agent, newest first.
 
-    Cursor pagination by version number: pass ``after`` from a previous
-    response's ``next_after`` to get the next page. Each version is a
-    complete snapshot of the agent's config at the time it was created.
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Each
+    version is a complete snapshot of the agent's config at creation time.
     """
+    st = page_cursor(cursor, {"limit": limit})
+    after = int(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
     items = await service.list_agent_versions(
-        pool, agent_id, limit=limit + 1, after=after, account_id=account_id
+        pool, agent_id, limit=page_limit + 1, after=after, account_id=account_id
     )
-    return ListResponse[AgentVersion].paginate(items, limit, cursor=lambda x: str(x.version))
+    return ListResponse[AgentVersion].paginate(items, page_limit, cursor=lambda x: x.version)
 
 
 @router.get("/{agent_id}/versions/{version}", operation_id="get_agent_version")

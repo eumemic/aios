@@ -51,7 +51,6 @@ _CRED_COLS = ("id", "display_name", "auth_type", "target_url", "updated_at")
 def list_(
     ctx: typer.Context,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
-    after: Annotated[str | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
@@ -61,7 +60,6 @@ def list_(
             columns=_VAULT_COLS,
             all_=all_,
             limit=limit,
-            after=after,
         )
 
     run_or_die(_run)
@@ -173,7 +171,6 @@ def cred_list(
     ctx: typer.Context,
     vault_id: str,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
-    after: Annotated[str | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
@@ -183,7 +180,6 @@ def cred_list(
             columns=_CRED_COLS,
             all_=all_,
             limit=limit,
-            after=after,
             vault_id=vault_id,
         )
 

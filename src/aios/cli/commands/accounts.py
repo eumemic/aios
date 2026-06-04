@@ -67,7 +67,7 @@ def _envelope[T](items: list[T]) -> dict[str, object]:
     return {
         "data": [item.to_dict() for item in items],  # type: ignore[attr-defined]
         "has_more": False,
-        "next_after": None,
+        "next_cursor": None,
     }
 
 

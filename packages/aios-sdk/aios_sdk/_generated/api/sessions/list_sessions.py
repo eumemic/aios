@@ -13,10 +13,10 @@ from ...types import UNSET, Response, Unset
 
 def _get_kwargs(
     *,
+    cursor: None | str | Unset = UNSET,
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -24,6 +24,13 @@ def _get_kwargs(
         headers["Authorization"] = authorization
 
     params: dict[str, Any] = {}
+
+    json_cursor: None | str | Unset
+    if isinstance(cursor, Unset):
+        json_cursor = UNSET
+    else:
+        json_cursor = cursor
+    params["cursor"] = json_cursor
 
     json_agent_id: None | str | Unset
     if isinstance(agent_id, Unset):
@@ -41,14 +48,12 @@ def _get_kwargs(
         json_status = status
     params["status"] = json_status
 
-    params["limit"] = limit
-
-    json_after: None | str | Unset
-    if isinstance(after, Unset):
-        json_after = UNSET
+    json_limit: int | None | Unset
+    if isinstance(limit, Unset):
+        json_limit = UNSET
     else:
-        json_after = after
-    params["after"] = json_after
+        json_limit = limit
+    params["limit"] = json_limit
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -95,19 +100,19 @@ def _build_response(
 def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
+    cursor: None | str | Unset = UNSET,
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSession]:
     """List
 
     Args:
+        cursor (None | str | Unset):
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
-        limit (int | Unset):  Default: 50.
-        after (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -119,10 +124,10 @@ def sync_detailed(
     """
 
     kwargs = _get_kwargs(
+        cursor=cursor,
         agent_id=agent_id,
         status=status,
         limit=limit,
-        after=after,
         authorization=authorization,
     )
 
@@ -136,19 +141,19 @@ def sync_detailed(
 def sync(
     *,
     client: AuthenticatedClient | Client,
+    cursor: None | str | Unset = UNSET,
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSession | None:
     """List
 
     Args:
+        cursor (None | str | Unset):
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
-        limit (int | Unset):  Default: 50.
-        after (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -161,10 +166,10 @@ def sync(
 
     return sync_detailed(
         client=client,
+        cursor=cursor,
         agent_id=agent_id,
         status=status,
         limit=limit,
-        after=after,
         authorization=authorization,
     ).parsed
 
@@ -172,19 +177,19 @@ def sync(
 async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
+    cursor: None | str | Unset = UNSET,
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSession]:
     """List
 
     Args:
+        cursor (None | str | Unset):
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
-        limit (int | Unset):  Default: 50.
-        after (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -196,10 +201,10 @@ async def asyncio_detailed(
     """
 
     kwargs = _get_kwargs(
+        cursor=cursor,
         agent_id=agent_id,
         status=status,
         limit=limit,
-        after=after,
         authorization=authorization,
     )
 
@@ -211,19 +216,19 @@ async def asyncio_detailed(
 async def asyncio(
     *,
     client: AuthenticatedClient | Client,
+    cursor: None | str | Unset = UNSET,
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSession | None:
     """List
 
     Args:
+        cursor (None | str | Unset):
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
-        limit (int | Unset):  Default: 50.
-        after (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -237,10 +242,10 @@ async def asyncio(
     return (
         await asyncio_detailed(
             client=client,
+            cursor=cursor,
             agent_id=agent_id,
             status=status,
             limit=limit,
-            after=after,
             authorization=authorization,
         )
     ).parsed

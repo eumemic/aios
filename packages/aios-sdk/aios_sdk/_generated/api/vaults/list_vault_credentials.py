@@ -14,8 +14,8 @@ from ...types import UNSET, Response, Unset
 def _get_kwargs(
     vault_id: str,
     *,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -24,14 +24,19 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
-    params["limit"] = limit
-
-    json_after: None | str | Unset
-    if isinstance(after, Unset):
-        json_after = UNSET
+    json_cursor: None | str | Unset
+    if isinstance(cursor, Unset):
+        json_cursor = UNSET
     else:
-        json_after = after
-    params["after"] = json_after
+        json_cursor = cursor
+    params["cursor"] = json_cursor
+
+    json_limit: int | None | Unset
+    if isinstance(limit, Unset):
+        json_limit = UNSET
+    else:
+        json_limit = limit
+    params["limit"] = json_limit
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -81,21 +86,22 @@ def sync_detailed(
     vault_id: str,
     *,
     client: AuthenticatedClient | Client,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseVaultCredential]:
     """List Credentials
 
      List credentials in a vault, newest first, excluding archived.
 
-    Cursor pagination via ``after``. Secret material is never returned —
-    only metadata (display name, target_url, auth_type, timestamps).
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Secret
+    material is never returned — only metadata (display name, target_url,
+    auth_type, timestamps).
 
     Args:
         vault_id (str):
-        limit (int | Unset):  Default: 50.
-        after (None | str | Unset):
+        cursor (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -108,8 +114,8 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         vault_id=vault_id,
+        cursor=cursor,
         limit=limit,
-        after=after,
         authorization=authorization,
     )
 
@@ -124,21 +130,22 @@ def sync(
     vault_id: str,
     *,
     client: AuthenticatedClient | Client,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseVaultCredential | None:
     """List Credentials
 
      List credentials in a vault, newest first, excluding archived.
 
-    Cursor pagination via ``after``. Secret material is never returned —
-    only metadata (display name, target_url, auth_type, timestamps).
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Secret
+    material is never returned — only metadata (display name, target_url,
+    auth_type, timestamps).
 
     Args:
         vault_id (str):
-        limit (int | Unset):  Default: 50.
-        after (None | str | Unset):
+        cursor (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -152,8 +159,8 @@ def sync(
     return sync_detailed(
         vault_id=vault_id,
         client=client,
+        cursor=cursor,
         limit=limit,
-        after=after,
         authorization=authorization,
     ).parsed
 
@@ -162,21 +169,22 @@ async def asyncio_detailed(
     vault_id: str,
     *,
     client: AuthenticatedClient | Client,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseVaultCredential]:
     """List Credentials
 
      List credentials in a vault, newest first, excluding archived.
 
-    Cursor pagination via ``after``. Secret material is never returned —
-    only metadata (display name, target_url, auth_type, timestamps).
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Secret
+    material is never returned — only metadata (display name, target_url,
+    auth_type, timestamps).
 
     Args:
         vault_id (str):
-        limit (int | Unset):  Default: 50.
-        after (None | str | Unset):
+        cursor (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -189,8 +197,8 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         vault_id=vault_id,
+        cursor=cursor,
         limit=limit,
-        after=after,
         authorization=authorization,
     )
 
@@ -203,21 +211,22 @@ async def asyncio(
     vault_id: str,
     *,
     client: AuthenticatedClient | Client,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseVaultCredential | None:
     """List Credentials
 
      List credentials in a vault, newest first, excluding archived.
 
-    Cursor pagination via ``after``. Secret material is never returned —
-    only metadata (display name, target_url, auth_type, timestamps).
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Secret
+    material is never returned — only metadata (display name, target_url,
+    auth_type, timestamps).
 
     Args:
         vault_id (str):
-        limit (int | Unset):  Default: 50.
-        after (None | str | Unset):
+        cursor (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -232,8 +241,8 @@ async def asyncio(
         await asyncio_detailed(
             vault_id=vault_id,
             client=client,
+            cursor=cursor,
             limit=limit,
-            after=after,
             authorization=authorization,
         )
     ).parsed

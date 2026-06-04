@@ -77,7 +77,6 @@ def list_(
         typer.Option("--mode", help="Filter by routing mode."),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
-    after: Annotated[str | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
@@ -88,7 +87,6 @@ def list_(
             max_widths=_MAXW,
             all_=all_,
             limit=limit,
-            after=after,
             connector=connector,
             session_id=session_id,
             mode=mode,

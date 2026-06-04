@@ -31,6 +31,7 @@ from aios.models.connections import (
     ConnectionSetSecrets,
     RecentChat,
 )
+from aios.models.pagination import page_cursor
 from aios.services import connections as service
 
 router = APIRouter(prefix="/v1/connections", tags=["connections"])
@@ -99,28 +100,44 @@ async def set_secrets(
 async def list_(
     pool: PoolDep,
     account_id: AccountIdDep,
+    cursor: str | None = None,
     connector: str | None = None,
     session_id: str | None = None,
     mode: ConnectionMode | None = None,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    after: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[Connection]:
-    """List connections, newest first, excluding archived. Cursor pagination via ``after``.
+    """List connections, newest first, excluding archived.
 
-    Filters: ``connector`` (e.g. ``"telegram"``), ``session_id`` (only
-    connections in single_session mode bound to that session), ``mode``
-    (``detached`` / ``single_session`` / ``per_chat``). Filters compose.
+    First page: optional filters ``connector`` (e.g. ``"telegram"``),
+    ``session_id`` (single_session connections bound to that session), ``mode``
+    (``detached`` / ``single_session`` / ``per_chat``) + ``?limit=``; filters
+    compose. Subsequent pages: ``?cursor=<next_cursor>`` (carries the filters).
     """
+    st = page_cursor(
+        cursor,
+        {"connector": connector, "session_id": session_id, "mode": mode, "limit": limit},
+    )
+    after = str(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    if st is not None:
+        connector = st.filters.get("connector")
+        session_id = st.filters.get("session_id")
+        mode = st.filters.get("mode")
     items = await service.list_connections(
         pool,
         connector=connector,
         session_id=session_id,
         mode=mode,
-        limit=limit + 1,
+        limit=page_limit + 1,
         after=after,
         account_id=account_id,
     )
-    return ListResponse[Connection].paginate(items, limit, cursor=lambda x: x.id)
+    return ListResponse[Connection].paginate(
+        items,
+        page_limit,
+        cursor=lambda x: x.id,
+        filters={"connector": connector, "session_id": session_id, "mode": mode},
+    )
 
 
 @router.get("/{connection_id}", operation_id="get_connection")

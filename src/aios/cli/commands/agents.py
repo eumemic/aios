@@ -35,9 +35,8 @@ _MAXW = {"name": 32, "model": 40}
 def list_(
     ctx: typer.Context,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
-    after: Annotated[str | None, typer.Option("--after", help="Cursor for pagination.")] = None,
     all_: Annotated[
-        bool, typer.Option("--all", help="Fetch every page (ignores --limit/--after).")
+        bool, typer.Option("--all", help="Fetch every page (ignores --limit).")
     ] = False,
 ) -> None:
     def _run() -> None:
@@ -48,7 +47,6 @@ def list_(
             max_widths=_MAXW,
             all_=all_,
             limit=limit,
-            after=after,
         )
 
     run_or_die(_run)
@@ -115,7 +113,6 @@ def versions(
     ctx: typer.Context,
     agent_id: str,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
-    after: Annotated[int | None, typer.Option("--after")] = None,
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
@@ -126,7 +123,6 @@ def versions(
             max_widths={"model": 40},
             all_=all_,
             limit=limit,
-            after=after,
             agent_id=agent_id,
         )
 

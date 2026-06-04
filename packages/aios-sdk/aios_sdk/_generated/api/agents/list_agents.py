@@ -12,9 +12,9 @@ from ...types import UNSET, Response, Unset
 
 def _get_kwargs(
     *,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
     name: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -23,14 +23,12 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
-    params["limit"] = limit
-
-    json_after: None | str | Unset
-    if isinstance(after, Unset):
-        json_after = UNSET
+    json_cursor: None | str | Unset
+    if isinstance(cursor, Unset):
+        json_cursor = UNSET
     else:
-        json_after = after
-    params["after"] = json_after
+        json_cursor = cursor
+    params["cursor"] = json_cursor
 
     json_name: None | str | Unset
     if isinstance(name, Unset):
@@ -38,6 +36,13 @@ def _get_kwargs(
     else:
         json_name = name
     params["name"] = json_name
+
+    json_limit: int | None | Unset
+    if isinstance(limit, Unset):
+        json_limit = UNSET
+    else:
+        json_limit = limit
+    params["limit"] = json_limit
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -84,23 +89,23 @@ def _build_response(
 def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
     name: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseAgent]:
     """List
 
      List agents (latest version of each), newest first, excluding archived.
 
-    Cursor pagination: pass ``after`` from a previous response's
-    ``next_after`` to get the next page. Optional ``name`` filter matches
-    exactly.
+    First page: optional ``name`` filter (exact match) + ``?limit=``.
+    Subsequent pages: ``?cursor=<next_cursor>`` (carries the filter; no other
+    params accepted alongside it).
 
     Args:
-        limit (int | Unset):  Default: 50.
-        after (None | str | Unset):
+        cursor (None | str | Unset):
         name (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -112,9 +117,9 @@ def sync_detailed(
     """
 
     kwargs = _get_kwargs(
-        limit=limit,
-        after=after,
+        cursor=cursor,
         name=name,
+        limit=limit,
         authorization=authorization,
     )
 
@@ -128,23 +133,23 @@ def sync_detailed(
 def sync(
     *,
     client: AuthenticatedClient | Client,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
     name: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseAgent | None:
     """List
 
      List agents (latest version of each), newest first, excluding archived.
 
-    Cursor pagination: pass ``after`` from a previous response's
-    ``next_after`` to get the next page. Optional ``name`` filter matches
-    exactly.
+    First page: optional ``name`` filter (exact match) + ``?limit=``.
+    Subsequent pages: ``?cursor=<next_cursor>`` (carries the filter; no other
+    params accepted alongside it).
 
     Args:
-        limit (int | Unset):  Default: 50.
-        after (None | str | Unset):
+        cursor (None | str | Unset):
         name (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -157,9 +162,9 @@ def sync(
 
     return sync_detailed(
         client=client,
-        limit=limit,
-        after=after,
+        cursor=cursor,
         name=name,
+        limit=limit,
         authorization=authorization,
     ).parsed
 
@@ -167,23 +172,23 @@ def sync(
 async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
     name: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseAgent]:
     """List
 
      List agents (latest version of each), newest first, excluding archived.
 
-    Cursor pagination: pass ``after`` from a previous response's
-    ``next_after`` to get the next page. Optional ``name`` filter matches
-    exactly.
+    First page: optional ``name`` filter (exact match) + ``?limit=``.
+    Subsequent pages: ``?cursor=<next_cursor>`` (carries the filter; no other
+    params accepted alongside it).
 
     Args:
-        limit (int | Unset):  Default: 50.
-        after (None | str | Unset):
+        cursor (None | str | Unset):
         name (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -195,9 +200,9 @@ async def asyncio_detailed(
     """
 
     kwargs = _get_kwargs(
-        limit=limit,
-        after=after,
+        cursor=cursor,
         name=name,
+        limit=limit,
         authorization=authorization,
     )
 
@@ -209,23 +214,23 @@ async def asyncio_detailed(
 async def asyncio(
     *,
     client: AuthenticatedClient | Client,
-    limit: int | Unset = 50,
-    after: None | str | Unset = UNSET,
+    cursor: None | str | Unset = UNSET,
     name: None | str | Unset = UNSET,
+    limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseAgent | None:
     """List
 
      List agents (latest version of each), newest first, excluding archived.
 
-    Cursor pagination: pass ``after`` from a previous response's
-    ``next_after`` to get the next page. Optional ``name`` filter matches
-    exactly.
+    First page: optional ``name`` filter (exact match) + ``?limit=``.
+    Subsequent pages: ``?cursor=<next_cursor>`` (carries the filter; no other
+    params accepted alongside it).
 
     Args:
-        limit (int | Unset):  Default: 50.
-        after (None | str | Unset):
+        cursor (None | str | Unset):
         name (None | str | Unset):
+        limit (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -239,9 +244,9 @@ async def asyncio(
     return (
         await asyncio_detailed(
             client=client,
-            limit=limit,
-            after=after,
+            cursor=cursor,
             name=name,
+            limit=limit,
             authorization=authorization,
         )
     ).parsed
