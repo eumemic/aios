@@ -646,6 +646,31 @@ class TestSpecHeadersOutbound:
         assert captured[0].get("Authorization") == "Bearer real"
         assert captured[0].get("X-MCP-Toolsets") == "issues"
 
+    async def test_auth_wins_over_case_variant_spec_header(self) -> None:
+        """A spec header that is only a CASE-variant of an auth header must be
+        dropped — HTTP header names are case-insensitive, so leaving both in
+        would emit two Authorization headers on the wire with the spec value
+        first, defeating the auth-wins guarantee."""
+        fake_client, captured = _capture_outbound_headers()
+        with (
+            patch("aios.mcp.client.httpx.AsyncClient", fake_client),
+            patch("aios.mcp.client.streamable_http_client", return_value=_transport()),
+            patch("aios.mcp.client.ClientSession", _session_ctx(_ok_session())),
+        ):
+            await call_mcp_tool(
+                "https://m/",
+                None,
+                {"Authorization": "Bearer real"},
+                "tool",
+                {},
+                spec_headers={"authorization": "Bearer spoof"},
+            )
+
+        # Exactly one authorization header, carrying the auth value, regardless
+        # of case the spec used.
+        auth_values = [v for k, v in captured[0].items() if k.lower() == "authorization"]
+        assert auth_values == ["Bearer real"]
+
     async def test_discover_passes_merged_headers(self) -> None:
         """Discovery also merges spec headers with auth headers on the
         outbound request."""

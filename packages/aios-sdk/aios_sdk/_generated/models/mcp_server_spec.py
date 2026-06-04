@@ -41,7 +41,10 @@ class McpServerSpec:
     pins.  Do NOT put secrets here: this dict is stored in plaintext agent
     JSON.  Real credentials belong in the vault path; a vault-derived auth
     header overrides a same-named entry here (auth headers win on
-    collision).
+    collision).  Names must be valid HTTP tokens and values printable ASCII
+    (validated below) so they can't fail only at connection time; headers
+    the MCP transport authors itself (Accept, Content-Type, Mcp-Session-Id,
+    Mcp-Protocol-Version) are rejected — setting them here is a silent no-op.
 
         Attributes:
             name (str):

@@ -94,6 +94,38 @@ class TestMcpServerSpec:
         with pytest.raises(ValueError):
             McpServerSpec(name="t", url="https://m", headers={}, bogus=1)  # type: ignore[call-arg]
 
+    def test_headers_reject_crlf_in_value(self) -> None:
+        """A CR/LF in a header value (header-injection vector) is rejected at
+        config time, not silently dropped at connection time."""
+        with pytest.raises(ValueError, match="invalid value for header"):
+            McpServerSpec(name="t", url="https://m", headers={"X-Foo": "bar\r\nX-Evil: 1"})
+
+    def test_headers_reject_non_ascii_value(self) -> None:
+        """Non-ASCII header values can't be encoded on the wire — rejected."""
+        with pytest.raises(ValueError, match="invalid value for header"):
+            McpServerSpec(name="t", url="https://m", headers={"X-Foo": "résumé"})
+
+    def test_headers_reject_illegal_name(self) -> None:
+        """A header name with whitespace / illegal token chars is rejected."""
+        with pytest.raises(ValueError, match="invalid HTTP header name"):
+            McpServerSpec(name="t", url="https://m", headers={"X Foo": "bar"})
+
+    @pytest.mark.parametrize(
+        "reserved",
+        ["Accept", "content-type", "Mcp-Session-Id", "MCP-PROTOCOL-VERSION"],
+    )
+    def test_headers_reject_reserved_mcp_protocol_headers(self, reserved: str) -> None:
+        """Headers the MCP transport authors per-request are rejected (any
+        case) — setting them is a silent no-op that also fragments the pool
+        key."""
+        with pytest.raises(ValueError, match="authored by the MCP transport"):
+            McpServerSpec(name="t", url="https://m", headers={reserved: "x"})
+
+    def test_headers_allow_empty_value(self) -> None:
+        """An empty header value is legal HTTP and preserved."""
+        spec = McpServerSpec(name="t", url="https://m", headers={"X-Foo": ""})
+        assert spec.headers == {"X-Foo": ""}
+
 
 class TestMcpToolsetConfig:
     def test_defaults(self) -> None:

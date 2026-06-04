@@ -185,8 +185,21 @@ def _headers_key(spec_headers: dict[str, str] | None) -> str:
 def _merge_headers(
     spec_headers: dict[str, str] | None, auth_headers: dict[str, str]
 ) -> dict[str, str]:
-    """Outbound httpx headers: spec headers first, auth headers win on collision."""
-    return {**(spec_headers or {}), **auth_headers}
+    """Outbound httpx headers: spec headers first, auth headers win on collision.
+
+    HTTP header names are case-insensitive, so collision detection must be too.
+    A plain ``{**spec, **auth}`` merge only dedupes byte-identical keys: a spec
+    header that is a case-variant of an auth header (e.g. spec ``authorization``
+    vs auth ``Authorization``) survives, and httpx emits BOTH on the wire with
+    the spec value first — defeating the auth-wins guarantee. Drop any spec
+    header whose name case-folds to an auth header name.
+    """
+    if not spec_headers:
+        return dict(auth_headers)
+    auth_names = {name.lower() for name in auth_headers}
+    merged = {name: value for name, value in spec_headers.items() if name.lower() not in auth_names}
+    merged.update(auth_headers)
+    return merged
 
 
 async def resolve_auth_for_target_url(

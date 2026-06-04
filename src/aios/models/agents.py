@@ -8,6 +8,7 @@ the full history. The ``model`` field is a free-form LiteLLM model string
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Literal, get_args
 
@@ -53,6 +54,19 @@ ToolTransport = Literal["cli", "agent_tool", "both"]
 
 _BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
 
+# Header names the MCP streamable-http transport authors on every request
+# (see ``mcp.client.streamable_http._prepare_headers``). A spec header named
+# after one of these never reaches the wire — the transport overwrites it
+# per-request — yet it would still fragment the connection-pool key
+# (``_headers_key``). Compared case-insensitively; HTTP header names are too.
+_RESERVED_MCP_HEADERS: frozenset[str] = frozenset(
+    {"accept", "content-type", "mcp-session-id", "mcp-protocol-version"}
+)
+
+# RFC 7230 ``token``: the legal character set for an HTTP header field name.
+# Excludes whitespace, control chars, ``:``, and non-ASCII by construction.
+_HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
 
 # ── MCP server declaration ────────────────────────────────────────────────────
 
@@ -77,7 +91,10 @@ class McpServerSpec(BaseModel):
     pins.  Do NOT put secrets here: this dict is stored in plaintext agent
     JSON.  Real credentials belong in the vault path; a vault-derived auth
     header overrides a same-named entry here (auth headers win on
-    collision).
+    collision).  Names must be valid HTTP tokens and values printable ASCII
+    (validated below) so they can't fail only at connection time; headers
+    the MCP transport authors itself (Accept, Content-Type, Mcp-Session-Id,
+    Mcp-Protocol-Version) are rejected — setting them here is a silent no-op.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -101,6 +118,36 @@ class McpServerSpec(BaseModel):
                 f"the `tool` CLI uses a flat top-level namespace where "
                 f"built-in tool names are reserved. Pick a different name."
             )
+        return v
+
+    @field_validator("headers")
+    @classmethod
+    def _validate_headers(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        # Reject HTTP-illegal headers at config time. httpx would otherwise
+        # raise only when the connection is opened, where the error is caught
+        # and the whole server silently dropped (logged at WARN). Fail loud at
+        # the write boundary instead.
+        if v is None:
+            return None
+        for name, value in v.items():
+            if not _HEADER_NAME_RE.fullmatch(name):
+                raise ValueError(
+                    f"invalid HTTP header name {name!r}: must be a non-empty RFC 7230 "
+                    "token (ASCII letters, digits, and any of !#$%&'*+-.^_`|~)"
+                )
+            if name.lower() in _RESERVED_MCP_HEADERS:
+                raise ValueError(
+                    f"header {name!r} is authored by the MCP transport on every request; "
+                    "setting it here has no effect on the wire. Remove it."
+                )
+            # Values: printable ASCII (0x20-0x7E) plus HTAB. CR/LF would enable
+            # header injection; non-ASCII can't be encoded on the wire.
+            bad = next((c for c in value if c != "\t" and not 0x20 <= ord(c) <= 0x7E), None)
+            if bad is not None:
+                raise ValueError(
+                    f"invalid value for header {name!r}: character {bad!r} is not allowed "
+                    "(only printable ASCII and tab — no control chars, CR, LF, or non-ASCII)"
+                )
         return v
 
 
