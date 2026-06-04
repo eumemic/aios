@@ -221,6 +221,12 @@ done
 curl -fsS "$api_url_local" >/dev/null 2>&1 || fail "api didn't reach /health in 60s"
 ok "api healthy"
 
+# Seed the deterministic dev key the console auto-logs-in with. Best-effort:
+# on a brand-new DB there's no root yet, so the seed no-ops with a hint and we
+# continue (the console's first-run bootstrap creates the root, after which a
+# re-run of dev-bootstrap seeds the key).
+"$SCRIPT_DIR/dev-seed-console-key.sh" || say "dev console key not seeded yet (see hint above)"
+
 # ── helpers for connection creation ───────────────────────────────────
 # Find the connection id for (connector, account) if one already exists,
 # else echo nothing.  --connector filters server-side, so the python only
