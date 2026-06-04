@@ -31,6 +31,7 @@ import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
+from aios.db import queries
 from aios.logging import get_logger
 from aios.sandbox.backends.base import CommandResult, SandboxBackend, SandboxHandle
 from aios.sandbox.git_proxy import GitProxy
@@ -107,6 +108,19 @@ class SandboxRegistry:
         resources are recycled and a fresh sandbox provisioned under the
         per-session lock.
 
+        A second warm-hit probe re-reads ``sessions.spec_version`` and
+        recycles the (still-alive) sandbox when it has drifted past the
+        snapshot stamped on the handle (issue #713). A memory store or
+        github repo attached/detached between steps bumps ``spec_version``
+        via a Postgres trigger; the next step would otherwise reuse a
+        sandbox whose mounts no longer match
+        :func:`build_spec_from_session`. The version probe only runs when
+        a ``pool`` is supplied (the cold-start span path already passes
+        one) and is best-effort — a transient DB error returns the live
+        handle rather than churning a healthy sandbox. A drifted version
+        falls through to the same stale-handle recycle path as a dead
+        liveness probe.
+
         Best-effort, not a hard guarantee. The probe runs lock-free, so a
         container can still die between the probe and the caller's use,
         and a concurrent ``release``/reaper (which DO hold the per-session
@@ -118,8 +132,15 @@ class SandboxRegistry:
         """
         handle = self._handles.get(session_id)
         if handle is not None and await self._backend.is_alive(handle):
-            self._last_used[session_id] = time.monotonic()
-            return handle
+            if pool is None or not await self._spec_version_changed(session_id, handle, pool):
+                self._last_used[session_id] = time.monotonic()
+                return handle
+            log.info(
+                "sandbox.spec_version_drift_recycling",
+                session_id=session_id,
+                container_id=handle.sandbox_id[:12],
+                handle_spec_version=handle.spec_version,
+            )
 
         # ``handle`` is the dead reference we just probed (or None on a cold
         # miss). Capture it: under the lock, a *different* cached handle means
@@ -152,6 +173,36 @@ class SandboxRegistry:
             self._handles[session_id] = handle
             self._last_used[session_id] = time.monotonic()
             return handle
+
+    async def _spec_version_changed(
+        self, session_id: str, handle: SandboxHandle, pool: asyncpg.Pool[Any]
+    ) -> bool:
+        """Return True iff ``sessions.spec_version`` drifted past the handle's
+        snapshot (issue #713).
+
+        Best-effort: any exception (transient DB error, session vanished)
+        returns ``False`` so a healthy sandbox isn't recycled over a blip.
+        The deferred ``sessions`` import matches the cycle-avoidance pattern
+        in :meth:`_provision_with_span` (the runtime module lists this
+        module under ``TYPE_CHECKING``); ``queries`` is imported at module
+        top, same as :mod:`aios.sandbox.spec`.
+        """
+        from aios.services import sessions as sessions_service
+
+        try:
+            account_id = await sessions_service.load_session_account_id(pool, session_id)
+            async with pool.acquire() as conn:
+                current = await queries.get_session_spec_version(
+                    conn, session_id, account_id=account_id
+                )
+        except Exception as err:
+            log.warning(
+                "sandbox.spec_version_probe_failed",
+                session_id=session_id,
+                error=str(err),
+            )
+            return False
+        return current != handle.spec_version
 
     async def _provision_with_span(
         self, session_id: str, *, pool: asyncpg.Pool[Any] | None

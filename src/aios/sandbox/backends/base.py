@@ -83,6 +83,11 @@ class SandboxSpec:
     populated ``extra_mounts``; the backend stamps it onto the handle
     it returns so the registry's drift detector can compare it against
     the current echo set on each step.
+
+    ``spec_version`` is the ``sessions.spec_version`` snapshot at build
+    time (issue #713). The backend copies it onto the handle so the
+    registry can re-read the current version on a warm hit and recycle
+    the sandbox when a session-scoped resource changed between steps.
     """
 
     session_id: str
@@ -95,6 +100,11 @@ class SandboxSpec:
     host_gateway_alias: str | None
     image: str
     mount_snapshot: frozenset[tuple[str, ...]] = frozenset()
+    # ``sessions.spec_version`` snapshot at build time (issue #713). Bumped
+    # by Postgres triggers on the resource tables that feed this spec
+    # (``session_memory_stores`` / ``session_github_repositories``); the
+    # registry's warm-hit probe compares it against the current value.
+    spec_version: int = 0
     # Per-sandbox resource caps (multi-tenancy hardening — #367 PR 9).
     # ``None`` leaves the host's default in place. The spec builder
     # populates these from the AIOS_SANDBOX_* settings; the backend
@@ -123,12 +133,20 @@ class SandboxHandle:
     have changed since the sandbox was provisioned (e.g. a memory store
     was attached or detached) — see
     :meth:`SandboxRegistry.release_if_mounts_changed`.
+
+    ``spec_version`` is the provision-time snapshot of
+    ``sessions.spec_version`` (issue #713). The registry's staleness
+    probe re-reads the current version on a warm hit and recycles the
+    cached sandbox when it has drifted past this snapshot — catching the
+    API-process and direct-SQL mutation gaps the write-path eviction
+    can't see.
     """
 
     session_id: str
     sandbox_id: str
     workspace_path: Path
     mount_snapshot: frozenset[tuple[str, ...]] = frozenset()
+    spec_version: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -67,6 +67,14 @@ async def attach_to_session(
     Caller controls the transaction so a failed attach rolls back the
     earlier session insert (paired flow with
     :func:`aios.services.memory_stores.attach_to_session`).
+
+    Conn-scoped (mid-transaction): does NOT evict the session's sandbox.
+    Github attachments feed build_spec_from_session, so eviction IS
+    required — but it must fire AFTER the parent transaction commits, so
+    :func:`aios.services.sessions.update_session` owns the post-commit
+    eviction hook (#713). Layer 2's ``spec_version`` trigger on
+    ``session_github_repositories`` is the direct-SQL / API-process
+    safety net behind it.
     """
     if not resources:
         return
@@ -108,6 +116,9 @@ async def set_session_resources(
     after the DB swap commits — the per-session ``.git/config`` carries
     the embedded auth token, so leaving them on disk after detach would
     be a slow plaintext-token leak.
+
+    Conn-scoped: sandbox eviction is fired post-commit by
+    :func:`aios.services.sessions.update_session`, not here (#713).
     """
     async with conn.transaction():
         old_ids = await _list_attached_resource_ids(conn, session_id, account_id=account_id)
@@ -121,7 +132,11 @@ async def detach_all_from_session(
 ) -> None:
     """Detach every github_repository from a session and clean up the
     working trees. Used by the full-list-replace path when the new
-    resource list contains no github entries."""
+    resource list contains no github entries.
+
+    Conn-scoped: sandbox eviction is fired post-commit by
+    :func:`aios.services.sessions.update_session`, not here (#713).
+    """
     async with conn.transaction():
         old_ids = await _list_attached_resource_ids(conn, session_id, account_id=account_id)
         await queries.delete_session_github_repos(conn, session_id, account_id=account_id)
@@ -171,6 +186,13 @@ async def rotate_token(
     both fields atomically.  Token-only callers leave ``identity``
     unset and the stored ``git_user_name`` / ``git_user_email`` survive
     the rotation.
+
+    In-place rotation does NOT call the sandbox-eviction hook (#713): the
+    UPDATE bumps the github echo's ``updated_at``, which is part of the
+    ``mount_snapshot`` key (see
+    :func:`aios.sandbox.spec.mount_snapshot_from_echoes`), so the
+    per-step :meth:`SandboxRegistry.release_if_mounts_changed` already
+    recycles the sandbox on the next step.
     """
     blob = _encrypt_token(crypto_box, new_token, account_id=account_id)
     async with pool.acquire() as conn, conn.transaction():

@@ -1372,10 +1372,17 @@ async def get_session_provisioning(
     session_id: str,
     *,
     account_id: str,
-) -> tuple[str, dict[str, str]]:
-    """Return ``(workspace_volume_path, env)`` for provisioning a session's container."""
+) -> tuple[str, dict[str, str], int]:
+    """Return ``(workspace_volume_path, env, spec_version)`` for provisioning
+    a session's container.
+
+    ``spec_version`` (issue #713) is the snapshot the backend stamps onto
+    the :class:`SandboxHandle` so the registry can detect drift on a warm
+    hit and recycle the cached sandbox.
+    """
     row = await conn.fetchrow(
-        "SELECT workspace_volume_path, env FROM sessions WHERE id = $1 AND account_id = $2",
+        "SELECT workspace_volume_path, env, spec_version "
+        "FROM sessions WHERE id = $1 AND account_id = $2",
         session_id,
         account_id,
     )
@@ -1383,7 +1390,29 @@ async def get_session_provisioning(
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
     raw_env = row["env"]
     env: dict[str, str] = parse_jsonb(raw_env)
-    return row["workspace_volume_path"], env
+    return row["workspace_volume_path"], env, row["spec_version"]
+
+
+async def get_session_spec_version(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> int:
+    """Return the session's current ``spec_version`` (issue #713).
+
+    Used by the registry's warm-hit staleness probe to compare the live
+    value against the snapshot stamped onto the cached
+    :class:`SandboxHandle`.
+    """
+    row = await conn.fetchrow(
+        "SELECT spec_version FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    return int(row["spec_version"])
 
 
 async def list_sessions(

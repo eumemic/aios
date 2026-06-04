@@ -189,8 +189,9 @@ async def resolve_bash_timeout_ceiling(session_id: str) -> int:
 
 async def _load_session_provisioning(
     session_id: str, *, account_id: str
-) -> tuple[str, dict[str, str]]:
-    """Load workspace path and env from the session row in one query."""
+) -> tuple[str, dict[str, str], int]:
+    """Load workspace path, env, and ``spec_version`` from the session row
+    in one query (issue #713 adds ``spec_version`` to the tuple)."""
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
@@ -360,7 +361,9 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
 
     settings = get_settings()
     account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
-    raw_path, session_env = await _load_session_provisioning(session_id, account_id=account_id)
+    raw_path, session_env, spec_version = await _load_session_provisioning(
+        session_id, account_id=account_id
+    )
     # Re-validate at the bind-mount boundary: ``validate_workspace_path``
     # also runs at session-create time, but a symlink swap on any
     # directory component of ``raw_path`` between then and now would
@@ -421,6 +424,7 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
             tool_broker_url=tool_broker_url,
             tool_broker_secret=tool_broker_secret,
             tool_socket_host_path=tool_socket_host_path,
+            spec_version=spec_version,
         )
     except BaseException:
         # Both proxies hold worker-process state (ports, token maps,
@@ -456,6 +460,7 @@ def _assemble_plan(
     tool_broker_secret: str,
     tool_socket_host_path: Path | None = None,
     disk_bytes: int | None = None,
+    spec_version: int = 0,
 ) -> ProvisioningPlan:
     """Pure assembly of the plan from already-materialized inputs.
 
@@ -579,6 +584,10 @@ def _assemble_plan(
         host_gateway_alias=None if is_running_in_container() else WORKER_NETWORK_ALIAS,
         image=image,
         mount_snapshot=snapshot,
+        # Provision-time ``sessions.spec_version`` snapshot (issue #713):
+        # the backend copies it onto the handle so the registry's warm-hit
+        # probe can detect a between-steps resource mutation and recycle.
+        spec_version=spec_version,
         # Resource caps come from deployment-wide settings (multi-tenancy
         # hardening — #367 PR 9). A future revision will let an account
         # override these via the management API; the spec-layer plumbing

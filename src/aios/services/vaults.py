@@ -4,6 +4,18 @@ Vaults are named collections of encrypted credentials for authenticated
 outbound services (MCP servers, HTTP APIs). The CryptoBox handles
 encryption/decryption; the service layer validates auth-type-specific
 fields and enforces limits.
+
+Sandbox eviction (#713): session-BINDING changes (which vaults a session
+can reach) flow through :func:`aios.db.queries.set_session_vaults` from
+:func:`aios.services.sessions.update_session`, which fires the post-commit
+sandbox-eviction hook as defense-in-depth. The in-place credential
+mutations here (:func:`refresh_credential`, :func:`update_vault_credential`,
+:func:`create_vault_credential`, and credential archive/delete) do NOT
+evict any sandbox: the MCP pool keys on ``(url, vault_id)`` and a rotation
+overwrites the row contents under that stable key, so the existing key
+already serves the new secret. Vault tables are also deliberately excluded
+from Layer 2's ``spec_version`` triggers — they don't change the sandbox
+spec.
 """
 
 from __future__ import annotations
