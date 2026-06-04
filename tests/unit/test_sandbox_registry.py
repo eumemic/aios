@@ -23,7 +23,13 @@ import pytest
 
 from aios.harness import runtime
 from aios.models.memory_stores import Access, MemoryStoreResourceEcho
-from aios.sandbox.backends.base import Mount, SandboxHandle, SandboxSpec, Unrestricted
+from aios.sandbox.backends.base import (
+    CommandResult,
+    Mount,
+    SandboxHandle,
+    SandboxSpec,
+    Unrestricted,
+)
 from aios.sandbox.registry import SandboxRegistry
 from aios.sandbox.spec import ProvisioningPlan
 from tests.helpers.sandbox import FakeBackend, make_handle
@@ -353,6 +359,82 @@ def _provisioning_plan(session_id: str) -> ProvisioningPlan:
         github_echoes=[],
         git_proxy=None,
     )
+
+
+def _provisioning_plan_limited(session_id: str) -> ProvisioningPlan:
+    """Like :func:`_provisioning_plan` but with a :class:`Limited` network
+    policy, so the registry's cold path actually runs
+    ``apply_network_lockdown`` (the security gate under test)."""
+    from aios.models.environments import EnvironmentConfig, LimitedNetworking
+    from aios.sandbox.backends.base import Limited
+
+    spec = SandboxSpec(
+        session_id=session_id,
+        instance_id="inst_TEST",
+        workspace=Mount(host_path=Path("/tmp/w"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={},
+        network_policy=Limited(allowed_hosts=frozenset({"api.example.com"})),
+        host_gateway_alias=None,
+        image="aios-sandbox:test",
+    )
+    return ProvisioningPlan(
+        spec=spec,
+        env_config=EnvironmentConfig(
+            networking=LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
+        ),
+        memory_echoes=[],
+        github_echoes=[],
+        git_proxy=None,
+    )
+
+
+class TestLockdownFailsClosed:
+    """A :class:`Limited` provision whose iptables lockdown fails must tear
+    the sandbox down and abort, never hand back a box with unrestricted
+    networking (silent #724 image-override bypass otherwise)."""
+
+    async def test_lockdown_failure_destroys_sandbox_and_raises(self) -> None:
+        backend = FakeBackend()
+        # The post-create setup execs all route through backend.exec; make
+        # the lockdown script (the only exec the cold path runs here, since
+        # the other setup steps are patched out) return nonzero.
+        backend.next_result = CommandResult(
+            exit_code=2,
+            stdout="",
+            stderr="iptables: not found",
+            timed_out=False,
+            truncated=False,
+        )
+        registry = SandboxRegistry(backend=backend)
+
+        broker = MagicMock()
+        broker.port = 8765
+
+        with (
+            patch("aios.harness.runtime.require_tool_broker", lambda: broker),
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=_provisioning_plan_limited("sess_X")),
+            ),
+            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            # NOTE: apply_network_lockdown is NOT patched — we want the real
+            # fail-closed behavior to fire against the failing backend.exec.
+        ):
+            from aios.sandbox.backends.base import SandboxBackendError
+
+            with pytest.raises(SandboxBackendError, match="network lockdown failed"):
+                await registry.get_or_provision("sess_X")
+
+        # Sandbox was created then torn down — no live handle left behind.
+        assert any(c[0] == "create" for c in backend.calls)
+        destroys = [c for c in backend.calls if c[0] == "destroy"]
+        assert len(destroys) == 1, "failed lockdown must destroy the just-created sandbox"
+        assert registry.peek("sess_X") is None, (
+            "a Limited sandbox whose lockdown failed must not remain cached"
+        )
 
 
 class TestStaleHandleDetection:

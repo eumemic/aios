@@ -28,6 +28,7 @@ from aios.harness.vision import (
     supports_vision,
 )
 from aios.sandbox.backends.base import SandboxHandle
+from aios.sandbox.spec import resolve_bash_timeout_ceiling
 from aios.sandbox.volumes import resolve_to_host_path
 from aios.services import sessions as sessions_service
 from aios.tools.memory_intercept import resolve_memory_target
@@ -103,10 +104,24 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     sandbox = runtime.require_sandbox_registry()
     handle = await sandbox.get_or_provision(session_id, pool=pool)
 
-    image_mime = await _detect_image_mime(session_id, path, handle=handle)
+    # Resolve the per-environment bash-timeout ceiling once (#725) and
+    # thread it through every sandbox-exec this handler may make (the
+    # text read below plus the image probe/stat helpers) so a raised
+    # env limit applies to read just as it does to bash. Falls back to
+    # the global default when no env override is set.
+    exec_timeout = await resolve_bash_timeout_ceiling(session_id)
+
+    image_mime = await _detect_image_mime(
+        session_id, path, handle=handle, exec_timeout=exec_timeout
+    )
     if image_mime is not None:
         return await _read_image(
-            session_id=session_id, path=path, mime=image_mime, handle=handle, pool=pool
+            session_id=session_id,
+            path=path,
+            mime=image_mime,
+            handle=handle,
+            pool=pool,
+            exec_timeout=exec_timeout,
         )
 
     target = resolve_memory_target(session_id, path)
@@ -141,7 +156,7 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     result = await sandbox.exec(
         handle,
         cmd,
-        timeout_seconds=settings.bash_default_timeout_seconds,
+        timeout_seconds=exec_timeout,
         max_output_bytes=settings.bash_max_output_bytes,
     )
 
@@ -159,7 +174,9 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     return {"path": path, "content": content}
 
 
-async def _detect_image_mime(session_id: str, path: str, *, handle: SandboxHandle) -> str | None:
+async def _detect_image_mime(
+    session_id: str, path: str, *, handle: SandboxHandle, exec_timeout: int
+) -> str | None:
     """Return the image mime for ``path``, or ``None`` to read it as text.
 
     The extension decides when it names a known image type — the common,
@@ -176,7 +193,7 @@ async def _detect_image_mime(session_id: str, path: str, *, handle: SandboxHandl
     mime = _EXT_TO_MIME.get(ext)
     if mime is not None:
         return mime
-    head = await _read_probe_bytes(session_id, path, handle=handle, n=16)
+    head = await _read_probe_bytes(session_id, path, handle=handle, n=16, exec_timeout=exec_timeout)
     if head is None:
         return None
     return sniff_image_mime(head)
@@ -189,6 +206,7 @@ async def _read_image(
     mime: str,
     handle: SandboxHandle,
     pool: Any,
+    exec_timeout: int,
 ) -> ToolResult:
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     model = await sessions_service.get_session_model(pool, session_id, account_id=account_id)
@@ -203,7 +221,7 @@ async def _read_image(
             return ToolResult(content=f"read failed: {err}", is_error=True)
         size = len(data)
     else:
-        result = await _stat_and_read_via_exec(handle, path)
+        result = await _stat_and_read_via_exec(handle, path, exec_timeout=exec_timeout)
         if result is None:
             return ToolResult(
                 content=f"read failed: file not readable inside sandbox: {path}",
@@ -239,7 +257,9 @@ async def _read_image(
     )
 
 
-async def _stat_and_read_via_exec(handle: SandboxHandle, path: str) -> tuple[bytes, int] | None:
+async def _stat_and_read_via_exec(
+    handle: SandboxHandle, path: str, *, exec_timeout: int
+) -> tuple[bytes, int] | None:
     """Fetch ``(bytes, size)`` for non-bind-mount image paths via one docker-exec.
 
     Returns ``None`` on any read failure (missing path, exec error,
@@ -253,7 +273,7 @@ async def _stat_and_read_via_exec(handle: SandboxHandle, path: str) -> tuple[byt
     result = await sandbox.exec(
         handle,
         cmd,
-        timeout_seconds=settings.bash_default_timeout_seconds,
+        timeout_seconds=exec_timeout,
         max_output_bytes=settings.bash_max_output_bytes,
     )
     if result.exit_code != 0:
@@ -268,7 +288,7 @@ async def _stat_and_read_via_exec(handle: SandboxHandle, path: str) -> tuple[byt
 
 
 async def _read_probe_bytes(
-    session_id: str, path: str, *, handle: SandboxHandle, n: int
+    session_id: str, path: str, *, handle: SandboxHandle, n: int, exec_timeout: int
 ) -> bytes | None:
     """First ``n`` bytes of ``path`` for magic-byte image detection.
 
@@ -287,10 +307,12 @@ async def _read_probe_bytes(
                 return fh.read(n)
         except OSError:
             return None
-    return await _read_head_bytes(handle, path, n=n)
+    return await _read_head_bytes(handle, path, n=n, exec_timeout=exec_timeout)
 
 
-async def _read_head_bytes(handle: SandboxHandle, path: str, *, n: int) -> bytes | None:
+async def _read_head_bytes(
+    handle: SandboxHandle, path: str, *, n: int, exec_timeout: int
+) -> bytes | None:
     """Read the first ``n`` bytes of ``path`` via one docker-exec, base64-framed
     so binary survives the str stdout boundary.  Used as the out-of-mount
     fallback for magic-byte image detection.  ``set -o pipefail`` makes a
@@ -305,7 +327,7 @@ async def _read_head_bytes(handle: SandboxHandle, path: str, *, n: int) -> bytes
     result = await sandbox.exec(
         handle,
         cmd,
-        timeout_seconds=settings.bash_default_timeout_seconds,
+        timeout_seconds=exec_timeout,
         max_output_bytes=settings.bash_max_output_bytes,
     )
     if result.exit_code != 0:

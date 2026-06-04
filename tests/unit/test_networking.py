@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -15,6 +15,7 @@ from aios.models.environments import (
     UnrestrictedNetworking,
 )
 from aios.sandbox.backends.base import (
+    CommandResult,
     Limited,
     Mount,
     SandboxBackendError,
@@ -333,3 +334,56 @@ class TestApplyNetworkLockdown:
         # Sanity: the constant exists and contains representative hosts.
         assert "pypi.org" in PACKAGE_REGISTRY_HOSTS
         assert "registry.npmjs.org" in PACKAGE_REGISTRY_HOSTS
+
+
+# ── lockdown fails closed (security gate, not best-effort) ─────────────────────
+
+
+class TestApplyNetworkLockdownFailsClosed:
+    """A :class:`Limited` sandbox whose iptables lockdown didn't apply is a
+    silent unrestricted-networking bypass — especially dangerous combined
+    with the per-environment image override (#724), where a tenant-supplied
+    image might lack ``iptables``/``getent``. The lockdown is a security
+    gate, so a nonzero exit (or a backend exec error) must raise rather than
+    log-and-continue, letting the registry tear the sandbox down.
+    """
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_raises_sandbox_backend_error(self) -> None:
+        backend = FakeBackend()
+        backend.next_result = CommandResult(
+            exit_code=3,
+            stdout="",
+            stderr="iptables: command not found",
+            timed_out=False,
+            truncated=False,
+        )
+        handle = make_handle()
+        networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
+
+        with pytest.raises(SandboxBackendError, match="network lockdown failed"):
+            await apply_network_lockdown(backend, handle, networking)
+
+    @pytest.mark.asyncio
+    async def test_backend_exec_error_propagates(self) -> None:
+        """An infra failure to even run the lockdown script must not be
+        swallowed into a wide-open sandbox — it propagates so the provision
+        aborts."""
+        backend = FakeBackend()
+        backend.exec = AsyncMock(  # type: ignore[method-assign]
+            side_effect=SandboxBackendError("daemon hiccup")
+        )
+        handle = make_handle()
+        networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
+
+        with pytest.raises(SandboxBackendError, match="daemon hiccup"):
+            await apply_network_lockdown(backend, handle, networking)
+
+    @pytest.mark.asyncio
+    async def test_zero_exit_does_not_raise(self) -> None:
+        """The happy path (exit 0) is unchanged — no exception."""
+        backend = FakeBackend()  # default exec returns exit 0
+        handle = make_handle()
+        networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
+
+        await apply_network_lockdown(backend, handle, networking)  # must not raise

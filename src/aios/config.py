@@ -146,11 +146,32 @@ class Settings(BaseSettings):
         "Translates to ``docker run --pids-limit``. Mitigates fork-bomb "
         "denial-of-service; ``None`` leaves the host's default in place.",
     )
+    sandbox_disk_bytes: int | None = Field(
+        default=None,
+        ge=10 * 1024 * 1024,
+        description="Maximum writable-layer size a sandbox container can "
+        "grow to, in bytes. Translates to ``docker run --storage-opt "
+        "size=`` so a heavy build (``npm ci``, large test artifacts) "
+        "can't fill the host disk and take down the worker + sibling "
+        "sandboxes. ``None`` leaves the host's default (unbounded) in "
+        "place. NOTE: ``--storage-opt size=`` is only honored by storage "
+        "drivers that support per-container quotas (``overlay2`` on an "
+        "``xfs``/``btrfs`` backing filesystem with ``pquota``, or "
+        "``devicemapper``); on an unsupported driver Docker rejects the "
+        "flag at ``create`` time, surfacing as a SandboxBackendError "
+        "rather than a silent no-op. Minimum 10 MiB to stay above the "
+        "image's own base size. Per-environment overridable via "
+        "``EnvironmentConfig.disk_bytes`` (issue #725).",
+    )
     bash_default_timeout_seconds: int = Field(
         default=120,
         ge=1,
-        description="Default timeout for a single bash tool call. The agent can "
-        "override per-call up to this maximum.",
+        description="Default ceiling for a single bash tool call, in seconds. "
+        "The agent can override per-call up to this maximum. A session bound "
+        "to an environment with ``EnvironmentConfig.bash_timeout_seconds`` set "
+        "uses that environment's ceiling instead — letting heavy dev workloads "
+        "run >120s commands without raising the global default for every "
+        "session on the worker (issue #725).",
     )
     bash_max_output_bytes: int = Field(
         default=100_000,

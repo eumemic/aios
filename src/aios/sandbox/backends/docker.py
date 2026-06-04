@@ -110,6 +110,17 @@ class DockerBackend:
             argv.extend(["--memory-swap", str(spec.memory_bytes)])
         if spec.pids_limit is not None:
             argv.extend(["--pids-limit", str(spec.pids_limit)])
+        if spec.disk_bytes is not None:
+            # Bound the container's writable layer so a heavy build can't
+            # fill the host disk and take the worker + sibling sandboxes
+            # down (issue #725). Only honored by storage drivers that
+            # support per-container quotas (overlay2 on xfs/btrfs with
+            # pquota, or devicemapper). On an unsupported driver Docker
+            # rejects this at ``docker run`` time — surfaced below as a
+            # SandboxBackendError on the nonzero exit, NOT silently
+            # dropped, so a misconfigured host fails loud rather than
+            # leaving the cap un-enforced.
+            argv.extend(["--storage-opt", f"size={spec.disk_bytes}"])
 
         # Keep stdin open so the container doesn't exit on empty stdin.
         argv.append("--interactive")

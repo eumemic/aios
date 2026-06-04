@@ -56,19 +56,33 @@ def canned_result() -> CommandResult:
 def stub_registry(
     stub_handle: SandboxHandle, canned_result: CommandResult, **kwargs: Any
 ) -> _StubRegistry:
-    """Install a stub sandbox registry on the runtime module, restore after."""
+    """Install a stub sandbox registry on the runtime module, restore after.
+
+    Also pins ``resolve_bash_timeout_ceiling`` to the global default so the
+    handler's per-env timeout lookup (issue #725) doesn't try to read a
+    real session row off the MagicMock pool. Tests that exercise the
+    per-env ceiling patch this themselves (see ``TestPerEnvTimeoutCeiling``).
+    """
     from unittest.mock import MagicMock
+
+    from aios.config import get_settings
 
     prev_registry = runtime.sandbox_registry
     prev_pool = runtime.pool
     stub = _StubRegistry(stub_handle, canned_result)
     runtime.sandbox_registry = stub  # type: ignore[assignment]
     runtime.pool = MagicMock()
-    try:
-        yield stub
-    finally:
-        runtime.sandbox_registry = prev_registry
-        runtime.pool = prev_pool
+    default_ceiling = get_settings().bash_default_timeout_seconds
+    with patch(
+        "aios.tools.bash.resolve_bash_timeout_ceiling",
+        new_callable=AsyncMock,
+        return_value=default_ceiling,
+    ):
+        try:
+            yield stub
+        finally:
+            runtime.sandbox_registry = prev_registry
+            runtime.pool = prev_pool
 
 
 class TestArguments:
@@ -156,6 +170,60 @@ class TestTimeoutCapping:
         )
         kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
         assert kwargs["timeout_seconds"] == 5
+
+
+class TestPerEnvTimeoutCeiling:
+    """The handler clamps to the per-environment ceiling resolved by
+    ``resolve_bash_timeout_ceiling`` (issue #725), not the global default.
+
+    The fixture pins the resolver to the global default; these tests
+    override it to a higher (or lower) per-env value to prove the handler
+    honors whatever ceiling the resolver returns.
+    """
+
+    async def test_honors_higher_per_env_ceiling(self, stub_registry: _StubRegistry) -> None:
+        """A request between the global default and a higher per-env
+        ceiling is passed through (not clamped to the global default)."""
+        with patch(
+            "aios.tools.bash.resolve_bash_timeout_ceiling",
+            new_callable=AsyncMock,
+            return_value=600,
+        ):
+            await bash_handler(
+                "sess_01TEST",
+                {"command": "true", "timeout_seconds": 300},
+            )
+        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        # 300 < 600 ceiling → request honored verbatim.
+        assert kwargs["timeout_seconds"] == 300
+
+    async def test_caps_at_higher_per_env_ceiling(self, stub_registry: _StubRegistry) -> None:
+        """A request above the per-env ceiling is clamped to that ceiling."""
+        with patch(
+            "aios.tools.bash.resolve_bash_timeout_ceiling",
+            new_callable=AsyncMock,
+            return_value=600,
+        ):
+            await bash_handler(
+                "sess_01TEST",
+                {"command": "true", "timeout_seconds": 5000},
+            )
+        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        assert kwargs["timeout_seconds"] == 600
+
+    async def test_default_to_per_env_ceiling_when_unspecified(
+        self, stub_registry: _StubRegistry
+    ) -> None:
+        """With no ``timeout_seconds`` in the call, the handler defaults to
+        the resolved per-env ceiling (here above the global default)."""
+        with patch(
+            "aios.tools.bash.resolve_bash_timeout_ceiling",
+            new_callable=AsyncMock,
+            return_value=600,
+        ):
+            await bash_handler("sess_01TEST", {"command": "true"})
+        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        assert kwargs["timeout_seconds"] == 600
 
 
 class TestExecRaisedReconcileSuppression:

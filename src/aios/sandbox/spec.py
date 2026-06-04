@@ -150,6 +150,43 @@ async def _load_environment_config(session_id: str, *, account_id: str) -> Envir
         )
 
 
+async def resolve_bash_timeout_ceiling(session_id: str) -> int:
+    """Return the maximum allowed bash-tool timeout (seconds) for a session.
+
+    A session bound to an environment whose
+    :attr:`EnvironmentConfig.bash_timeout_seconds` is set uses that
+    environment's ceiling; otherwise the worker-global
+    ``settings.bash_default_timeout_seconds`` (issue #725). The agent may
+    still request a shorter per-call timeout — this is the cap it is
+    clamped to, never a floor.
+
+    Total by design: any failure to load the environment config (no
+    environment attached, session/env not found, transient DB hiccup)
+    falls back to the global default rather than raising, so a bash call
+    never fails to *run* merely because the per-env override couldn't be
+    resolved. The bound it falls back to is the conservative (smaller-or-
+    equal) global one, so the fallback can't widen the ceiling beyond
+    what the operator configured globally.
+    """
+    settings = get_settings()
+    default = settings.bash_default_timeout_seconds
+    try:
+        account_id = await sessions_service.load_session_account_id(
+            runtime.require_pool(), session_id
+        )
+        env_config = await _load_environment_config(session_id, account_id=account_id)
+    except Exception as exc:  # total by contract (see docstring)
+        log.warning(
+            "sandbox.bash_timeout_resolve_failed",
+            session_id=session_id,
+            error=str(exc),
+        )
+        return default
+    if env_config is not None and env_config.bash_timeout_seconds is not None:
+        return env_config.bash_timeout_seconds
+    return default
+
+
 async def _load_session_provisioning(
     session_id: str, *, account_id: str
 ) -> tuple[str, dict[str, str]]:
@@ -354,12 +391,28 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     else:
         tool_broker_url = f"http://{WORKER_NETWORK_ALIAS}:{tool_broker.port}"
 
+    # Per-environment image override (#724): a session bound to an
+    # environment with ``image`` set provisions from that image; unset
+    # falls back to the worker-global ``settings.docker_image``. This is
+    # the only resolution point — everything downstream (backend create,
+    # the --pull decision) consumes ``spec.image`` blindly.
+    image = env_config.image if (env_config and env_config.image) else settings.docker_image
+    # Per-environment writable-layer disk cap (#725): environment
+    # override wins; otherwise the worker-global default (which is itself
+    # ``None`` = unbounded unless the operator set AIOS_SANDBOX_DISK_BYTES).
+    disk_bytes = (
+        env_config.disk_bytes
+        if (env_config and env_config.disk_bytes is not None)
+        else settings.sandbox_disk_bytes
+    )
+
     try:
         return _assemble_plan(
             session_id=session_id,
             instance_id=settings.instance_id,
-            image=settings.docker_image,
+            image=image,
             workspace_path=workspace_path,
+            disk_bytes=disk_bytes,
             env_config=env_config,
             session_env=session_env,
             memory_echoes=memory_echoes,
@@ -402,6 +455,7 @@ def _assemble_plan(
     tool_broker_url: str,
     tool_broker_secret: str,
     tool_socket_host_path: Path | None = None,
+    disk_bytes: int | None = None,
 ) -> ProvisioningPlan:
     """Pure assembly of the plan from already-materialized inputs.
 
@@ -532,6 +586,10 @@ def _assemble_plan(
         cpu_quota=settings.sandbox_cpu_quota,
         memory_bytes=settings.sandbox_memory_bytes,
         pids_limit=settings.sandbox_pids_limit,
+        # Writable-layer disk cap (#725): already resolved by the caller
+        # (environment override → global default), so pass it straight
+        # through rather than re-reading settings here.
+        disk_bytes=disk_bytes,
     )
 
     return ProvisioningPlan(

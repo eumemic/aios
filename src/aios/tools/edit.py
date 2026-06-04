@@ -39,6 +39,7 @@ from aios.errors import (
 )
 from aios.harness import runtime
 from aios.models.memory_stores import MAX_CONTENT_BYTES
+from aios.sandbox.spec import resolve_bash_timeout_ceiling
 from aios.services import memory_stores as memory_service
 from aios.services import sessions as sessions_service
 from aios.tools.memory_intercept import resolve_memory_target
@@ -130,6 +131,12 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     sandbox = runtime.require_sandbox_registry()
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
+    # Resolve the per-environment bash-timeout ceiling once (#725) and use
+    # it for both the read-back and write-back execs below, so an env that
+    # raised the limit applies to edit just as it does to bash. Falls back
+    # to the global default when no env override is set.
+    exec_timeout = await resolve_bash_timeout_ceiling(session_id)
+
     quoted_path = shlex.quote(path)
 
     # Step 1: read the current content. For memory mounts, read from DB to
@@ -152,7 +159,7 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
         read_result = await sandbox.exec(
             handle,
             f"cat -- {quoted_path}",
-            timeout_seconds=settings.bash_default_timeout_seconds,
+            timeout_seconds=exec_timeout,
             max_output_bytes=settings.bash_max_output_bytes,
         )
         if read_result.exit_code != 0:
@@ -255,7 +262,7 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     write_result = await sandbox.exec(
         handle,
         write_cmd,
-        timeout_seconds=settings.bash_default_timeout_seconds,
+        timeout_seconds=exec_timeout,
         max_output_bytes=settings.bash_max_output_bytes,
     )
     if write_result.exit_code != 0:

@@ -42,6 +42,7 @@ from aios.errors import (
 )
 from aios.harness import runtime
 from aios.models.memory_stores import MAX_CONTENT_BYTES
+from aios.sandbox.spec import resolve_bash_timeout_ceiling
 from aios.services import memory_stores as memory_service
 from aios.services import sessions as sessions_service
 from aios.tools.memory_intercept import resolve_memory_target
@@ -183,7 +184,11 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
     result = await sandbox.exec(
         handle,
         cmd,
-        timeout_seconds=settings.bash_default_timeout_seconds,
+        # Honor the session's per-environment bash-timeout ceiling (#725)
+        # so an env that raised the limit applies to every sandbox-exec
+        # tool, not just bash. Falls back to the global default when no
+        # env override is set.
+        timeout_seconds=await resolve_bash_timeout_ceiling(session_id),
         max_output_bytes=settings.bash_max_output_bytes,
     )
 
