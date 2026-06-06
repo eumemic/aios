@@ -71,3 +71,21 @@ async def run_scheduled_task(task_id: str) -> None:
     from aios.harness.scheduled_task_runner import run_scheduled_task_step
 
     await run_scheduled_task_step(task_id)
+
+
+@app.task(
+    name="harness.wake_workflow",
+    queue="workflows",
+    retry=False,
+    pass_context=False,
+)
+async def wake_workflow(run_id: str) -> None:
+    """Run one durable step of a workflow run.
+
+    Per-call ``lock=run_id`` + ``queueing_lock=run_id`` (from
+    :func:`aios.services.wake.defer_run_wake`) serialize a run's steps and dedup
+    queued wakes — the same idiom as ``wake_session``.
+    """
+    from aios.workflows.step import run_workflow_step
+
+    await run_workflow_step(run_id)

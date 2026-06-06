@@ -152,7 +152,7 @@ async def insert_wf_run(
     workflow_id: str,
     script: str,
     script_sha: str,
-    input: dict[str, Any] | None = None,
+    input: Any = None,
     parent_run_id: str | None = None,
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``)."""

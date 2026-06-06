@@ -53,8 +53,8 @@ class WfRun(BaseModel):
     script: str
     script_sha: str
     status: WfRunStatus
-    input: dict[str, Any] | None = None
-    output: dict[str, Any] | None = None
+    input: Any = None  # arbitrary JSON: a workflow's input need not be an object
+    output: Any = None  # arbitrary JSON: the script's return value
     last_event_seq: int
     created_at: datetime
     updated_at: datetime
@@ -87,5 +87,5 @@ class WfRunSignal(BaseModel):
     run_id: str
     call_key: str
     kind: WfRunSignalKind
-    result: dict[str, Any] | None = None
+    result: Any = None  # arbitrary JSON: the externally-delivered resume value
     delivered_at: datetime
