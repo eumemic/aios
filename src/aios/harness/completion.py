@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import litellm
 
 from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT
+from aios.harness.time_block import TIME_BLOCK_PREFIX
 
 # Anthropic rejects empty text blocks that some OpenRouter models emit on
 # tool-call-only turns; modify_params tells LiteLLM to sanitize them.
@@ -226,10 +227,10 @@ def inject_cache_breakpoints(
     1. **System message** — cache-stable across steps.
     2. **Last tool definition** — cache-stable while tools don't change.
     3. **Last stable conversation message** — the last event-sourced
-       message, skipping the trailing channels tail block (which
-       mutates every step: unread counts, previews) and any
-       empty-assistant separator inserted before it by
-       :func:`separate_adjacent_user_messages`.
+       message, skipping the trailing ephemeral tail blocks (the
+       current-time line and the channels listing, both of which mutate
+       every step) and any empty-assistant separator inserted before them
+       by :func:`separate_adjacent_user_messages`.
 
     Skipping the tail is load-bearing: with the breakpoint on the tail
     itself, the conversation prefix never gets its own cache entry and
@@ -261,6 +262,9 @@ def _last_stable_message_index(messages: list[dict[str, Any]]) -> int | None:
     * The channels tail block — identified by its content signature
       ``━━━ Channels ━━━`` (always the last user-role message when
       present).
+    * The current-time tail block — identified by
+      :data:`~aios.harness.time_block.TIME_BLOCK_PREFIX`; appended every
+      step and mutates with the clock.
     * Any role-transition separator — inserted by
       :func:`~aios.harness.context.separate_adjacent_user_messages` to
       defeat Anthropic's adjacent-user-merge; carries only a
@@ -271,7 +275,7 @@ def _last_stable_message_index(messages: list[dict[str, Any]]) -> int | None:
     """
     for i in range(len(messages) - 1, -1, -1):
         msg = messages[i]
-        if _is_tail_block(msg) or _is_separator_placeholder(msg):
+        if _is_tail_block(msg) or _is_time_block(msg) or _is_separator_placeholder(msg):
             continue
         return i
     return None
@@ -295,6 +299,29 @@ def _is_tail_block(msg: dict[str, Any]) -> bool:
             if isinstance(block, dict) and block.get("type") == "text":
                 text = block.get("text")
                 if isinstance(text, str) and text.startswith("━━━ Channels ━━━"):
+                    return True
+    return False
+
+
+def _is_time_block(msg: dict[str, Any]) -> bool:
+    """Detect the current-time tail block by its leading marker.
+
+    Mirrors :func:`_is_tail_block`: a user-role message whose content
+    begins with :data:`~aios.harness.time_block.TIME_BLOCK_PREFIX`.  Like
+    the channels tail, the time block mutates every step (the clock ticks),
+    so the breakpoint walker must skip it to keep the conversation prefix
+    cache-stable.
+    """
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content.startswith(TIME_BLOCK_PREFIX)
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str) and text.startswith(TIME_BLOCK_PREFIX):
                     return True
     return False
 

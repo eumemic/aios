@@ -26,6 +26,7 @@ work to honor the "byte-identical" promise.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from aios.harness._text import join_blocks
@@ -34,6 +35,7 @@ from aios.harness.context import (
     separate_adjacent_user_messages,
     stub_missing_reasoning_content,
 )
+from aios.harness.time_block import TIME_BLOCK_MAX_LOCAL, build_time_block
 from aios.tools.registry import to_openai_tools
 
 if TYPE_CHECKING:
@@ -214,7 +216,7 @@ async def compute_step_prelude(
         system_prompt=system_prompt,
         tools=tools,
         skill_versions=skill_versions,
-        tail_block_upper_bound_local=max_tail_block_local(channels),
+        tail_block_upper_bound_local=max_tail_block_local(channels) + TIME_BLOCK_MAX_LOCAL,
     )
 
 
@@ -274,6 +276,7 @@ async def compose_step_context(
     prelude: StepPrelude,
     events: list[Event],
     in_flight_tool_call_ids: frozenset[str] = frozenset(),
+    now: datetime | None = None,
 ) -> StepContext:
     """Compose the chat-completions payload for a step.
 
@@ -314,9 +317,13 @@ async def compose_step_context(
         in_flight_tool_call_ids=in_flight_tool_call_ids,
     )
 
-    # Tail block lives *after* build_messages so its per-step mutations
-    # (unread counts, previews) don't bust the prefix cache.  Paradigm
-    # prose stays in the cache-stable system prompt above.
+    # Tail blocks live *after* build_messages so their per-step mutations
+    # (the current time; unread counts, previews) don't bust the prefix
+    # cache.  Cache-stable prose stays in the system prompt above.
+    #
+    # Current-time block first, so the channels listing stays the literal
+    # tail that the focal-paradigm prose refers to.
+    ctx.messages.append(build_time_block(now if now is not None else datetime.now(UTC)))
     tail = build_channels_tail_block(channels, events, session.focal_channel)
     if tail is not None:
         ctx.messages.append(tail)

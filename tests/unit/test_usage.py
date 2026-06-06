@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from aios.harness.completion import (
@@ -9,6 +10,7 @@ from aios.harness.completion import (
     _normalize_usage,
     inject_cache_breakpoints,
 )
+from aios.harness.time_block import build_time_block
 
 # Model string that LiteLLM routes through the Anthropic provider — used to
 # exercise the branch of inject_cache_breakpoints that actually mutates
@@ -255,6 +257,52 @@ class TestInjectCacheBreakpoints:
         # Separator stays bare; tail stays bare.
         assert msgs[2] == {"role": "assistant", "content": "."}
         assert msgs[3]["content"] == tail["content"]
+
+    def test_skips_time_block_no_channels(self) -> None:
+        """The current-time tail block is appended every step and mutates
+        with the clock, exactly like the channels tail.  On a no-channels
+        session it is the literal last message, so the breakpoint must skip
+        it and land on the last stable event — otherwise the conversation
+        prefix re-caches every step.
+        """
+        time_block = build_time_block(datetime(2026, 6, 6, 19, 5, 49, tzinfo=UTC))
+        msgs = [
+            _msg("system", "sys"),
+            _msg("user", "hi there"),
+            _msg("assistant", "hello"),
+            time_block,
+        ]
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
+        # Last stable message (the assistant), not the mutating time block.
+        assert msgs[2]["content"] == [
+            {"type": "text", "text": "hello", "cache_control": _CACHE_CONTROL}
+        ]
+        # Time block stays un-annotated.
+        assert msgs[3]["content"] == time_block["content"]
+
+    def test_skips_both_time_block_and_channels_tail(self) -> None:
+        """Both ephemeral tails (current-time then channels listing) plus the
+        adjacency separator between them must be skipped; the breakpoint
+        lands on the last stable event-sourced message.
+        """
+        time_block = build_time_block(datetime(2026, 6, 6, 19, 5, 49, tzinfo=UTC))
+        channels_tail = _msg("user", "━━━ Channels ━━━\n▸ channel_id=x (focal)")
+        separator = {"role": "assistant", "content": "."}
+        msgs = [
+            _msg("system", "sys"),
+            _msg("assistant", "hello"),
+            time_block,
+            separator,
+            channels_tail,
+        ]
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
+        # Breakpoint on the last stable event (the assistant).
+        assert msgs[1]["content"] == [
+            {"type": "text", "text": "hello", "cache_control": _CACHE_CONTROL}
+        ]
+        # Both ephemeral tails stay un-annotated.
+        assert msgs[2]["content"] == time_block["content"]
+        assert msgs[4]["content"] == channels_tail["content"]
 
     def test_tail_only_context_falls_back_to_system_and_tool(self) -> None:
         """Degenerate case: only system + tail.  No stable conversation
