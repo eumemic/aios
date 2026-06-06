@@ -1,4 +1,5 @@
-"""E2E tests for the ``pending`` session status (issue #39)."""
+"""E2E tests for the derived ``active`` session status (issue #39): a user
+message gives an idle session owed work, so it derives ``active``."""
 
 from __future__ import annotations
 
@@ -85,10 +86,13 @@ async def idle_session_id(pool: Any) -> str:
     return session.id
 
 
-class TestPendingStatus:
-    async def test_post_message_flips_idle_to_pending(
+class TestActiveStatus:
+    async def test_post_message_makes_session_active(
         self, http_client: httpx.AsyncClient, idle_session_id: str
     ) -> None:
+        """An unprompted user message gives the session owed work, so its
+        derived status flips ``idle → active`` (#39 orchestrators need to
+        distinguish a session that will run from one that's truly done)."""
         r = await http_client.get(f"/v1/sessions/{idle_session_id}")
         assert r.json()["status"] == "idle"
 
@@ -99,27 +103,33 @@ class TestPendingStatus:
         assert r.status_code == 201, r.text
 
         r = await http_client.get(f"/v1/sessions/{idle_session_id}")
-        assert r.json()["status"] == "pending"
+        assert r.json()["status"] == "active"
 
-    async def test_rescheduling_status_not_clobbered(
+    async def test_armed_schedule_wake_stays_idle(
         self, http_client: httpx.AsyncClient, pool: Any, idle_session_id: str
     ) -> None:
-        account_id = "acc_test_stub"  # PR 3 scaffolding
-        from aios.services import sessions as sessions_svc
+        """Quiescent between fires: a session with an armed future wake (a
+        pending scheduled task) but no in-flight or unreacted work derives
+        ``idle``. The scheduled task is a row, not an event, so it adds no
+        unreacted stimulus — the timer only matters when it actually fires."""
+        from datetime import UTC, datetime, timedelta
 
-        await sessions_svc.set_session_status(
+        from aios.models.scheduled_tasks import ScheduledTaskCreate
+        from aios.services import scheduled_tasks as scheduled_tasks_svc
+
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        await scheduled_tasks_svc.add_task(
             pool,
             idle_session_id,
-            "rescheduling",
-            stop_reason={"type": "rescheduling"},
+            ScheduledTaskCreate(
+                name=f"wake-{_uniq()}",
+                fire_at=datetime.now(UTC) + timedelta(hours=1),
+                command="echo hi",
+                timeout_seconds=30,
+            ),
             account_id=account_id,
         )
 
-        r = await http_client.post(
-            f"/v1/sessions/{idle_session_id}/messages",
-            json={"content": "ping"},
-        )
-        assert r.status_code == 201, r.text
-
         r = await http_client.get(f"/v1/sessions/{idle_session_id}")
-        assert r.json()["status"] == "rescheduling"
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "idle"

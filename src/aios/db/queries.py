@@ -780,6 +780,65 @@ async def list_agent_versions(
 
 # ─── sessions ─────────────────────────────────────────────────────────────────
 
+# Read-time derivation of the session ``status`` ({active, idle}) from the event
+# log — there is no persisted status column (#728-era status collapse). A
+# session is ``active`` when it has owed/in-flight work that will advance
+# WITHOUT a new unprompted user message:
+#   * an unreacted stimulus  — a non-assistant message event past the assistant
+#     ``reacting_to`` watermark (queued/generating/tool-completed-awaiting-step), OR
+#   * an unresolved tool_call — an assistant tool_call with no tool-role result
+#     (harness tool in-flight, or blocked on an approval/custom-tool result).
+# ...EXCEPT when ``errored`` (retry budget exhausted, not yet recovered): the
+# latest ``turn_ended``/``error`` lifecycle event is more recent than the latest
+# user message. Errored forces ``idle`` (a special case of idle) and the sweep
+# skips it — see ``sweep.ERRORED_SESSIONS_SQL`` (the same predicate, used to
+# exclude errored sessions from inference; keep the two in sync).
+#
+# Correlated on ``sessions.id``/``sessions.account_id`` so it drops into any
+# query with ``sessions`` in scope. Each EXISTS rides a partial index
+# (events_session_message_seq_idx, events_assistant_tool_calls_idx,
+# events_tool_result_idx, events_turn_error_idx). For single reads and
+# keyset-limited list pages it evaluates on O(page) rows.
+#
+# ``_SESSION_ACTIVE_EXPR`` — has owed/in-flight work (unreacted stimulus OR
+# unresolved tool_call). ``_SESSION_ERRORED_EXPR`` — parked-errored latch
+# (also reused by ``lock_active_session_for_update`` and the clone gate).
+_SESSION_ACTIVE_EXPR = """(
+        EXISTS (
+            SELECT 1 FROM events ev
+             WHERE ev.session_id = sessions.id AND ev.account_id = sessions.account_id
+               AND ev.kind = 'message' AND ev.role <> 'assistant'
+               AND ev.seq > COALESCE((
+                   SELECT MAX(COALESCE((ae.data->>'reacting_to')::bigint, ae.seq))
+                     FROM events ae
+                    WHERE ae.session_id = sessions.id AND ae.account_id = sessions.account_id
+                      AND ae.kind = 'message' AND ae.role = 'assistant'), 0))
+        OR EXISTS (
+            SELECT 1 FROM events ate
+             CROSS JOIN LATERAL jsonb_array_elements(ate.data->'tool_calls') tc
+             WHERE ate.session_id = sessions.id AND ate.account_id = sessions.account_id
+               AND ate.kind = 'message' AND ate.role = 'assistant' AND ate.data ? 'tool_calls'
+               AND NOT EXISTS (
+                   SELECT 1 FROM events tr
+                    WHERE tr.session_id = sessions.id AND tr.account_id = sessions.account_id
+                      AND tr.kind = 'message' AND tr.role = 'tool'
+                      AND tr.data->>'tool_call_id' = tc->>'id'))
+    )"""
+
+_SESSION_ERRORED_EXPR = """EXISTS (
+        SELECT 1 FROM events le
+         WHERE le.session_id = sessions.id AND le.account_id = sessions.account_id
+           AND le.kind = 'lifecycle' AND le.data->>'stop_reason' = 'error'
+           AND le.seq > COALESCE((
+               SELECT MAX(ue.seq) FROM events ue
+                WHERE ue.session_id = sessions.id AND ue.account_id = sessions.account_id
+                  AND ue.kind = 'message' AND ue.role = 'user'), 0))"""
+
+_SESSION_STATUS_EXPR = (
+    f"CASE WHEN {_SESSION_ACTIVE_EXPR} AND NOT {_SESSION_ERRORED_EXPR} "
+    "THEN 'active' ELSE 'idle' END"
+)
+
 
 def _row_to_session(row: asyncpg.Record) -> Session:
     raw_metadata = row["metadata"]
@@ -793,7 +852,12 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         agent_version=row["agent_version"],
         title=row["title"],
         metadata=metadata,
-        status=row["status"],
+        # ``status`` is derived ({active, idle}) from the event log via
+        # ``_SESSION_STATUS_EXPR``; ``get_session``/``list_sessions`` select it
+        # as a ``status`` column. There is no persisted status column. Reads
+        # that don't derive it (INSERT ... RETURNING, clone) default to "idle"
+        # — a fresh session is idle, and internal paths never surface it.
+        status=row.get("status") or "idle",
         stop_reason=stop_reason,
         last_event_seq=row["last_event_seq"],
         usage=SessionUsage(
@@ -855,10 +919,10 @@ async def insert_session(
             """
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
-                status, workspace_volume_path, env,
+                workspace_volume_path, env,
                 focal_channel, focal_locked, account_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'idle', $7, $8::jsonb, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11)
             RETURNING *
             """,
             new_id,
@@ -888,6 +952,26 @@ async def insert_session(
 async def get_session(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> Session:
+    rec = await conn.fetchrow(
+        f"SELECT sessions.*, ({_SESSION_STATUS_EXPR}) AS status "
+        "FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    if rec is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    return _row_to_session(rec)
+
+
+async def get_session_bare(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> Session:
+    """Session read WITHOUT deriving ``status`` (defaults to ``idle``).
+
+    For callers that need only core columns and never surface the status label
+    — existence checks, the worker step path, connection lookups — so they
+    don't pay for the ``_SESSION_STATUS_EXPR`` event-log derivation.
+    """
     return await _get_scoped(
         conn,
         table="sessions",
@@ -994,6 +1078,16 @@ async def list_sessions(
     limit: int = 50,
     after: str | None = None,
 ) -> list[Session]:
+    """Keyset-paginated session list with derived ``status`` ({active, idle}).
+
+    ``status`` is a derived expression, not a column, so it's passed to
+    ``_list_scoped`` as an expression-filter (a static literal, never user
+    input) rather than a column name. That keeps the keyset/limit/has-more
+    boilerplate in one place while still applying the filter in SQL — so
+    pagination stays correct (post-filtering the page would conflate "few
+    matches in this window" with "no more results"). ``status`` and
+    ``last_event_at`` are derived in ``extra_select``.
+    """
     return await _list_scoped(
         conn,
         table="sessions",
@@ -1001,12 +1095,12 @@ async def list_sessions(
         row=_row_to_session,
         limit=limit,
         after=after,
-        filters=[("agent_id", agent_id), ("status", status)],
-        # Derive last-activity = timestamp of the session's newest event.
-        # ``ORDER BY seq DESC LIMIT 1`` rides the (session_id, seq) index, so
-        # it's O(log n) even for huge sessions (unlike MAX(created_at), which
-        # has no supporting index).
+        filters=[("agent_id", agent_id), (f"({_SESSION_STATUS_EXPR})", status)],
+        # last_event_at: timestamp of the session's newest event. ``ORDER BY
+        # seq DESC LIMIT 1`` rides the (session_id, seq) index — O(log n) even
+        # for huge sessions (unlike MAX(created_at), which has no index).
         extra_select=(
+            f"({_SESSION_STATUS_EXPR}) AS status, "
             "(SELECT e.created_at FROM events e WHERE e.session_id = sessions.id "
             "ORDER BY e.seq DESC LIMIT 1) AS last_event_at"
         ),
@@ -1025,7 +1119,8 @@ async def lock_active_session_for_update(
     row lock is what serialises concurrent retries on the same session.
     """
     row = await conn.fetchrow(
-        "SELECT status FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+        f"SELECT ({_SESSION_ERRORED_EXPR}) AS errored "
+        "FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
         session_id,
         account_id,
     )
@@ -1034,35 +1129,35 @@ async def lock_active_session_for_update(
             f"session {session_id} not found",
             detail={"session_id": session_id},
         )
-    if row["status"] == "errored":
+    if row["errored"]:
         raise ConflictError(
             f"session {session_id} is errored; post a user message to resume",
             detail={"session_id": session_id, "status": "errored"},
         )
 
 
-async def set_session_status(
+async def set_session_stop_reason(
     conn: asyncpg.Connection[Any],
     session_id: str,
-    status: SessionStatus,
-    stop_reason: dict[str, Any] | None = None,
+    stop_reason: dict[str, Any],
     *,
     account_id: str,
 ) -> None:
-    stop_json = json.dumps(stop_reason) if stop_reason is not None else None
-    # ``archived_at IS NULL`` guards the archive race: every caller is
-    # worker-internal and silent no-op is the right contract — surfacing
-    # would just cascade into an ``errored`` flip on the same archived row.
-    row = await conn.fetchrow(
-        "UPDATE sessions SET status = $1, stop_reason = $2::jsonb, updated_at = now() "
-        "WHERE id = $3 AND account_id = $4 AND archived_at IS NULL RETURNING 1",
-        status,
-        stop_json,
+    """Record why the most recent step ended. ``status`` is derived from the
+    event log (see ``_SESSION_STATUS_EXPR``), so this writes only
+    ``stop_reason`` — the console renders the Errored pill from
+    ``status == 'idle' AND stop_reason.type == 'error'``.
+
+    ``archived_at IS NULL`` guards the archive race: every caller is
+    worker-internal and a silent no-op is the right contract.
+    """
+    await conn.execute(
+        "UPDATE sessions SET stop_reason = $1::jsonb, updated_at = now() "
+        "WHERE id = $2 AND account_id = $3 AND archived_at IS NULL",
+        json.dumps(stop_reason),
         session_id,
         account_id,
     )
-    if row is None:
-        return
 
 
 async def increment_session_usage(
@@ -1297,9 +1392,6 @@ async def delete_session(
         )
 
 
-_CLONEABLE_STATUSES: tuple[SessionStatus, ...] = ("idle", "terminated")
-
-
 async def clone_session(
     conn: asyncpg.Connection[Any],
     parent_session_id: str,
@@ -1312,9 +1404,11 @@ async def clone_session(
     The clone inherits ``agent_id``, ``environment_id``, ``agent_version``,
     ``title``, ``metadata``, ``env``, vault bindings, memory-store
     attachments, github-repository attachments, ``last_event_seq``,
-    ``status``, ``stop_reason``, ``focal_channel``, and ``focal_locked``
+    ``stop_reason``, ``focal_channel``, and ``focal_locked``
     so its next forward step sees a context byte-identical to the
-    parent's at clone time.  ``focal_locked`` MUST follow ``focal_channel``
+    parent's at clone time.  (``status`` is derived from the event log, so
+    the clone's status follows from its copied events — idle, like the
+    parent it was required to be.)  ``focal_locked`` MUST follow ``focal_channel``
     on the clone path: a per_chat parent (``focal_locked=True``) cloned
     without its lock would inherit the bound channel but bypass the
     ``is_session_focal_locked`` gate on ``switch_channel``, letting the
@@ -1347,7 +1441,9 @@ async def clone_session(
 
     async with conn.transaction():
         row = await conn.fetchrow(
-            "SELECT status, archived_at FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            f"SELECT archived_at, ({_SESSION_ACTIVE_EXPR}) AS active, "
+            f"({_SESSION_ERRORED_EXPR}) AS errored "
+            "FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
             parent_session_id,
             account_id,
         )
@@ -1365,23 +1461,27 @@ async def clone_session(
                 f"session {parent_session_id} is archived",
                 detail={"id": parent_session_id},
             )
-        status = row["status"]
-        if status not in _CLONEABLE_STATUSES:
+        # Only clone idle (quiescent, non-errored) parents: an active parent
+        # has tool tasks in flight whose results would land only on its own
+        # session_id, leaving the clone's expected event stream undefined; an
+        # errored parent isn't a clean base. (Derived ``status == 'idle'`` =
+        # not active; errored is checked explicitly for a precise message.)
+        if row["active"] or row["errored"]:
+            state = "errored" if row["errored"] else "active"
             raise ConflictError(
-                f"can only clone sessions in {_CLONEABLE_STATUSES} state; "
-                f"parent {parent_session_id} is in {status!r}",
-                detail={"id": parent_session_id, "status": status},
+                f"can only clone idle sessions; parent {parent_session_id} is {state}",
+                detail={"id": parent_session_id, "status": state},
             )
 
         new_row = await conn.fetchrow(
             """
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
-                status, stop_reason, workspace_volume_path, env, last_event_seq,
+                stop_reason, workspace_volume_path, env, last_event_seq,
                 focal_channel, focal_locked, account_id
             )
             SELECT $1, agent_id, environment_id, agent_version, title, metadata,
-                   status, stop_reason, $2, env, last_event_seq, focal_channel,
+                   stop_reason, $2, env, last_event_seq, focal_channel,
                    focal_locked, account_id
               FROM sessions WHERE id = $3
             RETURNING *
@@ -1959,18 +2059,18 @@ async def append_event(
         raw_role = data.get("role")
         if isinstance(raw_role, str):
             role = raw_role
-    # User messages lift idle/errored → pending in the seq UPDATE so the
-    # sweep stops ignoring an errored session (#39, #353).
+    # A user message bumps ``updated_at`` (last-interaction time). It no longer
+    # needs to flip a status column: ``status`` is derived from the event log,
+    # so an errored session recovers automatically once a user message lands
+    # (its seq exceeds the latest error lifecycle event — see
+    # ``_SESSION_ERRORED_EXPR``), and the sweep stops skipping it (#39, #353).
     is_user_message = kind == "message" and role == "user"
 
     async with conn.transaction():
         seq_row = await conn.fetchrow(
             "UPDATE sessions "
             "SET last_event_seq = last_event_seq + 1, "
-            "    status = CASE WHEN $3 AND status IN ('idle', 'errored') "
-            "                  THEN 'pending' ELSE status END, "
-            "    updated_at = CASE WHEN $3 AND status IN ('idle', 'errored') "
-            "                      THEN now() ELSE updated_at END "
+            "    updated_at = CASE WHEN $3 THEN now() ELSE updated_at END "
             "WHERE id = $1 AND account_id = $2 AND archived_at IS NULL "
             "RETURNING last_event_seq, focal_channel",
             session_id,

@@ -37,18 +37,18 @@ class _FakeUpload:
 
 
 def _patch_session_get(session_id: str = "sess_x") -> Any:
-    """Patch ``queries.get_session`` to return a stub session row."""
+    """Patch ``queries.get_session_bare`` to return a stub session row."""
     stub = MagicMock()
     stub.id = session_id
     return patch(
-        "aios.services.files.queries.get_session",
+        "aios.services.files.queries.get_session_bare",
         AsyncMock(return_value=stub),
     )
 
 
 def _patch_session_not_found() -> Any:
     return patch(
-        "aios.services.files.queries.get_session",
+        "aios.services.files.queries.get_session_bare",
         AsyncMock(side_effect=NotFoundError("session sess_x not found", detail={"id": "sess_x"})),
     )
 

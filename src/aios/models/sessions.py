@@ -72,7 +72,21 @@ def _validate_session_resources(resources: list[SessionResource]) -> None:
     _validate_github_resources(github)
 
 
-SessionStatus = Literal["pending", "idle", "rescheduling", "errored", "terminated"]
+SessionStatus = Literal["active", "idle"]
+"""Derived session activity, computed from the event log at read time (there is
+no persisted status column).
+
+* ``active`` — the session has owed/in-flight work that will advance WITHOUT a
+  new unprompted user message: an unreacted user/tool stimulus, or an unresolved
+  tool_call (a built-in tool running, or one blocked on operator approval / a
+  custom-tool result — see :class:`AwaitingToolCall`).
+* ``idle`` — quiescent: nothing is owed; only a new unprompted user message (or
+  an armed timer firing) will move it. ``idle`` implies ``awaiting == []``.
+
+An *errored* session (model-call retry budget exhausted, not yet recovered) is a
+special case of ``idle``: it reads ``idle`` with ``stop_reason.type == "error"``
+and will not wake until a user message arrives.
+"""
 
 MAX_USER_MESSAGE_CHARS = 1_000_000
 
@@ -224,10 +238,12 @@ class SessionUpdate(BaseModel):
 class Session(BaseModel):
     """Read view of a session. Internal-only columns are not exposed.
 
-    ``stop_reason`` records why the most recent step ended. Possible
-    ``type`` values: ``"end_turn"``, ``"interrupt"``, ``"rescheduling"``,
-    ``"error"``. ``awaiting`` lists tool calls the session is blocked
-    on (derived per read from the event log + agent tool specs).
+    ``status`` ({active, idle}) is derived per read from the event log; see
+    :data:`SessionStatus`. ``stop_reason`` records why the most recent step
+    ended. Possible ``type`` values: ``"end_turn"``, ``"interrupt"``,
+    ``"rescheduling"``, ``"error"`` (``idle`` + ``error`` = the errored
+    landing pad). ``awaiting`` lists tool calls the session is blocked on
+    (derived per read from the event log + agent tool specs).
     """
 
     id: str

@@ -341,10 +341,11 @@ async def get_session_basic(
 
     Use this when the caller reads only core columns — the worker step
     path (``agent_id``, ``agent_version``, ``focal_channel``) and the
-    long-poll wait endpoint's existence check.
+    long-poll wait endpoint's existence check. Skips the ``status``
+    derivation (``status`` defaults to ``idle`` and is never surfaced here).
     """
     async with pool.acquire() as conn:
-        return await queries.get_session(conn, session_id, account_id=account_id)
+        return await queries.get_session_bare(conn, session_id, account_id=account_id)
 
 
 async def get_session_event_stats(
@@ -599,18 +600,18 @@ async def read_windowed_events(
         )
 
 
-async def set_session_status(
+async def set_session_stop_reason(
     pool: asyncpg.Pool[Any],
     session_id: str,
-    status: SessionStatus,
-    stop_reason: dict[str, Any] | None = None,
+    stop_reason: dict[str, Any],
     *,
     account_id: str,
 ) -> None:
+    """Record why the most recent step ended (end_turn/error/interrupt/
+    rescheduling). ``status`` is derived from the event log, so this no longer
+    writes a status column."""
     async with pool.acquire() as conn:
-        await queries.set_session_status(
-            conn, session_id, status, stop_reason, account_id=account_id
-        )
+        await queries.set_session_stop_reason(conn, session_id, stop_reason, account_id=account_id)
 
 
 async def increment_usage(

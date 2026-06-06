@@ -206,7 +206,7 @@ async def wake_session_handler(session_id: str, arguments: dict[str, Any]) -> di
     # justifies bypassing the usual ``account_id``-scoped helper.
     async with pool.acquire() as conn:
         target_row = await conn.fetchrow(
-            "SELECT account_id, status, archived_at FROM sessions WHERE id = $1",
+            "SELECT account_id, archived_at FROM sessions WHERE id = $1",
             target_session_id,
         )
     if target_row is None:
@@ -228,11 +228,6 @@ async def wake_session_handler(session_id: str, arguments: dict[str, Any]) -> di
         raise WakeSessionTargetUnavailableError(
             f"target session {target_session_id} is archived",
             detail={"target_session_id": target_session_id, "reason": "archived"},
-        )
-    if target_row["status"] == "terminated":
-        raise WakeSessionTargetUnavailableError(
-            f"target session {target_session_id} is terminated",
-            detail={"target_session_id": target_session_id, "reason": "terminated"},
         )
 
     # Wake-depth: inherit from the source's most recent user message;

@@ -1718,11 +1718,8 @@
               "anyOf": [
                 {
                   "enum": [
-                    "pending",
-                    "idle",
-                    "rescheduling",
-                    "errored",
-                    "terminated"
+                    "active",
+                    "idle"
                   ],
                   "type": "string"
                 },
@@ -12060,11 +12057,8 @@
           "status": {
             "type": "string",
             "enum": [
-              "pending",
-              "idle",
-              "rescheduling",
-              "errored",
-              "terminated"
+              "active",
+              "idle"
             ],
             "title": "Status"
           },
@@ -12200,7 +12194,7 @@
           "updated_at"
         ],
         "title": "Session",
-        "description": "Read view of a session. Internal-only columns are not exposed.\n\n``stop_reason`` records why the most recent step ended. Possible\n``type`` values: ``\"end_turn\"``, ``\"interrupt\"``, ``\"rescheduling\"``,\n``\"error\"``. ``awaiting`` lists tool calls the session is blocked\non (derived per read from the event log + agent tool specs)."
+        "description": "Read view of a session. Internal-only columns are not exposed.\n\n``status`` ({active, idle}) is derived per read from the event log; see\n:data:`SessionStatus`. ``stop_reason`` records why the most recent step\nended. Possible ``type`` values: ``\"end_turn\"``, ``\"interrupt\"``,\n``\"rescheduling\"``, ``\"error\"`` (``idle`` + ``error`` = the errored\nlanding pad). ``awaiting`` lists tool calls the session is blocked on\n(derived per read from the event log + agent tool specs)."
       },
       "SessionCloneRequest": {
         "properties": {
@@ -14054,11 +14048,8 @@
           "session_status": {
             "type": "string",
             "enum": [
-              "pending",
-              "idle",
-              "rescheduling",
-              "errored",
-              "terminated"
+              "active",
+              "idle"
             ],
             "title": "Session Status"
           },

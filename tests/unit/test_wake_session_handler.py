@@ -162,28 +162,8 @@ class TestWakeSessionHandlerPermission:
                 {"target_session_id": "sess_01TARGET", "prompt": "hi"},
             )
 
-    async def test_terminated_target_rejects(self, monkeypatch: Any, install_pool: Any) -> None:
-        install_pool(
-            _make_pool(
-                target_row={
-                    "account_id": "acc_test_stub",
-                    "status": "terminated",
-                    "archived_at": None,
-                },
-                depth=0,
-                recent_wakes=0,
-            )
-        )
-        monkeypatch.setattr("aios.db.queries.append_event", AsyncMock())
-        monkeypatch.setattr("aios.tools.wake_session.defer_wake", AsyncMock())
-        with pytest.raises(WakeSessionTargetUnavailableError, match="terminated"):
-            await wake_session_handler(
-                "sess_01SOURCE",
-                {"target_session_id": "sess_01TARGET", "prompt": "hi"},
-            )
-
     async def test_errored_target_allowed(self, monkeypatch: Any, install_pool: Any) -> None:
-        """Errored isn't a terminal state — a wake re-promotes it to pending."""
+        """Errored isn't a terminal state — a wake's user message recovers it."""
         install_pool(
             _make_pool(
                 target_row={

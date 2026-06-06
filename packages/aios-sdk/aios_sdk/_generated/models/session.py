@@ -28,10 +28,12 @@ T = TypeVar("T", bound="Session")
 class Session:
     """Read view of a session. Internal-only columns are not exposed.
 
-    ``stop_reason`` records why the most recent step ended. Possible
-    ``type`` values: ``"end_turn"``, ``"interrupt"``, ``"rescheduling"``,
-    ``"error"``. ``awaiting`` lists tool calls the session is blocked
-    on (derived per read from the event log + agent tool specs).
+    ``status`` ({active, idle}) is derived per read from the event log; see
+    :data:`SessionStatus`. ``stop_reason`` records why the most recent step
+    ended. Possible ``type`` values: ``"end_turn"``, ``"interrupt"``,
+    ``"rescheduling"``, ``"error"`` (``idle`` + ``error`` = the errored
+    landing pad). ``awaiting`` lists tool calls the session is blocked on
+    (derived per read from the event log + agent tool specs).
 
         Attributes:
             id (str):

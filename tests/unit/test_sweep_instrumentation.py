@@ -198,7 +198,7 @@ class TestEntrySweepSpan:
                     )
                 ),
             ),
-            patch("aios.harness.loop.sessions_service.set_session_status", AsyncMock()),
+            patch("aios.harness.loop.sessions_service.set_session_stop_reason", AsyncMock()),
             patch(
                 "aios.harness.loop.sessions_service.append_event",
                 AsyncMock(return_value=start_event),

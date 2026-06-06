@@ -28,7 +28,13 @@ from typing import Any
 import asyncpg
 import pytest
 
-from aios.harness.sweep import CANDIDATE_ROWS_SQL, GHOST_SPAN_START_SQL, UNREACTED_ROWS_SQL
+from aios.db.queries import _SESSION_STATUS_EXPR
+from aios.harness.sweep import (
+    CANDIDATE_ROWS_SQL,
+    ERRORED_SESSIONS_SQL,
+    GHOST_SPAN_START_SQL,
+    UNREACTED_ROWS_SQL,
+)
 from tests.conftest import needs_docker
 from tests.support import find_subplans_over_events
 
@@ -70,8 +76,8 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
         for sid in session_ids:
             await conn.execute(
                 """
-                INSERT INTO sessions (id, agent_id, environment_id, status, workspace_volume_path, account_id)
-                VALUES ($1, 'agt_perf', 'env_perf', 'idle', '/tmp/ws_' || $1, 'acc_test_stub')
+                INSERT INTO sessions (id, agent_id, environment_id, workspace_volume_path, account_id)
+                VALUES ($1, 'agt_perf', 'env_perf', '/tmp/ws_' || $1, 'acc_test_stub')
                 ON CONFLICT (id) DO NOTHING
                 """,
                 sid,
@@ -191,6 +197,19 @@ class TestNoCorrelatedSubplanOverEvents:
             f"{len(found)} correlated subplan(s) over events. Same CTE fix applies."
         )
 
+    async def test_errored_sessions_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
+        """``ERRORED_SESSIONS_SQL`` derives the parked-errored set the sweep
+        subtracts on every pass (replacing the old ``status = 'errored'``
+        column filter). Lock its two-MAX-CTE shape so it can't regress into a
+        correlated subquery over ``events``."""
+        plan = await _explain(seeded_pool, ERRORED_SESSIONS_SQL.format(scope_clause=""))
+        found = find_subplans_over_events(plan)
+        assert not found, (
+            f"N+1 regression in errored-session derivation: "
+            f"{len(found)} correlated subplan(s) over events. This query must "
+            f"hoist MAX(seq) per session via CTEs (see session_max_reacting)."
+        )
+
     async def test_span_start_rows_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
         """``GHOST_SPAN_START_SQL`` drives the two-branch ghost-recovery
         synthesis (#685).  Lock its single-pass shape so a future
@@ -231,6 +250,32 @@ class TestSweepQueryBudget:
         # Fixture seeds ~2600 events; linear-scan cost is ~2.6k hits. We
         # allow generous headroom; the pre-fix path burnt ~1.8M here.
         assert hits < 50_000, f"candidate_rows uses {hits} buffer hits — N+1 regression?"
+
+    async def test_list_sessions_status_derivation_budget(
+        self, seeded_pool: asyncpg.Pool[Any]
+    ) -> None:
+        """The read-time ``status`` derivation (``_SESSION_STATUS_EXPR``) runs
+        per returned row on ``list_sessions``/``get_session``. Keyset + LIMIT
+        bound it to the page, so on the pathological fixture (3 sessions, ~830
+        events each) it must stay cheap — guard against an accidental
+        O(events^2) plan (e.g. a cross-join in the correlated subqueries)."""
+        list_sql = (
+            f"SELECT sessions.*, ({_SESSION_STATUS_EXPR}) AS status, "
+            "(SELECT e.created_at FROM events e WHERE e.session_id = sessions.id "
+            "ORDER BY e.seq DESC LIMIT 1) AS last_event_at "
+            "FROM sessions WHERE sessions.archived_at IS NULL "
+            "AND sessions.account_id = $1 ORDER BY sessions.id DESC LIMIT 50"
+        )
+        async with seeded_pool.acquire() as conn:
+            result = await conn.fetchval(
+                f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {list_sql}", "acc_test_stub"
+            )
+        if isinstance(result, str):
+            result = json.loads(result)
+        hits = _total_buffer_hits(result[0]["Plan"])
+        assert hits < 50_000, (
+            f"list_sessions status derivation uses {hits} buffer hits — correlated-subquery blowup?"
+        )
 
 
 def _total_buffer_hits(plan_node: dict[str, Any]) -> int:

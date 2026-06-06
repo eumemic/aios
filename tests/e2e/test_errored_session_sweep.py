@@ -19,7 +19,6 @@ import pytest
 from aios.db.pool import create_pool
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.task_registry import TaskRegistry
-from aios.models.sessions import SessionStatus
 from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
 
@@ -45,10 +44,10 @@ async def _ensure_agent_and_env(pool: asyncpg.Pool[Any]) -> tuple[str, str]:
 async def _seed_session_with_unreacted_message(
     pool: asyncpg.Pool[Any],
     *,
-    status: SessionStatus,
+    errored: bool = False,
 ) -> str:
-    """Create a session via the service layer, append a user message, then
-    force ``status`` if it isn't ``pending``.  Returns the new session id.
+    """Create a session, append an unreacted user message, and optionally park
+    it in the derived ``errored`` state.  Returns the new session id.
     """
     account_id = "acc_test_stub"  # PR 3 scaffolding
     agent_id, environment_id = await _ensure_agent_and_env(pool)
@@ -61,8 +60,18 @@ async def _seed_session_with_unreacted_message(
         account_id=account_id,
     )
     await sessions_service.append_user_message(pool, session.id, "hi", account_id=account_id)
-    if status != "pending":
-        await sessions_service.set_session_status(pool, session.id, status, account_id=account_id)
+    if errored:
+        # ``errored`` is derived from the event log (sweep.ERRORED_SESSIONS_SQL /
+        # queries._SESSION_ERRORED_EXPR): a ``turn_ended``/``error`` lifecycle
+        # event more recent than the last user message. Append the same event
+        # ``loop._apply_retry_or_failure`` writes so the derived exclusion fires.
+        await sessions_service.append_event(
+            pool,
+            session.id,
+            "lifecycle",
+            {"event": "turn_ended", "status": "errored", "stop_reason": "error"},
+            account_id=account_id,
+        )
     return session.id
 
 
@@ -81,7 +90,7 @@ class TestErroredSessionSweepFilter:
         self, db_pool: asyncpg.Pool[Any]
     ) -> None:
         """The exhaustion landing pad: errored + unreacted user msg ⇒ skipped."""
-        sid = await _seed_session_with_unreacted_message(db_pool, status="errored")
+        sid = await _seed_session_with_unreacted_message(db_pool, errored=True)
 
         result = await find_sessions_needing_inference(db_pool, TaskRegistry(), session_id=sid)
 
@@ -89,28 +98,35 @@ class TestErroredSessionSweepFilter:
             "Errored sessions must not be re-woken by the sweep — that's the regression #353 fixes."
         )
 
-    async def test_pending_session_still_picked_up(self, db_pool: asyncpg.Pool[Any]) -> None:
-        """Sanity: a pending session with an unreacted user msg is still found."""
-        sid = await _seed_session_with_unreacted_message(db_pool, status="pending")
+    async def test_active_session_still_picked_up(self, db_pool: asyncpg.Pool[Any]) -> None:
+        """Sanity: a non-errored session with an unreacted user msg is found."""
+        sid = await _seed_session_with_unreacted_message(db_pool, errored=False)
 
         result = await find_sessions_needing_inference(db_pool, TaskRegistry(), session_id=sid)
 
         assert sid in result
 
-    async def test_user_message_flips_errored_to_pending(self, db_pool: asyncpg.Pool[Any]) -> None:
-        """``append_user_message`` is the operator-recovery escape hatch:
-        it must un-park an ``errored`` session by flipping status to ``pending``.
+    async def test_user_message_recovers_errored_session(self, db_pool: asyncpg.Pool[Any]) -> None:
+        """A new user message is the operator-recovery escape hatch: its seq
+        overtakes the error lifecycle event, so the session stops deriving
+        ``errored`` and the sweep picks it up again — no status flip needed.
         """
         account_id = "acc_test_stub"  # PR 3 scaffolding
-        sid = await _seed_session_with_unreacted_message(db_pool, status="errored")
+        sid = await _seed_session_with_unreacted_message(db_pool, errored=True)
+
+        # Parked: the sweep skips it.
+        assert (
+            await find_sessions_needing_inference(db_pool, TaskRegistry(), session_id=sid) == set()
+        )
 
         await sessions_service.append_user_message(
             db_pool, sid, "please try again", account_id=account_id
         )
 
-        async with db_pool.acquire() as conn:
-            status = await conn.fetchval("SELECT status FROM sessions WHERE id = $1", sid)
-        assert status == "pending", (
-            "A new user message must clear the errored marker so the next "
+        # Recovered: the new user message is more recent than the error event,
+        # so the session is no longer derived-errored and the sweep finds it.
+        result = await find_sessions_needing_inference(db_pool, TaskRegistry(), session_id=sid)
+        assert sid in result, (
+            "A new user message must recover an errored session so the next "
             "wake actually runs — otherwise recovery requires manual DB poking."
         )

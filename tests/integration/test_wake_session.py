@@ -197,27 +197,6 @@ class TestWakeSessionIntegration:
             )
         patched_defer_wake.assert_not_awaited()
 
-    async def test_terminated_target_rejected(
-        self,
-        pool_with_runtime: asyncpg.Pool[Any],
-        patched_defer_wake: AsyncMock,
-    ) -> None:
-        pool = pool_with_runtime
-        await _seed_account(pool, "acc_wake_term", "wake-test-terminated")
-        _, _, source = await seed_agent_env_session(pool, account_id="acc_wake_term", prefix="src")
-        _, _, target = await seed_agent_env_session(pool, account_id="acc_wake_term", prefix="dst")
-        async with pool.acquire() as conn:
-            await queries.set_session_status(
-                conn, target.id, "terminated", None, account_id="acc_wake_term"
-            )
-
-        with pytest.raises(WakeSessionTargetUnavailableError, match="terminated"):
-            await wake_session_handler(
-                source.id,
-                {"target_session_id": target.id, "prompt": "into the void"},
-            )
-        patched_defer_wake.assert_not_awaited()
-
     async def test_wake_depth_inherits_then_caps(
         self,
         pool_with_runtime: asyncpg.Pool[Any],

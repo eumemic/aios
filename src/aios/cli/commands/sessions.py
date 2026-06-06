@@ -38,7 +38,7 @@ def list_(
     agent_id: Annotated[str | None, typer.Option("--agent-id")] = None,
     status_filter: Annotated[
         str | None,
-        typer.Option("--status", help="Filter by status: running, idle, terminated."),
+        typer.Option("--status", help="Filter by status: active, idle."),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
     all_: Annotated[bool, typer.Option("--all")] = False,
@@ -130,7 +130,7 @@ def update(
     run_or_die(_run)
 
 
-@app.command("archive", help="Archive a session (status=terminated, soft).")
+@app.command("archive", help="Archive a session (soft delete via archived_at).")
 @covers("archive_session")
 def archive(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:

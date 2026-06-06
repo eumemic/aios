@@ -447,17 +447,18 @@ class TestBatchGating:
 @needs_docker
 class TestSessionStatus:
     async def test_status_transitions(self, harness: Harness) -> None:
-        """Session status should go pending → running → idle across a step.
+        """Derived status goes active → idle across a step.
 
-        ``harness.start`` appends a user message, which flips the newly
-        created session from ``idle`` to ``pending`` (issue #39 —
-        orchestrators need to distinguish "queued" from "turn finished").
+        ``harness.start`` appends a user message, giving the session owed
+        work, so it derives ``active`` (issue #39 — orchestrators need to
+        distinguish "will run" from "turn finished"). Once the model replies
+        with no pending work, it derives ``idle``.
         """
         harness.script_model([assistant("Hi!")])
         session = await harness.start("hello")
 
         s = await harness.session(session.id)
-        assert s.status == "pending"
+        assert s.status == "active"
 
         await harness.run_until_idle(session.id)
 
@@ -1128,9 +1129,11 @@ class TestCustomTools:
         # Run one step — model calls custom tool
         await harness.run_step(session.id)
 
-        # Session ends turn cleanly; custom tool is observable via awaiting
+        # Turn ends (stop_reason=end_turn) but the session is ACTIVE: the custom
+        # tool call is unresolved and resumes on a result POST (no user message
+        # needed), so status != idle. It's observable via awaiting.
         s = await harness.session(session.id)
-        assert s.status == "idle"
+        assert s.status == "active"
         assert s.stop_reason == {"type": "end_turn"}
         assert {a.tool_call_id for a in s.awaiting} == {"call_w1"}
         assert s.awaiting[0].kind == "custom"
@@ -1288,9 +1291,11 @@ class TestCustomTools:
         await harness.run_step(session.id)
         await harness.wait_for_tools(session.id)
 
-        # Custom tool is awaiting external execution; built-in already completed
+        # Custom tool is awaiting external execution (built-in already
+        # completed) → session is ACTIVE: the unresolved custom call resumes on
+        # a result POST without a user message.
         s = await harness.session(session.id)
-        assert s.status == "idle"
+        assert s.status == "active"
         assert s.stop_reason == {"type": "end_turn"}
         assert {a.tool_call_id for a in s.awaiting} == {"call_lookup"}
 
@@ -1366,8 +1371,10 @@ class TestPermissionPolicies:
         )
         await harness.run_step(session.id)
 
+        # always_ask tool pending confirmation → session is ACTIVE: it resumes
+        # on an operator confirmation (no user message needed).
         s = await harness.session(session.id)
-        assert s.status == "idle"
+        assert s.status == "active"
         assert s.stop_reason == {"type": "end_turn"}
         assert {a.tool_call_id for a in s.awaiting} == {"call_ask1"}
         assert s.awaiting[0].kind == "builtin"
@@ -1508,9 +1515,10 @@ class TestPermissionPolicies:
         await harness.run_step(session.id)
         await harness.wait_for_tools(session.id)
 
-        # glob should have executed; grep is awaiting confirmation
+        # glob should have executed; grep is awaiting confirmation → session is
+        # ACTIVE (resumes on the operator confirmation, no user message needed).
         s = await harness.session(session.id)
-        assert s.status == "idle"
+        assert s.status == "active"
         assert s.stop_reason == {"type": "end_turn"}
         assert {a.tool_call_id for a in s.awaiting} == {"call_slow"}
         assert s.awaiting[0].kind == "builtin"
