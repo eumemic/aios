@@ -248,7 +248,7 @@ class TestStepStartEndSpans:
                     )
                 ),
             ),
-            patch("aios.harness.loop.sessions_service.set_session_status", AsyncMock()),
+            patch("aios.harness.loop.sessions_service.set_session_stop_reason", AsyncMock()),
             patch("aios.harness.loop.sessions_service.append_event", append_event),
             patch(
                 "aios.harness.loop.stream_litellm",
@@ -345,7 +345,7 @@ class TestStepStartEndSpans:
                     )
                 ),
             ),
-            patch("aios.harness.loop.sessions_service.set_session_status", AsyncMock()),
+            patch("aios.harness.loop.sessions_service.set_session_stop_reason", AsyncMock()),
             patch(
                 "aios.harness.loop.sessions_service.append_event",
                 AsyncMock(return_value=start_event),
@@ -442,7 +442,7 @@ class TestStepStartEndSpans:
                     )
                 ),
             ),
-            patch("aios.harness.loop.sessions_service.set_session_status", AsyncMock()),
+            patch("aios.harness.loop.sessions_service.set_session_stop_reason", AsyncMock()),
             patch("aios.harness.loop.sessions_service.append_event", append_event),
             patch(
                 "aios.harness.loop.stream_litellm",

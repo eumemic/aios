@@ -76,7 +76,10 @@ def sync_detailed(
 ) -> Response[HTTPValidationError | Session]:
     """Interrupt
 
-     Interrupt a running session: cancel all in-flight work and idle it.
+     Interrupt a running session: cancel all in-flight work and record the
+    interrupt. Status is derived, so the session then reads ``idle`` if nothing
+    is owed, or ``active`` if a cancelled tool's result re-wakes a follow-up
+    step (strictly more honest than the old unconditional idle).
 
     Args:
         session_id (str):
@@ -113,7 +116,10 @@ def sync(
 ) -> HTTPValidationError | Session | None:
     """Interrupt
 
-     Interrupt a running session: cancel all in-flight work and idle it.
+     Interrupt a running session: cancel all in-flight work and record the
+    interrupt. Status is derived, so the session then reads ``idle`` if nothing
+    is owed, or ``active`` if a cancelled tool's result re-wakes a follow-up
+    step (strictly more honest than the old unconditional idle).
 
     Args:
         session_id (str):
@@ -145,7 +151,10 @@ async def asyncio_detailed(
 ) -> Response[HTTPValidationError | Session]:
     """Interrupt
 
-     Interrupt a running session: cancel all in-flight work and idle it.
+     Interrupt a running session: cancel all in-flight work and record the
+    interrupt. Status is derived, so the session then reads ``idle`` if nothing
+    is owed, or ``active`` if a cancelled tool's result re-wakes a follow-up
+    step (strictly more honest than the old unconditional idle).
 
     Args:
         session_id (str):
@@ -180,7 +189,10 @@ async def asyncio(
 ) -> HTTPValidationError | Session | None:
     """Interrupt
 
-     Interrupt a running session: cancel all in-flight work and idle it.
+     Interrupt a running session: cancel all in-flight work and record the
+    interrupt. Status is derived, so the session then reads ``idle`` if nothing
+    is owed, or ``active`` if a cancelled tool's result re-wakes a follow-up
+    step (strictly more honest than the old unconditional idle).
 
     Args:
         session_id (str):

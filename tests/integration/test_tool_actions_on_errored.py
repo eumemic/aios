@@ -60,8 +60,18 @@ async def errored_session_with_tool_call(
                 },
                 account_id="acc_err_tool",
             )
-            await queries.set_session_status(
-                conn, session.id, "errored", {"type": "error"}, account_id="acc_err_tool"
+            # Park the session in the derived ``errored`` state: a
+            # ``turn_ended``/``error`` lifecycle event with no later user
+            # message (see queries._SESSION_ERRORED_EXPR / sweep).
+            await queries.append_event(
+                conn,
+                session_id=session.id,
+                kind="lifecycle",
+                data={"event": "turn_ended", "status": "errored", "stop_reason": "error"},
+                account_id="acc_err_tool",
+            )
+            await queries.set_session_stop_reason(
+                conn, session.id, {"type": "error"}, account_id="acc_err_tool"
             )
         yield pool, "acc_err_tool", session.id
     finally:
@@ -141,13 +151,14 @@ async def test_confirm_tool_deny_rejects_errored_session(
 async def test_ghost_repair_skips_errored_session(
     errored_session_with_tool_call: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:
-    """Without the ``GHOST_ASST_SQL`` filter, ghost-repair would trip
-    the new operator-facing ConflictError on every errored session and
-    abort the sweep loop."""
+    """Ghost-repair must skip derived-errored sessions; otherwise it would
+    trip the operator-facing ConflictError on every errored session and abort
+    the sweep loop."""
     pool, _account_id, session_id = errored_session_with_tool_call
 
     repaired = await find_and_repair_ghosts(pool, TaskRegistry(), session_id=session_id)
     assert repaired == [], (
         f"ghost-repair attempted on an errored session (got {repaired}); "
-        f"GHOST_ASST_SQL is missing the ``s.status <> 'errored'`` filter."
+        f"find_and_repair_ghosts is missing the derived-errored exclusion "
+        f"(_errored_session_ids)."
     )

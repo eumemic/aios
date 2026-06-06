@@ -217,7 +217,7 @@ async def attach_connection(
                     f"connection {connection_id} is archived; cannot attach a session to it",
                     detail={"id": connection_id},
                 )
-            session = await queries.get_session(conn, session_id, account_id=account_id)
+            session = await queries.get_session_bare(conn, session_id, account_id=account_id)
             if session.archived_at is not None:
                 raise ConflictError(
                     f"session {session_id} is archived; cannot attach a connection to it",
@@ -391,7 +391,7 @@ async def bind_chat_to_session(
         # Validate both FKs at the service boundary — without this,
         # asyncpg surfaces FK violations as 500s instead of clean 4xxs.
         await queries.get_connection(conn, connection_id, account_id=account_id)
-        session = await queries.get_session(conn, session_id, account_id=account_id)
+        session = await queries.get_session_bare(conn, session_id, account_id=account_id)
         # Refuse archived sessions at bind time — the FK accepts archived
         # rows so without this check the ledger stamp succeeds, the
         # operator receives a 201 ``BoundChat`` with the archived id, and

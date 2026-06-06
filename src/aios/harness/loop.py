@@ -538,10 +538,13 @@ async def _run_session_step_body(
                 custom_tools=[tc.get("id") for tc in custom if tc.get("id")],
             )
 
-    # End-of-turn is unconditional; pending tool calls live on
-    # ``Session.awaiting`` (derived from the event log per read).
-    await sessions_service.set_session_status(
-        pool, session_id, "idle", stop_reason={"type": "end_turn"}, account_id=account_id
+    # End-of-turn is unconditional; the resulting ``status`` ({active, idle})
+    # is derived from the event log per read — a session that just launched
+    # background tools derives ``active`` until they resolve, without any
+    # status write here (see queries._SESSION_STATUS_EXPR). We only record the
+    # stop_reason of this step.
+    await sessions_service.set_session_stop_reason(
+        pool, session_id, {"type": "end_turn"}, account_id=account_id
     )
     await _append_lifecycle(
         pool, session_id, "turn_ended", "idle", "end_turn", account_id=account_id
@@ -860,12 +863,8 @@ async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str
     attempt = await _count_consecutive_rescheduling(pool, session_id, account_id=account_id)
     delay = _retry_delay_for_attempt(attempt)
     if delay is not None:
-        await sessions_service.set_session_status(
-            pool,
-            session_id,
-            "rescheduling",
-            stop_reason={"type": "rescheduling"},
-            account_id=account_id,
+        await sessions_service.set_session_stop_reason(
+            pool, session_id, {"type": "rescheduling"}, account_id=account_id
         )
         await _append_lifecycle(
             pool,
@@ -876,12 +875,13 @@ async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str
             account_id=account_id,
         )
         return delay
-    # Terminal landing pad (#353): sweep skips ``errored`` (see
-    # ``CANDIDATE_ROWS_SQL`` / ``CONFIRMED_ROWS_SQL``); any in-flight
-    # tool task that completes after this point sits unreaped until a
-    # user message lifts status back to ``pending`` (via ``append_event``).
-    await sessions_service.set_session_status(
-        pool, session_id, "errored", stop_reason={"type": "error"}, account_id=account_id
+    # Terminal landing pad (#353): the ``turn_ended``/``error`` lifecycle event
+    # appended below puts the session in the derived ``errored`` state, which
+    # the sweep skips (see ``sweep.ERRORED_SESSIONS_SQL``); any in-flight tool
+    # task that completes after this point sits unreaped until a user message
+    # recovers the session (its seq overtakes the error event).
+    await sessions_service.set_session_stop_reason(
+        pool, session_id, {"type": "error"}, account_id=account_id
     )
     await _append_lifecycle(
         pool, session_id, "turn_ended", "errored", "error", account_id=account_id

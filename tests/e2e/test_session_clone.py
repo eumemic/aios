@@ -88,11 +88,17 @@ async def parent_session_id(pool: Any) -> str:
         metadata={"k": "v"},
         account_id=account_id,
     )
-    # Append a couple of events so we can verify the copy.
+    # Append a user message and an assistant reply that reacts to it, so the
+    # parent is idle (no unreacted stimulus — clone requires an idle parent)
+    # and there are >=2 events to verify the copy.
     await sessions_svc.append_user_message(pool, session.id, "first", account_id=account_id)
-    await sessions_svc.append_user_message(pool, session.id, "second", account_id=account_id)
-    # The append flips status to pending; tests that need idle reset it.
-    await sessions_svc.set_session_status(pool, session.id, "idle", account_id=account_id)
+    await sessions_svc.append_event(
+        pool,
+        session.id,
+        "message",
+        {"role": "assistant", "content": "ack", "reacting_to": 1},
+        account_id=account_id,
+    )
     return session.id
 
 
@@ -166,30 +172,20 @@ class TestCloneBasic:
 
 
 class TestCloneRefusal:
-    async def test_refuses_pending_parent(
+    async def test_refuses_active_parent(
         self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
     ) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import sessions as sessions_svc
 
-        await sessions_svc.set_session_status(
-            pool, parent_session_id, "pending", account_id=account_id
+        # An unreacted user message makes the parent derive ``active`` — clone
+        # refuses non-idle parents (their in-flight/owed work would leave the
+        # clone's expected event stream undefined).
+        await sessions_svc.append_user_message(
+            pool, parent_session_id, "more", account_id=account_id
         )
         r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         assert r.status_code == 409, r.text
-
-    async def test_allowed_when_terminated(
-        self, http_client: httpx.AsyncClient, pool: Any, parent_session_id: str
-    ) -> None:
-        account_id = "acc_test_stub"  # PR 3 scaffolding
-        from aios.services import sessions as sessions_svc
-
-        await sessions_svc.set_session_status(
-            pool, parent_session_id, "terminated", account_id=account_id
-        )
-        r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
-        assert r.status_code == 201, r.text
-        assert r.json()["status"] == "terminated"
 
     async def test_404_on_missing_parent(self, http_client: httpx.AsyncClient) -> None:
         r = await http_client.post(

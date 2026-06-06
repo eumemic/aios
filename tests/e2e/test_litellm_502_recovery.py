@@ -57,7 +57,10 @@ class TestLiteLLMBadGatewayRecovery:
 
             await harness.run_step(session.id)
             s_after_first = await harness.session(session.id)
-            assert s_after_first.status == "rescheduling"
+            # Retry pending (unreacted user message + rescheduling stop_reason)
+            # derives ``active`` — rescheduling folded into active.
+            assert s_after_first.status == "active"
+            assert s_after_first.stop_reason == {"type": "rescheduling"}
 
             await harness.run_step(session.id)
             s_after_second = await harness.session(session.id)

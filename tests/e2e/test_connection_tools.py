@@ -308,9 +308,11 @@ class TestConnectionToolDispatch:
         )
 
         # Step 1: model calls chat_send → call appears in session.awaiting.
+        # The session is ACTIVE: the unresolved connection-sourced custom call
+        # resumes on a tool-result POST (no user message needed).
         await harness.run_step(session.id)
         s = await harness.session(session.id)
-        assert s.status == "idle"
+        assert s.status == "active"
         assert s.stop_reason == {"type": "end_turn"}
         assert {a.tool_call_id for a in s.awaiting} == {"cs_1"}
         assert s.awaiting[0].kind == "custom"

@@ -60,7 +60,7 @@ async def stage_upload(
     settings = get_settings()
 
     async with pool.acquire() as conn:
-        await queries.get_session(conn, session_id, account_id=account_id)  # 404 if missing
+        await queries.get_session_bare(conn, session_id, account_id=account_id)  # 404 if missing
 
     file_id = make_id(FILE)
     filename = safe_filename(upload.filename)

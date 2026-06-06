@@ -68,7 +68,6 @@ GHOST_ASST_SQL = """
       FROM events e
       JOIN sessions s ON s.id = e.session_id
      WHERE s.archived_at IS NULL
-       AND s.status <> 'errored'
        AND e.kind = 'message'
        AND e.role = 'assistant'
        AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
@@ -116,7 +115,6 @@ CANDIDATE_ROWS_SQL = """
       JOIN sessions s ON s.id = e.session_id
       LEFT JOIN session_max_reacting smr ON smr.session_id = e.session_id
      WHERE s.archived_at IS NULL
-       AND s.status <> 'errored'
        AND e.kind = 'message'
        AND e.role <> 'assistant'
        AND (smr.max_reacting IS NULL OR e.seq > smr.max_reacting)
@@ -128,7 +126,6 @@ CONFIRMED_ROWS_SQL = """
       FROM events lc
       JOIN sessions s ON s.id = lc.session_id
      WHERE s.archived_at IS NULL
-       AND s.status <> 'errored'
        AND lc.kind = 'lifecycle'
        AND lc.data->>'event' = 'tool_confirmed'
        AND lc.data->>'result' = 'allow'
@@ -177,6 +174,41 @@ ALL_ASST_ROWS_SQL = """
        AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
 """
 
+# Sessions currently in the terminal "errored" state, derived from the event
+# log (there is no denormalized ``status`` column). A session is errored when
+# its most recent ``turn_ended``/``error`` lifecycle event is more recent than
+# its most recent user message — i.e. a model-call failure exhausted the retry
+# budget and no user message has since arrived to recover it. A later user
+# message flips the inequality (``user_seq > err_seq``), which is exactly the
+# recovery semantics the pre-derivation ``append_event`` ``idle/errored →
+# pending`` flip provided.
+#
+# Shape: two ``MAX(seq)``-per-session CTEs joined — the same hoisted-aggregation
+# pattern as ``session_max_reacting`` above, so no correlated SubPlan re-scans
+# ``events`` (the #140 pathology). The error CTE is backed by the partial index
+# ``events_turn_error_idx`` (migration 0062); the user CTE reuses
+# ``events_session_message_seq_idx`` (migration 0001).
+ERRORED_SESSIONS_SQL = """
+    WITH err_max AS (
+        SELECT session_id, MAX(seq) AS err_seq
+          FROM events
+         WHERE kind = 'lifecycle' AND data->>'stop_reason' = 'error'
+         {scope_clause}
+         GROUP BY session_id
+    ),
+    user_max AS (
+        SELECT session_id, MAX(seq) AS user_seq
+          FROM events
+         WHERE kind = 'message' AND role = 'user'
+         {scope_clause}
+         GROUP BY session_id
+    )
+    SELECT em.session_id
+      FROM err_max em
+      LEFT JOIN user_max um ON um.session_id = em.session_id
+     WHERE um.user_seq IS NULL OR em.err_seq > um.user_seq
+"""
+
 
 # ─── ghost repair ────────────────────────────────────────────────────────────
 
@@ -215,6 +247,16 @@ async def find_and_repair_ghosts(
             return []
 
         session_ids = list({r["session_id"] for r in asst_rows})
+
+        # Skip errored sessions: their dispatched-but-unresolved tool calls are
+        # part of the terminal landing pad and stay unreaped until a user
+        # message recovers the session (mirrors the pre-derivation status skip).
+        errored = await _errored_session_ids(conn, session_id=session_id)
+        if errored:
+            asst_rows = [r for r in asst_rows if r["session_id"] not in errored]
+            if not asst_rows:
+                return []
+            session_ids = [s for s in session_ids if s not in errored]
 
         result_rows = await conn.fetch(ALL_RESULT_ROWS_SQL, session_ids)
         results_by_session: dict[str, set[str]] = {}
@@ -408,6 +450,22 @@ def _was_dispatched(
 # ─── sessions needing inference ──────────────────────────────────────────────
 
 
+async def _errored_session_ids(
+    conn: asyncpg.Connection[Any], *, session_id: str | None = None
+) -> set[str]:
+    """Session IDs currently in the derived ``errored`` state.
+
+    See ``ERRORED_SESSIONS_SQL``. The sweep excludes these from both
+    inference and ghost repair: an errored session is parked until a user
+    message recovers it (mirrors the pre-derivation ``status = 'errored'``
+    skip + the ``append_event`` recovery flip).
+    """
+    scope_clause = "AND session_id = $1" if session_id else ""
+    params: list[Any] = [session_id] if session_id else []
+    rows = await conn.fetch(ERRORED_SESSIONS_SQL.format(scope_clause=scope_clause), *params)
+    return {r["session_id"] for r in rows}
+
+
 async def find_sessions_needing_inference(
     pool: asyncpg.Pool[Any],
     task_registry: TaskRegistry,
@@ -452,6 +510,14 @@ async def find_sessions_needing_inference(
         )
         confirmed_sessions = {r["session_id"] for r in confirmed_rows}
 
+        # Errored sessions are parked until a user message recovers them.
+        # Derived from the event log rather than a denormalized status column
+        # (subtracted in-process to keep the candidate/confirmed queries free
+        # of an anti-join that the perf guard would flag as a SubPlan).
+        errored = await _errored_session_ids(conn, session_id=session_id)
+
+    candidates -= errored
+    confirmed_sessions -= errored
     to_filter = candidates - confirmed_sessions
     filtered = (
         await _filter_incomplete_batches(pool, task_registry, to_filter) if to_filter else set()

@@ -197,9 +197,9 @@ def mock_step_dependencies() -> Any:
             ),
         ),
         patch(
-            "aios.harness.loop.sessions_service.set_session_status",
+            "aios.harness.loop.sessions_service.set_session_stop_reason",
             AsyncMock(),
-        ) as set_status,
+        ) as set_stop_reason,
         patch(
             "aios.harness.loop.sessions_service.append_event",
             AsyncMock(return_value=start_event),
@@ -214,7 +214,7 @@ def mock_step_dependencies() -> Any:
         ) as defer_wake_mock,
     ):
         yield SimpleNamespace(
-            set_status=set_status,
+            set_stop_reason=set_stop_reason,
             append_event=append_event,
             defer_wake=defer_wake_mock,
         )
@@ -233,20 +233,26 @@ class TestRunSessionStepOnModelError:
         mock_step_dependencies.defer_wake.assert_awaited_once_with(
             ANY, "sess_x", cause="reschedule", delay_seconds=2, account_id=ANY
         )
-        status_calls = [call.args[2] for call in mock_step_dependencies.set_status.call_args_list]
-        assert "rescheduling" in status_calls
-        assert "idle" not in status_calls
+        # ``set_session_stop_reason(pool, session_id, stop_reason)`` — status is
+        # derived now, so the rescheduling state is recorded only via stop_reason
+        # (and the turn_ended/rescheduling lifecycle event).
+        stop_reasons = [
+            call.args[2] for call in mock_step_dependencies.set_stop_reason.call_args_list
+        ]
+        assert {"type": "rescheduling"} in stop_reasons
+        assert {"type": "end_turn"} not in stop_reasons
 
-    async def test_exhausted_budget_sets_errored_status_without_raising(
+    async def test_exhausted_budget_records_error_stop_reason_without_raising(
         self, mock_step_dependencies: Any
     ) -> None:
-        """Budget exhaustion parks the session in ``errored`` status (#353).
+        """Budget exhaustion parks the session in the derived ``errored`` state
+        (#353) — recorded as ``stop_reason={"type": "error"}`` plus the
+        ``turn_ended``/``error`` lifecycle event the sweep keys off.
 
-        After the fix, the inner model-call handler returns ``None`` instead of
-        re-raising, so ``run_session_step`` completes cleanly. The outer
-        ``harness_error`` handler never fires for model-call errors, preventing
-        an extra unintended ``_apply_retry_or_failure`` call that would
-        flip the session from ``errored`` back to ``rescheduling``.
+        The inner model-call handler returns ``None`` instead of re-raising, so
+        ``run_session_step`` completes cleanly; the outer ``harness_error``
+        handler never fires for model-call errors, preventing an extra
+        ``_apply_retry_or_failure`` call that would re-record ``rescheduling``.
         """
         with patch(
             "aios.harness.loop._count_consecutive_rescheduling",
@@ -255,12 +261,8 @@ class TestRunSessionStepOnModelError:
             await run_session_step("sess_x")  # must NOT raise
 
         mock_step_dependencies.defer_wake.assert_not_awaited()
-        statuses = [call.args[2] for call in mock_step_dependencies.set_status.call_args_list]
-        assert "errored" in statuses
-        assert "idle" not in statuses
-        errored_call = next(
-            call
-            for call in mock_step_dependencies.set_status.call_args_list
-            if call.args[2] == "errored"
-        )
-        assert errored_call.kwargs["stop_reason"] == {"type": "error"}
+        stop_reasons = [
+            call.args[2] for call in mock_step_dependencies.set_stop_reason.call_args_list
+        ]
+        assert {"type": "error"} in stop_reasons
+        assert {"type": "end_turn"} not in stop_reasons
