@@ -78,3 +78,23 @@ async def defer_wake(
             cause=cause,
             delay_seconds=delay_seconds,
         )
+
+
+async def defer_run_wake(run_id: str) -> None:
+    """Enqueue a ``wake_workflow`` job for a run, swallowing ``AlreadyEnqueued``.
+
+    Unlike :func:`defer_wake`, this appends **no** journal span: ``wf_run_events``
+    is single-writer — only ``run_workflow_step`` (under ``lock=run_id``) writes
+    it. ``queueing_lock`` dedups concurrent wakes for the same run.
+    """
+    from aios.harness.procrastinate_app import app
+
+    deferrer = app.configure_task(
+        "harness.wake_workflow",
+        lock=run_id,
+        queueing_lock=run_id,
+    )
+    try:
+        await deferrer.defer_async(run_id=run_id)
+    except procrastinate_exceptions.AlreadyEnqueued:
+        log.debug("run_wake.already_enqueued", run_id=run_id)

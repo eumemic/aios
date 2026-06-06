@@ -51,6 +51,13 @@ SCHEDULED_TASK: Final = "sched"
 # authorization-code flow (vault credential "Connect"). Rows are pruned on
 # expiry — see ``oauth_flows`` (migration 0061).
 OAUTH_FLOW: Final = "oaf"
+# Workflows: a deterministic-Python orchestrator (the dual of an agent).
+# ``workflows`` are immutable versioned definitions; ``wf_runs`` are durable
+# execution instances; ``wf_run_events`` is each run's append-only journal.
+# (``wf_run_signals`` has a composite PK and mints no id.) See migration 0064.
+WORKFLOW: Final = "wf"
+WORKFLOW_RUN: Final = "wfr"
+WORKFLOW_EVENT: Final = "wfe"
 
 _PREFIXES: Final = frozenset(
     {
@@ -76,6 +83,9 @@ _PREFIXES: Final = frozenset(
         ACCOUNT_KEY,
         SCHEDULED_TASK,
         OAUTH_FLOW,
+        WORKFLOW,
+        WORKFLOW_RUN,
+        WORKFLOW_EVENT,
     }
 )
 

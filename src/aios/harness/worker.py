@@ -165,6 +165,11 @@ async def worker_main() -> None:
                 woken=sweep.woken_sessions,
                 repaired_ghosts=sweep.repaired_ghosts,
             )
+        from aios.workflows.sweep import wake_runs_needing_step
+
+        woken_runs = await wake_runs_needing_step(pool)
+        if woken_runs:
+            log.info("worker.startup_sweep.workflows", woken_runs=woken_runs)
 
         # Reap orphaned sandbox containers from prior worker runs.
         reaped = await sandbox_registry.reap_orphans()
@@ -209,7 +214,7 @@ async def worker_main() -> None:
         )
 
         await procrastinate_app.run_worker_async(
-            queues=["sessions", "connectors"],
+            queues=["sessions", "connectors", "workflows"],
             concurrency=settings.worker_concurrency,
             wait=True,
             install_signal_handlers=True,
@@ -365,6 +370,11 @@ async def _periodic_sweep(
                     count=sweep.woken_sessions,
                     repaired_ghosts=sweep.repaired_ghosts,
                 )
+            from aios.workflows.sweep import wake_runs_needing_step
+
+            woken_runs = await wake_runs_needing_step(pool)
+            if woken_runs:
+                log.info("periodic_sweep.workflows", woken_runs=woken_runs)
         except Exception:
             log.exception("periodic_sweep.failed")
 

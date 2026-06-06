@@ -1,0 +1,223 @@
+"""Parent side of the out-of-process workflow script host.
+
+Spawns ``python -m aios.workflows.wf_script_host`` as a fresh interpreter
+(``spawn`` semantics — the worker's loaded ``aios.harness.runtime`` with the
+master ``CryptoBox`` + pool is never inherited), hands it the pinned source +
+input + memo over a pipe, and reads back the frontier + terminal frames.
+
+Containment is layered: the child self-imposes ``RLIMIT_CPU``/``RLIMIT_AS`` from
+env (best-effort, Unix), and the parent enforces a **wall-clock SIGKILL
+deadline** that is platform-independent and fires even on a tight CPU loop —
+because the parent only ever ``await``s a pipe read, never synchronous author
+code. A child that crashes / OOMs / is killed surfaces as a ``raised`` outcome;
+it can never wedge the worker.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import os
+import sys
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from aios.workflows._protocol import (
+    EMIT,
+    INIT,
+    RAISED,
+    RETURNED,
+    SUSPENDED,
+    decode_length,
+    encode_frame,
+)
+
+DEFAULT_CPU_SECONDS = 30
+DEFAULT_DEADLINE_SECONDS = 30.0
+# 4 GiB virtual-address ceiling: bounds a runaway allocation (e.g. ``[0]*10**10``
+# ≈ 80 GB) that the wall-clock deadline does NOT bound — the deadline caps
+# duration, not peak memory — while leaving ample headroom for a coordination
+# script. A ``setrlimit`` failure (platform-dependent) degrades to the deadline;
+# pass ``None`` to opt out.
+DEFAULT_ADDRESS_SPACE_BYTES: int | None = 4 * 1024**3
+
+HostOutcomeKind = Literal["suspended", "returned", "raised"]
+HostErrorKind = Literal[
+    "author_exception",
+    "script_host_crash",
+    "script_host_timeout",
+    "script_host_spawn_failed",
+]
+
+# SECURITY (load-bearing): the child IS the isolation boundary — author code is
+# assumed able to escape the restricted builtins and read the child's entire
+# environment (e.g. ``gate.__globals__['os'].environ``). So the child must inherit
+# NO secret-bearing variable: we pass a deny-by-default allowlist of launch /
+# locale essentials only — never ``AIOS_VAULT_KEY`` / ``AIOS_DB_URL`` / any
+# ``*_API_KEY`` / token. This is what makes "credential-free subprocess" (§3.4)
+# actually true; without it a malicious or buggy script reaches every tenant's
+# secrets via the inherited env. Extend this set, never widen to ``os.environ``.
+_CHILD_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONHASHSEED",
+        "VIRTUAL_ENV",
+        "__PYVENV_LAUNCHER__",  # macOS venv re-exec
+        "SYSTEMROOT",  # Windows interpreter launch
+        "PATHEXT",
+    }
+)
+
+
+@dataclass(frozen=True)
+class EmittedCapability:
+    capability_id: str
+    call_key: str  # "sha:<hex>#<ordinal>" — content_hash + ordinal are derivable from this
+    spec: Any
+
+
+@dataclass(frozen=True)
+class HostOutcome:
+    """The result of driving one wake of the author script in the subprocess."""
+
+    kind: HostOutcomeKind
+    emitted: list[EmittedCapability] = field(default_factory=list)
+    value: Any = None
+    error_repr: str | None = None
+    error_kind: HostErrorKind | None = None
+    stderr: str = ""
+
+
+def _parse_frames(buf: bytes) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
+    i = 0
+    while i + 4 <= len(buf):
+        n = decode_length(buf[i : i + 4])
+        if i + 4 + n > len(buf):
+            break  # truncated tail (crash mid-write) — ignore it
+        frames.append(json.loads(buf[i + 4 : i + 4 + n]))
+        i += 4 + n
+    return frames
+
+
+def _outcome_from_frames(
+    frames: list[dict[str, Any]], stderr: str, returncode: int | None
+) -> HostOutcome:
+    emitted = [
+        EmittedCapability(
+            capability_id=f["capability_id"],
+            call_key=f["call_key"],
+            spec=f.get("spec"),
+        )
+        for f in frames
+        if f.get("type") == EMIT
+    ]
+    terminal = next(
+        (f for f in reversed(frames) if f.get("type") in (SUSPENDED, RETURNED, RAISED)), None
+    )
+    if terminal is None:
+        return HostOutcome(
+            kind="raised",
+            emitted=emitted,
+            error_kind="script_host_crash",
+            error_repr=f"script host exited (rc={returncode}) without a terminal frame",
+            stderr=stderr,
+        )
+    kind = terminal["type"]
+    if kind == SUSPENDED:
+        return HostOutcome(kind="suspended", emitted=emitted, stderr=stderr)
+    if kind == RETURNED:
+        return HostOutcome(
+            kind="returned", emitted=emitted, value=terminal.get("value"), stderr=stderr
+        )
+    return HostOutcome(
+        kind="raised",
+        emitted=emitted,
+        error_repr=terminal.get("repr"),
+        error_kind="author_exception",
+        stderr=stderr,
+    )
+
+
+async def run_script_host(
+    *,
+    source: str,
+    input: Any,
+    memo: dict[str, Any],
+    cpu_seconds: int = DEFAULT_CPU_SECONDS,
+    address_space_bytes: int | None = DEFAULT_ADDRESS_SPACE_BYTES,
+    deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
+) -> HostOutcome:
+    """Drive one wake of ``source`` in a fresh, credential-free subprocess."""
+    init_bytes = encode_frame({"type": INIT, "source": source, "input": input, "memo": memo})
+    # Deny-by-default env: only non-secret launch/locale essentials cross the
+    # spawn (see ``_CHILD_ENV_ALLOWLIST``), plus the two rlimit knobs the child
+    # self-applies. The child must stay credential-free.
+    env = {k: os.environ[k] for k in _CHILD_ENV_ALLOWLIST if k in os.environ}
+    env["AIOS_WF_RLIMIT_CPU_S"] = str(cpu_seconds)
+    env["AIOS_WF_RLIMIT_AS_BYTES"] = str(address_space_bytes or 0)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "aios.workflows.wf_script_host",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+    except OSError as exc:
+        return HostOutcome(
+            kind="raised", error_kind="script_host_spawn_failed", error_repr=str(exc)
+        )
+
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(input=init_bytes), timeout=deadline_seconds
+        )
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        # Free the parent-side pipe FDs now; awaiting communicate()/wait() again
+        # can re-hang on a D-state child (cf. sandbox/_subprocess.py).
+        with contextlib.suppress(Exception):
+            proc._transport.close()  # type: ignore[attr-defined]
+        return HostOutcome(
+            kind="raised",
+            error_kind="script_host_timeout",
+            error_repr=f"script host exceeded the {deadline_seconds}s wall-clock deadline",
+        )
+    except BaseException:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            proc._transport.close()  # type: ignore[attr-defined]
+        raise
+
+    stderr = stderr_bytes.decode("utf-8", "replace")
+    # A corrupt / oversized stream (``decode_length`` ValueError, ``json.loads``
+    # JSONDecodeError — the latter is a ValueError subclass) must error the run as
+    # a host crash, never escape the step uncaught and wedge a non-terminal run
+    # into a sweep crashloop.
+    try:
+        frames = _parse_frames(stdout_bytes)
+    except ValueError as exc:
+        return HostOutcome(
+            kind="raised",
+            error_kind="script_host_crash",
+            error_repr=f"unparseable script host output: {exc}",
+            stderr=stderr,
+        )
+    return _outcome_from_frames(frames, stderr, proc.returncode)
