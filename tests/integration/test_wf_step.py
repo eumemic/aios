@@ -143,3 +143,70 @@ async def test_agent_capability_errors_in_block1(wf_runtime: asyncpg.Pool[Any]) 
     assert run is not None and run.status == "errored"
     completed = (await _events(pool, run_id))[-1]
     assert completed[1] == "run_completed"
+
+
+# ─── crash-safety + divergence (B1.6 + B1.7) ─────────────────────────────────
+
+
+async def test_resumes_from_journaled_call_result_after_crash(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """C5: a crash after the gate's call_result is journaled but before
+    run_completed → the next wake fast-forwards to completion, no re-run."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, _GATE_SCRIPT)
+    await run_workflow_step(run_id)  # → suspended, call_started{gate}
+    gate_key = (await _events(pool, run_id))[1][2]
+    assert gate_key is not None
+
+    # Simulate the harvest that committed just before the crash (status stays
+    # 'suspended' — the run_completed + status flip never happened).
+    async with pool.acquire() as conn:
+        await wf_queries.append_run_event(
+            conn,
+            account_id="acc_wf",
+            run_id=run_id,
+            type="call_result",
+            call_key=gate_key,
+            payload={"result": "yes", "is_error": False},
+        )
+
+    await run_workflow_step(run_id)  # fast-forward past the gate → complete
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == {"answer": "yes"}
+    assert [t for _s, t, _k in await _events(pool, run_id)] == [
+        "run_started",
+        "call_started",
+        "call_result",
+        "run_completed",
+    ]
+
+
+async def test_divergent_replay_is_caught(wf_runtime: asyncpg.Pool[Any]) -> None:
+    """The replay-prefix assertion: an open capability the script never re-emits
+    (a nondeterministic prior wake) errors the run instead of orphaning it."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, _GATE_SCRIPT)
+    # Inject a journal whose open capability has a call_key the script can't emit.
+    async with pool.acquire() as conn:
+        await wf_queries.append_run_event(
+            conn, account_id="acc_wf", run_id=run_id, type="run_started", payload={"input": None}
+        )
+        await wf_queries.append_run_event(
+            conn,
+            account_id="acc_wf",
+            run_id=run_id,
+            type="call_started",
+            call_key="sha:deadbeef#0",
+            payload={"capability": "gate", "gate_nonce": "x"},
+        )
+
+    await run_workflow_step(run_id)  # host emits the REAL gate key, not sha:deadbeef#0
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "errored"
+    assert events[-1].type == "run_completed"
+    assert events[-1].payload["error"]["kind"] == "nondeterministic_replay"

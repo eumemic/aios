@@ -89,6 +89,22 @@ async def run_workflow_step(run_id: str) -> None:
     outcome = await run_script_host(source=run.script, input=run.input, memo=memo)
 
     async with pool.acquire() as conn:
+        # Replay-prefix assertion (fail-closed): every still-open capability must
+        # be re-reached by this replay. If one wasn't, the script emitted a
+        # divergent sequence (nondeterminism) — error loudly rather than orphan
+        # the old call_started and silently open a fresh one.
+        emitted_keys = {cap.call_key for cap in outcome.emitted}
+        diverged = sorted(k for k in inflight if k not in emitted_keys)
+        if diverged:
+            await _complete_run(
+                conn,
+                run,
+                output=f"nondeterministic replay: open capabilities {diverged} were not re-emitted",
+                is_error=True,
+                error_kind="nondeterministic_replay",
+            )
+            return
+
         if outcome.kind == "returned":
             await _complete_run(conn, run, output=outcome.value, is_error=False)
             return
