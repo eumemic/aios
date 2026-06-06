@@ -90,14 +90,26 @@ _PREFIXES: Final = frozenset(
 )
 
 
-def make_id(prefix: str) -> str:
-    """Generate a fresh prefixed ULID id for ``prefix``.
+def make_id(prefix: str, *, body: bytes | None = None) -> str:
+    """Generate a prefixed ULID id for ``prefix``.
+
+    With no ``body``, returns a fresh random, time-ordered ULID. ``body``
+    (exactly 16 bytes) forces a **deterministic** ULID — Crockford-base32
+    encoded to the same 26-char body ``split_id`` accepts. Used for
+    content-addressed ids (e.g. a workflow's deterministic child session id
+    folded from ``(run_id, call_key)``) so a replayed spawn reproduces the
+    same id rather than minting a duplicate.
 
     Raises ``ValueError`` if ``prefix`` isn't one of the canonical aios
-    resource prefixes — this catches typos before they reach the DB.
+    resource prefixes (catches typos before they reach the DB), or if ``body``
+    is given but isn't exactly 16 bytes.
     """
     if prefix not in _PREFIXES:
         raise ValueError(f"unknown id prefix {prefix!r}; expected one of {sorted(_PREFIXES)}")
+    if body is not None:
+        if len(body) != 16:
+            raise ValueError(f"deterministic id body must be exactly 16 bytes, got {len(body)}")
+        return f"{prefix}_{ULID(body)}"
     return f"{prefix}_{ULID()}"
 
 
