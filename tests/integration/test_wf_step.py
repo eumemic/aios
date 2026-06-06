@@ -59,6 +59,7 @@ async def wf_runtime(
         with (
             mock.patch("aios.workflows.service.defer_run_wake", new=AsyncMock()),
             mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()),
+            mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()),
         ):
             yield pool
     finally:
@@ -231,15 +232,81 @@ async def test_terminal_run_and_double_resume_are_noops(wf_runtime: asyncpg.Pool
     assert await _events(pool, run_id) == before  # journal unchanged
 
 
-async def test_agent_capability_errors_in_block1(wf_runtime: asyncpg.Pool[Any]) -> None:
+# ─── B2.C — the agent spawn arm + crash matrix ───────────────────────────────
+
+
+async def test_agent_spawn_creates_child_and_suspends(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
     pool = wf_runtime
-    run_id = await _make_run(pool, "async def main(input):\n    return await agent('a1')")
+    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, {{'task': 'go'}})\n"
+    run_id = await _make_run(pool, script)
+    with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as child_wake:
+        await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "suspended"
+    started = [e for e in events if e.type == "call_started"]
+    assert len(started) == 1
+    assert started[0].payload["capability"] == "agent"
+    assert started[0].payload["child_agent_version"] == 1  # pinned
+    child_id = started[0].payload["child_session_id"]
+
+    # The child row exists (background, linked to the run) with the input delivered.
+    child = await sessions_service.get_session_basic(pool, child_id, account_id="acc_wf")
+    assert child.origin == "background" and child.parent_run_id == run_id
+    async with pool.acquire() as conn:
+        user_msgs = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE session_id = $1 AND kind = 'message' "
+            "AND data->>'role' = 'user'",
+            child_id,
+        )
+    assert user_msgs == 1
+    child_wake.assert_awaited_once()  # prompt wake of the child
+
+
+async def test_agent_spawn_idempotent_on_replay(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """C1/C2/C6: a re-step (crash replay) must NOT double-spawn or re-deliver input."""
+    pool = wf_runtime
+    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'hi')\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # wake 1: spawn
+    await run_workflow_step(run_id)  # wake 2: replay — re-emits the same frontier
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    started = [e for e in events if e.type == "call_started"]
+    assert len(started) == 1  # exactly one call_started — no double-spawn
+    assert children == 1  # exactly one child row
+    child_id = started[0].payload["child_session_id"]
+    async with pool.acquire() as conn:
+        user_msgs = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE session_id = $1 AND kind = 'message' "
+            "AND data->>'role' = 'user'",
+            child_id,
+        )
+    assert user_msgs == 1  # input delivered exactly once across replays
+
+
+async def test_agent_not_found_errors_the_run(wf_runtime: asyncpg.Pool[Any]) -> None:
+    pool = wf_runtime
+    run_id = await _make_run(
+        pool, "async def main(input):\n    return await agent('agent_nope', 'x')\n"
+    )
     await run_workflow_step(run_id)
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
     assert run is not None and run.status == "errored"
-    completed = (await _events(pool, run_id))[-1]
-    assert completed[1] == "run_completed"
+    assert events[-1].type == "run_completed"
+    assert events[-1].payload["error"]["kind"] == "agent_not_found"
 
 
 # ─── crash-safety + divergence (B1.6 + B1.7) ─────────────────────────────────

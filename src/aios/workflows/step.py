@@ -17,9 +17,10 @@ One wake:
    re-raises so the sweep retries — an infra hiccup must not terminally error the
    run). On a *real* replay (returned/suspended) a replay-prefix check fails
    closed on divergence. Returned → ``run_completed`` + ``completed`` (one txn).
-   Suspended → open any *new* frontier capability (a gate gets a nonce +
-   ``call_started``) and park as ``suspended``; the run re-wakes on the next
-   signal or sweep.
+   Suspended → open each *new* frontier capability and park as ``suspended``: a
+   gate gets a nonce; an ``agent`` spawns a deterministic, idempotent child
+   session, delivers its input, and journals ``call_started``. The run re-wakes
+   on the next signal / child completion or the periodic sweep.
 """
 
 from __future__ import annotations
@@ -29,12 +30,16 @@ from typing import Any
 
 import asyncpg
 
+from aios.db import queries as db_queries
 from aios.db.queries import workflows as wf_queries
+from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.workflows import WfRun
-from aios.services.wake import defer_run_wake
-from aios.workflows.host_launcher import run_script_host
+from aios.services.sessions import create_child_session
+from aios.services.wake import defer_run_wake, defer_wake
+from aios.workflows.child_id import child_session_id
+from aios.workflows.host_launcher import EmittedCapability, run_script_host
 
 log = get_logger("aios.workflows.step")
 
@@ -148,12 +153,16 @@ async def run_workflow_step(run_id: str) -> None:
                 # opened gate promptly instead of waiting for the periodic sweep.
                 if cap.call_key in signals:
                     needs_rewake = True
+            elif cap.capability_id == "agent":
+                if await _open_agent_capability(conn, pool, run, cap):
+                    return  # the frontier was terminally rejected (bad call) — run errored
             else:
-                # agent / parallel / pipeline are not openable in Block 1.
+                # parallel/pipeline reach the step as their `agent` leaves (B2.G);
+                # any other capability id is unknown.
                 await _complete_run(
                     conn,
                     run,
-                    output=f"capability {cap.capability_id!r} is not supported yet (lands in Block 2)",
+                    output=f"capability {cap.capability_id!r} is not supported yet",
                     is_error=True,
                     error_kind="not_implemented",
                 )
@@ -164,6 +173,94 @@ async def run_workflow_step(run_id: str) -> None:
     # harvests an already-delivered resume for a gate opened this wake.
     if needs_rewake:
         await defer_run_wake(run_id)
+
+
+async def _open_agent_capability(
+    conn: asyncpg.Connection[Any],
+    pool: asyncpg.Pool[Any],
+    run: WfRun,
+    cap: EmittedCapability,
+) -> bool:
+    """Spawn (or, on replay/C1', re-attach) the ``agent()`` child for a frontier,
+    then journal ``call_started{child_session_id, child_agent_version}``.
+
+    Idempotent + crash-safe: the child id is deterministic, ``create_child_session``
+    is ``ON CONFLICT`` (delivers the input atomically with the row on first spawn),
+    ``call_started`` dedups on the memo, and ``defer_wake`` dedups on its queueing
+    lock. On replay the child id already exists → re-attach, journaling the *row's*
+    pinned version (not a re-resolved one). Returns ``True`` iff the call was
+    terminally rejected (the run was errored — the caller should stop the step).
+    """
+    account_id = run.account_id
+    spec = cap.spec if isinstance(cap.spec, dict) else {}
+    if spec.get("output_schema") is not None:
+        await _complete_run(
+            conn,
+            run,
+            output="agent() output_schema is not supported in v1 (lands in Block 3)",
+            is_error=True,
+            error_kind="not_implemented",
+        )
+        return True
+    agent_id = spec.get("agent_id")
+    if not isinstance(agent_id, str):
+        await _complete_run(
+            conn,
+            run,
+            output=f"agent() requires a string agent_id, got {agent_id!r}",
+            is_error=True,
+            error_kind="bad_agent_call",
+        )
+        return True
+
+    child_id = child_session_id(run.id, cap.call_key)
+    try:
+        pinned = (await db_queries.get_agent(conn, agent_id, account_id=account_id)).version
+    except NotFoundError:
+        await _complete_run(
+            conn,
+            run,
+            output=f"agent {agent_id!r} not found",
+            is_error=True,
+            error_kind="agent_not_found",
+        )
+        return True
+
+    created = await create_child_session(
+        pool,
+        session_id=child_id,
+        account_id=account_id,
+        agent_id=agent_id,
+        environment_id=run.environment_id,
+        agent_version=pinned,
+        parent_run_id=run.id,
+        input=spec.get("input"),
+    )
+    # On replay the row already carries its first-spawn version — journal THAT, so
+    # call_started.child_agent_version always matches the version the child runs under.
+    child_version = (
+        pinned
+        if created
+        else (
+            await db_queries.get_session_bare(conn, child_id, account_id=account_id)
+        ).agent_version
+    )
+    await wf_queries.append_run_event(
+        conn,
+        account_id=account_id,
+        run_id=run.id,
+        type="call_started",
+        call_key=cap.call_key,
+        payload={
+            "capability": "agent",
+            "child_session_id": child_id,
+            "child_agent_version": child_version,
+        },
+    )
+    # Prompt wake of the child; the session sweep is the durable backstop (the
+    # child's first user message makes it is-wakeable regardless).
+    await defer_wake(pool, child_id, account_id=account_id, cause="workflow_child_spawn")
+    return False
 
 
 async def _complete_run(
